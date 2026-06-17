@@ -2,4 +2,5 @@
 
 pub mod members;
 pub mod model;
+pub mod rbac;
 pub mod workspaces;

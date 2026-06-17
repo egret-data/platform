@@ -78,6 +78,7 @@ async fn archive_hides_from_active_lookups() {
 }
 
 use egret_workspace::members::MemberRepo;
+use egret_workspace::rbac::Authorizer;
 
 #[tokio::test]
 async fn add_list_remove_member() {
@@ -122,4 +123,67 @@ async fn rejects_unknown_role() {
     let ws = wrepo.create(&uniq("ws"), "W", owner).await.unwrap();
     let err = mrepo.add(ws.id, "user", owner.0, "superuser", owner).await;
     assert!(matches!(err, Err(egret_core::Error::InvalidInput(_))));
+}
+
+async fn make_group(db: &Db, name: &str) -> uuid::Uuid {
+    sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+        .bind(name)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn workspace_permission_via_group_is_unioned() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let owner = seed_user(&db).await;
+    let user = seed_user(&db).await;
+    let wrepo = WorkspaceRepo::new(db.clone());
+    let mrepo = MemberRepo::new(db.clone());
+    let authz = Authorizer::new(db.clone());
+    let ws = wrepo.create(&uniq("ws"), "W", owner).await.unwrap();
+
+    // user is NOT a direct member; their GROUP is ws_admin.
+    let gid = make_group(&db, &uniq("grp")).await;
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(user.0)
+        .bind(gid)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    mrepo
+        .add(ws.id, "group", gid, "ws_admin", owner)
+        .await
+        .unwrap();
+
+    let perms = authz.workspace_permissions(user, ws.id).await.unwrap();
+    assert!(
+        perms.contains("workspace:manage_members"),
+        "group role must grant the perm"
+    );
+}
+
+#[tokio::test]
+async fn replace_platform_roles_and_check() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let user = seed_user(&db).await;
+    let authz = Authorizer::new(db.clone());
+    authz
+        .replace_platform_roles(user, &["data_steward".into()])
+        .await
+        .unwrap();
+    let perms = authz.platform_permissions(user).await.unwrap();
+    assert!(perms.contains("user:read"));
+    assert!(!perms.contains("workspace:create")); // data_steward lacks it
+                                                  // bad role rejected
+    assert!(authz
+        .replace_platform_roles(user, &["root".into()])
+        .await
+        .is_err());
 }
