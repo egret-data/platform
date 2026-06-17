@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
+use egret_auth::routes::{auth_router, AuthState};
 use egret_metastore::Db;
 
 /// Application state shared by all handlers.
@@ -12,21 +13,35 @@ use egret_metastore::Db;
 pub struct AppState {
     /// `None` in unit tests; `Some` once a database is wired in `egret-bin`.
     pub db: Option<Db>,
+    /// Present once a database is wired (in `egret-bin`); `None` in pure health unit tests.
+    pub auth: Option<AuthState>,
 }
 
 impl AppState {
     /// Build state with no database — used by unit tests and `--no-db` boots.
     pub fn without_db() -> Self {
-        Self { db: None }
+        Self {
+            db: None,
+            auth: None,
+        }
     }
 }
 
 /// Build the root router. Later phases mount feature routers here.
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
-        .with_state(state)
+        .route("/readyz", get(readyz));
+
+    if let Some(auth) = state.auth.clone() {
+        router = router.merge(
+            Router::new()
+                .nest("/api/auth", auth_router())
+                .with_state(auth),
+        );
+    }
+
+    router.with_state(state)
 }
 
 /// Liveness: the process is up. Always 200.

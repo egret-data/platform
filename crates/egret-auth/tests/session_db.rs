@@ -91,3 +91,107 @@ async fn revoke_invalidates() {
     svc.revoke(&issued.token).await.unwrap();
     assert!(svc.validate(&issued.token).await.unwrap().is_none());
 }
+
+use axum::body::Body;
+use axum::http::{Request as HttpRequest, StatusCode};
+use egret_auth::routes::{auth_router, AuthState};
+use egret_config::Config;
+use http_body_util::BodyExt;
+use tower::ServiceExt;
+
+#[tokio::test]
+async fn login_sets_cookies_and_me_returns_user() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let repo = UserRepo::new(db.clone());
+    let email = unique_email("login");
+    repo.insert_local(&email, "L", &hash_password("pw").unwrap())
+        .await
+        .unwrap();
+
+    let st = AuthState {
+        users: repo,
+        sessions: SessionService::new(db.clone(), Duration::hours(24), Duration::minutes(60)),
+        config: Config::default(),
+    };
+    let app = axum::Router::new()
+        .nest("/api/auth", auth_router())
+        .with_state(st);
+
+    // Login.
+    let body = serde_json::to_vec(&serde_json::json!({"email": email, "password": "pw"})).unwrap();
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let set_cookie_count = resp.headers().get_all("set-cookie").iter().count();
+    assert!(set_cookie_count >= 2, "expects session + csrf cookies");
+    // Find the egret_session= cookie specifically (order may vary).
+    let session_kv = resp
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|s| s.starts_with("egret_session="))
+        .expect("egret_session cookie present")
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    // /me with the session cookie.
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .uri("/api/auth/me")
+                .header("cookie", session_kv)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        json["email"].as_str().unwrap().to_lowercase(),
+        email.to_lowercase()
+    );
+}
+
+#[tokio::test]
+async fn me_without_cookie_is_401() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let st = AuthState {
+        users: UserRepo::new(db.clone()),
+        sessions: SessionService::new(db.clone(), Duration::hours(24), Duration::minutes(60)),
+        config: Config::default(),
+    };
+    let app = axum::Router::new()
+        .nest("/api/auth", auth_router())
+        .with_state(st);
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .uri("/api/auth/me")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}

@@ -52,7 +52,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .context("connecting to database")?;
     db.migrate().await.context("running migrations on boot")?;
 
-    let app = build_router(AppState { db: Some(db) });
+    let app = build_router(AppState {
+        db: Some(db),
+        auth: None,
+    });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
