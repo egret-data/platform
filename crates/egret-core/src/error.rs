@@ -20,6 +20,9 @@ pub enum Error {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    #[error("too many requests")]
+    TooManyRequests,
+
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }

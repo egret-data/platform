@@ -9,12 +9,20 @@ use figment::{
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitConfig {
+    pub login_max_attempts: u32,
+    pub login_window_secs: u64,
+    pub login_lockout_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub log: LogConfig,
     pub session: SessionConfig,
     pub csrf: CsrfConfig,
+    pub rate_limit: RateLimitConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +84,11 @@ impl Default for Config {
             csrf: CsrfConfig {
                 cookie_name: "egret_csrf".into(),
                 header_name: "X-Egret-CSRF".into(),
+            },
+            rate_limit: RateLimitConfig {
+                login_max_attempts: 5,
+                login_window_secs: 300,
+                login_lockout_secs: 300,
             },
         }
     }
@@ -141,6 +154,15 @@ mod tests {
             assert_eq!(cfg.session.absolute_ttl_hours, 24);
             assert_eq!(cfg.session.idle_ttl_minutes, 60);
             assert_eq!(cfg.csrf.header_name, "X-Egret-CSRF");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn rate_limit_defaults_present() {
+        figment::Jail::expect_with(|_j| {
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.rate_limit.login_max_attempts, 5);
             Ok(())
         });
     }

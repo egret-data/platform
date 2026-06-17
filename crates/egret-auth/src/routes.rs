@@ -1,6 +1,9 @@
 //! /api/auth routes: login (local), logout, me.
 
+use std::sync::OnceLock;
+
 use axum::extract::{FromRef, State};
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -12,15 +15,19 @@ use serde::{Deserialize, Serialize};
 use crate::cookie::{clear_cookie, csrf_cookie, session_cookie, CSRF_COOKIE, SESSION_COOKIE};
 use crate::password::verify_password;
 use crate::principal::{Auth, AuthError};
+use crate::ratelimit::RateLimiter;
 use crate::session::SessionService;
 use crate::token::generate_token;
 use crate::users::UserRepo;
+
+static DUMMY_HASH: OnceLock<String> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct AuthState {
     pub users: UserRepo,
     pub sessions: SessionService,
     pub config: Config,
+    pub rate_limiter: RateLimiter,
 }
 
 #[derive(Deserialize)]
@@ -50,30 +57,45 @@ pub fn auth_router() -> Router<AuthState> {
 
 async fn login(
     State(st): State<AuthState>,
+    headers: HeaderMap,
     jar: CookieJar,
     Json(body): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, AuthError> {
-    // Uniform error for unknown user vs bad password (no enumeration).
+    let ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let rl_key = format!("{ip}:{}", body.email.to_lowercase());
+    if !st.rate_limiter.check(&rl_key) {
+        return Err(AuthError(Error::TooManyRequests));
+    }
+
+    let dummy =
+        DUMMY_HASH.get_or_init(|| crate::password::hash_password("not-a-real-password").unwrap());
     let user = st
         .users
         .find_by_email(&body.email)
         .await
         .map_err(AuthError)?;
-    let user = user.ok_or(AuthError(Error::Unauthorized))?;
-    if user.status != "active" {
-        return Err(AuthError(Error::Unauthorized));
-    }
-    let hash = user
-        .password_hash
-        .as_deref()
-        .ok_or(AuthError(Error::Unauthorized))?;
+    let user = match user {
+        Some(u) if u.status == "active" && u.password_hash.is_some() => u,
+        _ => {
+            // Equalize timing for unknown/disabled/no-password users.
+            let _ = crate::password::verify_password(&body.password, dummy);
+            return Err(AuthError(Error::Unauthorized));
+        }
+    };
+    let hash = user.password_hash.as_deref().unwrap();
     if !verify_password(&body.password, hash).map_err(AuthError)? {
         return Err(AuthError(Error::Unauthorized));
     }
 
     let issued = st
         .sessions
-        .create(user.id, "", "")
+        .create(user.id, "", &ip)
         .await
         .map_err(AuthError)?;
     st.users

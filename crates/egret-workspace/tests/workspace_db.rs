@@ -285,6 +285,7 @@ async fn platform_admin_can_create_workspace() {
             chrono::Duration::minutes(1),
         ),
         config: Config::default(),
+        rate_limiter: egret_auth::ratelimit::RateLimiter::new(5, 300, 300),
     };
 }
 

@@ -115,6 +115,7 @@ async fn login_sets_cookies_and_me_returns_user() {
         users: repo,
         sessions: SessionService::new(db.clone(), Duration::hours(24), Duration::minutes(60)),
         config: Config::default(),
+        rate_limiter: egret_auth::ratelimit::RateLimiter::new(5, 300, 300),
     };
     let app = axum::Router::new()
         .nest("/api/auth", auth_router())
@@ -180,6 +181,7 @@ async fn me_without_cookie_is_401() {
         users: UserRepo::new(db.clone()),
         sessions: SessionService::new(db.clone(), Duration::hours(24), Duration::minutes(60)),
         config: Config::default(),
+        rate_limiter: egret_auth::ratelimit::RateLimiter::new(5, 300, 300),
     };
     let app = axum::Router::new()
         .nest("/api/auth", auth_router())
@@ -231,4 +233,43 @@ async fn platform_role_via_group_appears_in_principal() {
         .platform_roles
         .iter()
         .any(|r| r == "platform_admin"));
+}
+
+#[tokio::test]
+async fn login_is_rate_limited() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let email = unique_email("rl");
+    UserRepo::new(db.clone())
+        .insert_local(&email, "R", &hash_password("pw").unwrap())
+        .await
+        .unwrap();
+    let st = AuthState {
+        users: UserRepo::new(db.clone()),
+        sessions: SessionService::new(db.clone(), Duration::hours(24), Duration::minutes(60)),
+        config: Config::default(),
+        rate_limiter: egret_auth::ratelimit::RateLimiter::new(2, 300, 300),
+    };
+    let app = axum::Router::new()
+        .nest("/api/auth", auth_router())
+        .with_state(st);
+    let bad =
+        serde_json::to_vec(&serde_json::json!({"email": email, "password": "wrong"})).unwrap();
+    let mk = || {
+        HttpRequest::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .body(Body::from(bad.clone()))
+            .unwrap()
+    };
+
+    let s1 = app.clone().oneshot(mk()).await.unwrap().status(); // 401
+    let s2 = app.clone().oneshot(mk()).await.unwrap().status(); // 401
+    let s3 = app.oneshot(mk()).await.unwrap().status(); // 429 (limiter max=2)
+    assert_eq!(s1, StatusCode::UNAUTHORIZED);
+    assert_eq!(s2, StatusCode::UNAUTHORIZED);
+    assert_eq!(s3, StatusCode::TOO_MANY_REQUESTS);
 }
