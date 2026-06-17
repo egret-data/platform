@@ -1124,11 +1124,8 @@ services:
     ports:
       - "9000:9000"
       - "9001:9001"
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+    # No healthcheck: minio/minio:latest has no preconfigured `local` mc alias and no
+    # curl, so a readiness probe is unreliable. Phase 2 adds a proper health probe.
     volumes:
       - miniodata:/data
 
@@ -1310,7 +1307,7 @@ No gaps requiring new tasks.
 
 ## Notes for the executor
 
-- **Toolchain:** `rust-toolchain.toml` pins 1.82; if the local default differs, `rustup` auto-installs it on first `cargo` invocation.
+- **Toolchain:** `rust-toolchain.toml` pins `stable` (MSRV floor `1.85`); `rustup` auto-installs the stable toolchain on first `cargo` invocation if missing.
 - **Offline-green:** the full `cargo test --workspace` passes with no Postgres running (the only DB test self-skips). The DB path is exercised in CI (Postgres service) and locally via `just up` + Task 7 Step 5.
 - **Engine images:** `trino`/`starrocks` in compose are for later phases; Phase 0a doesn't connect to them. They're included now so the dev stack is complete and stable for Phase 1+.
 - **Next:** Phase 0b (frontend skeleton), then Phase 1 (auth/SSO + workspace + database registration) per the architecture roadmap.

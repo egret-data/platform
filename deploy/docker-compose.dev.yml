@@ -26,11 +26,9 @@ services:
     ports:
       - "9000:9000"
       - "9001:9001"
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+    # No healthcheck: `minio/minio:latest` has no `local` mc alias preconfigured and
+    # no curl, so a readiness probe is unreliable here. Phase 2 (when a service gates
+    # on MinIO) adds a proper probe against http://localhost:9000/minio/health/ready.
     volumes:
       - miniodata:/data
 
