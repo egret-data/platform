@@ -67,7 +67,7 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2021"
 license = "Apache-2.0"
-rust-version = "1.82"
+rust-version = "1.85"
 
 [workspace.dependencies]
 egret-core = { path = "crates/egret-core" }
@@ -101,18 +101,23 @@ Create `rust-toolchain.toml`:
 
 ```toml
 [toolchain]
-channel = "1.82"
+channel = "stable"
 components = ["rustfmt", "clippy"]
 ```
+
+> **Note:** `stable` is used (not a fixed `1.82`) because modern dependency versions
+> (`uuid` 1.21+, `axum` 0.8, `sqlx` 0.8) require Rust ≥ 1.85. `rust-version = "1.85"`
+> documents the MSRV floor.
 
 Create `rustfmt.toml`:
 
 ```toml
 edition = "2021"
 max_width = 100
-imports_granularity = "Crate"
-group_imports = "StdExternalCrate"
 ```
+
+> **Note:** Avoid nightly-only options (`imports_granularity`, `group_imports`) — they
+> emit warnings on the stable toolchain.
 
 Create `.clippy.toml`:
 
@@ -466,7 +471,15 @@ license.workspace = true
 [dependencies]
 serde.workspace = true
 figment.workspace = true
+
+[dev-dependencies]
+# `Jail` (used by the tests below) lives behind figment's `test` feature,
+# which is not enabled on the workspace dependency.
+figment = { version = "0.10", features = ["toml", "env", "test"] }
 ```
+
+> **Note:** `Config::load()` and the test closures carry `#[allow(clippy::result_large_err)]`
+> because `figment::Error` is large (~200 bytes) and clippy's `result_large_err` lint fires.
 
 - [ ] **Step 2: Write the failing test for config loading**
 
@@ -905,6 +918,7 @@ egret-core.workspace = true
 egret-config.workspace = true
 egret-metastore.workspace = true
 egret-server.workspace = true
+axum.workspace = true          # main.rs calls axum::serve directly
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true
@@ -1110,11 +1124,8 @@ services:
     ports:
       - "9000:9000"
       - "9001:9001"
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+    # No healthcheck: minio/minio:latest has no preconfigured `local` mc alias and no
+    # curl, so a readiness probe is unreliable. Phase 2 adds a proper health probe.
     volumes:
       - miniodata:/data
 
@@ -1242,7 +1253,7 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -1296,7 +1307,7 @@ No gaps requiring new tasks.
 
 ## Notes for the executor
 
-- **Toolchain:** `rust-toolchain.toml` pins 1.82; if the local default differs, `rustup` auto-installs it on first `cargo` invocation.
+- **Toolchain:** `rust-toolchain.toml` pins `stable` (MSRV floor `1.85`); `rustup` auto-installs the stable toolchain on first `cargo` invocation if missing.
 - **Offline-green:** the full `cargo test --workspace` passes with no Postgres running (the only DB test self-skips). The DB path is exercised in CI (Postgres service) and locally via `just up` + Task 7 Step 5.
 - **Engine images:** `trino`/`starrocks` in compose are for later phases; Phase 0a doesn't connect to them. They're included now so the dev stack is complete and stable for Phase 1+.
 - **Next:** Phase 0b (frontend skeleton), then Phase 1 (auth/SSO + workspace + database registration) per the architecture roadmap.

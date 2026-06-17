@@ -1,0 +1,55 @@
+name: egret-dev
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: egret
+      POSTGRES_PASSWORD: egret
+      POSTGRES_DB: egret
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U egret"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: egret
+      MINIO_ROOT_PASSWORD: egretsecret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    # No healthcheck: `minio/minio:latest` has no `local` mc alias preconfigured and
+    # no curl, so a readiness probe is unreliable here. Phase 2 (when a service gates
+    # on MinIO) adds a proper probe against http://localhost:9000/minio/health/ready.
+    volumes:
+      - miniodata:/data
+
+  trino:
+    image: trinodb/trino:latest
+    ports:
+      - "8090:8080"
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog
+
+  starrocks:
+    image: starrocks/allin1-ubuntu:latest
+    ports:
+      - "9030:9030"   # MySQL protocol (query)
+      - "8030:8030"   # FE HTTP
+    healthcheck:
+      test: ["CMD-SHELL", "mysql -h127.0.0.1 -P9030 -uroot -e 'select 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  pgdata:
+  miniodata:
