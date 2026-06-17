@@ -12,6 +12,7 @@ egret-core = { path = "crates/egret-core" }
 egret-config = { path = "crates/egret-config" }
 egret-metastore = { path = "crates/egret-metastore" }
 egret-server = { path = "crates/egret-server" }
+egret-auth = { path = "crates/egret-auth" }
 
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
