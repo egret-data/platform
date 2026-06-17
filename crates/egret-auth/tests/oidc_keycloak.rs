@@ -3,6 +3,7 @@
 //! These tests start `quay.io/keycloak/keycloak:26.0` with the `egret` realm
 //! imported and exercise the [`OidcService`] against it:
 //!   * `ropc_token_validates_and_has_groups` — direct-access-grant (ROPC) → validate id_token.
+//!   * `full_auth_code_flow_yields_claims`   — headless auth-code + PKCE + nonce flow.
 //!
 //! The whole file self-skips (prints a skip message and returns) when Docker is
 //! unavailable, so the suite stays green offline. When Docker is available the
@@ -154,4 +155,86 @@ async fn ropc_token_validates_and_has_groups() {
         "expected `data-team` in groups, got {:?}",
         claims.groups
     );
+}
+
+#[tokio::test]
+async fn full_auth_code_flow_yields_claims() {
+    let Some((issuer, _kc)) = start_keycloak().await else {
+        return;
+    };
+    let svc = OidcService::discover(&oidc_cfg(&issuer))
+        .await
+        .expect("discover");
+    let start = svc.start();
+
+    // reqwest client with a cookie jar, redirects disabled so we can read Location.
+    let http = reqwest::Client::builder()
+        .cookie_store(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    // 1. GET the authorize URL → Keycloak login page (HTML with a form action).
+    let get_resp = http.get(&start.authorize_url).send().await.unwrap();
+    let get_status = get_resp.status();
+    let login_html = get_resp.text().await.unwrap();
+    let action = extract_form_action(&login_html)
+        .unwrap_or_else(|| panic!("login form action not found; GET authorize -> {get_status}"));
+
+    // 2. POST credentials to the form action → 302 to redirect_uri?code=...&state=...
+    let resp = http
+        .post(&action)
+        .form(&[("username", "tester"), ("password", "pw")])
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_redirection(),
+        "expected a 3xx redirect after login POST, got {} (body: {})",
+        resp.status(),
+        resp.text().await.unwrap_or_default()
+    );
+    let location = resp
+        .headers()
+        .get("location")
+        .expect("redirect Location header")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let code = extract_query_param(&location, "code").expect("code");
+    let state = extract_query_param(&location, "state").expect("state");
+    assert_eq!(state, start.state, "state echoed back");
+
+    // 3. finish: exchange code (PKCE) + validate id_token (nonce).
+    let claims = svc
+        .finish(&code, &start.pkce_verifier, &start.nonce)
+        .await
+        .expect("finish");
+    assert_eq!(claims.email, "tester@egret.local");
+    assert!(
+        claims.groups.iter().any(|g| g == "data-team"),
+        "expected `data-team` in groups, got {:?}",
+        claims.groups
+    );
+}
+
+/// Extract the `action="..."` URL from Keycloak's login form. The value may contain
+/// HTML-escaped `&amp;`; un-escape those back to `&`.
+fn extract_form_action(html: &str) -> Option<String> {
+    let i = html.find("action=\"")? + "action=\"".len();
+    let rest = &html[i..];
+    let j = rest.find('"')?;
+    Some(rest[..j].replace("&amp;", "&"))
+}
+
+/// Extract a single query parameter value from a URL's query string.
+fn extract_query_param(url: &str, key: &str) -> Option<String> {
+    let q = url.split('?').nth(1)?;
+    for pair in q.split('&') {
+        let mut it = pair.splitn(2, '=');
+        if it.next() == Some(key) {
+            return it.next().map(|v| v.to_string());
+        }
+    }
+    None
 }
