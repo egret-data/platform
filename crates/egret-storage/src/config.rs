@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
     /// Custom S3 endpoint (MinIO). Empty/None means real AWS.
     pub endpoint: Option<String>,
@@ -10,4 +10,17 @@ pub struct StorageConfig {
     pub secret_key: String,
     /// Required for MinIO.
     pub path_style: bool,
+}
+
+impl std::fmt::Debug for StorageConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StorageConfig")
+            .field("endpoint", &self.endpoint)
+            .field("region", &self.region)
+            .field("bucket", &self.bucket)
+            .field("access_key", &"<redacted>")
+            .field("secret_key", &"<redacted>")
+            .field("path_style", &self.path_style)
+            .finish()
+    }
 }
