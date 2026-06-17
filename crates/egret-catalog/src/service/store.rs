@@ -336,3 +336,108 @@ impl CatalogStore {
         Ok(())
     }
 }
+
+// ---------------------------------------------------------------------------
+// View rows
+// ---------------------------------------------------------------------------
+
+/// Internal FromRow struct for raw DB fetch (metadata column stays as JSON value).
+#[derive(sqlx::FromRow)]
+struct ViewRowRaw {
+    id: Uuid,
+    name: String,
+    metadata: serde_json::Value,
+    metadata_location: String,
+    location: String,
+    current_version: i32,
+}
+
+/// A view row with metadata stored as an opaque JSON blob.
+pub struct ViewRow {
+    pub id: Uuid,
+    pub name: String,
+    pub metadata: serde_json::Value,
+    pub metadata_location: String,
+    pub location: String,
+    pub current_version: i32,
+}
+
+// ---------------------------------------------------------------------------
+// CatalogStore — view methods
+// ---------------------------------------------------------------------------
+
+impl CatalogStore {
+    /// Insert a new view. Returns `AlreadyExists` on unique-constraint violation.
+    pub async fn insert_view(
+        &self,
+        ns_id: Uuid,
+        name: &str,
+        metadata: &serde_json::Value,
+        metadata_location: &str,
+        location: &str,
+    ) -> Result<(), CatalogError> {
+        sqlx::query(
+            "INSERT INTO catalog_views \
+               (namespace_id, name, metadata, metadata_location, location, current_version) \
+             VALUES ($1, $2, $3, $4, $5, 0)",
+        )
+        .bind(ns_id)
+        .bind(name)
+        .bind(metadata)
+        .bind(metadata_location)
+        .bind(location)
+        .execute(&self.db.pool)
+        .await
+        .map_err(|e| match &e {
+            sqlx::Error::Database(d) if d.is_unique_violation() => {
+                CatalogError::AlreadyExists(name.into())
+            }
+            _ => CatalogError::Db(e),
+        })?;
+        Ok(())
+    }
+
+    /// Load a view by namespace + name. Returns `NotFound` if absent.
+    pub async fn load_view(&self, ns_id: Uuid, name: &str) -> Result<ViewRow, CatalogError> {
+        let raw = sqlx::query_as::<_, ViewRowRaw>(
+            "SELECT id, name, metadata, metadata_location, location, current_version \
+             FROM catalog_views WHERE namespace_id = $1 AND name = $2",
+        )
+        .bind(ns_id)
+        .bind(name)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(CatalogError::Db)?
+        .ok_or_else(|| CatalogError::NotFound(name.into()))?;
+        Ok(ViewRow {
+            id: raw.id,
+            name: raw.name,
+            metadata: raw.metadata,
+            metadata_location: raw.metadata_location,
+            location: raw.location,
+            current_version: raw.current_version,
+        })
+    }
+
+    /// List view names in a namespace, ordered alphabetically.
+    pub async fn list_views(&self, ns_id: Uuid) -> Result<Vec<String>, CatalogError> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT name FROM catalog_views WHERE namespace_id = $1 ORDER BY name",
+        )
+        .bind(ns_id)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(CatalogError::Db)
+    }
+
+    /// Drop a view (load then delete). Returns `NotFound` if absent.
+    pub async fn drop_view(&self, ns_id: Uuid, name: &str) -> Result<(), CatalogError> {
+        let v = self.load_view(ns_id, name).await?;
+        sqlx::query("DELETE FROM catalog_views WHERE id = $1")
+            .bind(v.id)
+            .execute(&self.db.pool)
+            .await
+            .map_err(CatalogError::Db)?;
+        Ok(())
+    }
+}
