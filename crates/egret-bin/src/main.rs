@@ -7,12 +7,17 @@ use chrono::Duration;
 use clap::Parser;
 use cli::{Cli, Command};
 use egret_auth::password::hash_password;
+use egret_auth::ratelimit::RateLimiter;
 use egret_auth::routes::AuthState;
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
 use egret_config::Config;
 use egret_metastore::Db;
 use egret_server::{build_router, AppState};
+use egret_workspace::members::MemberRepo;
+use egret_workspace::rbac::Authorizer;
+use egret_workspace::routes::WorkspaceState;
+use egret_workspace::workspaces::WorkspaceRepo;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -24,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Serve => serve(config).await,
         Command::Migrate => migrate(config).await,
-        Command::Init => init(config).await,
+        Command::Init { force } => init(config, force).await,
     }
 }
 
@@ -48,23 +53,24 @@ async fn migrate(config: Config) -> anyhow::Result<()> {
 }
 
 /// Bootstrap the first platform admin (local provider). Idempotent: refuses if a
-/// platform_admin already exists. Prints a generated password when none is supplied.
-async fn init(config: Config) -> anyhow::Result<()> {
+/// platform_admin already exists (unless `force` is set). Prints a generated password when none is supplied.
+async fn init(config: Config, force: bool) -> anyhow::Result<()> {
     let db = Db::connect(&config.database.url, config.database.max_connections)
         .await
         .context("connecting to database")?;
     db.migrate().await.context("running migrations")?;
 
-    // Refuse if a platform_admin assignment already exists.
-    let existing: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM platform_role_assignments pra \
-         JOIN roles r ON r.id = pra.role_id WHERE r.scope='platform' AND r.name='platform_admin'",
-    )
-    .fetch_one(&db.pool)
-    .await?;
-    if existing > 0 {
-        tracing::warn!("a platform_admin already exists; nothing to do");
-        return Ok(());
+    if !force {
+        let existing: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM platform_role_assignments pra \
+             JOIN roles r ON r.id = pra.role_id WHERE r.scope='platform' AND r.name='platform_admin'",
+        )
+        .fetch_one(&db.pool)
+        .await?;
+        if existing > 0 {
+            tracing::warn!("a platform_admin already exists; use --force to add another");
+            return Ok(());
+        }
     }
 
     let email = std::env::var("EGRET_ADMIN_EMAIL").unwrap_or_else(|_| "admin@egret.local".into());
@@ -95,19 +101,35 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .context("connecting to database")?;
     db.migrate().await.context("running migrations on boot")?;
 
+    let users = UserRepo::new(db.clone());
+    let sessions = SessionService::new(
+        db.clone(),
+        Duration::hours(config.session.absolute_ttl_hours as i64),
+        Duration::minutes(config.session.idle_ttl_minutes as i64),
+    );
+    let rate_limiter = RateLimiter::new(
+        config.rate_limit.login_max_attempts,
+        config.rate_limit.login_window_secs,
+        config.rate_limit.login_lockout_secs,
+    );
     let auth = AuthState {
-        users: UserRepo::new(db.clone()),
-        sessions: SessionService::new(
-            db.clone(),
-            Duration::hours(config.session.absolute_ttl_hours as i64),
-            Duration::minutes(config.session.idle_ttl_minutes as i64),
-        ),
+        users: users.clone(),
+        sessions: sessions.clone(),
         config: config.clone(),
+        rate_limiter,
+    };
+    let workspace = WorkspaceState {
+        workspaces: WorkspaceRepo::new(db.clone()),
+        members: MemberRepo::new(db.clone()),
+        authz: Authorizer::new(db.clone()),
+        users,
+        sessions,
     };
 
     let app = build_router(AppState {
         db: Some(db),
         auth: Some(auth),
+        workspace: Some(workspace),
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)

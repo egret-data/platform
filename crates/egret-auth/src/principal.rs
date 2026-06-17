@@ -52,6 +52,7 @@ impl IntoResponse for AuthError {
             Error::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Error::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
             Error::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+            Error::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too many requests"),
             Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         };
         (status, Json(serde_json::json!({ "error": msg }))).into_response()

@@ -1912,3 +1912,16 @@ Otherwise nothing to commit.
 - `WsContext(WorkspaceContext)` uses `egret_core::WorkspaceContext` (fields `workspace_id`, `principal`, `workspace_role`) and `is_platform_admin()` — matches the Phase 0a definition. ✅
 
 **Open follow-ups:** Phase 1a-3 (OIDC/SSO) consumes `map_idp_claims_to_roles` and `model::Provider`; group memberships get populated there.
+
+---
+
+## Execution record (applied during implementation)
+
+Implemented via subagent-driven TDD; independently reviewed (spec + security + code quality) — **APPROVED**. Offline `cargo test --workspace` = 57 passed; DB-gated `workspace_db` = 12, `session_db` = 8; clippy/fmt clean. e2e smoke verified: `egret init --force` → login → create workspace via `POST /api/admin/workspaces` (CSRF enforced) → list returns it.
+
+**Notes:** Task 7 was completed across two passes (the first dispatch was interrupted); the second reconciled the partial files and committed cleanly. No behavioral deviations from the plan.
+
+**Minor items deferred (non-blocking, from the review) — for a hardening follow-up:**
+- Rate-limit key trusts the `X-Forwarded-For` first hop; add trusted-proxy validation when a real proxy lands (per §9 this is MVP-scoped to single-instance).
+- Add an integration test for `DELETE /api/ws/{workspace}/members/...` (only the GET list path is currently covered).
+- Add a direct most-permissive union test (a principal denied by one role but allowed by another → allowed); current coverage proves the group path resolves but not the union property explicitly.

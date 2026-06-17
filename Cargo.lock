@@ -517,6 +517,7 @@ dependencies = [
  "egret-core",
  "egret-metastore",
  "egret-server",
+ "egret-workspace",
  "sqlx",
  "tokio",
  "tracing",
@@ -561,12 +562,34 @@ dependencies = [
  "egret-config",
  "egret-core",
  "egret-metastore",
+ "egret-workspace",
  "http-body-util",
  "serde_json",
  "tokio",
  "tower",
  "tower-http",
  "tracing",
+]
+
+[[package]]
+name = "egret-workspace"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "egret-auth",
+ "egret-config",
+ "egret-core",
+ "egret-metastore",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

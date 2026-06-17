@@ -1,6 +1,5 @@
 //! Auth domain types.
 
-use chrono::{DateTime, Utc};
 use egret_core::UserId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,12 +25,4 @@ pub struct User {
     pub name: String,
     pub password_hash: Option<String>,
     pub status: String, // 'active' | 'disabled'
-}
-
-#[derive(Debug, Clone)]
-pub struct Session {
-    pub id: uuid::Uuid,
-    pub user_id: UserId,
-    pub absolute_expires_at: DateTime<Utc>,
-    pub idle_expires_at: DateTime<Utc>,
 }
