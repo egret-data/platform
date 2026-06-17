@@ -1,44 +1,47 @@
 # Egret
 
-**Egret** là một data portal thống nhất viết bằng **Rust**, gộp năng lực của Metabase/Superset (BI &
-explorer), Lakekeeper (Iceberg REST catalog), Apache Ranger (centralized access policy), DBApi (data
-API builder) và n8n (workflow automation) — với frontend kế thừa design system của sparklabx.
+> 🇻🇳 Vietnamese reference: [`README.vi.md`](README.vi.md)
 
-## Hai portal trong một tool
+**Egret** is a unified data portal written in **Rust** that combines the capabilities of
+Metabase/Superset (BI & exploration), Lakekeeper (Iceberg REST catalog), Apache Ranger (centralized
+access policy), DBApi (data API builder), and n8n (workflow automation) — with a frontend that
+inherits the sparklabx design system.
 
-- **Admin / Data Governance** — quản lý database, Iceberg catalog, Ranger policy, users/workspaces, monitoring/audit.
-- **Explorer** — SQL Lab, dataset, chart, dashboard, notebook, Data API, workflow — **cô lập theo workspace** (dự án/phòng ban).
+## Two portals in one tool
 
-## Năng lực chính
+- **Admin / Data Governance** — manage databases, the Iceberg catalog, Ranger policies, users/workspaces, monitoring/audit.
+- **Explorer** — SQL Lab, dataset, chart, dashboard, notebook, Data APIs, workflows — **isolated per workspace** (project/department).
 
-- 🗄️ **Database management** — đăng ký/monitor database (MVP: Trino, StarRocks)
-- 🛡️ **Apache Ranger API** — tương thích Ranger Admin REST để Trino/StarRocks tải policy
-- 🧊 **Iceberg REST Catalog** — catalog tích hợp engine (tham khảo Lakekeeper)
+## Core capabilities
+
+- 🗄️ **Database management** — register/monitor databases (MVP: Trino, StarRocks)
+- 🛡️ **Apache Ranger API** — Ranger Admin REST-compatible so Trino/StarRocks download policies
+- 🧊 **Iceberg REST Catalog** — engine-integrated catalog (references Lakekeeper)
 - 📊 **BI / Explorer** — SQL Lab, dataset, chart (ECharts), dashboard, notebook
-- 🔌 **Data API Builder** — cấu hình HTTP API từ SQL (dynamic SQL kiểu MyBatis)
-- ⚙️ **Workflow Automation** — tự động hoá kiểu n8n (schedule, gửi mail, gọi API)
+- 🔌 **Data API Builder** — configure HTTP APIs from SQL (MyBatis-style dynamic SQL)
+- ⚙️ **Workflow Automation** — n8n-style automation (schedule, send email, call APIs)
 - 🏢 **Multi-workspace** · 🔐 **OIDC / SSO**
 
-## Kiến trúc
+## Architecture
 
-- **Backend:** modular monolith — Rust workspace nhiều crate, 1 binary (axum + tokio + sqlx).
-- **Frontend:** 1 SPA (React + Vite + Tailwind v4 + Radix), 2 route-group Admin/Explorer.
-- **Hạ tầng:** PostgreSQL + Object storage (S3/MinIO) + Redis (tùy chọn).
+- **Backend:** modular monolith — a Rust workspace of many crates, one binary (axum + tokio + sqlx).
+- **Frontend:** a single SPA (React + Vite + Tailwind v4 + Radix), two route groups Admin/Explorer.
+- **Infrastructure:** PostgreSQL + object storage (S3/MinIO) + Redis (optional).
 
-📐 **Tài liệu kiến trúc đầy đủ:**
-- 🇬🇧 **Bản gốc (canonical):** [`docs/en/architecture/2026-06-17-egret-architecture-design.md`](docs/en/architecture/2026-06-17-egret-architecture-design.md)
-- 🇻🇳 **Bản tham khảo:** [`docs/vi/architecture/2026-06-17-egret-architecture-design.md`](docs/vi/architecture/2026-06-17-egret-architecture-design.md)
+📐 **Full architecture document:**
+- 🇬🇧 **Canonical:** [`docs/en/architecture/2026-06-17-egret-architecture-design.md`](docs/en/architecture/2026-06-17-egret-architecture-design.md)
+- 🇻🇳 **Reference:** [`docs/vi/architecture/2026-06-17-egret-architecture-design.md`](docs/vi/architecture/2026-06-17-egret-architecture-design.md)
 
-> Quy ước tài liệu: **tiếng Anh là bản gốc**, tiếng Việt là bản tham khảo; đặt trong `docs/en/` và `docs/vi/` (mirror cấu trúc).
+> Documentation convention: **English is canonical**, Vietnamese is a reference translation; placed under `docs/en/` and `docs/vi/` (mirrored structure).
 
-## Trạng thái
+## Status
 
-🚧 Giai đoạn thiết kế. Xem [Roadmap](docs/en/architecture/2026-06-17-egret-architecture-design.md#16-phased-roadmap).
+🚧 Design phase. See the [Roadmap](docs/en/architecture/2026-06-17-egret-architecture-design.md#16-phased-roadmap).
 
-## Cấu trúc repo (dự kiến)
+## Repository layout (planned)
 
 ```text
-crates/      # 21 crate Rust (egret-core, -server, -auth, -catalog, -ranger, -engine, -bi, -dataapi, -workflow, ...)
+crates/      # 21 Rust crates (egret-core, -server, -auth, -catalog, -ranger, -engine, -bi, -dataapi, -workflow, ...)
 frontend/    # pnpm monorepo (apps/web + packages/ui|api-client|charts|workflow-canvas|...)
 migrations/  # sqlx migrations
 deploy/      # Dockerfile, compose, helm
