@@ -44,8 +44,8 @@ mod tests {
     #[test]
     fn migrator_embeds_baseline_migration() {
         assert!(
-            MIGRATOR.migrations.len() >= 5,
-            "expected through the oidc migration"
+            MIGRATOR.migrations.len() >= 6,
+            "expected through the catalog migration"
         );
     }
 }
