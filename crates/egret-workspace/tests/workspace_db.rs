@@ -9,7 +9,7 @@ use egret_auth::users::UserRepo;
 use egret_config::Config;
 use egret_core::{Pagination, UserId};
 use egret_metastore::Db;
-use egret_workspace::routes::{admin_workspace_router, WorkspaceState};
+use egret_workspace::routes::{admin_user_router, admin_workspace_router, WorkspaceState};
 use egret_workspace::workspaces::WorkspaceRepo;
 use tower::ServiceExt;
 
@@ -284,4 +284,40 @@ async fn platform_admin_can_create_workspace() {
         ),
         config: Config::default(),
     };
+}
+
+// ── Task 8: Admin user routes ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn assign_platform_role_then_user_gains_access() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let admin = seed_user(&db).await;
+    let target = seed_user(&db).await;
+    let st = ws_state(&db).await;
+    st.authz
+        .replace_platform_roles(admin, &["platform_admin".into()])
+        .await
+        .unwrap();
+    let cookie = login_cookie(&db, admin, &st.sessions).await;
+    let app = axum::Router::new()
+        .nest("/api/admin", admin_user_router())
+        .with_state(st);
+
+    let body = serde_json::to_vec(&serde_json::json!({"roles": ["data_steward"]})).unwrap();
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .method("PUT")
+                .uri(format!("/api/admin/users/{}/platform-roles", target.0))
+                .header("cookie", cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }
