@@ -153,7 +153,7 @@ groups(id uuid pk, name text unique, source text[local|oidc])
 user_groups(user_id fk, group_id fk, primary key(user_id, group_id))
 sessions(id uuid pk, token_hash text unique, user_id fk, created_at timestamptz,
          absolute_expires_at timestamptz, idle_expires_at timestamptz,
-         last_seen_at timestamptz, user_agent text, ip inet null)
+         last_seen_at timestamptz, user_agent text, ip text)
 ```
 > `sessions.token_hash` lưu hash của token (token thô chỉ nằm trong cookie) → lộ DB không lộ session sống. Index `sessions(token_hash)` và `sessions(user_id)`.
 

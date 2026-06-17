@@ -1645,3 +1645,22 @@ git commit -m "feat(bin): egret init bootstrap admin and serve wiring; session/c
 - `Principal { user_id, email, platform_roles }` matches the Phase 0a `egret-core` definition. ✅
 
 **Open follow-ups (next plans):** 1a-2 Workspace & RBAC (Authorizer, admin routes, `workspace_context_layer`, group-role resolution, login rate-limiting); 1a-3 OIDC/SSO.
+
+---
+
+## Execution record (applied during implementation)
+
+Implemented via subagent-driven TDD; independently reviewed (spec + security + code quality) — **APPROVED**, 35 offline tests + 6 DB-integration tests green, clippy/fmt clean.
+
+**Deviations from the plan text (all accepted, applied correctly):**
+- `time = "0.3"` added to `egret-auth` deps; cookie builders use `time::Duration` (axum-extra doesn't re-export `time`).
+- `use axum::extract::FromRef` imported in `principal.rs`.
+- `SessionConfig`/`CsrfConfig` + their config test landed in Task 8 (not 9) because `routes.rs` consumes `config.session.*`.
+- CSRF scoped via an inner protected sub-router (`login` exempt; `logout`+`me` behind `csrf_layer`); no outer csrf layer on `/api/auth` — resolves the Task 8 executor note.
+- `egret-bin` gained `chrono` + `sqlx` deps for `init`.
+- `sessions.ip` is `text` (not `inet`) to avoid the sqlx `ipnetwork` feature — matches this plan's migration; spec §6 updated to `text`.
+
+**Minor items deferred to Phase 1a-2 (hardening):**
+- Login user-enumeration timing side-channel → add a dummy argon2 verify + login rate-limiting.
+- `egret init --force` flag (currently idempotent refuse-only).
+- Dead-code domain types (`model::Provider`, `model::Session`) — wire in or drop when 1a-2/1a-3 need them.
