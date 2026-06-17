@@ -231,6 +231,22 @@ create table workspace_catalog_grant (
 );
 ```
 
+## 8.1 Performance considerations (JSONB-as-truth)
+
+Storing the full `TableMetadata` as one `jsonb` column is a deliberate trade-off. By access pattern:
+
+- **`loadTable` (hottest path):** JSONB *wins* over normalized — the REST response is essentially the whole `TableMetadata`, so reading one blob and deserializing is optimal. Lakekeeper's normalized model must JOIN ~11 tables and reassemble, which is more work for this dominant read.
+- **`listTables` / `HEAD` / drop / rename:** never touch the blob. Hot fields (`name`, `metadata_location`, `current_snapshot_id`, `current_version`) are **real columns**, so Postgres only de-TOASTs `metadata` when that column is actually selected.
+- **`commit` (the real downside):** read full blob → deserialize → apply → **re-serialize and rewrite the whole blob**, even to append one snapshot. For tables with long snapshot history this is **O(history) write amplification**; normalized would `INSERT` one snapshot row (O(1)).
+
+**Blob growth** is driven by the `snapshots` array (~hundreds of bytes per commit). Typical tables stay in the **KB** range (negligible). A write-heavy table (streaming/hourly) with long retention can reach **MB**, where parse cost (high-QPS loadTable) and write amplification (commit) start to matter. Postgres stores `jsonb` > 2KB in **TOAST** (lz4/pglz compressed, out-of-line), so a large blob costs de-TOAST + decompress + serde parse.
+
+**Verdict:** fine at Phase 2a / MVP scale. Four safety valves keep it bounded:
+1. **Hot columns separated** (done) — list/exists/pointer ops never read the blob.
+2. **Version-keyed loadTable cache** — cache deserialized metadata by `(table_id, current_version)`; a commit bumps the version so the cache self-invalidates, eliminating repeat-parse cost. (follow-up)
+3. **Snapshot retention / `expireSnapshots`** — the standard Iceberg mechanism bounds the blob.
+4. **Escape hatch** — if a write-heavy workload appears, migrate `CatalogStore` internals to a normalized snapshot table (lakekeeper-style). The **REST layer is unchanged**; only the store changes, so JSONB-as-truth is not a dead end.
+
 ## 9. Testing
 
 - **pyiceberg real-client gate** (`tests/` or `lakekeeper-integration-tests`-style crate): spin up MinIO + Egret via testcontainers; run a pyiceberg script that does `create_namespace → create_table(schema) → append(pyarrow table) → load_table → scan().to_arrow()` and asserts the round-tripped rows. Proves the REST protocol + remote signing end-to-end. Self-skips when Docker is unavailable (mirrors the Keycloak gate).

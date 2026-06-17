@@ -231,6 +231,22 @@ create table workspace_catalog_grant (
 );
 ```
 
+## 8.1 Cân nhắc performance (JSONB-as-truth)
+
+Lưu full `TableMetadata` thành 1 cột `jsonb` là đánh đổi có chủ đích. Theo access pattern:
+
+- **`loadTable` (đường nóng nhất):** JSONB *thắng* normalized — response REST gần như chính là toàn bộ `TableMetadata`, nên đọc 1 blob rồi deserialize là tối ưu. Mô hình normalized của lakekeeper phải JOIN ~11 bảng rồi ráp lại, nhiều việc hơn cho đường đọc chủ đạo này.
+- **`listTables` / `HEAD` / drop / rename:** không chạm blob. Các trường nóng (`name`, `metadata_location`, `current_snapshot_id`, `current_version`) là **cột thật**, nên Postgres chỉ de-TOAST `metadata` khi thực sự SELECT cột đó.
+- **`commit` (điểm yếu thật):** đọc full blob → deserialize → apply → **serialize & ghi lại nguyên blob**, dù chỉ thêm 1 snapshot. Bảng có lịch sử snapshot dài → **write amplification O(history)**; normalized chỉ `INSERT` 1 row snapshot (O(1)).
+
+**Blob phình** do mảng `snapshots` (~vài trăm byte mỗi commit). Bảng thường ở mức **KB** (không đáng kể). Bảng ghi-dày (streaming/hourly) giữ snapshot lâu có thể lên **MB**, lúc đó parse cost (loadTable QPS cao) + write amplification (commit) mới đáng kể. Postgres lưu `jsonb` > 2KB ở **TOAST** (nén lz4/pglz, out-of-line), nên blob to tốn de-TOAST + decompress + serde parse.
+
+**Kết luận:** ổn ở scale Phase 2a / MVP. Bốn van an toàn giữ blob bị chặn:
+1. **Tách cột nóng** (đã làm) — list/exists/pointer không đọc blob.
+2. **Cache loadTable theo version** — cache metadata deserialize theo `(table_id, current_version)`; commit bump version nên cache tự invalidate, triệt tiêu parse lặp. (follow-up)
+3. **Snapshot retention / `expireSnapshots`** — cơ chế Iceberg chuẩn, chặn kích thước blob.
+4. **Escape hatch** — nếu xuất hiện workload ghi-dày, migrate ruột `CatalogStore` sang normalized snapshot table (kiểu lakekeeper). **REST layer không đổi**; chỉ store đổi — JSONB-as-truth không phải ngõ cụt.
+
 ## 9. Test
 
 - **Gate pyiceberg client thật** (crate kiểu `tests/` hoặc `lakekeeper-integration-tests`): dựng MinIO + Egret qua testcontainers; chạy script pyiceberg `create_namespace → create_table(schema) → append(pyarrow table) → load_table → scan().to_arrow()` và assert lại data round-trip. Chứng minh protocol REST + remote signing end-to-end. Self-skip khi không có Docker (giống gate Keycloak).
