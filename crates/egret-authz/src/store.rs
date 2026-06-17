@@ -172,12 +172,11 @@ impl AuthzStore {
         enabled: bool,
     ) -> Result<(), AuthzError> {
         let mut tx = self.db.pool.begin().await?;
-        let svc: Option<i64> = sqlx::query_scalar::<_, i64>(
-            r#"SELECT service_id FROM authz_policies WHERE id = $1"#,
-        )
-        .bind(id)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let svc: Option<i64> =
+            sqlx::query_scalar::<_, i64>(r#"SELECT service_id FROM authz_policies WHERE id = $1"#)
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
         let Some(service_id) = svc else {
             tx.rollback().await?;
             return Err(AuthzError::NotFound(format!("policy {id}")));

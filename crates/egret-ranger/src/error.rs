@@ -22,9 +22,16 @@ impl IntoResponse for RangerError {
             AuthzError::Json(e) => (StatusCode::BAD_REQUEST, e.to_string()),
             AuthzError::Db(e) => {
                 tracing::error!(error = %e, "ranger: database error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_string(),
+                )
             }
         };
-        (status, Json(serde_json::json!({ "msg": msg, "statusCode": status.as_u16() }))).into_response()
+        (
+            status,
+            Json(serde_json::json!({ "msg": msg, "statusCode": status.as_u16() })),
+        )
+            .into_response()
     }
 }

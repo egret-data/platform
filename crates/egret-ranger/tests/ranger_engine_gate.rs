@@ -9,6 +9,10 @@ fn ranger_engine_enforces_egret_policies() {
         return;
     }
     let dir = env!("CARGO_MANIFEST_DIR").to_string() + "/../../tests/ranger";
-    let status = Command::new("mvn").args(["-q", "test"]).current_dir(&dir).status().expect("run mvn");
+    let status = Command::new("mvn")
+        .args(["-q", "test"])
+        .current_dir(&dir)
+        .status()
+        .expect("run mvn");
     assert!(status.success(), "Ranger enforcement test failed");
 }

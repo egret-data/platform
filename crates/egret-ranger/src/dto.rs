@@ -93,12 +93,16 @@ mod tests {
     fn policy_update_time_omitted_when_none() {
         let sp = ServicePolicies::new("s".into(), 1, 1, serde_json::json!({}), vec![], None);
         let j = serde_json::to_value(&sp).unwrap();
-        assert!(j.get("policyUpdateTime").is_none(), "policyUpdateTime must be absent when None, got {j}");
+        assert!(
+            j.get("policyUpdateTime").is_none(),
+            "policyUpdateTime must be absent when None, got {j}"
+        );
     }
 
     #[test]
     fn audit_mode_defaults_on_deserialize() {
-        let json = r#"{"serviceName":"s","serviceId":1,"policyVersion":2,"serviceDef":{},"policies":[]}"#;
+        let json =
+            r#"{"serviceName":"s","serviceId":1,"policyVersion":2,"serviceDef":{},"policies":[]}"#;
         let sp: ServicePolicies = serde_json::from_str(json).unwrap();
         assert_eq!(sp.audit_mode, "DEFAULT");
     }

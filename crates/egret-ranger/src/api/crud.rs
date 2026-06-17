@@ -97,9 +97,9 @@ async fn create_policy(
     let service = body["service"].as_str().ok_or_else(|| {
         RangerError::from(AuthzError::BadRequest("policy.service required".into()))
     })?;
-    let name = body["name"].as_str().ok_or_else(|| {
-        RangerError::from(AuthzError::BadRequest("policy.name required".into()))
-    })?;
+    let name = body["name"]
+        .as_str()
+        .ok_or_else(|| RangerError::from(AuthzError::BadRequest("policy.name required".into())))?;
     let svc = s.store.get_service(service).await?;
     let id = s.store.create_policy(svc.id, name, &body).await?;
     let mut out = body.clone();
@@ -122,9 +122,9 @@ async fn update_policy(
     Path(id): Path<i64>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, RangerError> {
-    let name = body["name"].as_str().ok_or_else(|| {
-        RangerError::from(AuthzError::BadRequest("policy.name required".into()))
-    })?;
+    let name = body["name"]
+        .as_str()
+        .ok_or_else(|| RangerError::from(AuthzError::BadRequest("policy.name required".into())))?;
     let enabled = body
         .get("isEnabled")
         .and_then(Value::as_bool)
