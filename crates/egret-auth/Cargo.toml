@@ -23,6 +23,7 @@ hex.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+time = "0.3"
 
 [dev-dependencies]
 tokio.workspace = true
