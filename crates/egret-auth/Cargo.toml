@@ -9,7 +9,7 @@ egret-core.workspace = true
 egret-metastore.workspace = true
 egret-config.workspace = true
 axum.workspace = true
-axum-extra.workspace = true
+axum-extra = { version = "0.10", features = ["cookie", "cookie-private"] }
 sqlx.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -23,9 +23,13 @@ hex.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+openidconnect.workspace = true
+reqwest.workspace = true
 time = "0.3"
 
 [dev-dependencies]
 tokio.workspace = true
 tower.workspace = true
 http-body-util = "0.1"
+testcontainers.workspace = true
+reqwest.workspace = true
