@@ -13,6 +13,22 @@ pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub log: LogConfig,
+    pub session: SessionConfig,
+    pub csrf: CsrfConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionConfig {
+    pub cookie_name: String,
+    pub absolute_ttl_hours: u32,
+    pub idle_ttl_minutes: u32,
+    pub secure: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CsrfConfig {
+    pub cookie_name: String,
+    pub header_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +66,16 @@ impl Default for Config {
             log: LogConfig {
                 filter: "info".into(),
                 json: false,
+            },
+            session: SessionConfig {
+                cookie_name: "egret_session".into(),
+                absolute_ttl_hours: 24,
+                idle_ttl_minutes: 60,
+                secure: false,
+            },
+            csrf: CsrfConfig {
+                cookie_name: "egret_csrf".into(),
+                header_name: "X-Egret-CSRF".into(),
             },
         }
     }
@@ -104,6 +130,17 @@ mod tests {
             jail.create_file("egret.toml", "[server]\nport = 7000\n")?;
             let cfg: Config = Config::figment().extract()?;
             assert_eq!(cfg.server.port, 7000);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn session_and_csrf_defaults_present() {
+        figment::Jail::expect_with(|_j| {
+            let cfg: Config = Config::figment().extract()?;
+            assert_eq!(cfg.session.absolute_ttl_hours, 24);
+            assert_eq!(cfg.session.idle_ttl_minutes, 60);
+            assert_eq!(cfg.csrf.header_name, "X-Egret-CSRF");
             Ok(())
         });
     }

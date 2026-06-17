@@ -44,8 +44,8 @@ mod tests {
     #[test]
     fn migrator_embeds_baseline_migration() {
         assert!(
-            !MIGRATOR.migrations.is_empty(),
-            "expected at least the baseline migration to be embedded"
+            MIGRATOR.migrations.len() >= 3,
+            "expected baseline + identity + rbac migrations to be embedded"
         );
     }
 }
