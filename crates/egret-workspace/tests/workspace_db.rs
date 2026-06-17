@@ -10,9 +10,10 @@ use egret_config::Config;
 use egret_core::{Pagination, UserId};
 use egret_metastore::Db;
 use egret_workspace::routes::{
-    admin_user_router, admin_workspace_router, ws_member_router, WorkspaceState,
+    admin_user_router, admin_workspace_router, me_router, ws_member_router, WorkspaceState,
 };
 use egret_workspace::workspaces::WorkspaceRepo;
+use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 async fn connect() -> Option<Db> {
@@ -405,4 +406,68 @@ async fn archived_workspace_is_404() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ── Task 1 / Phase 0b: me_router tests ───────────────────────────────────────
+
+#[tokio::test]
+async fn my_workspaces_lists_membership_and_admin_sees_all() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let owner = seed_user(&db).await;
+    let member = seed_user(&db).await;
+    let st = ws_state(&db).await;
+    let ws = st.workspaces.create(&uniq("ws"), "W", owner).await.unwrap();
+    st.members
+        .add(ws.id, "user", member.0, "ws_viewer", owner)
+        .await
+        .unwrap();
+    let app = axum::Router::new()
+        .nest("/api/me", me_router())
+        .with_state(st.clone());
+
+    // member sees their workspace
+    let cookie = login_cookie(&db, member, &st.sessions).await;
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .uri("/api/me/workspaces")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let arr: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(arr
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|w| w["id"] == ws.id.to_string()));
+
+    // a brand-new non-member sees none of this ws
+    let outsider = seed_user(&db).await;
+    let cookie2 = login_cookie(&db, outsider, &st.sessions).await;
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .uri("/api/me/workspaces")
+                .header("cookie", cookie2)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let arr: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(!arr
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|w| w["id"] == ws.id.to_string()));
 }

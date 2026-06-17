@@ -43,7 +43,7 @@ pub struct MeResponse {
     pub platform_roles: Vec<String>,
 }
 
-/// Build the auth router. `login` is CSRF-exempt (client has no cookie yet);
+/// Build the auth router. `login` and `config` are CSRF-exempt (client has no cookie yet);
 /// `logout` and `me` are behind `csrf_layer` (axum layers routes added before them).
 pub fn auth_router() -> Router<AuthState> {
     let protected = Router::new()
@@ -52,7 +52,12 @@ pub fn auth_router() -> Router<AuthState> {
         .layer(axum::middleware::from_fn(crate::csrf::csrf_layer));
     Router::new()
         .route("/login", post(login)) // CSRF-exempt
+        .route("/config", get(auth_config)) // CSRF-exempt, pre-login
         .merge(protected)
+}
+
+async fn auth_config(State(st): State<AuthState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "oidc_enabled": st.config.oidc.enabled }))
 }
 
 async fn login(

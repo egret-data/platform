@@ -167,6 +167,25 @@ async fn archive_ws(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+// ── Me routes (Task 1 / Phase 0b) ────────────────────────────────────────────
+
+async fn list_my_workspaces(
+    State(st): State<WorkspaceState>,
+    Auth(p): Auth,
+) -> Result<Json<Vec<WorkspaceDto>>, AuthError> {
+    let is_admin = p.platform_roles.iter().any(|r| r == "platform_admin");
+    let list = st
+        .workspaces
+        .list_for_principal(p.user_id, is_admin)
+        .await
+        .map_err(AuthError)?;
+    Ok(Json(list.into_iter().map(Into::into).collect()))
+}
+
+pub fn me_router() -> Router<WorkspaceState> {
+    Router::new().route("/workspaces", get(list_my_workspaces))
+}
+
 // ── Admin user routes (Task 8) ───────────────────────────────────────────────
 
 #[derive(Serialize)]

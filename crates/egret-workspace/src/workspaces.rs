@@ -91,6 +91,36 @@ impl WorkspaceRepo {
             .map_err(db_err)?;
         Ok(())
     }
+
+    /// Workspaces the principal can access: all active if `include_all` (platform_admin),
+    /// else those where the user is a member directly or via a group.
+    pub async fn list_for_principal(
+        &self,
+        user_id: UserId,
+        include_all: bool,
+    ) -> Result<Vec<Workspace>> {
+        let rows = if include_all {
+            sqlx::query_as::<_, WorkspaceRow>(
+                "SELECT id, slug, name, status FROM workspaces WHERE status = 'active' ORDER BY name",
+            )
+            .fetch_all(&self.db.pool)
+            .await
+        } else {
+            sqlx::query_as::<_, WorkspaceRow>(
+                "SELECT DISTINCT w.id, w.slug, w.name, w.status FROM workspaces w \
+                 JOIN workspace_members wm ON wm.workspace_id = w.id \
+                 WHERE w.status = 'active' \
+                   AND ( (wm.principal_type = 'user'  AND wm.principal_id = $1) \
+                      OR (wm.principal_type = 'group' AND wm.principal_id IN \
+                             (SELECT group_id FROM user_groups WHERE user_id = $1)) ) \
+                 ORDER BY w.name",
+            )
+            .bind(user_id.0)
+            .fetch_all(&self.db.pool)
+            .await
+        };
+        Ok(rows.map_err(db_err)?.into_iter().map(Into::into).collect())
+    }
 }
 
 #[derive(sqlx::FromRow)]
