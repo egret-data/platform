@@ -1,0 +1,12 @@
+[package]
+name = "egret-config"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+figment.workspace = true
+
+[dev-dependencies]
+figment = { version = "0.10", features = ["toml", "env", "test"] }
