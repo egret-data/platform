@@ -1838,6 +1838,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "egret-authz"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "egret-core",
+ "egret-metastore",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "egret-bin"
 version = "0.1.0"
 dependencies = [
@@ -1927,6 +1943,26 @@ dependencies = [
  "egret-core",
  "sqlx",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "egret-ranger"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "egret-authz",
+ "egret-config",
+ "egret-core",
+ "egret-metastore",
+ "http 1.4.2",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
  "tracing",
 ]
 
