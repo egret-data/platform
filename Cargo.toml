@@ -14,6 +14,21 @@ egret-metastore = { path = "crates/egret-metastore" }
 egret-server = { path = "crates/egret-server" }
 egret-auth = { path = "crates/egret-auth" }
 egret-workspace = { path = "crates/egret-workspace" }
+egret-storage = { path = "crates/egret-storage" }
+egret-iceberg-ext = { path = "crates/egret-iceberg-ext" }
+egret-catalog = { path = "crates/egret-catalog" }
+
+# Iceberg model — pin the lakekeeper fork/rev so the TableMetadataBuilder /
+# TableUpdate::apply / TableRequirement::check API matches the reference exactly.
+iceberg = { git = "https://github.com/lakekeeper/iceberg-rust.git", rev = "bb7017339f778de44830b4f970d9d5e1e84f5599" }
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-credential-types = { version = "1.2" }
+aws-sdk-s3 = { version = "1.121", default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio"] }
+aws-sdk-sts = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sigv4 = { version = "1.2" }
+url = { version = "2", features = ["serde"] }
+http = "1"
+typed-builder = "0.20"
 
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
