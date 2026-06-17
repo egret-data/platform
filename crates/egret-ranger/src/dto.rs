@@ -51,7 +51,7 @@ pub struct ServiceTags {
     pub op: String,
     pub service_name: String,
     pub tag_version: i64,
-    pub tags: serde_json::Map<String, Value>,
+    pub tags: serde_json::Map<String, Value>, // keyed by tag-id (Long-as-string per Ranger wire format); empty this phase
     pub service_resources: Vec<Value>,
 }
 
@@ -86,6 +86,32 @@ mod tests {
         assert_eq!(j["policyVersion"], 5);
         assert_eq!(j["serviceDef"]["name"], "trino");
         assert_eq!(j["auditMode"], "DEFAULT");
+        assert_eq!(j["policyUpdateTime"], 0);
+    }
+
+    #[test]
+    fn policy_update_time_omitted_when_none() {
+        let sp = ServicePolicies::new("s".into(), 1, 1, serde_json::json!({}), vec![], None);
+        let j = serde_json::to_value(&sp).unwrap();
+        assert!(j.get("policyUpdateTime").is_none(), "policyUpdateTime must be absent when None, got {j}");
+    }
+
+    #[test]
+    fn audit_mode_defaults_on_deserialize() {
+        let json = r#"{"serviceName":"s","serviceId":1,"policyVersion":2,"serviceDef":{},"policies":[]}"#;
+        let sp: ServicePolicies = serde_json::from_str(json).unwrap();
+        assert_eq!(sp.audit_mode, "DEFAULT");
+    }
+
+    #[test]
+    fn service_tags_empty_serializes_camel_case() {
+        let t = ServiceTags::empty("trino_prod".into());
+        let j = serde_json::to_value(&t).unwrap();
+        assert_eq!(j["op"], "add");
+        assert_eq!(j["serviceName"], "trino_prod");
+        assert_eq!(j["tagVersion"], 1);
+        assert!(j["tags"].is_object());
+        assert!(j["serviceResources"].is_array());
     }
 
     #[test]
