@@ -33,7 +33,10 @@ mod tests {
 
     #[test]
     fn display_messages_are_stable() {
-        assert_eq!(Error::NotFound("user".into()).to_string(), "not found: user");
+        assert_eq!(
+            Error::NotFound("user".into()).to_string(),
+            "not found: user"
+        );
         assert_eq!(Error::Unauthorized.to_string(), "unauthorized");
         assert_eq!(Error::Forbidden.to_string(), "forbidden");
     }
