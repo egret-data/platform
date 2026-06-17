@@ -67,7 +67,7 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2021"
 license = "Apache-2.0"
-rust-version = "1.82"
+rust-version = "1.85"
 
 [workspace.dependencies]
 egret-core = { path = "crates/egret-core" }
@@ -101,9 +101,13 @@ Create `rust-toolchain.toml`:
 
 ```toml
 [toolchain]
-channel = "1.82"
+channel = "stable"
 components = ["rustfmt", "clippy"]
 ```
+
+> **Note:** `stable` is used (not a fixed `1.82`) because modern dependency versions
+> (`uuid` 1.21+, `axum` 0.8, `sqlx` 0.8) require Rust ≥ 1.85. `rust-version = "1.85"`
+> documents the MSRV floor.
 
 Create `rustfmt.toml`:
 
@@ -1242,7 +1246,7 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
