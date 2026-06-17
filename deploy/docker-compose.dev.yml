@@ -61,6 +61,17 @@ services:
     volumes:
       - ./keycloak:/opt/keycloak/data/import:ro
 
+  # Optional: serve the production-built frontend via nginx.
+  # Primary dev path is `npm run dev` (Vite) + `cargo run -p egret-bin -- serve`.
+  # Note: the Egret backend is not containerized in this compose yet, so /api
+  # requests will not resolve. Use this service for static-build smoke tests only.
+  frontend:
+    build: ../frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - postgres
+
 volumes:
   pgdata:
   miniodata:
