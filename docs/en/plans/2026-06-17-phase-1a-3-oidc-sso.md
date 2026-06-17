@@ -1202,3 +1202,19 @@ git commit -m "fix(auth): address final OIDC verification findings"
 - `AuthState` is **not** modified (OIDC uses its own state) → no churn to 1a-1/1a-2 AuthState constructions. ✅
 
 **Open follow-ups:** account linking by verified email; `idp_role_mapping` (claim→role) activation; multi-IdP — all future.
+
+---
+
+## Execution record (applied during implementation)
+
+Implemented via subagent-driven TDD; independently reviewed (spec + security + code quality). All gates green: offline `cargo test --workspace` (18 suites), DB `oidc_db` 4/4, **real Keycloak `oidc_keycloak` 2/2** (ROPC + full auth-code+PKCE+nonce, ~1–2 min), clippy/fmt clean.
+
+**Adaptations (version-sensitive, applied correctly):**
+- `openidconnect` **4.0.1** endpoint type-states: client carries `Endpoint{Set,NotSet,MaybeSet}` generics; `exchange_code` is fallible; groups read via a custom `AdditionalClaims` (`GroupsClaims`) parameterizing the id-token type. Default features already include reqwest+rustls.
+- `testcontainers` **0.23**: `GenericImage` + `ImageExt` (`with_cmd`/`with_env_var`/`with_mount`) + `AsyncRunner::start`; readiness by polling the discovery endpoint.
+
+**Real-IdP testing paid off — two genuine defects caught that a mock would have missed:**
+1. **`invalid_scope`**: requesting a `groups` *scope* against the realm (which emits groups via a client mapper, not a client-scope) is rejected by Keycloak and breaks the authorize page. Fixed by dropping `"groups"` from the default `OidcConfig.scopes` (commit `e8ceebb`); the group claim is still emitted by the mapper. Spec §9 updated.
+2. **Encrypted session cookie (Critical, found in review)**: the callback added `egret_session`/`egret_csrf` to the `PrivateCookieJar`, which encrypts them — so the browser's session cookie was ciphertext that `SessionService.validate()` could never match, leaving OIDC users silently unauthenticated. Fixed (commit `9e9ee94`): session/csrf now go on a plain `CookieJar` (only the PKCE state cookie stays encrypted), state cookie is cleared on all error paths, and a `login_response` helper + regression test assert the emitted `Set-Cookie` value is the plaintext token.
+
+**Minor deferred (non-blocking):** `upsert_oidc_group` returns an existing `source='local'` group's id by name (a claim group colliding with a manual group name won't be revoked by sync — matches the "don't touch local" intent); account linking by verified email; `idp_role_mapping` activation. A browser-level callback→`/me` e2e (beyond the unit regression test) would further harden the cookie path.
