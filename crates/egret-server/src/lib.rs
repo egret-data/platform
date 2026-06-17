@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
+use egret_auth::oidc_routes::{oidc_router, OidcRoutesState};
 use egret_auth::routes::{auth_router, AuthState};
 use egret_metastore::Db;
 use egret_workspace::routes::{
@@ -20,6 +21,8 @@ pub struct AppState {
     pub auth: Option<AuthState>,
     /// Present once workspace crate is wired; `None` in pure health unit tests.
     pub workspace: Option<WorkspaceState>,
+    /// Present when `config.oidc.enabled`; `None` otherwise (or in unit tests).
+    pub oidc: Option<OidcRoutesState>,
 }
 
 impl AppState {
@@ -29,6 +32,7 @@ impl AppState {
             db: None,
             auth: None,
             workspace: None,
+            oidc: None,
         }
     }
 }
@@ -57,6 +61,14 @@ pub fn build_router(state: AppState) -> Router {
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
             .with_state(ws);
         router = router.merge(admin);
+    }
+
+    if let Some(oidc) = state.oidc.clone() {
+        router = router.merge(
+            Router::new()
+                .nest("/api/auth/oidc", oidc_router())
+                .with_state(oidc),
+        );
     }
 
     router.with_state(state)
