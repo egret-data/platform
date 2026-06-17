@@ -9,7 +9,9 @@ use egret_auth::users::UserRepo;
 use egret_config::Config;
 use egret_core::{Pagination, UserId};
 use egret_metastore::Db;
-use egret_workspace::routes::{admin_user_router, admin_workspace_router, WorkspaceState};
+use egret_workspace::routes::{
+    admin_user_router, admin_workspace_router, ws_member_router, WorkspaceState,
+};
 use egret_workspace::workspaces::WorkspaceRepo;
 use tower::ServiceExt;
 
@@ -320,4 +322,86 @@ async fn assign_platform_role_then_user_gains_access() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// ── Task 9: Workspace member routes ──────────────────────────────────────────
+
+#[tokio::test]
+async fn member_routes_enforce_membership() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let owner = seed_user(&db).await;
+    let admin_user = seed_user(&db).await;
+    let outsider = seed_user(&db).await;
+    let st = ws_state(&db).await;
+    let ws = st.workspaces.create(&uniq("ws"), "W", owner).await.unwrap();
+    st.members
+        .add(ws.id, "user", admin_user.0, "ws_admin", owner)
+        .await
+        .unwrap();
+    let app = axum::Router::new()
+        .nest("/api/ws", ws_member_router())
+        .with_state(st.clone());
+
+    // ws_admin can list members
+    let cookie = login_cookie(&db, admin_user, &st.sessions).await;
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .uri(format!("/api/ws/{}/members", ws.slug))
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // outsider gets 403
+    let cookie2 = login_cookie(&db, outsider, &st.sessions).await;
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .uri(format!("/api/ws/{}/members", ws.slug))
+                .header("cookie", cookie2)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn archived_workspace_is_404() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let owner = seed_user(&db).await;
+    let st = ws_state(&db).await;
+    let ws = st.workspaces.create(&uniq("ws"), "W", owner).await.unwrap();
+    st.members
+        .add(ws.id, "user", owner.0, "ws_admin", owner)
+        .await
+        .unwrap();
+    st.workspaces.archive(ws.id).await.unwrap();
+    let app = axum::Router::new()
+        .nest("/api/ws", ws_member_router())
+        .with_state(st.clone());
+    let cookie = login_cookie(&db, owner, &st.sessions).await;
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .uri(format!("/api/ws/{}/members", ws.slug))
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }

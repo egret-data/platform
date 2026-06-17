@@ -1,7 +1,7 @@
 //! HTTP state + routers for workspace administration and membership.
 
 use axum::extract::{FromRef, Path, Query, State};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use egret_auth::principal::{Auth, AuthError};
 use egret_auth::session::SessionService;
@@ -10,6 +10,7 @@ use egret_core::{Error, Pagination, UserId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::context::WsContext;
 use crate::members::MemberRepo;
 use crate::rbac::Authorizer;
 use crate::workspaces::WorkspaceRepo;
@@ -257,6 +258,87 @@ async fn set_platform_roles(
         .map_err(AuthError)?;
     st.authz
         .replace_platform_roles(UserId(id), &body.roles)
+        .await
+        .map_err(AuthError)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ── Workspace member routes (Task 9) ─────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct AddMember {
+    pub principal_type: String,
+    pub principal_id: Uuid,
+    pub role: String,
+}
+
+#[derive(Serialize)]
+pub struct MemberDto {
+    pub principal_type: String,
+    pub principal_id: String,
+    pub role: String,
+}
+
+pub fn ws_member_router() -> Router<WorkspaceState> {
+    Router::new()
+        .route("/{workspace}/members", get(list_members).post(add_member))
+        .route("/{workspace}/members/{ptype}/{pid}", delete(remove_member))
+}
+
+async fn list_members(
+    State(st): State<WorkspaceState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<Vec<MemberDto>>, AuthError> {
+    st.authz
+        .require_workspace(&ctx, "workspace:manage_members")
+        .await
+        .map_err(AuthError)?;
+    let members = st.members.list(ctx.workspace_id).await.map_err(AuthError)?;
+    Ok(Json(
+        members
+            .into_iter()
+            .map(|m| MemberDto {
+                principal_type: m.principal_type,
+                principal_id: m.principal_id.to_string(),
+                role: m.role,
+            })
+            .collect(),
+    ))
+}
+
+async fn add_member(
+    State(st): State<WorkspaceState>,
+    WsContext(ctx): WsContext,
+    Json(body): Json<AddMember>,
+) -> Result<Json<serde_json::Value>, AuthError> {
+    st.authz
+        .require_workspace(&ctx, "workspace:manage_members")
+        .await
+        .map_err(AuthError)?;
+    st.members
+        .add(
+            ctx.workspace_id,
+            &body.principal_type,
+            body.principal_id,
+            &body.role,
+            ctx.principal.user_id,
+        )
+        .await
+        .map_err(AuthError)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn remove_member(
+    State(st): State<WorkspaceState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, ptype, pid)): Path<(String, String, Uuid)>,
+) -> Result<Json<serde_json::Value>, AuthError> {
+    st.authz
+        .require_workspace(&ctx, "workspace:manage_members")
+        .await
+        .map_err(AuthError)?;
+    st.members
+        .remove(ctx.workspace_id, &ptype, pid)
         .await
         .map_err(AuthError)?;
     Ok(Json(serde_json::json!({ "ok": true })))

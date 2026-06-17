@@ -7,7 +7,9 @@ use axum::routing::get;
 use axum::{Json, Router};
 use egret_auth::routes::{auth_router, AuthState};
 use egret_metastore::Db;
-use egret_workspace::routes::{admin_user_router, admin_workspace_router, WorkspaceState};
+use egret_workspace::routes::{
+    admin_user_router, admin_workspace_router, ws_member_router, WorkspaceState,
+};
 
 /// Application state shared by all handlers.
 #[derive(Clone)]
@@ -51,6 +53,7 @@ pub fn build_router(state: AppState) -> Router {
                 "/api/admin",
                 admin_workspace_router().merge(admin_user_router()),
             )
+            .nest("/api/ws", ws_member_router())
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
             .with_state(ws);
         router = router.merge(admin);
