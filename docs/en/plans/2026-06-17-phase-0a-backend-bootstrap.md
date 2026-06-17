@@ -471,7 +471,15 @@ license.workspace = true
 [dependencies]
 serde.workspace = true
 figment.workspace = true
+
+[dev-dependencies]
+# `Jail` (used by the tests below) lives behind figment's `test` feature,
+# which is not enabled on the workspace dependency.
+figment = { version = "0.10", features = ["toml", "env", "test"] }
 ```
+
+> **Note:** `Config::load()` and the test closures carry `#[allow(clippy::result_large_err)]`
+> because `figment::Error` is large (~200 bytes) and clippy's `result_large_err` lint fires.
 
 - [ ] **Step 2: Write the failing test for config loading**
 
@@ -910,6 +918,7 @@ egret-core.workspace = true
 egret-config.workspace = true
 egret-metastore.workspace = true
 egret-server.workspace = true
+axum.workspace = true          # main.rs calls axum::serve directly
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true
