@@ -20,7 +20,7 @@ async fn put_get_delete_round_trip() {
         return;
     };
     let bucket = c.bucket.clone();
-    let store = S3Store::new(&c).await;
+    let store = S3Store::new(&c).await.unwrap();
     let uri = format!("s3://{bucket}/egret-test/{}.txt", uuid::Uuid::new_v4());
     store.put(&uri, b"hello".to_vec()).await.unwrap();
     assert_eq!(store.get(&uri).await.unwrap(), b"hello");

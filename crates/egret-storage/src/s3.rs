@@ -7,7 +7,7 @@ pub struct S3Store {
 }
 
 impl S3Store {
-    pub async fn new(cfg: &StorageConfig) -> Self {
+    pub async fn new(cfg: &StorageConfig) -> Result<Self, StorageError> {
         let creds = aws_credential_types::Credentials::new(
             cfg.access_key.clone(),
             cfg.secret_key.clone(),
@@ -26,9 +26,9 @@ impl S3Store {
         if cfg.path_style {
             b = b.force_path_style(true);
         }
-        Self {
+        Ok(Self {
             client: aws_sdk_s3::Client::from_conf(b.build()),
-        }
+        })
     }
 
     /// Split `s3://bucket/key` → (bucket, key).
@@ -67,7 +67,14 @@ impl ObjectStore for S3Store {
             .key(key)
             .send()
             .await
-            .map_err(|e| StorageError::S3(e.to_string()))?;
+            .map_err(|e| {
+                if let aws_sdk_s3::error::SdkError::ServiceError(se) = &e {
+                    if se.err().is_no_such_key() {
+                        return StorageError::NotFound(uri.to_string());
+                    }
+                }
+                StorageError::S3(e.to_string())
+            })?;
         let data = out
             .body
             .collect()
