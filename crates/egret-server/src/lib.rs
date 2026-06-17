@@ -7,6 +7,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use egret_auth::routes::{auth_router, AuthState};
 use egret_metastore::Db;
+use egret_workspace::routes::{admin_workspace_router, WorkspaceState};
 
 /// Application state shared by all handlers.
 #[derive(Clone)]
@@ -15,6 +16,8 @@ pub struct AppState {
     pub db: Option<Db>,
     /// Present once a database is wired (in `egret-bin`); `None` in pure health unit tests.
     pub auth: Option<AuthState>,
+    /// Present once workspace crate is wired; `None` in pure health unit tests.
+    pub workspace: Option<WorkspaceState>,
 }
 
 impl AppState {
@@ -23,6 +26,7 @@ impl AppState {
         Self {
             db: None,
             auth: None,
+            workspace: None,
         }
     }
 }
@@ -39,6 +43,14 @@ pub fn build_router(state: AppState) -> Router {
                 .nest("/api/auth", auth_router())
                 .with_state(auth),
         );
+    }
+
+    if let Some(ws) = state.workspace.clone() {
+        let admin = Router::new()
+            .nest("/api/admin", admin_workspace_router())
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(ws);
+        router = router.merge(admin);
     }
 
     router.with_state(state)

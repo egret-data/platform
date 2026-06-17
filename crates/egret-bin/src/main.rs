@@ -13,6 +13,10 @@ use egret_auth::users::UserRepo;
 use egret_config::Config;
 use egret_metastore::Db;
 use egret_server::{build_router, AppState};
+use egret_workspace::members::MemberRepo;
+use egret_workspace::rbac::Authorizer;
+use egret_workspace::routes::WorkspaceState;
+use egret_workspace::workspaces::WorkspaceRepo;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -95,19 +99,29 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .context("connecting to database")?;
     db.migrate().await.context("running migrations on boot")?;
 
+    let users = UserRepo::new(db.clone());
+    let sessions = SessionService::new(
+        db.clone(),
+        Duration::hours(config.session.absolute_ttl_hours as i64),
+        Duration::minutes(config.session.idle_ttl_minutes as i64),
+    );
     let auth = AuthState {
-        users: UserRepo::new(db.clone()),
-        sessions: SessionService::new(
-            db.clone(),
-            Duration::hours(config.session.absolute_ttl_hours as i64),
-            Duration::minutes(config.session.idle_ttl_minutes as i64),
-        ),
+        users: users.clone(),
+        sessions: sessions.clone(),
         config: config.clone(),
+    };
+    let workspace = WorkspaceState {
+        workspaces: WorkspaceRepo::new(db.clone()),
+        members: MemberRepo::new(db.clone()),
+        authz: Authorizer::new(db.clone()),
+        users,
+        sessions,
     };
 
     let app = build_router(AppState {
         db: Some(db),
         auth: Some(auth),
+        workspace: Some(workspace),
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)

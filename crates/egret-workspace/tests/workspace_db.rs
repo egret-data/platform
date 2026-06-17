@@ -1,10 +1,17 @@
 //! DB-gated integration tests; self-skip without DATABASE_URL.
 
+use axum::body::Body;
+use axum::http::{Request as HttpRequest, StatusCode};
 use egret_auth::password::hash_password;
+use egret_auth::routes::AuthState;
+use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
+use egret_config::Config;
 use egret_core::{Pagination, UserId};
 use egret_metastore::Db;
+use egret_workspace::routes::{admin_workspace_router, WorkspaceState};
 use egret_workspace::workspaces::WorkspaceRepo;
+use tower::ServiceExt;
 
 async fn connect() -> Option<Db> {
     let url = std::env::var("DATABASE_URL").ok()?;
@@ -186,4 +193,95 @@ async fn replace_platform_roles_and_check() {
         .replace_platform_roles(user, &["root".into()])
         .await
         .is_err());
+}
+
+async fn login_cookie(db: &Db, user: UserId, sessions: &SessionService) -> String {
+    let issued = sessions.create(user, "a", "").await.unwrap();
+    let _ = db;
+    format!("egret_session={}", issued.token)
+}
+
+async fn ws_state(db: &Db) -> WorkspaceState {
+    WorkspaceState {
+        workspaces: WorkspaceRepo::new(db.clone()),
+        members: egret_workspace::members::MemberRepo::new(db.clone()),
+        authz: egret_workspace::rbac::Authorizer::new(db.clone()),
+        users: UserRepo::new(db.clone()),
+        sessions: SessionService::new(
+            db.clone(),
+            chrono::Duration::hours(24),
+            chrono::Duration::minutes(60),
+        ),
+    }
+}
+
+#[tokio::test]
+async fn create_workspace_requires_platform_permission() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let plain = seed_user(&db).await; // no platform role
+    let st = ws_state(&db).await;
+    let cookie = login_cookie(&db, plain, &st.sessions).await;
+    let app = axum::Router::new()
+        .nest("/api/admin", admin_workspace_router())
+        .with_state(st);
+
+    let body = serde_json::to_vec(&serde_json::json!({"slug": uniq("ws"), "name": "X"})).unwrap();
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/api/admin/workspaces")
+                .header("cookie", cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn platform_admin_can_create_workspace() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let admin = seed_user(&db).await;
+    let st = ws_state(&db).await;
+    st.authz
+        .replace_platform_roles(admin, &["platform_admin".into()])
+        .await
+        .unwrap();
+    let cookie = login_cookie(&db, admin, &st.sessions).await;
+    let app = axum::Router::new()
+        .nest("/api/admin", admin_workspace_router())
+        .with_state(st.clone());
+
+    let body = serde_json::to_vec(&serde_json::json!({"slug": uniq("ws"), "name": "X"})).unwrap();
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/api/admin/workspaces")
+                .header("cookie", cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = AuthState {
+        users: UserRepo::new(db.clone()),
+        sessions: SessionService::new(
+            db.clone(),
+            chrono::Duration::hours(1),
+            chrono::Duration::minutes(1),
+        ),
+        config: Config::default(),
+    };
 }

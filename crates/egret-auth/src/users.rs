@@ -58,6 +58,19 @@ impl UserRepo {
         Ok(UserId(id))
     }
 
+    pub async fn list(&self, limit: i64, offset: i64) -> Result<Vec<User>> {
+        let rows = sqlx::query_as::<_, UserRow>(
+            "SELECT id, provider, email, name, password_hash, status FROM users \
+             ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
     pub async fn touch_last_login(&self, id: UserId) -> Result<()> {
         sqlx::query("UPDATE users SET last_login_at = now() WHERE id = $1")
             .bind(id.0)
