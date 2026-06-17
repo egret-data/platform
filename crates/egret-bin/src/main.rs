@@ -153,11 +153,37 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         None
     };
 
+    let catalog = if config.catalog.enabled {
+        let storage_cfg = egret_storage::StorageConfig {
+            endpoint: config.storage.endpoint.clone(),
+            region: config.storage.region.clone(),
+            bucket: config.storage.bucket.clone(),
+            access_key: config.storage.access_key.clone(),
+            secret_key: config.storage.secret_key.clone(),
+            path_style: config.storage.path_style,
+        };
+        let store = egret_catalog::service::CatalogStore::new(db.clone());
+        let storage: std::sync::Arc<dyn egret_storage::ObjectStore> =
+            std::sync::Arc::new(egret_storage::S3Store::new(&storage_cfg).await?);
+        let service = egret_catalog::service::CatalogService { store, storage };
+        let base_url = format!("http://{}:{}/catalog", config.server.host, config.server.port);
+        Some(egret_catalog::CatalogState {
+            service,
+            auth_token: config.catalog.auth_token.clone().into(),
+            warehouse: config.catalog.warehouse.clone().into(),
+            storage_cfg: std::sync::Arc::new(storage_cfg),
+            base_url: base_url.into(),
+        })
+    } else {
+        None
+    };
+
     let app = build_router(AppState {
         db: Some(db),
         auth: Some(auth),
         workspace: Some(workspace),
         oidc,
+        catalog,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)

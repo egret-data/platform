@@ -23,6 +23,8 @@ pub struct AppState {
     pub workspace: Option<WorkspaceState>,
     /// Present when `config.oidc.enabled`; `None` otherwise (or in unit tests).
     pub oidc: Option<OidcRoutesState>,
+    /// Present when `config.catalog.enabled`; `None` otherwise (or in unit tests).
+    pub catalog: Option<egret_catalog::CatalogState>,
 }
 
 impl AppState {
@@ -33,6 +35,7 @@ impl AppState {
             auth: None,
             workspace: None,
             oidc: None,
+            catalog: None,
         }
     }
 }
@@ -69,6 +72,14 @@ pub fn build_router(state: AppState) -> Router {
             Router::new()
                 .nest("/api/auth/oidc", oidc_router())
                 .with_state(oidc),
+        );
+    }
+
+    if let Some(catalog) = state.catalog.clone() {
+        router = router.merge(
+            Router::new()
+                .nest("/catalog", egret_catalog::iceberg_router(catalog))
+                .with_state(()),
         );
     }
 
