@@ -147,7 +147,7 @@ issuer_url = ""
 client_id = ""
 client_secret = ""
 redirect_url = "http://localhost:8080/api/auth/oidc/callback"
-scopes = ["openid", "email", "profile", "groups"]
+scopes = ["openid", "email", "profile"]   # groups lấy qua group mapper của IdP, không qua scope
 groups_claim = "groups"
 post_login_redirect = "/"
 

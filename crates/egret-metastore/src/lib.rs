@@ -44,8 +44,8 @@ mod tests {
     #[test]
     fn migrator_embeds_baseline_migration() {
         assert!(
-            MIGRATOR.migrations.len() >= 4,
-            "expected baseline + identity + rbac + index migrations"
+            MIGRATOR.migrations.len() >= 5,
+            "expected through the oidc migration"
         );
     }
 }

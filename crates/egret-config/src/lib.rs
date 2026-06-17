@@ -16,6 +16,24 @@ pub struct RateLimitConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcConfig {
+    pub enabled: bool,
+    pub issuer_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_url: String,
+    pub scopes: Vec<String>,
+    pub groups_claim: String,
+    pub post_login_redirect: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    /// base64-encoded key (≥64 bytes) for encrypting the OIDC state cookie.
+    pub secret_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
@@ -23,6 +41,8 @@ pub struct Config {
     pub session: SessionConfig,
     pub csrf: CsrfConfig,
     pub rate_limit: RateLimitConfig,
+    pub oidc: OidcConfig,
+    pub security: SecurityConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +110,23 @@ impl Default for Config {
                 login_window_secs: 300,
                 login_lockout_secs: 300,
             },
+            oidc: OidcConfig {
+                enabled: false,
+                issuer_url: String::new(),
+                client_id: String::new(),
+                client_secret: String::new(),
+                redirect_url: "http://localhost:8080/api/auth/oidc/callback".into(),
+                // Groups come from the IdP's group protocol-mapper (emitted on the
+                // `groups_claim`), so a `groups` *scope* is NOT requested by default —
+                // Keycloak rejects an undefined scope with `invalid_scope`. Add "groups"
+                // here only if your IdP exposes it as a client scope.
+                scopes: vec!["openid".into(), "email".into(), "profile".into()],
+                groups_claim: "groups".into(),
+                post_login_redirect: "/".into(),
+            },
+            security: SecurityConfig {
+                secret_key: String::new(),
+            },
         }
     }
 }
@@ -106,6 +143,26 @@ impl Config {
     #[allow(clippy::result_large_err)]
     pub fn load() -> Result<Self, figment::Error> {
         Self::figment().extract()
+    }
+
+    /// Validate cross-field invariants after loading. Call at boot.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.oidc.enabled {
+            use base64::Engine;
+            let key_len = base64::engine::general_purpose::STANDARD
+                .decode(self.security.secret_key.as_bytes())
+                .map(|b| b.len())
+                .unwrap_or(0);
+            if key_len < 64 {
+                return Err(
+                    "oidc.enabled requires security.secret_key (base64, >=64 bytes)".into(),
+                );
+            }
+            if self.oidc.issuer_url.is_empty() || self.oidc.client_id.is_empty() {
+                return Err("oidc.enabled requires issuer_url and client_id".into());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -165,5 +222,20 @@ mod tests {
             assert_eq!(cfg.rate_limit.login_max_attempts, 5);
             Ok(())
         });
+    }
+
+    #[test]
+    fn validate_ok_when_oidc_disabled() {
+        let cfg = Config::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_requires_secret_key_when_oidc_enabled() {
+        let mut cfg = Config::default();
+        cfg.oidc.enabled = true;
+        cfg.oidc.issuer_url = "http://idp".into();
+        cfg.oidc.client_id = "egret".into();
+        assert!(cfg.validate().is_err()); // empty secret_key
     }
 }

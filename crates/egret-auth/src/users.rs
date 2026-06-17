@@ -79,6 +79,48 @@ impl UserRepo {
             .map_err(db_err)?;
         Ok(())
     }
+
+    pub async fn find_by_external_subject(&self, sub: &str) -> Result<Option<User>> {
+        let row = sqlx::query_as::<_, UserRow>(
+            "SELECT id, provider, email, name, password_hash, status FROM users \
+             WHERE provider = 'oidc' AND external_subject = $1",
+        )
+        .bind(sub)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(row.map(Into::into))
+    }
+
+    pub async fn insert_oidc(&self, sub: &str, email: &str, name: &str) -> Result<UserId> {
+        let res = sqlx::query_scalar::<_, uuid::Uuid>(
+            "INSERT INTO users (provider, external_subject, email, name) \
+             VALUES ('oidc', $1, $2, $3) RETURNING id",
+        )
+        .bind(sub)
+        .bind(email)
+        .bind(name)
+        .fetch_one(&self.db.pool)
+        .await;
+        match res {
+            Ok(id) => Ok(UserId(id)),
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Err(
+                egret_core::Error::Conflict(format!("email or subject already exists: {email}")),
+            ),
+            Err(e) => Err(db_err(e)),
+        }
+    }
+
+    pub async fn update_profile(&self, id: UserId, email: &str, name: &str) -> Result<()> {
+        sqlx::query("UPDATE users SET email = $1, name = $2 WHERE id = $3")
+            .bind(email)
+            .bind(name)
+            .bind(id.0)
+            .execute(&self.db.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
 }
 
 #[derive(sqlx::FromRow)]

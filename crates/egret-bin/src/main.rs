@@ -6,6 +6,7 @@ use anyhow::Context;
 use chrono::Duration;
 use clap::Parser;
 use cli::{Cli, Command};
+use egret_auth::groups::GroupRepo;
 use egret_auth::password::hash_password;
 use egret_auth::ratelimit::RateLimiter;
 use egret_auth::routes::AuthState;
@@ -24,6 +25,7 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = Config::load().context("loading configuration")?;
+    config.validate().map_err(|e| anyhow::anyhow!(e))?;
     init_tracing(&config);
 
     match cli.command {
@@ -122,14 +124,40 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         workspaces: WorkspaceRepo::new(db.clone()),
         members: MemberRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
-        users,
-        sessions,
+        users: users.clone(),
+        sessions: sessions.clone(),
+    };
+
+    let oidc = if config.oidc.enabled {
+        use axum_extra::extract::cookie::Key;
+        use base64::Engine;
+        let key_bytes = base64::engine::general_purpose::STANDARD
+            .decode(config.security.secret_key.as_bytes())
+            .map_err(|e| anyhow::anyhow!("security.secret_key base64: {e}"))?;
+        let service = egret_auth::oidc::OidcService::discover(&config.oidc)
+            .await
+            .map_err(|e| anyhow::anyhow!("oidc discovery: {e}"))?;
+        Some(egret_auth::oidc_routes::OidcRoutesState {
+            oidc: service,
+            users: users.clone(),
+            groups: GroupRepo::new(db.clone()),
+            sessions: SessionService::new(
+                db.clone(),
+                Duration::hours(config.session.absolute_ttl_hours as i64),
+                Duration::minutes(config.session.idle_ttl_minutes as i64),
+            ),
+            config: config.clone(),
+            cookie_key: Key::from(&key_bytes),
+        })
+    } else {
+        None
     };
 
     let app = build_router(AppState {
         db: Some(db),
         auth: Some(auth),
         workspace: Some(workspace),
+        oidc,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)
