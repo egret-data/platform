@@ -1,0 +1,28 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Frontend
+node_modules/
+dist/
+.vite/
+*.local
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Build / data
+/data
+/tmp
+.codegraph/
