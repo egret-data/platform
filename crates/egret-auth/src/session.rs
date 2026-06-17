@@ -126,12 +126,14 @@ impl SessionService {
         Ok(())
     }
 
-    /// Platform roles assigned directly to the user (group roles arrive in 1a-2).
+    /// Platform roles for the user (direct + via group membership).
     async fn platform_roles(&self, user_id: UserId) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT r.name FROM platform_role_assignments pra \
+            "SELECT DISTINCT r.name FROM platform_role_assignments pra \
              JOIN roles r ON r.id = pra.role_id \
-             WHERE pra.principal_type = 'user' AND pra.principal_id = $1",
+             WHERE (pra.principal_type = 'user'  AND pra.principal_id = $1) \
+                OR (pra.principal_type = 'group' AND pra.principal_id IN \
+                       (SELECT group_id FROM user_groups WHERE user_id = $1))",
         )
         .bind(user_id.0)
         .fetch_all(&self.db.pool)

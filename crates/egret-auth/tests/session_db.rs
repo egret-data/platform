@@ -195,3 +195,40 @@ async fn me_without_cookie_is_401() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn platform_role_via_group_appears_in_principal() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let uid = seed_user(&db).await;
+    // user's group is assigned platform_admin
+    let gid: uuid::Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+        .bind(format!("g-{}", uuid::Uuid::new_v4().simple()))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(uid.0)
+        .bind(gid)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
+         SELECT 'group', $1, id FROM roles WHERE scope='platform' AND name='platform_admin'",
+    )
+    .bind(gid)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let svc = SessionService::new(db.clone(), Duration::hours(24), Duration::minutes(60));
+    let issued = svc.create(uid, "a", "").await.unwrap();
+    let principal = svc.validate(&issued.token).await.unwrap().unwrap();
+    assert!(principal
+        .platform_roles
+        .iter()
+        .any(|r| r == "platform_admin"));
+}
