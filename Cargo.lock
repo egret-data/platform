@@ -1864,10 +1864,12 @@ dependencies = [
  "chrono",
  "clap",
  "egret-auth",
+ "egret-authz",
  "egret-catalog",
  "egret-config",
  "egret-core",
  "egret-metastore",
+ "egret-ranger",
  "egret-server",
  "egret-storage",
  "egret-workspace",
@@ -1964,6 +1966,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1976,6 +1979,7 @@ dependencies = [
  "egret-config",
  "egret-core",
  "egret-metastore",
+ "egret-ranger",
  "egret-workspace",
  "http-body-util",
  "serde_json",
