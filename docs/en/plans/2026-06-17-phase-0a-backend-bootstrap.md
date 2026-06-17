@@ -114,9 +114,10 @@ Create `rustfmt.toml`:
 ```toml
 edition = "2021"
 max_width = 100
-imports_granularity = "Crate"
-group_imports = "StdExternalCrate"
 ```
+
+> **Note:** Avoid nightly-only options (`imports_granularity`, `group_imports`) — they
+> emit warnings on the stable toolchain.
 
 Create `.clippy.toml`:
 
