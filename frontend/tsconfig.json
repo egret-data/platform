@@ -4,7 +4,8 @@
     "module": "ESNext", "skipLibCheck": true, "moduleResolution": "bundler",
     "resolveJsonModule": true, "isolatedModules": true, "noEmit": true, "jsx": "react-jsx",
     "strict": true, "noUnusedLocals": true, "noUnusedParameters": true, "noFallthroughCasesInSwitch": true,
-    "baseUrl": ".", "paths": { "@/*": ["src/*"] }
+    "baseUrl": ".", "paths": { "@/*": ["src/*"] },
+    "types": ["vitest/globals", "@testing-library/jest-dom"]
   },
   "include": ["src"]
 }
