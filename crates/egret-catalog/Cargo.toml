@@ -1,0 +1,31 @@
+[package]
+name = "egret-catalog"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+egret-core.workspace = true
+egret-config.workspace = true
+egret-metastore.workspace = true
+egret-storage.workspace = true
+egret-iceberg-ext.workspace = true
+iceberg.workspace = true
+axum.workspace = true
+sqlx.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+url.workspace = true
+http.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tower.workspace = true
+http-body-util = "0.1"
+egret-config.workspace = true

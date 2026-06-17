@@ -34,6 +34,27 @@ pub struct SecurityConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogSettings {
+    pub enabled: bool,
+    pub warehouse: String,
+    pub auth_token: String,
+    /// Externally-reachable base origin of this server (WITHOUT the `/catalog`
+    /// suffix), advertised in `/v1/config`'s `s3.signer.uri`. Defaults to
+    /// `http://localhost:8080`; set this to a client-reachable URL in production.
+    pub public_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageSettings {
+    pub endpoint: Option<String>,
+    pub region: String,
+    pub bucket: String,
+    pub access_key: String,
+    pub secret_key: String,
+    pub path_style: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
@@ -43,6 +64,8 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     pub oidc: OidcConfig,
     pub security: SecurityConfig,
+    pub catalog: CatalogSettings,
+    pub storage: StorageSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +150,20 @@ impl Default for Config {
             security: SecurityConfig {
                 secret_key: String::new(),
             },
+            catalog: CatalogSettings {
+                enabled: false,
+                warehouse: "s3://warehouse".into(),
+                auth_token: String::new(),
+                public_url: Some("http://localhost:8080".into()),
+            },
+            storage: StorageSettings {
+                endpoint: Some("http://localhost:9000".into()),
+                region: "us-east-1".into(),
+                bucket: "warehouse".into(),
+                access_key: String::new(),
+                secret_key: String::new(),
+                path_style: true,
+            },
         }
     }
 }
@@ -160,6 +197,17 @@ impl Config {
             }
             if self.oidc.issuer_url.is_empty() || self.oidc.client_id.is_empty() {
                 return Err("oidc.enabled requires issuer_url and client_id".into());
+            }
+        }
+        if self.catalog.enabled {
+            if self.catalog.warehouse.is_empty() || self.catalog.auth_token.is_empty() {
+                return Err("catalog.enabled requires warehouse and auth_token".into());
+            }
+            if self.storage.access_key.is_empty()
+                || self.storage.secret_key.is_empty()
+                || self.storage.bucket.is_empty()
+            {
+                return Err("catalog.enabled requires storage access_key/secret_key/bucket".into());
             }
         }
         Ok(())
@@ -237,5 +285,23 @@ mod tests {
         cfg.oidc.issuer_url = "http://idp".into();
         cfg.oidc.client_id = "egret".into();
         assert!(cfg.validate().is_err()); // empty secret_key
+    }
+
+    #[test]
+    fn catalog_disabled_by_default_validates() {
+        let cfg = Config::default();
+        assert!(!cfg.catalog.enabled);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn catalog_enabled_requires_token_and_creds() {
+        let mut cfg = Config::default();
+        cfg.catalog.enabled = true;
+        assert!(cfg.validate().is_err());
+        cfg.catalog.auth_token = "t".into();
+        cfg.storage.access_key = "a".into();
+        cfg.storage.secret_key = "s".into();
+        assert!(cfg.validate().is_ok());
     }
 }
