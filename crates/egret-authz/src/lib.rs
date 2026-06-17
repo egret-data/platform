@@ -2,4 +2,4 @@
 pub mod error;
 pub mod store;
 pub use error::AuthzError;
-pub use store::AuthzStore;
+pub use store::{AuthzStore, PolicyRow};
