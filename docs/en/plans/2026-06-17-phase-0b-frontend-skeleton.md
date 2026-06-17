@@ -1117,3 +1117,17 @@ git commit -m "fix(frontend): address final verification findings"
 - Routes `/api/me/workspaces`, `/api/auth/config` — backend (Task 1) and frontend hooks (Task 4) agree. ✅
 
 **Open follow-ups:** real feature pages (later phases); OpenAPI-generated client; Playwright e2e; containerize the backend for full-stack compose.
+
+---
+
+## Execution record (applied during implementation)
+
+Implemented via subagent-driven TDD; independently reviewed (spec + code quality) — **APPROVED**, no Critical/Important issues. Gates green: backend `cargo test --workspace` (18 suites) + `workspace_db` 13/13 + clippy/fmt clean; frontend `npm run lint`/`typecheck`/`test` (10 passing)/`build` clean.
+
+**Notes from execution:**
+- sparklabx's `theme-provider` is a **custom** implementation (not `next-themes`, despite the dep being present); kept as-is, and `sonner.tsx`'s `useTheme` import was rewired to the custom provider (so `next-themes` isn't pulled in).
+- `react-resizable-panels` was added (the copied `resizable.tsx` needs it); all 29 shadcn components copied.
+- The Radix `Select` test drives the real component by polyfilling jsdom's missing `hasPointerCapture`/`setPointerCapture`/`releasePointerCapture`/`scrollIntoView`, then clicking trigger + option — asserting real navigation to `/explore/sales`.
+- nginx proxies `/api`→`http://egret:8080` (the planned backend service name); the backend isn't containerized in the dev compose yet, so the compose `frontend` service is a static-build smoke target — local dev uses `npm run dev` (Vite proxy).
+
+**Minor deferred (non-blocking):** `useLogout` relies on `RequireAuth` re-render to redirect (no explicit navigate); real feature pages, OpenAPI client, and Playwright e2e are future phases.
