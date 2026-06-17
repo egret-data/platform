@@ -1,0 +1,117 @@
+//! Postgres-backed workspace CRUD.
+
+use egret_core::{Error, Pagination, Result, UserId, WorkspaceId};
+use egret_metastore::Db;
+use uuid::Uuid;
+
+use crate::model::{is_valid_slug, Workspace};
+
+#[derive(Clone)]
+pub struct WorkspaceRepo {
+    db: Db,
+}
+
+impl WorkspaceRepo {
+    pub fn new(db: Db) -> Self {
+        Self { db }
+    }
+
+    pub async fn create(&self, slug: &str, name: &str, created_by: UserId) -> Result<Workspace> {
+        if !is_valid_slug(slug) {
+            return Err(Error::InvalidInput(format!("invalid slug: {slug}")));
+        }
+        let row = sqlx::query_as::<_, WorkspaceRow>(
+            "INSERT INTO workspaces (slug, name, created_by) VALUES ($1, $2, $3) \
+             RETURNING id, slug, name, status",
+        )
+        .bind(slug)
+        .bind(name)
+        .bind(created_by.0)
+        .fetch_one(&self.db.pool)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(db) if db.is_unique_violation() => {
+                Error::Conflict(format!("workspace slug already exists: {slug}"))
+            }
+            other => db_err(other),
+        })?;
+        Ok(row.into())
+    }
+
+    pub async fn list(&self, page: Pagination) -> Result<Vec<Workspace>> {
+        let rows = sqlx::query_as::<_, WorkspaceRow>(
+            "SELECT id, slug, name, status FROM workspaces ORDER BY created_at DESC \
+             LIMIT $1 OFFSET $2",
+        )
+        .bind(page.limit() as i64)
+        .bind(page.offset() as i64)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    pub async fn get_by_slug(&self, slug: &str) -> Result<Option<Workspace>> {
+        let row = sqlx::query_as::<_, WorkspaceRow>(
+            "SELECT id, slug, name, status FROM workspaces WHERE slug = $1",
+        )
+        .bind(slug)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(row.map(Into::into))
+    }
+
+    pub async fn get_by_id(&self, id: WorkspaceId) -> Result<Option<Workspace>> {
+        let row = sqlx::query_as::<_, WorkspaceRow>(
+            "SELECT id, slug, name, status FROM workspaces WHERE id = $1",
+        )
+        .bind(id.0)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(row.map(Into::into))
+    }
+
+    pub async fn update_name(&self, id: WorkspaceId, name: &str) -> Result<()> {
+        sqlx::query("UPDATE workspaces SET name = $1 WHERE id = $2")
+            .bind(name)
+            .bind(id.0)
+            .execute(&self.db.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    pub async fn archive(&self, id: WorkspaceId) -> Result<()> {
+        sqlx::query("UPDATE workspaces SET status = 'archived' WHERE id = $1")
+            .bind(id.0)
+            .execute(&self.db.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct WorkspaceRow {
+    id: Uuid,
+    slug: String,
+    name: String,
+    status: String,
+}
+
+impl From<WorkspaceRow> for Workspace {
+    fn from(r: WorkspaceRow) -> Self {
+        Workspace {
+            id: WorkspaceId(r.id),
+            slug: r.slug,
+            name: r.name,
+            status: r.status,
+        }
+    }
+}
+
+pub(crate) fn db_err(e: sqlx::Error) -> Error {
+    Error::Internal(anyhow::anyhow!(e))
+}
