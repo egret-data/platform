@@ -30,7 +30,10 @@ mod tests {
     #[test]
     fn hash_is_argon2id_and_verifies() {
         let h = hash_password("s3cret!").unwrap();
-        assert!(h.starts_with("$argon2id$"), "expected argon2id PHC, got {h}");
+        assert!(
+            h.starts_with("$argon2id$"),
+            "expected argon2id PHC, got {h}"
+        );
         assert!(verify_password("s3cret!", &h).unwrap());
     }
 
