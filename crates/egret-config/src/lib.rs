@@ -38,6 +38,10 @@ pub struct CatalogSettings {
     pub enabled: bool,
     pub warehouse: String,
     pub auth_token: String,
+    /// Externally-reachable base origin of this server (WITHOUT the `/catalog`
+    /// suffix), advertised in `/v1/config`'s `s3.signer.uri`. Defaults to
+    /// `http://localhost:8080`; set this to a client-reachable URL in production.
+    pub public_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +154,7 @@ impl Default for Config {
                 enabled: false,
                 warehouse: "s3://warehouse".into(),
                 auth_token: String::new(),
+                public_url: Some("http://localhost:8080".into()),
             },
             storage: StorageSettings {
                 endpoint: Some("http://localhost:9000".into()),

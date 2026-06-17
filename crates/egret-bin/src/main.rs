@@ -165,11 +165,19 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         let store = egret_catalog::service::CatalogStore::new(db.clone());
         let storage: std::sync::Arc<dyn egret_storage::ObjectStore> =
             std::sync::Arc::new(egret_storage::S3Store::new(&storage_cfg).await?);
-        let service = egret_catalog::service::CatalogService { store, storage };
-        let base_url = format!(
-            "http://{}:{}/catalog",
-            config.server.host, config.server.port
-        );
+        let service = egret_catalog::service::CatalogService {
+            store,
+            storage,
+            warehouse: config.catalog.warehouse.clone().into(),
+        };
+        // Advertise an externally-reachable origin in `s3.signer.uri`, not the bind
+        // host (which defaults to 0.0.0.0 and is unreachable for engines).
+        let public = config
+            .catalog
+            .public_url
+            .clone()
+            .unwrap_or_else(|| format!("http://localhost:{}", config.server.port));
+        let base_url = format!("{}/catalog", public.trim_end_matches('/'));
         Some(egret_catalog::CatalogState {
             service,
             auth_token: config.catalog.auth_token.clone().into(),

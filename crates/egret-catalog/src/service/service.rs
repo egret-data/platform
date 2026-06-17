@@ -13,6 +13,7 @@ use uuid::Uuid;
 pub struct CatalogService {
     pub store: CatalogStore,
     pub storage: Arc<dyn ObjectStore>,
+    pub warehouse: std::sync::Arc<str>,
 }
 
 impl CatalogService {
@@ -40,7 +41,7 @@ impl CatalogService {
         let table_uuid = Uuid::new_v4();
         let location = req.location.clone().unwrap_or_else(|| {
             egret_storage::table_base_location(
-                "s3://placeholder",
+                &self.warehouse,
                 ns_levels,
                 &req.name,
                 &table_uuid,

@@ -27,6 +27,8 @@ Stand up a spec-compliant **Iceberg REST Catalog** so external engines (Trino, S
 - Vended STS credentials (`aws-sdk-sts` is wired as a dependency for later; remote signing is the Phase 2a mechanism).
 - Normalized metadata tables (lakekeeper-style ~11 tables) — a later optimization over the JSONB blob.
 - Admin UI catalog browser — backend only this phase; UI arrives with the governance/BI frontend phases.
+- `stage-create` table creation (the field is accepted but not acted on this phase) — staged/atomic-replace flow deferred.
+- View rename (`POST /v1/views/rename`) and a view commit/replace path — views are stored as opaque metadata this phase; full view lifecycle deferred.
 
 ## 2. Decisions
 
@@ -95,7 +97,7 @@ Iceberg REST Catalog OpenAPI subset. All routes require a valid bearer token (§
 | | `DELETE /v1/namespaces/{ns}` | Drop (404 if missing, 409 if non-empty). |
 | | `POST /v1/namespaces/{ns}/properties` | Update/remove properties. |
 | Table | `GET /v1/namespaces/{ns}/tables` | List. |
-| | `POST /v1/namespaces/{ns}/tables` | Create (supports `stage-create`). Writes initial metadata.json + row. |
+| | `POST /v1/namespaces/{ns}/tables` | Create (note: `stage-create` accepted but deferred — see §1). Writes initial metadata.json + row. |
 | | `GET /v1/namespaces/{ns}/tables/{t}` | Load → `LoadTableResult` (metadata + `config` with signer uri). |
 | | `HEAD /v1/namespaces/{ns}/tables/{t}` | Exists. |
 | | `POST /v1/namespaces/{ns}/tables/{t}` | **Commit** — `{requirements, updates}`; optimistic CAS; 409 on conflict. |
@@ -103,7 +105,7 @@ Iceberg REST Catalog OpenAPI subset. All routes require a valid bearer token (§
 | | `POST /v1/tables/rename` | Rename/move across namespaces. |
 | | `POST /v1/namespaces/{ns}/register` | Register an existing table by `metadata_location`. |
 | | `POST /v1/namespaces/{ns}/tables/{t}/metrics` | Accept & ignore (200). |
-| View | `GET/POST /v1/namespaces/{ns}/views`, `GET/HEAD/POST/DELETE /v1/namespaces/{ns}/views/{v}`, `POST /v1/views/rename` | Same shape as tables; view metadata in `catalog_views.metadata` jsonb. |
+| View | `GET/POST /v1/namespaces/{ns}/views`, `GET/HEAD/POST/DELETE /v1/namespaces/{ns}/views/{v}`, `POST /v1/views/rename` (rename deferred — see §1) | Same shape as tables; view metadata in `catalog_views.metadata` jsonb. |
 | Sign | `POST /v1/aws/s3/sign` | Body `S3SignRequest{ region, uri, method, headers, body? }` → `S3SignResponse{ uri, headers }`. |
 
 Errors use the Iceberg `ErrorModel` JSON (`{ error: { message, type, code } }`) with correct HTTP status (400/401/403/404/409/419/500).

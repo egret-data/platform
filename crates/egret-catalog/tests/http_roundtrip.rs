@@ -58,6 +58,7 @@ async fn state() -> Option<CatalogState> {
         storage: Arc::new(MemStore(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         ))),
+        warehouse: Arc::from("s3://warehouse"),
     };
     Some(CatalogState {
         service,
@@ -215,4 +216,68 @@ async fn create_namespace_then_table_then_load() {
     let loaded: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(loaded["metadata"]["table-uuid"].is_string());
     assert_eq!(loaded["metadata"]["location"], req.location.unwrap());
+}
+
+/// When `location` is omitted, the table is placed under the configured warehouse
+/// (proves the `s3://placeholder` literal is gone).
+#[tokio::test]
+async fn create_table_without_location_uses_warehouse() {
+    let Some(st) = state().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let app = iceberg_router(st);
+    let ns = format!("t_{}", uuid::Uuid::new_v4().simple());
+
+    let body = serde_json::json!({ "namespace": [ns], "properties": {} });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/namespaces")
+                .header("Authorization", format!("Bearer {TOKEN}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "create namespace");
+
+    // Build a request with no explicit location.
+    let mut req = create_table_request("orders");
+    req.location = None;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/namespaces/{ns}/tables"))
+                .header("Authorization", format!("Bearer {TOKEN}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "create table; body={}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let location = created["metadata"]["location"].as_str().unwrap();
+    assert!(
+        location.starts_with("s3://warehouse"),
+        "table location should derive from the configured warehouse, got {location}"
+    );
+    let mloc = created["metadata-location"].as_str().unwrap();
+    assert!(
+        mloc.starts_with("s3://warehouse"),
+        "metadata-location should derive from the configured warehouse, got {mloc}"
+    );
 }

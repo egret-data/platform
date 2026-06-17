@@ -27,6 +27,8 @@ Dựng một **Iceberg REST Catalog** đúng chuẩn để engine ngoài (Trino,
 - Vended STS credentials (`aws-sdk-sts` chỉ wire sẵn cho sau; Phase 2a dùng remote signing).
 - Bảng metadata normalized (kiểu lakekeeper ~11 bảng) — tối ưu sau, thay cho JSONB blob.
 - Admin UI catalog browser — phase này chỉ backend; UI ở phase governance/BI sau.
+- Tạo bảng `stage-create` (trường được chấp nhận nhưng chưa xử lý ở phase này) — luồng staged/atomic-replace hoãn lại.
+- Đổi tên view (`POST /v1/views/rename`) và đường commit/replace view — view lưu dạng metadata opaque ở phase này; vòng đời view đầy đủ hoãn lại.
 
 ## 2. Quyết định
 
@@ -95,7 +97,7 @@ Tập con Iceberg REST Catalog OpenAPI. Mọi route cần bearer token hợp l�
 | | `DELETE /v1/namespaces/{ns}` | Drop (404 nếu thiếu, 409 nếu còn bảng). |
 | | `POST /v1/namespaces/{ns}/properties` | Cập nhật/xóa properties. |
 | Table | `GET /v1/namespaces/{ns}/tables` | List. |
-| | `POST /v1/namespaces/{ns}/tables` | Tạo (hỗ trợ `stage-create`). Ghi metadata.json đầu + row. |
+| | `POST /v1/namespaces/{ns}/tables` | Tạo (lưu ý: `stage-create` được chấp nhận nhưng hoãn — xem §1). Ghi metadata.json đầu + row. |
 | | `GET /v1/namespaces/{ns}/tables/{t}` | Load → `LoadTableResult` (metadata + `config` có signer uri). |
 | | `HEAD /v1/namespaces/{ns}/tables/{t}` | Tồn tại. |
 | | `POST /v1/namespaces/{ns}/tables/{t}` | **Commit** — `{requirements, updates}`; CAS optimistic; 409 khi conflict. |
@@ -103,7 +105,7 @@ Tập con Iceberg REST Catalog OpenAPI. Mọi route cần bearer token hợp l�
 | | `POST /v1/tables/rename` | Rename/di chuyển giữa namespace. |
 | | `POST /v1/namespaces/{ns}/register` | Đăng ký bảng có sẵn theo `metadata_location`. |
 | | `POST /v1/namespaces/{ns}/tables/{t}/metrics` | Nhận & bỏ qua (200). |
-| View | `GET/POST /v1/namespaces/{ns}/views`, `GET/HEAD/POST/DELETE /v1/namespaces/{ns}/views/{v}`, `POST /v1/views/rename` | Dạng giống table; metadata view ở `catalog_views.metadata` jsonb. |
+| View | `GET/POST /v1/namespaces/{ns}/views`, `GET/HEAD/POST/DELETE /v1/namespaces/{ns}/views/{v}`, `POST /v1/views/rename` (rename hoãn — xem §1) | Dạng giống table; metadata view ở `catalog_views.metadata` jsonb. |
 | Sign | `POST /v1/aws/s3/sign` | Body `S3SignRequest{ region, uri, method, headers, body? }` → `S3SignResponse{ uri, headers }`. |
 
 Lỗi dùng JSON `ErrorModel` của Iceberg (`{ error: { message, type, code } }`) kèm HTTP status đúng (400/401/403/404/409/419/500).
