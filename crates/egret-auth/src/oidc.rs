@@ -85,6 +85,15 @@ type GroupsTokenResponse = StandardTokenResponse<
 /// id_token claims parameterized with our [`GroupsClaims`].
 type GroupsIdTokenClaims = IdTokenClaims<GroupsClaims, CoreGenderClaim>;
 
+/// A raw id_token parameterized with our [`GroupsClaims`]. Parsing a token string
+/// (e.g. from a ROPC grant) into this type lets us reuse [`OidcService::claims_from`].
+type GroupsIdToken = openidconnect::IdToken<
+    GroupsClaims,
+    CoreGenderClaim,
+    CoreJweContentEncryptionAlgorithm,
+    CoreJwsSigningAlgorithm,
+>;
+
 /// The concrete client type-state produced by [`Client::from_provider_metadata`]:
 /// the authorization endpoint is always set, the token and userinfo endpoints are
 /// "maybe set" (present iff the discovery document advertised them).
@@ -185,6 +194,28 @@ impl OidcService {
             .await
             .map_err(oidc_err)?;
         self.verify_from_response(&token_response, nonce)
+    }
+
+    /// Validate a raw id_token string (used by tests / non-auth-code flows such as
+    /// ROPC). The `nonce` is checked only when `Some`; when `None`, the id_token must
+    /// not carry a `nonce` claim (matching the OIDC "no nonce requested" case). Runs
+    /// the same signature/iss/aud/exp validation as [`Self::finish`]. Returns
+    /// normalized claims.
+    pub fn verify_id_token(&self, id_token_str: &str, nonce: Option<&str>) -> Result<OidcClaims> {
+        use std::str::FromStr;
+        let id_token = GroupsIdToken::from_str(id_token_str).map_err(oidc_err)?;
+        let verifier = self.client.id_token_verifier();
+        // `NonceVerifier` for a closure is `FnOnce(Option<&Nonce>) -> Result<(), String>`.
+        let nonce_check = |got: Option<&Nonce>| match (nonce, got) {
+            // No nonce expected: accept tokens without a nonce claim (ROPC).
+            (None, None) => Ok(()),
+            (None, Some(_)) => Err("unexpected nonce claim".to_string()),
+            (Some(_), None) => Err("missing nonce claim".to_string()),
+            (Some(expected), Some(got)) if got.secret() == expected => Ok(()),
+            (Some(_), Some(_)) => Err("nonce mismatch".to_string()),
+        };
+        let claims = id_token.claims(&verifier, nonce_check).map_err(oidc_err)?;
+        self.claims_from(claims)
     }
 
     /// Verify the id_token in a token response (signature/iss/aud/exp + nonce) and
