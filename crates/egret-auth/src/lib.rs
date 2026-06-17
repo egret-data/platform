@@ -5,6 +5,7 @@ pub mod csrf;
 pub mod groups;
 pub mod model;
 pub mod oidc;
+pub mod oidc_cookie;
 pub mod password;
 pub mod principal;
 pub mod ratelimit;
