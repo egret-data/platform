@@ -16,6 +16,7 @@
 - DB-gated integration tests live in `crates/<name>/tests/*.rs` and self-skip when `DATABASE_URL` is unset (see `crates/egret-auth/tests/session_db.rs`). Storage tests additionally self-skip when the `[storage]` endpoint is unreachable.
 - Config: add nested structs to `egret_config::Config` with a `Default` impl and `validate()` checks; tests use `figment::Jail`.
 - Server wiring: `egret_server::AppState` carries `Option<_>` sub-states; `build_router` mounts a router when the state is `Some`.
+- **CRITICAL — sqlx style:** this codebase uses **runtime sqlx**, NOT the compile-time-checked `!` macros. The plan's SQL snippets show `sqlx::query!` / `sqlx::query_scalar!` for brevity, but you MUST implement them with the runtime forms used everywhere in `egret-auth`/`egret-workspace`: `sqlx::query_as::<_, Row>(...)` with a `#[derive(sqlx::FromRow)]` row struct, `sqlx::query_scalar::<_, T>(...)`, and `sqlx::query(...)` — using `.bind(arg)` for parameters (no `$1` interpolation of Rust values; bind positionally). This avoids needing a live `DATABASE_URL` or `.sqlx` cache at build time. Map columns explicitly. Example from `crates/egret-auth/src/users.rs`: `sqlx::query_as::<_, UserRow>("SELECT ... WHERE id = $1").bind(id).fetch_optional(&pool).await?`. For `text[]` and `jsonb` params, bind `Vec<String>` and `serde_json::Value` directly (sqlx supports both with the enabled features).
 
 ---
 
