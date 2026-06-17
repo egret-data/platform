@@ -15,16 +15,16 @@ impl From<AuthzError> for RangerError {
 
 impl IntoResponse for RangerError {
     fn into_response(self) -> Response {
-        let status = match &self.0 {
-            AuthzError::NotFound(_) => StatusCode::NOT_FOUND,
-            AuthzError::AlreadyExists(_) => StatusCode::CONFLICT,
-            AuthzError::BadRequest(_) | AuthzError::Json(_) => StatusCode::BAD_REQUEST,
-            AuthzError::Db(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        let (status, msg) = match &self.0 {
+            AuthzError::NotFound(m) => (StatusCode::NOT_FOUND, m.clone()),
+            AuthzError::AlreadyExists(m) => (StatusCode::CONFLICT, m.clone()),
+            AuthzError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
+            AuthzError::Json(e) => (StatusCode::BAD_REQUEST, e.to_string()),
+            AuthzError::Db(e) => {
+                tracing::error!(error = %e, "ranger: database error");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string())
+            }
         };
-        (
-            status,
-            Json(serde_json::json!({ "msg": self.0.to_string(), "statusCode": status.as_u16() })),
-        )
-            .into_response()
+        (status, Json(serde_json::json!({ "msg": msg, "statusCode": status.as_u16() }))).into_response()
     }
 }

@@ -29,7 +29,7 @@ pub async fn download_policies(
     }
     let def = s.store.get_service_def(&svc.r#type).await?.def_jsonb;
     let policies = s.store.enabled_policies_for_service(svc.id).await?;
-    let sp = ServicePolicies::new(svc.name, svc.id, svc.policy_version, def, policies, Some(0));
+    let sp = ServicePolicies::new(svc.name, svc.id, svc.policy_version, def, policies, None);
     Ok(Json(sp).into_response())
 }
 
