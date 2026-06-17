@@ -40,12 +40,7 @@ impl CatalogService {
         let ns = self.store.get_namespace(ns_levels).await?;
         let table_uuid = Uuid::new_v4();
         let location = req.location.clone().unwrap_or_else(|| {
-            egret_storage::table_base_location(
-                &self.warehouse,
-                ns_levels,
-                &req.name,
-                &table_uuid,
-            )
+            egret_storage::table_base_location(&self.warehouse, ns_levels, &req.name, &table_uuid)
         });
         let md = create_table_metadata(&req, table_uuid, location.clone())?;
         let mloc = self.write_metadata_json(&location, 0, &md).await?;
