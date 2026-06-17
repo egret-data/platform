@@ -1,5 +1,6 @@
-import { Link, useLocation } from "react-router-dom";
-import { Feather, LogOut, Moon, Settings, Sun } from "lucide-react";
+import { useEffect } from "react";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
+import { Compass, Feather, LogOut, Moon, Settings, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
@@ -15,6 +16,8 @@ import { useAuth } from "@/auth/useAuth";
 import { useLogout } from "@/api/hooks";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
+const LAST_WORKSPACE_KEY = "egret:last-workspace";
+
 function initials(email?: string) {
   if (!email) return "?";
   const name = email.split("@")[0];
@@ -27,13 +30,28 @@ export function Header() {
   const { me } = useAuth();
   const logout = useLogout();
   const { theme, setTheme } = useTheme();
-  const isAdmin = useLocation().pathname.startsWith("/admin");
+  const location = useLocation();
+  const navigate = useNavigate();
+  const { workspace } = useParams<{ workspace?: string }>();
+  const isAdmin = location.pathname.startsWith("/admin");
   const canAdmin = (me?.platform_roles?.length ?? 0) > 0;
+
+  // Persist the current workspace slug so Explorer can be restored from Admin
+  useEffect(() => {
+    if (workspace) {
+      localStorage.setItem(LAST_WORKSPACE_KEY, workspace);
+    }
+  }, [workspace]);
 
   const isDark =
     theme === "dark" ||
     (theme === "system" &&
       window.matchMedia("(prefers-color-scheme: dark)").matches);
+
+  function handleExplorer() {
+    const last = localStorage.getItem(LAST_WORKSPACE_KEY);
+    navigate(last ? `/explore/${last}` : "/");
+  }
 
   return (
     <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-card px-4">
@@ -48,17 +66,24 @@ export function Header() {
 
       <div className="flex-1" />
 
-      {canAdmin && (
-        <Button
-          asChild
-          variant={isAdmin ? "default" : "ghost"}
-          size="sm"
-          className="gap-2"
-        >
+      {canAdmin && !isAdmin && (
+        <Button asChild variant="ghost" size="sm" className="gap-2">
           <Link to="/admin">
             <Settings className="h-4 w-4" />
             Admin
           </Link>
+        </Button>
+      )}
+
+      {isAdmin && (
+        <Button
+          variant="default"
+          size="sm"
+          className="gap-2"
+          onClick={handleExplorer}
+        >
+          <Compass className="h-4 w-4" />
+          Explorer
         </Button>
       )}
 
