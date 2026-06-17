@@ -570,6 +570,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "egret-workspace"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "egret-auth",
+ "egret-config",
+ "egret-core",
+ "egret-metastore",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
