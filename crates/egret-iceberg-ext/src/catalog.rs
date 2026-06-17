@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
-use iceberg::{NamespaceIdent, TableIdent, TableRequirement, TableUpdate};
 use iceberg::spec::{Schema, SortOrder, TableMetadataRef, UnboundPartitionSpec};
+use iceberg::{NamespaceIdent, TableIdent, TableRequirement, TableUpdate};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

@@ -2,8 +2,8 @@
 use crate::{StorageConfig, StorageError};
 use aws_sigv4::{
     http_request::{
-        PayloadChecksumKind, PercentEncodingMode, SignableBody, SignableRequest, SigningSettings,
-        sign as aws_sign,
+        sign as aws_sign, PayloadChecksumKind, PercentEncodingMode, SignableBody, SignableRequest,
+        SigningSettings,
     },
     sign::v4,
 };
@@ -56,11 +56,15 @@ pub async fn sign_s3_request(
     // Guard: only sign requests aimed at the configured storage endpoint. Without this the
     // signer is an SSRF oracle — it would sign requests to any host using our S3 credentials.
     if let Some(endpoint) = &cfg.endpoint {
-        let want = url::Url::parse(endpoint).ok().and_then(|u| u.host_str().map(str::to_string));
+        let want = url::Url::parse(endpoint)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string));
         let got = req.uri.host_str().map(str::to_string);
         if let (Some(want), Some(got)) = (&want, &got) {
             if want != got {
-                return Err(StorageError::Signing(format!("refusing to sign request for unexpected host: {got} (expected {want})")));
+                return Err(StorageError::Signing(format!(
+                    "refusing to sign request for unexpected host: {got} (expected {want})"
+                )));
             }
         }
     }
@@ -98,7 +102,9 @@ pub async fn sign_s3_request(
 
     let mut header_pairs: Vec<(String, String)> = Vec::new();
     for (k, values) in &req.headers {
-        if UNSIGNED_HEADERS.iter().any(|u| u.eq_ignore_ascii_case(k)) { continue; }
+        if UNSIGNED_HEADERS.iter().any(|u| u.eq_ignore_ascii_case(k)) {
+            continue;
+        }
         for v in values {
             header_pairs.push((k.clone(), v.clone()));
         }
@@ -151,10 +157,7 @@ mod tests {
     async fn signs_put_with_authorization_header() {
         let req = S3SignRequest {
             region: "us-east-1".into(),
-            uri: url::Url::parse(
-                "http://localhost:9000/warehouse/ns/t/data/f.parquet",
-            )
-            .unwrap(),
+            uri: url::Url::parse("http://localhost:9000/warehouse/ns/t/data/f.parquet").unwrap(),
             method: http::Method::PUT,
             headers: HashMap::from([(
                 "x-amz-content-sha256".to_string(),
@@ -168,7 +171,8 @@ mod tests {
             .get("authorization")
             .or_else(|| resp.headers.get("Authorization"));
         assert!(
-            auth.map(|v| v[0].starts_with("AWS4-HMAC-SHA256")).unwrap_or(false),
+            auth.map(|v| v[0].starts_with("AWS4-HMAC-SHA256"))
+                .unwrap_or(false),
             "expected AWS4 auth header, got {:?}",
             resp.headers
         );
@@ -194,11 +198,21 @@ mod tests {
             region: "us-east-1".into(),
             uri: url::Url::parse("http://localhost:9000/warehouse/ns/t/data/f.parquet").unwrap(),
             method: http::Method::PUT,
-            headers: std::collections::HashMap::from([("authorization".to_string(), vec!["Bearer stale".to_string()])]),
+            headers: std::collections::HashMap::from([(
+                "authorization".to_string(),
+                vec!["Bearer stale".to_string()],
+            )]),
             body: None,
         };
         let resp = sign_s3_request(&cfg(), &req).await.unwrap();
-        let auth = resp.headers.get("authorization").or_else(|| resp.headers.get("Authorization")).unwrap();
-        assert!(auth.iter().any(|v| v.starts_with("AWS4-HMAC-SHA256")), "expected AWS4 auth, got {auth:?}");
+        let auth = resp
+            .headers
+            .get("authorization")
+            .or_else(|| resp.headers.get("Authorization"))
+            .unwrap();
+        assert!(
+            auth.iter().any(|v| v.starts_with("AWS4-HMAC-SHA256")),
+            "expected AWS4 auth, got {auth:?}"
+        );
     }
 }

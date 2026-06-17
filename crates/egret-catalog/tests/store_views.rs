@@ -17,10 +17,7 @@ async fn insert_load_drop_view() {
         return;
     };
     let levels = vec![format!("t_{}", uuid::Uuid::new_v4().simple())];
-    let ns = s
-        .create_namespace(&levels, &HashMap::new())
-        .await
-        .unwrap();
+    let ns = s.create_namespace(&levels, &HashMap::new()).await.unwrap();
     let md = serde_json::json!({ "view-uuid": uuid::Uuid::new_v4().to_string() });
     s.insert_view(
         ns.id,
@@ -32,10 +29,7 @@ async fn insert_load_drop_view() {
     .await
     .unwrap();
     assert_eq!(s.load_view(ns.id, "v").await.unwrap().name, "v");
-    assert_eq!(
-        s.list_views(ns.id).await.unwrap(),
-        vec!["v".to_string()]
-    );
+    assert_eq!(s.list_views(ns.id).await.unwrap(), vec!["v".to_string()]);
     s.drop_view(ns.id, "v").await.unwrap();
     assert!(s.load_view(ns.id, "v").await.is_err());
     s.drop_namespace(&levels).await.unwrap();

@@ -33,7 +33,9 @@ pub async fn load(
     State(s): State<CatalogState>,
     Path((ns, table)): Path<(String, String)>,
 ) -> Result<Json<LoadTableResult>, CatalogError> {
-    Ok(Json(s.service.load_table(&parse_namespace(&ns), &table).await?))
+    Ok(Json(
+        s.service.load_table(&parse_namespace(&ns), &table).await?,
+    ))
 }
 
 pub async fn commit(
@@ -55,8 +57,8 @@ pub async fn list(
     let levels = parse_namespace(&ns);
     let nsrow = s.service.store.get_namespace(&levels).await?;
     let names = s.service.store.list_tables(nsrow.id).await?;
-    let ns_ident = NamespaceIdent::from_vec(levels)
-        .map_err(|e| CatalogError::BadRequest(e.to_string()))?;
+    let ns_ident =
+        NamespaceIdent::from_vec(levels).map_err(|e| CatalogError::BadRequest(e.to_string()))?;
     let identifiers = names
         .into_iter()
         .map(|n| TableIdent::new(ns_ident.clone(), n))
@@ -93,7 +95,11 @@ pub async fn rename(
     State(s): State<CatalogState>,
     Json(req): Json<RenameTableRequest>,
 ) -> Result<axum::http::StatusCode, CatalogError> {
-    let src_ns = s.service.store.get_namespace(req.source.namespace.as_ref()).await?;
+    let src_ns = s
+        .service
+        .store
+        .get_namespace(req.source.namespace.as_ref())
+        .await?;
     let dst_ns = s
         .service
         .store
@@ -101,7 +107,12 @@ pub async fn rename(
         .await?;
     s.service
         .store
-        .rename_table(src_ns.id, &req.source.name, dst_ns.id, &req.destination.name)
+        .rename_table(
+            src_ns.id,
+            &req.source.name,
+            dst_ns.id,
+            &req.destination.name,
+        )
         .await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

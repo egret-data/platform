@@ -23,15 +23,12 @@ pub async fn list(
     Query(q): Query<ListQuery>,
 ) -> Result<Json<ListNamespacesResponse>, CatalogError> {
     let parent = q.parent.as_deref().map(parse_namespace);
-    let rows = s
-        .service
-        .store
-        .list_namespaces(parent.as_deref())
-        .await?;
+    let rows = s.service.store.list_namespaces(parent.as_deref()).await?;
     let mut namespaces = Vec::with_capacity(rows.len());
     for levels in rows {
         namespaces.push(
-            NamespaceIdent::from_vec(levels).map_err(|e| CatalogError::BadRequest(e.to_string()))?,
+            NamespaceIdent::from_vec(levels)
+                .map_err(|e| CatalogError::BadRequest(e.to_string()))?,
         );
     }
     Ok(Json(ListNamespacesResponse {
@@ -63,8 +60,8 @@ pub async fn load(
     let row = s.service.store.get_namespace(&levels).await?;
     let properties: HashMap<String, String> =
         serde_json::from_value(row.properties).unwrap_or_default();
-    let namespace =
-        NamespaceIdent::from_vec(row.levels).map_err(|e| CatalogError::BadRequest(e.to_string()))?;
+    let namespace = NamespaceIdent::from_vec(row.levels)
+        .map_err(|e| CatalogError::BadRequest(e.to_string()))?;
     Ok(Json(GetNamespaceResponse {
         namespace,
         properties: Some(properties),
@@ -83,7 +80,10 @@ pub async fn drop(
     State(s): State<CatalogState>,
     Path(ns): Path<String>,
 ) -> Result<axum::http::StatusCode, CatalogError> {
-    s.service.store.drop_namespace(&parse_namespace(&ns)).await?;
+    s.service
+        .store
+        .drop_namespace(&parse_namespace(&ns))
+        .await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 

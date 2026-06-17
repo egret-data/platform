@@ -26,7 +26,10 @@ async fn insert_load_drop_table() {
     let tid = uuid::Uuid::new_v4();
     let loc = format!("s3://wh/{}/orders-{tid}", levels[0]);
     let md = minimal_metadata(&loc, tid);
-    let mloc = format!("{loc}/metadata/00000-{}.metadata.json", uuid::Uuid::new_v4());
+    let mloc = format!(
+        "{loc}/metadata/00000-{}.metadata.json",
+        uuid::Uuid::new_v4()
+    );
     s.insert_table(ns.id, "orders", tid, &md, &mloc, &loc)
         .await
         .unwrap();

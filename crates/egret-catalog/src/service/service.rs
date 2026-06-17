@@ -25,8 +25,7 @@ impl CatalogService {
         md: &TableMetadata,
     ) -> Result<String, CatalogError> {
         let mloc = table_metadata_location(location, version, &Uuid::new_v4());
-        let bytes =
-            serde_json::to_vec(md).map_err(|e| CatalogError::BadRequest(e.to_string()))?;
+        let bytes = serde_json::to_vec(md).map_err(|e| CatalogError::BadRequest(e.to_string()))?;
         self.storage.put(&mloc, bytes).await?;
         Ok(mloc)
     }

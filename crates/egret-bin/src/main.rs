@@ -166,7 +166,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         let storage: std::sync::Arc<dyn egret_storage::ObjectStore> =
             std::sync::Arc::new(egret_storage::S3Store::new(&storage_cfg).await?);
         let service = egret_catalog::service::CatalogService { store, storage };
-        let base_url = format!("http://{}:{}/catalog", config.server.host, config.server.port);
+        let base_url = format!(
+            "http://{}:{}/catalog",
+            config.server.host, config.server.port
+        );
         Some(egret_catalog::CatalogState {
             service,
             auth_token: config.catalog.auth_token.clone().into(),

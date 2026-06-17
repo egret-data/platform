@@ -3,5 +3,5 @@ pub mod catalog;
 pub mod error;
 pub mod sign;
 
-pub use iceberg::{NamespaceIdent, TableIdent, TableRequirement, TableUpdate};
 pub use iceberg::spec::{Schema, SortOrder, TableMetadata, TableMetadataRef, UnboundPartitionSpec};
+pub use iceberg::{NamespaceIdent, TableIdent, TableRequirement, TableUpdate};

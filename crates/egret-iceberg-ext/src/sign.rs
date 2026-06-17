@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Serde helper for `http::Method` (http 1.x does not have `http-serde` 1 support).
 mod http_method_serde {

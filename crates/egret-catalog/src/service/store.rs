@@ -61,26 +61,22 @@ impl CatalogStore {
         parent: Option<&[String]>,
     ) -> Result<Vec<Vec<String>>, CatalogError> {
         match parent {
-            None => {
-                sqlx::query_scalar::<_, Vec<String>>(
-                    "SELECT levels FROM catalog_namespaces ORDER BY levels",
-                )
-                .fetch_all(&self.db.pool)
-                .await
-                .map_err(CatalogError::Db)
-            }
-            Some(p) => {
-                sqlx::query_scalar::<_, Vec<String>>(
-                    "SELECT levels FROM catalog_namespaces \
+            None => sqlx::query_scalar::<_, Vec<String>>(
+                "SELECT levels FROM catalog_namespaces ORDER BY levels",
+            )
+            .fetch_all(&self.db.pool)
+            .await
+            .map_err(CatalogError::Db),
+            Some(p) => sqlx::query_scalar::<_, Vec<String>>(
+                "SELECT levels FROM catalog_namespaces \
                      WHERE levels[1:cardinality($1::text[])] = $1 \
                        AND cardinality(levels) = cardinality($1::text[]) + 1 \
                      ORDER BY levels",
-                )
-                .bind(p)
-                .fetch_all(&self.db.pool)
-                .await
-                .map_err(CatalogError::Db)
-            }
+            )
+            .bind(p)
+            .fetch_all(&self.db.pool)
+            .await
+            .map_err(CatalogError::Db),
         }
     }
 
@@ -193,8 +189,8 @@ impl CatalogStore {
         metadata_location: &str,
         location: &str,
     ) -> Result<(), CatalogError> {
-        let md = serde_json::to_value(metadata)
-            .map_err(|e| CatalogError::BadRequest(e.to_string()))?;
+        let md =
+            serde_json::to_value(metadata).map_err(|e| CatalogError::BadRequest(e.to_string()))?;
         let snap: Option<i64> = metadata.current_snapshot_id();
         sqlx::query(
             "INSERT INTO catalog_tables \
@@ -293,8 +289,8 @@ impl CatalogStore {
         metadata: &TableMetadata,
         new_metadata_location: &str,
     ) -> Result<(), CatalogError> {
-        let md = serde_json::to_value(metadata)
-            .map_err(|e| CatalogError::BadRequest(e.to_string()))?;
+        let md =
+            serde_json::to_value(metadata).map_err(|e| CatalogError::BadRequest(e.to_string()))?;
         let snap: Option<i64> = metadata.current_snapshot_id();
         let mut tx = self.db.pool.begin().await.map_err(CatalogError::Db)?;
         let affected = sqlx::query(

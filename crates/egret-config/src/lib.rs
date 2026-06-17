@@ -202,9 +202,7 @@ impl Config {
                 || self.storage.secret_key.is_empty()
                 || self.storage.bucket.is_empty()
             {
-                return Err(
-                    "catalog.enabled requires storage access_key/secret_key/bucket".into(),
-                );
+                return Err("catalog.enabled requires storage access_key/secret_key/bucket".into());
             }
         }
         Ok(())

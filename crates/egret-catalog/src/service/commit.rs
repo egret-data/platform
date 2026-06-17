@@ -17,13 +17,11 @@ pub fn apply_commit(
             .map_err(|e| CatalogError::Conflict(e.to_string()))?;
     }
     // 2. Apply updates in order via the iceberg builder.
-    let mut builder = TableMetadataBuilder::new_from_metadata(
-        current,
-        metadata_location.map(str::to_string),
-    );
+    let mut builder =
+        TableMetadataBuilder::new_from_metadata(current, metadata_location.map(str::to_string));
     for u in updates {
-        builder = TableUpdate::apply(u, builder)
-            .map_err(|e| CatalogError::BadRequest(e.to_string()))?;
+        builder =
+            TableUpdate::apply(u, builder).map_err(|e| CatalogError::BadRequest(e.to_string()))?;
     }
     let built = builder
         .build()
@@ -43,9 +41,13 @@ mod tests {
         let updates = vec![TableUpdate::SetProperties {
             updates: HashMap::from([("owner".to_string(), "egret".to_string())]),
         }];
-        let new_md =
-            apply_commit(md, Some("s3://wh/ns/t-x/metadata/00000-x.json"), &[], updates)
-                .unwrap();
+        let new_md = apply_commit(
+            md,
+            Some("s3://wh/ns/t-x/metadata/00000-x.json"),
+            &[],
+            updates,
+        )
+        .unwrap();
         assert_eq!(
             new_md.properties().get("owner").map(String::as_str),
             Some("egret")

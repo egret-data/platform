@@ -81,7 +81,10 @@ fn create_table_request(name: &str) -> CreateTableRequest {
         .unwrap();
     CreateTableRequest {
         name: name.to_string(),
-        location: Some(format!("s3://warehouse/test/{name}-{}", uuid::Uuid::new_v4())),
+        location: Some(format!(
+            "s3://warehouse/test/{name}-{}",
+            uuid::Uuid::new_v4()
+        )),
         schema,
         partition_spec: None,
         write_order: None,
