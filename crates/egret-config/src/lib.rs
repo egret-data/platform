@@ -116,12 +116,11 @@ impl Default for Config {
                 client_id: String::new(),
                 client_secret: String::new(),
                 redirect_url: "http://localhost:8080/api/auth/oidc/callback".into(),
-                scopes: vec![
-                    "openid".into(),
-                    "email".into(),
-                    "profile".into(),
-                    "groups".into(),
-                ],
+                // Groups come from the IdP's group protocol-mapper (emitted on the
+                // `groups_claim`), so a `groups` *scope* is NOT requested by default —
+                // Keycloak rejects an undefined scope with `invalid_scope`. Add "groups"
+                // here only if your IdP exposes it as a client scope.
+                scopes: vec!["openid".into(), "email".into(), "profile".into()],
                 groups_claim: "groups".into(),
                 post_login_redirect: "/".into(),
             },
