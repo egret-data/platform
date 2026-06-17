@@ -26,3 +26,6 @@ dist/
 /data
 /tmp
 .codegraph/
+
+# Visual brainstorm companion
+.superpowers/
