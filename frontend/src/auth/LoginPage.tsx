@@ -1,8 +1,10 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
 import { useAuthConfig, useLogin } from "@/api/hooks";
+import { ApiError } from "@/api/client";
 
 export function LoginPage() {
   const [email, setEmail] = useState("");
@@ -10,12 +12,21 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const login = useLogin();
   const cfg = useAuthConfig();
+  const navigate = useNavigate();
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    try { await login.mutateAsync({ email, password }); }
-    catch { setError("Invalid email or password"); }
+    try {
+      await login.mutateAsync({ email, password });
+      navigate("/", { replace: true });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 429) {
+        setError("Too many attempts. Please wait a few minutes and try again.");
+      } else {
+        setError("Invalid email or password");
+      }
+    }
   };
 
   return (

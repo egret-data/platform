@@ -8,6 +8,13 @@ import { LoginPage } from "@/auth/LoginPage";
 import { NotFound } from "@/routes/NotFound";
 import { useAuth } from "@/auth/useAuth";
 import { useMyWorkspaces } from "@/api/hooks";
+
+function LoginRoute() {
+  const { me, isLoading } = useAuth();
+  if (isLoading) return <div className="p-10">Loading…</div>;
+  if (me) return <Navigate to="/" replace />;
+  return <LoginPage />;
+}
 import SqlLab from "@/routes/explore/SqlLab";
 import Datasets from "@/routes/explore/Datasets";
 import Charts from "@/routes/explore/Charts";
@@ -74,7 +81,7 @@ export default function App() {
         <BrowserRouter>
           <AuthProvider>
             <Routes>
-              <Route path="/login" element={<LoginPage />} />
+              <Route path="/login" element={<LoginRoute />} />
               <Route path="/" element={<RequireAuth><HomeRedirect /></RequireAuth>} />
               <Route path="/explore/:workspace/*" element={<RequireAuth><ExploreRoutes /></RequireAuth>} />
               <Route path="/admin/*" element={<RequireAuth><AdminRoutes /></RequireAuth>} />
