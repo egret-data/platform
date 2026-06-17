@@ -153,6 +153,19 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         None
     };
 
+    let ranger = if config.ranger.enabled {
+        let store = egret_authz::AuthzStore::new(db.clone());
+        egret_authz::seed_trino(&store)
+            .await
+            .map_err(anyhow::Error::from)?;
+        Some(egret_ranger::RangerState {
+            store,
+            auth_token: config.ranger.auth_token.clone().into(),
+        })
+    } else {
+        None
+    };
+
     let catalog = if config.catalog.enabled {
         let storage_cfg = egret_storage::StorageConfig {
             endpoint: config.storage.endpoint.clone(),
@@ -195,6 +208,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         workspace: Some(workspace),
         oidc,
         catalog,
+        ranger,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)
