@@ -58,6 +58,9 @@ mod tests {
         .unwrap();
         let md = create_table_metadata(&req, uuid::Uuid::nil(), "s3://wh/t".into()).unwrap();
         assert!(!md.properties().contains_key("format-version"));
-        assert_eq!(md.properties().get("owner").map(String::as_str), Some("egret"));
+        assert_eq!(
+            md.properties().get("owner").map(String::as_str),
+            Some("egret")
+        );
     }
 }
