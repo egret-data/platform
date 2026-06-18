@@ -221,9 +221,8 @@ impl Config {
                 return Err("catalog.enabled requires storage access_key/secret_key/bucket".into());
             }
         }
-        if self.ranger.enabled && self.ranger.auth_token.is_empty() {
-            return Err("ranger.enabled requires auth_token".into());
-        }
+        // ranger.auth_token may be empty: that selects anonymous `/service` access for stock
+        // Ranger plugins (e.g. Trino) that authenticate out-of-band. Set a token to require bearer.
         Ok(())
     }
 }
@@ -327,10 +326,12 @@ mod tests {
     }
 
     #[test]
-    fn ranger_enabled_requires_token() {
+    fn ranger_enabled_validates_with_or_without_token() {
         let mut cfg = Config::default();
         cfg.ranger.enabled = true;
-        assert!(cfg.validate().is_err());
+        // Empty token = anonymous /service (for stock Ranger plugins). Valid.
+        assert!(cfg.validate().is_ok());
+        // A configured token is also valid (requires bearer).
         cfg.ranger.auth_token = "t".into();
         assert!(cfg.validate().is_ok());
     }

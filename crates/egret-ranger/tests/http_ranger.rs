@@ -41,6 +41,46 @@ fn req(method: &str, uri: &str, token: Option<&str>, body: Option<Value>) -> Req
 }
 
 #[tokio::test]
+async fn anonymous_mode_allows_download_without_bearer() {
+    // Empty token = anonymous /service so stock Ranger plugins (no bearer) can download.
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("skip");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let store = AuthzStore::new(db);
+    seed_trino(&store).await.expect("seed");
+    let svc = format!("trino_{}", uuid::Uuid::new_v4().simple());
+    let app = ranger_router(RangerState {
+        store,
+        auth_token: Arc::from(""),
+    });
+    // create a service (no bearer), then download (no bearer) → 200
+    let r = app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/plugins/services",
+            None,
+            Some(json!({"name": svc, "type": "trino", "configs": {}})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let r = app
+        .oneshot(req(
+            "GET",
+            &format!("/plugins/policies/download/{svc}"),
+            None,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn download_requires_bearer() {
     let Some((app, svc)) = app().await else {
         eprintln!("skip");

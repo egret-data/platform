@@ -7,11 +7,19 @@ use axum::middleware::Next;
 use axum::response::Response;
 
 /// Constant-time bearer check against the configured ranger token.
+///
+/// Anonymous mode: when no token is configured (empty), `/service` is open. The native
+/// Ranger plugins (e.g. Trino's `RangerAdminRESTClient`) authenticate out-of-band
+/// (Kerberos / trusted network) and do not send a bearer token, so an empty token lets
+/// stock plugins download policies. Set a token to require bearer auth.
 pub async fn require_bearer(
     State(state): State<RangerState>,
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    if state.auth_token.is_empty() {
+        return Ok(next.run(req).await);
+    }
     let token = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
