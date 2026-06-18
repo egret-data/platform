@@ -47,6 +47,15 @@ pub struct SecretsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineConfig {
+    pub max_rows: usize,
+    pub query_timeout_secs: u64,
+    pub preview_rows: usize,
+    /// Object-store key prefix for query results (under the storage bucket).
+    pub results_prefix: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogSettings {
     pub enabled: bool,
     pub warehouse: String,
@@ -81,6 +90,7 @@ pub struct Config {
     pub storage: StorageSettings,
     pub ranger: RangerSettings,
     pub secrets: SecretsConfig,
+    pub engine: EngineConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +196,12 @@ impl Default for Config {
             secrets: SecretsConfig {
                 master_key: String::new(),
             },
+            engine: EngineConfig {
+                max_rows: 100_000,
+                query_timeout_secs: 60,
+                preview_rows: 100,
+                results_prefix: "query-results".into(),
+            },
         }
     }
 }
@@ -243,6 +259,12 @@ impl Config {
             if key_len < 32 {
                 return Err("secrets.master_key must be base64 of >=32 bytes".into());
             }
+        }
+        if self.engine.max_rows == 0 || self.engine.query_timeout_secs == 0 {
+            return Err("engine.max_rows and engine.query_timeout_secs must be >= 1".into());
+        }
+        if self.engine.preview_rows > self.engine.max_rows {
+            return Err("engine.preview_rows must be <= engine.max_rows".into());
         }
         Ok(())
     }
@@ -372,5 +394,21 @@ mod tests {
         use base64::Engine;
         cfg.secrets.master_key = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn engine_defaults_present_and_validate() {
+        let cfg = Config::default();
+        assert_eq!(cfg.engine.max_rows, 100_000);
+        assert_eq!(cfg.engine.query_timeout_secs, 60);
+        assert_eq!(cfg.engine.preview_rows, 100);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn engine_preview_must_not_exceed_max_rows() {
+        let mut cfg = Config::default();
+        cfg.engine.preview_rows = 200_000; // > max_rows
+        assert!(cfg.validate().is_err());
     }
 }
