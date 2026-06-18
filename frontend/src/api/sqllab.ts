@@ -3,7 +3,7 @@ import { apiFetch, apiJson } from "./client";
 
 // ── types ──
 export interface DatabaseListItem { id: string; name: string; engine: string }
-export interface SavedQuery { id: string; database_id: string | null; name: string; sql: string; created_by: string | null; updated_at: string }
+export interface SavedQuery { id: string; database_id: string | null; name: string; sql: string; description: string; created_by: string | null; updated_at: string }
 export interface SchemaColumn { name: string; type: string }
 export type QueryStatus = "queued" | "running" | "finished" | "failed" | "cancelled";
 export interface QueryView {
@@ -36,10 +36,8 @@ export function useDatabases(ws: string) {
 // ── run / poll / results (engine API) ──
 export function useSubmitQuery(ws: string) {
   return useMutation({
-    mutationFn: (body: { database_id: string; sql: string }) =>
-      apiJson<{ id: string; status: QueryStatus }>(`/ws/${ws}/queries`, {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
-      }),
+    mutationFn: (body: { database_id: string; sql: string; limit?: number }) =>
+      apiJson<{ id: string; status: QueryStatus }>(`/ws/${ws}/queries`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
   });
 }
 export function useQueryStatus(ws: string, id: string | null) {
@@ -62,6 +60,13 @@ export function useCancelQuery(ws: string) {
 export function useHistory(ws: string) {
   return useQuery<HistoryItem[]>({ queryKey: qk.history(ws), queryFn: () => apiJson<HistoryItem[]>(`/ws/${ws}/queries`) });
 }
+export function useResults(ws: string, queryId: string | null, page: number, enabled: boolean) {
+  return useQuery<ResultsPage>({
+    queryKey: ["sqllab", ws, "results", queryId, page],
+    queryFn: () => fetchResults(ws, queryId!, page, 100),
+    enabled: !!queryId && enabled,
+  });
+}
 
 // ── saved queries (egret-bi) ──
 export function useSavedQueries(ws: string) {
@@ -70,7 +75,7 @@ export function useSavedQueries(ws: string) {
 export function useSaveQuery(ws: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { database_id: string | null; name: string; sql: string }) =>
+    mutationFn: (body: { database_id: string | null; name: string; sql: string; description?: string }) =>
       apiJson<SavedQuery>(`/ws/${ws}/sqllab/queries`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.saved(ws) }),
   });
