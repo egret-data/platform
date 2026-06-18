@@ -2014,6 +2014,7 @@ dependencies = [
  "egret-config",
  "egret-core",
  "egret-database",
+ "egret-engine",
  "egret-metastore",
  "egret-ranger",
  "egret-secrets",
@@ -2101,6 +2102,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "egret-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "egret-auth",
+ "egret-config",
+ "egret-core",
+ "egret-database",
+ "egret-metastore",
+ "egret-secrets",
+ "egret-storage",
+ "egret-workspace",
+ "hex",
+ "http-body-util",
+ "mysql_async",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "egret-iceberg-ext"
 version = "0.1.0"
 dependencies = [
@@ -2169,6 +2202,7 @@ dependencies = [
  "egret-config",
  "egret-core",
  "egret-database",
+ "egret-engine",
  "egret-metastore",
  "egret-ranger",
  "egret-workspace",
