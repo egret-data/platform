@@ -203,7 +203,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     };
 
     // Hoist crypto/SecretStore/DatabaseRepo so both the database and engine blocks can share them.
-    let (secrets, databases) = {
+    let databases = {
         use base64::Engine as _;
         let crypto = if config.secrets.master_key.is_empty() {
             None
@@ -214,8 +214,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             Some(egret_secrets::Crypto::new(&key).map_err(|e| anyhow::anyhow!(e.to_string()))?)
         };
         let secrets = egret_secrets::SecretStore::new(db.clone(), crypto);
-        let databases = egret_database::DatabaseRepo::new(db.clone(), secrets.clone());
-        (secrets, databases)
+        egret_database::DatabaseRepo::new(db.clone(), secrets)
     };
 
     let database = Some(egret_database::DatabaseState {
@@ -265,8 +264,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             authz: Authorizer::new(db.clone()),
         })
     };
-
-    let _ = secrets; // kept alive through DatabaseRepo; suppress unused-variable warning
 
     let app = build_router(AppState {
         db: Some(db),

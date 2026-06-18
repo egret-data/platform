@@ -39,6 +39,10 @@ pub trait Connector: Send + Sync {
     /// Run `sql`, honoring `limits` and `cancel`. Fetches up to `max_rows + 1` rows;
     /// if the extra row appears, sets `truncated` and drops it. On a triggered
     /// `cancel`, best-effort aborts the engine query and returns `EngineError::Cancelled`.
+    ///
+    /// Cancellation is observed cooperatively between fetched pages/rows; a query
+    /// blocked in a single network read is interrupted by the JobManager's outer
+    /// timeout, which drops the future.
     async fn execute(
         &self,
         sql: &str,
