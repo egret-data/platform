@@ -68,7 +68,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved }: {
           <div className="flex-1"><SqlEditor value={tab.sql} onChange={(v) => patch({ sql: v })} schemaWords={words} /></div>
         </div>
       </Panel>
-      <PanelResizeHandle className="h-1 bg-border" />
+      <PanelResizeHandle className="h-1.5 bg-border transition-colors hover:bg-primary/60 data-[resize-handle-state=drag]:bg-primary" />
       <Panel defaultSize={50} minSize={20}>
         <Tabs defaultValue="results" className="flex h-full flex-col">
           <TabsList className="m-2 w-fit"><TabsTrigger value="results">Results</TabsTrigger><TabsTrigger value="history">History</TabsTrigger><TabsTrigger value="saved">Saved</TabsTrigger></TabsList>
@@ -91,9 +91,11 @@ export function SqlTab({ ws, tab, patch, onOpenSaved }: {
   if (panelCollapsed) {
     return (
       <div className="flex h-full">
-        <button onClick={() => setPanelCollapsed(false)} title="Show data panel" className="self-start border-r p-2 text-muted-foreground hover:text-foreground">
-          <PanelLeftOpen className="h-4 w-4" />
-        </button>
+        <div className="flex h-full flex-col border-r">
+          <button onClick={() => setPanelCollapsed(false)} title="Show data panel" className="p-2 text-muted-foreground hover:text-foreground">
+            <PanelLeftOpen className="h-4 w-4" />
+          </button>
+        </div>
         <div className="min-w-0 flex-1">{main}</div>
         {saveDialog}
       </div>
@@ -105,7 +107,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved }: {
       <Panel defaultSize={22} minSize={12}>
         <DataPanel ws={ws} dbId={tab.dbId} onDb={(id) => patch({ dbId: id })} onInsert={insert} onWords={setWords} onCollapse={() => setPanelCollapsed(true)} />
       </Panel>
-      <PanelResizeHandle className="w-1 bg-border" />
+      <PanelResizeHandle className="w-1.5 bg-border transition-colors hover:bg-primary/60 data-[resize-handle-state=drag]:bg-primary" />
       <Panel defaultSize={78}>{main}</Panel>
       {saveDialog}
     </PanelGroup>
