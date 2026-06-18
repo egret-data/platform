@@ -22,6 +22,7 @@ egret-ranger = { path = "crates/egret-ranger" }
 egret-secrets = { path = "crates/egret-secrets" }
 egret-database = { path = "crates/egret-database" }
 egret-engine = { path = "crates/egret-engine" }
+egret-bi = { path = "crates/egret-bi" }
 
 # Iceberg model — pin the lakekeeper fork/rev so the TableMetadataBuilder /
 # TableUpdate::apply / TableRequirement::check API matches the reference exactly.

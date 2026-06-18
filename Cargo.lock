@@ -1999,6 +1999,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "egret-bi"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
+ "egret-auth",
+ "egret-config",
+ "egret-core",
+ "egret-database",
+ "egret-engine",
+ "egret-metastore",
+ "egret-secrets",
+ "egret-workspace",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "egret-bin"
 version = "0.1.0"
 dependencies = [
