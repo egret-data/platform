@@ -2,6 +2,7 @@ import { useState } from "react";
 import { format as formatSql } from "sql-formatter";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { toast } from "sonner";
+import { PanelLeftOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -26,6 +27,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved }: {
   const [page, setPage] = useState(0);
   const [words, setWords] = useState<string[]>([]);
   const [saveOpen, setSaveOpen] = useState(false);
+  const [panelCollapsed, setPanelCollapsed] = useState(false);
 
   const submit = useSubmitQuery(ws);
   const cancel = useCancelQuery(ws);
@@ -47,47 +49,65 @@ export function SqlTab({ ws, tab, patch, onOpenSaved }: {
   }
   function insert(name: string) { patch({ sql: tab.sql + name }); }
 
+  const main = (
+    <PanelGroup direction="vertical">
+      <Panel defaultSize={50} minSize={20}>
+        <div className="flex h-full flex-col">
+          <div className="flex items-center gap-2 border-b p-2">
+            <Button size="sm" onClick={run} disabled={running}>Run</Button>
+            <Button size="sm" variant="outline" disabled={!running} onClick={() => queryId && cancel.mutate(queryId)}>Cancel</Button>
+            <Button size="sm" variant="outline" onClick={doFormat}>Format</Button>
+            <Select value={String(tab.limit)} onValueChange={(v) => patch({ limit: Number(v) })}>
+              <SelectTrigger className="h-8 w-28"><SelectValue /></SelectTrigger>
+              <SelectContent>{LIMITS.map((l) => <SelectItem key={l} value={String(l)}>{l.toLocaleString()} rows</SelectItem>)}</SelectContent>
+            </Select>
+            <Button size="sm" variant="outline" onClick={() => setSaveOpen(true)}>Save</Button>
+            {running && <span className="text-sm text-muted-foreground">running…</span>}
+            {status.data?.status === "failed" && <span className="text-sm text-red-600">{status.data.error}</span>}
+          </div>
+          <div className="flex-1"><SqlEditor value={tab.sql} onChange={(v) => patch({ sql: v })} schemaWords={words} /></div>
+        </div>
+      </Panel>
+      <PanelResizeHandle className="h-1 bg-border" />
+      <Panel defaultSize={50} minSize={20}>
+        <Tabs defaultValue="results" className="flex h-full flex-col">
+          <TabsList className="m-2 w-fit"><TabsTrigger value="results">Results</TabsTrigger><TabsTrigger value="history">History</TabsTrigger><TabsTrigger value="saved">Saved</TabsTrigger></TabsList>
+          <TabsContent value="results" className="flex-1 overflow-hidden">
+            <ResultsGrid page={results.data ?? null} pageIndex={page} onPage={setPage} truncated={status.data?.truncated ?? false}
+              csvHref={finished && queryId ? csvUrl(ws, queryId) : null} />
+          </TabsContent>
+          <TabsContent value="history" className="flex-1 overflow-auto"><HistoryTab ws={ws} onLoad={(s) => patch({ sql: s })} /></TabsContent>
+          <TabsContent value="saved" className="flex-1 overflow-auto"><SavedTab ws={ws} onOpen={onOpenSaved} /></TabsContent>
+        </Tabs>
+      </Panel>
+    </PanelGroup>
+  );
+
+  const saveDialog = (
+    <SaveQueryDialog open={saveOpen} onOpenChange={setSaveOpen}
+      onSave={async (name, description) => { await save.mutateAsync({ database_id: tab.dbId, name, sql: tab.sql, description }); toast.success("Saved"); }} />
+  );
+
+  if (panelCollapsed) {
+    return (
+      <div className="flex h-full">
+        <button onClick={() => setPanelCollapsed(false)} title="Show data panel" className="self-start border-r p-2 text-muted-foreground hover:text-foreground">
+          <PanelLeftOpen className="h-4 w-4" />
+        </button>
+        <div className="min-w-0 flex-1">{main}</div>
+        {saveDialog}
+      </div>
+    );
+  }
+
   return (
     <PanelGroup direction="horizontal" className="h-full">
-      <Panel defaultSize={22} minSize={0} collapsible>
-        <DataPanel ws={ws} dbId={tab.dbId} onDb={(id) => patch({ dbId: id })} onInsert={insert} onWords={setWords} />
+      <Panel defaultSize={22} minSize={12}>
+        <DataPanel ws={ws} dbId={tab.dbId} onDb={(id) => patch({ dbId: id })} onInsert={insert} onWords={setWords} onCollapse={() => setPanelCollapsed(true)} />
       </Panel>
       <PanelResizeHandle className="w-1 bg-border" />
-      <Panel defaultSize={78}>
-        <PanelGroup direction="vertical">
-          <Panel defaultSize={50} minSize={20}>
-            <div className="flex h-full flex-col">
-              <div className="flex items-center gap-2 border-b p-2">
-                <Button size="sm" onClick={run} disabled={running}>Run</Button>
-                <Button size="sm" variant="outline" disabled={!running} onClick={() => queryId && cancel.mutate(queryId)}>Cancel</Button>
-                <Button size="sm" variant="outline" onClick={doFormat}>Format</Button>
-                <Select value={String(tab.limit)} onValueChange={(v) => patch({ limit: Number(v) })}>
-                  <SelectTrigger className="h-8 w-28"><SelectValue /></SelectTrigger>
-                  <SelectContent>{LIMITS.map((l) => <SelectItem key={l} value={String(l)}>{l.toLocaleString()} rows</SelectItem>)}</SelectContent>
-                </Select>
-                <Button size="sm" variant="outline" onClick={() => setSaveOpen(true)}>Save</Button>
-                {running && <span className="text-sm text-muted-foreground">running…</span>}
-                {status.data?.status === "failed" && <span className="text-sm text-red-600">{status.data.error}</span>}
-              </div>
-              <div className="flex-1"><SqlEditor value={tab.sql} onChange={(v) => patch({ sql: v })} schemaWords={words} /></div>
-            </div>
-          </Panel>
-          <PanelResizeHandle className="h-1 bg-border" />
-          <Panel defaultSize={50} minSize={20}>
-            <Tabs defaultValue="results" className="flex h-full flex-col">
-              <TabsList className="m-2 w-fit"><TabsTrigger value="results">Results</TabsTrigger><TabsTrigger value="history">History</TabsTrigger><TabsTrigger value="saved">Saved</TabsTrigger></TabsList>
-              <TabsContent value="results" className="flex-1 overflow-hidden">
-                <ResultsGrid page={results.data ?? null} pageIndex={page} onPage={setPage} truncated={status.data?.truncated ?? false}
-                  csvHref={finished && queryId ? csvUrl(ws, queryId) : null} />
-              </TabsContent>
-              <TabsContent value="history" className="flex-1 overflow-auto"><HistoryTab ws={ws} onLoad={(s) => patch({ sql: s })} /></TabsContent>
-              <TabsContent value="saved" className="flex-1 overflow-auto"><SavedTab ws={ws} onOpen={onOpenSaved} /></TabsContent>
-            </Tabs>
-          </Panel>
-        </PanelGroup>
-      </Panel>
-      <SaveQueryDialog open={saveOpen} onOpenChange={setSaveOpen}
-        onSave={async (name, description) => { await save.mutateAsync({ database_id: tab.dbId, name, sql: tab.sql, description }); toast.success("Saved"); }} />
+      <Panel defaultSize={78}>{main}</Panel>
+      {saveDialog}
     </PanelGroup>
   );
 }

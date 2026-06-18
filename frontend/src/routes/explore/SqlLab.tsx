@@ -20,7 +20,7 @@ function SqlLabWorkspace({ ws }: { ws: string }) {
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-1 border-b bg-muted/30 px-1">
         {tabs.map((t) => (
-          <div key={t.id} className={`flex items-center gap-1 rounded-t px-2 py-1 text-sm ${t.id === activeId ? "bg-background" : "hover:bg-accent"}`}>
+          <div key={t.id} className={`flex items-center gap-1 border-b-2 px-3 py-1.5 text-sm ${t.id === activeId ? "border-primary bg-background font-medium text-foreground" : "border-transparent text-muted-foreground hover:bg-accent"}`}>
             {editing === t.id ? (
               <input autoFocus defaultValue={t.title} className="w-24 bg-transparent outline-none"
                 onBlur={(e) => { renameTab(t.id, e.target.value || t.title); setEditing(null); }}
