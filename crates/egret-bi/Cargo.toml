@@ -29,3 +29,7 @@ tower.workspace = true
 http-body-util = "0.1"
 egret-secrets.workspace = true
 url = { workspace = true }
+egret-database.workspace = true
+egret-auth.workspace = true
+egret-workspace.workspace = true
+chrono.workspace = true
