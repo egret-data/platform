@@ -3,3 +3,6 @@
 mod crypto;
 mod error;
 mod store;
+
+pub use crypto::Crypto;
+pub use error::SecretsError;
