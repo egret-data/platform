@@ -31,14 +31,21 @@ async fn crud_roundtrip() {
         return;
     };
     let q = r
-        .create(wid, None, "q1", "SELECT 1", Some(egret_core::UserId(uid)))
+        .create(
+            wid,
+            None,
+            "q1",
+            "SELECT 1",
+            "",
+            Some(egret_core::UserId(uid)),
+        )
         .await
         .unwrap();
     assert_eq!(q.name, "q1");
     assert!(r.list(wid).await.unwrap().iter().any(|s| s.id == q.id));
     let got = r.get(q.id).await.unwrap().unwrap();
     assert_eq!(got.sql, "SELECT 1");
-    let upd = r.update(q.id, "q1b", "SELECT 2", None).await.unwrap();
+    let upd = r.update(q.id, "q1b", "SELECT 2", "", None).await.unwrap();
     assert_eq!(upd.name, "q1b");
     assert_eq!(upd.sql, "SELECT 2");
     r.delete(q.id).await.unwrap();
@@ -52,9 +59,39 @@ async fn owner_returns_creator() {
         return;
     };
     let q = r
-        .create(wid, None, "q", "SELECT 1", Some(egret_core::UserId(uid)))
+        .create(
+            wid,
+            None,
+            "q",
+            "SELECT 1",
+            "",
+            Some(egret_core::UserId(uid)),
+        )
         .await
         .unwrap();
     assert_eq!(r.owner(q.id).await.unwrap(), Some(uid));
+    r.delete(q.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn description_roundtrips() {
+    let Some((r, wid, uid)) = setup().await else {
+        eprintln!("skip");
+        return;
+    };
+    let q = r
+        .create(
+            wid,
+            None,
+            "q",
+            "SELECT 1",
+            "my desc",
+            Some(egret_core::UserId(uid)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(q.description, "my desc");
+    let got = r.get(q.id).await.unwrap().unwrap();
+    assert_eq!(got.description, "my desc");
     r.delete(q.id).await.unwrap();
 }

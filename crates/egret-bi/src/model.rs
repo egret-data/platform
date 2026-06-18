@@ -8,6 +8,8 @@ pub struct SaveQuery {
     pub database_id: Option<Uuid>,
     pub name: String,
     pub sql: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -16,6 +18,7 @@ pub struct SavedQueryDto {
     pub database_id: Option<String>,
     pub name: String,
     pub sql: String,
+    pub description: String,
     pub created_by: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }

@@ -73,6 +73,7 @@ fn dto(q: crate::saved::SavedQuery) -> SavedQueryDto {
         database_id: q.database_id.map(|d| d.to_string()),
         name: q.name,
         sql: q.sql,
+        description: q.description,
         created_by: q.created_by.map(|u| u.to_string()),
         updated_at: q.updated_at,
     }
@@ -101,6 +102,7 @@ async fn save(
             b.database_id,
             &b.name,
             &b.sql,
+            &b.description,
             Some(ctx.principal.user_id),
         )
         .await
@@ -152,7 +154,7 @@ async fn update(
     require_owner(&st, &ctx, id).await?;
     let q = st
         .saved
-        .update(id, &b.name, &b.sql, b.database_id)
+        .update(id, &b.name, &b.sql, &b.description, b.database_id)
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(dto(q)))

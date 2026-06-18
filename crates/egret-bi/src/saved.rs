@@ -17,11 +17,12 @@ pub struct SavedQuery {
     pub database_id: Option<Uuid>,
     pub name: String,
     pub sql: String,
+    pub description: String,
     pub created_by: Option<Uuid>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-const COLS: &str = "id, database_id, name, sql, created_by, updated_at";
+const COLS: &str = "id, database_id, name, sql, description, created_by, updated_at";
 
 impl SavedQueryRepo {
     pub fn new(db: Db) -> Self {
@@ -34,16 +35,18 @@ impl SavedQueryRepo {
         db_id: Option<Uuid>,
         name: &str,
         sql: &str,
+        description: &str,
         user: Option<UserId>,
     ) -> Result<SavedQuery, BiError> {
         let row = sqlx::query_as::<_, SavedQuery>(&format!(
-            "INSERT INTO saved_queries (workspace_id, database_id, name, sql, created_by) \
-             VALUES ($1,$2,$3,$4,$5) RETURNING {COLS}"
+            "INSERT INTO saved_queries (workspace_id, database_id, name, sql, description, created_by) \
+             VALUES ($1,$2,$3,$4,$5,$6) RETURNING {COLS}"
         ))
         .bind(ws)
         .bind(db_id)
         .bind(name)
         .bind(sql)
+        .bind(description)
         .bind(user.map(|u| u.0))
         .fetch_one(&self.db.pool)
         .await?;
@@ -75,11 +78,12 @@ impl SavedQueryRepo {
         id: Uuid,
         name: &str,
         sql: &str,
+        description: &str,
         db_id: Option<Uuid>,
     ) -> Result<SavedQuery, BiError> {
         let row = sqlx::query_as::<_, SavedQuery>(&format!(
-            "UPDATE saved_queries SET name=$2, sql=$3, database_id=$4, updated_at=now() WHERE id=$1 RETURNING {COLS}"))
-            .bind(id).bind(name).bind(sql).bind(db_id)
+            "UPDATE saved_queries SET name=$2, sql=$3, description=$4, database_id=$5, updated_at=now() WHERE id=$1 RETURNING {COLS}"))
+            .bind(id).bind(name).bind(sql).bind(description).bind(db_id)
             .fetch_optional(&self.db.pool).await?
             .ok_or_else(|| BiError::NotFound(id.to_string()))?;
         Ok(row)
