@@ -31,9 +31,11 @@ export default function SqlLab() {
   const save = useSaveQuery(ws);
 
   const finished = status.data?.status === "finished";
-  if (finished && queryId && results === null) {
-    fetchResults(ws, queryId, 0, PAGE).then(setResults).catch(() => {});
-  }
+  useEffect(() => {
+    if (finished && queryId && results === null) {
+      fetchResults(ws, queryId, 0, PAGE).then(setResults).catch(() => {});
+    }
+  }, [finished, queryId, results, ws]);
 
   async function run() {
     if (!dbId) { toast.error("Pick a database"); return; }
@@ -48,6 +50,14 @@ export default function SqlLab() {
   async function onSave() {
     const name = window.prompt("Query name?"); if (!name) return;
     await save.mutateAsync({ database_id: dbId, name, sql }); toast.success("Saved");
+  }
+
+  function loadIntoEditor(newSql: string, newDb?: string | null) {
+    setSql(newSql);
+    if (newDb) setDbId(newDb);
+    setQueryId(null);
+    setResults(null);
+    setPage(0);
   }
 
   const running = status.data?.status === "queued" || status.data?.status === "running";
@@ -94,8 +104,8 @@ export default function SqlLab() {
                 <ResultsGrid page={results} pageIndex={page} onPage={goPage} truncated={status.data?.truncated ?? false}
                   csvHref={finished && queryId ? csvUrl(ws, queryId) : null} />
               </TabsContent>
-              <TabsContent value="history" className="flex-1 overflow-auto"><HistoryTab ws={ws} onLoad={setSql} /></TabsContent>
-              <TabsContent value="saved" className="flex-1 overflow-auto"><SavedTab ws={ws} onLoad={(s, d) => { setSql(s); if (d) setDbId(d); }} /></TabsContent>
+              <TabsContent value="history" className="flex-1 overflow-auto"><HistoryTab ws={ws} onLoad={(s) => loadIntoEditor(s)} /></TabsContent>
+              <TabsContent value="saved" className="flex-1 overflow-auto"><SavedTab ws={ws} onLoad={(s, d) => loadIntoEditor(s, d)} /></TabsContent>
             </Tabs>
           </Panel>
         </PanelGroup>

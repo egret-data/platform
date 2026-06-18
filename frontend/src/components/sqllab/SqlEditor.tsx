@@ -1,6 +1,6 @@
 import Editor, { type Monaco } from "@monaco-editor/react";
 import type * as MonacoNS from "monaco-editor";
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 
 export interface SchemaHint { tables: string[]; columnsByTable: Record<string, string[]> }
 
@@ -8,8 +8,11 @@ export function SqlEditor({ value, onChange, hint }: { value: string; onChange: 
   const hintRef = useRef(hint);
   hintRef.current = hint;
 
+  const disposableRef = useRef<{ dispose: () => void } | null>(null);
+  useEffect(() => () => disposableRef.current?.dispose(), []);
+
   function handleMount(_editor: unknown, monaco: Monaco) {
-    monaco.languages.registerCompletionItemProvider("sql", {
+    disposableRef.current = monaco.languages.registerCompletionItemProvider("sql", {
       provideCompletionItems: (model: MonacoNS.editor.ITextModel, position: MonacoNS.Position) => {
         const word = model.getWordUntilPosition(position);
         const range = { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber, startColumn: word.startColumn, endColumn: word.endColumn };
