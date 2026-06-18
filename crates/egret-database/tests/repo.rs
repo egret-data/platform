@@ -154,3 +154,55 @@ async fn delete_removes_secret_row() {
         .unwrap();
     assert_eq!(remaining, 0, "delete must remove the backing secret row");
 }
+
+async fn ws_and_user() -> Option<(Db, uuid::Uuid, uuid::Uuid)> {
+    let url = std::env::var("DATABASE_URL").ok()?;
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let uid: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO users (email, name, provider, status, password_hash) \
+         VALUES ($1,'t','local','active','x') RETURNING id",
+    )
+    .bind(format!("u_{}@t.local", uuid::Uuid::new_v4().simple()))
+    .fetch_one(&db.pool)
+    .await
+    .expect("user");
+    let wid: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by) VALUES ($1,'t',$2) RETURNING id",
+    )
+    .bind(format!("w-{}", uuid::Uuid::new_v4().simple()))
+    .bind(uid)
+    .fetch_one(&db.pool)
+    .await
+    .expect("ws");
+    Some((db, wid, uid))
+}
+
+#[tokio::test]
+async fn grant_revoke_and_list_for_workspace() {
+    let Some(r) = repo(true).await else {
+        eprintln!("skip");
+        return;
+    };
+    let Some((_db, wid, uid)) = ws_and_user().await else {
+        return;
+    };
+    let database = r.create(&input(&uniq("db"), None), None).await.unwrap();
+
+    r.grant(wid, database.id, Some(egret_core::UserId(uid)))
+        .await
+        .unwrap();
+    let listed = r.list_for_workspace(wid).await.unwrap();
+    assert!(listed.iter().any(|d| d.id == database.id));
+
+    // grant is idempotent
+    r.grant(wid, database.id, Some(egret_core::UserId(uid)))
+        .await
+        .unwrap();
+
+    r.revoke(wid, database.id).await.unwrap();
+    let after = r.list_for_workspace(wid).await.unwrap();
+    assert!(!after.iter().any(|d| d.id == database.id));
+
+    r.delete(database.id).await.unwrap();
+}

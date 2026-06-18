@@ -15,7 +15,7 @@ pub struct DatabaseRepo {
 }
 
 #[derive(sqlx::FromRow)]
-struct Row {
+pub(crate) struct Row {
     id: Uuid,
     name: String,
     engine: String,
@@ -27,7 +27,7 @@ struct Row {
 }
 
 impl Row {
-    fn into_database(self) -> Result<Database, DatabaseError> {
+    pub(crate) fn into_database(self) -> Result<Database, DatabaseError> {
         let engine = Engine::parse(&self.engine)
             .ok_or_else(|| DatabaseError::BadRequest(format!("unknown engine: {}", self.engine)))?;
         let options: ConnOptions = serde_json::from_value(self.options).unwrap_or_default();
@@ -52,6 +52,11 @@ impl DatabaseRepo {
     /// Expose the secret store (used by routes to open a stored secret for testing).
     pub fn secrets(&self) -> &SecretStore {
         &self.secrets
+    }
+
+    /// Internal pool accessor for sibling modules (e.g. grants).
+    pub(crate) fn pool(&self) -> &sqlx::PgPool {
+        &self.db.pool
     }
 
     /// Register a new database, sealing `secret` if provided.
