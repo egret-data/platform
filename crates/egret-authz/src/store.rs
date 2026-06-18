@@ -237,11 +237,26 @@ impl AuthzStore {
         &self,
         service_id: i64,
     ) -> Result<Vec<Value>, AuthzError> {
-        Ok(sqlx::query_scalar::<_, Value>(
-            r#"SELECT policy_jsonb FROM authz_policies WHERE service_id = $1 AND enabled = true ORDER BY id"#,
+        // Inject the DB-assigned numeric `id`, `version`, and `isEnabled` into each policy.
+        // The Ranger policy engine NPEs on a policy whose `id` is null, and clients only send
+        // these on the response/CRUD path — the stored body keeps the client's original JSON.
+        let rows = sqlx::query_as::<_, (i64, i64, bool, Value)>(
+            r#"SELECT id, version, enabled, policy_jsonb FROM authz_policies
+               WHERE service_id = $1 AND enabled = true ORDER BY id"#,
         )
         .bind(service_id)
         .fetch_all(&self.db.pool)
-        .await?)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, version, enabled, mut p)| {
+                if let Value::Object(m) = &mut p {
+                    m.insert("id".into(), Value::from(id));
+                    m.insert("version".into(), Value::from(version));
+                    m.insert("isEnabled".into(), Value::from(enabled));
+                }
+                p
+            })
+            .collect())
     }
 }

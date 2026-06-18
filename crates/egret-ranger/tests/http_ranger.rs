@@ -134,6 +134,14 @@ async fn create_service_policy_then_download_and_304() {
     let sp: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(sp["policies"].as_array().unwrap().len(), 1);
     assert!(sp["policyVersion"].as_i64().unwrap() > ver);
+    // The real Ranger policy engine NPEs on a policy whose `id` is null; the download must
+    // inject the DB-assigned id (+ isEnabled). Regression guard for the live-Trino finding.
+    assert!(
+        sp["policies"][0]["id"].as_i64().is_some(),
+        "downloaded policy must carry a numeric id, got {}",
+        sp["policies"][0]
+    );
+    assert_eq!(sp["policies"][0]["isEnabled"], serde_json::json!(true));
 }
 
 #[tokio::test]
