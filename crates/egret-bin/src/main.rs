@@ -202,7 +202,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         None
     };
 
-    let database = {
+    // Hoist crypto/SecretStore/DatabaseRepo so both the database and engine blocks can share them.
+    let databases = {
         use base64::Engine as _;
         let crypto = if config.secrets.master_key.is_empty() {
             None
@@ -213,11 +214,54 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             Some(egret_secrets::Crypto::new(&key).map_err(|e| anyhow::anyhow!(e.to_string()))?)
         };
         let secrets = egret_secrets::SecretStore::new(db.clone(), crypto);
-        Some(egret_database::DatabaseState {
-            repo: egret_database::DatabaseRepo::new(db.clone(), secrets),
-            authz: Authorizer::new(db.clone()),
+        egret_database::DatabaseRepo::new(db.clone(), secrets)
+    };
+
+    let database = Some(egret_database::DatabaseState {
+        repo: databases.clone(),
+        authz: Authorizer::new(db.clone()),
+        sessions: sessions.clone(),
+        workspaces: WorkspaceRepo::new(db.clone()),
+    });
+
+    let engine = {
+        let storage_cfg = egret_storage::StorageConfig {
+            endpoint: config.storage.endpoint.clone(),
+            region: config.storage.region.clone(),
+            bucket: config.storage.bucket.clone(),
+            access_key: config.storage.access_key.clone(),
+            secret_key: config.storage.secret_key.clone(),
+            path_style: config.storage.path_style,
+        };
+        let storage: std::sync::Arc<dyn egret_storage::ObjectStore> =
+            std::sync::Arc::new(egret_storage::S3Store::new(&storage_cfg).await?);
+        let store = egret_engine::QueryStore::new(db.clone());
+        let limits = egret_engine::model::Limits {
+            max_rows: config.engine.max_rows,
+            timeout: std::time::Duration::from_secs(config.engine.query_timeout_secs),
+        };
+        let bucket_uri = format!("s3://{}", config.storage.bucket);
+        let jobs = egret_engine::JobManager::new(
+            store.clone(),
+            databases.clone(),
+            std::sync::Arc::new(egret_engine::connector::DefaultConnectorFactory),
+            storage.clone(),
+            bucket_uri.clone(),
+            config.engine.results_prefix.clone(),
+            limits.clone(),
+            config.engine.preview_rows,
+        );
+        Some(egret_engine::EngineState {
+            store,
+            jobs,
+            databases,
+            storage,
+            bucket_uri: bucket_uri.into(),
+            results_prefix: config.engine.results_prefix.clone().into(),
+            limits,
             sessions: sessions.clone(),
             workspaces: WorkspaceRepo::new(db.clone()),
+            authz: Authorizer::new(db.clone()),
         })
     };
 
@@ -229,6 +273,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         catalog,
         ranger,
         database,
+        engine,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)
