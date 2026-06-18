@@ -27,6 +27,11 @@ export function DataPanel({ ws, dbId, onDb, onInsert, onWords }: DataPanelProps)
   const tables = useTables(ws, dbId, catalog, schema);
   const columns = useColumns(ws, dbId, catalog, schema, table, !!table);
 
+  // Auto-select the only available database (improves UX + makes tests deterministic).
+  useEffect(() => {
+    if (!dbId && databases && databases.length === 1) onDb(databases[0].id);
+  }, [databases, dbId, onDb]);
+
   const words = [
     ...(cats.data ?? []),
     ...(schemas.data ?? []),
