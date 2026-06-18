@@ -5,6 +5,7 @@ mod error;
 mod job;
 pub mod model;
 mod routes;
-mod store;
+pub mod store;
 
 pub use error::{EngineApiError, EngineError};
+pub use store::{Query, QueryStore};
