@@ -29,6 +29,8 @@ pub struct AppState {
     pub ranger: Option<egret_ranger::RangerState>,
     /// Present once a database is wired (in `egret-bin`); `None` in pure health unit tests.
     pub database: Option<egret_database::DatabaseState>,
+    /// Present once the engine is wired (in `egret-bin`); `None` in unit tests.
+    pub engine: Option<egret_engine::EngineState>,
 }
 
 impl AppState {
@@ -42,6 +44,7 @@ impl AppState {
             catalog: None,
             ranger: None,
             database: None,
+            engine: None,
         }
     }
 }
@@ -103,6 +106,14 @@ pub fn build_router(state: AppState) -> Router {
             .nest("/api/me", egret_database::me_database_router())
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
             .with_state(database);
+        router = router.merge(group);
+    }
+
+    if let Some(engine) = state.engine.clone() {
+        let group = Router::new()
+            .nest("/api", egret_engine::engine_router())
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(engine);
         router = router.merge(group);
     }
 

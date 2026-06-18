@@ -21,6 +21,7 @@ egret-authz.workspace = true
 egret-ranger.workspace = true
 egret-secrets.workspace = true
 egret-database.workspace = true
+egret-engine.workspace = true
 tokio.workspace = true
 axum.workspace = true
 clap.workspace = true
