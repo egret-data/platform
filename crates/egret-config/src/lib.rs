@@ -34,6 +34,12 @@ pub struct SecurityConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RangerSettings {
+    pub enabled: bool,
+    pub auth_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogSettings {
     pub enabled: bool,
     pub warehouse: String,
@@ -66,6 +72,7 @@ pub struct Config {
     pub security: SecurityConfig,
     pub catalog: CatalogSettings,
     pub storage: StorageSettings,
+    pub ranger: RangerSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,6 +171,10 @@ impl Default for Config {
                 secret_key: String::new(),
                 path_style: true,
             },
+            ranger: RangerSettings {
+                enabled: false,
+                auth_token: String::new(),
+            },
         }
     }
 }
@@ -210,6 +221,8 @@ impl Config {
                 return Err("catalog.enabled requires storage access_key/secret_key/bucket".into());
             }
         }
+        // ranger.auth_token may be empty: that selects anonymous `/service` access for stock
+        // Ranger plugins (e.g. Trino) that authenticate out-of-band. Set a token to require bearer.
         Ok(())
     }
 }
@@ -302,6 +315,24 @@ mod tests {
         cfg.catalog.auth_token = "t".into();
         cfg.storage.access_key = "a".into();
         cfg.storage.secret_key = "s".into();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn ranger_disabled_by_default_validates() {
+        let cfg = Config::default();
+        assert!(!cfg.ranger.enabled);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn ranger_enabled_validates_with_or_without_token() {
+        let mut cfg = Config::default();
+        cfg.ranger.enabled = true;
+        // Empty token = anonymous /service (for stock Ranger plugins). Valid.
+        assert!(cfg.validate().is_ok());
+        // A configured token is also valid (requires bearer).
+        cfg.ranger.auth_token = "t".into();
         assert!(cfg.validate().is_ok());
     }
 }

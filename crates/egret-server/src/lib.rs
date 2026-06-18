@@ -25,6 +25,8 @@ pub struct AppState {
     pub oidc: Option<OidcRoutesState>,
     /// Present when `config.catalog.enabled`; `None` otherwise (or in unit tests).
     pub catalog: Option<egret_catalog::CatalogState>,
+    /// Present when `config.ranger.enabled`; `None` otherwise (or in unit tests).
+    pub ranger: Option<egret_ranger::RangerState>,
 }
 
 impl AppState {
@@ -36,6 +38,7 @@ impl AppState {
             workspace: None,
             oidc: None,
             catalog: None,
+            ranger: None,
         }
     }
 }
@@ -79,6 +82,14 @@ pub fn build_router(state: AppState) -> Router {
         router = router.merge(
             Router::new()
                 .nest("/catalog", egret_catalog::iceberg_router(catalog))
+                .with_state(()),
+        );
+    }
+
+    if let Some(ranger) = state.ranger.clone() {
+        router = router.merge(
+            Router::new()
+                .nest("/service", egret_ranger::ranger_router(ranger))
                 .with_state(()),
         );
     }

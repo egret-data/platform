@@ -44,8 +44,8 @@ mod tests {
     #[test]
     fn migrator_embeds_baseline_migration() {
         assert!(
-            MIGRATOR.migrations.len() >= 6,
-            "expected through the catalog migration"
+            MIGRATOR.migrations.len() >= 7,
+            "expected through the authz migration"
         );
     }
 }

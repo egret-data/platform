@@ -43,7 +43,12 @@ impl CatalogService {
             egret_storage::table_base_location(&self.warehouse, ns_levels, &req.name, &table_uuid)
         });
         let md = create_table_metadata(&req, table_uuid, location.clone())?;
-        let mloc = self.write_metadata_json(&location, 0, &md).await?;
+        // Do NOT write metadata.json into the table location on create. Engines like Trino
+        // verify the target location is empty before using a freshly-created table; a
+        // pre-written metadata file trips their "non-empty location" guard. The DB holds the
+        // authoritative metadata (returned inline by loadTable); the first commit writes the
+        // metadata.json artifact. `metadata_location` records where v0 would live.
+        let mloc = table_metadata_location(&location, 0, &Uuid::new_v4());
         self.store
             .insert_table(ns.id, &req.name, table_uuid, &md, &mloc, &location)
             .await?;
