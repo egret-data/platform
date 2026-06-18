@@ -39,7 +39,9 @@ export default function SqlLab() {
 
   async function run() {
     if (!dbId) { toast.error("Pick a database"); return; }
-    setResults(null); setPage(0);
+    // Clear the previous query FIRST so its (still-finished) results can't be re-fetched
+    // during the submit round-trip — that was the "query 2 shows query 1" bug.
+    setResults(null); setPage(0); setQueryId(null);
     try { const { id } = await submit.mutateAsync({ database_id: dbId, sql }); setQueryId(id); }
     catch (e) { toast.error(String(e)); }
   }
