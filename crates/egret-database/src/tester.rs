@@ -92,19 +92,51 @@ async fn send_json(req: reqwest::RequestBuilder) -> Result<TrinoResp, String> {
         .map_err(|e| format!("decode: {e}"))
 }
 
-// ── StarRocks (filled in Task 8) ──────────────────────────────────────────────
+// ── StarRocks (MySQL protocol) ────────────────────────────────────────────────
 
 pub async fn test_starrocks(
-    _host: &str,
-    _port: i32,
-    _options: &ConnOptions,
-    _secret: Option<&str>,
+    host: &str,
+    port: i32,
+    options: &ConnOptions,
+    secret: Option<&str>,
 ) -> TestOutcome {
-    // Implemented in Task 8.
-    TestOutcome {
-        ok: false,
-        latency_ms: 0,
-        detail: "starrocks tester not yet implemented".into(),
+    use mysql_async::prelude::Queryable;
+
+    let started = Instant::now();
+    let user = options.user.clone().unwrap_or_else(|| "root".into());
+    let mut builder = mysql_async::OptsBuilder::default()
+        .ip_or_hostname(host.to_string())
+        .tcp_port(port as u16)
+        .user(Some(user))
+        .prefer_socket(false);
+    if let Some(s) = secret {
+        builder = builder.pass(Some(s.to_string()));
+    }
+    if let Some(db) = &options.database {
+        builder = builder.db_name(Some(db.clone()));
+    }
+    let opts: mysql_async::Opts = builder.into();
+
+    let work = async {
+        let mut conn = mysql_async::Conn::new(opts)
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        let got: Option<i64> = conn
+            .query_first::<i64, _>("SELECT 1")
+            .await
+            .map_err(|e| format!("query: {e}"))?;
+        let _ = conn.disconnect().await;
+        if got == Some(1) {
+            Ok(())
+        } else {
+            Err(format!("unexpected result: {got:?}"))
+        }
+    };
+
+    match tokio::time::timeout(TIMEOUT, work).await {
+        Ok(Ok(())) => ok(started),
+        Ok(Err(e)) => fail(started, e),
+        Err(_) => fail(started, "timeout".into()),
     }
 }
 
