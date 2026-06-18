@@ -1,137 +1,39 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useParams } from "react-router-dom";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  csvUrl, fetchResults, useCancelQuery, useDatabases, useHistory, useQueryStatus,
-  useSaveQuery, useSavedQueries, useDeleteSavedQuery, useSubmitQuery,
-  type ResultsPage,
-} from "@/api/sqllab";
-import { SqlEditor, type SchemaHint } from "@/components/sqllab/SqlEditor";
-import { ResultsGrid } from "@/components/sqllab/ResultsGrid";
-import { SchemaTree } from "@/components/sqllab/SchemaTree";
+import { Plus, X } from "lucide-react";
+import { useTabs } from "@/hooks/useTabs";
+import { SqlTab } from "@/components/sqllab/SqlTab";
 
 export default function SqlLab() {
   const ws = useParams().workspace!;
-  const { data: databases } = useDatabases(ws);
-  const [dbId, setDbId] = useState<string | null>(null);
-  const db = databases?.find((d) => d.id === dbId) ?? null;
-  const [sql, setSql] = useState("SELECT 1");
-  const [queryId, setQueryId] = useState<string | null>(null);
-  const [page, setPage] = useState(0);
-  const [results, setResults] = useState<ResultsPage | null>(null);
-  const PAGE = 100;
-
-  const submit = useSubmitQuery(ws);
-  const cancel = useCancelQuery(ws);
-  const status = useQueryStatus(ws, queryId);
-  const save = useSaveQuery(ws);
-
-  const finished = status.data?.status === "finished";
-  useEffect(() => {
-    if (finished && queryId && results === null) {
-      fetchResults(ws, queryId, 0, PAGE).then(setResults).catch(() => {});
-    }
-  }, [finished, queryId, results, ws]);
-
-  async function run() {
-    if (!dbId) { toast.error("Pick a database"); return; }
-    // Clear the previous query FIRST so its (still-finished) results can't be re-fetched
-    // during the submit round-trip — that was the "query 2 shows query 1" bug.
-    setResults(null); setPage(0); setQueryId(null);
-    try { const { id } = await submit.mutateAsync({ database_id: dbId, sql }); setQueryId(id); }
-    catch (e) { toast.error(String(e)); }
-  }
-  async function goPage(n: number) {
-    if (!queryId) return;
-    setPage(n); setResults(await fetchResults(ws, queryId, n, PAGE));
-  }
-  async function onSave() {
-    const name = window.prompt("Query name?"); if (!name) return;
-    await save.mutateAsync({ database_id: dbId, name, sql }); toast.success("Saved");
-  }
-
-  function loadIntoEditor(newSql: string, newDb?: string | null) {
-    setSql(newSql);
-    if (newDb) setDbId(newDb);
-    setQueryId(null);
-    setResults(null);
-    setPage(0);
-  }
-
-  const running = status.data?.status === "queued" || status.data?.status === "running";
-  const [hint, setHint] = useState<SchemaHint>({ tables: [], columnsByTable: {} });
-
-  useEffect(() => {
-    if (!dbId && databases && databases.length === 1) setDbId(databases[0].id);
-  }, [databases, dbId]);
+  const { tabs, activeId, setActive, addTab, closeTab, renameTab, patchTab, openTab } = useTabs(ws);
+  const [editing, setEditing] = useState<string | null>(null);
+  const active = tabs.find((t) => t.id === activeId) ?? tabs[0];
 
   return (
-    <PanelGroup direction="horizontal" className="h-full">
-      <Panel defaultSize={20} minSize={12}>
-        <div className="flex h-full flex-col border-r">
-          <div className="border-b p-2">
-            <Select value={dbId ?? ""} onValueChange={setDbId}>
-              <SelectTrigger><SelectValue placeholder="Database" /></SelectTrigger>
-              <SelectContent>{(databases ?? []).map((d) => <SelectItem key={d.id} value={d.id}>{d.name} ({d.engine})</SelectItem>)}</SelectContent>
-            </Select>
+    <div className="flex h-full flex-col">
+      <div className="flex items-center gap-1 border-b bg-muted/30 px-1">
+        {tabs.map((t) => (
+          <div key={t.id} className={`flex items-center gap-1 rounded-t px-2 py-1 text-sm ${t.id === activeId ? "bg-background" : "hover:bg-accent"}`}>
+            {editing === t.id ? (
+              <input autoFocus defaultValue={t.title} className="w-24 bg-transparent outline-none"
+                onBlur={(e) => { renameTab(t.id, e.target.value || t.title); setEditing(null); }}
+                onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
+            ) : (
+              <button onClick={() => setActive(t.id)} onDoubleClick={() => setEditing(t.id)} className="max-w-[12rem] truncate">{t.title}</button>
+            )}
+            <button onClick={() => closeTab(t.id)} className="text-muted-foreground hover:text-foreground"><X className="h-3 w-3" /></button>
           </div>
-          <SchemaTree ws={ws} db={dbId} engine={db?.engine ?? null} onInsert={(n) => setSql((s) => s + n)}
-            onTables={(t) => setHint((h) => ({ ...h, tables: Array.from(new Set([...h.tables, ...t])) }))} />
-        </div>
-      </Panel>
-      <PanelResizeHandle className="w-1 bg-border" />
-      <Panel defaultSize={80}>
-        <PanelGroup direction="vertical">
-          <Panel defaultSize={50} minSize={20}>
-            <div className="flex h-full flex-col">
-              <div className="flex items-center gap-2 border-b p-2">
-                <Button size="sm" onClick={run} disabled={running}>Run</Button>
-                <Button size="sm" variant="outline" disabled={!running} onClick={() => queryId && cancel.mutate(queryId)}>Cancel</Button>
-                <Button size="sm" variant="outline" onClick={onSave}>Save</Button>
-                {running && <span className="text-sm text-muted-foreground">running…</span>}
-                {status.data?.status === "failed" && <span className="text-sm text-red-600">{status.data.error}</span>}
-              </div>
-              <div className="flex-1"><SqlEditor value={sql} onChange={setSql} hint={hint} /></div>
-            </div>
-          </Panel>
-          <PanelResizeHandle className="h-1 bg-border" />
-          <Panel defaultSize={50} minSize={20}>
-            <Tabs defaultValue="results" className="flex h-full flex-col">
-              <TabsList className="m-2 w-fit"><TabsTrigger value="results">Results</TabsTrigger><TabsTrigger value="history">History</TabsTrigger><TabsTrigger value="saved">Saved</TabsTrigger></TabsList>
-              <TabsContent value="results" className="flex-1 overflow-hidden">
-                <ResultsGrid page={results} pageIndex={page} onPage={goPage} truncated={status.data?.truncated ?? false}
-                  csvHref={finished && queryId ? csvUrl(ws, queryId) : null} />
-              </TabsContent>
-              <TabsContent value="history" className="flex-1 overflow-auto"><HistoryTab ws={ws} onLoad={(s) => loadIntoEditor(s)} /></TabsContent>
-              <TabsContent value="saved" className="flex-1 overflow-auto"><SavedTab ws={ws} onLoad={(s, d) => loadIntoEditor(s, d)} /></TabsContent>
-            </Tabs>
-          </Panel>
-        </PanelGroup>
-      </Panel>
-    </PanelGroup>
-  );
-}
-
-function HistoryTab({ ws, onLoad }: { ws: string; onLoad: (sql: string) => void }) {
-  const { data } = useHistory(ws);
-  return <div className="p-2 text-sm">{(data ?? []).map((h) => (
-    <button key={h.id} className="block w-full truncate rounded px-2 py-1 text-left hover:bg-accent" onClick={() => onLoad(h.sql)} title={h.sql}>
-      <span className="text-muted-foreground">[{h.status}]</span> {h.sql}
-    </button>
-  ))}</div>;
-}
-
-function SavedTab({ ws, onLoad }: { ws: string; onLoad: (sql: string, db: string | null) => void }) {
-  const { data } = useSavedQueries(ws);
-  const del = useDeleteSavedQuery(ws);
-  return <div className="p-2 text-sm">{(data ?? []).map((q) => (
-    <div key={q.id} className="flex items-center gap-2 rounded px-2 py-1 hover:bg-accent">
-      <button className="flex-1 truncate text-left" onClick={() => onLoad(q.sql, q.database_id)} title={q.sql}>{q.name}</button>
-      <button className="text-xs text-red-600" onClick={() => del.mutate(q.id)}>delete</button>
+        ))}
+        <button onClick={addTab} className="px-2 py-1 text-muted-foreground hover:text-foreground" title="New tab"><Plus className="h-4 w-4" /></button>
+      </div>
+      <div className="flex-1 overflow-hidden">
+        {active && (
+          <SqlTab key={active.id} ws={ws} tab={active}
+            patch={(p) => patchTab(active.id, p)}
+            onOpenSaved={(sql, dbId) => openTab({ title: "Saved", sql, dbId, limit: active.limit })} />
+        )}
+      </div>
     </div>
-  ))}</div>;
+  );
 }

@@ -2,12 +2,15 @@ import Editor, { type Monaco } from "@monaco-editor/react";
 import type * as MonacoNS from "monaco-editor";
 import { useEffect, useRef } from "react";
 
-export interface SchemaHint { tables: string[]; columnsByTable: Record<string, string[]> }
+const KEYWORDS = [
+  "SELECT","FROM","WHERE","GROUP BY","ORDER BY","HAVING","LIMIT","JOIN","LEFT JOIN","RIGHT JOIN",
+  "INNER JOIN","ON","AS","AND","OR","NOT","IN","IS NULL","IS NOT NULL","DISTINCT","COUNT","SUM",
+  "AVG","MIN","MAX","CASE","WHEN","THEN","ELSE","END","UNION","UNION ALL","WITH","INSERT","UPDATE","DELETE","CREATE","TABLE",
+];
 
-export function SqlEditor({ value, onChange, hint }: { value: string; onChange: (v: string) => void; hint: SchemaHint }) {
-  const hintRef = useRef(hint);
-  hintRef.current = hint;
-
+export function SqlEditor({ value, onChange, schemaWords }: { value: string; onChange: (v: string) => void; schemaWords: string[] }) {
+  const wordsRef = useRef(schemaWords);
+  wordsRef.current = schemaWords;
   const disposableRef = useRef<{ dispose: () => void } | null>(null);
   useEffect(() => () => disposableRef.current?.dispose(), []);
 
@@ -16,16 +19,13 @@ export function SqlEditor({ value, onChange, hint }: { value: string; onChange: 
       provideCompletionItems: (model: MonacoNS.editor.ITextModel, position: MonacoNS.Position) => {
         const word = model.getWordUntilPosition(position);
         const range = { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber, startColumn: word.startColumn, endColumn: word.endColumn };
-        const h = hintRef.current;
-        const tableItems = h.tables.map((t) => ({ label: t, kind: monaco.languages.CompletionItemKind.Struct, insertText: t, range }));
-        const colItems = Object.values(h.columnsByTable).flat().map((c) => ({ label: c, kind: monaco.languages.CompletionItemKind.Field, insertText: c, range }));
-        return { suggestions: [...tableItems, ...colItems] };
+        const kw = KEYWORDS.map((k) => ({ label: k, kind: monaco.languages.CompletionItemKind.Keyword, insertText: k, range }));
+        const objs = Array.from(new Set(wordsRef.current)).map((w) => ({ label: w, kind: monaco.languages.CompletionItemKind.Field, insertText: w, range }));
+        return { suggestions: [...objs, ...kw] };
       },
     });
   }
 
-  return (
-    <Editor height="100%" defaultLanguage="sql" value={value} onChange={(v) => onChange(v ?? "")} onMount={handleMount}
-      options={{ minimap: { enabled: false }, fontSize: 13, scrollBeyondLastLine: false }} />
-  );
+  return <Editor height="100%" defaultLanguage="sql" value={value} onChange={(v) => onChange(v ?? "")} onMount={handleMount}
+    options={{ minimap: { enabled: false }, fontSize: 13, scrollBeyondLastLine: false }} />;
 }
