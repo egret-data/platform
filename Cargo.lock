@@ -2013,8 +2013,10 @@ dependencies = [
  "egret-catalog",
  "egret-config",
  "egret-core",
+ "egret-database",
  "egret-metastore",
  "egret-ranger",
+ "egret-secrets",
  "egret-server",
  "egret-storage",
  "egret-workspace",
@@ -2094,6 +2096,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -2165,6 +2168,7 @@ dependencies = [
  "egret-catalog",
  "egret-config",
  "egret-core",
+ "egret-database",
  "egret-metastore",
  "egret-ranger",
  "egret-workspace",
