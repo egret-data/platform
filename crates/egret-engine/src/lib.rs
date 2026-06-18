@@ -8,4 +8,5 @@ mod routes;
 pub mod store;
 
 pub use error::{EngineApiError, EngineError};
+pub use job::JobManager;
 pub use store::{Query, QueryStore};

@@ -32,3 +32,5 @@ hex.workspace = true
 tower.workspace = true
 http-body-util = "0.1"
 url = { workspace = true }
+egret-secrets.workspace = true
+sqlx.workspace = true
