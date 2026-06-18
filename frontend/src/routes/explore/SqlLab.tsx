@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { toast } from "sonner";
@@ -51,7 +51,11 @@ export default function SqlLab() {
   }
 
   const running = status.data?.status === "queued" || status.data?.status === "running";
-  const hint: SchemaHint = useMemo(() => ({ tables: [], columnsByTable: {} }), []);
+  const [hint, setHint] = useState<SchemaHint>({ tables: [], columnsByTable: {} });
+
+  useEffect(() => {
+    if (!dbId && databases && databases.length === 1) setDbId(databases[0].id);
+  }, [databases, dbId]);
 
   return (
     <PanelGroup direction="horizontal" className="h-full">
@@ -63,7 +67,8 @@ export default function SqlLab() {
               <SelectContent>{(databases ?? []).map((d) => <SelectItem key={d.id} value={d.id}>{d.name} ({d.engine})</SelectItem>)}</SelectContent>
             </Select>
           </div>
-          <SchemaTree ws={ws} db={dbId} engine={db?.engine ?? null} onInsert={(n) => setSql((s) => s + n)} />
+          <SchemaTree ws={ws} db={dbId} engine={db?.engine ?? null} onInsert={(n) => setSql((s) => s + n)}
+            onTables={(t) => setHint((h) => ({ ...h, tables: Array.from(new Set([...h.tables, ...t])) }))} />
         </div>
       </Panel>
       <PanelResizeHandle className="w-1 bg-border" />
