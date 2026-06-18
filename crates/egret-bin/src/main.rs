@@ -202,6 +202,25 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         None
     };
 
+    let database = {
+        use base64::Engine as _;
+        let crypto = if config.secrets.master_key.is_empty() {
+            None
+        } else {
+            let key = base64::engine::general_purpose::STANDARD
+                .decode(config.secrets.master_key.as_bytes())
+                .map_err(|e| anyhow::anyhow!("secrets.master_key base64: {e}"))?;
+            Some(egret_secrets::Crypto::new(&key).map_err(|e| anyhow::anyhow!(e.to_string()))?)
+        };
+        let secrets = egret_secrets::SecretStore::new(db.clone(), crypto);
+        Some(egret_database::DatabaseState {
+            repo: egret_database::DatabaseRepo::new(db.clone(), secrets),
+            authz: Authorizer::new(db.clone()),
+            sessions: sessions.clone(),
+            workspaces: WorkspaceRepo::new(db.clone()),
+        })
+    };
+
     let app = build_router(AppState {
         db: Some(db),
         auth: Some(auth),
@@ -209,6 +228,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         oidc,
         catalog,
         ranger,
+        database,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)

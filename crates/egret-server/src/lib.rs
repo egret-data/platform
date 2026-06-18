@@ -27,6 +27,8 @@ pub struct AppState {
     pub catalog: Option<egret_catalog::CatalogState>,
     /// Present when `config.ranger.enabled`; `None` otherwise (or in unit tests).
     pub ranger: Option<egret_ranger::RangerState>,
+    /// Present once a database is wired (in `egret-bin`); `None` in pure health unit tests.
+    pub database: Option<egret_database::DatabaseState>,
 }
 
 impl AppState {
@@ -39,6 +41,7 @@ impl AppState {
             oidc: None,
             catalog: None,
             ranger: None,
+            database: None,
         }
     }
 }
@@ -92,6 +95,15 @@ pub fn build_router(state: AppState) -> Router {
                 .nest("/service", egret_ranger::ranger_router(ranger))
                 .with_state(()),
         );
+    }
+
+    if let Some(database) = state.database.clone() {
+        let group = Router::new()
+            .nest("/api/admin", egret_database::admin_database_router())
+            .nest("/api/me", egret_database::me_database_router())
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(database);
+        router = router.merge(group);
     }
 
     router.with_state(state)
