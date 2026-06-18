@@ -9,5 +9,5 @@ pub mod store;
 
 pub use error::{EngineApiError, EngineError};
 pub use job::JobManager;
-pub use routes::{engine_router, EngineState};
+pub use routes::{engine_router, rows_to_csv, EngineState};
 pub use store::{Query, QueryStore};
