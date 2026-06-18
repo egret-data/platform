@@ -5,7 +5,13 @@ import { useTabs } from "@/hooks/useTabs";
 import { SqlTab } from "@/components/sqllab/SqlTab";
 
 export default function SqlLab() {
+  // Remount per workspace so the per-workspace tab state (localStorage) reloads
+  // cleanly on a workspace switch (the route param changes without remounting).
   const ws = useParams().workspace!;
+  return <SqlLabWorkspace key={ws} ws={ws} />;
+}
+
+function SqlLabWorkspace({ ws }: { ws: string }) {
   const { tabs, activeId, setActive, addTab, closeTab, renameTab, patchTab, openTab } = useTabs(ws);
   const [editing, setEditing] = useState<string | null>(null);
   const active = tabs.find((t) => t.id === activeId) ?? tabs[0];
