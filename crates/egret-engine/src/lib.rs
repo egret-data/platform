@@ -6,3 +6,5 @@ mod job;
 pub mod model;
 mod routes;
 mod store;
+
+pub use error::{EngineApiError, EngineError};
