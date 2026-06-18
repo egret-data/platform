@@ -1,0 +1,8 @@
+//! Async query engine: connectors (Trino/StarRocks), job manager, result store.
+
+pub mod connector;
+mod error;
+mod job;
+pub mod model;
+mod routes;
+mod store;
