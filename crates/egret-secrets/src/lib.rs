@@ -6,3 +6,4 @@ mod store;
 
 pub use crypto::Crypto;
 pub use error::SecretsError;
+pub use store::SecretStore;
