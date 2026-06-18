@@ -5,3 +5,5 @@ pub mod model;
 mod routes;
 mod saved;
 mod schema;
+
+pub use error::{BiApiError, BiError};
