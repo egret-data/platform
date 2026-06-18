@@ -40,6 +40,13 @@ pub struct RangerSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretsConfig {
+    /// base64-encoded master key (≥32 bytes) for AES-256-GCM credential encryption.
+    /// Empty disables credential sealing — registering a database WITH a secret then fails.
+    pub master_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogSettings {
     pub enabled: bool,
     pub warehouse: String,
@@ -73,6 +80,7 @@ pub struct Config {
     pub catalog: CatalogSettings,
     pub storage: StorageSettings,
     pub ranger: RangerSettings,
+    pub secrets: SecretsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +183,9 @@ impl Default for Config {
                 enabled: false,
                 auth_token: String::new(),
             },
+            secrets: SecretsConfig {
+                master_key: String::new(),
+            },
         }
     }
 }
@@ -223,6 +234,16 @@ impl Config {
         }
         // ranger.auth_token may be empty: that selects anonymous `/service` access for stock
         // Ranger plugins (e.g. Trino) that authenticate out-of-band. Set a token to require bearer.
+        if !self.secrets.master_key.is_empty() {
+            use base64::Engine;
+            let key_len = base64::engine::general_purpose::STANDARD
+                .decode(self.secrets.master_key.as_bytes())
+                .map(|b| b.len())
+                .unwrap_or(0);
+            if key_len < 32 {
+                return Err("secrets.master_key must be base64 of >=32 bytes".into());
+            }
+        }
         Ok(())
     }
 }
@@ -333,6 +354,23 @@ mod tests {
         assert!(cfg.validate().is_ok());
         // A configured token is also valid (requires bearer).
         cfg.ranger.auth_token = "t".into();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn secrets_master_key_defaults_empty_and_validates() {
+        let cfg = Config::default();
+        assert!(cfg.secrets.master_key.is_empty());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn secrets_master_key_must_be_base64_32_bytes_when_set() {
+        let mut cfg = Config::default();
+        cfg.secrets.master_key = "tooshort".into(); // not valid base64 of >=32 bytes
+        assert!(cfg.validate().is_err());
+        use base64::Engine;
+        cfg.secrets.master_key = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
         assert!(cfg.validate().is_ok());
     }
 }
