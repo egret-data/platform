@@ -14,6 +14,7 @@ egret-catalog.workspace = true
 egret-ranger.workspace = true
 egret-database.workspace = true
 egret-engine.workspace = true
+egret-bi.workspace = true
 axum.workspace = true
 tower-http.workspace = true
 serde_json.workspace = true

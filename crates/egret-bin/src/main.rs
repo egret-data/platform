@@ -254,7 +254,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         Some(egret_engine::EngineState {
             store,
             jobs,
-            databases,
+            databases: databases.clone(),
             storage,
             bucket_uri: bucket_uri.into(),
             results_prefix: config.engine.results_prefix.clone().into(),
@@ -265,6 +265,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         })
     };
 
+    let bi = Some(egret_bi::BiState {
+        saved: egret_bi::SavedQueryRepo::new(db.clone()),
+        schema: egret_bi::SchemaService::new(),
+        databases: databases.clone(),
+        sessions: sessions.clone(),
+        workspaces: WorkspaceRepo::new(db.clone()),
+        authz: Authorizer::new(db.clone()),
+    });
+
     let app = build_router(AppState {
         db: Some(db),
         auth: Some(auth),
@@ -274,6 +283,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         ranger,
         database,
         engine,
+        bi,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)

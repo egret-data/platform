@@ -133,7 +133,7 @@ async fn submit_runs_to_finished() {
         eprintln!("skip");
         return;
     };
-    let id = jobs.submit(wid, did, None, "SELECT 1").await.unwrap();
+    let id = jobs.submit(wid, did, None, "SELECT 1", None).await.unwrap();
     assert_eq!(
         wait_status(&store, id, QueryStatus::Finished, 40).await,
         QueryStatus::Finished
@@ -149,7 +149,7 @@ async fn cancel_sets_cancelled() {
         eprintln!("skip");
         return;
     };
-    let id = jobs.submit(wid, did, None, "SELECT 1").await.unwrap();
+    let id = jobs.submit(wid, did, None, "SELECT 1", None).await.unwrap();
     wait_status(&store, id, QueryStatus::Running, 20).await;
     jobs.cancel(id).await.unwrap();
     assert_eq!(

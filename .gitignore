@@ -33,3 +33,5 @@ dist/
 # Playwright MCP artifacts
 .playwright-mcp/
 egret-*.png
+egret.toml
+deploy/trino/catalog/*.properties

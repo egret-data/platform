@@ -57,6 +57,7 @@ pub fn engine_router() -> Router<EngineState> {
         .route("/ws/{workspace}/queries", post(submit).get(history))
         .route("/ws/{workspace}/queries/{id}", get(status))
         .route("/ws/{workspace}/queries/{id}/results", get(results))
+        .route("/ws/{workspace}/queries/{id}/results.csv", get(results_csv))
         .route("/ws/{workspace}/queries/{id}/cancel", post(cancel))
 }
 
@@ -93,6 +94,7 @@ async fn submit(
             body.database_id,
             Some(ctx.principal.user_id.0),
             &body.sql,
+            body.limit,
         )
         .await
         .map_err(EngineApiError::from)?;
@@ -188,6 +190,97 @@ async fn results(
         row_count: q.row_count.unwrap_or(0),
         truncated: q.truncated,
     }))
+}
+
+async fn results_csv(
+    State(st): State<EngineState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, uuid::Uuid)>,
+) -> Result<axum::response::Response, EngineApiError> {
+    st.authz
+        .require_workspace(&ctx, PERM)
+        .await
+        .map_err(EngineApiError::from)?;
+    let q = owned(&st, &ctx, id).await?;
+    let rows = match &q.result_ref {
+        Some(uri) => {
+            let n = q.row_count.unwrap_or(0).max(0) as usize;
+            st.store
+                .read_results(&st.storage, uri, 0, n)
+                .await
+                .map_err(EngineApiError::from)?
+        }
+        None => vec![],
+    };
+    let columns = q.columns.clone().unwrap_or(serde_json::json!([]));
+    let body = rows_to_csv(&columns, &rows);
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"query-{id}.csv\""),
+            ),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+/// Build a CSV (RFC 4180) from a columns spec `[{name,type}]` + JSONL rows (`[[v,...]]`).
+pub fn rows_to_csv(columns: &serde_json::Value, rows: &[serde_json::Value]) -> String {
+    let mut out = String::new();
+    if let Some(cols) = columns.as_array() {
+        if !cols.is_empty() {
+            let headers: Vec<String> = cols
+                .iter()
+                .map(|c| {
+                    c.get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                })
+                .collect();
+            out.push_str(
+                &headers
+                    .iter()
+                    .map(|h| csv_field(h))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            out.push('\n');
+        }
+    }
+    for row in rows {
+        if let Some(arr) = row.as_array() {
+            let line = arr
+                .iter()
+                .map(|v| csv_field(&cell(v)))
+                .collect::<Vec<_>>()
+                .join(",");
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn cell(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn csv_field(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
 }
 
 async fn cancel(

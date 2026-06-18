@@ -1,0 +1,35 @@
+[package]
+name = "egret-bi"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+egret-core.workspace = true
+egret-config.workspace = true
+egret-metastore.workspace = true
+egret-auth.workspace = true
+egret-workspace.workspace = true
+egret-database.workspace = true
+egret-engine.workspace = true
+axum.workspace = true
+sqlx.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
+http-body-util = "0.1"
+egret-secrets.workspace = true
+url = { workspace = true }
+egret-database.workspace = true
+egret-auth.workspace = true
+egret-workspace.workspace = true
+chrono.workspace = true
