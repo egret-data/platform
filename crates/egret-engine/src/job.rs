@@ -58,14 +58,22 @@ impl JobManager {
         database_id: Uuid,
         user: Option<Uuid>,
         sql: &str,
+        limit: Option<usize>,
     ) -> Result<Uuid, EngineError> {
         let id = self.store.insert(ws, database_id, user, sql).await?;
+        let max_rows = limit
+            .map(|l| l.clamp(1, self.limits.max_rows))
+            .unwrap_or(self.limits.max_rows);
+        let limits = Limits {
+            max_rows,
+            timeout: self.limits.timeout,
+        };
         let token = CancellationToken::new();
         self.cancels.lock().unwrap().insert(id, token.clone());
         let this = self.clone();
         let sql = sql.to_string();
         tokio::spawn(async move {
-            this.run(id, database_id, sql, token).await;
+            this.run(id, database_id, sql, limits, token).await;
             this.cancels.lock().unwrap().remove(&id);
         });
         Ok(id)
@@ -80,12 +88,19 @@ impl JobManager {
         Ok(())
     }
 
-    async fn run(&self, id: Uuid, database_id: Uuid, sql: String, token: CancellationToken) {
+    async fn run(
+        &self,
+        id: Uuid,
+        database_id: Uuid,
+        sql: String,
+        limits: Limits,
+        token: CancellationToken,
+    ) {
         if let Err(e) = self.store.set_running(id).await {
             tracing::warn!(%id, error=%e, "failed to mark query running");
             return;
         }
-        match self.execute(id, database_id, &sql, &token).await {
+        match self.execute(id, database_id, &sql, &limits, &token).await {
             Ok(()) => {} // finish() already persisted inside execute()
             Err(EngineError::Cancelled) => {
                 let _ = self.store.set_cancelled(id).await;
@@ -102,14 +117,15 @@ impl JobManager {
         id: Uuid,
         database_id: Uuid,
         sql: &str,
+        limits: &Limits,
         token: &CancellationToken,
     ) -> Result<(), EngineError> {
         let db = self.databases.get(database_id).await?;
         let secret = self.databases.open_secret(database_id).await?;
         let connector = self.factory.build(&db, secret).await?;
 
-        let fut = connector.execute(sql, &self.limits, token.clone());
-        let result = match tokio::time::timeout(self.limits.timeout, fut).await {
+        let fut = connector.execute(sql, limits, token.clone());
+        let result = match tokio::time::timeout(limits.timeout, fut).await {
             Ok(r) => r?,
             Err(_) => {
                 token.cancel();

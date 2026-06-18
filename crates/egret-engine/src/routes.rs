@@ -94,6 +94,7 @@ async fn submit(
             body.database_id,
             Some(ctx.principal.user_id.0),
             &body.sql,
+            body.limit,
         )
         .await
         .map_err(EngineApiError::from)?;

@@ -68,6 +68,8 @@ pub struct Limits {
 pub struct SubmitQuery {
     pub database_id: Uuid,
     pub sql: String,
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
