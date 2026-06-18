@@ -12,6 +12,7 @@ egret-auth.workspace = true
 egret-workspace.workspace = true
 egret-database.workspace = true
 egret-storage.workspace = true
+egret-secrets.workspace = true
 axum.workspace = true
 sqlx.workspace = true
 serde.workspace = true
@@ -32,5 +33,4 @@ hex.workspace = true
 tower.workspace = true
 http-body-util = "0.1"
 url = { workspace = true }
-egret-secrets.workspace = true
 sqlx.workspace = true
