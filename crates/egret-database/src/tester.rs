@@ -70,7 +70,12 @@ pub async fn test_trino(
         }
         match resp.next_uri.take() {
             Some(next) => {
-                let r = client.get(&next);
+                // Re-attach auth on every poll: a secured Trino requires it on the
+                // nextUri GETs too, not just the initial POST.
+                let mut r = client.get(&next).header("X-Trino-User", user);
+                if let Some(s) = secret {
+                    r = r.basic_auth(user, Some(s));
+                }
                 resp = match send_json(r).await {
                     Ok(r) => r,
                     Err(e) => return fail(started, e),
@@ -103,10 +108,14 @@ pub async fn test_starrocks(
     use mysql_async::prelude::Queryable;
 
     let started = Instant::now();
+    let port = match u16::try_from(port) {
+        Ok(p) => p,
+        Err(_) => return fail(started, format!("invalid port: {port}")),
+    };
     let user = options.user.clone().unwrap_or_else(|| "root".into());
     let mut builder = mysql_async::OptsBuilder::default()
         .ip_or_hostname(host.to_string())
-        .tcp_port(port as u16)
+        .tcp_port(port)
         .user(Some(user))
         .prefer_socket(false);
     if let Some(s) = secret {
