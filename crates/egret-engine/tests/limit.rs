@@ -122,5 +122,8 @@ async fn per_query_limit_caps_rows() {
     let q = store.get(id).await.unwrap().unwrap();
     assert_eq!(q.status, QueryStatus::Finished);
     assert_eq!(q.row_count, Some(5));
-    assert!(q.truncated);
+    assert!(
+        !q.truncated,
+        "a SQL-LIMIT'd query returns exactly N and is not 'truncated'"
+    );
 }

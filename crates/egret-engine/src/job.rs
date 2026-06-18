@@ -60,7 +60,7 @@ impl JobManager {
         sql: &str,
         limit: Option<usize>,
     ) -> Result<Uuid, EngineError> {
-        let id = self.store.insert(ws, database_id, user, sql).await?;
+        let id = self.store.insert(ws, database_id, user, sql).await?; // original sql stored
         let max_rows = limit
             .map(|l| l.clamp(1, self.limits.max_rows))
             .unwrap_or(self.limits.max_rows);
@@ -68,12 +68,13 @@ impl JobManager {
             max_rows,
             timeout: self.limits.timeout,
         };
+        let effective_sql = apply_sql_limit(sql, limit, max_rows); // wrapped for SELECT
         let token = CancellationToken::new();
         self.cancels.lock().unwrap().insert(id, token.clone());
         let this = self.clone();
-        let sql = sql.to_string();
+        let run_sql = effective_sql;
         tokio::spawn(async move {
-            this.run(id, database_id, sql, limits, token).await;
+            this.run(id, database_id, run_sql, limits, token).await;
             this.cancels.lock().unwrap().remove(&id);
         });
         Ok(id)
@@ -146,5 +147,68 @@ impl JobManager {
             .finish(id, &result, &uri, self.preview_rows)
             .await?;
         Ok(())
+    }
+}
+
+/// Wrap a single SELECT/WITH statement with a SQL `LIMIT n` (Superset-style) so the
+/// engine returns exactly `n` rows. Non-SELECT / multi-statement SQL is returned
+/// unchanged (the fetch-cap remains the backstop).
+fn apply_sql_limit(sql: &str, limit: Option<usize>, max_rows: usize) -> String {
+    let Some(l) = limit else {
+        return sql.to_string();
+    };
+    let n = l.clamp(1, max_rows);
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let is_select = lower.starts_with("select") || lower.starts_with("with");
+    let single_statement = !trimmed.contains(';');
+    if is_select && single_statement {
+        format!("SELECT * FROM (\n{trimmed}\n) AS _egret_lim LIMIT {n}")
+    } else {
+        sql.to_string()
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::apply_sql_limit;
+    #[test]
+    fn wraps_single_select() {
+        let out = apply_sql_limit("SELECT * FROM t", Some(5), 100);
+        assert_eq!(
+            out,
+            "SELECT * FROM (\nSELECT * FROM t\n) AS _egret_lim LIMIT 5"
+        );
+    }
+    #[test]
+    fn wraps_with_cte_and_strips_trailing_semicolon() {
+        let out = apply_sql_limit("WITH a AS (SELECT 1) SELECT * FROM a;", Some(10), 100);
+        assert_eq!(
+            out,
+            "SELECT * FROM (\nWITH a AS (SELECT 1) SELECT * FROM a\n) AS _egret_lim LIMIT 10"
+        );
+    }
+    #[test]
+    fn clamps_to_max_rows() {
+        let out = apply_sql_limit("SELECT 1", Some(999), 100);
+        assert!(out.ends_with("LIMIT 100"));
+    }
+    #[test]
+    fn does_not_wrap_show() {
+        assert_eq!(
+            apply_sql_limit("SHOW CATALOGS", Some(5), 100),
+            "SHOW CATALOGS"
+        );
+    }
+    #[test]
+    fn does_not_wrap_multi_statement() {
+        assert_eq!(
+            apply_sql_limit("SELECT 1; SELECT 2", Some(5), 100),
+            "SELECT 1; SELECT 2"
+        );
+    }
+    #[test]
+    fn no_limit_unchanged() {
+        assert_eq!(apply_sql_limit("SELECT 1", None, 100), "SELECT 1");
     }
 }
