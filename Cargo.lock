@@ -2038,6 +2038,7 @@ dependencies = [
  "clap",
  "egret-auth",
  "egret-authz",
+ "egret-bi",
  "egret-catalog",
  "egret-config",
  "egret-core",
@@ -2226,6 +2227,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "egret-auth",
+ "egret-bi",
  "egret-catalog",
  "egret-config",
  "egret-core",
