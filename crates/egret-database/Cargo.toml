@@ -27,3 +27,4 @@ tokio.workspace = true
 [dev-dependencies]
 tower.workspace = true
 http-body-util = "0.1"
+url = { workspace = true }

@@ -5,7 +5,7 @@ mod grants;
 pub mod model;
 mod repo;
 mod routes;
-mod tester;
+pub mod tester;
 
 pub use error::{DatabaseError, DbApiError};
 pub use model::Engine;
