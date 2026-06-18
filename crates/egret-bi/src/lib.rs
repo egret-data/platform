@@ -7,3 +7,4 @@ mod saved;
 mod schema;
 
 pub use error::{BiApiError, BiError};
+pub use saved::{SavedQuery, SavedQueryRepo};
