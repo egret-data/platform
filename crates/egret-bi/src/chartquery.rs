@@ -219,13 +219,16 @@ pub fn build(
                 "rollup requires at least one dimension".into(),
             ));
         }
-        // Resolve every dimension to its expression once, preserving order.
+        // Resolve every dimension to its expression once; remember each name's position.
         let mut dim_exprs: Vec<String> = Vec::new();
-        for name in &spec.dimensions {
+        let mut dim_index: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for (i, name) in spec.dimensions.iter().enumerate() {
             let c = find_column(columns, name)
                 .ok_or_else(|| BiError::BadRequest(format!("unknown dimension: {name}")))?;
             let e = column_sql(engine, c);
             select.push(format!("{e} AS {}", quote_ident(engine, name)));
+            dim_index.insert(name.as_str(), i);
             dim_exprs.push(e);
         }
         for name in &spec.metrics {
@@ -233,8 +236,8 @@ pub fn build(
                 .ok_or_else(|| BiError::BadRequest(format!("unknown metric: {name}")))?;
             select.push(format!("{} AS {}", m.expression, quote_ident(engine, name)));
         }
-        let rolling = !spec.rollup_groups.is_empty();
-        if rolling {
+        let has_rollup = !spec.rollup_groups.is_empty();
+        if has_rollup {
             for (i, e) in dim_exprs.iter().enumerate() {
                 // {i} is a usize counter, never user data — safe unquoted.
                 select.push(format!("GROUPING({e}) AS __grp_{i}"));
@@ -242,24 +245,28 @@ pub fn build(
         }
         let mut sql = format!("SELECT {}\nFROM {from}", select.join(", "));
         push_where(&mut sql, engine, columns, &spec.filters)?;
-        if rolling {
+        if has_rollup {
             // One ROLLUP(...) per group; the cross-product is every grouping level.
+            // Rollup names must be a subset of `dimensions` (so each has a GROUPING marker).
             let mut parts: Vec<String> = Vec::new();
             for group in &spec.rollup_groups {
                 let mut exprs: Vec<String> = Vec::new();
                 for name in group {
-                    let c = find_column(columns, name).ok_or_else(|| {
-                        BiError::BadRequest(format!("unknown rollup dimension: {name}"))
+                    let &i = dim_index.get(name.as_str()).ok_or_else(|| {
+                        BiError::BadRequest(format!("rollup dimension not in dimensions: {name}"))
                     })?;
-                    exprs.push(column_sql(engine, c));
+                    exprs.push(dim_exprs[i].clone());
                 }
                 if !exprs.is_empty() {
                     parts.push(format!("ROLLUP({})", exprs.join(", ")));
                 }
             }
-            if !parts.is_empty() {
-                sql.push_str(&format!("\nGROUP BY {}", parts.join(", ")));
+            if parts.is_empty() {
+                return Err(BiError::BadRequest(
+                    "rollup_groups contains no resolvable dimensions".into(),
+                ));
             }
+            sql.push_str(&format!("\nGROUP BY {}", parts.join(", ")));
         } else if !dim_exprs.is_empty() {
             sql.push_str(&format!("\nGROUP BY {}", dim_exprs.join(", ")));
         }
@@ -564,5 +571,37 @@ mod tests {
         assert!(sql.contains("GROUPING(\"region\") AS __grp_0"), "{sql}");
         assert!(sql.contains("GROUPING(\"nation\") AS __grp_1"), "{sql}");
         assert!(sql.contains("GROUPING(\"seg\") AS __grp_2"), "{sql}");
+    }
+
+    #[test]
+    fn build_rejects_rollup_name_not_in_dimensions() {
+        let cols = vec![col("region", "string", None), col("seg", "string", None)];
+        let metrics = vec![metric("revenue", "SUM(price)")];
+        let spec = QuerySpec {
+            metrics: vec!["revenue".into()],
+            dimensions: vec!["region".into()], // seg is NOT a dimension
+            columns: vec![],
+            filters: vec![],
+            orderby: vec![],
+            row_limit: 10,
+            rollup_groups: vec![vec!["region".into()], vec!["seg".into()]],
+        };
+        assert!(build(Engine::Trino, &phys(), &cols, &metrics, &spec).is_err());
+    }
+
+    #[test]
+    fn build_rejects_all_empty_rollup_groups() {
+        let cols = vec![col("region", "string", None)];
+        let metrics = vec![metric("revenue", "SUM(price)")];
+        let spec = QuerySpec {
+            metrics: vec!["revenue".into()],
+            dimensions: vec!["region".into()],
+            columns: vec![],
+            filters: vec![],
+            orderby: vec![],
+            row_limit: 10,
+            rollup_groups: vec![vec![], vec![]],
+        };
+        assert!(build(Engine::Trino, &phys(), &cols, &metrics, &spec).is_err());
     }
 }
