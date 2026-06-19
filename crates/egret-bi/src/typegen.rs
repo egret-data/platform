@@ -41,8 +41,9 @@ pub fn generic_type(engine: Engine, raw_type: &str) -> GenericType {
     }
 }
 
-/// Lowercased leading keyword: strip any "(...)" suffix and trailing tokens,
-/// but keep multi-word temporal types (e.g. "timestamp with time zone").
+/// Lowercased type minus any "(...)" precision/length suffix (e.g.
+/// "VARCHAR(20)" -> "varchar", "timestamp(3) with time zone" -> "timestamp with
+/// time zone"). The per-engine classifiers then key off the leading keyword.
 fn type_head(raw: &str) -> String {
     let lowered = raw.trim().to_ascii_lowercase();
     let no_paren = lowered.split('(').next().unwrap_or("").trim();
@@ -61,6 +62,12 @@ fn classify_trino(head: &str) -> GenericType {
     }
 }
 
+// Known physical-vs-virtual vocabulary asymmetry: the MySQL wire protocol used
+// for virtual datasets cannot distinguish StarRocks `BOOLEAN` from `TINYINT`
+// (both arrive as MYSQL_TYPE_TINY), and `LARGEINT` has no protocol type. So a
+// `BOOLEAN` column classifies as Boolean via DESCRIBE (physical) but Numeric via
+// describe() (virtual); a `LARGEINT` is Numeric physical but falls to String
+// virtual. This is protocol-inherent, not a coding bug; documented as a v1 edge.
 fn classify_starrocks(head: &str) -> GenericType {
     let first = head.split_whitespace().next().unwrap_or("");
     match first {
