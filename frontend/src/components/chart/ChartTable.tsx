@@ -10,7 +10,12 @@ const NUMERIC = /int|double|decimal|real|numeric|float|bigint/i;
 
 function formatCell(value: unknown, type: string): string {
   if (value == null) return "";
-  if (NUMERIC.test(type) && typeof value === "number") return value.toLocaleString();
+  if (NUMERIC.test(type)) {
+    const n = typeof value === "number" ? value : Number(value);
+    if (Number.isFinite(n) && !(typeof value === "string" && value.trim() === "")) {
+      return n.toLocaleString();
+    }
+  }
   return String(value);
 }
 
@@ -19,13 +24,23 @@ export function ChartTable({ columns, rows }: { columns: ResultColumn[]; rows: u
 
   const cols = useMemo<ColumnDef<unknown[]>[]>(
     () =>
-      columns.map((c, i) => ({
-        id: c.name,
-        accessorFn: (row) => row[i],
-        header: c.name,
-        cell: (ctx) => formatCell(ctx.getValue(), c.type),
-        enableSorting: true,
-      })),
+      columns.map((c, i) => {
+        const isNum = NUMERIC.test(c.type);
+        return {
+          id: `col_${i}`,
+          accessorFn: (row) => {
+            const v = row[i];
+            if (isNum && typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) {
+              return Number(v);
+            }
+            return v;
+          },
+          header: c.name,
+          cell: (ctx) => formatCell(ctx.getValue(), c.type),
+          enableSorting: true,
+          meta: { isNum },
+        };
+      }),
     [columns],
   );
 
@@ -45,7 +60,7 @@ export function ChartTable({ columns, rows }: { columns: ResultColumn[]; rows: u
           {table.getHeaderGroups().map((hg) => (
             <tr key={hg.id} className="border-b text-left text-muted-foreground">
               {hg.headers.map((h) => {
-                const isNum = NUMERIC.test(columns.find((c) => c.name === h.column.id)?.type ?? "");
+                const isNum = (h.column.columnDef.meta as { isNum?: boolean } | undefined)?.isNum ?? false;
                 return (
                   <th
                     key={h.id}
@@ -64,7 +79,7 @@ export function ChartTable({ columns, rows }: { columns: ResultColumn[]; rows: u
           {table.getRowModel().rows.map((r) => (
             <tr key={r.id} className="border-t">
               {r.getVisibleCells().map((cell) => {
-                const isNum = NUMERIC.test(columns.find((c) => c.name === cell.column.id)?.type ?? "");
+                const isNum = (cell.column.columnDef.meta as { isNum?: boolean } | undefined)?.isNum ?? false;
                 return (
                   <td key={cell.id} className={`py-1 px-3 ${isNum ? "text-right tabular-nums" : ""}`}>
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}

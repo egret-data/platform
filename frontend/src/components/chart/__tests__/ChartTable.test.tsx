@@ -14,4 +14,14 @@ describe("ChartTable", () => {
     expect(screen.getByText("revenue")).toBeInTheDocument();
     expect(screen.getByText("1,234.5")).toBeInTheDocument();
   });
+
+  it("formats numeric values delivered as strings", () => {
+    render(
+      <ChartTable
+        columns={[{ name: "revenue", type: "bigint" }]}
+        rows={[["1234567"]]}
+      />,
+    );
+    expect(screen.getByText("1,234,567")).toBeInTheDocument();
+  });
 });
