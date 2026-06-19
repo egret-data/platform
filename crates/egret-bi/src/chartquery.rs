@@ -72,11 +72,17 @@ pub(crate) fn sql_literal(v: &serde_json::Value, type_generic: &str) -> Result<S
             } else if let Some(n) = v.as_u64() {
                 Ok(n.to_string())
             } else if let Some(n) = v.as_f64() {
-                Ok(n.to_string())
+                if n.is_finite() {
+                    Ok(n.to_string())
+                } else {
+                    Err(BiError::BadRequest(format!("not a finite number: {n}")))
+                }
             } else if let Some(s) = v.as_str() {
                 s.parse::<f64>()
+                    .ok()
+                    .filter(|n| n.is_finite())
                     .map(|n| n.to_string())
-                    .map_err(|_| BiError::BadRequest(format!("not a number: {s}")))
+                    .ok_or_else(|| BiError::BadRequest(format!("not a number: {s}")))
             } else {
                 Err(BiError::BadRequest(
                     "expected a numeric filter value".into(),
@@ -327,6 +333,15 @@ mod tests {
             sql_literal(&json!("a' OR '1'='1"), "string").unwrap(),
             "'a'' OR ''1''=''1'"
         );
+    }
+
+    #[test]
+    fn sql_literal_rejects_non_finite() {
+        assert!(sql_literal(&json!("inf"), "numeric").is_err());
+        assert!(sql_literal(&json!("nan"), "numeric").is_err());
+        assert!(sql_literal(&json!("infinity"), "numeric").is_err());
+        // finite still works
+        assert_eq!(sql_literal(&json!("3.5"), "numeric").unwrap(), "3.5");
     }
 
     fn col(name: &str, tg: &str, expr: Option<&str>) -> DatasetColumn {
