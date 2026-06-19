@@ -80,6 +80,9 @@ pub struct DatasetSummaryDto {
     pub description: String,
     pub database_id: String,
     pub kind: &'static str,
+    pub catalog: Option<String>,
+    pub schema: Option<String>,
+    pub table: Option<String>,
     pub column_count: i64,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -114,6 +117,9 @@ pub fn summary_dto(ds: Dataset, column_count: i64) -> DatasetSummaryDto {
         name: ds.name,
         description: ds.description,
         database_id: ds.database_id.to_string(),
+        catalog: ds.catalog,
+        schema: ds.schema_name,
+        table: ds.table_name,
         column_count,
         updated_at: ds.updated_at,
     }

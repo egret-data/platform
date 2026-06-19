@@ -10,9 +10,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useDatabases, useCatalogs, useSchemas, useTables } from "@/api/sqllab";
 import { useCreateDataset, type CreateSource } from "@/api/datasets";
 
-export function CreateDatasetDialog({ ws, open, onOpenChange, initialSql, initialDbId, initialTab }: {
+export function CreateDatasetDialog({ ws, open, onOpenChange, initialSql, initialDbId, initialTab, initialName }: {
   ws: string; open: boolean; onOpenChange: (o: boolean) => void;
-  initialSql?: string; initialDbId?: string | null; initialTab?: "table" | "sql";
+  initialSql?: string; initialDbId?: string | null; initialTab?: "table" | "sql"; initialName?: string;
 }) {
   const nav = useNavigate();
   const { data: databases } = useDatabases(ws);
@@ -33,7 +33,7 @@ export function CreateDatasetDialog({ ws, open, onOpenChange, initialSql, initia
 
   useEffect(() => {
     if (open) {
-      setName("");
+      setName(initialName ?? "");
       setDescription("");
       setCatalog("");
       setSchema("");

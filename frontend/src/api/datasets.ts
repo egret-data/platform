@@ -4,7 +4,8 @@ import { apiFetch, apiJson } from "./client";
 export type DatasetKind = "physical" | "virtual";
 export interface DatasetSummary {
   id: string; name: string; description: string; database_id: string;
-  kind: DatasetKind; column_count: number; updated_at: string;
+  kind: DatasetKind; catalog: string | null; schema: string | null; table: string | null;
+  column_count: number; updated_at: string;
 }
 export interface DatasetColumn {
   column_name: string; data_type: string; type_generic: string; is_temporal: boolean; ordinal: number;
