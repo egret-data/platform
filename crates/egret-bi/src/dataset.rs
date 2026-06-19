@@ -205,6 +205,14 @@ impl DatasetRepo {
         id: Uuid,
         fresh: &[NewColumn],
     ) -> Result<(), BiError> {
+        // Defensive: an empty source would make the DELETE below wipe every physical column.
+        // A real source always has ≥1 column; introspect() errors (not []) on an unreachable
+        // engine, so an empty slice here means something is wrong — refuse rather than destroy.
+        if fresh.is_empty() {
+            return Err(BiError::BadRequest(
+                "source returned no columns; refusing to wipe the column snapshot".into(),
+            ));
+        }
         let mut tx = self.db.pool.begin().await?;
 
         for (i, c) in fresh.iter().enumerate() {
@@ -239,8 +247,11 @@ impl DatasetRepo {
         .execute(&mut *tx)
         .await?;
 
+        // Renumber calculated columns to follow the physical ones. `sub` is one row per calc
+        // column (with a 0-based rank); `phys` is a single scalar count — the cross-join just
+        // attaches that scalar to each `sub` row (not a Cartesian blow-up).
         sqlx::query(
-            "UPDATE dataset_columns c SET ordinal = sub.rn + phys.n \
+            "UPDATE dataset_columns AS c SET ordinal = sub.rn + phys.n \
              FROM (SELECT id, (row_number() OVER (ORDER BY ordinal)) - 1 AS rn \
                    FROM dataset_columns WHERE dataset_id = $1 AND expression IS NOT NULL) sub, \
                   (SELECT count(*) AS n FROM dataset_columns WHERE dataset_id = $1 AND expression IS NULL) phys \
@@ -398,6 +409,8 @@ impl DatasetRepo {
         description: Option<&str>,
         expr_update: Option<(&str, &str, &str, bool)>,
     ) -> Result<(), BiError> {
+        // Both updates in one tx so a metadata+expression edit applies atomically.
+        let mut tx = self.db.pool.begin().await?;
         sqlx::query(
             "UPDATE dataset_columns SET \
                verbose_name = COALESCE($3, verbose_name), \
@@ -408,7 +421,7 @@ impl DatasetRepo {
         .bind(column_name)
         .bind(verbose_name)
         .bind(description)
-        .execute(&self.db.pool)
+        .execute(&mut *tx)
         .await?;
 
         if let Some((expr, dt, tg, temporal)) = expr_update {
@@ -422,9 +435,10 @@ impl DatasetRepo {
             .bind(dt)
             .bind(tg)
             .bind(temporal)
-            .execute(&self.db.pool)
+            .execute(&mut *tx)
             .await?;
         }
+        tx.commit().await?;
         Ok(())
     }
 

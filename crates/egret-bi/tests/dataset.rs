@@ -208,7 +208,7 @@ async fn update_name_and_description() {
 }
 
 #[tokio::test]
-async fn replace_columns_add_remove_retype() {
+async fn reconcile_add_remove_retype() {
     let Some((r, wid, db_id, _uid)) = setup().await else {
         eprintln!("skip");
         return;
