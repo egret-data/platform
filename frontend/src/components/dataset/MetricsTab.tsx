@@ -159,7 +159,7 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
                       <td className="pr-2">
                         <span className="rounded bg-muted px-1.5 py-0.5 text-xs">{m.type_generic}</span>
                       </td>
-                      <td className="pr-2 pb-1">
+                      <td className="space-y-1 pr-2 pb-1">
                         <Input
                           className="h-7 text-xs"
                           value={editState.verbose_name}
@@ -170,6 +170,17 @@ export function MetricsTab({ ws, datasetId, metrics }: Props) {
                             }))
                           }
                           placeholder="Verbose name"
+                        />
+                        <Input
+                          className="h-7 text-xs"
+                          value={editState.description}
+                          onChange={(e) =>
+                            setEditing((prev) => ({
+                              ...prev,
+                              [m.id]: { ...prev[m.id], description: e.target.value },
+                            }))
+                          }
+                          placeholder="Description"
                         />
                       </td>
                       <td className="pb-1">

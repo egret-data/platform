@@ -120,6 +120,9 @@ export function ColumnsTab({ ws, datasetId, columns }: Props) {
           </tr>
         </thead>
         <tbody>
+          {columns.length === 0 && (
+            <tr><td colSpan={7} className="py-2 text-muted-foreground">No columns yet — Refresh to sync from the source.</td></tr>
+          )}
           {columns.map((c) => {
             const editState = editing[c.column_name];
             const isEditing = !!editState;
