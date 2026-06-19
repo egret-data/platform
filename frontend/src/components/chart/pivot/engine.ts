@@ -221,7 +221,7 @@ export function buildPivot(input: PivotInput): Pivot {
         bodyRows.push({
           rowPath: subPath,
           kind: "subtotal",
-          headerCells: [{ label: "Total", depth: depth + 1, rowSpan: 1, colSpan: m - (depth + 1) }],
+          headerCells: [{ label: `Totals for ${String(ch.value ?? "")}`, depth: depth + 1, rowSpan: 1, colSpan: m - (depth + 1) }],
           values: rowValues(subPath),
         });
         span += 1;
@@ -247,7 +247,7 @@ export function buildPivot(input: PivotInput): Pivot {
       bodyRows.push({
         rowPath: subPath,
         kind: "subtotal",
-        headerCells: [{ label: "Total", depth: 0, rowSpan: 1, colSpan: m }],
+        headerCells: [{ label: `Totals for ${String(ch.value ?? "")}`, depth: 0, rowSpan: 1, colSpan: m }],
         values: rowValues(subPath),
       });
     }
@@ -257,7 +257,7 @@ export function buildPivot(input: PivotInput): Pivot {
     bodyRows.push({
       rowPath: [],
       kind: "grand",
-      headerCells: [{ label: "Grand total", depth: 0, rowSpan: 1, colSpan: m }],
+      headerCells: [{ label: "Grand totals", depth: 0, rowSpan: 1, colSpan: m }],
       values: rowValues([]),
     });
   }

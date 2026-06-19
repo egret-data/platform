@@ -19,7 +19,7 @@ describe("PivotTable", () => {
     render(<PivotTable input={input} />);
     expect(screen.getByText("SMB")).toBeInTheDocument();
     expect(screen.getByText("ENT")).toBeInTheDocument();
-    expect(screen.getByText("Grand total")).toBeInTheDocument();
+    expect(screen.getByText("Grand totals")).toBeInTheDocument();
     expect(screen.getByText("35")).toBeInTheDocument();
   });
 });
