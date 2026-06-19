@@ -24,24 +24,37 @@ fn guard_single_statement(expr: &str) -> Result<(), BiError> {
     if trimmed.is_empty() {
         return Err(BiError::BadRequest("expression is empty".into()));
     }
-    let mut in_str = false;
+    let mut in_str = false; // inside a '...' string literal
+    let mut in_id = false; // inside a "..." quoted identifier
     let mut chars = trimmed.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            '\'' => {
+            '\'' if !in_id => {
                 if in_str && chars.peek() == Some(&'\'') {
                     chars.next(); // escaped '' inside a string literal
                 } else {
                     in_str = !in_str;
                 }
             }
-            ';' if !in_str => {
+            '"' if !in_str => {
+                if in_id && chars.peek() == Some(&'"') {
+                    chars.next(); // escaped "" inside a quoted identifier
+                } else {
+                    in_id = !in_id;
+                }
+            }
+            ';' if !in_str && !in_id => {
                 return Err(BiError::BadRequest(
                     "expression must be a single statement".into(),
                 ));
             }
             _ => {}
         }
+    }
+    if in_str || in_id {
+        return Err(BiError::BadRequest(
+            "unterminated quoted string or identifier in expression".into(),
+        ));
     }
     Ok(())
 }
@@ -54,15 +67,16 @@ fn source_ref(spec: &ConnSpec, source: &SourceSpec) -> String {
             schema,
             table,
         } => match spec.engine {
-            Engine::Trino => {
-                let cat = catalog.as_deref().unwrap_or("");
-                format!(
+            Engine::Trino => match catalog.as_deref() {
+                Some(cat) if !cat.is_empty() => format!(
                     "{}.{}.{}",
                     quote_trino(cat),
                     quote_trino(schema),
                     quote_trino(table)
-                )
-            }
+                ),
+                // No catalog: qualify with schema.table (a quoted empty catalog is invalid SQL).
+                _ => format!("{}.{}", quote_trino(schema), quote_trino(table)),
+            },
             Engine::StarRocks => format!("{}.{}", quote_mysql(schema), quote_mysql(table)),
         },
         SourceSpec::Virtual { sql } => format!("(\n{sql}\n) AS _egret_src"),
@@ -119,5 +133,9 @@ mod tests {
         assert!(guard_single_statement("   ").is_err());
         assert!(guard_single_statement("1; DROP TABLE t").is_err());
         assert!(guard_single_statement("concat(a, ';', b)").is_ok());
+        // `;` inside a double-quoted identifier is allowed; unterminated quotes rejected.
+        assert!(guard_single_statement("\"col;name\" + 1").is_ok());
+        assert!(guard_single_statement("'abc").is_err());
+        assert!(guard_single_statement("\"abc").is_err());
     }
 }
