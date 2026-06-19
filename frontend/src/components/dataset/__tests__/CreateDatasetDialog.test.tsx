@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -30,6 +30,13 @@ function renderDialog(props: Partial<React.ComponentProps<typeof CreateDatasetDi
   );
 }
 
+/** Return the SQL tab panel — the one that is currently visible (not hidden). */
+function getSqlTabPanel() {
+  const panels = screen.getAllByRole("tabpanel");
+  // Radix may keep both panels in the DOM; pick the one that contains the SQL textarea.
+  return panels.find((p) => within(p).queryByPlaceholderText("SELECT …") !== null)!;
+}
+
 test("renders both tab triggers", () => {
   renderDialog();
   expect(screen.getByRole("tab", { name: "From table" })).toBeInTheDocument();
@@ -43,12 +50,12 @@ test("dataset name input is present", () => {
 
 test("From SQL tab shows Create button disabled when SQL textarea is empty", async () => {
   renderDialog({ initialTab: "sql" });
-  // Click "From SQL" tab to activate it
+  // Click "From SQL" tab to make sure it is active
   await userEvent.click(screen.getByRole("tab", { name: "From SQL" }));
-  // Find the Create button inside the SQL tab — it should be disabled because sql is empty
-  const createButtons = screen.getAllByRole("button", { name: "Create" });
-  // The SQL tab's Create button is disabled when SQL is empty
-  expect(createButtons.some((btn) => btn.hasAttribute("disabled"))).toBe(true);
+  // Scope to the SQL tab panel specifically
+  const sqlPanel = getSqlTabPanel();
+  const createBtn = within(sqlPanel).getByRole("button", { name: "Create" });
+  expect(createBtn).toBeDisabled();
 });
 
 test("SQL Create button enabled after typing SQL", async () => {
@@ -56,8 +63,8 @@ test("SQL Create button enabled after typing SQL", async () => {
   await userEvent.click(screen.getByRole("tab", { name: "From SQL" }));
   const textarea = screen.getByPlaceholderText("SELECT …");
   await userEvent.type(textarea, "SELECT 1");
-  // After typing, no Create button should be disabled (the SQL one is now enabled)
-  const createButtons = screen.getAllByRole("button", { name: "Create" });
-  const sqlCreate = createButtons[createButtons.length - 1]; // SQL Create is the last one
-  expect(sqlCreate).not.toBeDisabled();
+  // Scope to the SQL tab panel to get the right Create button
+  const sqlPanel = getSqlTabPanel();
+  const createBtn = within(sqlPanel).getByRole("button", { name: "Create" });
+  expect(createBtn).not.toBeDisabled();
 });

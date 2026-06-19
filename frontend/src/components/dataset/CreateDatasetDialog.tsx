@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -29,12 +29,27 @@ export function CreateDatasetDialog({ ws, open, onOpenChange, initialSql, initia
   const schemas = useSchemas(ws, dbId || null, isTrino ? catalog : "");
   const tables = useTables(ws, dbId || null, catalog, schema);
   const [sql, setSql] = useState(initialSql ?? "");
+  const [tab, setTab] = useState<"table" | "sql">(initialTab ?? "table");
+
+  useEffect(() => {
+    if (open) {
+      setName("");
+      setDescription("");
+      setCatalog("");
+      setSchema("");
+      setTable("");
+      setSql(initialSql ?? "");
+      setDbId(initialDbId ?? "");
+      setTab(initialTab ?? "table");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   async function submit(source: CreateSource) {
     if (!dbId) { toast.error("Pick a database"); return; }
     if (!name.trim()) { toast.error("Name required"); return; }
     try {
-      const ds = await create.mutateAsync({ name, database_id: dbId, description, source });
+      const ds = await create.mutateAsync({ name: name.trim(), database_id: dbId, description, source });
       toast.success("Dataset created");
       onOpenChange(false);
       nav(`/explore/${ws}/datasets/${ds.id}`);
@@ -45,7 +60,7 @@ export function CreateDatasetDialog({ ws, open, onOpenChange, initialSql, initia
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader><DialogTitle>New dataset</DialogTitle></DialogHeader>
-        <Tabs defaultValue={initialTab ?? "table"}>
+        <Tabs value={tab} onValueChange={(v) => setTab(v as "table" | "sql")}>
           <TabsList><TabsTrigger value="table">From table</TabsTrigger><TabsTrigger value="sql">From SQL</TabsTrigger></TabsList>
 
           <div className="space-y-2 py-2">
