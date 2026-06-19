@@ -136,7 +136,7 @@ export default function ChartExplore() {
   const status = useQueryStatus(ws, queryId);
   const finished = status.data?.status === "finished";
   const results = useResults(ws, queryId, 0, finished);
-  const resultColumns = results.data?.columns ?? [];
+  const resultColumns = (results.data?.columns ?? []).filter((c) => !c.name.startsWith("__grp_"));
   const metricTypes = Object.fromEntries((detail.data?.metrics ?? []).map((m) => [m.metric_name, m.data_type ?? "double"]));
 
   async function run() {
