@@ -480,7 +480,7 @@ async fn ds_refresh(
     let source = source_of(&ds);
     let new_columns = introspect(&st, &spec, &source).await?;
     st.datasets
-        .replace_columns(id, &new_columns)
+        .reconcile_physical_columns(id, &new_columns)
         .await
         .map_err(BiApiError::from)?;
     let ds = st

@@ -71,6 +71,9 @@ pub struct DatasetColumnDto {
     pub type_generic: String,
     pub is_temporal: bool,
     pub ordinal: i32,
+    pub expression: Option<String>,
+    pub verbose_name: String,
+    pub description: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -145,6 +148,9 @@ pub fn detail_dto(ds: Dataset, columns: Vec<DatasetColumn>) -> DatasetDetailDto 
                 type_generic: c.type_generic,
                 is_temporal: c.is_temporal,
                 ordinal: c.ordinal,
+                expression: c.expression,
+                verbose_name: c.verbose_name,
+                description: c.description,
             })
             .collect(),
     }
