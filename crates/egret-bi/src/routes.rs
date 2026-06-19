@@ -606,11 +606,11 @@ async fn ds_delete_metric(
     WsContext(ctx): WsContext,
     Path((_w, id, metric_id)): Path<(String, Uuid, Uuid)>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    require_dataset_owner(&st, &ctx, id).await?;
     st.authz
         .require_workspace(&ctx, DS_MANAGE)
         .await
         .map_err(BiApiError::from)?;
+    require_dataset_owner(&st, &ctx, id).await?;
     st.datasets
         .delete_metric(metric_id)
         .await
@@ -719,11 +719,11 @@ async fn ds_delete_column(
     WsContext(ctx): WsContext,
     Path((_w, id, column_name)): Path<(String, Uuid, String)>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    require_dataset_owner(&st, &ctx, id).await?;
     st.authz
         .require_workspace(&ctx, DS_MANAGE)
         .await
         .map_err(BiApiError::from)?;
+    require_dataset_owner(&st, &ctx, id).await?;
     st.datasets
         .delete_calc_column(id, &column_name)
         .await
