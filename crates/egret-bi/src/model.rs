@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::chart::Chart;
+use crate::chartquery::QuerySpec;
 use crate::dataset::{Dataset, DatasetColumn, Metric};
 
 #[derive(Debug, Deserialize)]
@@ -220,6 +222,64 @@ pub fn detail_dto(
             .collect(),
         metrics: metrics.into_iter().map(metric_dto).collect(),
     }
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ChartDto {
+    pub id: String,
+    pub dataset_id: String,
+    pub name: String,
+    pub description: String,
+    pub viz_type: String,
+    pub params: serde_json::Value,
+    pub created_by: Option<String>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub fn chart_dto(c: Chart) -> ChartDto {
+    ChartDto {
+        id: c.id.to_string(),
+        dataset_id: c.dataset_id.to_string(),
+        name: c.name,
+        description: c.description,
+        viz_type: c.viz_type,
+        params: c.params,
+        created_by: c.created_by.map(|u| u.to_string()),
+        updated_at: c.updated_at,
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CreateChart {
+    pub dataset_id: uuid::Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub viz_type: String,
+    pub params: serde_json::Value,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct UpdateChart {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub viz_type: String,
+    pub params: serde_json::Value,
+}
+
+/// Build-only data request: produce SQL for a dataset + QuerySpec; the client submits it
+/// to the existing /queries endpoint and polls.
+#[derive(Debug, serde::Deserialize)]
+pub struct ChartDataBody {
+    pub dataset_id: uuid::Uuid,
+    pub query_spec: QuerySpec,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ChartDataResponse {
+    pub sql: String,
+    pub database_id: String,
 }
 
 #[cfg(test)]

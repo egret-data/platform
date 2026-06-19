@@ -60,14 +60,14 @@ fn guard_single_statement(expr: &str) -> Result<(), BiError> {
     Ok(())
 }
 
-/// Build the `FROM <source>` reference for the probe.
-fn source_ref(spec: &ConnSpec, source: &SourceSpec) -> String {
+/// Build the `FROM <source>` reference for `engine`.
+pub(crate) fn source_ref_for(engine: Engine, source: &SourceSpec) -> String {
     match source {
         SourceSpec::Physical {
             catalog,
             schema,
             table,
-        } => match spec.engine {
+        } => match engine {
             Engine::Trino => match catalog.as_deref() {
                 Some(cat) if !cat.is_empty() => format!(
                     "{}.{}.{}",
@@ -94,7 +94,7 @@ pub async fn validate_expression(
     guard_single_statement(expr)?;
     let probe = format!(
         "SELECT {expr} AS _egret_expr FROM {}",
-        source_ref(spec, source)
+        source_ref_for(spec.engine, source)
     );
     let cols = build_connector(spec)
         .describe(&probe, Duration::from_secs(15))
