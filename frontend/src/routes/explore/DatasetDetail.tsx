@@ -8,7 +8,10 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useDataset, useRefreshDataset, useDeleteDataset, useUpdateDataset } from "@/api/datasets";
+import { ColumnsTab } from "@/components/dataset/ColumnsTab";
+import { MetricsTab } from "@/components/dataset/MetricsTab";
 
 export default function DatasetDetail() {
   const { workspace: ws = "", id = "" } = useParams();
@@ -106,21 +109,18 @@ export default function DatasetDetail() {
         </div>
       </div>
 
-      <table className="w-full text-sm">
-        <thead className="text-left text-muted-foreground">
-          <tr><th className="py-1">Column</th><th>Type</th><th>Class</th><th>Temporal</th></tr>
-        </thead>
-        <tbody>
-          {ds.columns.map((c) => (
-            <tr key={c.column_name} className="border-t">
-              <td className="py-1 font-mono">{c.column_name}</td>
-              <td className="font-mono text-muted-foreground">{c.data_type}</td>
-              <td><span className="rounded bg-muted px-1.5 py-0.5 text-xs">{c.type_generic}</span></td>
-              <td>{c.is_temporal ? "✓" : ""}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <Tabs defaultValue="columns" className="mt-4">
+        <TabsList>
+          <TabsTrigger value="columns">Columns ({ds.columns.length})</TabsTrigger>
+          <TabsTrigger value="metrics">Metrics ({ds.metrics.length})</TabsTrigger>
+        </TabsList>
+        <TabsContent value="columns">
+          <ColumnsTab ws={ws} datasetId={id} columns={ds.columns} />
+        </TabsContent>
+        <TabsContent value="metrics">
+          <MetricsTab ws={ws} datasetId={id} metrics={ds.metrics} />
+        </TabsContent>
+      </Tabs>
 
       <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <AlertDialogContent>
