@@ -89,7 +89,9 @@ async fn create_physical_and_virtual() {
             db_id,
             "virt1",
             "",
-            &SourceSpec::Virtual { sql: "SELECT 1".to_string() },
+            &SourceSpec::Virtual {
+                sql: "SELECT 1".to_string(),
+            },
             &[NewColumn {
                 column_name: "one".to_string(),
                 data_type: "integer".to_string(),
@@ -249,7 +251,7 @@ async fn replace_columns_add_remove_retype() {
     let cols = r.columns(ds.id).await.unwrap();
     assert_eq!(cols.len(), 2, "ts removed, amount added → 2 cols");
     assert_eq!(cols[0].column_name, "id");
-    assert_eq!(cols[0].data_type, "varchar");   // retyped
+    assert_eq!(cols[0].data_type, "varchar"); // retyped
     assert_eq!(cols[0].type_generic, "string"); // retyped
     assert_eq!(cols[1].column_name, "amount");
 

@@ -14,8 +14,14 @@ pub struct DatasetRepo {
 /// The source side of a dataset: exactly one kind.
 #[derive(Debug, Clone)]
 pub enum SourceSpec {
-    Physical { catalog: Option<String>, schema: String, table: String },
-    Virtual { sql: String },
+    Physical {
+        catalog: Option<String>,
+        schema: String,
+        table: String,
+    },
+    Virtual {
+        sql: String,
+    },
 }
 
 /// A classified column ready to persist (route maps raw engine type → generic).
@@ -79,9 +85,16 @@ impl DatasetRepo {
         user: Option<UserId>,
     ) -> Result<Dataset, BiError> {
         let (catalog, schema_name, table_name, sql) = match source {
-            SourceSpec::Physical { catalog, schema, table } => {
-                (catalog.clone(), Some(schema.clone()), Some(table.clone()), None)
-            }
+            SourceSpec::Physical {
+                catalog,
+                schema,
+                table,
+            } => (
+                catalog.clone(),
+                Some(schema.clone()),
+                Some(table.clone()),
+                None,
+            ),
             SourceSpec::Virtual { sql } => (None, None, None, Some(sql.clone())),
         };
 

@@ -330,7 +330,11 @@ async fn introspect(
     source: &SourceSpec,
 ) -> Result<Vec<NewColumn>, BiApiError> {
     let raw: Vec<(String, String)> = match source {
-        SourceSpec::Physical { catalog, schema, table } => st
+        SourceSpec::Physical {
+            catalog,
+            schema,
+            table,
+        } => st
             .schema
             .columns(spec, catalog.as_deref().unwrap_or(""), schema, table)
             .await
@@ -368,9 +372,15 @@ async fn ds_create(
     // conn_spec_perm enforces DS_MANAGE (and that the db is granted) — single auth checkpoint.
     let spec = conn_spec_perm(&st, &ctx, b.database_id, DS_MANAGE).await?;
     let source = match b.source {
-        CreateSource::Physical { catalog, schema, table } => {
-            SourceSpec::Physical { catalog, schema, table }
-        }
+        CreateSource::Physical {
+            catalog,
+            schema,
+            table,
+        } => SourceSpec::Physical {
+            catalog,
+            schema,
+            table,
+        },
         CreateSource::Virtual { sql } => SourceSpec::Virtual { sql },
     };
     let columns = introspect(&st, &spec, &source).await?;
@@ -395,9 +405,20 @@ async fn ds_list(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
 ) -> Result<Json<Vec<DatasetSummaryDto>>, BiApiError> {
-    st.authz.require_workspace(&ctx, DS_READ).await.map_err(BiApiError::from)?;
-    let rows = st.datasets.list(ctx.workspace_id.0).await.map_err(BiApiError::from)?;
-    Ok(Json(rows.into_iter().map(|(ds, n)| crate::model::summary_dto(ds, n)).collect()))
+    st.authz
+        .require_workspace(&ctx, DS_READ)
+        .await
+        .map_err(BiApiError::from)?;
+    let rows = st
+        .datasets
+        .list(ctx.workspace_id.0)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(ds, n)| crate::model::summary_dto(ds, n))
+            .collect(),
+    ))
 }
 
 async fn ds_get(
@@ -405,7 +426,10 @@ async fn ds_get(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    st.authz.require_workspace(&ctx, DS_READ).await.map_err(BiApiError::from)?;
+    st.authz
+        .require_workspace(&ctx, DS_READ)
+        .await
+        .map_err(BiApiError::from)?;
     let ds = st
         .datasets
         .get(id)
@@ -422,7 +446,10 @@ async fn ds_update(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<UpdateDataset>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    st.authz.require_workspace(&ctx, DS_MANAGE).await.map_err(BiApiError::from)?;
+    st.authz
+        .require_workspace(&ctx, DS_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
     require_dataset_owner(&st, &ctx, id).await?;
     let ds = st
         .datasets
@@ -438,7 +465,10 @@ async fn ds_refresh(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    st.authz.require_workspace(&ctx, DS_MANAGE).await.map_err(BiApiError::from)?;
+    st.authz
+        .require_workspace(&ctx, DS_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
     require_dataset_owner(&st, &ctx, id).await?;
     let ds = st
         .datasets
@@ -449,7 +479,10 @@ async fn ds_refresh(
     let spec = conn_spec_perm(&st, &ctx, ds.database_id, DS_MANAGE).await?;
     let source = source_of(&ds);
     let new_columns = introspect(&st, &spec, &source).await?;
-    st.datasets.replace_columns(id, &new_columns).await.map_err(BiApiError::from)?;
+    st.datasets
+        .replace_columns(id, &new_columns)
+        .await
+        .map_err(BiApiError::from)?;
     let ds = st
         .datasets
         .get(id)
@@ -465,7 +498,10 @@ async fn ds_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz.require_workspace(&ctx, DS_MANAGE).await.map_err(BiApiError::from)?;
+    st.authz
+        .require_workspace(&ctx, DS_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
     require_dataset_owner(&st, &ctx, id).await?;
     st.datasets.delete(id).await.map_err(BiApiError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))

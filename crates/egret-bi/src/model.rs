@@ -36,8 +36,14 @@ pub struct SchemaColumn {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum CreateSource {
-    Physical { catalog: Option<String>, schema: String, table: String },
-    Virtual { sql: String },
+    Physical {
+        catalog: Option<String>,
+        schema: String,
+        table: String,
+    },
+    Virtual {
+        sql: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,7 +100,11 @@ pub struct DatasetDetailDto {
 }
 
 pub fn dataset_kind(ds: &Dataset) -> &'static str {
-    if ds.sql.is_some() { "virtual" } else { "physical" }
+    if ds.sql.is_some() {
+        "virtual"
+    } else {
+        "physical"
+    }
 }
 
 pub fn summary_dto(ds: Dataset, column_count: i64) -> DatasetSummaryDto {

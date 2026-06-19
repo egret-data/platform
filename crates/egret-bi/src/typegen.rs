@@ -52,8 +52,9 @@ fn type_head(raw: &str) -> String {
 fn classify_trino(head: &str) -> GenericType {
     let first = head.split_whitespace().next().unwrap_or("");
     match first {
-        "tinyint" | "smallint" | "integer" | "int" | "bigint" | "real" | "double"
-        | "decimal" => GenericType::Numeric,
+        "tinyint" | "smallint" | "integer" | "int" | "bigint" | "real" | "double" | "decimal" => {
+            GenericType::Numeric
+        }
         "date" | "time" | "timestamp" => GenericType::Temporal,
         "boolean" => GenericType::Boolean,
         _ => GenericType::String,
@@ -63,8 +64,8 @@ fn classify_trino(head: &str) -> GenericType {
 fn classify_starrocks(head: &str) -> GenericType {
     let first = head.split_whitespace().next().unwrap_or("");
     match first {
-        "tinyint" | "smallint" | "int" | "bigint" | "largeint" | "float" | "double"
-        | "decimal" | "decimalv2" | "decimalv3" => GenericType::Numeric,
+        "tinyint" | "smallint" | "int" | "bigint" | "largeint" | "float" | "double" | "decimal"
+        | "decimalv2" | "decimalv3" => GenericType::Numeric,
         "date" | "datetime" | "time" => GenericType::Temporal,
         "boolean" => GenericType::Boolean,
         _ => GenericType::String,
@@ -77,7 +78,14 @@ mod tests {
 
     #[test]
     fn trino_numeric_variants() {
-        for t in ["bigint", "INTEGER", "double", "decimal(10,2)", "real", "tinyint"] {
+        for t in [
+            "bigint",
+            "INTEGER",
+            "double",
+            "decimal(10,2)",
+            "real",
+            "tinyint",
+        ] {
             assert_eq!(generic_type(Engine::Trino, t), GenericType::Numeric, "{t}");
         }
     }
@@ -94,7 +102,10 @@ mod tests {
 
     #[test]
     fn trino_string_and_boolean() {
-        assert_eq!(generic_type(Engine::Trino, "varchar(255)"), GenericType::String);
+        assert_eq!(
+            generic_type(Engine::Trino, "varchar(255)"),
+            GenericType::String
+        );
         assert_eq!(generic_type(Engine::Trino, "json"), GenericType::String);
         assert_eq!(generic_type(Engine::Trino, "boolean"), GenericType::Boolean);
     }
@@ -102,18 +113,42 @@ mod tests {
     #[test]
     fn starrocks_variants() {
         assert_eq!(generic_type(Engine::StarRocks, "int"), GenericType::Numeric);
-        assert_eq!(generic_type(Engine::StarRocks, "largeint"), GenericType::Numeric);
-        assert_eq!(generic_type(Engine::StarRocks, "decimalv2(10,2)"), GenericType::Numeric);
-        assert_eq!(generic_type(Engine::StarRocks, "decimalv3"), GenericType::Numeric);
-        assert_eq!(generic_type(Engine::StarRocks, "DATETIME"), GenericType::Temporal);
-        assert_eq!(generic_type(Engine::StarRocks, "varchar(20)"), GenericType::String);
-        assert_eq!(generic_type(Engine::StarRocks, "boolean"), GenericType::Boolean);
+        assert_eq!(
+            generic_type(Engine::StarRocks, "largeint"),
+            GenericType::Numeric
+        );
+        assert_eq!(
+            generic_type(Engine::StarRocks, "decimalv2(10,2)"),
+            GenericType::Numeric
+        );
+        assert_eq!(
+            generic_type(Engine::StarRocks, "decimalv3"),
+            GenericType::Numeric
+        );
+        assert_eq!(
+            generic_type(Engine::StarRocks, "DATETIME"),
+            GenericType::Temporal
+        );
+        assert_eq!(
+            generic_type(Engine::StarRocks, "varchar(20)"),
+            GenericType::String
+        );
+        assert_eq!(
+            generic_type(Engine::StarRocks, "boolean"),
+            GenericType::Boolean
+        );
     }
 
     #[test]
     fn unknown_falls_back_to_string() {
-        assert_eq!(generic_type(Engine::Trino, "hyperloglog"), GenericType::String);
-        assert_eq!(generic_type(Engine::StarRocks, "bitmap"), GenericType::String);
+        assert_eq!(
+            generic_type(Engine::Trino, "hyperloglog"),
+            GenericType::String
+        );
+        assert_eq!(
+            generic_type(Engine::StarRocks, "bitmap"),
+            GenericType::String
+        );
         assert_eq!(generic_type(Engine::Trino, ""), GenericType::String);
     }
 

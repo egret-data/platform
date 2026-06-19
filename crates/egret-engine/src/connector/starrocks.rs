@@ -202,7 +202,9 @@ fn coltype_name(ty: mysql_async::consts::ColumnType) -> &'static str {
         MYSQL_TYPE_DOUBLE => "double",
         MYSQL_TYPE_DECIMAL | MYSQL_TYPE_NEWDECIMAL => "decimal",
         MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE => "date",
-        MYSQL_TYPE_DATETIME | MYSQL_TYPE_DATETIME2 | MYSQL_TYPE_TIMESTAMP
+        MYSQL_TYPE_DATETIME
+        | MYSQL_TYPE_DATETIME2
+        | MYSQL_TYPE_TIMESTAMP
         | MYSQL_TYPE_TIMESTAMP2 => "datetime",
         MYSQL_TYPE_TIME | MYSQL_TYPE_TIME2 => "time",
         MYSQL_TYPE_JSON => "json",

@@ -1,7 +1,9 @@
 //! Router smoke test — unauthenticated requests rejected.
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use egret_bi::{dataset_router, sqllab_router, BiState, DatasetRepo, SavedQueryRepo, SchemaService};
+use egret_bi::{
+    dataset_router, sqllab_router, BiState, DatasetRepo, SavedQueryRepo, SchemaService,
+};
 use egret_metastore::Db;
 use tower::ServiceExt;
 
