@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, apiJson } from "./client";
+import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 
 export type VizType = "table" | "pivot_table";
 export type FilterOp =
@@ -32,6 +33,8 @@ export interface ChartParams {
   showRowTotals?: boolean;
   showColTotals?: boolean;
   condense?: boolean;
+  columnSettings?: Record<string, ColumnFormat>;
+  conditionalFormatting?: Rule[];
 }
 
 export interface Chart {
