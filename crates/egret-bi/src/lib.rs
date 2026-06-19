@@ -1,7 +1,7 @@
 //! BI layer: SQL Lab (saved queries + schema introspection) and dataset persistence.
 
 mod chart;
-mod chartquery;
+pub mod chartquery;
 mod dataset;
 mod error;
 mod expr;
@@ -12,9 +12,6 @@ mod schema;
 mod typegen;
 
 pub use chart::{Chart, ChartRepo};
-pub use chartquery::{
-    build as build_chart_query, Filter, FilterOp, OrderBy, QuerySpec, MAX_CHART_ROWS,
-};
 pub use dataset::{Dataset, DatasetColumn, DatasetRepo, Metric, NewColumn, SourceSpec};
 pub use error::{BiApiError, BiError};
 pub use expr::{validate_expression, DescribedExpr};
