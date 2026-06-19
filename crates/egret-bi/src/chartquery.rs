@@ -27,7 +27,7 @@ pub struct QuerySpec {
     pub orderby: Vec<OrderBy>,
     pub row_limit: i64,
     #[serde(default)]
-    pub rollup: bool,
+    pub rollup_groups: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -214,11 +214,12 @@ pub fn build(
     let mut select: Vec<String> = Vec::new();
 
     if aggregate {
-        if spec.rollup && spec.dimensions.is_empty() {
+        if !spec.rollup_groups.is_empty() && spec.dimensions.is_empty() {
             return Err(BiError::BadRequest(
                 "rollup requires at least one dimension".into(),
             ));
         }
+        // Resolve every dimension to its expression once, preserving order.
         let mut dim_exprs: Vec<String> = Vec::new();
         for name in &spec.dimensions {
             let c = find_column(columns, name)
@@ -232,20 +233,35 @@ pub fn build(
                 .ok_or_else(|| BiError::BadRequest(format!("unknown metric: {name}")))?;
             select.push(format!("{} AS {}", m.expression, quote_ident(engine, name)));
         }
-        if spec.rollup {
+        let rolling = !spec.rollup_groups.is_empty();
+        if rolling {
             for (i, e) in dim_exprs.iter().enumerate() {
-                // {i} is a usize counter from enumerate(), never user data — safe unquoted.
+                // {i} is a usize counter, never user data — safe unquoted.
                 select.push(format!("GROUPING({e}) AS __grp_{i}"));
             }
         }
         let mut sql = format!("SELECT {}\nFROM {from}", select.join(", "));
         push_where(&mut sql, engine, columns, &spec.filters)?;
-        if !dim_exprs.is_empty() {
-            if spec.rollup {
-                sql.push_str(&format!("\nGROUP BY ROLLUP({})", dim_exprs.join(", ")));
-            } else {
-                sql.push_str(&format!("\nGROUP BY {}", dim_exprs.join(", ")));
+        if rolling {
+            // One ROLLUP(...) per group; the cross-product is every grouping level.
+            let mut parts: Vec<String> = Vec::new();
+            for group in &spec.rollup_groups {
+                let mut exprs: Vec<String> = Vec::new();
+                for name in group {
+                    let c = find_column(columns, name).ok_or_else(|| {
+                        BiError::BadRequest(format!("unknown rollup dimension: {name}"))
+                    })?;
+                    exprs.push(column_sql(engine, c));
+                }
+                if !exprs.is_empty() {
+                    parts.push(format!("ROLLUP({})", exprs.join(", ")));
+                }
             }
+            if !parts.is_empty() {
+                sql.push_str(&format!("\nGROUP BY {}", parts.join(", ")));
+            }
+        } else if !dim_exprs.is_empty() {
+            sql.push_str(&format!("\nGROUP BY {}", dim_exprs.join(", ")));
         }
         push_orderby(&mut sql, engine, columns, metrics, &spec.orderby)?;
         push_limit(&mut sql, spec.row_limit);
@@ -390,7 +406,7 @@ mod tests {
             filters: vec![],
             orderby: vec![],
             row_limit: 100,
-            rollup: false,
+            rollup_groups: vec![],
         };
         let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
         assert!(sql.contains("\"region\" AS \"region\""), "{sql}");
@@ -411,11 +427,11 @@ mod tests {
             filters: vec![],
             orderby: vec![],
             row_limit: 100,
-            rollup: true,
+            rollup_groups: vec![vec!["region".into()], vec!["seg".into()]],
         };
         let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
         assert!(
-            sql.contains("GROUP BY ROLLUP(\"region\", \"seg\")"),
+            sql.contains("GROUP BY ROLLUP(\"region\"), ROLLUP(\"seg\")"),
             "{sql}"
         );
         assert!(sql.contains("GROUPING(\"region\") AS __grp_0"), "{sql}");
@@ -435,7 +451,7 @@ mod tests {
                 desc: true,
             }],
             row_limit: 50,
-            rollup: false,
+            rollup_groups: vec![],
         };
         let sql = build(Engine::Trino, &phys(), &cols, &[], &spec).unwrap();
         assert!(sql.contains("\"id\" AS \"id\""), "{sql}");
@@ -475,7 +491,7 @@ mod tests {
             ],
             orderby: vec![],
             row_limit: 100,
-            rollup: false,
+            rollup_groups: vec![],
         };
         let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
         assert!(sql.contains("\"region\" = 'EU'"), "{sql}");
@@ -494,7 +510,7 @@ mod tests {
             filters: vec![],
             orderby: vec![],
             row_limit: 10,
-            rollup: false,
+            rollup_groups: vec![],
         };
         assert!(build(Engine::Trino, &phys(), &cols, &[], &spec).is_err());
     }
@@ -515,11 +531,38 @@ mod tests {
             filters: vec![],
             orderby: vec![],
             row_limit: 100,
-            rollup: false,
+            rollup_groups: vec![],
         };
         let sql = build(Engine::StarRocks, &src, &cols, &metrics, &spec).unwrap();
         assert!(sql.contains("`region` AS `region`"), "{sql}");
         assert!(sql.contains("GROUP BY `region`"), "{sql}");
         assert!(sql.contains("FROM `s`.`t`"), "{sql}");
+    }
+
+    #[test]
+    fn build_two_rollups_for_pivot() {
+        let cols = vec![
+            col("region", "string", None),
+            col("nation", "string", None),
+            col("seg", "string", None),
+        ];
+        let metrics = vec![metric("revenue", "SUM(price)")];
+        let spec = QuerySpec {
+            metrics: vec!["revenue".into()],
+            dimensions: vec!["region".into(), "nation".into(), "seg".into()],
+            columns: vec![],
+            filters: vec![],
+            orderby: vec![],
+            row_limit: 100,
+            rollup_groups: vec![vec!["region".into(), "nation".into()], vec!["seg".into()]],
+        };
+        let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
+        assert!(
+            sql.contains("GROUP BY ROLLUP(\"region\", \"nation\"), ROLLUP(\"seg\")"),
+            "{sql}"
+        );
+        assert!(sql.contains("GROUPING(\"region\") AS __grp_0"), "{sql}");
+        assert!(sql.contains("GROUPING(\"nation\") AS __grp_1"), "{sql}");
+        assert!(sql.contains("GROUPING(\"seg\") AS __grp_2"), "{sql}");
     }
 }

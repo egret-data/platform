@@ -87,7 +87,7 @@ async fn table_chart_runs_on_trino() {
         filters: vec![],
         orderby: vec![],
         row_limit: 100,
-        rollup: false,
+        rollup_groups: vec![],
     };
     let sql = build(spec.engine, &orders(), &cols, &metrics, &qs).unwrap();
     let r = run(&spec, &sql).await;
@@ -121,7 +121,7 @@ async fn rollup_chart_adds_grand_total_on_trino() {
         filters: vec![],
         orderby: vec![],
         row_limit: 100,
-        rollup: true,
+        rollup_groups: vec![vec!["orderpriority".into()]],
     };
     let sql = build(spec.engine, &orders(), &cols, &metrics, &qs).unwrap();
     let r = run(&spec, &sql).await;
