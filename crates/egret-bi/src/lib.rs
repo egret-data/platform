@@ -2,14 +2,16 @@
 
 mod dataset;
 mod error;
+mod expr;
 pub mod model;
 mod routes;
 mod saved;
 mod schema;
 mod typegen;
 
-pub use dataset::{Dataset, DatasetColumn, DatasetRepo, NewColumn, SourceSpec};
+pub use dataset::{Dataset, DatasetColumn, DatasetRepo, Metric, NewColumn, SourceSpec};
 pub use error::{BiApiError, BiError};
+pub use expr::{validate_expression, DescribedExpr};
 pub use routes::{dataset_router, sqllab_router, BiState};
 pub use saved::{SavedQuery, SavedQueryRepo};
 pub use schema::SchemaService;

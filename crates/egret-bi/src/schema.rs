@@ -121,10 +121,10 @@ fn val_to_string(v: serde_json::Value) -> String {
 }
 
 /// Quote a Trino identifier: wrap in double-quotes, escape internal quotes.
-fn quote_trino(ident: &str) -> String {
+pub(crate) fn quote_trino(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 /// Quote a MySQL/StarRocks identifier: backticks, escape internal backticks.
-fn quote_mysql(ident: &str) -> String {
+pub(crate) fn quote_mysql(ident: &str) -> String {
     format!("`{}`", ident.replace('`', "``"))
 }

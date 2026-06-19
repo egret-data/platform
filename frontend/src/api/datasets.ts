@@ -9,11 +9,16 @@ export interface DatasetSummary {
 }
 export interface DatasetColumn {
   column_name: string; data_type: string; type_generic: string; is_temporal: boolean; ordinal: number;
+  expression: string | null; verbose_name: string; description: string; is_calculated: boolean;
+}
+export interface DatasetMetric {
+  id: string; metric_name: string; expression: string; data_type: string; type_generic: string;
+  verbose_name: string; description: string; ordinal: number;
 }
 export interface DatasetDetail {
   id: string; name: string; description: string; database_id: string; kind: DatasetKind;
   catalog: string | null; schema: string | null; table: string | null; sql: string | null;
-  updated_at: string; columns: DatasetColumn[];
+  updated_at: string; columns: DatasetColumn[]; metrics: DatasetMetric[];
 }
 export type CreateSource =
   | { kind: "physical"; catalog?: string | null; schema: string; table: string }
@@ -69,4 +74,31 @@ export function useDeleteDataset(ws: string) {
     mutationFn: (id: string) => apiFetch(`/ws/${ws}/datasets/${id}`, { method: "DELETE" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: dsKeys.list(ws) }),
   });
+}
+
+function mutateDetail(ws: string, id: string) {
+  return (path: string, method: string, body?: unknown) => {
+    if (body !== undefined) {
+      return apiJson<DatasetDetail>(`/ws/${ws}/datasets/${id}${path}`, {
+        method,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+    return apiJson<DatasetDetail>(`/ws/${ws}/datasets/${id}${path}`, { method });
+  };
+}
+
+export function useDatasetMutations(ws: string, id: string) {
+  const qc = useQueryClient();
+  const inval = () => qc.invalidateQueries({ queryKey: dsKeys.detail(ws, id) });
+  const m = mutateDetail(ws, id);
+  return {
+    addMetric: useMutation({ mutationFn: (b: { metric_name: string; expression: string; verbose_name?: string; description?: string }) => m(`/metrics`, "POST", b), onSuccess: inval }),
+    updateMetric: useMutation({ mutationFn: (a: { metricId: string; body: { metric_name: string; expression: string; verbose_name?: string; description?: string } }) => m(`/metrics/${a.metricId}`, "PUT", a.body), onSuccess: inval }),
+    deleteMetric: useMutation({ mutationFn: (metricId: string) => m(`/metrics/${metricId}`, "DELETE"), onSuccess: inval }),
+    addColumn: useMutation({ mutationFn: (b: { column_name: string; expression: string; verbose_name?: string; description?: string }) => m(`/columns`, "POST", b), onSuccess: inval }),
+    updateColumn: useMutation({ mutationFn: (a: { name: string; body: { verbose_name?: string; description?: string; expression?: string } }) => m(`/columns/${encodeURIComponent(a.name)}`, "PUT", a.body), onSuccess: inval }),
+    deleteColumn: useMutation({ mutationFn: (name: string) => m(`/columns/${encodeURIComponent(name)}`, "DELETE"), onSuccess: inval }),
+  };
 }

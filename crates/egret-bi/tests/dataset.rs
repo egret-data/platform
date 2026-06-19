@@ -208,7 +208,7 @@ async fn update_name_and_description() {
 }
 
 #[tokio::test]
-async fn replace_columns_add_remove_retype() {
+async fn reconcile_add_remove_retype() {
     let Some((r, wid, db_id, _uid)) = setup().await else {
         eprintln!("skip");
         return;
@@ -231,7 +231,7 @@ async fn replace_columns_add_remove_retype() {
         .await
         .unwrap();
 
-    // Replace: drop `ts`, keep `id` but retype, add `amount`.
+    // Reconcile: drop `ts`, keep `id` but retype, add `amount`.
     let new_cols = vec![
         NewColumn {
             column_name: "id".to_string(),
@@ -246,7 +246,9 @@ async fn replace_columns_add_remove_retype() {
             is_temporal: false,
         },
     ];
-    r.replace_columns(ds.id, &new_cols).await.unwrap();
+    r.reconcile_physical_columns(ds.id, &new_cols)
+        .await
+        .unwrap();
 
     let cols = r.columns(ds.id).await.unwrap();
     assert_eq!(cols.len(), 2, "ts removed, amount added → 2 cols");
@@ -289,6 +291,147 @@ async fn delete_cascades_columns() {
         r.columns(ds.id).await.unwrap().is_empty(),
         "columns cascaded"
     );
+}
+
+#[tokio::test]
+async fn reconcile_preserves_calculated_columns_and_metadata() {
+    let Some((repo, wid, db_id, uid)) = setup().await else {
+        eprintln!("skip");
+        return;
+    };
+
+    let phys = vec![
+        egret_bi::NewColumn {
+            column_name: "id".into(),
+            data_type: "bigint".into(),
+            type_generic: "numeric".into(),
+            is_temporal: false,
+        },
+        egret_bi::NewColumn {
+            column_name: "ts".into(),
+            data_type: "timestamp".into(),
+            type_generic: "temporal".into(),
+            is_temporal: true,
+        },
+    ];
+    let ds = repo
+        .create(
+            wid,
+            db_id,
+            "sales",
+            "",
+            &egret_bi::SourceSpec::Physical {
+                catalog: Some("tpch".into()),
+                schema: "tiny".into(),
+                table: "orders".into(),
+            },
+            &phys,
+            Some(egret_core::UserId(uid)),
+        )
+        .await
+        .unwrap();
+
+    repo.update_column(ds.id, "id", Some("Order ID"), Some("the id"), None)
+        .await
+        .unwrap();
+    repo.add_calc_column(ds.id, "id_x2", "id * 2", "bigint", "numeric", false, "", "")
+        .await
+        .unwrap();
+
+    let fresh = vec![
+        egret_bi::NewColumn {
+            column_name: "id".into(),
+            data_type: "varchar".into(),
+            type_generic: "string".into(),
+            is_temporal: false,
+        },
+        egret_bi::NewColumn {
+            column_name: "region".into(),
+            data_type: "varchar".into(),
+            type_generic: "string".into(),
+            is_temporal: false,
+        },
+    ];
+    repo.reconcile_physical_columns(ds.id, &fresh)
+        .await
+        .unwrap();
+
+    let cols = repo.columns(ds.id).await.unwrap();
+    let by = |n: &str| cols.iter().find(|c| c.column_name == n).cloned();
+    assert!(by("ts").is_none(), "dropped physical column removed");
+    assert_eq!(
+        by("region").unwrap().type_generic,
+        "string",
+        "new physical added"
+    );
+    let id = by("id").unwrap();
+    assert_eq!(id.data_type, "varchar", "physical retyped");
+    assert_eq!(
+        id.verbose_name, "Order ID",
+        "user metadata preserved across refresh"
+    );
+    let calc = by("id_x2").expect("calculated column preserved");
+    assert_eq!(calc.expression.as_deref(), Some("id * 2"));
+    repo.delete(ds.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn metric_and_calc_column_crud() {
+    let Some((repo, wid, db_id, _uid)) = setup().await else {
+        eprintln!("skip");
+        return;
+    };
+
+    let ds = repo
+        .create(
+            wid,
+            db_id,
+            "ds",
+            "",
+            &egret_bi::SourceSpec::Virtual {
+                sql: "SELECT 1".into(),
+            },
+            &[egret_bi::NewColumn {
+                column_name: "n".into(),
+                data_type: "bigint".into(),
+                type_generic: "numeric".into(),
+                is_temporal: false,
+            }],
+            None,
+        )
+        .await
+        .unwrap();
+
+    repo.add_metric(ds.id, "total", "SUM(n)", "bigint", "numeric", "Total", "")
+        .await
+        .unwrap();
+    assert!(repo
+        .add_metric(ds.id, "total", "COUNT(*)", "bigint", "numeric", "", "")
+        .await
+        .is_err());
+    let ms = repo.metrics(ds.id).await.unwrap();
+    assert_eq!(ms.len(), 1);
+    repo.update_metric(ms[0].id, "total2", "COUNT(*)", "bigint", "numeric", "", "")
+        .await
+        .unwrap();
+    assert_eq!(repo.metric_dataset(ms[0].id).await.unwrap(), Some(ds.id));
+    repo.delete_metric(ms[0].id).await.unwrap();
+    assert!(repo.metrics(ds.id).await.unwrap().is_empty());
+
+    repo.add_calc_column(ds.id, "n2", "n*2", "bigint", "numeric", false, "", "")
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.column_is_calculated(ds.id, "n2").await.unwrap(),
+        Some(true)
+    );
+    assert_eq!(
+        repo.column_is_calculated(ds.id, "n").await.unwrap(),
+        Some(false)
+    );
+    assert!(repo.delete_calc_column(ds.id, "n").await.is_err());
+    repo.delete_calc_column(ds.id, "n2").await.unwrap();
+    repo.delete(ds.id).await.unwrap();
 }
 
 #[tokio::test]

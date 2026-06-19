@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::dataset::{Dataset, DatasetColumn};
+use crate::dataset::{Dataset, DatasetColumn, Metric};
 
 #[derive(Debug, Deserialize)]
 pub struct SaveQuery {
@@ -71,6 +71,10 @@ pub struct DatasetColumnDto {
     pub type_generic: String,
     pub is_temporal: bool,
     pub ordinal: i32,
+    pub expression: Option<String>,
+    pub verbose_name: String,
+    pub description: String,
+    pub is_calculated: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,6 +104,7 @@ pub struct DatasetDetailDto {
     pub sql: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub columns: Vec<DatasetColumnDto>,
+    pub metrics: Vec<MetricDto>,
 }
 
 pub fn dataset_kind(ds: &Dataset) -> &'static str {
@@ -107,6 +112,61 @@ pub fn dataset_kind(ds: &Dataset) -> &'static str {
         "virtual"
     } else {
         "physical"
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct MetricDto {
+    pub id: String,
+    pub metric_name: String,
+    pub expression: String,
+    pub data_type: String,
+    pub type_generic: String,
+    pub verbose_name: String,
+    pub description: String,
+    pub ordinal: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MetricBody {
+    pub metric_name: String,
+    pub expression: String,
+    #[serde(default)]
+    pub verbose_name: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddColumnBody {
+    pub column_name: String,
+    pub expression: String,
+    #[serde(default)]
+    pub verbose_name: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateColumnBody {
+    #[serde(default)]
+    pub verbose_name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub expression: Option<String>,
+}
+
+pub fn metric_dto(m: Metric) -> MetricDto {
+    MetricDto {
+        id: m.id.to_string(),
+        metric_name: m.metric_name,
+        expression: m.expression,
+        data_type: m.data_type,
+        type_generic: m.type_generic,
+        verbose_name: m.verbose_name,
+        description: m.description,
+        ordinal: m.ordinal,
     }
 }
 
@@ -125,7 +185,11 @@ pub fn summary_dto(ds: Dataset, column_count: i64) -> DatasetSummaryDto {
     }
 }
 
-pub fn detail_dto(ds: Dataset, columns: Vec<DatasetColumn>) -> DatasetDetailDto {
+pub fn detail_dto(
+    ds: Dataset,
+    columns: Vec<DatasetColumn>,
+    metrics: Vec<Metric>,
+) -> DatasetDetailDto {
     DatasetDetailDto {
         kind: dataset_kind(&ds),
         id: ds.id.to_string(),
@@ -139,14 +203,22 @@ pub fn detail_dto(ds: Dataset, columns: Vec<DatasetColumn>) -> DatasetDetailDto 
         updated_at: ds.updated_at,
         columns: columns
             .into_iter()
-            .map(|c| DatasetColumnDto {
-                column_name: c.column_name,
-                data_type: c.data_type,
-                type_generic: c.type_generic,
-                is_temporal: c.is_temporal,
-                ordinal: c.ordinal,
+            .map(|c| {
+                let is_calculated = c.expression.is_some();
+                DatasetColumnDto {
+                    is_calculated,
+                    column_name: c.column_name,
+                    data_type: c.data_type,
+                    type_generic: c.type_generic,
+                    is_temporal: c.is_temporal,
+                    ordinal: c.ordinal,
+                    expression: c.expression,
+                    verbose_name: c.verbose_name,
+                    description: c.description,
+                }
             })
             .collect(),
+        metrics: metrics.into_iter().map(metric_dto).collect(),
     }
 }
 
