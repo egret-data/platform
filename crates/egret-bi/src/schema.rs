@@ -128,3 +128,13 @@ pub(crate) fn quote_trino(ident: &str) -> String {
 pub(crate) fn quote_mysql(ident: &str) -> String {
     format!("`{}`", ident.replace('`', "``"))
 }
+
+/// Quote an identifier for the given engine.
+// used by chartquery::build in a later task
+#[allow(dead_code)]
+pub(crate) fn quote_ident(engine: Engine, ident: &str) -> String {
+    match engine {
+        Engine::Trino => quote_trino(ident),
+        Engine::StarRocks => quote_mysql(ident),
+    }
+}
