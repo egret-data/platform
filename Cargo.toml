@@ -67,3 +67,6 @@ testcontainers = "0.23"
 
 [profile.dev]
 opt-level = 0
+# Slim debuginfo so linking the workspace's many test binaries doesn't exhaust the
+# CI runner's memory (`ld ... signal 7 [Bus error]`). Keeps line-table backtraces.
+debug = "line-tables-only"
