@@ -1,7 +1,7 @@
 //! SQL Lab routes: saved queries + schema browse. Dataset CRUD routes.
 
 use axum::extract::{FromRef, Path, Query as AxQuery, State};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use egret_auth::session::SessionService;
 use egret_core::Error;
@@ -16,9 +16,10 @@ use uuid::Uuid;
 
 use crate::dataset::{NewColumn, SourceSpec};
 use crate::error::BiApiError;
+use crate::expr::validate_expression;
 use crate::model::{
-    CreateDataset, CreateSource, DatasetDetailDto, DatasetSummaryDto, SaveQuery, SavedQueryDto,
-    UpdateDataset,
+    AddColumnBody, CreateDataset, CreateSource, DatasetDetailDto, DatasetSummaryDto, MetricBody,
+    SaveQuery, SavedQueryDto, UpdateColumnBody, UpdateDataset,
 };
 use crate::saved::SavedQueryRepo;
 use crate::schema::SchemaService;
@@ -321,6 +322,16 @@ pub fn dataset_router() -> Router<BiState> {
             get(ds_get).put(ds_update).delete(ds_remove),
         )
         .route("/ws/{workspace}/datasets/{id}/refresh", post(ds_refresh))
+        .route("/ws/{workspace}/datasets/{id}/metrics", post(ds_add_metric))
+        .route(
+            "/ws/{workspace}/datasets/{id}/metrics/{metric_id}",
+            put(ds_update_metric).delete(ds_delete_metric),
+        )
+        .route("/ws/{workspace}/datasets/{id}/columns", post(ds_add_column))
+        .route(
+            "/ws/{workspace}/datasets/{id}/columns/{column_name}",
+            put(ds_update_column).delete(ds_delete_column),
+        )
 }
 
 /// Introspect a source's columns and classify them. Physical → schema service; virtual → describe().
@@ -397,8 +408,7 @@ async fn ds_create(
         )
         .await
         .map_err(BiApiError::from)?;
-    let cols = st.datasets.columns(ds.id).await.map_err(BiApiError::from)?;
-    Ok(Json(crate::model::detail_dto(ds, cols)))
+    Ok(Json(load_detail(&st, ds.id).await?))
 }
 
 async fn ds_list(
@@ -430,14 +440,7 @@ async fn ds_get(
         .require_workspace(&ctx, DS_READ)
         .await
         .map_err(BiApiError::from)?;
-    let ds = st
-        .datasets
-        .get(id)
-        .await
-        .map_err(BiApiError::from)?
-        .ok_or(Error::NotFound("dataset".into()))?;
-    let cols = st.datasets.columns(id).await.map_err(BiApiError::from)?;
-    Ok(Json(crate::model::detail_dto(ds, cols)))
+    Ok(Json(load_detail(&st, id).await?))
 }
 
 async fn ds_update(
@@ -451,13 +454,11 @@ async fn ds_update(
         .await
         .map_err(BiApiError::from)?;
     require_dataset_owner(&st, &ctx, id).await?;
-    let ds = st
-        .datasets
+    st.datasets
         .update(id, &b.name, &b.description, b.sql.as_deref())
         .await
         .map_err(BiApiError::from)?;
-    let cols = st.datasets.columns(id).await.map_err(BiApiError::from)?;
-    Ok(Json(crate::model::detail_dto(ds, cols)))
+    Ok(Json(load_detail(&st, id).await?))
 }
 
 async fn ds_refresh(
@@ -483,14 +484,7 @@ async fn ds_refresh(
         .reconcile_physical_columns(id, &new_columns)
         .await
         .map_err(BiApiError::from)?;
-    let ds = st
-        .datasets
-        .get(id)
-        .await
-        .map_err(BiApiError::from)?
-        .ok_or(Error::NotFound("dataset".into()))?;
-    let cols = st.datasets.columns(id).await.map_err(BiApiError::from)?;
-    Ok(Json(crate::model::detail_dto(ds, cols)))
+    Ok(Json(load_detail(&st, id).await?))
 }
 
 async fn ds_remove(
@@ -505,6 +499,18 @@ async fn ds_remove(
     require_dataset_owner(&st, &ctx, id).await?;
     st.datasets.delete(id).await.map_err(BiApiError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn load_detail(st: &BiState, id: Uuid) -> Result<DatasetDetailDto, BiApiError> {
+    let ds = st
+        .datasets
+        .get(id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("dataset".into()))?;
+    let cols = st.datasets.columns(id).await.map_err(BiApiError::from)?;
+    let metrics = st.datasets.metrics(id).await.map_err(BiApiError::from)?;
+    Ok(crate::model::detail_dto(ds, cols, metrics))
 }
 
 fn source_of(ds: &crate::dataset::Dataset) -> SourceSpec {
@@ -529,4 +535,198 @@ async fn require_dataset_owner(
     } else {
         Err(Error::Forbidden.into())
     }
+}
+
+async fn ds_add_metric(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+    Json(b): Json<MetricBody>,
+) -> Result<Json<DatasetDetailDto>, BiApiError> {
+    require_dataset_owner(&st, &ctx, id).await?;
+    let ds = st
+        .datasets
+        .get(id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("dataset".into()))?;
+    let spec = conn_spec_perm(&st, &ctx, ds.database_id, DS_MANAGE).await?;
+    let d = validate_expression(&spec, &source_of(&ds), &b.expression)
+        .await
+        .map_err(BiApiError::from)?;
+    st.datasets
+        .add_metric(
+            id,
+            &b.metric_name,
+            &b.expression,
+            &d.data_type,
+            &d.type_generic,
+            &b.verbose_name,
+            &b.description,
+        )
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(load_detail(&st, id).await?))
+}
+
+async fn ds_update_metric(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id, metric_id)): Path<(String, Uuid, Uuid)>,
+    Json(b): Json<MetricBody>,
+) -> Result<Json<DatasetDetailDto>, BiApiError> {
+    require_dataset_owner(&st, &ctx, id).await?;
+    let ds = st
+        .datasets
+        .get(id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("dataset".into()))?;
+    let spec = conn_spec_perm(&st, &ctx, ds.database_id, DS_MANAGE).await?;
+    let d = validate_expression(&spec, &source_of(&ds), &b.expression)
+        .await
+        .map_err(BiApiError::from)?;
+    st.datasets
+        .update_metric(
+            metric_id,
+            &b.metric_name,
+            &b.expression,
+            &d.data_type,
+            &d.type_generic,
+            &b.verbose_name,
+            &b.description,
+        )
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(load_detail(&st, id).await?))
+}
+
+async fn ds_delete_metric(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id, metric_id)): Path<(String, Uuid, Uuid)>,
+) -> Result<Json<DatasetDetailDto>, BiApiError> {
+    require_dataset_owner(&st, &ctx, id).await?;
+    st.authz
+        .require_workspace(&ctx, DS_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    st.datasets
+        .delete_metric(metric_id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(load_detail(&st, id).await?))
+}
+
+async fn ds_add_column(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+    Json(b): Json<AddColumnBody>,
+) -> Result<Json<DatasetDetailDto>, BiApiError> {
+    require_dataset_owner(&st, &ctx, id).await?;
+    let ds = st
+        .datasets
+        .get(id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("dataset".into()))?;
+    let spec = conn_spec_perm(&st, &ctx, ds.database_id, DS_MANAGE).await?;
+    let d = validate_expression(&spec, &source_of(&ds), &b.expression)
+        .await
+        .map_err(BiApiError::from)?;
+    st.datasets
+        .add_calc_column(
+            id,
+            &b.column_name,
+            &b.expression,
+            &d.data_type,
+            &d.type_generic,
+            d.type_generic == "temporal",
+            &b.verbose_name,
+            &b.description,
+        )
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(load_detail(&st, id).await?))
+}
+
+async fn ds_update_column(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id, column_name)): Path<(String, Uuid, String)>,
+    Json(b): Json<UpdateColumnBody>,
+) -> Result<Json<DatasetDetailDto>, BiApiError> {
+    require_dataset_owner(&st, &ctx, id).await?;
+    let expr_update = if let Some(expr) = b.expression.as_deref() {
+        match st
+            .datasets
+            .column_is_calculated(id, &column_name)
+            .await
+            .map_err(BiApiError::from)?
+        {
+            Some(true) => {
+                let ds = st
+                    .datasets
+                    .get(id)
+                    .await
+                    .map_err(BiApiError::from)?
+                    .ok_or(Error::NotFound("dataset".into()))?;
+                let spec = conn_spec_perm(&st, &ctx, ds.database_id, DS_MANAGE).await?;
+                let d = validate_expression(&spec, &source_of(&ds), expr)
+                    .await
+                    .map_err(BiApiError::from)?;
+                Some((
+                    expr.to_string(),
+                    d.data_type,
+                    d.type_generic.clone(),
+                    d.type_generic == "temporal",
+                ))
+            }
+            Some(false) => {
+                return Err(crate::BiError::BadRequest(
+                    "cannot set an expression on a physical column".into(),
+                )
+                .into())
+            }
+            None => return Err(Error::NotFound("column".into()).into()),
+        }
+    } else {
+        st.authz
+            .require_workspace(&ctx, DS_MANAGE)
+            .await
+            .map_err(BiApiError::from)?;
+        None
+    };
+    let eu = expr_update
+        .as_ref()
+        .map(|(e, dt, tg, t)| (e.as_str(), dt.as_str(), tg.as_str(), *t));
+    st.datasets
+        .update_column(
+            id,
+            &column_name,
+            b.verbose_name.as_deref(),
+            b.description.as_deref(),
+            eu,
+        )
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(load_detail(&st, id).await?))
+}
+
+async fn ds_delete_column(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id, column_name)): Path<(String, Uuid, String)>,
+) -> Result<Json<DatasetDetailDto>, BiApiError> {
+    require_dataset_owner(&st, &ctx, id).await?;
+    st.authz
+        .require_workspace(&ctx, DS_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    st.datasets
+        .delete_calc_column(id, &column_name)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(load_detail(&st, id).await?))
 }
