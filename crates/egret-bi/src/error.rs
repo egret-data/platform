@@ -12,6 +12,8 @@ pub enum BiError {
     Forbidden,
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("engine: {0}")]
     Engine(String),
     #[error(transparent)]
@@ -74,6 +76,7 @@ impl IntoResponse for BiApiError {
                 BiError::NotFound(_) => (StatusCode::NOT_FOUND, e.to_string()),
                 BiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
                 BiError::BadRequest(_) => (StatusCode::BAD_REQUEST, e.to_string()),
+                BiError::Conflict(_) => (StatusCode::CONFLICT, e.to_string()),
                 BiError::Engine(_) => (StatusCode::BAD_GATEWAY, e.to_string()),
                 BiError::Db(_) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
