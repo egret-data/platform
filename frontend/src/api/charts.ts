@@ -20,7 +20,7 @@ export interface QuerySpec {
   filters: ChartFilter[];
   orderby: ChartOrderBy[];
   row_limit: number;
-  rollup: boolean;
+  rollup_groups: string[][];
 }
 
 export interface ChartParams {
@@ -28,7 +28,10 @@ export interface ChartParams {
   // pivot-only layout (ignored for table viz)
   rows?: string[];
   cols?: string[];
-  metric?: string;
+  metrics?: string[];
+  showRowTotals?: boolean;
+  showColTotals?: boolean;
+  condense?: boolean;
 }
 
 export interface Chart {
