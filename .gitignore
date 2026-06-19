@@ -35,3 +35,6 @@ dist/
 egret-*.png
 egret.toml
 deploy/trino/catalog/*.properties
+
+# Claude Code local scratch / worktrees
+.claude/
