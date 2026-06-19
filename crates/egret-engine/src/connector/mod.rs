@@ -1,6 +1,7 @@
 //! Connector trait + per-engine construction + value mapping.
 
 use async_trait::async_trait;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use egret_database::model::{ConnOptions, Database, Engine};
@@ -49,6 +50,17 @@ pub trait Connector: Send + Sync {
         limits: &Limits,
         cancel: CancellationToken,
     ) -> Result<QueryResult, EngineError>;
+
+    /// Return the typed columns of an arbitrary `SELECT` without fetching rows.
+    /// Default: wrap the query as `LIMIT 0` and reuse `execute`'s column metadata —
+    /// correct for engines whose `execute` already yields clean type names (Trino).
+    /// Engines whose `execute` emits protocol-level type tags override this.
+    async fn describe(&self, sql: &str, timeout: Duration) -> Result<Vec<crate::model::Column>, EngineError> {
+        let wrapped = format!("SELECT * FROM (\n{sql}\n) AS _egret_ds LIMIT 0");
+        let limits = Limits { max_rows: 0, timeout };
+        let r = self.execute(&wrapped, &limits, CancellationToken::new()).await?;
+        Ok(r.columns)
+    }
 }
 
 /// Construct the right connector for a spec.
