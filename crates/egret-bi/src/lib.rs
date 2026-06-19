@@ -10,6 +10,9 @@ mod saved;
 mod schema;
 mod typegen;
 
+pub use chartquery::{
+    build as build_chart_query, Filter, FilterOp, OrderBy, QuerySpec, MAX_CHART_ROWS,
+};
 pub use dataset::{Dataset, DatasetColumn, DatasetRepo, Metric, NewColumn, SourceSpec};
 pub use error::{BiApiError, BiError};
 pub use expr::{validate_expression, DescribedExpr};

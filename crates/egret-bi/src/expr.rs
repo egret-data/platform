@@ -75,6 +75,7 @@ pub(crate) fn source_ref_for(engine: Engine, source: &SourceSpec) -> String {
                     quote_trino(schema),
                     quote_trino(table)
                 ),
+                // No catalog: qualify with schema.table (a quoted empty catalog is invalid SQL).
                 _ => format!("{}.{}", quote_trino(schema), quote_trino(table)),
             },
             Engine::StarRocks => format!("{}.{}", quote_mysql(schema), quote_mysql(table)),
