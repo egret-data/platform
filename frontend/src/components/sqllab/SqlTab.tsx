@@ -14,6 +14,7 @@ import { SqlEditor } from "@/components/sqllab/SqlEditor";
 import { ResultsGrid } from "@/components/sqllab/ResultsGrid";
 import { DataPanel } from "@/components/sqllab/DataPanel";
 import { SaveQueryDialog } from "@/components/sqllab/SaveQueryDialog";
+import { CreateDatasetDialog } from "@/components/dataset/CreateDatasetDialog";
 import type { SqlTabState } from "@/hooks/useTabs";
 
 const LIMITS = [10, 100, 1000, 10000, 100000];
@@ -27,6 +28,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved }: {
   const [page, setPage] = useState(0);
   const [words, setWords] = useState<string[]>([]);
   const [saveOpen, setSaveOpen] = useState(false);
+  const [datasetOpen, setDatasetOpen] = useState(false);
   const [panelCollapsed, setPanelCollapsed] = useState(false);
 
   const submit = useSubmitQuery(ws);
@@ -62,6 +64,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved }: {
               <SelectContent>{LIMITS.map((l) => <SelectItem key={l} value={String(l)}>{l.toLocaleString()} rows</SelectItem>)}</SelectContent>
             </Select>
             <Button size="sm" variant="outline" onClick={() => setSaveOpen(true)}>Save</Button>
+            <Button size="sm" variant="outline" onClick={() => setDatasetOpen(true)}>Save as dataset</Button>
             {running && <span className="text-sm text-muted-foreground">running…</span>}
             {status.data?.status === "failed" && <span className="text-sm text-red-600">{status.data.error}</span>}
           </div>
@@ -88,6 +91,17 @@ export function SqlTab({ ws, tab, patch, onOpenSaved }: {
       onSave={async (name, description) => { await save.mutateAsync({ database_id: tab.dbId, name, sql: tab.sql, description }); toast.success("Saved"); }} />
   );
 
+  const datasetDialog = (
+    <CreateDatasetDialog
+      ws={ws}
+      open={datasetOpen}
+      onOpenChange={setDatasetOpen}
+      initialSql={tab.sql}
+      initialDbId={tab.dbId}
+      initialTab="sql"
+    />
+  );
+
   if (panelCollapsed) {
     return (
       <div className="flex h-full">
@@ -98,6 +112,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved }: {
         </div>
         <div className="min-w-0 flex-1">{main}</div>
         {saveDialog}
+        {datasetDialog}
       </div>
     );
   }
@@ -110,6 +125,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved }: {
       <PanelResizeHandle className="w-1.5 bg-border transition-colors hover:bg-primary/60 data-[resize-handle-state=drag]:bg-primary" />
       <Panel defaultSize={78}>{main}</Panel>
       {saveDialog}
+      {datasetDialog}
     </PanelGroup>
   );
 }
