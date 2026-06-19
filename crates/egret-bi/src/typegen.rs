@@ -22,6 +22,7 @@ impl GenericType {
             GenericType::Boolean => "boolean",
         }
     }
+
     /// Whether this column is a time column (drives time-series chart axes).
     pub fn is_temporal(self) -> bool {
         matches!(self, GenericType::Temporal)
@@ -63,7 +64,7 @@ fn classify_starrocks(head: &str) -> GenericType {
     let first = head.split_whitespace().next().unwrap_or("");
     match first {
         "tinyint" | "smallint" | "int" | "bigint" | "largeint" | "float" | "double"
-        | "decimal" | "decimalv3" => GenericType::Numeric,
+        | "decimal" | "decimalv2" | "decimalv3" => GenericType::Numeric,
         "date" | "datetime" | "time" => GenericType::Temporal,
         "boolean" => GenericType::Boolean,
         _ => GenericType::String,
@@ -102,6 +103,8 @@ mod tests {
     fn starrocks_variants() {
         assert_eq!(generic_type(Engine::StarRocks, "int"), GenericType::Numeric);
         assert_eq!(generic_type(Engine::StarRocks, "largeint"), GenericType::Numeric);
+        assert_eq!(generic_type(Engine::StarRocks, "decimalv2(10,2)"), GenericType::Numeric);
+        assert_eq!(generic_type(Engine::StarRocks, "decimalv3"), GenericType::Numeric);
         assert_eq!(generic_type(Engine::StarRocks, "DATETIME"), GenericType::Temporal);
         assert_eq!(generic_type(Engine::StarRocks, "varchar(20)"), GenericType::String);
         assert_eq!(generic_type(Engine::StarRocks, "boolean"), GenericType::Boolean);
