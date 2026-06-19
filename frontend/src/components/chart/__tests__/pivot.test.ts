@@ -19,13 +19,16 @@ describe("buildPivot", () => {
     expect(pivot.colKeys).toEqual([["SMB"], ["ENT"]]);
   });
   it("places leaf cells by (rowKey, colKey)", () => {
-    const eu = pivot.rows.find((r) => r.key.join("|") === "EU" && !r.isSubtotal)!;
+    const eu = pivot.rows.find((r) => r.key.join("|") === "EU")!;
     expect(eu.cells["SMB"]).toBe(10);
     expect(eu.cells["ENT"]).toBe(20);
   });
-  it("marks subtotal + grand-total rows from grouping markers", () => {
-    expect(pivot.rows.some((r) => r.isSubtotal && r.key[0] === "EU")).toBe(true);
+  it("merges the row total onto the row and exposes the grand total", () => {
+    const eu = pivot.rows.find((r) => r.key.join("|") === "EU")!;
+    expect(eu.cells["__total"]).toBe(30);   // EU subtotal across segments (10 + 20)
     expect(pivot.grandTotal).not.toBeNull();
+    // each row-key appears exactly once (no doubled rows)
+    expect(pivot.rows.filter((r) => r.key[0] === "EU").length).toBe(1);
   });
 });
 
@@ -40,7 +43,7 @@ describe("buildPivot null column value", () => {
     const p = buildPivot(columns, rows, ["region"], ["segment"], "revenue");
     // the null-valued column key is represented with the "∅" sentinel and its cell is reachable
     expect(p.colKeys).toEqual([["∅"]]);
-    const eu = p.rows.find((r) => r.key.join("|") === "EU" && !r.isSubtotal)!;
+    const eu = p.rows.find((r) => r.key.join("|") === "EU")!;
     expect(eu.cells["∅"]).toBe(7);
   });
 });

@@ -56,8 +56,15 @@ export function buildPivot(
     const ck = colDimIdx.map((i) => r[i] as string | null);
 
     if (colRolled) {
-      // subtotal row for this rowKey
-      out.push({ key: rk.map((v) => String(v ?? "")), cells: { __total: value }, isSubtotal: true });
+      // row total across columns → merge into this row-key's PivotRow as the "__total" cell
+      const rkStr = key(rk);
+      let pr = byRowKey.get(rkStr);
+      if (!pr) {
+        pr = { key: rk.map((v) => String(v ?? "")), cells: {}, isSubtotal: false };
+        byRowKey.set(rkStr, pr);
+        out.push(pr);
+      }
+      pr.cells["__total"] = value;
       continue;
     }
     // leaf cell
@@ -102,11 +109,11 @@ export function PivotTable(props: {
       </thead>
       <tbody>
         {p.rows.map((r, i) => (
-          <tr key={i} className={r.isSubtotal ? "border-t bg-muted/40 font-medium" : "border-t"}>
+          <tr key={i} className="border-t">
             {r.key.map((v, j) => <td key={j} className="py-1 pr-3">{v}</td>)}
             {p.colKeys.map((k) => (
               <td key={colKeyStr(k)} className="px-3 text-right tabular-nums">
-                {r.isSubtotal ? "" : fmt(r.cells[colKeyStr(k)])}
+                {fmt(r.cells[colKeyStr(k)])}
               </td>
             ))}
             <td className="px-3 text-right font-semibold tabular-nums">{fmt(r.cells["__total"])}</td>
