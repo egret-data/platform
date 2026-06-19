@@ -81,6 +81,7 @@ export interface ColLeaf {
 export interface TopCell {
   label: string;
   colSpan: number;
+  rowSpan?: number;
 }
 export interface RowHeaderCell {
   label: string;
@@ -159,21 +160,34 @@ export function buildPivot(input: PivotInput): Pivot {
     for (const metric of input.metrics) colLeaves.push({ colPath: [], metric, isTotal: true });
   }
 
-  // ----- top header levels -----
+  // ----- top header levels (merge consecutive same-prefix column cells) -----
+  const C = input.colDims.length;
+  const nMetric = input.metrics.length;
   const topHeader: TopCell[][] = [];
-  for (let d = 0; d < input.colDims.length; d++) {
+  for (let d = 0; d < C; d++) {
     const level: TopCell[] = [];
-    for (const cp of effectiveColPaths) {
-      level.push({ label: String(cp[d] ?? ""), colSpan: input.metrics.length });
+    let g = 0;
+    while (g < effectiveColPaths.length) {
+      const pref = JSON.stringify(effectiveColPaths[g].slice(0, d + 1));
+      let count = 0;
+      while (
+        g + count < effectiveColPaths.length &&
+        JSON.stringify(effectiveColPaths[g + count].slice(0, d + 1)) === pref
+      ) {
+        count++;
+      }
+      level.push({ label: String(effectiveColPaths[g][d] ?? ""), colSpan: count * nMetric });
+      g += count;
     }
-    if (input.showRowTotals) level.push({ label: "Total", colSpan: input.metrics.length });
+    // the right-hand "Total" group spans all column-dim header levels — emit once on level 0.
+    if (input.showRowTotals && d === 0) {
+      level.push({ label: "Total", colSpan: nMetric, rowSpan: C });
+    }
     topHeader.push(level);
   }
-  if (input.metrics.length > 1) {
-    const level: TopCell[] = [];
-    const groups = effectiveColPaths.length + (input.showRowTotals ? 1 : 0);
-    for (let g = 0; g < groups; g++) for (const metric of input.metrics) level.push({ label: metric, colSpan: 1 });
-    topHeader.push(level);
+  // metric sub-header (only when more than one metric) — one cell per colLeaf, aligned to values.
+  if (nMetric > 1) {
+    topHeader.push(colLeaves.map((cl) => ({ label: cl.metric, colSpan: 1 })));
   }
 
   // ----- body rows (depth-first over row tree, inserting subtotals) -----
@@ -247,6 +261,8 @@ export function buildPivot(input: PivotInput): Pivot {
       values: rowValues([]),
     });
   }
+
+  for (const br of bodyRows) br.headerCells.sort((a, b) => a.depth - b.depth);
 
   return { rowDimNames: input.rowDims, topHeader, colLeaves, bodyRows };
 }

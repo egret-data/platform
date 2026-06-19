@@ -111,3 +111,57 @@ describe("buildPivot nested rows (2 row × 1 col)", () => {
     expect(region.rowSpan).toBe(2);
   });
 });
+
+describe("buildPivot 3 row dims — header cell depth order", () => {
+  // region → nation → city, 1 col dim seg. Markers __grp_0..3.
+  const p = buildPivot({
+    columns: ["region", "nation", "city", "seg", "revenue", "__grp_0", "__grp_1", "__grp_2", "__grp_3"],
+    rows: [
+      ["EU", "DE", "BER", "SMB", 3, 0, 0, 0, 0],
+      ["EU", "DE", "MUC", "SMB", 4, 0, 0, 0, 0],
+      // DE city subtotals + region/nation rollups (only what the renderer needs for structure)
+      ["EU", "DE", "BER", null, 3, 0, 0, 0, 1],
+      ["EU", "DE", "MUC", null, 4, 0, 0, 0, 1],
+      ["EU", "DE", null, "SMB", 7, 0, 0, 1, 0],
+      ["EU", "DE", null, null, 7, 0, 0, 1, 1],
+      ["EU", null, null, "SMB", 7, 0, 1, 1, 0],
+      ["EU", null, null, null, 7, 0, 1, 1, 1],
+      [null, null, null, "SMB", 7, 1, 1, 1, 0],
+      [null, null, null, null, 7, 1, 1, 1, 1],
+    ],
+    rowDims: ["region", "nation", "city"], colDims: ["seg"], metrics: ["revenue"],
+    showRowTotals: true, showColTotals: true, condense: true, collapsed: new Set(),
+  });
+
+  it("orders the first leaf row's header cells by depth (region, nation, city)", () => {
+    const depths = p.bodyRows[0].headerCells.map((c) => c.depth);
+    expect(depths).toEqual([...depths].sort((a, b) => a - b)); // ascending
+    expect(depths[0]).toBe(0); // region first
+  });
+});
+
+describe("buildPivot 2 col dims — merged outer header", () => {
+  const p = buildPivot({
+    columns: ["region", "ccat", "seg", "revenue", "__grp_0", "__grp_1", "__grp_2"],
+    rows: [
+      ["EU", "A", "SMB", 1, 0, 0, 0],
+      ["EU", "A", "ENT", 2, 0, 0, 0],
+      ["EU", "B", "SMB", 3, 0, 0, 0],
+      ["EU", null, null, 6, 0, 1, 1],
+      [null, null, null, 6, 1, 1, 1],
+    ],
+    rowDims: ["region"], colDims: ["ccat", "seg"], metrics: ["revenue"],
+    showRowTotals: false, showColTotals: true, condense: true, collapsed: new Set(),
+  });
+
+  it("merges the outer (ccat) header: A spans its two seg leaves", () => {
+    const level0 = p.topHeader[0];
+    const a = level0.find((c) => c.label === "A")!;
+    expect(a.colSpan).toBe(2); // A/SMB + A/ENT, nMetric=1
+    const b = level0.find((c) => c.label === "B")!;
+    expect(b.colSpan).toBe(1);
+  });
+  it("has a second header level for the inner (seg) dim", () => {
+    expect(p.topHeader.length).toBe(2);
+  });
+});
