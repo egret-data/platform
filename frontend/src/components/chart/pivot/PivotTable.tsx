@@ -12,7 +12,7 @@ export function PivotTable({
   metricTypes?: Record<string, string>;
 }) {
   const p = buildPivot(input);
-  const condRows = p.bodyRows.map((br) => br.values);
+  const condRows = p.bodyRows.filter((br) => br.kind === "leaf").map((br) => br.values);
   const condColIndex: Record<string, number> = {};
   p.colLeaves.forEach((cl, i) => { if (!(cl.metric in condColIndex)) condColIndex[cl.metric] = i; });
   const cond = buildConditional(condRows, condColIndex, conditionalFormatting, { isPivot: true });
