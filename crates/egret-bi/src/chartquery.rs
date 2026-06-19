@@ -67,7 +67,11 @@ pub enum FilterOp {
 pub(crate) fn sql_literal(v: &serde_json::Value, type_generic: &str) -> Result<String, BiError> {
     match type_generic {
         "numeric" => {
-            if let Some(n) = v.as_f64() {
+            if let Some(n) = v.as_i64() {
+                Ok(n.to_string())
+            } else if let Some(n) = v.as_u64() {
+                Ok(n.to_string())
+            } else if let Some(n) = v.as_f64() {
                 Ok(n.to_string())
             } else if let Some(s) = v.as_str() {
                 s.parse::<f64>()
@@ -204,6 +208,11 @@ pub fn build(
     let mut select: Vec<String> = Vec::new();
 
     if aggregate {
+        if spec.rollup && spec.dimensions.is_empty() {
+            return Err(BiError::BadRequest(
+                "rollup requires at least one dimension".into(),
+            ));
+        }
         let mut dim_exprs: Vec<String> = Vec::new();
         for name in &spec.dimensions {
             let c = find_column(columns, name)
@@ -219,6 +228,7 @@ pub fn build(
         }
         if spec.rollup {
             for (i, e) in dim_exprs.iter().enumerate() {
+                // {i} is a usize counter from enumerate(), never user data — safe unquoted.
                 select.push(format!("GROUPING({e}) AS __grp_{i}"));
             }
         }
@@ -472,5 +482,29 @@ mod tests {
             rollup: false,
         };
         assert!(build(Engine::Trino, &phys(), &cols, &[], &spec).is_err());
+    }
+
+    #[test]
+    fn build_aggregate_starrocks_uses_backticks() {
+        let cols = vec![col("region", "string", None)];
+        let metrics = vec![metric("revenue", "SUM(price)")];
+        let src = SourceSpec::Physical {
+            catalog: None,
+            schema: "s".into(),
+            table: "t".into(),
+        };
+        let spec = QuerySpec {
+            metrics: vec!["revenue".into()],
+            dimensions: vec!["region".into()],
+            columns: vec![],
+            filters: vec![],
+            orderby: vec![],
+            row_limit: 100,
+            rollup: false,
+        };
+        let sql = build(Engine::StarRocks, &src, &cols, &metrics, &spec).unwrap();
+        assert!(sql.contains("`region` AS `region`"), "{sql}");
+        assert!(sql.contains("GROUP BY `region`"), "{sql}");
+        assert!(sql.contains("FROM `s`.`t`"), "{sql}");
     }
 }
