@@ -26,8 +26,8 @@ pub struct Chart {
 const COLS: &str =
     "id, workspace_id, dataset_id, name, description, viz_type, params, created_by, updated_at";
 
-/// Map a unique-violation on (workspace_id, name) to a Conflict; pass everything else through.
-fn map_create_err(e: sqlx::Error) -> BiError {
+/// Map a unique-violation (on insert or update) to a Conflict; pass everything else through.
+fn map_conflict_err(e: sqlx::Error) -> BiError {
     if let sqlx::Error::Database(ref dbe) = e {
         if dbe.is_unique_violation() {
             return BiError::Conflict("a chart with that name already exists".into());
@@ -66,7 +66,7 @@ impl ChartRepo {
             .bind(created_by)
             .fetch_one(&self.db.pool)
             .await
-            .map_err(map_create_err)
+            .map_err(map_conflict_err)
     }
 
     pub async fn get(&self, id: Uuid) -> Result<Option<Chart>, BiError> {
@@ -104,7 +104,7 @@ impl ChartRepo {
         .bind(params)
         .execute(&self.db.pool)
         .await
-        .map_err(map_create_err)?;
+        .map_err(map_conflict_err)?;
         Ok(())
     }
 

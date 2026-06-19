@@ -756,11 +756,11 @@ async fn ds_delete_column(
 pub fn chart_router() -> Router<BiState> {
     Router::new()
         .route("/ws/{workspace}/charts", post(ch_create).get(ch_list))
+        .route("/ws/{workspace}/charts/data", post(ch_data))
         .route(
             "/ws/{workspace}/charts/{id}",
             get(ch_get).put(ch_update).delete(ch_remove),
         )
-        .route("/ws/{workspace}/charts/data", post(ch_data))
 }
 
 async fn require_chart_in_ws(

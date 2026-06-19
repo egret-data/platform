@@ -224,7 +224,7 @@ pub fn detail_dto(
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub struct ChartDto {
     pub id: String,
     pub dataset_id: String,
@@ -249,7 +249,7 @@ pub fn chart_dto(c: Chart) -> ChartDto {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 pub struct CreateChart {
     pub dataset_id: uuid::Uuid,
     pub name: String,
@@ -259,7 +259,7 @@ pub struct CreateChart {
     pub params: serde_json::Value,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 pub struct UpdateChart {
     pub name: String,
     #[serde(default)]
@@ -270,13 +270,13 @@ pub struct UpdateChart {
 
 /// Build-only data request: produce SQL for a dataset + QuerySpec; the client submits it
 /// to the existing /queries endpoint and polls.
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 pub struct ChartDataBody {
     pub dataset_id: uuid::Uuid,
     pub query_spec: QuerySpec,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub struct ChartDataResponse {
     pub sql: String,
     pub database_id: String,
