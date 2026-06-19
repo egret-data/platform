@@ -17,6 +17,7 @@ function LoginRoute() {
 }
 import SqlLab from "@/routes/explore/SqlLab";
 import Datasets from "@/routes/explore/Datasets";
+import DatasetDetail from "@/routes/explore/DatasetDetail";
 import Charts from "@/routes/explore/Charts";
 import Dashboards from "@/routes/explore/Dashboards";
 import Notebooks from "@/routes/explore/Notebooks";
@@ -45,6 +46,7 @@ function ExploreRoutes() {
           <Route index element={<Navigate to="sql-lab" replace />} />
           <Route path="sql-lab" element={<SqlLab />} />
           <Route path="datasets" element={<Datasets />} />
+          <Route path="datasets/:id" element={<DatasetDetail />} />
           <Route path="charts" element={<Charts />} />
           <Route path="dashboards" element={<Dashboards />} />
           <Route path="notebooks" element={<Notebooks />} />

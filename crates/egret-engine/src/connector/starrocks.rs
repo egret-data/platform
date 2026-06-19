@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use mysql_async::prelude::Queryable;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use super::{ConnSpec, Connector};
@@ -103,6 +104,36 @@ impl Connector for StarRocksConnector {
             truncated,
         })
     }
+
+    async fn describe(&self, sql: &str, timeout: Duration) -> Result<Vec<Column>, EngineError> {
+        let wrapped = format!("SELECT * FROM (\n{sql}\n) AS _egret_ds LIMIT 0");
+        let opts = self.opts.clone();
+        // Bound the whole connect+query under `timeout` — unlike `execute`, `describe`
+        // is called directly (no JobManager outer timeout), so a hung query would block.
+        let fut = async move {
+            let mut conn = mysql_async::Conn::new(opts)
+                .await
+                .map_err(|e| EngineError::Connect(e.to_string()))?;
+            let result = conn
+                .query_iter(wrapped)
+                .await
+                .map_err(|e| EngineError::Engine(e.to_string()))?;
+            let columns: Vec<Column> = result
+                .columns_ref()
+                .iter()
+                .map(|c| Column {
+                    name: c.name_str().to_string(),
+                    ty: coltype_name(c.column_type()).to_string(),
+                })
+                .collect();
+            drop(result);
+            let _ = conn.disconnect().await;
+            Ok::<Vec<Column>, EngineError>(columns)
+        };
+        tokio::time::timeout(timeout, fut)
+            .await
+            .map_err(|_| EngineError::Timeout)?
+    }
 }
 
 fn row_to_json(
@@ -154,5 +185,30 @@ fn bytes_to_json(b: &[u8], ty: Option<mysql_async::consts::ColumnType>) -> serde
         // DECIMAL/NEWDECIMAL, VARCHAR, STRING, dates, blobs, and everything else:
         // keep as string to preserve exact representation.
         _ => serde_json::Value::String(s.to_owned()),
+    }
+}
+
+/// Map a MySQL/StarRocks protocol column type to a canonical lowercase SQL name,
+/// matching the vocabulary `DESCRIBE` returns so `typegen` classifies both the
+/// physical (DESCRIBE) and virtual (describe) paths identically.
+fn coltype_name(ty: mysql_async::consts::ColumnType) -> &'static str {
+    use mysql_async::consts::ColumnType::*;
+    match ty {
+        MYSQL_TYPE_TINY => "tinyint",
+        MYSQL_TYPE_SHORT => "smallint",
+        MYSQL_TYPE_LONG | MYSQL_TYPE_INT24 | MYSQL_TYPE_YEAR => "int",
+        MYSQL_TYPE_LONGLONG => "bigint",
+        MYSQL_TYPE_FLOAT => "float",
+        MYSQL_TYPE_DOUBLE => "double",
+        MYSQL_TYPE_DECIMAL | MYSQL_TYPE_NEWDECIMAL => "decimal",
+        MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE => "date",
+        MYSQL_TYPE_DATETIME
+        | MYSQL_TYPE_DATETIME2
+        | MYSQL_TYPE_TIMESTAMP
+        | MYSQL_TYPE_TIMESTAMP2 => "datetime",
+        MYSQL_TYPE_TIME | MYSQL_TYPE_TIME2 => "time",
+        MYSQL_TYPE_JSON => "json",
+        MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING | MYSQL_TYPE_STRING => "varchar",
+        _ => "string",
     }
 }
