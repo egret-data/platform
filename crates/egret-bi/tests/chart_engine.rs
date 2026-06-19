@@ -75,7 +75,7 @@ async fn run(spec: &ConnSpec, sql: &str) -> egret_engine::model::QueryResult {
 #[tokio::test]
 async fn table_chart_runs_on_trino() {
     let Some(spec) = trino_spec() else {
-        eprintln!("skip: no Trino");
+        eprintln!("skip: EGRET_TEST_TRINO_URL not set");
         return;
     };
     let cols = vec![dim("orderpriority")];
@@ -91,14 +91,25 @@ async fn table_chart_runs_on_trino() {
     };
     let sql = build(spec.engine, &orders(), &cols, &metrics, &qs).unwrap();
     let r = run(&spec, &sql).await;
-    // tpch orders has 5 distinct order priorities
-    assert!(!r.rows.is_empty(), "expected rows, sql=\n{sql}");
+    assert!(!r.truncated, "unexpected truncation");
+    assert!(
+        r.columns.iter().any(|c| c.name == "orderpriority"),
+        "missing orderpriority column, cols={:?}",
+        r.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
+    assert!(
+        r.columns.iter().any(|c| c.name == "revenue"),
+        "missing revenue metric column, cols={:?}",
+        r.columns.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
+    // tpch tiny.orders has exactly 5 distinct order priorities.
+    assert_eq!(r.rows.len(), 5, "expected 5 priority rows, sql=\n{sql}");
 }
 
 #[tokio::test]
 async fn rollup_chart_adds_grand_total_on_trino() {
     let Some(spec) = trino_spec() else {
-        eprintln!("skip: no Trino");
+        eprintln!("skip: EGRET_TEST_TRINO_URL not set");
         return;
     };
     let cols = vec![dim("orderpriority")];
@@ -114,6 +125,7 @@ async fn rollup_chart_adds_grand_total_on_trino() {
     };
     let sql = build(spec.engine, &orders(), &cols, &metrics, &qs).unwrap();
     let r = run(&spec, &sql).await;
+    assert!(!r.truncated, "unexpected truncation");
     let grp_idx = r
         .columns
         .iter()
