@@ -9,6 +9,8 @@ import {
 import { useSubmitQuery, useQueryStatus, useResults } from "@/api/sqllab";
 import { ChartTable } from "@/components/chart/ChartTable";
 import { PivotTable } from "@/components/chart/pivot/PivotTable";
+import { SettingsSidebar } from "@/components/chart/settings/SettingsSidebar";
+import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -70,6 +72,9 @@ export default function ChartExplore() {
   const [showColTotals, setShowColTotals] = useState(true);
   const [condense, setCondense] = useState(true);
   const [rowLimit, setRowLimit] = useState(1000);
+  const [columnSettings, setColumnSettings] = useState<Record<string, ColumnFormat>>({});
+  const [conditionalFormatting, setConditionalFormatting] = useState<Rule[]>([]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // hydrate from a saved chart once it loads (dataset/viz/controls + save dialog fields)
   useEffect(() => {
@@ -90,6 +95,8 @@ export default function ChartExplore() {
       setTableCols([...(p.spec?.dimensions ?? []), ...(p.spec?.columns ?? [])]);
     }
     setRowLimit(p.spec?.row_limit ?? 1000);
+    setColumnSettings(p.columnSettings ?? {});
+    setConditionalFormatting(p.conditionalFormatting ?? []);
     setSaveName(c.name);
     setSaveDesc(c.description);
   }, [existing.data]);
@@ -129,6 +136,8 @@ export default function ChartExplore() {
   const status = useQueryStatus(ws, queryId);
   const finished = status.data?.status === "finished";
   const results = useResults(ws, queryId, 0, finished);
+  const resultColumns = results.data?.columns ?? [];
+  const metricTypes = Object.fromEntries((detail.data?.metrics ?? []).map((m) => [m.metric_name, m.data_type ?? "double"]));
 
   async function run() {
     setQueryId(null);
@@ -150,8 +159,8 @@ export default function ChartExplore() {
 
   function paramsForSave(): ChartParams {
     return viz === "pivot_table"
-      ? { spec: specForRun(), rows: pRows, cols: pCols, metrics: pVals, showRowTotals, showColTotals, condense }
-      : { spec: specForRun() };
+      ? { spec: specForRun(), rows: pRows, cols: pCols, metrics: pVals, showRowTotals, showColTotals, condense, columnSettings, conditionalFormatting }
+      : { spec: specForRun(), columnSettings, conditionalFormatting };
   }
 
   async function save() {
@@ -202,7 +211,7 @@ export default function ChartExplore() {
         {/* Dataset picker */}
         <div className="space-y-1">
           <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Dataset</Label>
-          <Select value={datasetId ?? ""} onValueChange={(v) => { setDatasetId(v || null); setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]); }}>
+          <Select value={datasetId ?? ""} onValueChange={(v) => { setDatasetId(v || null); setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]); setColumnSettings({}); setConditionalFormatting([]); }}>
             <SelectTrigger className="h-8 text-sm">
               <SelectValue placeholder="Pick a dataset…" />
             </SelectTrigger>
@@ -338,6 +347,7 @@ export default function ChartExplore() {
           >
             {id ? "Update" : "Save"}
           </Button>
+          <Button size="sm" variant="outline" onClick={() => setSettingsOpen((o) => !o)}>Settings</Button>
           {build.data?.sql && (
             <details className="ml-auto text-xs text-muted-foreground">
               <summary className="cursor-pointer select-none hover:text-foreground">View SQL</summary>
@@ -346,33 +356,57 @@ export default function ChartExplore() {
           )}
         </div>
 
-        {/* Preview */}
-        {status.data?.status === "failed" && (
-          <p className="rounded bg-destructive/10 p-3 text-sm text-destructive">{status.data.error}</p>
-        )}
+        {/* Preview + Settings sidebar */}
+        <div className="flex gap-3">
+          <div className="flex-1 min-w-0">
+            {status.data?.status === "failed" && (
+              <p className="rounded bg-destructive/10 p-3 text-sm text-destructive">{status.data.error}</p>
+            )}
 
-        {isRunning && (
-          <p className="text-sm text-muted-foreground">Running…</p>
-        )}
+            {isRunning && (
+              <p className="text-sm text-muted-foreground">Running…</p>
+            )}
 
-        {finished && results.data && viz === "pivot_table" && (
-          <PivotTable
-            input={{
-              columns: results.data.columns.map((c) => c.name),
-              rows: results.data.rows,
-              rowDims: pRows, colDims: pCols, metrics: pVals,
-              showRowTotals, showColTotals, condense, collapsed: new Set(),
-            }}
-          />
-        )}
+            {finished && results.data && viz === "pivot_table" && (
+              <PivotTable
+                input={{
+                  columns: results.data.columns.map((c) => c.name),
+                  rows: results.data.rows,
+                  rowDims: pRows, colDims: pCols, metrics: pVals,
+                  showRowTotals, showColTotals, condense, collapsed: new Set(),
+                }}
+                columnSettings={columnSettings}
+                conditionalFormatting={conditionalFormatting}
+                metricTypes={metricTypes}
+              />
+            )}
 
-        {finished && results.data && viz !== "pivot_table" && (
-          <ChartTable columns={results.data.columns} rows={results.data.rows} />
-        )}
+            {finished && results.data && viz !== "pivot_table" && (
+              <ChartTable
+                columns={results.data.columns}
+                rows={results.data.rows}
+                columnSettings={columnSettings}
+                conditionalFormatting={conditionalFormatting}
+              />
+            )}
 
-        {!queryId && !build.isPending && !submit.isPending && (
-          <p className="text-sm text-muted-foreground">Configure the controls on the left and click Run.</p>
-        )}
+            {!queryId && !build.isPending && !submit.isPending && (
+              <p className="text-sm text-muted-foreground">Configure the controls on the left and click Run.</p>
+            )}
+          </div>
+
+          {settingsOpen && resultColumns.length > 0 && (
+            <SettingsSidebar
+              columns={resultColumns}
+              isPivot={viz === "pivot_table"}
+              columnSettings={columnSettings}
+              conditionalFormatting={conditionalFormatting}
+              onColumnSettings={setColumnSettings}
+              onConditional={setConditionalFormatting}
+              onClose={() => setSettingsOpen(false)}
+            />
+          )}
+        </div>
       </div>
 
       {/* Save dialog */}
