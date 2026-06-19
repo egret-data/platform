@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { useDatasets, useDataset } from "@/api/datasets";
 import {
@@ -23,6 +23,7 @@ import {
 export default function ChartExplore() {
   const ws = useParams().workspace!;
   const { id } = useParams(); // present when editing a saved chart
+  const navigate = useNavigate();
   const datasets = useDatasets(ws);
   const existing = useChart(ws, id ?? null);
 
@@ -39,7 +40,7 @@ export default function ChartExplore() {
   const [pivotMetric, setPivotMetric] = useState<string>("");
   const [rowLimit, setRowLimit] = useState(1000);
 
-  // hydrate from a saved chart once it loads
+  // hydrate from a saved chart once it loads (dataset/viz/controls + save dialog fields)
   useEffect(() => {
     const c = existing.data;
     if (!c) return;
@@ -51,10 +52,12 @@ export default function ChartExplore() {
       setPivotCol(p.cols?.[0] ?? "");
       setPivotMetric(p.metric ?? "");
     } else {
-      setTableMetrics(p.spec.metrics ?? []);
-      setTableCols([...(p.spec.dimensions ?? []), ...(p.spec.columns ?? [])]);
+      setTableMetrics(p.spec?.metrics ?? []);
+      setTableCols([...(p.spec?.dimensions ?? []), ...(p.spec?.columns ?? [])]);
     }
-    setRowLimit(p.spec.row_limit ?? 1000);
+    setRowLimit(p.spec?.row_limit ?? 1000);
+    setSaveName(c.name);
+    setSaveDesc(c.description);
   }, [existing.data]);
 
   const columns = detail.data?.columns ?? [];
@@ -92,6 +95,7 @@ export default function ChartExplore() {
   const results = useResults(ws, queryId, 0, finished);
 
   async function run() {
+    setQueryId(null);
     if (!datasetId) { toast.error("Pick a dataset first"); return; }
     if (viz === "pivot_table" && (!pivotRow || !pivotMetric)) {
       toast.error("Pivot needs a row dimension and a metric"); return;
@@ -107,9 +111,6 @@ export default function ChartExplore() {
   const [saveOpen, setSaveOpen] = useState(false);
   const [saveName, setSaveName] = useState("");
   const [saveDesc, setSaveDesc] = useState("");
-  useEffect(() => {
-    if (existing.data) { setSaveName(existing.data.name); setSaveDesc(existing.data.description); }
-  }, [existing.data]);
 
   function paramsForSave(): ChartParams {
     return viz === "pivot_table"
@@ -120,15 +121,26 @@ export default function ChartExplore() {
   async function save() {
     if (!datasetId) { toast.error("Pick a dataset"); return; }
     if (!saveName.trim()) { toast.error("Name required"); return; }
+    if (viz === "pivot_table" && (!pivotRow || !pivotMetric)) {
+      toast.error("Pivot needs a row dimension and a metric"); return;
+    }
     try {
       if (id) {
         await mutations.update.mutateAsync({ id, name: saveName.trim(), description: saveDesc, viz_type: viz, params: paramsForSave() });
+        setSaveOpen(false);
+        toast.success("Saved");
       } else {
-        await mutations.create.mutateAsync({ dataset_id: datasetId, name: saveName.trim(), description: saveDesc, viz_type: viz, params: paramsForSave() });
+        const created = await mutations.create.mutateAsync({ dataset_id: datasetId, name: saveName.trim(), description: saveDesc, viz_type: viz, params: paramsForSave() });
+        setSaveOpen(false);
+        toast.success("Saved");
+        navigate(`/explore/${ws}/charts/${created.id}`);
       }
-      setSaveOpen(false);
-      toast.success("Saved");
     } catch (e) { toast.error(String(e)); }
+  }
+
+  function changeViz(v: VizType) {
+    setViz(v);
+    setQueryId(null);
   }
 
   function toggleTableMetric(name: string) {
@@ -174,7 +186,7 @@ export default function ChartExplore() {
               size="sm"
               variant={viz === "table" ? "default" : "outline"}
               className="flex-1 text-xs"
-              onClick={() => setViz("table")}
+              onClick={() => changeViz("table")}
             >
               Table
             </Button>
@@ -182,7 +194,7 @@ export default function ChartExplore() {
               size="sm"
               variant={viz === "pivot_table" ? "default" : "outline"}
               className="flex-1 text-xs"
-              onClick={() => setViz("pivot_table")}
+              onClick={() => changeViz("pivot_table")}
             >
               Pivot
             </Button>
@@ -292,7 +304,10 @@ export default function ChartExplore() {
             min={1}
             max={100000}
             value={rowLimit}
-            onChange={(e) => setRowLimit(Number(e.target.value) || 1000)}
+            onChange={(e) => {
+              const n = Number(e.target.value);
+              setRowLimit(Number.isNaN(n) ? 0 : n);
+            }}
             className="h-8 text-sm"
           />
         </div>
