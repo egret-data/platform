@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { isNumericType, isTemporalType, type ColumnFormat } from "../format-types";
 
 interface ResultColumn { name: string; type: string }
@@ -11,6 +11,11 @@ export function FormatSection({
   onChange: (v: Record<string, ColumnFormat>) => void;
 }) {
   const [sel, setSel] = useState<string | null>(columns[0]?.name ?? null);
+
+  useEffect(() => {
+    if (!sel || !columns.find((c) => c.name === sel)) setSel(columns[0]?.name ?? null);
+  }, [columns, sel]);
+
   const col = columns.find((c) => c.name === sel);
   const fmt = (sel && value[sel]) || {};
 

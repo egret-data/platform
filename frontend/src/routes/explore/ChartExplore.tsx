@@ -211,7 +211,7 @@ export default function ChartExplore() {
         {/* Dataset picker */}
         <div className="space-y-1">
           <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Dataset</Label>
-          <Select value={datasetId ?? ""} onValueChange={(v) => { setDatasetId(v || null); setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]); setColumnSettings({}); setConditionalFormatting([]); }}>
+          <Select value={datasetId ?? ""} onValueChange={(v) => { setDatasetId(v || null); setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]); setColumnSettings({}); setConditionalFormatting([]); setQueryId(null); }}>
             <SelectTrigger className="h-8 text-sm">
               <SelectValue placeholder="Pick a dataset…" />
             </SelectTrigger>
@@ -395,7 +395,7 @@ export default function ChartExplore() {
             )}
           </div>
 
-          {settingsOpen && resultColumns.length > 0 && (
+          {settingsOpen && (
             <SettingsSidebar
               columns={resultColumns}
               isPivot={viz === "pivot_table"}

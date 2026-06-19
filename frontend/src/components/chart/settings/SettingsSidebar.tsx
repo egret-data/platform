@@ -26,9 +26,13 @@ export function SettingsSidebar({
         </div>
         <button type="button" aria-label="close settings" className="text-muted-foreground" onClick={onClose}>✕</button>
       </div>
-      {tab === "format"
-        ? <FormatSection columns={columns} value={columnSettings} onChange={onColumnSettings} />
-        : <ConditionalFormattingSection columns={columns} rules={conditionalFormatting} isPivot={isPivot} onChange={onConditional} />}
+      {columns.length === 0 ? (
+        <p className="text-xs text-muted-foreground">Run a query to configure columns.</p>
+      ) : tab === "format" ? (
+        <FormatSection columns={columns} value={columnSettings} onChange={onColumnSettings} />
+      ) : (
+        <ConditionalFormattingSection columns={columns} rules={conditionalFormatting} isPivot={isPivot} onChange={onConditional} />
+      )}
     </div>
   );
 }
