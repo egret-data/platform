@@ -165,3 +165,29 @@ describe("buildPivot 2 col dims — merged outer header", () => {
     expect(p.topHeader.length).toBe(2);
   });
 });
+
+describe("buildPivot no column dims (grouped table)", () => {
+  const p = buildPivot({
+    columns: ["region", "nation", "revenue", "__grp_0", "__grp_1"],
+    rows: [
+      ["EU", "DE", 4, 0, 0],
+      ["EU", "FR", 6, 0, 0],
+      ["EU", null, 10, 0, 1],   // EU subtotal
+      [null, null, 10, 1, 1],   // grand total
+    ],
+    rowDims: ["region", "nation"], colDims: [], metrics: ["revenue"],
+    showRowTotals: true, showColTotals: true, condense: true, collapsed: new Set(),
+  });
+
+  it("has exactly one value column (no duplicate Total column)", () => {
+    expect(p.colLeaves.length).toBe(1);
+    expect(p.colLeaves[0].isTotal).toBe(false);
+  });
+  it("each body row has exactly one value", () => {
+    for (const br of p.bodyRows) expect(br.values.length).toBe(1);
+  });
+  it("renders a header row (metric level) so columns are labeled", () => {
+    expect(p.topHeader.length).toBe(1);
+    expect(p.topHeader[0].some((c) => c.label === "revenue")).toBe(true);
+  });
+});

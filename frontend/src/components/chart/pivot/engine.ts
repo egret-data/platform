@@ -156,7 +156,7 @@ export function buildPivot(input: PivotInput): Pivot {
   for (const cp of effectiveColPaths) {
     for (const metric of input.metrics) colLeaves.push({ colPath: cp, metric, isTotal: false });
   }
-  if (input.showRowTotals) {
+  if (input.showRowTotals && input.colDims.length > 0) {
     for (const metric of input.metrics) colLeaves.push({ colPath: [], metric, isTotal: true });
   }
 
@@ -186,7 +186,7 @@ export function buildPivot(input: PivotInput): Pivot {
     topHeader.push(level);
   }
   // metric sub-header (only when more than one metric) — one cell per colLeaf, aligned to values.
-  if (nMetric > 1) {
+  if (nMetric > 1 || C === 0) {
     topHeader.push(colLeaves.map((cl) => ({ label: cl.metric, colSpan: 1 })));
   }
 
