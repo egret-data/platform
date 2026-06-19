@@ -78,21 +78,31 @@ called out inline.
 Frontend Explore page
   │  build QuerySpec (metrics, dimensions, columns, filters, orderby, row_limit, rollup)
   ▼
-POST /api/ws/{ws}/charts/data  { dataset_id | chart_id, query_spec }
+POST /api/ws/{ws}/charts/data  { dataset_id, query_spec }
   │
   ├─ load dataset (source + columns + metrics)         [DatasetRepo]
   ├─ validate names in QuerySpec against the dataset    [chartquery]
   ├─ build SQL                                          [chartquery::build]
-  └─ submit SQL → JobManager → returns { query_id }     [egret-engine]
+  └─ return { sql, database_id }                        [egret-bi]
   ▼
-Frontend polls GET /api/ws/{ws}/queries/{query_id}/status + /results   (existing endpoints)
+Frontend submits sql → POST /api/ws/{ws}/queries → JobManager   (existing endpoint)
+  ▼
+Frontend polls GET /api/ws/{ws}/queries/{id}/status + /results  (existing endpoints)
   ▼
 Render: Table (tanstack) | Pivot (cross-tab over ROLLUP rows)
 ```
 
 Chart CRUD (`charts` table) is independent of execution: a saved chart stores `viz_type`
 + `params` (the `QuerySpec` plus pivot row/column split). To view a saved chart, the
-frontend posts its `params` to `charts/data` exactly like the live preview.
+frontend posts its `query_spec` to `charts/data` exactly like the live preview, then submits
+the returned SQL to the existing `/queries` flow.
+
+`charts/data` returns SQL rather than submitting itself so `BiState` stays decoupled from
+`JobManager` (no heavy fixture in the BI http test), and the generated SQL becomes a visible
+"View SQL" affordance. Execution still runs through `JobManager` + polling (the chosen model);
+only the submit is client-initiated, like SQL Lab. The viewer roles (`ws_editor`/`ws_admin`)
+already hold `query:run`, so polling works; fully decoupling chart-view from `query:run` via
+chart-owned result endpoints is a 3c-3.2 refinement.
 
 ## Components
 
@@ -237,20 +247,19 @@ Mounted under the workspace scope alongside datasets/sqllab:
 | `GET    /api/ws/{ws}/charts/{id}`          | `chart:read`     | detail                         |
 | `PUT    /api/ws/{ws}/charts/{id}`          | `chart:manage`   | update (owner-or-admin)        |
 | `DELETE /api/ws/{ws}/charts/{id}`          | `chart:manage`   | delete (owner-or-admin)        |
-| `POST   /api/ws/{ws}/charts/data`          | `chart:read`     | build SQL + submit job         |
+| `POST   /api/ws/{ws}/charts/data`          | `chart:read`     | build SQL (returns sql)        |
 
 - **Nested-ownership guard:** every `/charts/{id}` handler verifies the chart belongs to
   the path workspace before acting (404 on mismatch) — per the IDOR lesson from 3c-2.2.
-- `charts/data` accepts either an inline `query_spec` (+ `dataset_id`) for live preview, or
-  a `chart_id` to render a saved chart; it loads the dataset, builds SQL, submits via
-  `JobManager`, and returns `{ query_id }`. The frontend then polls the existing
-  `/queries/{id}` endpoints.
+- `charts/data` takes `{ dataset_id, query_spec }`, verifies the dataset belongs to the path
+  workspace, builds the SQL, and returns `{ sql, database_id }`. The frontend submits that to
+  the existing `POST /api/ws/{ws}/queries` endpoint and polls `/queries/{id}`.
 
 ### 7. Frontend
 
 - **API client** `frontend/src/api/charts.ts`: `Chart`, `QuerySpec` types; `useCharts(ws)`,
-  `useChart(ws,id)`, `useChartMutations(ws)`, and `runChartData(ws, body) → query_id` then
-  reuse the existing query-polling hook.
+  `useChart(ws,id)`, `useChartMutations(ws)`, and `useBuildChartData(ws, body) → { sql,
+  database_id }`, then reuse the existing `useSubmitQuery`/`useQueryStatus`/`useResults` hooks.
 - **Explore page** `routes/explore/ChartExplore.tsx`: left rail lists the dataset's metrics
   and columns; a Table/Pivot toggle; a controls panel (dimensions, metrics, column filters,
   sort, row limit; pivot adds a rows-vs-columns split); a **Run** button driving the live
@@ -294,7 +303,7 @@ Mounted under the workspace scope alongside datasets/sqllab:
 - Operators come from an enum, never free text.
 - No raw `WHERE`/`HAVING` passthrough.
 - RBAC on every route; owner-or-admin on mutations; nested-ownership guard on `/charts/{id}`
-  and on `charts/data` with a `chart_id`.
+  and a workspace check on `charts/data`'s `dataset_id` (a dataset from another workspace 404s).
 - `row_limit` clamped to `MAX_CHART_ROWS`; execution inherits the engine timeout + row cap.
 
 ## Deferred → 3c-3.2 and beyond

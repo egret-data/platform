@@ -79,21 +79,30 @@ hình `QueryObject → SQL`). Các quyết định kế thừa và nguồn gốc
 Trang Explore (frontend)
   │  dựng QuerySpec (metrics, dimensions, columns, filters, orderby, row_limit, rollup)
   ▼
-POST /api/ws/{ws}/charts/data  { dataset_id | chart_id, query_spec }
+POST /api/ws/{ws}/charts/data  { dataset_id, query_spec }
   │
   ├─ nạp dataset (nguồn + cột + metric)                 [DatasetRepo]
   ├─ kiểm tra tên trong QuerySpec so với dataset        [chartquery]
   ├─ dựng SQL                                           [chartquery::build]
-  └─ đẩy SQL → JobManager → trả { query_id }            [egret-engine]
+  └─ trả { sql, database_id }                           [egret-bi]
   ▼
-Frontend poll GET /api/ws/{ws}/queries/{query_id}/status + /results   (endpoint sẵn có)
+Frontend gửi sql → POST /api/ws/{ws}/queries → JobManager   (endpoint sẵn có)
+  ▼
+Frontend poll GET /api/ws/{ws}/queries/{id}/status + /results   (endpoint sẵn có)
   ▼
 Render: Bảng (tanstack) | Pivot (cross-tab trên dòng ROLLUP)
 ```
 
 CRUD chart (bảng `charts`) độc lập với thực thi: một chart đã lưu chứa `viz_type` + `params`
-(`QuerySpec` cộng cách chia dòng/cột của pivot). Để xem chart đã lưu, frontend gửi `params`
-của nó tới `charts/data` y như xem trước trực tiếp.
+(`QuerySpec` cộng cách chia dòng/cột của pivot). Để xem chart đã lưu, frontend gửi `query_spec`
+của nó tới `charts/data` y như xem trước trực tiếp, rồi gửi SQL trả về vào luồng `/queries` sẵn có.
+
+`charts/data` trả SQL thay vì tự đẩy job để `BiState` tách rời khỏi `JobManager` (không cần
+fixture nặng trong test http của BI), và SQL sinh ra trở thành tính năng "Xem SQL" hữu hình.
+Thực thi vẫn chạy qua `JobManager` + polling (mô hình đã chọn); chỉ là submit do client khởi
+tạo, giống SQL Lab. Vai trò xem (`ws_editor`/`ws_admin`) vốn đã có `query:run` nên polling chạy
+được; tách hẳn xem-chart khỏi `query:run` qua endpoint kết quả riêng của chart là phần tinh chỉnh
+ở 3c-3.2.
 
 ## Thành phần
 
@@ -237,19 +246,19 @@ Gắn dưới phạm vi workspace cạnh datasets/sqllab:
 | `GET    /api/ws/{ws}/charts/{id}`          | `chart:read`     | chi tiết                       |
 | `PUT    /api/ws/{ws}/charts/{id}`          | `chart:manage`   | cập nhật (owner-or-admin)      |
 | `DELETE /api/ws/{ws}/charts/{id}`          | `chart:manage`   | xoá (owner-or-admin)           |
-| `POST   /api/ws/{ws}/charts/data`          | `chart:read`     | dựng SQL + đẩy job             |
+| `POST   /api/ws/{ws}/charts/data`          | `chart:read`     | dựng SQL (trả sql)             |
 
 - **Guard sở hữu lồng nhau:** mọi handler `/charts/{id}` xác minh chart thuộc workspace
   trong path trước khi xử lý (404 nếu lệch) — theo bài học IDOR ở 3c-2.2.
-- `charts/data` nhận hoặc `query_spec` nội tuyến (+ `dataset_id`) để xem trước trực tiếp,
-  hoặc `chart_id` để render chart đã lưu; nó nạp dataset, dựng SQL, đẩy qua `JobManager`,
-  rồi trả `{ query_id }`. Frontend sau đó poll các endpoint `/queries/{id}` sẵn có.
+- `charts/data` nhận `{ dataset_id, query_spec }`, xác minh dataset thuộc workspace trong path,
+  dựng SQL, rồi trả `{ sql, database_id }`. Frontend gửi cái đó tới endpoint
+  `POST /api/ws/{ws}/queries` sẵn có và poll `/queries/{id}`.
 
 ### 7. Frontend
 
 - **API client** `frontend/src/api/charts.ts`: kiểu `Chart`, `QuerySpec`; `useCharts(ws)`,
-  `useChart(ws,id)`, `useChartMutations(ws)`, và `runChartData(ws, body) → query_id` rồi
-  dùng lại hook poll truy vấn sẵn có.
+  `useChart(ws,id)`, `useChartMutations(ws)`, và `useBuildChartData(ws, body) → { sql,
+  database_id }`, rồi dùng lại các hook `useSubmitQuery`/`useQueryStatus`/`useResults` sẵn có.
 - **Trang Explore** `routes/explore/ChartExplore.tsx`: rail trái liệt kê metric và cột của
   dataset; nút chuyển Table/Pivot; bảng điều khiển (dimensions, metrics, lọc theo cột, sắp
   xếp, giới hạn dòng; pivot thêm phần chia dòng-vs-cột); nút **Run** điều khiển xem trước;
@@ -293,7 +302,7 @@ Gắn dưới phạm vi workspace cạnh datasets/sqllab:
 - Toán tử đến từ enum, không bao giờ là text tự do.
 - Không có `WHERE`/`HAVING` thô truyền thẳng.
 - RBAC trên mọi route; owner-or-admin khi mutation; guard sở hữu lồng nhau trên `/charts/{id}`
-  và trên `charts/data` khi có `chart_id`.
+  và kiểm tra workspace cho `dataset_id` của `charts/data` (dataset từ workspace khác → 404).
 - `row_limit` kẹp về `MAX_CHART_ROWS`; thực thi kế thừa timeout + row cap của engine.
 
 ## Hoãn → 3c-3.2 và xa hơn
