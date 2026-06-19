@@ -13,8 +13,14 @@ export interface Pivot {
 
 const key = (parts: (string | null)[]) => parts.map((p) => (p == null ? "∅" : String(p))).join("|");
 
-/** Cross-tab flat ROLLUP rows. `rowDims`/`colDims` are column names; `metric` is the value column.
- * `__grp_<i>` markers (1 = rolled up) identify subtotal/grand-total rows. */
+/** Cross-tab flat ROLLUP rows into a pivot grid.
+ *
+ * Assumes the result came from `GROUP BY ROLLUP(rowDim, colDim)` with AT MOST ONE row
+ * dimension and AT MOST ONE column dimension — that ROLLUP yields exactly {leaf cells, one
+ * subtotal per row-key (column rolled up), one grand total (all rolled up)}, which is what
+ * this function classifies via the `__grp_<i>` markers (1 = rolled up). Multi-level pivots
+ * (multiple row or column dimensions) produce intermediate groupings this flat model does
+ * not handle and are out of scope here — the explore UI constrains pivots accordingly. */
 export function buildPivot(
   columns: string[],
   rows: FlatRow[],
@@ -56,7 +62,8 @@ export function buildPivot(
     }
     // leaf cell
     const ckStr = key(ck);
-    if (!colKeySet.has(ckStr)) colKeySet.set(ckStr, ck.map((v) => String(v ?? "")));
+    // Use the same null sentinel as key() so the renderer's colKeyStr lookup matches.
+    if (!colKeySet.has(ckStr)) colKeySet.set(ckStr, ck.map((v) => (v == null ? "∅" : String(v))));
     const rkStr = key(rk);
     let pr = byRowKey.get(rkStr);
     if (!pr) {

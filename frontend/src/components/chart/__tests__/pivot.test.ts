@@ -28,3 +28,19 @@ describe("buildPivot", () => {
     expect(pivot.grandTotal).not.toBeNull();
   });
 });
+
+describe("buildPivot null column value", () => {
+  it("keeps a genuinely-null column-dimension cell reachable", () => {
+    const columns = ["region", "segment", "revenue", "__grp_0", "__grp_1"];
+    const rows: FlatRow[] = [
+      ["EU", null, 7, 0, 0],   // a real row whose segment value is NULL (not a rollup)
+      ["EU", null, 7, 0, 1],   // EU subtotal (segment rolled up)
+      [null, null, 7, 1, 1],   // grand total
+    ];
+    const p = buildPivot(columns, rows, ["region"], ["segment"], "revenue");
+    // the null-valued column key is represented with the "∅" sentinel and its cell is reachable
+    expect(p.colKeys).toEqual([["∅"]]);
+    const eu = p.rows.find((r) => r.key.join("|") === "EU" && !r.isSubtotal)!;
+    expect(eu.cells["∅"]).toBe(7);
+  });
+});
