@@ -365,7 +365,7 @@ async fn ds_create(
     WsContext(ctx): WsContext,
     Json(b): Json<CreateDataset>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    st.authz.require_workspace(&ctx, DS_MANAGE).await.map_err(BiApiError::from)?;
+    // conn_spec_perm enforces DS_MANAGE (and that the db is granted) — single auth checkpoint.
     let spec = conn_spec_perm(&st, &ctx, b.database_id, DS_MANAGE).await?;
     let source = match b.source {
         CreateSource::Physical { catalog, schema, table } => {
