@@ -14,12 +14,14 @@ use serde::Deserialize;
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::chartquery;
 use crate::dataset::{NewColumn, SourceSpec};
 use crate::error::BiApiError;
 use crate::expr::validate_expression;
 use crate::model::{
-    AddColumnBody, CreateDataset, CreateSource, DatasetDetailDto, DatasetSummaryDto, MetricBody,
-    SaveQuery, SavedQueryDto, UpdateColumnBody, UpdateDataset,
+    AddColumnBody, ChartDataBody, ChartDataResponse, CreateChart, CreateDataset, CreateSource,
+    DatasetDetailDto, DatasetSummaryDto, MetricBody, SaveQuery, SavedQueryDto, UpdateChart,
+    UpdateColumnBody, UpdateDataset,
 };
 use crate::saved::SavedQueryRepo;
 use crate::schema::SchemaService;
@@ -34,6 +36,7 @@ pub struct BiState {
     pub workspaces: WorkspaceRepo,
     pub authz: Authorizer,
     pub datasets: crate::dataset::DatasetRepo,
+    pub charts: crate::chart::ChartRepo,
 }
 impl FromRef<BiState> for SessionService {
     fn from_ref(s: &BiState) -> Self {
@@ -54,6 +57,8 @@ impl FromRef<BiState> for Authorizer {
 const PERM: &str = "query:run";
 const DS_READ: &str = "dataset:read";
 const DS_MANAGE: &str = "dataset:manage";
+const CH_READ: &str = "chart:read";
+const CH_MANAGE: &str = "chart:manage";
 
 pub fn sqllab_router() -> Router<BiState> {
     Router::new()
@@ -744,4 +749,198 @@ async fn ds_delete_column(
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(load_detail(&st, id).await?))
+}
+
+// ── Chart routes ─────────────────────────────────────────────────────────────
+
+pub fn chart_router() -> Router<BiState> {
+    Router::new()
+        .route("/ws/{workspace}/charts", post(ch_create).get(ch_list))
+        .route(
+            "/ws/{workspace}/charts/{id}",
+            get(ch_get).put(ch_update).delete(ch_remove),
+        )
+        .route("/ws/{workspace}/charts/data", post(ch_data))
+}
+
+async fn require_chart_in_ws(
+    st: &BiState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> Result<(), BiApiError> {
+    match st
+        .charts
+        .chart_workspace(id)
+        .await
+        .map_err(BiApiError::from)?
+    {
+        Some(w) if w == ctx.workspace_id.0 => Ok(()),
+        _ => Err(Error::NotFound("chart".into()).into()),
+    }
+}
+
+async fn require_chart_owner(
+    st: &BiState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> Result<(), BiApiError> {
+    let owner = st.charts.owner(id).await.map_err(BiApiError::from)?;
+    if is_admin(ctx) || owner == Some(ctx.principal.user_id.0) {
+        Ok(())
+    } else {
+        Err(Error::Forbidden.into())
+    }
+}
+
+async fn ch_list(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<Vec<crate::model::ChartDto>>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, CH_READ)
+        .await
+        .map_err(BiApiError::from)?;
+    let rows = st
+        .charts
+        .list_by_workspace(ctx.workspace_id.0)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(
+        rows.into_iter().map(crate::model::chart_dto).collect(),
+    ))
+}
+
+async fn ch_create(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Json(b): Json<CreateChart>,
+) -> Result<Json<crate::model::ChartDto>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, CH_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    let ds = st
+        .datasets
+        .get(b.dataset_id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("dataset".into()))?;
+    if ds.workspace_id != ctx.workspace_id.0 {
+        return Err(Error::NotFound("dataset".into()).into());
+    }
+    let c = st
+        .charts
+        .create(
+            ctx.workspace_id.0,
+            b.dataset_id,
+            &b.name,
+            &b.description,
+            &b.viz_type,
+            &b.params,
+            Some(ctx.principal.user_id.0),
+        )
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(crate::model::chart_dto(c)))
+}
+
+async fn ch_get(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<crate::model::ChartDto>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, CH_READ)
+        .await
+        .map_err(BiApiError::from)?;
+    require_chart_in_ws(&st, &ctx, id).await?;
+    let c = st
+        .charts
+        .get(id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("chart".into()))?;
+    Ok(Json(crate::model::chart_dto(c)))
+}
+
+async fn ch_update(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+    Json(b): Json<UpdateChart>,
+) -> Result<Json<crate::model::ChartDto>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, CH_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_chart_in_ws(&st, &ctx, id).await?;
+    require_chart_owner(&st, &ctx, id).await?;
+    st.charts
+        .update(id, &b.name, &b.description, &b.viz_type, &b.params)
+        .await
+        .map_err(BiApiError::from)?;
+    let c = st
+        .charts
+        .get(id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("chart".into()))?;
+    Ok(Json(crate::model::chart_dto(c)))
+}
+
+async fn ch_remove(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, CH_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_chart_in_ws(&st, &ctx, id).await?;
+    require_chart_owner(&st, &ctx, id).await?;
+    st.charts.delete(id).await.map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn ch_data(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Json(b): Json<ChartDataBody>,
+) -> Result<Json<ChartDataResponse>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, CH_READ)
+        .await
+        .map_err(BiApiError::from)?;
+    let ds = st
+        .datasets
+        .get(b.dataset_id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("dataset".into()))?;
+    if ds.workspace_id != ctx.workspace_id.0 {
+        return Err(Error::NotFound("dataset".into()).into());
+    }
+    let database = st
+        .databases
+        .get(ds.database_id)
+        .await
+        .map_err(|e| BiApiError::from(crate::BiError::from(e)))?;
+    let cols = st
+        .datasets
+        .columns(b.dataset_id)
+        .await
+        .map_err(BiApiError::from)?;
+    let metrics = st
+        .datasets
+        .metrics(b.dataset_id)
+        .await
+        .map_err(BiApiError::from)?;
+    let source = source_of(&ds);
+    let sql = chartquery::build(database.engine, &source, &cols, &metrics, &b.query_spec)
+        .map_err(BiApiError::from)?;
+    Ok(Json(ChartDataResponse {
+        sql,
+        database_id: ds.database_id.to_string(),
+    }))
 }
