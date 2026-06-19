@@ -107,35 +107,50 @@ async fn table_chart_runs_on_trino() {
 }
 
 #[tokio::test]
-async fn rollup_chart_adds_grand_total_on_trino() {
+async fn pivot_rollup_x_rollup_runs_on_trino() {
     let Some(spec) = trino_spec() else {
         eprintln!("skip: EGRET_TEST_TRINO_URL not set");
         return;
     };
-    let cols = vec![dim("orderpriority")];
+    let cols = vec![dim("orderpriority"), dim("orderstatus")];
     let metrics = vec![revenue()];
     let qs = QuerySpec {
         metrics: vec!["revenue".into()],
-        dimensions: vec!["orderpriority".into()],
+        dimensions: vec!["orderpriority".into(), "orderstatus".into()],
         columns: vec![],
         filters: vec![],
         orderby: vec![],
-        row_limit: 100,
-        rollup_groups: vec![vec!["orderpriority".into()]],
+        row_limit: 1000,
+        rollup_groups: vec![vec!["orderpriority".into()], vec!["orderstatus".into()]],
     };
     let sql = build(spec.engine, &orders(), &cols, &metrics, &qs).unwrap();
     let r = run(&spec, &sql).await;
     assert!(!r.truncated, "unexpected truncation");
-    let grp_idx = r
+    let g0 = r
         .columns
         .iter()
         .position(|c| c.name == "__grp_0")
-        .expect("__grp_0 column present");
-    // ROLLUP over one dimension yields per-priority rows + exactly one grand-total row (__grp_0 = 1).
-    let grand_totals = r
+        .expect("__grp_0");
+    let g1 = r
+        .columns
+        .iter()
+        .position(|c| c.name == "__grp_1")
+        .expect("__grp_1");
+    // grand total row: both dims rolled up.
+    let grand = r
         .rows
         .iter()
-        .filter(|row| row[grp_idx].as_i64() == Some(1))
+        .filter(|row| row[g0].as_i64() == Some(1) && row[g1].as_i64() == Some(1))
         .count();
-    assert_eq!(grand_totals, 1, "expected one grand-total row, sql=\n{sql}");
+    assert_eq!(grand, 1, "expected one grand-total row, sql=\n{sql}");
+    // row subtotals (priority kept, status rolled up): g0=0, g1=1; tpch has 5 priorities.
+    let row_subtotals = r
+        .rows
+        .iter()
+        .filter(|row| row[g0].as_i64() == Some(0) && row[g1].as_i64() == Some(1))
+        .count();
+    assert!(
+        row_subtotals >= 5,
+        "expected per-priority subtotals, sql=\n{sql}"
+    );
 }
