@@ -537,6 +537,24 @@ async fn require_dataset_owner(
     }
 }
 
+/// Guard against cross-dataset/cross-workspace metric access: the metric must belong to
+/// the dataset named in the path (the auth check is scoped to that dataset).
+async fn require_metric_in_dataset(
+    st: &BiState,
+    dataset_id: Uuid,
+    metric_id: Uuid,
+) -> Result<(), BiApiError> {
+    match st
+        .datasets
+        .metric_dataset(metric_id)
+        .await
+        .map_err(BiApiError::from)?
+    {
+        Some(d) if d == dataset_id => Ok(()),
+        _ => Err(Error::NotFound("metric".into()).into()),
+    }
+}
+
 async fn ds_add_metric(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -576,6 +594,7 @@ async fn ds_update_metric(
     Json(b): Json<MetricBody>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
     require_dataset_owner(&st, &ctx, id).await?;
+    require_metric_in_dataset(&st, id, metric_id).await?;
     let ds = st
         .datasets
         .get(id)
@@ -611,6 +630,7 @@ async fn ds_delete_metric(
         .await
         .map_err(BiApiError::from)?;
     require_dataset_owner(&st, &ctx, id).await?;
+    require_metric_in_dataset(&st, id, metric_id).await?;
     st.datasets
         .delete_metric(metric_id)
         .await
@@ -642,7 +662,7 @@ async fn ds_add_column(
             &b.expression,
             &d.data_type,
             &d.type_generic,
-            d.type_generic == "temporal",
+            d.is_temporal,
             &b.verbose_name,
             &b.description,
         )
@@ -657,6 +677,10 @@ async fn ds_update_column(
     Path((_w, id, column_name)): Path<(String, Uuid, String)>,
     Json(b): Json<UpdateColumnBody>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DS_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
     require_dataset_owner(&st, &ctx, id).await?;
     let expr_update = if let Some(expr) = b.expression.as_deref() {
         match st
@@ -676,12 +700,7 @@ async fn ds_update_column(
                 let d = validate_expression(&spec, &source_of(&ds), expr)
                     .await
                     .map_err(BiApiError::from)?;
-                Some((
-                    expr.to_string(),
-                    d.data_type,
-                    d.type_generic.clone(),
-                    d.type_generic == "temporal",
-                ))
+                Some((expr.to_string(), d.data_type, d.type_generic, d.is_temporal))
             }
             Some(false) => {
                 return Err(crate::BiError::BadRequest(
@@ -692,10 +711,6 @@ async fn ds_update_column(
             None => return Err(Error::NotFound("column".into()).into()),
         }
     } else {
-        st.authz
-            .require_workspace(&ctx, DS_MANAGE)
-            .await
-            .map_err(BiApiError::from)?;
         None
     };
     let eu = expr_update

@@ -15,6 +15,7 @@ use crate::typegen::generic_type;
 pub struct DescribedExpr {
     pub data_type: String,
     pub type_generic: String,
+    pub is_temporal: bool,
 }
 
 /// Reject empty or multi-statement expressions. A `;` outside string literals would let the
@@ -108,6 +109,7 @@ pub async fn validate_expression(
     Ok(DescribedExpr {
         data_type,
         type_generic: g.as_str().to_string(),
+        is_temporal: g.is_temporal(),
     })
 }
 
