@@ -105,30 +105,34 @@ impl Connector for StarRocksConnector {
         })
     }
 
-    async fn describe(
-        &self,
-        sql: &str,
-        _timeout: Duration,
-    ) -> Result<Vec<Column>, EngineError> {
+    async fn describe(&self, sql: &str, timeout: Duration) -> Result<Vec<Column>, EngineError> {
         let wrapped = format!("SELECT * FROM (\n{sql}\n) AS _egret_ds LIMIT 0");
-        let mut conn = mysql_async::Conn::new(self.opts.clone())
+        let opts = self.opts.clone();
+        // Bound the whole connect+query under `timeout` — unlike `execute`, `describe`
+        // is called directly (no JobManager outer timeout), so a hung query would block.
+        let fut = async move {
+            let mut conn = mysql_async::Conn::new(opts)
+                .await
+                .map_err(|e| EngineError::Connect(e.to_string()))?;
+            let result = conn
+                .query_iter(wrapped)
+                .await
+                .map_err(|e| EngineError::Engine(e.to_string()))?;
+            let columns: Vec<Column> = result
+                .columns_ref()
+                .iter()
+                .map(|c| Column {
+                    name: c.name_str().to_string(),
+                    ty: coltype_name(c.column_type()).to_string(),
+                })
+                .collect();
+            drop(result);
+            let _ = conn.disconnect().await;
+            Ok::<Vec<Column>, EngineError>(columns)
+        };
+        tokio::time::timeout(timeout, fut)
             .await
-            .map_err(|e| EngineError::Connect(e.to_string()))?;
-        let result = conn
-            .query_iter(wrapped)
-            .await
-            .map_err(|e| EngineError::Engine(e.to_string()))?;
-        let columns: Vec<Column> = result
-            .columns_ref()
-            .iter()
-            .map(|c| Column {
-                name: c.name_str().to_string(),
-                ty: coltype_name(c.column_type()).to_string(),
-            })
-            .collect();
-        drop(result);
-        let _ = conn.disconnect().await;
-        Ok(columns)
+            .map_err(|_| EngineError::Timeout)?
     }
 }
 
