@@ -1,5 +1,6 @@
-//! BI layer: SQL Lab (saved queries + schema introspection). Dataset/chart/dashboard come later.
+//! BI layer: SQL Lab (saved queries + schema introspection) and dataset persistence.
 
+mod dataset;
 mod error;
 pub mod model;
 mod routes;
@@ -7,6 +8,7 @@ mod saved;
 mod schema;
 mod typegen;
 
+pub use dataset::{Dataset, DatasetColumn, DatasetRepo, NewColumn, SourceSpec};
 pub use error::{BiApiError, BiError};
 pub use routes::{sqllab_router, BiState};
 pub use saved::{SavedQuery, SavedQueryRepo};
