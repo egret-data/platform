@@ -78,10 +78,10 @@ describe("buildPivot single-dim (1 row × 1 col × 1 metric)", () => {
   it("places leaf values and the row total", () => {
     const eu = p.bodyRows[0];
     expect(eu.kind).toBe("leaf");
-    expect(eu.values).toEqual(["10", "20", "30"]); // SMB=10, ENT=20, Total=30
+    expect(eu.values).toEqual([10, 20, 30]); // SMB=10, ENT=20, Total=30
   });
   it("grand total row totals across rows", () => {
-    expect(p.bodyRows[2].values).toEqual(["15", "20", "35"]); // SMB col=15, ENT col=20, grand=35
+    expect(p.bodyRows[2].values).toEqual([15, 20, 35]); // SMB col=15, ENT col=20, grand=35
   });
 });
 

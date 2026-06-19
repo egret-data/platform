@@ -1,7 +1,21 @@
 import { buildPivot, type PivotInput } from "./engine";
+import { formatValue } from "../format";
+import { buildConditional } from "../conditional";
+import type { ColumnFormat, Rule } from "../format-types";
 
-export function PivotTable({ input }: { input: PivotInput }) {
+export function PivotTable({
+  input, columnSettings = {}, conditionalFormatting = [], metricTypes = {},
+}: {
+  input: PivotInput;
+  columnSettings?: Record<string, ColumnFormat>;
+  conditionalFormatting?: Rule[];
+  metricTypes?: Record<string, string>;
+}) {
   const p = buildPivot(input);
+  const condRows = p.bodyRows.filter((br) => br.kind === "leaf").map((br) => br.values);
+  const condColIndex: Record<string, number> = {};
+  p.colLeaves.forEach((cl, i) => { if (!(cl.metric in condColIndex)) condColIndex[cl.metric] = i; });
+  const cond = buildConditional(condRows, condColIndex, conditionalFormatting, { isPivot: true });
   const rowDimCount = p.rowDimNames.length;
   const levels = p.topHeader.length;
 
@@ -37,7 +51,6 @@ export function PivotTable({ input }: { input: PivotInput }) {
         </thead>
         <tbody>
           {p.bodyRows.map((br, ri) => {
-            const total = br.kind === "subtotal" || br.kind === "grand";
             return (
               <tr
                 key={ri}
@@ -61,15 +74,18 @@ export function PivotTable({ input }: { input: PivotInput }) {
                   </th>
                 ))}
                 {br.values.map((v, vi) => {
-                  const isTotalCol = p.colLeaves[vi]?.isTotal;
+                  const cl = p.colLeaves[vi];
+                  const text = formatValue(v, metricTypes[cl.metric] ?? "double", columnSettings[cl.metric]);
+                  const bg = cond.bg(v, cl.metric);
                   return (
                     <td
                       key={vi}
-                      className={`border-r px-4 py-1.5 text-right tabular-nums last:border-r-0 ${
-                        total || isTotalCol ? "font-semibold" : ""
+                      className={`border-l px-4 py-1.5 text-right tabular-nums last:border-r-0 ${
+                        br.kind === "subtotal" || br.kind === "grand" || cl.isTotal ? "font-semibold" : ""
                       }`}
+                      style={bg ? { backgroundColor: bg } : undefined}
                     >
-                      {v}
+                      {text}
                     </td>
                   );
                 })}
