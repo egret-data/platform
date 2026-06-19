@@ -5,7 +5,12 @@ export type VizType = "table" | "pivot_table";
 export type FilterOp =
   | "eq" | "ne" | "gt" | "ge" | "lt" | "le" | "like" | "in" | "not_in" | "is_null" | "is_not_null";
 
-export interface ChartFilter { col: string; op: FilterOp; value?: unknown }
+export type NullFilterOp = "is_null" | "is_not_null";
+export type ValueFilterOp = Exclude<FilterOp, NullFilterOp>;
+
+export type ChartFilter =
+  | { col: string; op: NullFilterOp }
+  | { col: string; op: ValueFilterOp; value: unknown };
 export interface ChartOrderBy { field: string; desc: boolean }
 
 export interface QuerySpec {
@@ -66,7 +71,7 @@ export function useChartMutations(ws: string) {
     onSuccess: invalidate,
   });
   const update = useMutation({
-    mutationFn: ({ id, ...b }: { id: string; name: string; description?: string; viz_type: VizType; params: ChartParams }) =>
+    mutationFn: ({ id, ...b }: { id: string; name: string; description: string; viz_type: VizType; params: ChartParams }) =>
       apiJson<Chart>(`/ws/${ws}/charts/${id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(b) }),
     onSuccess: invalidate,
   });
