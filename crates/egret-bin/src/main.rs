@@ -272,6 +272,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
+        datasets: egret_bi::DatasetRepo::new(db.clone()),
     });
 
     let app = build_router(AppState {

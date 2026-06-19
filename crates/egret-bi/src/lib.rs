@@ -10,7 +10,7 @@ mod typegen;
 
 pub use dataset::{Dataset, DatasetColumn, DatasetRepo, NewColumn, SourceSpec};
 pub use error::{BiApiError, BiError};
-pub use routes::{sqllab_router, BiState};
+pub use routes::{dataset_router, sqllab_router, BiState};
 pub use saved::{SavedQuery, SavedQueryRepo};
 pub use schema::SchemaService;
 pub use typegen::{generic_type, GenericType};

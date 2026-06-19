@@ -121,8 +121,9 @@ pub fn build_router(state: AppState) -> Router {
     }
 
     if let Some(bi) = state.bi.clone() {
+        let bi_routes = egret_bi::sqllab_router().merge(egret_bi::dataset_router());
         let group = Router::new()
-            .nest("/api", egret_bi::sqllab_router())
+            .nest("/api", bi_routes)
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
             .with_state(bi);
         router = router.merge(group);

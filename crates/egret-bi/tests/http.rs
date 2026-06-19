@@ -1,7 +1,7 @@
 //! Router smoke test — unauthenticated requests rejected.
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use egret_bi::{sqllab_router, BiState, SavedQueryRepo, SchemaService};
+use egret_bi::{dataset_router, sqllab_router, BiState, DatasetRepo, SavedQueryRepo, SchemaService};
 use egret_metastore::Db;
 use tower::ServiceExt;
 
@@ -19,7 +19,8 @@ fn build_state(db: Db) -> BiState {
             chrono::Duration::minutes(60),
         ),
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
-        authz: egret_workspace::rbac::Authorizer::new(db),
+        authz: egret_workspace::rbac::Authorizer::new(db.clone()),
+        datasets: DatasetRepo::new(db),
     }
 }
 
@@ -60,6 +61,25 @@ async fn schema_catalogs_requires_auth() {
         .oneshot(
             Request::builder()
                 .uri("/ws/eng/sqllab/databases/00000000-0000-0000-0000-000000000000/catalogs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn dataset_list_requires_auth() {
+    let Some(st) = state().await else {
+        eprintln!("skip");
+        return;
+    };
+    let app = dataset_router().with_state(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/ws/eng/datasets")
                 .body(Body::empty())
                 .unwrap(),
         )

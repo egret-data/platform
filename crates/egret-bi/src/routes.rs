@@ -1,4 +1,4 @@
-//! SQL Lab routes: saved queries + schema browse.
+//! SQL Lab routes: saved queries + schema browse. Dataset CRUD routes.
 
 use axum::extract::{FromRef, Path, Query as AxQuery, State};
 use axum::routing::{get, post};
@@ -6,17 +6,23 @@ use axum::{Json, Router};
 use egret_auth::session::SessionService;
 use egret_core::Error;
 use egret_database::DatabaseRepo;
-use egret_engine::connector::ConnSpec;
+use egret_engine::connector::{build_connector, ConnSpec};
 use egret_workspace::context::WsContext;
 use egret_workspace::rbac::Authorizer;
 use egret_workspace::workspaces::WorkspaceRepo;
 use serde::Deserialize;
+use std::time::Duration;
 use uuid::Uuid;
 
+use crate::dataset::{NewColumn, SourceSpec};
 use crate::error::BiApiError;
-use crate::model::{SaveQuery, SavedQueryDto};
+use crate::model::{
+    CreateDataset, CreateSource, DatasetDetailDto, DatasetSummaryDto, SaveQuery, SavedQueryDto,
+    UpdateDataset,
+};
 use crate::saved::SavedQueryRepo;
 use crate::schema::SchemaService;
+use crate::typegen::generic_type;
 
 #[derive(Clone)]
 pub struct BiState {
@@ -26,6 +32,7 @@ pub struct BiState {
     pub sessions: SessionService,
     pub workspaces: WorkspaceRepo,
     pub authz: Authorizer,
+    pub datasets: crate::dataset::DatasetRepo,
 }
 impl FromRef<BiState> for SessionService {
     fn from_ref(s: &BiState) -> Self {
@@ -44,6 +51,8 @@ impl FromRef<BiState> for Authorizer {
 }
 
 const PERM: &str = "query:run";
+const DS_READ: &str = "dataset:read";
+const DS_MANAGE: &str = "dataset:manage";
 
 pub fn sqllab_router() -> Router<BiState> {
     Router::new()
@@ -190,8 +199,17 @@ async fn conn_spec(
     ctx: &egret_core::WorkspaceContext,
     db: Uuid,
 ) -> Result<ConnSpec, BiApiError> {
+    conn_spec_perm(st, ctx, db, PERM).await
+}
+
+async fn conn_spec_perm(
+    st: &BiState,
+    ctx: &egret_core::WorkspaceContext,
+    db: Uuid,
+    perm: &str,
+) -> Result<ConnSpec, BiApiError> {
     st.authz
-        .require_workspace(ctx, PERM)
+        .require_workspace(ctx, perm)
         .await
         .map_err(BiApiError::from)?;
     let granted = st
@@ -291,4 +309,188 @@ async fn columns(
             .await
             .map_err(BiApiError::from)?,
     ))
+}
+
+// ── Dataset routes ──────────────────────────────────────────────────────────
+
+pub fn dataset_router() -> Router<BiState> {
+    Router::new()
+        .route("/ws/{workspace}/datasets", post(ds_create).get(ds_list))
+        .route(
+            "/ws/{workspace}/datasets/{id}",
+            get(ds_get).put(ds_update).delete(ds_remove),
+        )
+        .route("/ws/{workspace}/datasets/{id}/refresh", post(ds_refresh))
+}
+
+/// Introspect a source's columns and classify them. Physical → schema service; virtual → describe().
+async fn introspect(
+    st: &BiState,
+    spec: &ConnSpec,
+    source: &SourceSpec,
+) -> Result<Vec<NewColumn>, BiApiError> {
+    let raw: Vec<(String, String)> = match source {
+        SourceSpec::Physical { catalog, schema, table } => st
+            .schema
+            .columns(spec, catalog.as_deref().unwrap_or(""), schema, table)
+            .await
+            .map_err(BiApiError::from)?
+            .into_iter()
+            .map(|c| (c.name, c.ty))
+            .collect(),
+        SourceSpec::Virtual { sql } => build_connector(spec)
+            .describe(sql, Duration::from_secs(15))
+            .await
+            .map_err(|e| BiApiError::from(crate::BiError::from(e)))?
+            .into_iter()
+            .map(|c| (c.name, c.ty))
+            .collect(),
+    };
+    Ok(raw
+        .into_iter()
+        .map(|(name, ty)| {
+            let g = generic_type(spec.engine, &ty);
+            NewColumn {
+                column_name: name,
+                data_type: ty,
+                type_generic: g.as_str().to_string(),
+                is_temporal: g.is_temporal(),
+            }
+        })
+        .collect())
+}
+
+async fn ds_create(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Json(b): Json<CreateDataset>,
+) -> Result<Json<DatasetDetailDto>, BiApiError> {
+    st.authz.require_workspace(&ctx, DS_MANAGE).await.map_err(BiApiError::from)?;
+    let spec = conn_spec_perm(&st, &ctx, b.database_id, DS_MANAGE).await?;
+    let source = match b.source {
+        CreateSource::Physical { catalog, schema, table } => {
+            SourceSpec::Physical { catalog, schema, table }
+        }
+        CreateSource::Virtual { sql } => SourceSpec::Virtual { sql },
+    };
+    let columns = introspect(&st, &spec, &source).await?;
+    let ds = st
+        .datasets
+        .create(
+            ctx.workspace_id.0,
+            b.database_id,
+            &b.name,
+            &b.description,
+            &source,
+            &columns,
+            Some(ctx.principal.user_id),
+        )
+        .await
+        .map_err(BiApiError::from)?;
+    let cols = st.datasets.columns(ds.id).await.map_err(BiApiError::from)?;
+    Ok(Json(crate::model::detail_dto(ds, cols)))
+}
+
+async fn ds_list(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<Vec<DatasetSummaryDto>>, BiApiError> {
+    st.authz.require_workspace(&ctx, DS_READ).await.map_err(BiApiError::from)?;
+    let rows = st.datasets.list(ctx.workspace_id.0).await.map_err(BiApiError::from)?;
+    Ok(Json(rows.into_iter().map(|(ds, n)| crate::model::summary_dto(ds, n)).collect()))
+}
+
+async fn ds_get(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<DatasetDetailDto>, BiApiError> {
+    st.authz.require_workspace(&ctx, DS_READ).await.map_err(BiApiError::from)?;
+    let ds = st
+        .datasets
+        .get(id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("dataset".into()))?;
+    let cols = st.datasets.columns(id).await.map_err(BiApiError::from)?;
+    Ok(Json(crate::model::detail_dto(ds, cols)))
+}
+
+async fn ds_update(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+    Json(b): Json<UpdateDataset>,
+) -> Result<Json<DatasetDetailDto>, BiApiError> {
+    st.authz.require_workspace(&ctx, DS_MANAGE).await.map_err(BiApiError::from)?;
+    require_dataset_owner(&st, &ctx, id).await?;
+    let ds = st
+        .datasets
+        .update(id, &b.name, &b.description, b.sql.as_deref())
+        .await
+        .map_err(BiApiError::from)?;
+    let cols = st.datasets.columns(id).await.map_err(BiApiError::from)?;
+    Ok(Json(crate::model::detail_dto(ds, cols)))
+}
+
+async fn ds_refresh(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<DatasetDetailDto>, BiApiError> {
+    st.authz.require_workspace(&ctx, DS_MANAGE).await.map_err(BiApiError::from)?;
+    require_dataset_owner(&st, &ctx, id).await?;
+    let ds = st
+        .datasets
+        .get(id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("dataset".into()))?;
+    let spec = conn_spec_perm(&st, &ctx, ds.database_id, DS_MANAGE).await?;
+    let source = source_of(&ds);
+    let new_columns = introspect(&st, &spec, &source).await?;
+    st.datasets.replace_columns(id, &new_columns).await.map_err(BiApiError::from)?;
+    let ds = st
+        .datasets
+        .get(id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("dataset".into()))?;
+    let cols = st.datasets.columns(id).await.map_err(BiApiError::from)?;
+    Ok(Json(crate::model::detail_dto(ds, cols)))
+}
+
+async fn ds_remove(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz.require_workspace(&ctx, DS_MANAGE).await.map_err(BiApiError::from)?;
+    require_dataset_owner(&st, &ctx, id).await?;
+    st.datasets.delete(id).await.map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+fn source_of(ds: &crate::dataset::Dataset) -> SourceSpec {
+    match &ds.sql {
+        Some(sql) => SourceSpec::Virtual { sql: sql.clone() },
+        None => SourceSpec::Physical {
+            catalog: ds.catalog.clone(),
+            schema: ds.schema_name.clone().unwrap_or_default(),
+            table: ds.table_name.clone().unwrap_or_default(),
+        },
+    }
+}
+
+async fn require_dataset_owner(
+    st: &BiState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> Result<(), BiApiError> {
+    let owner = st.datasets.owner(id).await.map_err(BiApiError::from)?;
+    if is_admin(ctx) || owner == Some(ctx.principal.user_id.0) {
+        Ok(())
+    } else {
+        Err(Error::Forbidden.into())
+    }
 }
