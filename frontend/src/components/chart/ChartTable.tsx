@@ -3,24 +3,32 @@ import {
   flexRender, getCoreRowModel, getSortedRowModel, useReactTable,
   type ColumnDef, type SortingState,
 } from "@tanstack/react-table";
+import { formatValue } from "./format";
+import { buildConditional } from "./conditional";
+import type { ColumnFormat, Rule } from "./format-types";
 
 export interface ResultColumn { name: string; type: string }
 
 const NUMERIC = /int|double|decimal|real|numeric|float|bigint/i;
 
-function formatCell(value: unknown, type: string): string {
-  if (value == null) return "";
-  if (NUMERIC.test(type)) {
-    const n = typeof value === "number" ? value : Number(value);
-    if (Number.isFinite(n) && !(typeof value === "string" && value.trim() === "")) {
-      return n.toLocaleString();
-    }
-  }
-  return String(value);
-}
-
-export function ChartTable({ columns, rows }: { columns: ResultColumn[]; rows: unknown[][] }) {
+export function ChartTable({
+  columns, rows, columnSettings = {}, conditionalFormatting = [],
+}: {
+  columns: ResultColumn[];
+  rows: unknown[][];
+  columnSettings?: Record<string, ColumnFormat>;
+  conditionalFormatting?: Rule[];
+}) {
   const [sorting, setSorting] = useState<SortingState>([]);
+
+  const colIndexByName = useMemo(
+    () => Object.fromEntries(columns.map((c, i) => [c.name, i])),
+    [columns],
+  );
+  const cond = useMemo(
+    () => buildConditional(rows, colIndexByName, conditionalFormatting),
+    [rows, colIndexByName, conditionalFormatting],
+  );
 
   const cols = useMemo<ColumnDef<unknown[]>[]>(
     () =>
@@ -36,12 +44,12 @@ export function ChartTable({ columns, rows }: { columns: ResultColumn[]; rows: u
             return v;
           },
           header: c.name,
-          cell: (ctx) => formatCell(ctx.getValue(), c.type),
+          cell: (ctx) => formatValue(ctx.getValue(), c.type, columnSettings[c.name]),
           enableSorting: true,
-          meta: { isNum },
+          meta: { isNum, name: c.name },
         };
       }),
-    [columns],
+    [columns, columnSettings],
   );
 
   const table = useReactTable({
@@ -76,18 +84,27 @@ export function ChartTable({ columns, rows }: { columns: ResultColumn[]; rows: u
           ))}
         </thead>
         <tbody>
-          {table.getRowModel().rows.map((r) => (
-            <tr key={r.id} className="border-t">
-              {r.getVisibleCells().map((cell) => {
-                const isNum = (cell.column.columnDef.meta as { isNum?: boolean } | undefined)?.isNum ?? false;
-                return (
-                  <td key={cell.id} className={`py-1 px-3 ${isNum ? "text-right tabular-nums" : ""}`}>
-                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                  </td>
-                );
-              })}
-            </tr>
-          ))}
+          {table.getRowModel().rows.map((r) => {
+            const rowColor = cond.rowBg(r.index);
+            return (
+              <tr key={r.id} className="border-t" style={rowColor ? { backgroundColor: rowColor } : undefined}>
+                {r.getVisibleCells().map((cell) => {
+                  const meta = cell.column.columnDef.meta as { isNum?: boolean; name?: string } | undefined;
+                  const isNum = meta?.isNum ?? false;
+                  const bg = cond.bg(cell.getValue(), meta?.name ?? cell.column.id);
+                  return (
+                    <td
+                      key={cell.id}
+                      className={`py-1 px-3 ${isNum ? "text-right tabular-nums" : ""}`}
+                      style={bg ? { backgroundColor: bg } : undefined}
+                    >
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
