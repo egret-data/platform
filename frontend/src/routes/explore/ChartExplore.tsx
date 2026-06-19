@@ -8,7 +8,7 @@ import {
 } from "@/api/charts";
 import { useSubmitQuery, useQueryStatus, useResults } from "@/api/sqllab";
 import { ChartTable } from "@/components/chart/ChartTable";
-import { PivotTable } from "@/components/chart/PivotTable";
+import { PivotTable } from "@/components/chart/pivot/PivotTable";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -19,6 +19,34 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
+
+function OrderedPicker({
+  label, selected, onChange, options,
+}: { label: string; selected: string[]; onChange: (v: string[]) => void; options: string[] }) {
+  const remaining = options.filter((o) => !selected.includes(o));
+  return (
+    <div className="space-y-1">
+      <div className="text-sm">{label}</div>
+      <div className="flex flex-wrap gap-1">
+        {selected.map((s) => (
+          <span key={s} className="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-xs">
+            {s}
+            <button type="button" className="text-muted-foreground hover:text-destructive"
+              onClick={() => onChange(selected.filter((x) => x !== s))}>×</button>
+          </span>
+        ))}
+      </div>
+      {remaining.length > 0 && (
+        <Select value="" onValueChange={(v) => v && onChange([...selected, v])}>
+          <SelectTrigger className="h-8"><SelectValue placeholder={`Add ${label.toLowerCase()}…`} /></SelectTrigger>
+          <SelectContent>
+            {remaining.map((o) => <SelectItem key={o} value={o}>{o}</SelectItem>)}
+          </SelectContent>
+        </Select>
+      )}
+    </div>
+  );
+}
 
 export default function ChartExplore() {
   const ws = useParams().workspace!;
@@ -34,10 +62,13 @@ export default function ChartExplore() {
   // table-mode controls
   const [tableMetrics, setTableMetrics] = useState<string[]>([]);
   const [tableCols, setTableCols] = useState<string[]>([]);
-  // pivot-mode controls (single-dim each)
-  const [pivotRow, setPivotRow] = useState<string>("");
-  const [pivotCol, setPivotCol] = useState<string>("");
-  const [pivotMetric, setPivotMetric] = useState<string>("");
+  // pivot-mode controls (multi-dim ordered)
+  const [pRows, setPRows] = useState<string[]>([]);
+  const [pCols, setPCols] = useState<string[]>([]);
+  const [pVals, setPVals] = useState<string[]>([]);
+  const [showRowTotals, setShowRowTotals] = useState(true);
+  const [showColTotals, setShowColTotals] = useState(true);
+  const [condense, setCondense] = useState(true);
   const [rowLimit, setRowLimit] = useState(1000);
 
   // hydrate from a saved chart once it loads (dataset/viz/controls + save dialog fields)
@@ -48,9 +79,12 @@ export default function ChartExplore() {
     setViz(c.viz_type);
     const p = c.params;
     if (c.viz_type === "pivot_table") {
-      setPivotRow(p.rows?.[0] ?? "");
-      setPivotCol(p.cols?.[0] ?? "");
-      setPivotMetric(p.metric ?? "");
+      setPRows(p.rows ?? []);
+      setPCols(p.cols ?? []);
+      setPVals(p.metrics ?? []);
+      setShowRowTotals(p.showRowTotals ?? true);
+      setShowColTotals(p.showColTotals ?? true);
+      setCondense(p.condense ?? true);
     } else {
       setTableMetrics(p.spec?.metrics ?? []);
       setTableCols([...(p.spec?.dimensions ?? []), ...(p.spec?.columns ?? [])]);
@@ -65,14 +99,16 @@ export default function ChartExplore() {
 
   function specForRun(): QuerySpec {
     if (viz === "pivot_table") {
+      const dims = [...pRows, ...pCols];
+      const groups = [pRows, pCols].filter((g) => g.length > 0);
       return {
-        metrics: pivotMetric ? [pivotMetric] : [],
-        dimensions: [pivotRow, pivotCol].filter(Boolean),
+        metrics: pVals,
+        dimensions: dims,
         columns: [],
         filters: [],
         orderby: [],
         row_limit: rowLimit,
-        rollup: true,
+        rollup_groups: groups,
       };
     }
     const agg = tableMetrics.length > 0;
@@ -83,7 +119,7 @@ export default function ChartExplore() {
       filters: [],
       orderby: [],
       row_limit: rowLimit,
-      rollup: false,
+      rollup_groups: [],
     };
   }
 
@@ -97,8 +133,8 @@ export default function ChartExplore() {
   async function run() {
     setQueryId(null);
     if (!datasetId) { toast.error("Pick a dataset first"); return; }
-    if (viz === "pivot_table" && (!pivotRow || !pivotMetric)) {
-      toast.error("Pivot needs a row dimension and a metric"); return;
+    if (viz === "pivot_table" && (pRows.length === 0 || pVals.length === 0)) {
+      toast.error("Pivot needs at least one row dimension and one value"); return;
     }
     try {
       const { sql, database_id } = await build.mutateAsync({ dataset_id: datasetId, query_spec: specForRun() });
@@ -114,15 +150,15 @@ export default function ChartExplore() {
 
   function paramsForSave(): ChartParams {
     return viz === "pivot_table"
-      ? { spec: specForRun(), rows: [pivotRow], cols: pivotCol ? [pivotCol] : [], metric: pivotMetric }
+      ? { spec: specForRun(), rows: pRows, cols: pCols, metrics: pVals, showRowTotals, showColTotals, condense }
       : { spec: specForRun() };
   }
 
   async function save() {
     if (!datasetId) { toast.error("Pick a dataset"); return; }
     if (!saveName.trim()) { toast.error("Name required"); return; }
-    if (viz === "pivot_table" && (!pivotRow || !pivotMetric)) {
-      toast.error("Pivot needs a row dimension and a metric"); return;
+    if (viz === "pivot_table" && (pRows.length === 0 || pVals.length === 0)) {
+      toast.error("Pivot needs at least one row dimension and one value"); return;
     }
     try {
       if (id) {
@@ -166,7 +202,7 @@ export default function ChartExplore() {
         {/* Dataset picker */}
         <div className="space-y-1">
           <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Dataset</Label>
-          <Select value={datasetId ?? ""} onValueChange={(v) => { setDatasetId(v || null); setTableMetrics([]); setTableCols([]); setPivotRow(""); setPivotCol(""); setPivotMetric(""); }}>
+          <Select value={datasetId ?? ""} onValueChange={(v) => { setDatasetId(v || null); setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]); }}>
             <SelectTrigger className="h-8 text-sm">
               <SelectValue placeholder="Pick a dataset…" />
             </SelectTrigger>
@@ -248,50 +284,21 @@ export default function ChartExplore() {
         {/* Controls: pivot viz */}
         {viz === "pivot_table" && (
           <>
-            <p className="text-xs text-muted-foreground">Pivot supports one row + one column dimension.</p>
-
-            <div className="space-y-1">
-              <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Row dimension</Label>
-              <Select value={pivotRow} onValueChange={setPivotRow}>
-                <SelectTrigger className="h-8 text-sm">
-                  <SelectValue placeholder="Pick a column…" />
-                </SelectTrigger>
-                <SelectContent>
-                  {columns.map((col) => (
-                    <SelectItem key={col.column_name} value={col.column_name}>{col.column_name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-1">
-              <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Column dimension</Label>
-              <Select value={pivotCol || "__none"} onValueChange={(v) => setPivotCol(v === "__none" ? "" : v)}>
-                <SelectTrigger className="h-8 text-sm">
-                  <SelectValue placeholder="None (optional)" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__none">None</SelectItem>
-                  {columns.map((col) => (
-                    <SelectItem key={col.column_name} value={col.column_name}>{col.column_name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-1">
-              <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Metric</Label>
-              <Select value={pivotMetric} onValueChange={setPivotMetric}>
-                <SelectTrigger className="h-8 text-sm">
-                  <SelectValue placeholder="Pick a metric…" />
-                </SelectTrigger>
-                <SelectContent>
-                  {metrics.map((m) => (
-                    <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            <OrderedPicker label="Rows" selected={pRows} onChange={setPRows}
+              options={columns.map((c) => c.column_name).filter((n) => !pCols.includes(n))} />
+            <OrderedPicker label="Columns" selected={pCols} onChange={setPCols}
+              options={columns.map((c) => c.column_name).filter((n) => !pRows.includes(n))} />
+            <OrderedPicker label="Values" selected={pVals} onChange={setPVals}
+              options={metrics.map((m) => m.metric_name)} />
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox checked={showRowTotals} onCheckedChange={(v) => setShowRowTotals(!!v)} /> Row totals
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox checked={showColTotals} onCheckedChange={(v) => setShowColTotals(!!v)} /> Column totals
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox checked={condense} onCheckedChange={(v) => setCondense(!!v)} /> Condense duplicate totals
+            </label>
           </>
         )}
 
@@ -348,18 +355,19 @@ export default function ChartExplore() {
           <p className="text-sm text-muted-foreground">Running…</p>
         )}
 
-        {finished && results.data && (
-          viz === "pivot_table" ? (
-            <PivotTable
-              columns={results.data.columns.map((c) => c.name)}
-              rows={results.data.rows}
-              rowDims={pivotRow ? [pivotRow] : []}
-              colDims={pivotCol ? [pivotCol] : []}
-              metric={pivotMetric}
-            />
-          ) : (
-            <ChartTable columns={results.data.columns} rows={results.data.rows} />
-          )
+        {finished && results.data && viz === "pivot_table" && (
+          <PivotTable
+            input={{
+              columns: results.data.columns.map((c) => c.name),
+              rows: results.data.rows,
+              rowDims: pRows, colDims: pCols, metrics: pVals,
+              showRowTotals, showColTotals, condense, collapsed: new Set(),
+            }}
+          />
+        )}
+
+        {finished && results.data && viz !== "pivot_table" && (
+          <ChartTable columns={results.data.columns} rows={results.data.rows} />
         )}
 
         {!queryId && !build.isPending && !submit.isPending && (
