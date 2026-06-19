@@ -42,7 +42,6 @@ export function CreateDatasetDialog({ ws, open, onOpenChange, initialSql, initia
       setDbId(initialDbId ?? "");
       setTab(initialTab ?? "table");
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   async function submit(source: CreateSource) {

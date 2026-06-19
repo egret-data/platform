@@ -62,7 +62,6 @@ export default function Datasets() {
       return sort.dir === "asc" ? cmp : -cmp;
     });
     return r;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, databases, query, typeFilter, dbFilter, sort]);
 
   const hasData = !!data && data.length > 0;
@@ -70,7 +69,7 @@ export default function Datasets() {
   const someSelected = rows.some((d) => selected.has(d.id));
 
   function toggle(id: string) {
-    setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+    setSelected((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   }
   function toggleAll() {
     setSelected((s) => {

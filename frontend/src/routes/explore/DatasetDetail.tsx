@@ -36,7 +36,6 @@ export default function DatasetDetail() {
       searchParams.delete("edit");
       setSearchParams(searchParams, { replace: true });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ds, searchParams]);
 
   if (isLoading) return <div className="p-4 text-muted-foreground">Loading…</div>;
