@@ -22,4 +22,8 @@ describe("PivotTable", () => {
     expect(screen.getByText("Grand totals")).toBeInTheDocument();
     expect(screen.getByText("35")).toBeInTheDocument();
   });
+  it("applies a column format to value cells", () => {
+    render(<PivotTable input={input} metricTypes={{ revenue: "double" }} columnSettings={{ revenue: { prefix: "$" } }} />);
+    expect(screen.getByText("$35")).toBeInTheDocument();
+  });
 });

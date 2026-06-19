@@ -93,7 +93,7 @@ export interface BodyRow {
   rowPath: (string | null)[];
   kind: "leaf" | "subtotal" | "grand";
   headerCells: RowHeaderCell[]; // only cells that START on this row
-  values: string[];             // formatted, aligned to colLeaves
+  values: CellValue[];          // raw, aligned to colLeaves
 }
 export interface Pivot {
   rowDimNames: string[];
@@ -101,15 +101,6 @@ export interface Pivot {
   colLeaves: ColLeaf[];
   bodyRows: BodyRow[];
 }
-
-const fmt = (v: CellValue): string => {
-  if (v == null) return "";
-  if (typeof v === "number") return v.toLocaleString();
-  const n = Number(v);
-  return typeof v === "string" && v.trim() !== "" && Number.isFinite(n)
-    ? n.toLocaleString()
-    : String(v);
-};
 
 interface TreeNode {
   value: string | null;
@@ -193,8 +184,8 @@ export function buildPivot(input: PivotInput): Pivot {
   // ----- body rows (depth-first over row tree, inserting subtotals) -----
   const bodyRows: BodyRow[] = [];
 
-  function rowValues(rowPath: (string | null)[]): string[] {
-    return colLeaves.map((cl) => fmt(ix.cell(rowPath, cl.colPath, cl.metric)));
+  function rowValues(rowPath: (string | null)[]): CellValue[] {
+    return colLeaves.map((cl) => ix.cell(rowPath, cl.colPath, cl.metric));
   }
 
   // returns the number of body rows produced for `node`'s subtree, EXCLUDING node's own subtotal row.
