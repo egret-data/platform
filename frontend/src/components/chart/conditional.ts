@@ -80,7 +80,7 @@ export function buildConditional(
     for (const rule of rules) {
       if (!rule.columns.includes(colName)) continue;
       if (rule.type === "single") {
-        if (rule.highlight_row && !opts.isPivot) continue;
+        if (rule.highlight_row) continue; // highlight_row → rowBg only (and rowBg is null in pivot)
         if (matchOperator(rule.operator, value, rule.value)) {
           return rgba(rule.color, CELL_ALPHA);
         }

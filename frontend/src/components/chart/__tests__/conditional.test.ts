@@ -70,4 +70,9 @@ describe("buildConditional row highlight", () => {
     const c = buildConditional(rows, colIndex, rules, { isPivot: true });
     expect(c.rowBg(0)).toBeNull();
   });
+  it("isPivot: a highlight_row rule produces no cell color", () => {
+    const rules: Rule[] = [{ columns: ["revenue"], type: "single", operator: ">", value: 0, color: "#abcdef", highlight_row: true }];
+    const c = buildConditional(rows, colIndex, rules, { isPivot: true });
+    expect(c.bg(50, "revenue")).toBeNull();
+  });
 });
