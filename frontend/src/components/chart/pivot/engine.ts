@@ -72,3 +72,181 @@ export function indexResult(input: PivotInput): Indexed {
 
   return { rowLeafPaths, colLeafPaths, cell };
 }
+
+export interface ColLeaf {
+  colPath: (string | null)[];
+  metric: string;
+  isTotal: boolean;        // the right-hand "Total" column group (colPath = [])
+}
+export interface TopCell {
+  label: string;
+  colSpan: number;
+}
+export interface RowHeaderCell {
+  label: string;
+  depth: number;           // which row-dim column it starts at
+  rowSpan: number;
+  colSpan: number;
+}
+export interface BodyRow {
+  rowPath: (string | null)[];
+  kind: "leaf" | "subtotal" | "grand";
+  headerCells: RowHeaderCell[]; // only cells that START on this row
+  values: string[];             // formatted, aligned to colLeaves
+}
+export interface Pivot {
+  rowDimNames: string[];
+  topHeader: TopCell[][];       // one array per top-header level
+  colLeaves: ColLeaf[];
+  bodyRows: BodyRow[];
+}
+
+const fmt = (v: CellValue): string => {
+  if (v == null) return "";
+  if (typeof v === "number") return v.toLocaleString();
+  const n = Number(v);
+  return typeof v === "string" && v.trim() !== "" && Number.isFinite(n)
+    ? n.toLocaleString()
+    : String(v);
+};
+
+interface TreeNode {
+  value: string | null;
+  children: TreeNode[];
+  childByValue: Map<string | null, TreeNode>;
+}
+const newNode = (value: string | null): TreeNode => ({ value, children: [], childByValue: new Map() });
+
+function buildTree(paths: (string | null)[][]): TreeNode {
+  const root = newNode(null);
+  for (const path of paths) {
+    let cur = root;
+    for (const v of path) {
+      let next = cur.childByValue.get(v);
+      if (!next) {
+        next = newNode(v);
+        cur.childByValue.set(v, next);
+        cur.children.push(next);
+      }
+      cur = next;
+    }
+  }
+  return root;
+}
+
+export function buildPivot(input: PivotInput): Pivot {
+  const ix = indexResult(input);
+  const m = input.rowDims.length;
+  const rowTree = buildTree(ix.rowLeafPaths);
+  const colTree = buildTree(ix.colLeafPaths);
+
+  // ----- column leaves (full col paths × metrics, + optional Total group) -----
+  const colLeafPaths: (string | null)[][] = [];
+  (function collect(node: TreeNode, path: (string | null)[]) {
+    if (node.children.length === 0) {
+      if (path.length > 0) colLeafPaths.push(path);
+      return;
+    }
+    for (const ch of node.children) collect(ch, [...path, ch.value]);
+  })(colTree, []);
+  const effectiveColPaths = colLeafPaths.length ? colLeafPaths : [[]];
+
+  const colLeaves: ColLeaf[] = [];
+  for (const cp of effectiveColPaths) {
+    for (const metric of input.metrics) colLeaves.push({ colPath: cp, metric, isTotal: false });
+  }
+  if (input.showRowTotals) {
+    for (const metric of input.metrics) colLeaves.push({ colPath: [], metric, isTotal: true });
+  }
+
+  // ----- top header levels -----
+  const topHeader: TopCell[][] = [];
+  for (let d = 0; d < input.colDims.length; d++) {
+    const level: TopCell[] = [];
+    for (const cp of effectiveColPaths) {
+      level.push({ label: String(cp[d] ?? ""), colSpan: input.metrics.length });
+    }
+    if (input.showRowTotals) level.push({ label: "Total", colSpan: input.metrics.length });
+    topHeader.push(level);
+  }
+  if (input.metrics.length > 1) {
+    const level: TopCell[] = [];
+    const groups = effectiveColPaths.length + (input.showRowTotals ? 1 : 0);
+    for (let g = 0; g < groups; g++) for (const metric of input.metrics) level.push({ label: metric, colSpan: 1 });
+    topHeader.push(level);
+  }
+
+  // ----- body rows (depth-first over row tree, inserting subtotals) -----
+  const bodyRows: BodyRow[] = [];
+
+  function rowValues(rowPath: (string | null)[]): string[] {
+    return colLeaves.map((cl) => fmt(ix.cell(rowPath, cl.colPath, cl.metric)));
+  }
+
+  // returns the number of body rows produced for `node`'s subtree, EXCLUDING node's own subtotal row.
+  function emit(node: TreeNode, path: (string | null)[], depth: number): number {
+    if (node.children.length === 0) {
+      bodyRows.push({ rowPath: path, kind: "leaf", headerCells: [], values: rowValues(path) });
+      return 1;
+    }
+    let span = 0;
+    for (const ch of node.children) {
+      const childStart = bodyRows.length;
+      const childSpan = emit(ch, [...path, ch.value], depth + 1);
+      bodyRows[childStart].headerCells.push({
+        label: String(ch.value ?? ""),
+        depth: depth + 1,
+        rowSpan: childSpan,
+        colSpan: 1,
+      });
+      span += childSpan;
+      const childHasSubtotal =
+        input.showColTotals && ch.children.length > 0 && (!input.condense || ch.children.length > 1);
+      if (childHasSubtotal) {
+        const subPath = [...path, ch.value];
+        bodyRows.push({
+          rowPath: subPath,
+          kind: "subtotal",
+          headerCells: [{ label: "Total", depth: depth + 1, rowSpan: 1, colSpan: m - (depth + 1) }],
+          values: rowValues(subPath),
+        });
+        span += 1;
+      }
+    }
+    return span;
+  }
+
+  // top-level row groups (depth 0)
+  for (const ch of rowTree.children) {
+    const start = bodyRows.length;
+    const childSpan = emit(ch, [ch.value], 0);
+    bodyRows[start].headerCells.unshift({
+      label: String(ch.value ?? ""),
+      depth: 0,
+      rowSpan: childSpan,
+      colSpan: 1,
+    });
+    const hasSubtotal =
+      input.showColTotals && ch.children.length > 0 && (!input.condense || ch.children.length > 1);
+    if (hasSubtotal) {
+      const subPath = [ch.value];
+      bodyRows.push({
+        rowPath: subPath,
+        kind: "subtotal",
+        headerCells: [{ label: "Total", depth: 0, rowSpan: 1, colSpan: m }],
+        values: rowValues(subPath),
+      });
+    }
+  }
+
+  if (input.showColTotals) {
+    bodyRows.push({
+      rowPath: [],
+      kind: "grand",
+      headerCells: [{ label: "Grand total", depth: 0, rowSpan: 1, colSpan: m }],
+      values: rowValues([]),
+    });
+  }
+
+  return { rowDimNames: input.rowDims, topHeader, colLeaves, bodyRows };
+}
