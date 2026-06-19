@@ -266,12 +266,12 @@ export default function ChartExplore() {
 
             <div className="space-y-1">
               <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Column dimension</Label>
-              <Select value={pivotCol} onValueChange={setPivotCol}>
+              <Select value={pivotCol || "__none"} onValueChange={(v) => setPivotCol(v === "__none" ? "" : v)}>
                 <SelectTrigger className="h-8 text-sm">
                   <SelectValue placeholder="None (optional)" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">None</SelectItem>
+                  <SelectItem value="__none">None</SelectItem>
                   {columns.map((col) => (
                     <SelectItem key={col.column_name} value={col.column_name}>{col.column_name}</SelectItem>
                   ))}
@@ -302,7 +302,7 @@ export default function ChartExplore() {
             id="row-limit"
             type="number"
             min={1}
-            max={100000}
+            max={10000}
             value={rowLimit}
             onChange={(e) => {
               const n = Number(e.target.value);
