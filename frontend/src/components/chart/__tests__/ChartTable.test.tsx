@@ -75,4 +75,11 @@ describe("ChartTable interactions", () => {
     fireEvent.click(screen.getByText("Next"));
     expect(screen.getByText("Showing 26–30 of 30")).toBeInTheDocument();
   });
+
+  it("renders columns in tableState.columnOrder", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(2)} tableState={{ columnOrder: ["b", "a"] }} />);
+    const headers = within(document.querySelector("thead")!).getAllByRole("columnheader");
+    expect(headers[0]).toHaveTextContent("b");
+    expect(headers[1]).toHaveTextContent("a");
+  });
 });

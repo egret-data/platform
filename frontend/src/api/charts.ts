@@ -29,6 +29,7 @@ export interface TableState {
   hiddenColumns?: string[];                 // colName[] currently hidden
   pinnedLeft?: number;                      // freeze the first N columns (0 = none)
   pagination?: { enabled: boolean; pageSize: number };  // pageSize in {25, 50, 100}
+  columnOrder?: string[];   // table viz only: column names in display order
 }
 
 export interface ChartParams {
