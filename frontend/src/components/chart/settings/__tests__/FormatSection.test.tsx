@@ -3,7 +3,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { FormatSection } from "../FormatSection";
 
 describe("FormatSection", () => {
-  it("shows numeric controls and writes a column format when a setting is edited", () => {
+  it("expands a numeric column on click and writes a format when a setting is edited", () => {
     const onChange = vi.fn();
     render(
       <FormatSection
@@ -12,8 +12,10 @@ describe("FormatSection", () => {
         onChange={onChange}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "revenue" }));
-    // numeric column → the Number style control is present
+    // collapsed by default
+    expect(screen.queryByLabelText("Number style")).not.toBeInTheDocument();
+    // click the column row to expand its settings
+    fireEvent.click(screen.getByRole("button", { name: /revenue/ }));
     expect(screen.getByLabelText("Number style")).toBeInTheDocument();
     // editing a native input writes that column's format
     fireEvent.change(screen.getByLabelText("Prefix"), { target: { value: "$" } });
@@ -28,6 +30,7 @@ describe("FormatSection", () => {
         onChange={() => {}}
       />,
     );
+    fireEvent.click(screen.getByRole("button", { name: /name/ }));
     expect(screen.queryByLabelText("Number style")).not.toBeInTheDocument();
     expect(screen.getByText(/no format options/i)).toBeInTheDocument();
   });
