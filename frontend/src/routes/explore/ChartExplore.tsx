@@ -1,14 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { useDatasets, useDataset } from "@/api/datasets";
 import {
   useBuildChartData, useChart, useChartMutations,
-  type QuerySpec, type VizType, type ChartParams, type TableState,
+  type QuerySpec, type VizType, type ChartParams, type TableState, type ChartFilter,
 } from "@/api/charts";
 import { useSubmitQuery, useQueryStatus, useResults } from "@/api/sqllab";
 import { ChartTable } from "@/components/chart/ChartTable";
 import { PivotTable } from "@/components/chart/pivot/PivotTable";
+import { FilterChips } from "@/components/chart/FilterChips";
+import { DrillMenu } from "@/components/chart/DrillMenu";
+import { DrillRecordsDialog } from "@/components/chart/DrillRecordsDialog";
+import type { DrillContext } from "@/components/chart/drill";
 import { ChartTypeGallery } from "@/components/chart/ChartTypeGallery";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { FormatSection } from "@/components/chart/settings/FormatSection";
@@ -19,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
@@ -26,39 +31,16 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
-
-function OrderedPicker({
-  label, selected, onChange, options,
-}: { label: string; selected: string[]; onChange: (v: string[]) => void; options: string[] }) {
-  const remaining = options.filter((o) => !selected.includes(o));
-  return (
-    <div className="space-y-1">
-      <div className="text-sm">{label}</div>
-      <div className="flex flex-wrap gap-1">
-        {selected.map((s) => (
-          <span key={s} className="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-xs">
-            {s}
-            <button type="button" className="text-muted-foreground hover:text-destructive"
-              onClick={() => onChange(selected.filter((x) => x !== s))}>×</button>
-          </span>
-        ))}
-      </div>
-      {remaining.length > 0 && (
-        <Select value="" onValueChange={(v) => v && onChange([...selected, v])}>
-          <SelectTrigger className="h-8"><SelectValue placeholder={`Add ${label.toLowerCase()}…`} /></SelectTrigger>
-          <SelectContent>
-            {remaining.map((o) => <SelectItem key={o} value={o}>{o}</SelectItem>)}
-          </SelectContent>
-        </Select>
-      )}
-    </div>
-  );
-}
+import { FieldZone } from "@/components/chart/config/FieldZone";
 
 const UNDERLINE_LIST = "h-auto w-full justify-start gap-4 rounded-none border-b bg-transparent p-0";
 const UNDERLINE_TRIGGER = "rounded-none border-b-2 border-transparent px-0 pb-2 text-sm data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none";
 
 const isValidViz = (v: string | null): v is VizType => CHART_TYPES.some((t) => t.key === v);
+
+function SectionLabel({ children }: { children: ReactNode }) {
+  return <div className="border-b pb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">{children}</div>;
+}
 
 export default function ChartExplore() {
   const ws = useParams().workspace!;
@@ -90,6 +72,9 @@ export default function ChartExplore() {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [pivotSort, setPivotSort] = useState<Record<string, "asc" | "desc">>({});
   const [tableState, setTableState] = useState<TableState>({});
+  const [filters, setFilters] = useState<ChartFilter[]>([]);
+  const [drillMenu, setDrillMenu] = useState<{ ctx: DrillContext; x: number; y: number } | null>(null);
+  const [recordsFilters, setRecordsFilters] = useState<ChartFilter[] | null>(null);
 
   // hydrate from a saved chart once it loads (dataset/viz/controls + save dialog fields)
   useEffect(() => {
@@ -115,6 +100,7 @@ export default function ChartExplore() {
     setCollapsed(new Set(p.collapsedRows ?? []));
     setPivotSort(p.pivotSort ?? {});
     setTableState(p.tableState ?? {});
+    setFilters(p.spec?.filters ?? []);
     setSaveName(c.name);
     setSaveDesc(c.description);
   }, [existing.data]);
@@ -132,14 +118,14 @@ export default function ChartExplore() {
       const dims = [...pRows, ...pCols];
       const groups = [pRows, pCols].filter((g) => g.length > 0);
       return {
-        metrics: pVals, dimensions: dims, columns: [], filters: [], orderby: [],
+        metrics: pVals, dimensions: dims, columns: [], filters, orderby: [],
         row_limit: rowLimit, rollup_groups: groups,
       };
     }
     const agg = tableMetrics.length > 0;
     return {
       metrics: tableMetrics, dimensions: agg ? tableCols : [], columns: agg ? [] : tableCols,
-      filters: [], orderby: [], row_limit: rowLimit, rollup_groups: [],
+      filters, orderby: [], row_limit: rowLimit, rollup_groups: [],
     };
   }
 
@@ -150,6 +136,9 @@ export default function ChartExplore() {
   const finished = status.data?.status === "finished";
   const results = useResults(ws, queryId, 0, finished);
   const resultColumns = (results.data?.columns ?? []).filter((c) => !c.name.startsWith("__grp_"));
+  // In a pivot, only the value (metric) cells are formatted/colored — row/column dimension cells are
+  // headers and never styled. So the Format/Conditional pickers should offer only the value columns.
+  const styleColumns = viz === "pivot_table" ? resultColumns.filter((c) => pVals.includes(c.name)) : resultColumns;
   const metricTypes = Object.fromEntries((detail.data?.metrics ?? []).map((m) => [m.metric_name, m.data_type ?? "double"]));
 
   async function run() {
@@ -164,6 +153,12 @@ export default function ChartExplore() {
       setQueryId(ack.id);
     } catch (e) { toast.error(String(e)); }
   }
+
+  function addFilter(f: ChartFilter) {
+    setFilters((prev) => [...prev.filter((x) => x.col !== f.col), f]);
+  }
+  // Re-run whenever filters change, but only if a query is already in flight/done
+  useEffect(() => { if (queryId) void run(); }, [filters]); // intentionally omits run/queryId to avoid infinite loop
 
   const mutations = useChartMutations(ws);
   const [saveOpen, setSaveOpen] = useState(false);
@@ -211,7 +206,7 @@ export default function ChartExplore() {
 
   function resetControls() {
     setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]);
-    setColumnSettings({}); setConditionalFormatting([]); setCollapsed(new Set()); setPivotSort({}); setTableState({}); setQueryId(null);
+    setColumnSettings({}); setConditionalFormatting([]); setCollapsed(new Set()); setPivotSort({}); setTableState({}); setFilters([]); setQueryId(null);
   }
 
   const isRunning = status.data?.status === "queued" || status.data?.status === "running";
@@ -298,11 +293,11 @@ export default function ChartExplore() {
 
             {viz === "pivot_table" && (
               <>
-                <OrderedPicker label="Rows" selected={pRows} onChange={setPRows}
+                <FieldZone label="Rows" selected={pRows} onChange={setPRows}
                   options={columns.map((c) => c.column_name).filter((n) => !pCols.includes(n))} />
-                <OrderedPicker label="Columns" selected={pCols} onChange={setPCols}
+                <FieldZone label="Columns" selected={pCols} onChange={setPCols}
                   options={columns.map((c) => c.column_name).filter((n) => !pRows.includes(n))} />
-                <OrderedPicker label="Values" selected={pVals} onChange={setPVals}
+                <FieldZone label="Values" selected={pVals} onChange={setPVals}
                   options={metrics.map((m) => m.metric_name)} />
               </>
             )}
@@ -318,18 +313,21 @@ export default function ChartExplore() {
           {/* ── DISPLAY TAB ── */}
           <TabsContent value="display" className="space-y-4">
             {viz === "pivot_table" && (
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <Checkbox id="show-row-totals" checked={showRowTotals} onCheckedChange={(v) => setShowRowTotals(!!v)} />
-                  <Label htmlFor="show-row-totals" className="cursor-pointer text-sm font-normal">Row totals</Label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Checkbox id="show-col-totals" checked={showColTotals} onCheckedChange={(v) => setShowColTotals(!!v)} />
-                  <Label htmlFor="show-col-totals" className="cursor-pointer text-sm font-normal">Column totals</Label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Checkbox id="condense-totals" checked={condense} onCheckedChange={(v) => setCondense(!!v)} />
-                  <Label htmlFor="condense-totals" className="cursor-pointer text-sm font-normal">Condense duplicate totals</Label>
+              <div className="space-y-1">
+                <SectionLabel>Totals</SectionLabel>
+                <div className="space-y-2.5 pt-1.5">
+                  <div className="flex items-center justify-between">
+                    <Label htmlFor="show-row-totals" className="text-sm font-normal">Row totals</Label>
+                    <Switch id="show-row-totals" checked={showRowTotals} onCheckedChange={(v) => setShowRowTotals(v)} />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <Label htmlFor="show-col-totals" className="text-sm font-normal">Column totals</Label>
+                    <Switch id="show-col-totals" checked={showColTotals} onCheckedChange={(v) => setShowColTotals(v)} />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <Label htmlFor="condense-totals" className="text-sm font-normal">Condense duplicate totals</Label>
+                    <Switch id="condense-totals" checked={condense} onCheckedChange={(v) => setCondense(v)} />
+                  </div>
                 </div>
               </div>
             )}
@@ -339,18 +337,18 @@ export default function ChartExplore() {
             ) : (
               <>
                 {viz === "table" && (
-                  <div className="space-y-1">
-                    <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Columns</div>
+                  <div className="space-y-1.5">
+                    <SectionLabel>Columns</SectionLabel>
                     <TableColumnsSection columns={resultColumns} value={tableState} onChange={setTableState} />
                   </div>
                 )}
-                <div className="space-y-1">
-                  <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Formatting</div>
-                  <FormatSection columns={resultColumns} value={columnSettings} onChange={setColumnSettings} />
+                <div className="space-y-1.5">
+                  <SectionLabel>Formatting</SectionLabel>
+                  <FormatSection columns={styleColumns} value={columnSettings} onChange={setColumnSettings} />
                 </div>
-                <div className="space-y-1">
-                  <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Conditional formatting</div>
-                  <ConditionalFormattingSection columns={resultColumns} rules={conditionalFormatting} isPivot={viz === "pivot_table"} onChange={setConditionalFormatting} />
+                <div className="space-y-1.5">
+                  <SectionLabel>Conditional formatting</SectionLabel>
+                  <ConditionalFormattingSection columns={styleColumns} rules={conditionalFormatting} isPivot={viz === "pivot_table"} onChange={setConditionalFormatting} />
                 </div>
               </>
             )}
@@ -373,6 +371,9 @@ export default function ChartExplore() {
           )}
         </div>
 
+        {filters.length > 0 && (
+          <FilterChips filters={filters} onRemove={(i) => setFilters((prev) => prev.filter((_, j) => j !== i))} />
+        )}
         {status.data?.status === "failed" && (
           <p className="rounded bg-destructive/10 p-3 text-sm text-destructive">{status.data.error}</p>
         )}
@@ -407,12 +408,15 @@ export default function ChartExplore() {
                 return next;
               })
             }
+            onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })}
           />
         )}
         {finished && results.data && viz !== "pivot_table" && (
           <ChartTable columns={results.data.columns} rows={results.data.rows}
             columnSettings={columnSettings} conditionalFormatting={conditionalFormatting}
-            tableState={tableState} onTableStateChange={setTableState} />
+            tableState={tableState} onTableStateChange={setTableState}
+            dimensionColumns={tableMetrics.length > 0 ? tableCols : []}
+            onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })} />
         )}
         {!queryId && !build.isPending && !submit.isPending && (
           <p className="text-sm text-muted-foreground">Configure the controls on the left and click Run.</p>
@@ -449,6 +453,23 @@ export default function ChartExplore() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {drillMenu && (
+        <DrillMenu
+          ctx={drillMenu.ctx} x={drillMenu.x} y={drillMenu.y}
+          onFilterBy={addFilter}
+          onSeeRecords={(fs) => setRecordsFilters(fs)}
+          onClose={() => setDrillMenu(null)}
+        />
+      )}
+      <DrillRecordsDialog
+        open={recordsFilters !== null}
+        onOpenChange={(o) => { if (!o) setRecordsFilters(null); }}
+        ws={ws} datasetId={datasetId}
+        columns={(detail.data?.columns ?? []).map((c) => ({ name: c.column_name, type: c.data_type ?? "varchar" }))}
+        filters={recordsFilters ?? []}
+        rowLimit={rowLimit}
+      />
     </div>
   );
 }

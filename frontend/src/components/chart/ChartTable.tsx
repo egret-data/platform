@@ -16,6 +16,7 @@ import { buildConditional } from "./conditional";
 import type { ColumnFormat, Rule } from "./format-types";
 import type { TableState } from "@/api/charts";
 import { Button } from "@/components/ui/button";
+import { tableCellDrill, type DrillContext } from "./drill";
 
 export interface ResultColumn { name: string; type: string }
 
@@ -46,7 +47,7 @@ const MIN_COL_WIDTH = 60;
 
 export function ChartTable({
   columns, rows, columnSettings = {}, conditionalFormatting = [],
-  tableState = {}, onTableStateChange,
+  tableState = {}, onTableStateChange, dimensionColumns, onCellDrill,
 }: {
   columns: ResultColumn[];
   rows: unknown[][];
@@ -54,6 +55,8 @@ export function ChartTable({
   conditionalFormatting?: Rule[];
   tableState?: TableState;
   onTableStateChange?: (next: TableState) => void;
+  dimensionColumns?: string[];
+  onCellDrill?: (ctx: DrillContext, x: number, y: number) => void;
 }) {
   const [sorting, setSorting] = useState<SortingState>([]);
 
@@ -190,10 +193,10 @@ export function ChartTable({
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
     <div className="rounded-md border">
       <div className="max-h-[60vh] overflow-auto">
-        <table className="w-full border-collapse text-sm">
-          <thead className="bg-muted/40">
+        <table className="w-full border-separate border-spacing-0 text-xs text-foreground/90">
+          <thead className="bg-accent">
             {table.getHeaderGroups().map((hg) => (
-              <tr key={hg.id} className="border-b border-border/60 text-left text-muted-foreground">
+              <tr key={hg.id} className="text-left text-muted-foreground">
                 <SortableContext items={table.getVisibleLeafColumns().map((c) => c.id)} strategy={horizontalListSortingStrategy}>
                 {hg.headers.map((h) => {
                   const isNum = (h.column.columnDef.meta as { isNum?: boolean } | undefined)?.isNum ?? false;
@@ -209,8 +212,8 @@ export function ChartTable({
                         ...(sized ? { width: h.getSize() } : {}),
                         ...(pinned ? { left: h.column.getStart("left") } : {}),
                       }}
-                      className={`relative sticky top-0 cursor-pointer select-none px-3 py-2 font-medium whitespace-nowrap ${
-                        pinned ? "z-30 border-r border-border/60 bg-muted/40" : "z-10"
+                      className={`relative sticky top-0 cursor-pointer select-none border-b border-border/50 bg-accent px-3 py-2 font-medium whitespace-nowrap ${
+                        pinned ? "z-30 border-r border-border/50" : "z-10"
                       } ${isNum ? "text-right" : "text-left"}`}
                     >
                       {flexRender(h.column.columnDef.header, h.getContext())}
@@ -238,7 +241,7 @@ export function ChartTable({
             {table.getRowModel().rows.map((r) => {
               const rowColor = cond.rowBg(r.index);
               return (
-                <tr key={r.id} className="border-t border-border/60 hover:bg-muted/20" style={rowColor ? { backgroundColor: rowColor } : undefined}>
+                <tr key={r.id} className="hover:bg-accent/40" style={rowColor ? { backgroundColor: rowColor } : undefined}>
                   {r.getVisibleCells().map((cell) => {
                     const meta = cell.column.columnDef.meta as { isNum?: boolean; name?: string } | undefined;
                     const isNum = meta?.isNum ?? false;
@@ -258,9 +261,15 @@ export function ChartTable({
                             ? (pinTint ? { background: `linear-gradient(${pinTint}, ${pinTint}), hsl(var(--background))` } : {})
                             : (bg ? { backgroundColor: bg } : {})),
                         }}
-                        className={`px-3 py-2 ${isNum ? "text-right tabular-nums" : ""} ${
-                          pinned ? `sticky z-20 border-r border-border/60${pinTint ? "" : " bg-background"}` : ""
-                        }`}
+                        className={`border-b border-border/50 px-3 py-2 ${isNum ? "text-right tabular-nums" : ""} ${
+                          pinned ? `sticky z-20 border-r border-border/50${pinTint ? "" : " bg-background"}` : ""
+                        } ${onCellDrill && dimensionColumns?.length ? "cursor-pointer" : ""}`}
+                        onClick={onCellDrill && dimensionColumns && dimensionColumns.length > 0
+                          ? (e) => onCellDrill(
+                              tableCellDrill(dimensionColumns, columns.map((c) => c.name), r.original as unknown[]),
+                              e.clientX, e.clientY,
+                            )
+                          : undefined}
                       >
                         {flexRender(cell.column.columnDef.cell, cell.getContext())}
                       </td>
@@ -273,7 +282,7 @@ export function ChartTable({
         </table>
       </div>
       {paginationEnabled && (
-        <div className="flex items-center justify-between border-t border-border/60 px-3 py-2 text-xs text-muted-foreground">
+        <div className="flex items-center justify-between border-t border-border/50 px-3 py-2 text-xs text-muted-foreground">
           <span>
             {totalRows === 0 ? "No rows" : `Showing ${start + 1}–${Math.min(start + pageSize, totalRows)} of ${totalRows}`}
           </span>

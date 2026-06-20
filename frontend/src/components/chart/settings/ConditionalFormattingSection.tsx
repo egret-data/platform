@@ -1,5 +1,7 @@
 import { useState } from "react";
+import { Plus, ChevronUp, ChevronDown, Trash2 } from "lucide-react";
 import type { Rule, SingleColorRule } from "../format-types";
+import { Button } from "@/components/ui/button";
 import { RuleEditor } from "./RuleEditor";
 
 interface ResultColumn { name: string; type: string }
@@ -46,22 +48,30 @@ export function ConditionalFormattingSection({
   };
 
   return (
-    <div className="space-y-2 text-sm">
-      <button type="button" className="rounded border px-3 py-1" onClick={() => setEditing(rules.length)}>+ Add rule</button>
+    <div className="space-y-1.5 text-sm">
       {rules.length === 0 && <p className="text-xs text-muted-foreground">No rules yet.</p>}
       {rules.map((rule, i) => (
-        <div key={i} className="flex items-center justify-between rounded border px-2 py-1">
-          <button type="button" className="flex items-center gap-2 text-left" onClick={() => setEditing(i)}>
-            <span className="inline-block h-4 w-4 rounded" style={{ backgroundColor: rule.type === "single" ? rule.color : rule.colors[rule.colors.length - 1] }} />
-            <span className="text-xs">{describeRule(rule)}</span>
+        <div key={i} className="flex items-center gap-1.5 rounded-md border bg-muted/40 px-2 py-1">
+          <button type="button" className="flex flex-1 items-center gap-2 overflow-hidden text-left" aria-label={`edit rule ${i + 1}`} onClick={() => setEditing(i)}>
+            <span className="inline-block h-4 w-4 shrink-0 rounded border" style={{ backgroundColor: rule.type === "single" ? rule.color : rule.colors[rule.colors.length - 1] }} />
+            <span className="truncate text-xs">{describeRule(rule)}</span>
           </button>
-          <div className="flex gap-1">
-            <button type="button" aria-label="up" onClick={() => move(i, -1)}>↑</button>
-            <button type="button" aria-label="down" onClick={() => move(i, 1)}>↓</button>
-            <button type="button" aria-label="delete" className="text-destructive" onClick={() => onChange(rules.filter((_, k) => k !== i))}>✕</button>
+          <div className="flex items-center text-muted-foreground">
+            <button type="button" aria-label="move rule up" disabled={i === 0} className="rounded p-0.5 hover:bg-accent hover:text-foreground disabled:opacity-30" onClick={() => move(i, -1)}>
+              <ChevronUp className="h-3.5 w-3.5" />
+            </button>
+            <button type="button" aria-label="move rule down" disabled={i === rules.length - 1} className="rounded p-0.5 hover:bg-accent hover:text-foreground disabled:opacity-30" onClick={() => move(i, 1)}>
+              <ChevronDown className="h-3.5 w-3.5" />
+            </button>
+            <button type="button" aria-label="delete rule" className="rounded p-0.5 hover:bg-accent hover:text-destructive" onClick={() => onChange(rules.filter((_, k) => k !== i))}>
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
           </div>
         </div>
       ))}
+      <Button type="button" variant="outline" size="sm" className="w-full" onClick={() => setEditing(rules.length)}>
+        <Plus className="mr-1 h-3.5 w-3.5" /> Add rule
+      </Button>
     </div>
   );
 }
