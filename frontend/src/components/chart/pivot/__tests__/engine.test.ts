@@ -191,3 +191,56 @@ describe("buildPivot no column dims (grouped table)", () => {
     expect(p.topHeader[0].some((c) => c.label === "revenue")).toBe(true);
   });
 });
+
+// 2 row dims (region, seg) × 0 col dims × 1 metric. ROLLUP(region, seg).
+const rowGrouped: PivotInput = {
+  columns: ["region", "seg", "revenue", "__grp_0", "__grp_1"],
+  rows: [
+    ["EU", "SMB", 10, 0, 0],
+    ["EU", "ENT", 20, 0, 0],
+    ["EU", null, 30, 0, 1],   // EU subtotal
+    ["US", "SMB", 5, 0, 0],
+    ["US", "ENT", 7, 0, 0],
+    ["US", null, 12, 0, 1],   // US subtotal
+    [null, null, 42, 1, 1],   // grand total
+  ],
+  rowDims: ["region", "seg"], colDims: [], metrics: ["revenue"],
+  showRowTotals: false, showColTotals: true, condense: true, collapsed: new Set<string>(),
+};
+
+describe("collapse", () => {
+  it("marks subtotal-bearing groups collapsible when expanded", () => {
+    const p = buildPivot(rowGrouped);
+    const euCell = p.bodyRows.flatMap((r) => r.headerCells).find((h) => h.label === "EU");
+    expect(euCell?.collapsible).toBe(true);
+    expect(euCell?.collapsed).toBe(false);
+    expect(euCell?.path).toEqual(["EU"]);
+    expect(p.bodyRows.some((r) => JSON.stringify(r.rowPath) === JSON.stringify(["EU", "SMB"]))).toBe(true);
+  });
+
+  it("collapsing a group hides its children and shows a collapsed subtotal row", () => {
+    const p = buildPivot({ ...rowGrouped, collapsed: new Set(['["EU"]']) });
+    expect(p.bodyRows.some((r) => JSON.stringify(r.rowPath) === JSON.stringify(["EU", "SMB"]))).toBe(false);
+    const euRow = p.bodyRows.find((r) => JSON.stringify(r.rowPath) === JSON.stringify(["EU"]) && r.kind === "subtotal");
+    expect(euRow).toBeTruthy();
+    expect(euRow!.values[0]).toBe(30);
+    const euCell = euRow!.headerCells.find((h) => h.label === "EU");
+    expect(euCell?.collapsible).toBe(true);
+    expect(euCell?.collapsed).toBe(true);
+    expect(p.bodyRows.some((r) => JSON.stringify(r.rowPath) === JSON.stringify(["US", "SMB"]))).toBe(true);
+  });
+});
+
+describe("dimension sort", () => {
+  it("sorts a row dimension descending when requested", () => {
+    const p = buildPivot({ ...rowGrouped, sortDims: { region: "desc" } });
+    const firstGroupLabel = p.bodyRows.flatMap((r) => r.headerCells).find((h) => h.depth === 0)?.label;
+    expect(firstGroupLabel).toBe("US");
+  });
+
+  it("keeps first-appearance order when no sort is set", () => {
+    const p = buildPivot(rowGrouped);
+    const firstGroupLabel = p.bodyRows.flatMap((r) => r.headerCells).find((h) => h.depth === 0)?.label;
+    expect(firstGroupLabel).toBe("EU");
+  });
+});

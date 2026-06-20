@@ -29,6 +29,7 @@ export interface TableState {
   hiddenColumns?: string[];                 // colName[] currently hidden
   pinnedLeft?: number;                      // freeze the first N columns (0 = none)
   pagination?: { enabled: boolean; pageSize: number };  // pageSize in {25, 50, 100}
+  columnOrder?: string[];   // table viz only: column names in display order
 }
 
 export interface ChartParams {
@@ -43,6 +44,8 @@ export interface ChartParams {
   columnSettings?: Record<string, ColumnFormat>;
   conditionalFormatting?: Rule[];
   tableState?: TableState;
+  collapsedRows?: string[];                     // pivot only: serialized collapsed row-group paths
+  pivotSort?: Record<string, "asc" | "desc">;   // pivot only: row-dimension name -> direction
 }
 
 export interface Chart {

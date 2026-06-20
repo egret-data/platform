@@ -8,6 +8,7 @@ export interface PivotInput {
   showColTotals: boolean;     // nested row-subtotal rows + bottom grand-total row
   condense: boolean;          // drop a subtotal row when its group has one child
   collapsed: Set<string>;     // serialized row-group paths that are collapsed
+  sortDims?: Record<string, "asc" | "desc">;  // row-dimension name -> direction; absent = natural order
 }
 
 export type CellValue = number | string | null;
@@ -88,6 +89,9 @@ export interface RowHeaderCell {
   depth: number;           // which row-dim column it starts at
   rowSpan: number;
   colSpan: number;
+  path?: (string | null)[]; // the group path this cell heads (for the collapse toggle)
+  collapsible?: boolean;    // group has a subtotal → can be collapsed
+  collapsed?: boolean;      // currently collapsed (renderer shows [+] vs [–])
 }
 export interface BodyRow {
   rowPath: (string | null)[];
@@ -126,10 +130,34 @@ function buildTree(paths: (string | null)[][]): TreeNode {
   return root;
 }
 
+// Total order over dimension values: null sorts as minimum (so it leads asc, trails desc),
+// then all numeric-looking values (compared numerically) before all other strings — this keeps
+// the comparator transitive even when a dimension mixes numbers and digit-leading text.
+function cmpValues(a: string | null, b: string | null): number {
+  if (a === b) return 0;
+  if (a === null) return -1;
+  if (b === null) return 1;
+  const fa = a.trim() !== "" && Number.isFinite(Number(a));
+  const fb = b.trim() !== "" && Number.isFinite(Number(b));
+  if (fa && fb) return Number(a) - Number(b);
+  if (fa !== fb) return fa ? -1 : 1;
+  return a.localeCompare(b);
+}
+
+function sortTree(node: TreeNode, depth: number, dims: string[], sortDims: Record<string, "asc" | "desc">) {
+  const dir = sortDims[dims[depth]];
+  if (dir) {
+    const sign = dir === "desc" ? -1 : 1;
+    node.children.sort((a, b) => cmpValues(a.value, b.value) * sign);
+  }
+  for (const ch of node.children) sortTree(ch, depth + 1, dims, sortDims);
+}
+
 export function buildPivot(input: PivotInput): Pivot {
   const ix = indexResult(input);
   const m = input.rowDims.length;
   const rowTree = buildTree(ix.rowLeafPaths);
+  sortTree(rowTree, 0, input.rowDims, input.sortDims ?? {});
   const colTree = buildTree(ix.colLeafPaths);
 
   // ----- column leaves (full col paths × metrics, + optional Total group) -----
@@ -181,39 +209,58 @@ export function buildPivot(input: PivotInput): Pivot {
     topHeader.push(colLeaves.map((cl) => ({ label: cl.metric, colSpan: 1 })));
   }
 
-  // ----- body rows (depth-first over row tree, inserting subtotals) -----
+  // ----- body rows (depth-first over row tree, inserting subtotals; collapse-aware) -----
   const bodyRows: BodyRow[] = [];
 
   function rowValues(rowPath: (string | null)[]): CellValue[] {
     return colLeaves.map((cl) => ix.cell(rowPath, cl.colPath, cl.metric));
   }
 
-  // returns the number of body rows produced for `node`'s subtree, EXCLUDING node's own subtotal row.
-  function emit(node: TreeNode, path: (string | null)[], depth: number): number {
-    if (node.children.length === 0) {
-      bodyRows.push({ rowPath: path, kind: "leaf", headerCells: [], values: rowValues(path) });
-      return 1;
-    }
+  // emit body rows for `node`'s children, each occupying row-dim column `depth`. returns rows emitted.
+  function emitChildren(node: TreeNode, path: (string | null)[], depth: number): number {
     let span = 0;
     for (const ch of node.children) {
-      const childStart = bodyRows.length;
-      const childSpan = emit(ch, [...path, ch.value], depth + 1);
-      bodyRows[childStart].headerCells.push({
+      const childPath = [...path, ch.value];
+      const isGroup = ch.children.length > 0;
+      const hasSubtotal = input.showColTotals && isGroup && (!input.condense || ch.children.length > 1);
+
+      if (!isGroup) {
+        const start = bodyRows.length;
+        bodyRows.push({ rowPath: childPath, kind: "leaf", headerCells: [], values: rowValues(childPath) });
+        bodyRows[start].headerCells.push({ label: String(ch.value ?? ""), depth, rowSpan: 1, colSpan: 1 });
+        span += 1;
+        continue;
+      }
+
+      if (hasSubtotal && input.collapsed.has(JSON.stringify(childPath))) {
+        // collapsed group → a single subtotal row carrying the group's aggregate + a collapsed toggle
+        bodyRows.push({
+          rowPath: childPath,
+          kind: "subtotal",
+          headerCells: [{ label: String(ch.value ?? ""), depth, rowSpan: 1, colSpan: m - depth, path: childPath, collapsible: true, collapsed: true }],
+          values: rowValues(childPath),
+        });
+        span += 1;
+        continue;
+      }
+
+      const start = bodyRows.length;
+      const childSpan = emitChildren(ch, childPath, depth + 1);
+      bodyRows[start].headerCells.push({
         label: String(ch.value ?? ""),
-        depth: depth + 1,
+        depth,
         rowSpan: childSpan,
         colSpan: 1,
+        ...(hasSubtotal ? { path: childPath, collapsible: true, collapsed: false } : {}),
       });
       span += childSpan;
-      const childHasSubtotal =
-        input.showColTotals && ch.children.length > 0 && (!input.condense || ch.children.length > 1);
-      if (childHasSubtotal) {
-        const subPath = [...path, ch.value];
+
+      if (hasSubtotal) {
         bodyRows.push({
-          rowPath: subPath,
+          rowPath: childPath,
           kind: "subtotal",
-          headerCells: [{ label: `Totals for ${String(ch.value ?? "")}`, depth: depth + 1, rowSpan: 1, colSpan: m - (depth + 1) }],
-          values: rowValues(subPath),
+          headerCells: [{ label: `Totals for ${String(ch.value ?? "")}`, depth, rowSpan: 1, colSpan: m - depth }],
+          values: rowValues(childPath),
         });
         span += 1;
       }
@@ -221,28 +268,7 @@ export function buildPivot(input: PivotInput): Pivot {
     return span;
   }
 
-  // top-level row groups (depth 0)
-  for (const ch of rowTree.children) {
-    const start = bodyRows.length;
-    const childSpan = emit(ch, [ch.value], 0);
-    bodyRows[start].headerCells.unshift({
-      label: String(ch.value ?? ""),
-      depth: 0,
-      rowSpan: childSpan,
-      colSpan: 1,
-    });
-    const hasSubtotal =
-      input.showColTotals && ch.children.length > 0 && (!input.condense || ch.children.length > 1);
-    if (hasSubtotal) {
-      const subPath = [ch.value];
-      bodyRows.push({
-        rowPath: subPath,
-        kind: "subtotal",
-        headerCells: [{ label: `Totals for ${String(ch.value ?? "")}`, depth: 0, rowSpan: 1, colSpan: m }],
-        values: rowValues(subPath),
-      });
-    }
-  }
+  emitChildren(rowTree, [], 0);
 
   if (input.showColTotals) {
     bodyRows.push({

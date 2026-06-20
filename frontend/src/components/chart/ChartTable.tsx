@@ -1,8 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type CSSProperties, type MouseEventHandler } from "react";
 import {
   flexRender, getCoreRowModel, getPaginationRowModel, getSortedRowModel, useReactTable,
   type ColumnDef, type ColumnSizingState, type SortingState,
 } from "@tanstack/react-table";
+import {
+  DndContext, PointerSensor, useSensor, useSensors,
+  closestCenter, type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext, horizontalListSortingStrategy, useSortable, arrayMove,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { formatValue } from "./format";
 import { buildConditional } from "./conditional";
 import type { ColumnFormat, Rule } from "./format-types";
@@ -10,6 +18,28 @@ import type { TableState } from "@/api/charts";
 import { Button } from "@/components/ui/button";
 
 export interface ResultColumn { name: string; type: string }
+
+function SortableHeader({ id, disabled, children, className, style, onClick }: {
+  id: string; disabled?: boolean; children: ReactNode; className?: string;
+  style?: CSSProperties; onClick?: MouseEventHandler;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id, disabled });
+  // Destructure role out so we can override dnd-kit's "button" with "columnheader"
+  const { role: _dndRole, ...restAttributes } = attributes;
+  return (
+    <th
+      ref={setNodeRef}
+      role="columnheader"
+      onClick={onClick}
+      style={{ ...style, transform: CSS.Translate.toString(transform), transition, opacity: isDragging ? 0.6 : 1 }}
+      className={className}
+      {...restAttributes}
+      {...listeners}
+    >
+      {children}
+    </th>
+  );
+}
 
 const NUMERIC = /int|double|decimal|real|numeric|float|bigint/i;
 const MIN_COL_WIDTH = 60;
@@ -86,6 +116,15 @@ export function ChartTable({
     [pinnedCount],
   );
 
+  const columnOrder = useMemo<string[]>(() => {
+    const byName = new Map(columns.map((c, i) => [c.name, `col_${i}`]));
+    const ordered = (tableState.columnOrder ?? [])
+      .map((name) => byName.get(name))
+      .filter((id): id is string => id != null);
+    columns.forEach((_, i) => { if (!ordered.includes(`col_${i}`)) ordered.push(`col_${i}`); });
+    return ordered;
+  }, [columns, tableState.columnOrder]);
+
   const paginationEnabled = !!tableState.pagination?.enabled;
   const pageSize = tableState.pagination?.pageSize ?? 25;
   const [pageIndex, setPageIndex] = useState(0);
@@ -99,6 +138,7 @@ export function ChartTable({
       columnSizing: localSizing,
       columnVisibility,
       columnPinning,
+      columnOrder,
       ...(paginationEnabled ? { pagination: { pageIndex, pageSize } } : {}),
     },
     columnResizeMode: "onChange",
@@ -129,23 +169,41 @@ export function ChartTable({
     wasResizing.current = isResizing;
   }, [isResizing]);
 
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
+  function handleDragEnd(e: DragEndEvent) {
+    const { active, over } = e;
+    if (!over || active.id === over.id) return;
+    const ids = table.getState().columnOrder.length ? table.getState().columnOrder : columns.map((_, i) => `col_${i}`);
+    const from = ids.indexOf(String(active.id));
+    const to = ids.indexOf(String(over.id));
+    if (from < 0 || to < 0) return;
+    const nextIds = arrayMove(ids, from, to);
+    const idToName = new Map(columns.map((c, i) => [`col_${i}`, c.name]));
+    const names = nextIds.map((id) => idToName.get(id)).filter((n): n is string => n != null);
+    onTableStateChange?.({ ...tableState, columnOrder: names });
+  }
+
   const totalRows = rows.length;
   const start = paginationEnabled ? pageIndex * pageSize : 0;
 
   return (
+    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
     <div className="rounded-md border">
       <div className="max-h-[60vh] overflow-auto">
         <table className="w-full border-collapse text-sm">
           <thead className="bg-muted/40">
             {table.getHeaderGroups().map((hg) => (
               <tr key={hg.id} className="border-b border-border/60 text-left text-muted-foreground">
+                <SortableContext items={table.getVisibleLeafColumns().map((c) => c.id)} strategy={horizontalListSortingStrategy}>
                 {hg.headers.map((h) => {
                   const isNum = (h.column.columnDef.meta as { isNum?: boolean } | undefined)?.isNum ?? false;
                   const sized = localSizing[h.column.id] != null;
                   const pinned = h.column.getIsPinned() === "left";
                   return (
-                    <th
+                    <SortableHeader
                       key={h.id}
+                      id={h.column.id}
+                      disabled={pinned}
                       onClick={h.column.getToggleSortingHandler()}
                       style={{
                         ...(sized ? { width: h.getSize() } : {}),
@@ -164,13 +222,15 @@ export function ChartTable({
                           aria-label="Resize column"
                           onMouseDown={h.getResizeHandler()}
                           onTouchStart={h.getResizeHandler()}
+                          onPointerDown={(e) => e.stopPropagation()}
                           onClick={(e) => e.stopPropagation()}
                           className="absolute right-0 top-0 h-full w-1 cursor-col-resize touch-none select-none hover:bg-primary/40"
                         />
                       )}
-                    </th>
+                    </SortableHeader>
                   );
                 })}
+                </SortableContext>
               </tr>
             ))}
           </thead>
@@ -225,5 +285,6 @@ export function ChartTable({
         </div>
       )}
     </div>
+    </DndContext>
   );
 }
