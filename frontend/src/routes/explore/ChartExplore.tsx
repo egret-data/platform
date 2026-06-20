@@ -30,34 +30,7 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
-
-function OrderedPicker({
-  label, selected, onChange, options,
-}: { label: string; selected: string[]; onChange: (v: string[]) => void; options: string[] }) {
-  const remaining = options.filter((o) => !selected.includes(o));
-  return (
-    <div className="space-y-1">
-      <div className="text-sm">{label}</div>
-      <div className="flex flex-wrap gap-1">
-        {selected.map((s) => (
-          <span key={s} className="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-xs">
-            {s}
-            <button type="button" className="text-muted-foreground hover:text-destructive"
-              onClick={() => onChange(selected.filter((x) => x !== s))}>×</button>
-          </span>
-        ))}
-      </div>
-      {remaining.length > 0 && (
-        <Select value="" onValueChange={(v) => v && onChange([...selected, v])}>
-          <SelectTrigger className="h-8"><SelectValue placeholder={`Add ${label.toLowerCase()}…`} /></SelectTrigger>
-          <SelectContent>
-            {remaining.map((o) => <SelectItem key={o} value={o}>{o}</SelectItem>)}
-          </SelectContent>
-        </Select>
-      )}
-    </div>
-  );
-}
+import { FieldZone } from "@/components/chart/config/FieldZone";
 
 const UNDERLINE_LIST = "h-auto w-full justify-start gap-4 rounded-none border-b bg-transparent p-0";
 const UNDERLINE_TRIGGER = "rounded-none border-b-2 border-transparent px-0 pb-2 text-sm data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none";
@@ -312,11 +285,11 @@ export default function ChartExplore() {
 
             {viz === "pivot_table" && (
               <>
-                <OrderedPicker label="Rows" selected={pRows} onChange={setPRows}
+                <FieldZone label="Rows" selected={pRows} onChange={setPRows}
                   options={columns.map((c) => c.column_name).filter((n) => !pCols.includes(n))} />
-                <OrderedPicker label="Columns" selected={pCols} onChange={setPCols}
+                <FieldZone label="Columns" selected={pCols} onChange={setPCols}
                   options={columns.map((c) => c.column_name).filter((n) => !pRows.includes(n))} />
-                <OrderedPicker label="Values" selected={pVals} onChange={setPVals}
+                <FieldZone label="Values" selected={pVals} onChange={setPVals}
                   options={metrics.map((m) => m.metric_name)} />
               </>
             )}
