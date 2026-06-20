@@ -27,13 +27,13 @@ export function PivotTable({
 
   return (
     <div className="max-h-[60vh] overflow-auto rounded-md border">
-      <table className="border-collapse text-sm">
+      <table className="w-full border-collapse text-sm">
         <thead className="bg-muted/40 text-foreground">
           {p.topHeader.map((level, li) => (
             <tr key={li} className="border-b border-border/60">
               {/* empty corner above the row-dim name headers (only when >1 header level) */}
               {li === 0 && levels > 1 && (
-                <th className="sticky left-0 top-0 z-30 border-r border-border/60 bg-muted/40" colSpan={rowDimCount} rowSpan={levels - 1} />
+                <th className="w-px sticky left-0 top-0 z-30 border-r border-border/60 bg-muted/40" colSpan={rowDimCount} rowSpan={levels - 1} />
               )}
               {/* row-dim names as their own column headers on the last header row (clickable to sort) */}
               {li === levels - 1 &&
@@ -43,7 +43,7 @@ export function PivotTable({
                     <th
                       key={`rd-${di}`}
                       onClick={onCycleSort ? () => onCycleSort(name) : undefined}
-                      className={`sticky top-0 z-30 border-r border-border/60 bg-muted/40 px-4 py-2 text-left font-semibold whitespace-nowrap ${di === 0 ? "left-0" : ""} ${onCycleSort ? "cursor-pointer select-none" : ""}`}
+                      className={`w-px sticky top-0 z-30 border-r border-border/60 bg-muted/40 px-4 py-2 text-left font-semibold whitespace-nowrap ${di === 0 ? "left-0" : ""} ${onCycleSort ? "cursor-pointer select-none" : ""}`}
                     >
                       {name}{dir === "asc" ? " ▲" : dir === "desc" ? " ▼" : ""}
                     </th>
@@ -78,7 +78,7 @@ export function PivotTable({
                 <th
                   key={hi}
                   scope="row"
-                  className={`border-r border-border/60 bg-background px-4 py-2 text-left align-top font-normal whitespace-nowrap ${hc.depth === 0 ? "sticky left-0 z-20" : ""}`}
+                  className={`w-px border-r border-border/60 bg-background px-4 py-2 text-left align-top font-normal whitespace-nowrap ${hc.depth === 0 ? "sticky left-0 z-20" : ""}`}
                   rowSpan={hc.rowSpan}
                   colSpan={hc.colSpan}
                 >
