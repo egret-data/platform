@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { useDatasets, useDataset } from "@/api/datasets";
 import {
   useBuildChartData, useChart, useChartMutations,
-  type QuerySpec, type VizType, type ChartParams,
+  type QuerySpec, type VizType, type ChartParams, type TableState,
 } from "@/api/charts";
 import { useSubmitQuery, useQueryStatus, useResults } from "@/api/sqllab";
 import { ChartTable } from "@/components/chart/ChartTable";
@@ -13,6 +13,7 @@ import { ChartTypeGallery } from "@/components/chart/ChartTypeGallery";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { FormatSection } from "@/components/chart/settings/FormatSection";
 import { ConditionalFormattingSection } from "@/components/chart/settings/ConditionalFormattingSection";
+import { TableColumnsSection } from "@/components/chart/settings/TableColumnsSection";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -86,6 +87,7 @@ export default function ChartExplore() {
   const [rowLimit, setRowLimit] = useState(1000);
   const [columnSettings, setColumnSettings] = useState<Record<string, ColumnFormat>>({});
   const [conditionalFormatting, setConditionalFormatting] = useState<Rule[]>([]);
+  const [tableState, setTableState] = useState<TableState>({});
 
   // hydrate from a saved chart once it loads (dataset/viz/controls + save dialog fields)
   useEffect(() => {
@@ -108,6 +110,7 @@ export default function ChartExplore() {
     setRowLimit(p.spec?.row_limit ?? 1000);
     setColumnSettings(p.columnSettings ?? {});
     setConditionalFormatting(p.conditionalFormatting ?? []);
+    setTableState(p.tableState ?? {});
     setSaveName(c.name);
     setSaveDesc(c.description);
   }, [existing.data]);
@@ -166,7 +169,7 @@ export default function ChartExplore() {
   function paramsForSave(): ChartParams {
     return viz === "pivot_table"
       ? { spec: specForRun(), rows: pRows, cols: pCols, metrics: pVals, showRowTotals, showColTotals, condense, columnSettings, conditionalFormatting }
-      : { spec: specForRun(), columnSettings, conditionalFormatting };
+      : { spec: specForRun(), columnSettings, conditionalFormatting, tableState };
   }
 
   async function save() {
@@ -204,7 +207,7 @@ export default function ChartExplore() {
 
   function resetControls() {
     setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]);
-    setColumnSettings({}); setConditionalFormatting([]); setQueryId(null);
+    setColumnSettings({}); setConditionalFormatting([]); setTableState({}); setQueryId(null);
   }
 
   const isRunning = status.data?.status === "queued" || status.data?.status === "running";
@@ -331,6 +334,12 @@ export default function ChartExplore() {
               <p className="text-xs text-muted-foreground">Run the chart to configure column formatting.</p>
             ) : (
               <>
+                {viz === "table" && (
+                  <div className="space-y-1">
+                    <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Columns</div>
+                    <TableColumnsSection columns={resultColumns} value={tableState} onChange={setTableState} />
+                  </div>
+                )}
                 <div className="space-y-1">
                   <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Formatting</div>
                   <FormatSection columns={resultColumns} value={columnSettings} onChange={setColumnSettings} />
@@ -380,7 +389,8 @@ export default function ChartExplore() {
         )}
         {finished && results.data && viz !== "pivot_table" && (
           <ChartTable columns={results.data.columns} rows={results.data.rows}
-            columnSettings={columnSettings} conditionalFormatting={conditionalFormatting} />
+            columnSettings={columnSettings} conditionalFormatting={conditionalFormatting}
+            tableState={tableState} onTableStateChange={setTableState} />
         )}
         {!queryId && !build.isPending && !submit.isPending && (
           <p className="text-sm text-muted-foreground">Configure the controls on the left and click Run.</p>
