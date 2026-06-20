@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { useDatasets, useDataset } from "@/api/datasets";
@@ -23,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
@@ -36,6 +37,10 @@ const UNDERLINE_LIST = "h-auto w-full justify-start gap-4 rounded-none border-b 
 const UNDERLINE_TRIGGER = "rounded-none border-b-2 border-transparent px-0 pb-2 text-sm data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none";
 
 const isValidViz = (v: string | null): v is VizType => CHART_TYPES.some((t) => t.key === v);
+
+function SectionLabel({ children }: { children: ReactNode }) {
+  return <div className="border-b pb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">{children}</div>;
+}
 
 export default function ChartExplore() {
   const ws = useParams().workspace!;
@@ -305,18 +310,21 @@ export default function ChartExplore() {
           {/* ── DISPLAY TAB ── */}
           <TabsContent value="display" className="space-y-4">
             {viz === "pivot_table" && (
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <Checkbox id="show-row-totals" checked={showRowTotals} onCheckedChange={(v) => setShowRowTotals(!!v)} />
-                  <Label htmlFor="show-row-totals" className="cursor-pointer text-sm font-normal">Row totals</Label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Checkbox id="show-col-totals" checked={showColTotals} onCheckedChange={(v) => setShowColTotals(!!v)} />
-                  <Label htmlFor="show-col-totals" className="cursor-pointer text-sm font-normal">Column totals</Label>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Checkbox id="condense-totals" checked={condense} onCheckedChange={(v) => setCondense(!!v)} />
-                  <Label htmlFor="condense-totals" className="cursor-pointer text-sm font-normal">Condense duplicate totals</Label>
+              <div className="space-y-1">
+                <SectionLabel>Totals</SectionLabel>
+                <div className="space-y-2.5 pt-1.5">
+                  <div className="flex items-center justify-between">
+                    <Label htmlFor="show-row-totals" className="text-sm font-normal">Row totals</Label>
+                    <Switch id="show-row-totals" checked={showRowTotals} onCheckedChange={(v) => setShowRowTotals(v)} />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <Label htmlFor="show-col-totals" className="text-sm font-normal">Column totals</Label>
+                    <Switch id="show-col-totals" checked={showColTotals} onCheckedChange={(v) => setShowColTotals(v)} />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <Label htmlFor="condense-totals" className="text-sm font-normal">Condense duplicate totals</Label>
+                    <Switch id="condense-totals" checked={condense} onCheckedChange={(v) => setCondense(v)} />
+                  </div>
                 </div>
               </div>
             )}
@@ -326,17 +334,17 @@ export default function ChartExplore() {
             ) : (
               <>
                 {viz === "table" && (
-                  <div className="space-y-1">
-                    <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Columns</div>
+                  <div className="space-y-1.5">
+                    <SectionLabel>Columns</SectionLabel>
                     <TableColumnsSection columns={resultColumns} value={tableState} onChange={setTableState} />
                   </div>
                 )}
-                <div className="space-y-1">
-                  <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Formatting</div>
+                <div className="space-y-1.5">
+                  <SectionLabel>Formatting</SectionLabel>
                   <FormatSection columns={resultColumns} value={columnSettings} onChange={setColumnSettings} />
                 </div>
-                <div className="space-y-1">
-                  <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Conditional formatting</div>
+                <div className="space-y-1.5">
+                  <SectionLabel>Conditional formatting</SectionLabel>
                   <ConditionalFormattingSection columns={resultColumns} rules={conditionalFormatting} isPivot={viz === "pivot_table"} onChange={setConditionalFormatting} />
                 </div>
               </>

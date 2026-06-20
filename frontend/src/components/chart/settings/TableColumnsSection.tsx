@@ -1,5 +1,6 @@
 import type { TableState } from "@/api/charts";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import {
@@ -54,10 +55,10 @@ export function TableColumnsSection({
       </div>
 
       <div className="space-y-2">
-        <div className="flex items-center gap-2">
-          <Checkbox id="paginate" checked={pagination.enabled}
-            onCheckedChange={(v) => onChange({ ...value, pagination: { ...pagination, enabled: !!v } })} />
-          <Label htmlFor="paginate" className="cursor-pointer text-sm font-normal">Paginate</Label>
+        <div className="flex items-center justify-between">
+          <Label htmlFor="paginate" className="text-sm font-normal">Paginate</Label>
+          <Switch id="paginate" checked={pagination.enabled}
+            onCheckedChange={(v) => onChange({ ...value, pagination: { ...pagination, enabled: v } })} />
         </div>
         {pagination.enabled && (
           <div className="space-y-1">
