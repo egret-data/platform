@@ -24,6 +24,13 @@ export interface QuerySpec {
   rollup_groups: string[][];
 }
 
+export interface TableState {
+  columnWidths?: Record<string, number>;   // colName -> px (manual resizes only)
+  hiddenColumns?: string[];                 // colName[] currently hidden
+  pinnedLeft?: number;                      // freeze the first N columns (0 = none)
+  pagination?: { enabled: boolean; pageSize: number };  // pageSize in {25, 50, 100}
+}
+
 export interface ChartParams {
   spec: QuerySpec;
   // pivot-only layout (ignored for table viz)
@@ -35,6 +42,7 @@ export interface ChartParams {
   condense?: boolean;
   columnSettings?: Record<string, ColumnFormat>;
   conditionalFormatting?: Rule[];
+  tableState?: TableState;
 }
 
 export interface Chart {
