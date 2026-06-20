@@ -193,8 +193,8 @@ export function ChartTable({
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
     <div className="rounded-md border">
       <div className="max-h-[60vh] overflow-auto">
-        <table className="w-full border-collapse text-sm">
-          <thead className="bg-muted/40">
+        <table className="w-full border-separate border-spacing-0 text-sm">
+          <thead className="bg-background">
             {table.getHeaderGroups().map((hg) => (
               <tr key={hg.id} className="border-b border-border/60 text-left text-muted-foreground">
                 <SortableContext items={table.getVisibleLeafColumns().map((c) => c.id)} strategy={horizontalListSortingStrategy}>
@@ -213,7 +213,7 @@ export function ChartTable({
                         ...(pinned ? { left: h.column.getStart("left") } : {}),
                       }}
                       className={`relative sticky top-0 cursor-pointer select-none px-3 py-2 font-medium whitespace-nowrap ${
-                        pinned ? "z-30 border-r border-border/60 bg-muted/40" : "z-10"
+                        pinned ? "z-30 border-r border-border/60 bg-background" : "z-10"
                       } ${isNum ? "text-right" : "text-left"}`}
                     >
                       {flexRender(h.column.columnDef.header, h.getContext())}
