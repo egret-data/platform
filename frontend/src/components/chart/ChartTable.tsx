@@ -62,18 +62,18 @@ export function ChartTable({
   });
 
   return (
-    <div className="overflow-auto">
+    <div className="overflow-auto rounded-md border">
       <table className="w-full border-collapse text-sm">
-        <thead>
+        <thead className="bg-muted/40">
           {table.getHeaderGroups().map((hg) => (
-            <tr key={hg.id} className="border-b text-left text-muted-foreground">
+            <tr key={hg.id} className="border-b border-border/60 text-left text-muted-foreground">
               {hg.headers.map((h) => {
                 const isNum = (h.column.columnDef.meta as { isNum?: boolean } | undefined)?.isNum ?? false;
                 return (
                   <th
                     key={h.id}
                     onClick={h.column.getToggleSortingHandler()}
-                    className={`cursor-pointer select-none py-1 px-3 ${isNum ? "text-right" : "text-left"}`}
+                    className={`cursor-pointer select-none py-2 px-3 font-medium whitespace-nowrap ${isNum ? "text-right" : "text-left"}`}
                   >
                     {flexRender(h.column.columnDef.header, h.getContext())}
                     {{ asc: " ▲", desc: " ▼" }[h.column.getIsSorted() as string] ?? ""}
@@ -87,7 +87,7 @@ export function ChartTable({
           {table.getRowModel().rows.map((r) => {
             const rowColor = cond.rowBg(r.index);
             return (
-              <tr key={r.id} className="border-t" style={rowColor ? { backgroundColor: rowColor } : undefined}>
+              <tr key={r.id} className="border-t border-border/60 hover:bg-muted/20" style={rowColor ? { backgroundColor: rowColor } : undefined}>
                 {r.getVisibleCells().map((cell) => {
                   const meta = cell.column.columnDef.meta as { isNum?: boolean; name?: string } | undefined;
                   const isNum = meta?.isNum ?? false;
@@ -95,7 +95,7 @@ export function ChartTable({
                   return (
                     <td
                       key={cell.id}
-                      className={`py-1 px-3 ${isNum ? "text-right tabular-nums" : ""}`}
+                      className={`py-2 px-3 ${isNum ? "text-right tabular-nums" : ""}`}
                       style={bg ? { backgroundColor: bg } : undefined}
                     >
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}

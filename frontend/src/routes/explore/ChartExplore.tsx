@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { useDatasets, useDataset } from "@/api/datasets";
 import {
@@ -9,12 +9,16 @@ import {
 import { useSubmitQuery, useQueryStatus, useResults } from "@/api/sqllab";
 import { ChartTable } from "@/components/chart/ChartTable";
 import { PivotTable } from "@/components/chart/pivot/PivotTable";
-import { SettingsSidebar } from "@/components/chart/settings/SettingsSidebar";
+import { ChartTypeGallery } from "@/components/chart/ChartTypeGallery";
+import { CHART_TYPES } from "@/components/chart/chartTypes";
+import { FormatSection } from "@/components/chart/settings/FormatSection";
+import { ConditionalFormattingSection } from "@/components/chart/settings/ConditionalFormattingSection";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
@@ -50,16 +54,24 @@ function OrderedPicker({
   );
 }
 
+const UNDERLINE_LIST = "h-auto w-full justify-start gap-4 rounded-none border-b bg-transparent p-0";
+const UNDERLINE_TRIGGER = "rounded-none border-b-2 border-transparent px-0 pb-2 text-sm data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none";
+
+const isValidViz = (v: string | null): v is VizType => CHART_TYPES.some((t) => t.key === v);
+
 export default function ChartExplore() {
   const ws = useParams().workspace!;
   const { id } = useParams(); // present when editing a saved chart
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const typeParam = searchParams.get("type");
   const datasets = useDatasets(ws);
   const existing = useChart(ws, id ?? null);
 
   const [datasetId, setDatasetId] = useState<string | null>(null);
   const detail = useDataset(ws, datasetId);
-  const [viz, setViz] = useState<VizType>("table");
+  const [viz, setViz] = useState<VizType>(!id && isValidViz(typeParam) ? typeParam : "table");
+  const [vizPickerOpen, setVizPickerOpen] = useState(false);
 
   // table-mode controls
   const [tableMetrics, setTableMetrics] = useState<string[]>([]);
@@ -74,7 +86,6 @@ export default function ChartExplore() {
   const [rowLimit, setRowLimit] = useState(1000);
   const [columnSettings, setColumnSettings] = useState<Record<string, ColumnFormat>>({});
   const [conditionalFormatting, setConditionalFormatting] = useState<Rule[]>([]);
-  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // hydrate from a saved chart once it loads (dataset/viz/controls + save dialog fields)
   useEffect(() => {
@@ -101,6 +112,11 @@ export default function ChartExplore() {
     setSaveDesc(c.description);
   }, [existing.data]);
 
+  // keep viz in sync with ?type for new charts (browser back/forward, deep links)
+  useEffect(() => {
+    if (!id && isValidViz(typeParam)) setViz(typeParam);
+  }, [id, typeParam]);
+
   const columns = detail.data?.columns ?? [];
   const metrics = detail.data?.metrics ?? [];
 
@@ -109,24 +125,14 @@ export default function ChartExplore() {
       const dims = [...pRows, ...pCols];
       const groups = [pRows, pCols].filter((g) => g.length > 0);
       return {
-        metrics: pVals,
-        dimensions: dims,
-        columns: [],
-        filters: [],
-        orderby: [],
-        row_limit: rowLimit,
-        rollup_groups: groups,
+        metrics: pVals, dimensions: dims, columns: [], filters: [], orderby: [],
+        row_limit: rowLimit, rollup_groups: groups,
       };
     }
     const agg = tableMetrics.length > 0;
     return {
-      metrics: tableMetrics,
-      dimensions: agg ? tableCols : [],
-      columns: agg ? [] : tableCols,
-      filters: [],
-      orderby: [],
-      row_limit: rowLimit,
-      rollup_groups: [],
+      metrics: tableMetrics, dimensions: agg ? tableCols : [], columns: agg ? [] : tableCols,
+      filters: [], orderby: [], row_limit: rowLimit, rollup_groups: [],
     };
   }
 
@@ -186,168 +192,166 @@ export default function ChartExplore() {
   function changeViz(v: VizType) {
     setViz(v);
     setQueryId(null);
+    if (!id) setSearchParams({ type: v });
   }
 
   function toggleTableMetric(name: string) {
     setTableMetrics((prev) => prev.includes(name) ? prev.filter((m) => m !== name) : [...prev, name]);
   }
-
   function toggleTableCol(name: string) {
     setTableCols((prev) => prev.includes(name) ? prev.filter((c) => c !== name) : [...prev, name]);
   }
 
+  function resetControls() {
+    setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]);
+    setColumnSettings({}); setConditionalFormatting([]); setQueryId(null);
+  }
+
   const isRunning = status.data?.status === "queued" || status.data?.status === "running";
+  const vizMeta = CHART_TYPES.find((t) => t.key === viz);
+
+  // ── New-chart gallery: shown when creating a chart with no type chosen yet ──
+  if (!id && !typeParam) {
+    return (
+      <div className="mx-auto max-w-3xl p-6">
+        <Link className="text-xs text-muted-foreground hover:underline" to={`/explore/${ws}/charts`}>← Charts</Link>
+        <h1 className="mb-1 mt-2 text-lg font-semibold">Choose a visualization</h1>
+        <p className="mb-4 text-sm text-muted-foreground">Pick a chart type to start building.</p>
+        <ChartTypeGallery onSelect={(k) => { setViz(k); setSearchParams({ type: k }); }} />
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full min-h-0 gap-0">
-      {/* Left rail */}
-      <div className="w-64 shrink-0 overflow-y-auto border-r p-4 space-y-4">
-        <div>
-          <Link className="text-xs text-muted-foreground hover:underline" to={`/explore/${ws}/charts`}>
-            ← Charts
-          </Link>
-        </div>
+      {/* Left panel */}
+      <div className="w-72 shrink-0 overflow-y-auto border-r p-4 space-y-4">
+        <Link className="text-xs text-muted-foreground hover:underline" to={`/explore/${ws}/charts`}>← Charts</Link>
 
-        {/* Dataset picker */}
-        <div className="space-y-1">
-          <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Dataset</Label>
-          <Select value={datasetId ?? ""} onValueChange={(v) => { setDatasetId(v || null); setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]); setColumnSettings({}); setConditionalFormatting([]); setQueryId(null); }}>
-            <SelectTrigger className="h-8 text-sm">
-              <SelectValue placeholder="Pick a dataset…" />
-            </SelectTrigger>
-            <SelectContent>
-              {(datasets.data ?? []).map((d) => (
-                <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        {/* Viz toggle */}
-        <div className="space-y-1">
-          <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Visualization</Label>
-          <div className="flex gap-1">
-            <Button
-              size="sm"
-              variant={viz === "table" ? "default" : "outline"}
-              className="flex-1 text-xs"
-              onClick={() => changeViz("table")}
-            >
-              Table
-            </Button>
-            <Button
-              size="sm"
-              variant={viz === "pivot_table" ? "default" : "outline"}
-              className="flex-1 text-xs"
-              onClick={() => changeViz("pivot_table")}
-            >
-              Pivot
-            </Button>
+        {/* Viz header + change */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            {vizMeta && <vizMeta.icon className="h-4 w-4 text-primary" />}
+            <span className="text-sm font-medium">{vizMeta?.name ?? viz}</span>
           </div>
+          <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => setVizPickerOpen(true)}>
+            Change
+          </Button>
         </div>
 
-        {/* Controls: table viz */}
-        {viz === "table" && (
-          <>
+        <Tabs defaultValue="data">
+          <TabsList className={UNDERLINE_LIST}>
+            <TabsTrigger value="data" className={UNDERLINE_TRIGGER}>Data</TabsTrigger>
+            <TabsTrigger value="display" className={UNDERLINE_TRIGGER}>Display</TabsTrigger>
+          </TabsList>
+
+          {/* ── DATA TAB ── */}
+          <TabsContent value="data" className="space-y-4">
             <div className="space-y-1">
-              <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Metrics</Label>
-              <p className="text-xs text-muted-foreground">Pick metrics for an aggregated table, or just columns for raw rows.</p>
-              <div className="space-y-1 pt-1">
-                {metrics.length === 0 && <p className="text-xs text-muted-foreground italic">No metrics on this dataset.</p>}
-                {metrics.map((m) => (
-                  <div key={m.metric_name} className="flex items-center gap-2">
-                    <Checkbox
-                      id={`metric-${m.metric_name}`}
-                      checked={tableMetrics.includes(m.metric_name)}
-                      onCheckedChange={() => toggleTableMetric(m.metric_name)}
-                    />
-                    <Label htmlFor={`metric-${m.metric_name}`} className="text-sm font-normal cursor-pointer">
-                      {m.metric_name}
-                    </Label>
-                  </div>
-                ))}
-              </div>
+              <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Dataset</Label>
+              <Select value={datasetId ?? ""} onValueChange={(v) => { setDatasetId(v || null); resetControls(); }}>
+                <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dataset…" /></SelectTrigger>
+                <SelectContent>
+                  {(datasets.data ?? []).map((d) => (
+                    <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
 
-            <div className="space-y-1">
-              <Label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Columns</Label>
-              <div className="space-y-1 pt-1">
-                {columns.length === 0 && <p className="text-xs text-muted-foreground italic">Select a dataset to see columns.</p>}
-                {columns.map((col) => (
-                  <div key={col.column_name} className="flex items-center gap-2">
-                    <Checkbox
-                      id={`col-${col.column_name}`}
-                      checked={tableCols.includes(col.column_name)}
-                      onCheckedChange={() => toggleTableCol(col.column_name)}
-                    />
-                    <Label htmlFor={`col-${col.column_name}`} className="text-sm font-normal cursor-pointer">
-                      {col.column_name}
-                    </Label>
+            {viz === "table" && (
+              <>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metrics</Label>
+                  <p className="text-xs text-muted-foreground">Pick metrics for an aggregated table, or just columns for raw rows.</p>
+                  <div className="space-y-1 pt-1">
+                    {metrics.length === 0 && <p className="text-xs italic text-muted-foreground">No metrics on this dataset.</p>}
+                    {metrics.map((m) => (
+                      <div key={m.metric_name} className="flex items-center gap-2">
+                        <Checkbox id={`metric-${m.metric_name}`} checked={tableMetrics.includes(m.metric_name)} onCheckedChange={() => toggleTableMetric(m.metric_name)} />
+                        <Label htmlFor={`metric-${m.metric_name}`} className="cursor-pointer text-sm font-normal">{m.metric_name}</Label>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Columns</Label>
+                  <div className="space-y-1 pt-1">
+                    {columns.length === 0 && <p className="text-xs italic text-muted-foreground">Select a dataset to see columns.</p>}
+                    {columns.map((col) => (
+                      <div key={col.column_name} className="flex items-center gap-2">
+                        <Checkbox id={`col-${col.column_name}`} checked={tableCols.includes(col.column_name)} onCheckedChange={() => toggleTableCol(col.column_name)} />
+                        <Label htmlFor={`col-${col.column_name}`} className="cursor-pointer text-sm font-normal">{col.column_name}</Label>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {viz === "pivot_table" && (
+              <>
+                <OrderedPicker label="Rows" selected={pRows} onChange={setPRows}
+                  options={columns.map((c) => c.column_name).filter((n) => !pCols.includes(n))} />
+                <OrderedPicker label="Columns" selected={pCols} onChange={setPCols}
+                  options={columns.map((c) => c.column_name).filter((n) => !pRows.includes(n))} />
+                <OrderedPicker label="Values" selected={pVals} onChange={setPVals}
+                  options={metrics.map((m) => m.metric_name)} />
+              </>
+            )}
+
+            <div className="space-y-1">
+              <Label htmlFor="row-limit" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Row limit</Label>
+              <Input id="row-limit" type="number" min={1} max={10000} value={rowLimit}
+                onChange={(e) => { const n = Number(e.target.value); setRowLimit(Number.isNaN(n) ? 0 : n); }}
+                className="h-8 text-sm" />
             </div>
-          </>
-        )}
+          </TabsContent>
 
-        {/* Controls: pivot viz */}
-        {viz === "pivot_table" && (
-          <>
-            <OrderedPicker label="Rows" selected={pRows} onChange={setPRows}
-              options={columns.map((c) => c.column_name).filter((n) => !pCols.includes(n))} />
-            <OrderedPicker label="Columns" selected={pCols} onChange={setPCols}
-              options={columns.map((c) => c.column_name).filter((n) => !pRows.includes(n))} />
-            <OrderedPicker label="Values" selected={pVals} onChange={setPVals}
-              options={metrics.map((m) => m.metric_name)} />
-            <label className="flex items-center gap-2 text-sm">
-              <Checkbox checked={showRowTotals} onCheckedChange={(v) => setShowRowTotals(!!v)} /> Row totals
-            </label>
-            <label className="flex items-center gap-2 text-sm">
-              <Checkbox checked={showColTotals} onCheckedChange={(v) => setShowColTotals(!!v)} /> Column totals
-            </label>
-            <label className="flex items-center gap-2 text-sm">
-              <Checkbox checked={condense} onCheckedChange={(v) => setCondense(!!v)} /> Condense duplicate totals
-            </label>
-          </>
-        )}
+          {/* ── DISPLAY TAB ── */}
+          <TabsContent value="display" className="space-y-4">
+            {viz === "pivot_table" && (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <Checkbox id="show-row-totals" checked={showRowTotals} onCheckedChange={(v) => setShowRowTotals(!!v)} />
+                  <Label htmlFor="show-row-totals" className="cursor-pointer text-sm font-normal">Row totals</Label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Checkbox id="show-col-totals" checked={showColTotals} onCheckedChange={(v) => setShowColTotals(!!v)} />
+                  <Label htmlFor="show-col-totals" className="cursor-pointer text-sm font-normal">Column totals</Label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Checkbox id="condense-totals" checked={condense} onCheckedChange={(v) => setCondense(!!v)} />
+                  <Label htmlFor="condense-totals" className="cursor-pointer text-sm font-normal">Condense duplicate totals</Label>
+                </div>
+              </div>
+            )}
 
-        {/* Row limit */}
-        <div className="space-y-1">
-          <Label htmlFor="row-limit" className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Row limit</Label>
-          <Input
-            id="row-limit"
-            type="number"
-            min={1}
-            max={10000}
-            value={rowLimit}
-            onChange={(e) => {
-              const n = Number(e.target.value);
-              setRowLimit(Number.isNaN(n) ? 0 : n);
-            }}
-            className="h-8 text-sm"
-          />
-        </div>
+            {resultColumns.length === 0 ? (
+              <p className="text-xs text-muted-foreground">Run the chart to configure column formatting.</p>
+            ) : (
+              <>
+                <div className="space-y-1">
+                  <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Formatting</div>
+                  <FormatSection columns={resultColumns} value={columnSettings} onChange={setColumnSettings} />
+                </div>
+                <div className="space-y-1">
+                  <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Conditional formatting</div>
+                  <ConditionalFormattingSection columns={resultColumns} rules={conditionalFormatting} isPivot={viz === "pivot_table"} onChange={setConditionalFormatting} />
+                </div>
+              </>
+            )}
+          </TabsContent>
+        </Tabs>
       </div>
 
-      {/* Main area */}
+      {/* Main area (full-width preview) */}
       <div className="flex-1 overflow-auto p-4 space-y-3">
-        {/* Action bar */}
         <div className="flex items-center gap-2">
-          <Button
-            onClick={run}
-            disabled={build.isPending || submit.isPending}
-            size="sm"
-          >
+          <Button onClick={run} disabled={build.isPending || submit.isPending} size="sm">
             {(build.isPending || submit.isPending) ? "Building…" : "Run"}
           </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setSaveOpen(true)}
-          >
-            {id ? "Update" : "Save"}
-          </Button>
-          <Button size="sm" variant="outline" onClick={() => setSettingsOpen((o) => !o)}>Settings</Button>
+          <Button variant="outline" size="sm" onClick={() => setSaveOpen(true)}>{id ? "Update" : "Save"}</Button>
           {build.data?.sql && (
             <details className="ml-auto text-xs text-muted-foreground">
               <summary className="cursor-pointer select-none hover:text-foreground">View SQL</summary>
@@ -356,90 +360,60 @@ export default function ChartExplore() {
           )}
         </div>
 
-        {/* Preview + Settings sidebar */}
-        <div className="flex gap-3">
-          <div className="flex-1 min-w-0">
-            {status.data?.status === "failed" && (
-              <p className="rounded bg-destructive/10 p-3 text-sm text-destructive">{status.data.error}</p>
-            )}
+        {status.data?.status === "failed" && (
+          <p className="rounded bg-destructive/10 p-3 text-sm text-destructive">{status.data.error}</p>
+        )}
+        {isRunning && <p className="text-sm text-muted-foreground">Running…</p>}
 
-            {isRunning && (
-              <p className="text-sm text-muted-foreground">Running…</p>
-            )}
-
-            {finished && results.data && viz === "pivot_table" && (
-              <PivotTable
-                input={{
-                  columns: results.data.columns.map((c) => c.name),
-                  rows: results.data.rows,
-                  rowDims: pRows, colDims: pCols, metrics: pVals,
-                  showRowTotals, showColTotals, condense, collapsed: new Set(),
-                }}
-                columnSettings={columnSettings}
-                conditionalFormatting={conditionalFormatting}
-                metricTypes={metricTypes}
-              />
-            )}
-
-            {finished && results.data && viz !== "pivot_table" && (
-              <ChartTable
-                columns={results.data.columns}
-                rows={results.data.rows}
-                columnSettings={columnSettings}
-                conditionalFormatting={conditionalFormatting}
-              />
-            )}
-
-            {!queryId && !build.isPending && !submit.isPending && (
-              <p className="text-sm text-muted-foreground">Configure the controls on the left and click Run.</p>
-            )}
-          </div>
-
-          {settingsOpen && (
-            <SettingsSidebar
-              columns={resultColumns}
-              isPivot={viz === "pivot_table"}
-              columnSettings={columnSettings}
-              conditionalFormatting={conditionalFormatting}
-              onColumnSettings={setColumnSettings}
-              onConditional={setConditionalFormatting}
-              onClose={() => setSettingsOpen(false)}
-            />
-          )}
-        </div>
+        {finished && results.data && viz === "pivot_table" && (
+          <PivotTable
+            input={{
+              columns: results.data.columns.map((c) => c.name),
+              rows: results.data.rows,
+              rowDims: pRows, colDims: pCols, metrics: pVals,
+              showRowTotals, showColTotals, condense, collapsed: new Set(),
+            }}
+            columnSettings={columnSettings}
+            conditionalFormatting={conditionalFormatting}
+            metricTypes={metricTypes}
+          />
+        )}
+        {finished && results.data && viz !== "pivot_table" && (
+          <ChartTable columns={results.data.columns} rows={results.data.rows}
+            columnSettings={columnSettings} conditionalFormatting={conditionalFormatting} />
+        )}
+        {!queryId && !build.isPending && !submit.isPending && (
+          <p className="text-sm text-muted-foreground">Configure the controls on the left and click Run.</p>
+        )}
       </div>
+
+      {/* Change-visualization dialog */}
+      <Dialog open={vizPickerOpen} onOpenChange={setVizPickerOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Change visualization</DialogTitle></DialogHeader>
+          <div className="py-2">
+            <ChartTypeGallery selected={viz} onSelect={(k) => { changeViz(k); setVizPickerOpen(false); }} />
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Save dialog */}
       <Dialog open={saveOpen} onOpenChange={setSaveOpen}>
         <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{id ? "Update chart" : "Save chart"}</DialogTitle>
-          </DialogHeader>
+          <DialogHeader><DialogTitle>{id ? "Update chart" : "Save chart"}</DialogTitle></DialogHeader>
           <div className="space-y-3 py-2">
             <div className="space-y-1">
               <Label htmlFor="chart-name">Name</Label>
-              <Input
-                id="chart-name"
-                value={saveName}
-                onChange={(e) => setSaveName(e.target.value)}
-                placeholder="Chart name…"
-              />
+              <Input id="chart-name" value={saveName} onChange={(e) => setSaveName(e.target.value)} placeholder="Chart name…" />
             </div>
             <div className="space-y-1">
               <Label htmlFor="chart-desc">Description</Label>
-              <Input
-                id="chart-desc"
-                value={saveDesc}
-                onChange={(e) => setSaveDesc(e.target.value)}
-                placeholder="Optional description…"
-              />
+              <Input id="chart-desc" value={saveDesc} onChange={(e) => setSaveDesc(e.target.value)} placeholder="Optional description…" />
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setSaveOpen(false)}>Cancel</Button>
-            <Button onClick={save} disabled={mutations.create.isPending || mutations.update.isPending}>
-              {id ? "Update" : "Save"}
-            </Button>
+            <Button onClick={save} disabled={mutations.create.isPending || mutations.update.isPending}>{id ? "Update" : "Save"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
