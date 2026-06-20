@@ -8,6 +8,7 @@ describe("ChartTypeGallery", () => {
     render(<ChartTypeGallery onSelect={onSelect} />);
     expect(screen.getByText("Table")).toBeInTheDocument();
     expect(screen.getByText("Pivot Table")).toBeInTheDocument();
+    expect(screen.getByText("Bar")).toBeInTheDocument();
     fireEvent.click(screen.getByText("Pivot Table"));
     expect(onSelect).toHaveBeenCalledWith("pivot_table");
   });

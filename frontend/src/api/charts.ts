@@ -2,7 +2,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, apiJson } from "./client";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 
-export type VizType = "table" | "pivot_table";
+export type VizType =
+  | "table" | "pivot_table"
+  | "bar" | "line" | "area" | "scatter" | "combo" | "pie" | "scalar";
+
+export const CARTESIAN_VIZ = ["bar", "line", "area", "scatter", "combo"] as const;
+export type CartesianViz = (typeof CARTESIAN_VIZ)[number];
+export const isCartesianViz = (v: VizType): v is CartesianViz =>
+  (CARTESIAN_VIZ as readonly string[]).includes(v);
 export type FilterOp =
   | "eq" | "ne" | "gt" | "ge" | "lt" | "le" | "like" | "in" | "not_in" | "is_null" | "is_not_null";
 
@@ -32,6 +39,30 @@ export interface TableState {
   columnOrder?: string[];   // table viz only: column names in display order
 }
 
+export interface CartesianConfig {
+  xAxis?: string;            // single dimension (category / x)
+  yMetrics: string[];        // one or more metrics (y)
+  series?: string;           // optional 2nd dimension (breakout)
+  stacked?: boolean;         // bar/area
+  horizontal?: boolean;      // bar
+  smooth?: boolean;          // line/area
+  showLabels?: boolean;      // data labels
+  showLegend?: boolean;      // legend visibility
+  xLabel?: string;
+  yLabel?: string;
+  seriesTypes?: Record<string, "bar" | "line">;  // combo only: metric -> type
+}
+export interface PieConfig {
+  dimension?: string;
+  metric?: string;
+  donut?: boolean;
+  showLegend?: boolean;
+  showLabels?: boolean;
+}
+export interface ScalarConfig {
+  metric?: string;
+}
+
 export interface ChartParams {
   spec: QuerySpec;
   // pivot-only layout (ignored for table viz)
@@ -46,6 +77,9 @@ export interface ChartParams {
   tableState?: TableState;
   collapsedRows?: string[];                     // pivot only: serialized collapsed row-group paths
   pivotSort?: Record<string, "asc" | "desc">;   // pivot only: row-dimension name -> direction
+  cartesian?: CartesianConfig;   // cartesian-family viz only
+  pie?: PieConfig;               // pie viz only
+  scalar?: ScalarConfig;         // big-number viz only
 }
 
 export interface Chart {
