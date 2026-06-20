@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within, fireEvent } from "@testing-library/react";
 import { ChartTable } from "../ChartTable";
+
+const COLS = [{ name: "a", type: "varchar" }, { name: "b", type: "double" }];
+const mkRows = (n: number) => Array.from({ length: n }, (_, i) => [`a${i}`, i]);
 
 describe("ChartTable", () => {
   it("renders headers and formatted numeric cells", () => {
@@ -41,5 +44,35 @@ describe("ChartTable", () => {
     expect(formatted).toBeInTheDocument();
     const cell = formatted.closest("td")!;
     expect(cell.style.backgroundColor).toMatch(/rgba\(255, 0, 0/);
+  });
+});
+
+describe("ChartTable interactions", () => {
+  it("hides a column listed in hiddenColumns", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(3)} tableState={{ hiddenColumns: ["a"] }} />);
+    expect(screen.queryByText("a")).not.toBeInTheDocument();
+    expect(screen.getByText("b")).toBeInTheDocument();
+  });
+
+  it("ignores stale columnWidths keys for columns that no longer exist", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(2)} tableState={{ columnWidths: { zzz: 200 } }} />);
+    expect(screen.getByText("a")).toBeInTheDocument();
+    expect(screen.getByText("b")).toBeInTheDocument();
+  });
+
+  it("marks the first column sticky when pinnedLeft=1", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(2)} tableState={{ pinnedLeft: 1 }} />);
+    const aHeader = screen.getByText("a").closest("th")!;
+    expect(aHeader.className).toContain("sticky");
+    expect(aHeader.className).toContain("z-30");
+  });
+
+  it("paginates to pageSize rows with a working Next button", () => {
+    render(<ChartTable columns={COLS} rows={mkRows(30)} tableState={{ pagination: { enabled: true, pageSize: 25 } }} />);
+    expect(screen.getByText("Showing 1–25 of 30")).toBeInTheDocument();
+    const body = document.querySelector("tbody")!;
+    expect(within(body).getAllByRole("row")).toHaveLength(25);
+    fireEvent.click(screen.getByText("Next"));
+    expect(screen.getByText("Showing 26–30 of 30")).toBeInTheDocument();
   });
 });
