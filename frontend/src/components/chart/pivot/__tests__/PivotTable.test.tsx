@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
+import { vi } from "vitest";
 import { PivotTable } from "../PivotTable";
 import type { PivotInput } from "../engine";
 
@@ -25,5 +26,33 @@ describe("PivotTable", () => {
   it("applies a column format to value cells", () => {
     render(<PivotTable input={input} metricTypes={{ revenue: "double" }} columnSettings={{ revenue: { prefix: "$" } }} />);
     expect(screen.getByText("$35")).toBeInTheDocument();
+  });
+});
+
+const grouped = {
+  columns: ["region", "seg", "revenue", "__grp_0", "__grp_1"],
+  rows: [
+    ["EU", "SMB", 10, 0, 0], ["EU", "ENT", 20, 0, 0], ["EU", null, 30, 0, 1],
+    ["US", "SMB", 5, 0, 0], ["US", "ENT", 7, 0, 0], ["US", null, 12, 0, 1],
+    [null, null, 42, 1, 1],
+  ],
+  rowDims: ["region", "seg"], colDims: [], metrics: ["revenue"],
+  showRowTotals: false, showColTotals: true, condense: true, collapsed: new Set<string>(),
+};
+
+describe("PivotTable interactions", () => {
+  it("renders a collapse toggle on a collapsible group and fires onToggleCollapse", () => {
+    const onToggleCollapse = vi.fn();
+    render(<PivotTable input={grouped} onToggleCollapse={onToggleCollapse} />);
+    const btns = screen.getAllByRole("button", { name: "Collapse group" });
+    fireEvent.click(btns[0]);
+    expect(onToggleCollapse).toHaveBeenCalledWith('["EU"]');
+  });
+
+  it("fires onCycleSort when a row-dimension header is clicked", () => {
+    const onCycleSort = vi.fn();
+    render(<PivotTable input={grouped} onCycleSort={onCycleSort} />);
+    fireEvent.click(screen.getByText("region"));
+    expect(onCycleSort).toHaveBeenCalledWith("region");
   });
 });
