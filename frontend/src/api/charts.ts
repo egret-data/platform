@@ -44,6 +44,8 @@ export interface ChartParams {
   columnSettings?: Record<string, ColumnFormat>;
   conditionalFormatting?: Rule[];
   tableState?: TableState;
+  collapsedRows?: string[];                     // pivot only: serialized collapsed row-group paths
+  pivotSort?: Record<string, "asc" | "desc">;   // pivot only: row-dimension name -> direction
 }
 
 export interface Chart {

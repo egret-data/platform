@@ -87,6 +87,8 @@ export default function ChartExplore() {
   const [rowLimit, setRowLimit] = useState(1000);
   const [columnSettings, setColumnSettings] = useState<Record<string, ColumnFormat>>({});
   const [conditionalFormatting, setConditionalFormatting] = useState<Rule[]>([]);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [pivotSort, setPivotSort] = useState<Record<string, "asc" | "desc">>({});
   const [tableState, setTableState] = useState<TableState>({});
 
   // hydrate from a saved chart once it loads (dataset/viz/controls + save dialog fields)
@@ -110,6 +112,8 @@ export default function ChartExplore() {
     setRowLimit(p.spec?.row_limit ?? 1000);
     setColumnSettings(p.columnSettings ?? {});
     setConditionalFormatting(p.conditionalFormatting ?? []);
+    setCollapsed(new Set(p.collapsedRows ?? []));
+    setPivotSort(p.pivotSort ?? {});
     setTableState(p.tableState ?? {});
     setSaveName(c.name);
     setSaveDesc(c.description);
@@ -168,7 +172,7 @@ export default function ChartExplore() {
 
   function paramsForSave(): ChartParams {
     return viz === "pivot_table"
-      ? { spec: specForRun(), rows: pRows, cols: pCols, metrics: pVals, showRowTotals, showColTotals, condense, columnSettings, conditionalFormatting }
+      ? { spec: specForRun(), rows: pRows, cols: pCols, metrics: pVals, showRowTotals, showColTotals, condense, columnSettings, conditionalFormatting, collapsedRows: [...collapsed], pivotSort }
       : { spec: specForRun(), columnSettings, conditionalFormatting, tableState };
   }
 
@@ -207,7 +211,7 @@ export default function ChartExplore() {
 
   function resetControls() {
     setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]);
-    setColumnSettings({}); setConditionalFormatting([]); setTableState({}); setQueryId(null);
+    setColumnSettings({}); setConditionalFormatting([]); setCollapsed(new Set()); setPivotSort({}); setTableState({}); setQueryId(null);
   }
 
   const isRunning = status.data?.status === "queued" || status.data?.status === "running";
@@ -380,11 +384,29 @@ export default function ChartExplore() {
               columns: results.data.columns.map((c) => c.name),
               rows: results.data.rows,
               rowDims: pRows, colDims: pCols, metrics: pVals,
-              showRowTotals, showColTotals, condense, collapsed: new Set(),
+              showRowTotals, showColTotals, condense, collapsed,
+              sortDims: pivotSort,
             }}
             columnSettings={columnSettings}
             conditionalFormatting={conditionalFormatting}
             metricTypes={metricTypes}
+            onToggleCollapse={(path) =>
+              setCollapsed((prev) => {
+                const next = new Set(prev);
+                if (next.has(path)) next.delete(path); else next.add(path);
+                return next;
+              })
+            }
+            onCycleSort={(dim) =>
+              setPivotSort((prev) => {
+                const cur = prev[dim];
+                const next = { ...prev };
+                if (cur === undefined) next[dim] = "asc";
+                else if (cur === "asc") next[dim] = "desc";
+                else delete next[dim];
+                return next;
+              })
+            }
           />
         )}
         {finished && results.data && viz !== "pivot_table" && (
