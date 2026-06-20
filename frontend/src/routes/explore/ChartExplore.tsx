@@ -136,6 +136,9 @@ export default function ChartExplore() {
   const finished = status.data?.status === "finished";
   const results = useResults(ws, queryId, 0, finished);
   const resultColumns = (results.data?.columns ?? []).filter((c) => !c.name.startsWith("__grp_"));
+  // In a pivot, only the value (metric) cells are formatted/colored — row/column dimension cells are
+  // headers and never styled. So the Format/Conditional pickers should offer only the value columns.
+  const styleColumns = viz === "pivot_table" ? resultColumns.filter((c) => pVals.includes(c.name)) : resultColumns;
   const metricTypes = Object.fromEntries((detail.data?.metrics ?? []).map((m) => [m.metric_name, m.data_type ?? "double"]));
 
   async function run() {
@@ -341,11 +344,11 @@ export default function ChartExplore() {
                 )}
                 <div className="space-y-1.5">
                   <SectionLabel>Formatting</SectionLabel>
-                  <FormatSection columns={resultColumns} value={columnSettings} onChange={setColumnSettings} />
+                  <FormatSection columns={styleColumns} value={columnSettings} onChange={setColumnSettings} />
                 </div>
                 <div className="space-y-1.5">
                   <SectionLabel>Conditional formatting</SectionLabel>
-                  <ConditionalFormattingSection columns={resultColumns} rules={conditionalFormatting} isPivot={viz === "pivot_table"} onChange={setConditionalFormatting} />
+                  <ConditionalFormattingSection columns={styleColumns} rules={conditionalFormatting} isPivot={viz === "pivot_table"} onChange={setConditionalFormatting} />
                 </div>
               </>
             )}
