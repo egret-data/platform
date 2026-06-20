@@ -25,19 +25,20 @@ export function PivotTable({
   const levels = p.topHeader.length;
   const sortDirs = input.sortDims ?? {};
 
-  // Subtle full grid on every cell (border-b + border-r); opaque bg-secondary header band; opaque
-  // row-header cells so sticky panes never bleed. border-separate keeps cell z-index working.
-  const GRID = "border-b border-r border-border/70";
+  // Hairline grid mirroring Metabase: horizontal (table-border ~8%) slightly stronger than the
+  // vertical (border-subtle ~5%). Opaque bg-accent total band; opaque row-headers so sticky panes
+  // never bleed. border-separate keeps cell z-index working.
+  const GRID = "border-b border-border/50 border-r border-border/30";
 
   return (
     <div className="max-h-[60vh] overflow-auto rounded-md border">
-      <table className="w-full border-separate border-spacing-0 text-sm">
+      <table className="w-full border-separate border-spacing-0 text-xs text-foreground/90">
         <thead className="text-foreground">
           {p.topHeader.map((level, li) => (
             <tr key={li}>
               {/* empty corner above the row-dim name headers (only when >1 header level) */}
               {li === 0 && levels > 1 && (
-                <th className={`w-px sticky left-0 top-0 z-30 ${GRID} bg-secondary`} colSpan={rowDimCount} rowSpan={levels - 1} />
+                <th className={`w-px sticky left-0 top-0 z-30 ${GRID} bg-accent`} colSpan={rowDimCount} rowSpan={levels - 1} />
               )}
               {/* row-dim names as their own column headers on the last header row (clickable to sort) */}
               {li === levels - 1 &&
@@ -47,7 +48,7 @@ export function PivotTable({
                     <th
                       key={`rd-${di}`}
                       onClick={onCycleSort ? () => onCycleSort(name) : undefined}
-                      className={`w-px sticky top-0 z-30 ${GRID} bg-secondary px-4 py-2 text-left font-semibold whitespace-nowrap ${di === 0 ? "left-0" : ""} ${onCycleSort ? "cursor-pointer select-none" : ""}`}
+                      className={`w-px sticky top-0 z-30 ${GRID} bg-accent px-4 py-1.5 text-left font-semibold whitespace-nowrap ${di === 0 ? "left-0" : ""} ${onCycleSort ? "cursor-pointer select-none" : ""}`}
                     >
                       {name}{dir === "asc" ? " ▲" : dir === "desc" ? " ▼" : ""}
                     </th>
@@ -56,7 +57,7 @@ export function PivotTable({
               {level.map((c, ci) => (
                 <th
                   key={ci}
-                  className={`sticky top-0 z-10 ${GRID} bg-secondary px-4 py-2 text-right font-semibold whitespace-nowrap last:border-r-0`}
+                  className={`sticky top-0 z-10 ${GRID} bg-accent px-4 py-1.5 text-right font-semibold whitespace-nowrap last:border-r-0`}
                   colSpan={c.colSpan}
                   rowSpan={c.rowSpan ?? 1}
                 >
@@ -70,12 +71,12 @@ export function PivotTable({
           {p.bodyRows.map((br, ri) => {
             const isTotal = br.kind === "subtotal" || br.kind === "grand";
             return (
-              <tr key={ri} className={isTotal ? "font-semibold" : "hover:bg-secondary/40"}>
+              <tr key={ri} className={isTotal ? "font-semibold" : "hover:bg-accent/40"}>
                 {br.headerCells.map((hc, hi) => (
                   <th
                     key={hi}
                     scope="row"
-                    className={`w-px ${GRID} ${isTotal ? "bg-secondary" : "bg-background"} px-4 py-2 text-left align-top font-normal whitespace-nowrap ${hc.depth === 0 ? "sticky left-0 z-20" : ""}`}
+                    className={`w-px ${GRID} ${isTotal ? "bg-accent" : "bg-background"} px-4 py-1.5 text-left align-top font-normal whitespace-nowrap ${hc.depth === 0 ? "sticky left-0 z-20" : ""}`}
                     rowSpan={hc.rowSpan}
                     colSpan={hc.colSpan}
                   >
@@ -99,9 +100,9 @@ export function PivotTable({
                   return (
                     <td
                       key={vi}
-                      className={`${GRID} px-4 py-2 text-right tabular-nums last:border-r-0 ${
+                      className={`${GRID} px-4 py-1.5 text-right tabular-nums last:border-r-0 ${
                         isTotal || cl.isTotal ? "font-semibold" : ""
-                      } ${isTotal && !bg ? "bg-secondary" : ""} ${onCellDrill && br.kind === "leaf" ? "cursor-pointer" : ""}`}
+                      } ${isTotal && !bg ? "bg-accent" : ""} ${onCellDrill && br.kind === "leaf" ? "cursor-pointer" : ""}`}
                       style={bg ? { backgroundColor: bg } : undefined}
                       onClick={onCellDrill && br.kind === "leaf"
                         ? (e) => onCellDrill(
