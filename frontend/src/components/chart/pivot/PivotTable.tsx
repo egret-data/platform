@@ -25,15 +25,19 @@ export function PivotTable({
   const levels = p.topHeader.length;
   const sortDirs = input.sortDims ?? {};
 
+  // Subtle full grid on every cell (border-b + border-r); opaque bg-secondary header band; opaque
+  // row-header cells so sticky panes never bleed. border-separate keeps cell z-index working.
+  const GRID = "border-b border-r border-border/70";
+
   return (
     <div className="max-h-[60vh] overflow-auto rounded-md border">
       <table className="w-full border-separate border-spacing-0 text-sm">
-        <thead className="bg-background text-foreground">
+        <thead className="text-foreground">
           {p.topHeader.map((level, li) => (
-            <tr key={li} className="border-b border-border/60">
+            <tr key={li}>
               {/* empty corner above the row-dim name headers (only when >1 header level) */}
               {li === 0 && levels > 1 && (
-                <th className="w-px sticky left-0 top-0 z-30 border-r border-border/60 bg-background" colSpan={rowDimCount} rowSpan={levels - 1} />
+                <th className={`w-px sticky left-0 top-0 z-30 ${GRID} bg-secondary`} colSpan={rowDimCount} rowSpan={levels - 1} />
               )}
               {/* row-dim names as their own column headers on the last header row (clickable to sort) */}
               {li === levels - 1 &&
@@ -43,7 +47,7 @@ export function PivotTable({
                     <th
                       key={`rd-${di}`}
                       onClick={onCycleSort ? () => onCycleSort(name) : undefined}
-                      className={`w-px sticky top-0 z-30 border-r border-border/60 bg-background px-4 py-2 text-left font-semibold whitespace-nowrap ${di === 0 ? "left-0" : ""} ${onCycleSort ? "cursor-pointer select-none" : ""}`}
+                      className={`w-px sticky top-0 z-30 ${GRID} bg-secondary px-4 py-2 text-left font-semibold whitespace-nowrap ${di === 0 ? "left-0" : ""} ${onCycleSort ? "cursor-pointer select-none" : ""}`}
                     >
                       {name}{dir === "asc" ? " ▲" : dir === "desc" ? " ▼" : ""}
                     </th>
@@ -52,7 +56,7 @@ export function PivotTable({
               {level.map((c, ci) => (
                 <th
                   key={ci}
-                  className="sticky top-0 z-10 border-r border-border/60 bg-background px-4 py-2 text-right font-semibold whitespace-nowrap last:border-r-0"
+                  className={`sticky top-0 z-10 ${GRID} bg-secondary px-4 py-2 text-right font-semibold whitespace-nowrap last:border-r-0`}
                   colSpan={c.colSpan}
                   rowSpan={c.rowSpan ?? 1}
                 >
@@ -63,62 +67,56 @@ export function PivotTable({
           ))}
         </thead>
         <tbody>
-          {p.bodyRows.map((br, ri) => (
-            <tr
-              key={ri}
-              className={
-                br.kind === "grand"
-                  ? "border-t-2 border-border font-semibold"
-                  : br.kind === "subtotal"
-                    ? "border-t border-border/60 bg-muted/20 font-semibold"
-                    : "border-t border-border/60 hover:bg-muted/20"
-              }
-            >
-              {br.headerCells.map((hc, hi) => (
-                <th
-                  key={hi}
-                  scope="row"
-                  className={`w-px border-r border-border/60 bg-background px-4 py-2 text-left align-top font-normal whitespace-nowrap ${hc.depth === 0 ? "sticky left-0 z-20" : ""}`}
-                  rowSpan={hc.rowSpan}
-                  colSpan={hc.colSpan}
-                >
-                  {hc.collapsible && hc.path && onToggleCollapse && (
-                    <button
-                      type="button"
-                      onClick={() => onToggleCollapse(JSON.stringify(hc.path))}
-                      aria-label={hc.collapsed ? "Expand group" : "Collapse group"}
-                      className="mr-1 inline-flex h-4 w-4 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-                    >
-                      {hc.collapsed ? "▸" : "▾"}
-                    </button>
-                  )}
-                  {hc.label}
-                </th>
-              ))}
-              {br.values.map((v, vi) => {
-                const cl = p.colLeaves[vi];
-                const text = formatValue(v, metricTypes[cl.metric] ?? "double", columnSettings[cl.metric]);
-                const bg = cond.bg(v, cl.metric);
-                return (
-                  <td
-                    key={vi}
-                    className={`border-l border-border/60 px-4 py-2 text-right tabular-nums last:border-r-0 ${
-                      br.kind === "subtotal" || br.kind === "grand" || cl.isTotal ? "font-semibold" : ""
-                    } ${onCellDrill && br.kind === "leaf" ? "cursor-pointer" : ""}`}
-                    style={bg ? { backgroundColor: bg } : undefined}
-                    onClick={onCellDrill && br.kind === "leaf"
-                      ? (e) => onCellDrill(
-                          pivotCellDrill(input.rowDims, br.rowPath, input.colDims, cl.colPath),
-                          e.clientX, e.clientY,
-                        )
-                      : undefined}
+          {p.bodyRows.map((br, ri) => {
+            const isTotal = br.kind === "subtotal" || br.kind === "grand";
+            return (
+              <tr key={ri} className={isTotal ? "font-semibold" : "hover:bg-secondary/40"}>
+                {br.headerCells.map((hc, hi) => (
+                  <th
+                    key={hi}
+                    scope="row"
+                    className={`w-px ${GRID} ${isTotal ? "bg-secondary" : "bg-background"} px-4 py-2 text-left align-top font-normal whitespace-nowrap ${hc.depth === 0 ? "sticky left-0 z-20" : ""}`}
+                    rowSpan={hc.rowSpan}
+                    colSpan={hc.colSpan}
                   >
-                    {text}
-                  </td>
-                );
-              })}
-            </tr>
-          ))}
+                    {hc.collapsible && hc.path && onToggleCollapse && (
+                      <button
+                        type="button"
+                        onClick={() => onToggleCollapse(JSON.stringify(hc.path))}
+                        aria-label={hc.collapsed ? "Expand group" : "Collapse group"}
+                        className="mr-1.5 inline-flex h-4 w-4 items-center justify-center rounded border bg-background text-xs leading-none text-muted-foreground hover:bg-accent hover:text-foreground"
+                      >
+                        {hc.collapsed ? "+" : "–"}
+                      </button>
+                    )}
+                    {hc.label}
+                  </th>
+                ))}
+                {br.values.map((v, vi) => {
+                  const cl = p.colLeaves[vi];
+                  const text = formatValue(v, metricTypes[cl.metric] ?? "double", columnSettings[cl.metric]);
+                  const bg = cond.bg(v, cl.metric);
+                  return (
+                    <td
+                      key={vi}
+                      className={`${GRID} px-4 py-2 text-right tabular-nums last:border-r-0 ${
+                        isTotal || cl.isTotal ? "font-semibold" : ""
+                      } ${isTotal && !bg ? "bg-secondary" : ""} ${onCellDrill && br.kind === "leaf" ? "cursor-pointer" : ""}`}
+                      style={bg ? { backgroundColor: bg } : undefined}
+                      onClick={onCellDrill && br.kind === "leaf"
+                        ? (e) => onCellDrill(
+                            pivotCellDrill(input.rowDims, br.rowPath, input.colDims, cl.colPath),
+                            e.clientX, e.clientY,
+                          )
+                        : undefined}
+                    >
+                      {text}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

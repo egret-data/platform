@@ -194,9 +194,9 @@ export function ChartTable({
     <div className="rounded-md border">
       <div className="max-h-[60vh] overflow-auto">
         <table className="w-full border-separate border-spacing-0 text-sm">
-          <thead className="bg-background">
+          <thead className="bg-secondary">
             {table.getHeaderGroups().map((hg) => (
-              <tr key={hg.id} className="border-b border-border/60 text-left text-muted-foreground">
+              <tr key={hg.id} className="text-left text-muted-foreground">
                 <SortableContext items={table.getVisibleLeafColumns().map((c) => c.id)} strategy={horizontalListSortingStrategy}>
                 {hg.headers.map((h) => {
                   const isNum = (h.column.columnDef.meta as { isNum?: boolean } | undefined)?.isNum ?? false;
@@ -212,8 +212,8 @@ export function ChartTable({
                         ...(sized ? { width: h.getSize() } : {}),
                         ...(pinned ? { left: h.column.getStart("left") } : {}),
                       }}
-                      className={`relative sticky top-0 cursor-pointer select-none px-3 py-2 font-medium whitespace-nowrap ${
-                        pinned ? "z-30 border-r border-border/60 bg-background" : "z-10"
+                      className={`relative sticky top-0 cursor-pointer select-none border-b border-border/60 bg-secondary px-3 py-2 font-medium whitespace-nowrap ${
+                        pinned ? "z-30 border-r border-border/60" : "z-10"
                       } ${isNum ? "text-right" : "text-left"}`}
                     >
                       {flexRender(h.column.columnDef.header, h.getContext())}
@@ -241,7 +241,7 @@ export function ChartTable({
             {table.getRowModel().rows.map((r) => {
               const rowColor = cond.rowBg(r.index);
               return (
-                <tr key={r.id} className="border-t border-border/60 hover:bg-muted/20" style={rowColor ? { backgroundColor: rowColor } : undefined}>
+                <tr key={r.id} className="hover:bg-secondary/40" style={rowColor ? { backgroundColor: rowColor } : undefined}>
                   {r.getVisibleCells().map((cell) => {
                     const meta = cell.column.columnDef.meta as { isNum?: boolean; name?: string } | undefined;
                     const isNum = meta?.isNum ?? false;
@@ -261,7 +261,7 @@ export function ChartTable({
                             ? (pinTint ? { background: `linear-gradient(${pinTint}, ${pinTint}), hsl(var(--background))` } : {})
                             : (bg ? { backgroundColor: bg } : {})),
                         }}
-                        className={`px-3 py-2 ${isNum ? "text-right tabular-nums" : ""} ${
+                        className={`border-b border-border/60 px-3 py-2 ${isNum ? "text-right tabular-nums" : ""} ${
                           pinned ? `sticky z-20 border-r border-border/60${pinTint ? "" : " bg-background"}` : ""
                         } ${onCellDrill && dimensionColumns?.length ? "cursor-pointer" : ""}`}
                         onClick={onCellDrill && dimensionColumns && dimensionColumns.length > 0
