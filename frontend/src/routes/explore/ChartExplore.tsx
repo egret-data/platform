@@ -112,6 +112,11 @@ export default function ChartExplore() {
     setSaveDesc(c.description);
   }, [existing.data]);
 
+  // keep viz in sync with ?type for new charts (browser back/forward, deep links)
+  useEffect(() => {
+    if (!id && isValidViz(typeParam)) setViz(typeParam);
+  }, [id, typeParam]);
+
   const columns = detail.data?.columns ?? [];
   const metrics = detail.data?.metrics ?? [];
 
