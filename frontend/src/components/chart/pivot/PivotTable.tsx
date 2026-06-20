@@ -2,10 +2,11 @@ import { buildPivot, type PivotInput } from "./engine";
 import { formatValue } from "../format";
 import { buildConditional } from "../conditional";
 import type { ColumnFormat, Rule } from "../format-types";
+import { pivotCellDrill, type DrillContext } from "../drill";
 
 export function PivotTable({
   input, columnSettings = {}, conditionalFormatting = [], metricTypes = {},
-  onToggleCollapse, onCycleSort,
+  onToggleCollapse, onCycleSort, onCellDrill,
 }: {
   input: PivotInput;
   columnSettings?: Record<string, ColumnFormat>;
@@ -13,6 +14,7 @@ export function PivotTable({
   metricTypes?: Record<string, string>;
   onToggleCollapse?: (serializedPath: string) => void;
   onCycleSort?: (dimName: string) => void;
+  onCellDrill?: (ctx: DrillContext, x: number, y: number) => void;
 }) {
   const p = buildPivot(input);
   const condRows = p.bodyRows.filter((br) => br.kind === "leaf").map((br) => br.values);
@@ -102,8 +104,14 @@ export function PivotTable({
                     key={vi}
                     className={`border-l border-border/60 px-4 py-2 text-right tabular-nums last:border-r-0 ${
                       br.kind === "subtotal" || br.kind === "grand" || cl.isTotal ? "font-semibold" : ""
-                    }`}
+                    } ${onCellDrill && br.kind === "leaf" ? "cursor-pointer" : ""}`}
                     style={bg ? { backgroundColor: bg } : undefined}
+                    onClick={onCellDrill && br.kind === "leaf"
+                      ? (e) => onCellDrill(
+                          pivotCellDrill(input.rowDims, br.rowPath, input.colDims, cl.colPath),
+                          e.clientX, e.clientY,
+                        )
+                      : undefined}
                   >
                     {text}
                   </td>

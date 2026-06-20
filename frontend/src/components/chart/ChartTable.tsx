@@ -16,6 +16,7 @@ import { buildConditional } from "./conditional";
 import type { ColumnFormat, Rule } from "./format-types";
 import type { TableState } from "@/api/charts";
 import { Button } from "@/components/ui/button";
+import { tableCellDrill, type DrillContext } from "./drill";
 
 export interface ResultColumn { name: string; type: string }
 
@@ -46,7 +47,7 @@ const MIN_COL_WIDTH = 60;
 
 export function ChartTable({
   columns, rows, columnSettings = {}, conditionalFormatting = [],
-  tableState = {}, onTableStateChange,
+  tableState = {}, onTableStateChange, dimensionColumns, onCellDrill,
 }: {
   columns: ResultColumn[];
   rows: unknown[][];
@@ -54,6 +55,8 @@ export function ChartTable({
   conditionalFormatting?: Rule[];
   tableState?: TableState;
   onTableStateChange?: (next: TableState) => void;
+  dimensionColumns?: string[];
+  onCellDrill?: (ctx: DrillContext, x: number, y: number) => void;
 }) {
   const [sorting, setSorting] = useState<SortingState>([]);
 
@@ -260,7 +263,13 @@ export function ChartTable({
                         }}
                         className={`px-3 py-2 ${isNum ? "text-right tabular-nums" : ""} ${
                           pinned ? `sticky z-20 border-r border-border/60${pinTint ? "" : " bg-background"}` : ""
-                        }`}
+                        } ${onCellDrill && dimensionColumns?.length ? "cursor-pointer" : ""}`}
+                        onClick={onCellDrill && dimensionColumns && dimensionColumns.length > 0
+                          ? (e) => onCellDrill(
+                              tableCellDrill(dimensionColumns, columns.map((c) => c.name), r.original as unknown[]),
+                              e.clientX, e.clientY,
+                            )
+                          : undefined}
                       >
                         {flexRender(cell.column.columnDef.cell, cell.getContext())}
                       </td>

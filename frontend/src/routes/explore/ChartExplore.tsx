@@ -4,11 +4,15 @@ import { toast } from "sonner";
 import { useDatasets, useDataset } from "@/api/datasets";
 import {
   useBuildChartData, useChart, useChartMutations,
-  type QuerySpec, type VizType, type ChartParams, type TableState,
+  type QuerySpec, type VizType, type ChartParams, type TableState, type ChartFilter,
 } from "@/api/charts";
 import { useSubmitQuery, useQueryStatus, useResults } from "@/api/sqllab";
 import { ChartTable } from "@/components/chart/ChartTable";
 import { PivotTable } from "@/components/chart/pivot/PivotTable";
+import { FilterChips } from "@/components/chart/FilterChips";
+import { DrillMenu } from "@/components/chart/DrillMenu";
+import { DrillRecordsDialog } from "@/components/chart/DrillRecordsDialog";
+import type { DrillContext } from "@/components/chart/drill";
 import { ChartTypeGallery } from "@/components/chart/ChartTypeGallery";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { FormatSection } from "@/components/chart/settings/FormatSection";
@@ -90,6 +94,9 @@ export default function ChartExplore() {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [pivotSort, setPivotSort] = useState<Record<string, "asc" | "desc">>({});
   const [tableState, setTableState] = useState<TableState>({});
+  const [filters, setFilters] = useState<ChartFilter[]>([]);
+  const [drillMenu, setDrillMenu] = useState<{ ctx: DrillContext; x: number; y: number } | null>(null);
+  const [recordsFilters, setRecordsFilters] = useState<ChartFilter[] | null>(null);
 
   // hydrate from a saved chart once it loads (dataset/viz/controls + save dialog fields)
   useEffect(() => {
@@ -115,6 +122,7 @@ export default function ChartExplore() {
     setCollapsed(new Set(p.collapsedRows ?? []));
     setPivotSort(p.pivotSort ?? {});
     setTableState(p.tableState ?? {});
+    setFilters(p.spec?.filters ?? []);
     setSaveName(c.name);
     setSaveDesc(c.description);
   }, [existing.data]);
@@ -132,14 +140,14 @@ export default function ChartExplore() {
       const dims = [...pRows, ...pCols];
       const groups = [pRows, pCols].filter((g) => g.length > 0);
       return {
-        metrics: pVals, dimensions: dims, columns: [], filters: [], orderby: [],
+        metrics: pVals, dimensions: dims, columns: [], filters, orderby: [],
         row_limit: rowLimit, rollup_groups: groups,
       };
     }
     const agg = tableMetrics.length > 0;
     return {
       metrics: tableMetrics, dimensions: agg ? tableCols : [], columns: agg ? [] : tableCols,
-      filters: [], orderby: [], row_limit: rowLimit, rollup_groups: [],
+      filters, orderby: [], row_limit: rowLimit, rollup_groups: [],
     };
   }
 
@@ -164,6 +172,12 @@ export default function ChartExplore() {
       setQueryId(ack.id);
     } catch (e) { toast.error(String(e)); }
   }
+
+  function addFilter(f: ChartFilter) {
+    setFilters((prev) => [...prev.filter((x) => x.col !== f.col), f]);
+  }
+  // Re-run whenever filters change, but only if a query is already in flight/done
+  useEffect(() => { if (queryId) void run(); }, [filters]); // intentionally omits run/queryId to avoid infinite loop
 
   const mutations = useChartMutations(ws);
   const [saveOpen, setSaveOpen] = useState(false);
@@ -211,7 +225,7 @@ export default function ChartExplore() {
 
   function resetControls() {
     setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]);
-    setColumnSettings({}); setConditionalFormatting([]); setCollapsed(new Set()); setPivotSort({}); setTableState({}); setQueryId(null);
+    setColumnSettings({}); setConditionalFormatting([]); setCollapsed(new Set()); setPivotSort({}); setTableState({}); setFilters([]); setQueryId(null);
   }
 
   const isRunning = status.data?.status === "queued" || status.data?.status === "running";
@@ -373,6 +387,9 @@ export default function ChartExplore() {
           )}
         </div>
 
+        {filters.length > 0 && (
+          <FilterChips filters={filters} onRemove={(i) => setFilters((prev) => prev.filter((_, j) => j !== i))} />
+        )}
         {status.data?.status === "failed" && (
           <p className="rounded bg-destructive/10 p-3 text-sm text-destructive">{status.data.error}</p>
         )}
@@ -407,12 +424,15 @@ export default function ChartExplore() {
                 return next;
               })
             }
+            onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })}
           />
         )}
         {finished && results.data && viz !== "pivot_table" && (
           <ChartTable columns={results.data.columns} rows={results.data.rows}
             columnSettings={columnSettings} conditionalFormatting={conditionalFormatting}
-            tableState={tableState} onTableStateChange={setTableState} />
+            tableState={tableState} onTableStateChange={setTableState}
+            dimensionColumns={tableMetrics.length > 0 ? tableCols : []}
+            onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })} />
         )}
         {!queryId && !build.isPending && !submit.isPending && (
           <p className="text-sm text-muted-foreground">Configure the controls on the left and click Run.</p>
@@ -449,6 +469,23 @@ export default function ChartExplore() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {drillMenu && (
+        <DrillMenu
+          ctx={drillMenu.ctx} x={drillMenu.x} y={drillMenu.y}
+          onFilterBy={addFilter}
+          onSeeRecords={(fs) => setRecordsFilters(fs)}
+          onClose={() => setDrillMenu(null)}
+        />
+      )}
+      <DrillRecordsDialog
+        open={recordsFilters !== null}
+        onOpenChange={(o) => { if (!o) setRecordsFilters(null); }}
+        ws={ws} datasetId={datasetId}
+        columns={(detail.data?.columns ?? []).map((c) => ({ name: c.column_name, type: c.data_type ?? "varchar" }))}
+        filters={recordsFilters ?? []}
+        rowLimit={rowLimit}
+      />
     </div>
   );
 }
