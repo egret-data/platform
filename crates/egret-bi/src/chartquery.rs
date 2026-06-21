@@ -246,9 +246,13 @@ pub fn build(
         let mut sql = format!("SELECT {}\nFROM {from}", select.join(", "));
         push_where(&mut sql, engine, columns, &spec.filters)?;
         if has_rollup {
-            // One ROLLUP(...) per group; the cross-product is every grouping level.
-            // Rollup names must be a subset of `dimensions` (so each has a GROUPING marker).
-            let mut parts: Vec<String> = Vec::new();
+            // Each group contributes its ROLLUP levels (full prefix down to empty); the
+            // cross-product across groups is every grouping level. We emit explicit
+            // GROUPING SETS rather than `ROLLUP(a), ROLLUP(b)` because the latter is
+            // Trino-only — StarRocks parses `ROLLUP(col)` as a function call and errors.
+            // GROUPING SETS is accepted by both. Rollup names must be a subset of
+            // `dimensions` (so each has a GROUPING marker).
+            let mut group_levels: Vec<Vec<Vec<String>>> = Vec::new();
             for group in &spec.rollup_groups {
                 let mut exprs: Vec<String> = Vec::new();
                 for name in group {
@@ -257,16 +261,40 @@ pub fn build(
                     })?;
                     exprs.push(dim_exprs[i].clone());
                 }
-                if !exprs.is_empty() {
-                    parts.push(format!("ROLLUP({})", exprs.join(", ")));
+                if exprs.is_empty() {
+                    continue;
                 }
+                // ROLLUP(a, b) ⇒ levels (a, b), (a), (): every prefix, longest first.
+                let levels: Vec<Vec<String>> = (0..=exprs.len())
+                    .rev()
+                    .map(|k| exprs[..k].to_vec())
+                    .collect();
+                group_levels.push(levels);
             }
-            if parts.is_empty() {
+            if group_levels.is_empty() {
                 return Err(BiError::BadRequest(
                     "rollup_groups contains no resolvable dimensions".into(),
                 ));
             }
-            sql.push_str(&format!("\nGROUP BY {}", parts.join(", ")));
+            // Cartesian product of each group's levels → the full set of grouping sets.
+            let mut sets: Vec<Vec<String>> = vec![Vec::new()];
+            for levels in &group_levels {
+                let mut next: Vec<Vec<String>> = Vec::new();
+                for prefix in &sets {
+                    for level in levels {
+                        let mut combined = prefix.clone();
+                        combined.extend(level.iter().cloned());
+                        next.push(combined);
+                    }
+                }
+                sets = next;
+            }
+            let sets_sql: Vec<String> =
+                sets.iter().map(|s| format!("({})", s.join(", "))).collect();
+            sql.push_str(&format!(
+                "\nGROUP BY GROUPING SETS ({})",
+                sets_sql.join(", ")
+            ));
         } else if !dim_exprs.is_empty() {
             sql.push_str(&format!("\nGROUP BY {}", dim_exprs.join(", ")));
         }
@@ -437,8 +465,12 @@ mod tests {
             rollup_groups: vec![vec!["region".into()], vec!["seg".into()]],
         };
         let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
+        // ROLLUP(region) × ROLLUP(seg) expanded to portable GROUPING SETS
+        // (works on both Trino and StarRocks).
         assert!(
-            sql.contains("GROUP BY ROLLUP(\"region\"), ROLLUP(\"seg\")"),
+            sql.contains(
+                "GROUP BY GROUPING SETS ((\"region\", \"seg\"), (\"region\"), (\"seg\"), ())"
+            ),
             "{sql}"
         );
         assert!(sql.contains("GROUPING(\"region\") AS __grp_0"), "{sql}");
@@ -564,8 +596,11 @@ mod tests {
             rollup_groups: vec![vec!["region".into(), "nation".into()], vec!["seg".into()]],
         };
         let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
+        // ROLLUP(region, nation) × ROLLUP(seg) → portable GROUPING SETS.
         assert!(
-            sql.contains("GROUP BY ROLLUP(\"region\", \"nation\"), ROLLUP(\"seg\")"),
+            sql.contains(
+                "GROUP BY GROUPING SETS ((\"region\", \"nation\", \"seg\"), (\"region\", \"nation\"), (\"region\", \"seg\"), (\"region\"), (\"seg\"), ())"
+            ),
             "{sql}"
         );
         assert!(sql.contains("GROUPING(\"region\") AS __grp_0"), "{sql}");

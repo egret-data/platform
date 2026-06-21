@@ -43,7 +43,9 @@ export interface ColorRangeRule {
 }
 export type Rule = SingleColorRule | ColorRangeRule;
 
-const NUMERIC_RE = /int|double|decimal|real|numeric|float|bigint/i;
+// Covers SQL type names (Trino: bigint, double…) and MySQL-protocol enum names
+// returned by StarRocks (MYSQL_TYPE_LONGLONG / LONG / SHORT / TINY / NEWDECIMAL…).
+const NUMERIC_RE = /int|double|decimal|real|numeric|float|bigint|long|short|tiny/i;
 const TEMPORAL_RE = /date|time|timestamp/i;
 
 export function isNumericType(type: string): boolean {
