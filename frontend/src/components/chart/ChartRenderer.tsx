@@ -9,18 +9,20 @@ import { buildFunnelOption } from "@/components/chart/echarts/options/funnel";
 import { buildWaterfallOption } from "@/components/chart/echarts/options/waterfall";
 import { buildBoxplotOption } from "@/components/chart/echarts/options/boxplot";
 import { buildSankeyOption } from "@/components/chart/echarts/options/sankey";
-import { ChartTable } from "@/components/chart/ChartTable";
+import { ChartTable, type ResultColumn } from "@/components/chart/ChartTable";
 import { PivotTable } from "@/components/chart/pivot/PivotTable";
 import { BigNumber } from "@/components/chart/BigNumber";
 import { ProgressChart } from "@/components/chart/ProgressChart";
 import { SmartScalarChart } from "@/components/chart/SmartScalarChart";
 
-type Col = { name: string; type: string };
+const EmptyState = () => (
+  <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
+);
 
 export interface ChartRendererProps {
   vizType: VizType;
   params: ChartParams;
-  columns: Col[];
+  columns: ResultColumn[];
   rows: unknown[][];
   /** metric_name -> data_type, for metric value formatting. Optional; defaults to {}. */
   metricTypes?: Record<string, string>;
@@ -81,7 +83,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
     return (
       <div className="h-[60vh] rounded-md border p-2">
         {rows.length === 0
-          ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
+          ? <EmptyState />
           : <EChartsRenderer option={buildCartesianOption(columns, rows, {
               kind: vizType, xAxis: cartesian.xAxis, xMetric: cartesian.xMetric, yMetrics: cartesian.yMetrics, series: cartesian.series,
               stacked: cartesian.stacked, horizontal: cartesian.horizontal, smooth: cartesian.smooth,
@@ -104,7 +106,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
     return (
       <div className="h-[60vh] rounded-md border p-2">
         {rows.length === 0
-          ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
+          ? <EmptyState />
           : <EChartsRenderer option={buildPieOption(columns, rows, {
               dimension: pie.dimension, metric: pie.metric, donut: pie.donut,
               showLegend: pie.showLegend, showLabels: pie.showLabels,
@@ -147,9 +149,11 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
   if (vizType === "gauge") {
     return (
       <div className="h-[50vh] rounded-md border p-2">
-        <EChartsRenderer option={buildGaugeOption(columns, rows, {
-          metric: gauge.metric, min: gauge.min, max: gauge.max, columnSettings, metricTypes,
-        })} />
+        {rows.length === 0
+          ? <EmptyState />
+          : <EChartsRenderer option={buildGaugeOption(columns, rows, {
+              metric: gauge.metric, min: gauge.min, max: gauge.max, columnSettings, metricTypes,
+            })} />}
       </div>
     );
   }
@@ -158,7 +162,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
     return (
       <div className="h-[60vh] rounded-md border p-2">
         {rows.length === 0
-          ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
+          ? <EmptyState />
           : <EChartsRenderer option={buildFunnelOption(columns, rows, {
               dimension: funnel.dimension, metric: funnel.metric, columnSettings, metricTypes,
             })} />}
@@ -170,7 +174,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
     return (
       <div className="h-[60vh] rounded-md border p-2">
         {rows.length === 0
-          ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
+          ? <EmptyState />
           : <EChartsRenderer option={buildWaterfallOption(columns, rows, {
               xAxis: waterfall.xAxis, metric: waterfall.metric, showTotal: waterfall.showTotal, columnSettings, metricTypes,
             })} />}
@@ -196,7 +200,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
     return (
       <div className="h-[60vh] rounded-md border p-2">
         {rows.length === 0
-          ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
+          ? <EmptyState />
           : <EChartsRenderer option={buildBoxplotOption(columns, rows, {
               category: box.category, value: box.value, columnSettings, metricTypes,
             })} />}
@@ -208,7 +212,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
     return (
       <div className="h-[60vh] rounded-md border p-2">
         {rows.length === 0
-          ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
+          ? <EmptyState />
           : <EChartsRenderer option={buildSankeyOption(columns, rows, {
               source: sankey.source, target: sankey.target, metric: sankey.metric, columnSettings, metricTypes,
             })} />}
