@@ -1,6 +1,7 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { CartesianViz } from "@/api/charts";
 import type { ColumnFormat } from "../../format-types";
+import { isNumericType, isTemporalType } from "../../format-types";
 import { formatValue } from "../../format";
 import { CHART_THEME, COLOR_FALLBACK, resolveColor, seriesColor } from "../palette";
 
@@ -37,6 +38,14 @@ const distinct = (vals: unknown[]) => {
   return out;
 };
 
+// Order the x categories by axis type — temporal chronologically, numeric ascending —
+// while leaving a nominal (string) axis in first-seen order. (Metabase model/dataset.ts.)
+function sortCategories(cats: unknown[], type: string): unknown[] {
+  if (isTemporalType(type)) return [...cats].sort((a, b) => Date.parse(String(a)) - Date.parse(String(b)));
+  if (isNumericType(type)) return [...cats].sort((a, b) => Number(a) - Number(b));
+  return cats;
+}
+
 export function buildCartesianOption(
   columns: ResultColumn[],
   rows: unknown[][],
@@ -51,7 +60,10 @@ export function buildCartesianOption(
     return baseOption(cfg, [], []);
   }
 
-  const categories = distinct(rows.map((r) => r[xi]));
+  // Drop rows with a null x value, then order categories by the x column's type.
+  const xType = columns[xi].type;
+  const xrows = rows.filter((r) => r[xi] != null);
+  const categories = sortCategories(distinct(xrows.map((r) => r[xi])), xType);
   const catKey = (v: unknown) => String(v);
 
   // Breakout: one ECharts series per distinct series value (first y-metric only).
@@ -59,8 +71,8 @@ export function buildCartesianOption(
     const gi = idx[cfg.series];
     const metric = cfg.yMetrics[0];
     const mi = idx[metric];
-    const seriesValues = distinct(rows.map((r) => r[gi]));
-    const cell = new Map(rows.map((r) => [`${catKey(r[xi])} ${catKey(r[gi])}`, r[mi] as number | null]));
+    const seriesValues = distinct(xrows.map((r) => r[gi]));
+    const cell = new Map(xrows.map((r) => [`${catKey(r[xi])} ${catKey(r[gi])}`, r[mi] as number | null]));
     const series = seriesValues.map((sv, si) => {
       const data = categories.map((c) => {
         const v = cell.get(`${catKey(c)} ${catKey(sv)}`);
@@ -73,7 +85,7 @@ export function buildCartesianOption(
     return baseOption(cfg, categories as (string | number)[], series);
   }
 
-  const rowByCat = new Map(rows.map((r) => [catKey(r[xi]), r]));
+  const rowByCat = new Map(xrows.map((r) => [catKey(r[xi]), r]));
   const series = cfg.yMetrics.map((metric, si) => {
     const mi = idx[metric];
     const data = categories.map((c) => {

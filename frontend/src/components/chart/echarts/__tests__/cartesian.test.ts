@@ -125,3 +125,35 @@ describe("buildCartesianOption — Metabase-parity styling & axes", () => {
     expect(opt.series[0].label.formatter({ value: 10 })).toBe("$10");
   });
 });
+
+// Phase 1c — cartesian data shaping, clean-room from Metabase's cartesian/model/dataset.ts
+// (sort dimension by axis type; drop null-dimension rows).
+describe("buildCartesianOption — data shaping (Metabase parity 1c)", () => {
+  it("sorts a numeric x-axis ascending (not first-seen)", () => {
+    const cols = [{ name: "yr", type: "int" }, { name: "rev", type: "double" }];
+    const rows = [["2021", 3], ["2019", 1], ["2020", 2]];
+    const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "yr", yMetrics: ["rev"] }) as any;
+    expect(opt.xAxis.data).toEqual(["2019", "2020", "2021"]);
+    expect(opt.series[0].data).toEqual([1, 2, 3]);
+  });
+  it("sorts a temporal x-axis chronologically", () => {
+    const cols = [{ name: "d", type: "date" }, { name: "rev", type: "double" }];
+    const rows = [["2024-03-01", 3], ["2024-01-01", 1], ["2024-02-01", 2]];
+    const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "d", yMetrics: ["rev"] }) as any;
+    expect(opt.xAxis.data).toEqual(["2024-01-01", "2024-02-01", "2024-03-01"]);
+    expect(opt.series[0].data).toEqual([1, 2, 3]);
+  });
+  it("preserves first-seen order for a categorical (string) x-axis", () => {
+    const cols = [{ name: "p", type: "varchar" }, { name: "rev", type: "double" }];
+    const rows = [["Med", 2], ["High", 3], ["Low", 1]];
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "p", yMetrics: ["rev"] }) as any;
+    expect(opt.xAxis.data).toEqual(["Med", "High", "Low"]);
+  });
+  it("drops rows whose x value is null", () => {
+    const cols = [{ name: "yr", type: "int" }, { name: "rev", type: "double" }];
+    const rows = [["2020", 2], [null, 5], ["2019", 1]];
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "yr", yMetrics: ["rev"] }) as any;
+    expect(opt.xAxis.data).toEqual(["2019", "2020"]);
+    expect(opt.series[0].data).toEqual([1, 2]);
+  });
+});

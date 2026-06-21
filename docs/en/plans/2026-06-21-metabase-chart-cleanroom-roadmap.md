@@ -19,10 +19,13 @@ Reference (read-to-understand only): `metabase/frontend/src/metabase/visualizati
   Done in `3cce13c`. Also fixed a latent bug (`b0e649a`): CSS-var chart colors don't
   resolve in ECharts' SVG attributes — added `resolveColor()` (gridlines/axis/Other
   were rendering black). Verified live.
-- [ ] **1b. Pie donut polish** — centre total (show on hover / always), percent-visibility
-  modes (inside / legend / both), auto decimal places for %. (mb: pie/option.ts, format.ts)
-- [ ] **1c. Cartesian data shaping** — sort dimension (numeric/time) before plotting;
-  drop null-dimension rows; per-series missing-value strategy (gap vs zero). (mb: cartesian/model/dataset.ts)
+- [x] **1b. Pie donut polish** — centre total (donut + Show total), percent-visibility
+  modes (off / inside / both). Done in `b99a902` (registers GraphicComponent). Verified
+  live. (legend-mode % + hover-swap of centre value deferred.)
+- [x] **1c. Cartesian data shaping** — sort x by axis type (temporal chronological,
+  numeric ascending, nominal preserved); drop null-dimension rows. Auto by column type,
+  no new config. (mb: cartesian/model/dataset.ts) — per-series missing-value strategy
+  (gap vs zero) deferred to 2a.
 - [ ] **1d. Cartesian axes** — log / pow y-scale; dual Y-axis (left/right per metric);
   auto axis range. (mb: cartesian/model/axis.ts, option/axis.ts)
 - [ ] **1e. Cartesian overlays** — goal line, trend line, stack totals labels,
