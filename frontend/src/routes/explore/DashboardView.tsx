@@ -89,7 +89,9 @@ export default function DashboardView() {
   // every grid item sized from its card (a newly added card is never auto-placed at 1x1).
   const layout: Layout[] = cards.map((c) => ({
     i: c.id, x: c.grid_col, y: c.grid_row, w: c.size_x, h: c.size_y,
-    minW: CARD_MIN_SIZE.w, minH: CARD_MIN_SIZE.h,
+    // clamp the minimums to the card's own size so a short card (e.g. a 1-row
+    // heading) never has minH/minW larger than its height/width (RGL warns).
+    minW: Math.min(CARD_MIN_SIZE.w, c.size_x), minH: Math.min(CARD_MIN_SIZE.h, c.size_y),
   }));
 
   function onLayoutChange(next: Layout[]) {
