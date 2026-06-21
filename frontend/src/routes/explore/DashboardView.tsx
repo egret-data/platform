@@ -5,29 +5,13 @@ import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 import { useDashboard, useDashboardMutations, type CardInput, type DashboardCard as Card } from "@/api/dashboards";
 import { useCharts, type Chart } from "@/api/charts";
-import { useChartData } from "@/api/useChartData";
-import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { Button } from "@/components/ui/button";
 import { GRID_COLS, CARD_MIN_SIZE, CARD_DEFAULT_SIZE } from "@/components/chart/dashboard-grid";
+import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
 import { toast } from "sonner";
 
 const Grid = WidthProvider(RGL);
 const ROW_PX = 90;
-
-function CardTile({ ws, chart }: { ws: string; chart: Chart | undefined }) {
-  const data = useChartData(ws, chart ?? null);
-  if (!chart) return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Chart not found</div>;
-  return (
-    <div className="flex h-full flex-col">
-      <div className="border-b px-2 py-1 text-sm font-medium">{chart.name}</div>
-      <div className="min-h-0 flex-1 overflow-auto p-1">
-        {data.error ? <div className="text-sm text-destructive">{data.error}</div>
-          : data.isLoading ? <div className="text-sm text-muted-foreground">Loading…</div>
-          : <ChartRenderer vizType={chart.viz_type} params={chart.params} columns={data.columns} rows={data.rows} />}
-      </div>
-    </div>
-  );
-}
 
 export default function DashboardView() {
   const { workspace: ws, id } = useParams() as { workspace: string; id: string };
@@ -139,7 +123,7 @@ export default function DashboardView() {
           onLayoutChange={onLayoutChange}
         >
           {cards.map((c) => (
-            <div key={c.id} className="relative overflow-hidden rounded-md border bg-background">
+            <div key={c.id} className={`relative overflow-hidden ${c.card_type === "heading" ? "" : "rounded-md border bg-background"}`}>
               {editing && (
                 <button
                   type="button"
@@ -148,7 +132,7 @@ export default function DashboardView() {
                   onClick={() => removeCard(c.id)}
                 >✕</button>
               )}
-              <CardTile ws={ws} chart={chartById.get(c.chart_id ?? "")} />
+              <DashboardCardView ws={ws} card={c} chart={chartById.get(c.chart_id ?? "")} />
             </div>
           ))}
         </Grid>
