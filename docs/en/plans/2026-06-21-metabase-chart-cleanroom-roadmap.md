@@ -52,7 +52,7 @@ One phase each, simplest first:
   value labels at bar ends. New viz_type "row" reusing the cartesian builder + gallery
   entry. Verified live. (mb: visualizations/RowChart)
 - [ ] 3b. Waterfall
-- [ ] 3c. Funnel
+- [x] 3c. Funnel — ECharts funnel series (stages sorted descending, palette, inside labels). Verified live.
 - [x] 3d. Progress — value-vs-goal bar (React component, fill = value/goal, overshoot
   shown, pointer + recoloured track). Verified live.
 - [x] 3e. Gauge — value on a 0..max arc (ECharts gauge series, registers GaugeChart;

@@ -1,5 +1,5 @@
 import {
-  Table2, LayoutGrid, BarChart3, BarChartHorizontal, LineChart, AreaChart, ScatterChart, Spline, PieChart, Hash, BarChartHorizontalBig, Gauge,
+  Table2, LayoutGrid, BarChart3, BarChartHorizontal, LineChart, AreaChart, ScatterChart, Spline, PieChart, Hash, BarChartHorizontalBig, Gauge, Filter,
   type LucideIcon,
 } from "lucide-react";
 import type { VizType } from "@/api/charts";
@@ -34,4 +34,5 @@ export const CHART_TYPES: ChartTypeMeta[] = [
   { key: "scalar", name: "Big number", description: "A single aggregated value, large and formatted.", icon: Hash },
   { key: "progress", name: "Progress", description: "A single value against a goal, as a progress bar.", icon: BarChartHorizontalBig },
   { key: "gauge", name: "Gauge", description: "A single value on an arc between a min and max.", icon: Gauge },
+  { key: "funnel", name: "Funnel", description: "Stages of a process, each narrower than the last.", icon: Filter },
 ];
