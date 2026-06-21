@@ -265,8 +265,10 @@ pub fn build(
                     continue;
                 }
                 // ROLLUP(a, b) ⇒ levels (a, b), (a), (): every prefix, longest first.
-                let levels: Vec<Vec<String>> =
-                    (0..=exprs.len()).rev().map(|k| exprs[..k].to_vec()).collect();
+                let levels: Vec<Vec<String>> = (0..=exprs.len())
+                    .rev()
+                    .map(|k| exprs[..k].to_vec())
+                    .collect();
                 group_levels.push(levels);
             }
             if group_levels.is_empty() {
@@ -289,7 +291,10 @@ pub fn build(
             }
             let sets_sql: Vec<String> =
                 sets.iter().map(|s| format!("({})", s.join(", "))).collect();
-            sql.push_str(&format!("\nGROUP BY GROUPING SETS ({})", sets_sql.join(", ")));
+            sql.push_str(&format!(
+                "\nGROUP BY GROUPING SETS ({})",
+                sets_sql.join(", ")
+            ));
         } else if !dim_exprs.is_empty() {
             sql.push_str(&format!("\nGROUP BY {}", dim_exprs.join(", ")));
         }
