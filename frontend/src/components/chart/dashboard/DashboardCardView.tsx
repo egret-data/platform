@@ -13,8 +13,8 @@ function asString(v: unknown): string | undefined {
 function ChartCardTile({ ws, card, chart, refreshNonce }: { ws: string; card: DashboardCard; chart: Chart | undefined; refreshNonce?: number }) {
   const data = useChartData(ws, chart ?? null, refreshNonce);
   const titleOverride = asString(card.options.title);          // undefined → use chart name; "" → hide
-  const showHeader = titleOverride !== "";
   const headerText = titleOverride || chart?.name || "";
+  const showHeader = titleOverride !== "" && headerText !== "";
   if (!chart) return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Chart not found</div>;
   return (
     <div className="flex h-full flex-col">

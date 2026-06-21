@@ -41,4 +41,9 @@ describe("LinkCard", () => {
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
     expect(screen.getByText(/no url/i)).toBeInTheDocument();
   });
+  it("does NOT render a javascript: URL as a link (XSS guard)", () => {
+    render(<LinkCard url="javascript:alert(1)" label="x" />);
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    expect(screen.getByText(/no url/i)).toBeInTheDocument();
+  });
 });

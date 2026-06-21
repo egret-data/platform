@@ -18,7 +18,7 @@ export function useDashboardViewControls(): DashboardViewControls {
   const [refreshNonce, setRefreshNonce] = useState(0);
 
   const setRefreshSeconds = (s: number | null) =>
-    setParams((p) => { const n = new URLSearchParams(p); if (s) n.set("refresh", String(s)); else n.delete("refresh"); return n; }, { replace: true });
+    setParams((p) => { const n = new URLSearchParams(p); if (s !== null && s > 0) n.set("refresh", String(s)); else n.delete("refresh"); return n; }, { replace: true });
   const setFullscreen = (v: boolean) =>
     setParams((p) => { const n = new URLSearchParams(p); if (v) n.set("fullscreen", "true"); else n.delete("fullscreen"); return n; }, { replace: true });
 

@@ -31,6 +31,7 @@ export function useChartData(ws: string, chart: Chart | null, nonce?: number): C
     (async () => {
       try {
         const { sql, database_id } = await build.mutateAsync({ dataset_id: chart.dataset_id, query_spec: chart.params.spec });
+        if (cancelled) return;
         const q = await submit.mutateAsync({ database_id, sql, limit: chart.params.spec.row_limit });
         if (!cancelled) setQueryId(q.id);
       } catch (e) {
