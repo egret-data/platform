@@ -35,7 +35,6 @@ export default function DashboardView() {
   const { data: charts } = useCharts(ws);
   const { update } = useDashboardMutations(ws);
   const [editing, setEditing] = useState(false);
-  const [layout, setLayout] = useState<Layout[] | null>(null);
   const [draftCards, setDraftCards] = useState<Card[] | null>(null);
   const cardSeqRef = useRef(0);
   const chartById = useMemo(() => new Map((charts ?? []).map((c) => [c.id, c])), [charts]);
@@ -43,7 +42,6 @@ export default function DashboardView() {
   useEffect(() => {
     setEditing(false);
     setDraftCards(null);
-    setLayout(null);
   }, [id]);
 
   if (isLoading || !dash) return <div className="p-4 text-muted-foreground">Loading…</div>;
@@ -52,7 +50,7 @@ export default function DashboardView() {
   const cards = editing && draftCards ? draftCards : dashboard.cards;
 
   function startEdit() { setDraftCards(dashboard.cards.map((c) => ({ ...c }))); setEditing(true); }
-  function cancelEdit() { setEditing(false); setDraftCards(null); setLayout(null); }
+  function cancelEdit() { setEditing(false); setDraftCards(null); }
 
   function addCard(chart: Chart) {
     const maxY = cards.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
@@ -65,25 +63,38 @@ export default function DashboardView() {
   function removeCard(cardId: string) {
     setDraftCards(cards.filter((c) => c.id !== cardId));
   }
-  const baseLayout: Layout[] = cards.map((c) => ({
+
+  // The cards are the single source of truth for positions: the RGL layout is derived
+  // from them, and drag/resize writes positions straight back into the draft. This keeps
+  // every grid item sized from its card (a newly added card is never auto-placed at 1x1).
+  const layout: Layout[] = cards.map((c) => ({
     i: c.id, x: c.grid_col, y: c.grid_row, w: c.size_x, h: c.size_y,
     minW: CARD_MIN_SIZE.w, minH: CARD_MIN_SIZE.h,
   }));
-  const activeLayout = editing && layout ? layout : baseLayout;
+
+  function onLayoutChange(next: Layout[]) {
+    if (!editing) return;
+    setDraftCards((prev) => {
+      const base = prev ?? dashboard.cards;
+      let changed = false;
+      const merged = base.map((c) => {
+        const l = next.find((x) => x.i === c.id);
+        if (!l || (l.x === c.grid_col && l.y === c.grid_row && l.w === c.size_x && l.h === c.size_y)) return c;
+        changed = true;
+        return { ...c, grid_col: l.x, grid_row: l.y, size_x: l.w, size_y: l.h };
+      });
+      return changed ? merged : base;   // same ref when nothing moved → no re-render loop
+    });
+  }
 
   async function onSave() {
-    const byId = new Map((layout ?? []).map((l) => [l.i, l]));
-    const payload: CardInput[] = cards.map((c) => {
-      const l = byId.get(c.id);
-      return {
-        chart_id: c.chart_id, card_type: c.card_type,
-        grid_col: l?.x ?? c.grid_col, grid_row: l?.y ?? c.grid_row,
-        size_x: l?.w ?? c.size_x, size_y: l?.h ?? c.size_y, options: c.options,
-      };
-    });
+    const payload: CardInput[] = cards.map((c) => ({
+      chart_id: c.chart_id, card_type: c.card_type,
+      grid_col: c.grid_col, grid_row: c.grid_row, size_x: c.size_x, size_y: c.size_y, options: c.options,
+    }));
     try {
       await update.mutateAsync({ id: dashboard.id, name: dashboard.name, description: dashboard.description, cards: payload });
-      setEditing(false); setDraftCards(null); setLayout(null);
+      setEditing(false); setDraftCards(null);
       toast.success("Saved");
     } catch (e) { toast.error(String(e)); }
   }
@@ -124,8 +135,8 @@ export default function DashboardView() {
           rowHeight={ROW_PX}
           isDraggable={editing}
           isResizable={editing}
-          layout={activeLayout}
-          onLayoutChange={(l) => { if (editing) setLayout(l); }}
+          layout={layout}
+          onLayoutChange={onLayoutChange}
         >
           {cards.map((c) => (
             <div key={c.id} className="relative overflow-hidden rounded-md border bg-background">

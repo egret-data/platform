@@ -4,6 +4,10 @@ import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import DashboardView from "../DashboardView";
 
+const { updateSpy } = vi.hoisted(() => ({
+  updateSpy: vi.fn((_b: { id: string; name: string; description?: string; cards: Array<{ size_x: number; size_y: number }> }) => Promise.resolve({})),
+}));
+
 vi.mock("@/api/dashboards", () => ({
   useDashboard: () => ({
     data: {
@@ -12,7 +16,7 @@ vi.mock("@/api/dashboards", () => ({
     },
     isLoading: false,
   }),
-  useDashboardMutations: () => ({ update: { mutateAsync: vi.fn(), isPending: false } }),
+  useDashboardMutations: () => ({ update: { mutateAsync: updateSpy, isPending: false } }),
 }));
 vi.mock("@/api/charts", async (orig) => ({
   ...(await orig<typeof import("@/api/charts")>()),
@@ -53,5 +57,23 @@ describe("DashboardView (edit mode)", () => {
     const addBtn = screen.getByRole("button", { name: /add sales/i });
     fireEvent.click(addBtn);
     expect(screen.getAllByRole("button", { name: /remove card/i }).length).toBeGreaterThan(0);
+  });
+
+  // Regression: a newly added card must keep its default size in the save payload.
+  // (A bug let RGL auto-place a card missing from the controlled layout at 1x1.)
+  it("saves an added card at its default size, not collapsed", async () => {
+    updateSpy.mockClear();
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    fireEvent.click(screen.getByRole("button", { name: /add sales/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    const payload = updateSpy.mock.calls[0][0];
+    expect(payload.cards).toHaveLength(2);           // existing + added
+    // every card (including the freshly added one) is a real size, never 1x1
+    for (const c of payload.cards) {
+      expect(c.size_x).toBeGreaterThanOrEqual(6);
+      expect(c.size_y).toBeGreaterThanOrEqual(4);
+    }
   });
 });
