@@ -19,17 +19,8 @@ import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { FormatSection } from "@/components/chart/settings/FormatSection";
 import { ConditionalFormattingSection } from "@/components/chart/settings/ConditionalFormattingSection";
 import { TableColumnsSection } from "@/components/chart/settings/TableColumnsSection";
-import { EChartsRenderer } from "@/components/chart/echarts/EChartsRenderer";
-import { buildCartesianOption, cartesianSeriesNames } from "@/components/chart/echarts/options/cartesian";
-import { buildPieOption } from "@/components/chart/echarts/options/pie";
-import { BigNumber } from "@/components/chart/BigNumber";
-import { ProgressChart } from "@/components/chart/ProgressChart";
-import { buildGaugeOption } from "@/components/chart/echarts/options/gauge";
-import { buildFunnelOption } from "@/components/chart/echarts/options/funnel";
-import { buildWaterfallOption } from "@/components/chart/echarts/options/waterfall";
-import { SmartScalarChart } from "@/components/chart/SmartScalarChart";
-import { buildBoxplotOption } from "@/components/chart/echarts/options/boxplot";
-import { buildSankeyOption } from "@/components/chart/echarts/options/sankey";
+import { cartesianSeriesNames } from "@/components/chart/echarts/options/cartesian";
+import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { CartesianDisplaySection } from "@/components/chart/settings/CartesianDisplaySection";
 import { PieDisplaySection } from "@/components/chart/settings/PieDisplaySection";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
@@ -828,99 +819,14 @@ export default function ChartExplore() {
             dimensionColumns={tableMetrics.length > 0 ? tableCols : []}
             onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })} />
         )}
-        {finished && results.data && isCartesianViz(viz) && (
-          <div className="h-[60vh] rounded-md border p-2">
-            {results.data.rows.length === 0
-              ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
-              : <EChartsRenderer option={buildCartesianOption(results.data.columns, results.data.rows, {
-                  kind: viz, xAxis: cartesian.xAxis, xMetric: cartesian.xMetric, yMetrics: cartesian.yMetrics, series: cartesian.series,
-                  stacked: cartesian.stacked, horizontal: cartesian.horizontal, smooth: cartesian.smooth,
-                  showLabels: cartesian.showLabels, showLegend: cartesian.showLegend,
-                  xLabel: cartesian.xLabel, yLabel: cartesian.yLabel, seriesTypes: cartesian.seriesTypes,
-                  rightAxisMetrics: cartesian.rightAxisMetrics, logScale: cartesian.logScale,
-                  normalized: cartesian.normalized, goalValue: cartesian.goalValue, goalLabel: cartesian.goalLabel,
-                  trendLine: cartesian.trendLine, connectNulls: cartesian.connectNulls, step: cartesian.step,
-                  showStackTotal: cartesian.showStackTotal,
-                  seriesColors: cartesian.seriesColors, seriesLabels: cartesian.seriesLabels,
-                  yMin: cartesian.yMin, yMax: cartesian.yMax,
-                  showMarkers: cartesian.showMarkers, xScale: cartesian.xScale,
-                  columnSettings, metricTypes,
-                })} />}
-          </div>
-        )}
-        {finished && results.data && viz === "pie" && (
-          <div className="h-[60vh] rounded-md border p-2">
-            {results.data.rows.length === 0
-              ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
-              : <EChartsRenderer option={buildPieOption(results.data.columns, results.data.rows, {
-                  dimension: pie.dimension, metric: pie.metric, donut: pie.donut,
-                  showLegend: pie.showLegend, showLabels: pie.showLabels,
-                  sliceThreshold: pie.sliceThreshold, sortRows: pie.sortRows,
-                  showTotal: pie.showTotal, percentVisibility: pie.percentVisibility,
-                  sliceColors: pie.sliceColors,
-                  columnSettings, metricTypes,
-                })} />}
-          </div>
-        )}
-        {finished && results.data && viz === "scalar" && (
-          <div className="rounded-md border">
-            <BigNumber columns={results.data.columns} rows={results.data.rows} metric={scalar.metric} format={scalar.metric ? columnSettings[scalar.metric] : undefined} />
-          </div>
-        )}
-        {finished && results.data && viz === "progress" && (
-          <div className="rounded-md border">
-            <ProgressChart columns={results.data.columns} rows={results.data.rows} metric={progress.metric} goal={progress.goal}
-              format={progress.metric ? columnSettings[progress.metric] : undefined} />
-          </div>
-        )}
-        {finished && results.data && viz === "gauge" && (
-          <div className="h-[50vh] rounded-md border p-2">
-            <EChartsRenderer option={buildGaugeOption(results.data.columns, results.data.rows, {
-              metric: gauge.metric, min: gauge.min, max: gauge.max, columnSettings, metricTypes,
-            })} />
-          </div>
-        )}
-        {finished && results.data && viz === "funnel" && (
-          <div className="h-[60vh] rounded-md border p-2">
-            {results.data.rows.length === 0
-              ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
-              : <EChartsRenderer option={buildFunnelOption(results.data.columns, results.data.rows, {
-                  dimension: funnel.dimension, metric: funnel.metric, columnSettings, metricTypes,
-                })} />}
-          </div>
-        )}
-        {finished && results.data && viz === "waterfall" && (
-          <div className="h-[60vh] rounded-md border p-2">
-            {results.data.rows.length === 0
-              ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
-              : <EChartsRenderer option={buildWaterfallOption(results.data.columns, results.data.rows, {
-                  xAxis: waterfall.xAxis, metric: waterfall.metric, showTotal: waterfall.showTotal, columnSettings, metricTypes,
-                })} />}
-          </div>
-        )}
-        {finished && results.data && viz === "smartscalar" && (
-          <div className="rounded-md border">
-            <SmartScalarChart columns={results.data.columns} rows={results.data.rows} dimension={smart.dimension} metric={smart.metric}
-              format={smart.metric ? columnSettings[smart.metric] : undefined} />
-          </div>
-        )}
-        {finished && results.data && viz === "boxplot" && (
-          <div className="h-[60vh] rounded-md border p-2">
-            {results.data.rows.length === 0
-              ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
-              : <EChartsRenderer option={buildBoxplotOption(results.data.columns, results.data.rows, {
-                  category: box.category, value: box.value, columnSettings, metricTypes,
-                })} />}
-          </div>
-        )}
-        {finished && results.data && viz === "sankey" && (
-          <div className="h-[60vh] rounded-md border p-2">
-            {results.data.rows.length === 0
-              ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
-              : <EChartsRenderer option={buildSankeyOption(results.data.columns, results.data.rows, {
-                  source: sankey.source, target: sankey.target, metric: sankey.metric, columnSettings, metricTypes,
-                })} />}
-          </div>
+        {finished && results.data && viz !== "table" && viz !== "pivot_table" && (
+          <ChartRenderer
+            vizType={viz}
+            params={paramsForSave()}
+            columns={results.data.columns}
+            rows={results.data.rows}
+            metricTypes={metricTypes}
+          />
         )}
         {!queryId && !build.isPending && !submit.isPending && (
           <p className="text-sm text-muted-foreground">Configure the controls on the left and click Run.</p>
