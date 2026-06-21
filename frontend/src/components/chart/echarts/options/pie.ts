@@ -1,7 +1,7 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
-import { SERIES_PALETTE, OTHER_SLICE_COLOR } from "../palette";
+import { SERIES_PALETTE, OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor } from "../palette";
 
 export interface ResultColumn { name: string; type: string }
 export interface PieBuildConfig {
@@ -48,7 +48,8 @@ function buildSlices(rows: unknown[][], di: number, mi: number, cfg: PieBuildCon
     if (small.length > 1) {
       const big = slices.filter((s) => s.value / total >= threshold);
       const otherTotal = small.reduce((t, s) => t + s.value, 0);
-      slices = [...big, { name: OTHER_NAME, value: otherTotal, itemStyle: { color: OTHER_SLICE_COLOR } }];
+      const otherColor = resolveColor(OTHER_SLICE_COLOR, COLOR_FALLBACK.axisLabel);
+      slices = [...big, { name: OTHER_NAME, value: otherTotal, itemStyle: { color: otherColor } }];
     }
   }
 

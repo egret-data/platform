@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { SERIES_PALETTE, CHART_THEME, seriesColor } from "../palette";
+import { SERIES_PALETTE, CHART_THEME, seriesColor, resolveColor } from "../palette";
 
 describe("chart palette", () => {
   it("exposes Metabase's 8 accent colors in order", () => {
@@ -17,5 +17,16 @@ describe("chart palette", () => {
     expect(seriesColor(0)).toBe("#509EE3");
     expect(seriesColor(8)).toBe("#509EE3"); // wraps
     expect(seriesColor(9)).toBe("#88BF4D");
+  });
+  describe("resolveColor", () => {
+    it("returns concrete colors unchanged (no var)", () => {
+      expect(resolveColor("#509EE3", "#000")).toBe("#509EE3");
+      expect(resolveColor("rgb(1,2,3)", "#000")).toBe("rgb(1,2,3)");
+    });
+    it("falls back when a var() cannot be resolved (jsdom has no computed custom props)", () => {
+      // jsdom's getComputedStyle does not resolve CSS custom properties, so the
+      // fallback must be used — guaranteeing ECharts never receives a raw var().
+      expect(resolveColor("var(--border)", "#e5e7eb")).toBe("#e5e7eb");
+    });
   });
 });

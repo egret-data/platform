@@ -2,7 +2,7 @@ import type { EChartsCoreOption } from "echarts/core";
 import type { CartesianViz } from "@/api/charts";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
-import { CHART_THEME, seriesColor } from "../palette";
+import { CHART_THEME, COLOR_FALLBACK, resolveColor, seriesColor } from "../palette";
 
 export interface ResultColumn { name: string; type: string }
 export interface CartesianBuildConfig {
@@ -117,6 +117,8 @@ function decorateSeries(
 
 function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], series: unknown[]): EChartsCoreOption {
   const horizontal = !!cfg.horizontal && cfg.kind !== "scatter";
+  const gridLine = resolveColor(CHART_THEME.gridLine, COLOR_FALLBACK.gridLine);
+  const axisLabelColor = resolveColor(CHART_THEME.axisLabel, COLOR_FALLBACK.axisLabel);
   const valueFmt = (v: number) => {
     const m = cfg.yMetrics[0];
     return m ? formatValue(v, cfg.metricTypes?.[m] ?? "double", cfg.columnSettings?.[m]) : String(v);
@@ -124,13 +126,13 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   const categoryAxis = {
     type: "category" as const, data: categories,
     name: cfg.xLabel, nameLocation: "middle" as const, nameGap: 28,
-    axisLabel: { fontSize: CHART_THEME.axisFontSize, color: CHART_THEME.axisLabel },
-    axisLine: { lineStyle: { color: CHART_THEME.gridLine } },
+    axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor },
+    axisLine: { lineStyle: { color: gridLine } },
   };
   const valueAxis = {
     type: "value" as const, name: cfg.yLabel,
-    axisLabel: { fontSize: CHART_THEME.axisFontSize, color: CHART_THEME.axisLabel, formatter: valueFmt },
-    splitLine: { lineStyle: { color: CHART_THEME.gridLine } },
+    axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: valueFmt },
+    splitLine: { lineStyle: { color: gridLine } },
   };
   return {
     color: undefined,

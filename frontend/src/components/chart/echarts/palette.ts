@@ -25,12 +25,41 @@ export const CHART_THEME = {
   axisWeight: 400,      // CHART_STYLE.axisTicks/axisName.weight
   // gridline / axis line color — light hairline, like Metabase's
   // --mb-color-cartesian-grid-line. Uses the egret CSS border token.
-  gridLine: "hsl(var(--border))",
-  axisLabel: "hsl(var(--muted-foreground))",
+  gridLine: "var(--border)",
+  axisLabel: "var(--muted-foreground)",
   grid: { left: 8, right: 16, top: 16, bottom: 12, containLabel: true },
 } as const;
 
 export const seriesColor = (i: number) => SERIES_PALETTE[i % SERIES_PALETTE.length];
 
 /** Muted color for the aggregated "Other" pie slice (Metabase uses text-tertiary). */
-export const OTHER_SLICE_COLOR = "hsl(var(--muted-foreground))";
+export const OTHER_SLICE_COLOR = "var(--muted-foreground)";
+
+// ECharts' SVG renderer writes colors as SVG presentation attributes, where CSS
+// `var()` does NOT resolve (and egret's tokens are oklch(), so a wrapping hsl()
+// would be invalid anyway). Resolve a `var(--x)` expression to a concrete computed
+// color via a probe element; fall back to a fixed color in non-DOM (vitest/SSR).
+const colorCache = new Map<string, string>();
+export function resolveColor(expr: string, fallback: string): string {
+  const m = /var\((--[\w-]+)\)/.exec(expr);
+  if (!m) return expr;
+  if (typeof document === "undefined" || !document.body) return fallback;
+  const cached = colorCache.get(expr);
+  if (cached) return cached;
+  const probe = document.createElement("span");
+  probe.style.color = `var(${m[1]})`;
+  probe.style.display = "none";
+  document.body.appendChild(probe);
+  const resolved = getComputedStyle(probe).color;
+  probe.remove();
+  // jsdom returns the literal "var(--x)" (no resolution); a real browser returns rgb().
+  const out = resolved && !resolved.includes("var(") ? resolved : fallback;
+  colorCache.set(expr, out);
+  return out;
+}
+
+/** Concrete fallbacks (≈ egret light-theme tokens) for non-DOM contexts. */
+export const COLOR_FALLBACK = {
+  gridLine: "#e5e7eb",     // ≈ --border (very light gray)
+  axisLabel: "#6b7280",    // ≈ --muted-foreground (slate)
+} as const;
