@@ -146,7 +146,9 @@ export default function DashboardView() {
                 onClick={() => {
                   const next = !view.isFullscreen;
                   view.setFullscreen(next);
-                  try { if (next) document.documentElement.requestFullscreen?.(); else if (document.fullscreenElement) document.exitFullscreen?.(); } catch { /* ignore */ }
+                  // best-effort native fullscreen; these return a Promise that rejects when
+                  // the browser denies it (no gesture / headless), so swallow it (.catch).
+                  try { if (next) document.documentElement.requestFullscreen?.()?.catch(() => {}); else if (document.fullscreenElement) document.exitFullscreen?.()?.catch(() => {}); } catch { /* ignore */ }
                 }}>
                 {view.isFullscreen ? "Exit fullscreen" : "Fullscreen"}
               </Button>
