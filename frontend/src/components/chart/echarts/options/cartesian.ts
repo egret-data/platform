@@ -53,8 +53,25 @@ export function buildCartesianOption(
 
   const categories = distinct(rows.map((r) => r[xi]));
   const catKey = (v: unknown) => String(v);
-  const rowByCat = new Map(rows.map((r) => [catKey(r[xi]), r]));
 
+  // Breakout: one ECharts series per distinct series value (first y-metric only).
+  if (cfg.series != null && idx[cfg.series] != null) {
+    const gi = idx[cfg.series];
+    const metric = cfg.yMetrics[0];
+    const mi = idx[metric];
+    const seriesValues = distinct(rows.map((r) => r[gi]));
+    const cell = new Map(rows.map((r) => [`${catKey(r[xi])} ${catKey(r[gi])}`, r[mi] as number | null]));
+    const series = seriesValues.map((sv, si) => {
+      const data = categories.map((c) => {
+        const v = cell.get(`${catKey(c)} ${catKey(sv)}`);
+        return v === undefined ? null : v;
+      });
+      return decorateSeries({ name: String(sv), data }, metric, si, cfg, fmt);
+    });
+    return baseOption(cfg, categories as (string | number)[], series);
+  }
+
+  const rowByCat = new Map(rows.map((r) => [catKey(r[xi]), r]));
   const series = cfg.yMetrics.map((metric, si) => {
     const mi = idx[metric];
     const data = categories.map((c) => {
@@ -63,7 +80,6 @@ export function buildCartesianOption(
     });
     return decorateSeries({ name: metric, data }, metric, si, cfg, fmt);
   });
-
   return baseOption(cfg, categories as (string | number)[], series);
 }
 
