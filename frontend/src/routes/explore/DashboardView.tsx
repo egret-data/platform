@@ -25,6 +25,7 @@ export default function DashboardView() {
   const cardSeqRef = useRef(0);
   const chartById = useMemo(() => new Map((charts ?? []).map((c) => [c.id, c])), [charts]);
   const view = useDashboardViewControls();
+  const [replacingId, setReplacingId] = useState<string | null>(null);
 
   useEffect(() => {
     setEditing(false);
@@ -50,8 +51,6 @@ export default function DashboardView() {
   function removeCard(cardId: string) {
     setDraftCards(cards.filter((c) => c.id !== cardId));
   }
-
-  const [replacingId, setReplacingId] = useState<string | null>(null);
 
   function duplicateCard(cardId: string) {
     setDraftCards((prev) => {
