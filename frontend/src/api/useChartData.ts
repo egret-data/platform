@@ -38,7 +38,6 @@ export function useChartData(ws: string, chart: Chart | null): ChartData {
       }
     })();
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ws, specKey]);
 
   const failed = status.data?.status === "failed" || status.data?.status === "cancelled";

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import RGL, { WidthProvider, type Layout } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
@@ -30,15 +30,21 @@ function CardTile({ ws, chart }: { ws: string; chart: Chart | undefined }) {
 }
 
 export default function DashboardView() {
-  const ws = useParams().workspace!;
-  const id = useParams().id!;
+  const { workspace: ws, id } = useParams() as { workspace: string; id: string };
   const { data: dash, isLoading } = useDashboard(ws, id);
   const { data: charts } = useCharts(ws);
   const { update } = useDashboardMutations(ws);
   const [editing, setEditing] = useState(false);
   const [layout, setLayout] = useState<Layout[] | null>(null);
   const [draftCards, setDraftCards] = useState<Card[] | null>(null);
+  const cardSeqRef = useRef(0);
   const chartById = useMemo(() => new Map((charts ?? []).map((c) => [c.id, c])), [charts]);
+
+  useEffect(() => {
+    setEditing(false);
+    setDraftCards(null);
+    setLayout(null);
+  }, [id]);
 
   if (isLoading || !dash) return <div className="p-4 text-muted-foreground">Loading…</div>;
 
@@ -51,7 +57,7 @@ export default function DashboardView() {
   function addCard(chart: Chart) {
     const maxY = cards.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
     const newCard: Card = {
-      id: `new-${chart.id}-${cards.length}`, chart_id: chart.id, card_type: "chart",
+      id: `new-${chart.id}-${cardSeqRef.current++}`, chart_id: chart.id, card_type: "chart",
       grid_col: 0, grid_row: maxY, size_x: CARD_DEFAULT_SIZE.w, size_y: CARD_DEFAULT_SIZE.h, options: {},
     };
     setDraftCards([...cards, newCard]);
