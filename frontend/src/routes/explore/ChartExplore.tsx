@@ -5,7 +5,7 @@ import { useDatasets, useDataset } from "@/api/datasets";
 import {
   useBuildChartData, useChart, useChartMutations,
   type QuerySpec, type VizType, type ChartParams, type TableState, type ChartFilter,
-  type CartesianConfig, type PieConfig, type ScalarConfig, isCartesianViz,
+  type CartesianConfig, type PieConfig, type ScalarConfig, type ProgressConfig, isCartesianViz,
 } from "@/api/charts";
 import { useSubmitQuery, useQueryStatus, useResults } from "@/api/sqllab";
 import { ChartTable } from "@/components/chart/ChartTable";
@@ -23,6 +23,7 @@ import { EChartsRenderer } from "@/components/chart/echarts/EChartsRenderer";
 import { buildCartesianOption } from "@/components/chart/echarts/options/cartesian";
 import { buildPieOption } from "@/components/chart/echarts/options/pie";
 import { BigNumber } from "@/components/chart/BigNumber";
+import { ProgressChart } from "@/components/chart/ProgressChart";
 import { CartesianDisplaySection } from "@/components/chart/settings/CartesianDisplaySection";
 import { PieDisplaySection } from "@/components/chart/settings/PieDisplaySection";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
@@ -82,6 +83,7 @@ export default function ChartExplore() {
   const [cartesian, setCartesian] = useState<CartesianConfig>({ yMetrics: [] });
   const [pie, setPie] = useState<PieConfig>({});
   const [scalar, setScalar] = useState<ScalarConfig>({});
+  const [progress, setProgress] = useState<ProgressConfig>({});
   const patchCartesian = (p: Partial<CartesianConfig>) => setCartesian((c) => ({ ...c, ...p }));
   const patchPie = (p: Partial<PieConfig>) => setPie((c) => ({ ...c, ...p }));
   const [filters, setFilters] = useState<ChartFilter[]>([]);
@@ -108,6 +110,8 @@ export default function ChartExplore() {
       setPie(p.pie ?? {});
     } else if (c.viz_type === "scalar") {
       setScalar(p.scalar ?? { metric: p.spec?.metrics?.[0] });
+    } else if (c.viz_type === "progress") {
+      setProgress(p.progress ?? { metric: p.spec?.metrics?.[0] });
     } else {
       setTableMetrics(p.spec?.metrics ?? []);
       setTableCols([...(p.spec?.dimensions ?? []), ...(p.spec?.columns ?? [])]);
@@ -142,6 +146,9 @@ export default function ChartExplore() {
     }
     if (viz === "scalar") {
       return { metrics: scalar.metric ? [scalar.metric] : [], dimensions: [], columns: [], filters, orderby: [], row_limit: 1, rollup_groups: [] };
+    }
+    if (viz === "progress") {
+      return { metrics: progress.metric ? [progress.metric] : [], dimensions: [], columns: [], filters, orderby: [], row_limit: 1, rollup_groups: [] };
     }
     if (viz === "pivot_table") {
       const dims = [...pRows, ...pCols];
@@ -190,6 +197,9 @@ export default function ChartExplore() {
     if (viz === "scalar" && !scalar.metric) {
       toast.error("Big number needs a metric"); return;
     }
+    if (viz === "progress" && !progress.metric) {
+      toast.error("Progress needs a metric"); return;
+    }
     try {
       const { sql, database_id } = await build.mutateAsync({ dataset_id: datasetId, query_spec: specForRun() });
       const ack = await submit.mutateAsync({ database_id, sql, limit: rowLimit });
@@ -215,6 +225,7 @@ export default function ChartExplore() {
     if (isCartesianViz(viz)) return { spec: specForRun(), cartesian, columnSettings };
     if (viz === "pie") return { spec: specForRun(), pie };
     if (viz === "scalar") return { spec: specForRun(), scalar, columnSettings };
+    if (viz === "progress") return { spec: specForRun(), progress, columnSettings };
     return { spec: specForRun(), columnSettings, conditionalFormatting, tableState };
   }
 
@@ -254,7 +265,7 @@ export default function ChartExplore() {
   function resetControls() {
     setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]);
     setColumnSettings({}); setConditionalFormatting([]); setCollapsed(new Set()); setPivotSort({}); setTableState({}); setFilters([]); setQueryId(null);
-    setCartesian({ yMetrics: [] }); setPie({}); setScalar({});
+    setCartesian({ yMetrics: [] }); setPie({}); setScalar({}); setProgress({});
   }
 
   const isRunning = status.data?.status === "queued" || status.data?.status === "running";
@@ -412,6 +423,26 @@ export default function ChartExplore() {
                   </SelectContent>
                 </Select>
               </div>
+            )}
+
+            {viz === "progress" && (
+              <>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
+                  <Select value={progress.metric ?? ""} onValueChange={(v) => setProgress((p) => ({ ...p, metric: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
+                    <SelectContent>
+                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="progress-goal" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Goal</Label>
+                  <Input id="progress-goal" type="number" value={progress.goal ?? ""}
+                    onChange={(e) => { const n = Number(e.target.value); setProgress((p) => ({ ...p, goal: e.target.value === "" || Number.isNaN(n) ? undefined : n })); }}
+                    className="h-8 text-sm" placeholder="Target value" />
+                </div>
+              </>
             )}
 
             <div className="space-y-1">
@@ -579,6 +610,12 @@ export default function ChartExplore() {
         {finished && results.data && viz === "scalar" && (
           <div className="rounded-md border">
             <BigNumber columns={results.data.columns} rows={results.data.rows} metric={scalar.metric} format={scalar.metric ? columnSettings[scalar.metric] : undefined} />
+          </div>
+        )}
+        {finished && results.data && viz === "progress" && (
+          <div className="rounded-md border">
+            <ProgressChart columns={results.data.columns} rows={results.data.rows} metric={progress.metric} goal={progress.goal}
+              format={progress.metric ? columnSettings[progress.metric] : undefined} />
           </div>
         )}
         {!queryId && !build.isPending && !submit.isPending && (
