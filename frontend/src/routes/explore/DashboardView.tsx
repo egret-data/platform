@@ -48,15 +48,21 @@ export default function DashboardView() {
     setDraftCards(cards.filter((c) => c.id !== cardId));
   }
   function addVirtualCard(card_type: "text" | "heading" | "link", options: Record<string, unknown>) {
-    const maxY = cards.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
-    const newCard: Card = {
-      id: `new-${card_type}-${cardSeqRef.current++}`, chart_id: null, card_type,
-      grid_col: 0, grid_row: maxY, size_x: CARD_DEFAULT_SIZE.w, size_y: card_type === "heading" ? 1 : CARD_DEFAULT_SIZE.h, options,
-    };
-    setDraftCards([...cards, newCard]);
+    setDraftCards((prev) => {
+      const base = prev ?? dashboard.cards;
+      const maxY = base.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
+      const newCard: Card = {
+        id: `new-${card_type}-${cardSeqRef.current++}`, chart_id: null, card_type,
+        grid_col: 0, grid_row: maxY, size_x: CARD_DEFAULT_SIZE.w, size_y: card_type === "heading" ? 1 : CARD_DEFAULT_SIZE.h, options,
+      };
+      return [...base, newCard];
+    });
   }
   function updateCardOptions(cardId: string, patch: Record<string, unknown>) {
-    setDraftCards(cards.map((c) => (c.id === cardId ? { ...c, options: { ...c.options, ...patch } } : c)));
+    setDraftCards((prev) => {
+      const base = prev ?? dashboard.cards;
+      return base.map((c) => (c.id === cardId ? { ...c, options: { ...c.options, ...patch } } : c));
+    });
   }
 
   // The cards are the single source of truth for positions: the RGL layout is derived
