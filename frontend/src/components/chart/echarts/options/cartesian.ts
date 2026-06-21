@@ -66,7 +66,9 @@ export function buildCartesianOption(
         const v = cell.get(`${catKey(c)} ${catKey(sv)}`);
         return v === undefined ? null : v;
       });
-      return decorateSeries({ name: String(sv), data }, metric, si, cfg, fmt);
+      // Metabase parity: null / empty-string breakout values render as "(empty)".
+      const name = sv == null || sv === "" ? "(empty)" : String(sv);
+      return decorateSeries({ name, data }, metric, si, cfg, fmt);
     });
     return baseOption(cfg, categories as (string | number)[], series);
   }
