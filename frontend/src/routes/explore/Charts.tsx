@@ -1,7 +1,10 @@
 import { Link, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { useCharts, useChartMutations } from "@/api/charts";
+import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { Button } from "@/components/ui/button";
+
+const vizLabel = (v: string) => CHART_TYPES.find((t) => t.key === v)?.name ?? v;
 
 export default function Charts() {
   const ws = useParams().workspace!;
@@ -27,7 +30,7 @@ export default function Charts() {
             {charts.map((c) => (
               <tr key={c.id} className="border-t">
                 <td className="py-1 pr-3"><Link className="hover:underline" to={`/explore/${ws}/charts/${c.id}`}>{c.name}</Link></td>
-                <td className="pr-3">{c.viz_type === "pivot_table" ? "Pivot" : "Table"}</td>
+                <td className="pr-3">{vizLabel(c.viz_type)}</td>
                 <td className="pr-3 text-muted-foreground">{new Date(c.updated_at).toLocaleString()}</td>
                 <td>
                   <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive"
