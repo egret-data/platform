@@ -5,7 +5,7 @@ import { useDatasets, useDataset } from "@/api/datasets";
 import {
   useBuildChartData, useChart, useChartMutations,
   type QuerySpec, type VizType, type ChartParams, type TableState, type ChartFilter,
-  type CartesianConfig, type PieConfig, type ScalarConfig, type ProgressConfig, type GaugeConfig, type FunnelConfig, type WaterfallConfig, type SmartScalarConfig, isCartesianViz,
+  type CartesianConfig, type PieConfig, type ScalarConfig, type ProgressConfig, type GaugeConfig, type FunnelConfig, type WaterfallConfig, type SmartScalarConfig, type BoxplotConfig, type SankeyConfig, isCartesianViz,
 } from "@/api/charts";
 import { useSubmitQuery, useQueryStatus, useResults } from "@/api/sqllab";
 import { ChartTable } from "@/components/chart/ChartTable";
@@ -28,6 +28,8 @@ import { buildGaugeOption } from "@/components/chart/echarts/options/gauge";
 import { buildFunnelOption } from "@/components/chart/echarts/options/funnel";
 import { buildWaterfallOption } from "@/components/chart/echarts/options/waterfall";
 import { SmartScalarChart } from "@/components/chart/SmartScalarChart";
+import { buildBoxplotOption } from "@/components/chart/echarts/options/boxplot";
+import { buildSankeyOption } from "@/components/chart/echarts/options/sankey";
 import { CartesianDisplaySection } from "@/components/chart/settings/CartesianDisplaySection";
 import { PieDisplaySection } from "@/components/chart/settings/PieDisplaySection";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
@@ -92,6 +94,8 @@ export default function ChartExplore() {
   const [funnel, setFunnel] = useState<FunnelConfig>({});
   const [waterfall, setWaterfall] = useState<WaterfallConfig>({});
   const [smart, setSmart] = useState<SmartScalarConfig>({});
+  const [box, setBox] = useState<BoxplotConfig>({});
+  const [sankey, setSankey] = useState<SankeyConfig>({});
   const patchCartesian = (p: Partial<CartesianConfig>) => setCartesian((c) => ({ ...c, ...p }));
   const patchPie = (p: Partial<PieConfig>) => setPie((c) => ({ ...c, ...p }));
   const [filters, setFilters] = useState<ChartFilter[]>([]);
@@ -128,6 +132,10 @@ export default function ChartExplore() {
       setWaterfall(p.waterfall ?? { xAxis: p.spec?.dimensions?.[0], metric: p.spec?.metrics?.[0] });
     } else if (c.viz_type === "smartscalar") {
       setSmart(p.smartscalar ?? { dimension: p.spec?.dimensions?.[0], metric: p.spec?.metrics?.[0] });
+    } else if (c.viz_type === "boxplot") {
+      setBox(p.boxplot ?? { category: p.spec?.columns?.[0], value: p.spec?.columns?.[1] });
+    } else if (c.viz_type === "sankey") {
+      setSankey(p.sankey ?? { source: p.spec?.dimensions?.[0], target: p.spec?.dimensions?.[1], metric: p.spec?.metrics?.[0] });
     } else {
       setTableMetrics(p.spec?.metrics ?? []);
       setTableCols([...(p.spec?.dimensions ?? []), ...(p.spec?.columns ?? [])]);
@@ -178,6 +186,13 @@ export default function ChartExplore() {
     if (viz === "smartscalar") {
       const dims = smart.dimension ? [smart.dimension] : [];
       return { metrics: smart.metric ? [smart.metric] : [], dimensions: dims, columns: [], filters, orderby: smart.dimension ? [{ field: smart.dimension, desc: false }] : [], row_limit: rowLimit, rollup_groups: [] };
+    }
+    if (viz === "boxplot") {
+      // Raw rows (no aggregation) — quartiles are computed client-side.
+      return { metrics: [], dimensions: [], columns: [box.category, box.value].filter((c): c is string => !!c), filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
+    }
+    if (viz === "sankey") {
+      return { metrics: sankey.metric ? [sankey.metric] : [], dimensions: [sankey.source, sankey.target].filter((d): d is string => !!d), columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
     }
     if (viz === "pivot_table") {
       const dims = [...pRows, ...pCols];
@@ -241,6 +256,12 @@ export default function ChartExplore() {
     if (viz === "smartscalar" && (!smart.dimension || !smart.metric)) {
       toast.error("Trend needs a time dimension and a metric"); return;
     }
+    if (viz === "boxplot" && (!box.category || !box.value)) {
+      toast.error("Box plot needs a category and a value column"); return;
+    }
+    if (viz === "sankey" && (!sankey.source || !sankey.target || !sankey.metric)) {
+      toast.error("Sankey needs source, target and a metric"); return;
+    }
     try {
       const { sql, database_id } = await build.mutateAsync({ dataset_id: datasetId, query_spec: specForRun() });
       const ack = await submit.mutateAsync({ database_id, sql, limit: rowLimit });
@@ -271,6 +292,8 @@ export default function ChartExplore() {
     if (viz === "funnel") return { spec: specForRun(), funnel, columnSettings };
     if (viz === "waterfall") return { spec: specForRun(), waterfall, columnSettings };
     if (viz === "smartscalar") return { spec: specForRun(), smartscalar: smart, columnSettings };
+    if (viz === "boxplot") return { spec: specForRun(), boxplot: box, columnSettings };
+    if (viz === "sankey") return { spec: specForRun(), sankey, columnSettings };
     return { spec: specForRun(), columnSettings, conditionalFormatting, tableState };
   }
 
@@ -310,7 +333,7 @@ export default function ChartExplore() {
   function resetControls() {
     setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]);
     setColumnSettings({}); setConditionalFormatting([]); setCollapsed(new Set()); setPivotSort({}); setTableState({}); setFilters([]); setQueryId(null);
-    setCartesian({ yMetrics: [] }); setPie({}); setScalar({}); setProgress({}); setGauge({}); setFunnel({}); setWaterfall({}); setSmart({});
+    setCartesian({ yMetrics: [] }); setPie({}); setScalar({}); setProgress({}); setGauge({}); setFunnel({}); setWaterfall({}); setSmart({}); setBox({}); setSankey({});
   }
 
   const isRunning = status.data?.status === "queued" || status.data?.status === "running";
@@ -591,6 +614,61 @@ export default function ChartExplore() {
               </>
             )}
 
+            {viz === "boxplot" && (
+              <>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Category</Label>
+                  <Select value={box.category ?? ""} onValueChange={(v) => setBox((b) => ({ ...b, category: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a column…" /></SelectTrigger>
+                    <SelectContent>
+                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Value column</Label>
+                  <Select value={box.value ?? ""} onValueChange={(v) => setBox((b) => ({ ...b, value: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a numeric column…" /></SelectTrigger>
+                    <SelectContent>
+                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </>
+            )}
+
+            {viz === "sankey" && (
+              <>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Source</Label>
+                  <Select value={sankey.source ?? ""} onValueChange={(v) => setSankey((s) => ({ ...s, source: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
+                    <SelectContent>
+                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Target</Label>
+                  <Select value={sankey.target ?? ""} onValueChange={(v) => setSankey((s) => ({ ...s, target: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
+                    <SelectContent>
+                      {columns.filter((c) => c.column_name !== sankey.source).map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
+                  <Select value={sankey.metric ?? ""} onValueChange={(v) => setSankey((s) => ({ ...s, metric: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
+                    <SelectContent>
+                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </>
+            )}
+
             <div className="space-y-1">
               <Label htmlFor="row-limit" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Row limit</Label>
               <Input id="row-limit" type="number" min={1} max={10000} value={rowLimit}
@@ -793,6 +871,24 @@ export default function ChartExplore() {
           <div className="rounded-md border">
             <SmartScalarChart columns={results.data.columns} rows={results.data.rows} dimension={smart.dimension} metric={smart.metric}
               format={smart.metric ? columnSettings[smart.metric] : undefined} />
+          </div>
+        )}
+        {finished && results.data && viz === "boxplot" && (
+          <div className="h-[60vh] rounded-md border p-2">
+            {results.data.rows.length === 0
+              ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
+              : <EChartsRenderer option={buildBoxplotOption(results.data.columns, results.data.rows, {
+                  category: box.category, value: box.value, columnSettings, metricTypes,
+                })} />}
+          </div>
+        )}
+        {finished && results.data && viz === "sankey" && (
+          <div className="h-[60vh] rounded-md border p-2">
+            {results.data.rows.length === 0
+              ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
+              : <EChartsRenderer option={buildSankeyOption(results.data.columns, results.data.rows, {
+                  source: sankey.source, target: sankey.target, metric: sankey.metric, columnSettings, metricTypes,
+                })} />}
           </div>
         )}
         {!queryId && !build.isPending && !submit.isPending && (

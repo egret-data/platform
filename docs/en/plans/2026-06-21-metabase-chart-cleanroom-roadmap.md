@@ -59,8 +59,8 @@ One phase each, simplest first:
 - [x] 3e. Gauge — value on a 0..max arc (ECharts gauge series, registers GaugeChart;
   progress arc + pointer + centre value). Verified live.
 - [x] 3f. SmartScalar (Trend) — latest value + % change vs previous period (React component, up/down arrow + colour + comparison label). Verified live.
-- [ ] 3g. BoxPlot
-- [ ] 3h. Sankey
+- [x] 3g. BoxPlot — distribution (min/Q1/median/Q3/max) per category, quartiles computed client-side from raw rows (registers BoxplotChart). Verified live.
+- [x] 3h. Sankey — weighted flows source→target from a 2-dimension + metric query (registers SankeyChart). Verified live.
 - [ ] 3i. Map (region/pin) — largest; needs geo data
 
 ## Working rules
