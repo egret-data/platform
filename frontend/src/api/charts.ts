@@ -4,7 +4,7 @@ import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 
 export type VizType =
   | "table" | "pivot_table"
-  | "bar" | "row" | "line" | "area" | "scatter" | "combo" | "pie" | "scalar" | "progress" | "gauge" | "funnel" | "waterfall";
+  | "bar" | "row" | "line" | "area" | "scatter" | "combo" | "pie" | "scalar" | "progress" | "gauge" | "funnel" | "waterfall" | "smartscalar";
 
 export const CARTESIAN_VIZ = ["bar", "row", "line", "area", "scatter", "combo"] as const;
 export type CartesianViz = (typeof CARTESIAN_VIZ)[number];
@@ -92,6 +92,10 @@ export interface WaterfallConfig {
   metric?: string;
   showTotal?: boolean;
 }
+export interface SmartScalarConfig {
+  dimension?: string;
+  metric?: string;
+}
 
 export interface ChartParams {
   spec: QuerySpec;
@@ -114,6 +118,7 @@ export interface ChartParams {
   gauge?: GaugeConfig;           // gauge viz only
   funnel?: FunnelConfig;         // funnel viz only
   waterfall?: WaterfallConfig;   // waterfall viz only
+  smartscalar?: SmartScalarConfig; // trend viz only
 }
 
 export interface Chart {

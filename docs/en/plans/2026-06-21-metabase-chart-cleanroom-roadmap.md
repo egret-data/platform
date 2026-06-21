@@ -57,7 +57,7 @@ One phase each, simplest first:
   shown, pointer + recoloured track). Verified live.
 - [x] 3e. Gauge — value on a 0..max arc (ECharts gauge series, registers GaugeChart;
   progress arc + pointer + centre value). Verified live.
-- [ ] 3f. SmartScalar (trend vs previous period)
+- [x] 3f. SmartScalar (Trend) — latest value + % change vs previous period (React component, up/down arrow + colour + comparison label). Verified live.
 - [ ] 3g. BoxPlot
 - [ ] 3h. Sankey
 - [ ] 3i. Map (region/pin) — largest; needs geo data
