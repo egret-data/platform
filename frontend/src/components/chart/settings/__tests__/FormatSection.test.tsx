@@ -22,7 +22,7 @@ describe("FormatSection", () => {
     expect(onChange).toHaveBeenCalledWith({ revenue: { prefix: "$" } });
   });
 
-  it("offers no numeric controls for a text column", () => {
+  it("offers Display-as (not numeric controls) for a text column", () => {
     render(
       <FormatSection
         columns={[{ name: "name", type: "varchar" }]}
@@ -32,6 +32,6 @@ describe("FormatSection", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /name/ }));
     expect(screen.queryByLabelText("Number style")).not.toBeInTheDocument();
-    expect(screen.getByText(/no format options/i)).toBeInTheDocument();
+    expect(screen.getByLabelText("Display as")).toBeInTheDocument();
   });
 });

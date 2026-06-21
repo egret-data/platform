@@ -18,6 +18,8 @@ export interface PieBuildConfig {
   showTotal?: boolean;
   /** Whether the slice's percent appears in its label. Default "off". */
   percentVisibility?: "off" | "inside" | "both";
+  /** Per-slice colour override, keyed by the slice (dimension) value. */
+  sliceColors?: Record<string, string>;
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
 }
@@ -66,6 +68,13 @@ export function buildPieOption(columns: ResultColumn[], rows: unknown[][], cfg: 
   const mi = cfg.metric != null ? idx[cfg.metric] : undefined;
 
   const data = di == null || mi == null ? [] : buildSlices(rows, di, mi, cfg);
+  // Per-slice colour overrides win over the palette slot (the "Other" slice keeps its muted tint).
+  if (cfg.sliceColors) {
+    for (const s of data) {
+      const c = cfg.sliceColors[s.name];
+      if (c && s.name !== OTHER_NAME) s.itemStyle = { color: c };
+    }
+  }
 
   const fmt = (v: unknown) =>
     cfg.metric ? formatValue(v, cfg.metricTypes?.[cfg.metric] ?? "double", cfg.columnSettings?.[cfg.metric]) : String(v);

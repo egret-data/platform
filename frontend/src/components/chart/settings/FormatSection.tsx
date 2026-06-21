@@ -137,6 +137,7 @@ export function FormatSection({
                     <div className="space-y-2.5 pt-1">
                       <ToggleRow id={`fmt-compact-${c.name}`} label="Compact (1.2K)" checked={!!fmt.compact} onChange={(v) => patch({ compact: v })} />
                       <ToggleRow id={`fmt-negatives-${c.name}`} label="Negatives in ( )" checked={!!fmt.negative_in_parentheses} onChange={(v) => patch({ negative_in_parentheses: v })} />
+                      <ToggleRow id={`fmt-minibar-${c.name}`} label="Show a mini bar chart" checked={!!fmt.show_mini_bar} onChange={(v) => patch({ show_mini_bar: v })} />
                     </div>
                   </div>
                 )}
@@ -159,7 +160,33 @@ export function FormatSection({
                 )}
 
                 {!isNumericType(c.type) && !isTemporalType(c.type) && (
-                  <p className="text-xs text-muted-foreground">Text columns have no format options.</p>
+                  <div className="space-y-3">
+                    <Field label="Display as">
+                      <Select value={fmt.view_as ?? "auto"}
+                        onValueChange={(v) => patch({ view_as: v as ColumnFormat["view_as"] })}>
+                        <SelectTrigger aria-label="Display as" className="h-8"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="auto">Automatic</SelectItem>
+                          <SelectItem value="text">Text</SelectItem>
+                          <SelectItem value="link">Link</SelectItem>
+                          <SelectItem value="email">Email</SelectItem>
+                          <SelectItem value="image">Image</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                    {fmt.view_as === "link" && (
+                      <>
+                        <Field label="Link text">
+                          <Input className="h-8" placeholder="{{value}}" value={fmt.link_text ?? ""}
+                            onChange={(e) => patch({ link_text: e.target.value || undefined })} />
+                        </Field>
+                        <Field label="Link URL">
+                          <Input className="h-8" placeholder="{{value}}" value={fmt.link_url ?? ""}
+                            onChange={(e) => patch({ link_url: e.target.value || undefined })} />
+                        </Field>
+                      </>
+                    )}
+                  </div>
                 )}
               </div>
             )}

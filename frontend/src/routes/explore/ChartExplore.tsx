@@ -20,7 +20,7 @@ import { FormatSection } from "@/components/chart/settings/FormatSection";
 import { ConditionalFormattingSection } from "@/components/chart/settings/ConditionalFormattingSection";
 import { TableColumnsSection } from "@/components/chart/settings/TableColumnsSection";
 import { EChartsRenderer } from "@/components/chart/echarts/EChartsRenderer";
-import { buildCartesianOption } from "@/components/chart/echarts/options/cartesian";
+import { buildCartesianOption, cartesianSeriesNames } from "@/components/chart/echarts/options/cartesian";
 import { buildPieOption } from "@/components/chart/echarts/options/pie";
 import { BigNumber } from "@/components/chart/BigNumber";
 import { ProgressChart } from "@/components/chart/ProgressChart";
@@ -226,6 +226,19 @@ export default function ChartExplore() {
     : viz === "pie" ? []   // pie value formatting handled in its tooltip; no column formatting UI
     : resultColumns;
   const metricTypes = Object.fromEntries((detail.data?.metrics ?? []).map((m) => [m.metric_name, m.data_type ?? "double"]));
+  // Series the cartesian chart will draw — used by the Options panel to offer per-series
+  // colour / rename controls (empty until results arrive).
+  const cartesianSeries = isCartesianViz(viz) && results.data
+    ? cartesianSeriesNames(results.data.columns, results.data.rows, cartesian)
+    : [];
+  // Distinct slice (dimension) values for the pie per-slice colour controls.
+  const pieSlices = viz === "pie" && results.data && pie.dimension
+    ? Array.from(new Set(
+        results.data.rows
+          .map((r) => String(r[results.data!.columns.findIndex((c) => c.name === pie.dimension)] ?? ""))
+          .filter((v) => v !== ""),
+      ))
+    : [];
 
   async function run() {
     setQueryId(null);
@@ -715,13 +728,13 @@ export default function ChartExplore() {
             {isCartesianViz(viz) && (
               <div className="space-y-1">
                 <SectionLabel>Options</SectionLabel>
-                <CartesianDisplaySection kind={viz} config={cartesian} onChange={patchCartesian} />
+                <CartesianDisplaySection kind={viz} config={cartesian} onChange={patchCartesian} seriesNames={cartesianSeries} />
               </div>
             )}
             {viz === "pie" && (
               <div className="space-y-1">
                 <SectionLabel>Options</SectionLabel>
-                <PieDisplaySection config={pie} onChange={patchPie} />
+                <PieDisplaySection config={pie} onChange={patchPie} sliceNames={pieSlices} />
               </div>
             )}
 
@@ -828,6 +841,8 @@ export default function ChartExplore() {
                   normalized: cartesian.normalized, goalValue: cartesian.goalValue, goalLabel: cartesian.goalLabel,
                   trendLine: cartesian.trendLine, connectNulls: cartesian.connectNulls, step: cartesian.step,
                   showStackTotal: cartesian.showStackTotal,
+                  seriesColors: cartesian.seriesColors, seriesLabels: cartesian.seriesLabels,
+                  yMin: cartesian.yMin, yMax: cartesian.yMax,
                   columnSettings, metricTypes,
                 })} />}
           </div>
@@ -841,6 +856,7 @@ export default function ChartExplore() {
                   showLegend: pie.showLegend, showLabels: pie.showLabels,
                   sliceThreshold: pie.sliceThreshold, sortRows: pie.sortRows,
                   showTotal: pie.showTotal, percentVisibility: pie.percentVisibility,
+                  sliceColors: pie.sliceColors,
                   columnSettings, metricTypes,
                 })} />}
           </div>

@@ -2,6 +2,7 @@ import type { CartesianConfig, CartesianViz } from "@/api/charts";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
+import { seriesColor, SUMMARIZE_COLOR } from "@/components/chart/echarts/palette";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "@/components/ui/select";
@@ -16,15 +17,20 @@ function Toggle({ id, label, checked, onChange }: { id: string; label: string; c
 }
 
 export function CartesianDisplaySection({
-  kind, config, onChange,
+  kind, config, onChange, seriesNames = [],
 }: {
   kind: CartesianViz;
   config: CartesianConfig;
   onChange: (patch: Partial<CartesianConfig>) => void;
+  seriesNames?: string[];
 }) {
   const isBar = kind === "bar";   // Horizontal toggle is for vertical bar only (row is always horizontal)
   const isLineish = kind === "line" || kind === "area";
   const canStack = kind === "bar" || kind === "row" || kind === "area";
+  // Default colour a series shows before any override: lone (non-breakout) metric gets the
+  // summarize green, everything else cycles the accent palette — mirrors the renderer.
+  const defaultColor = (i: number) =>
+    !config.series && seriesNames.length === 1 ? SUMMARIZE_COLOR : seriesColor(i);
   return (
     <div className="space-y-2.5 pt-1.5">
       <Toggle id="cz-legend" label="Legend" checked={!!config.showLegend} onChange={(v) => onChange({ showLegend: v })} />
@@ -60,6 +66,34 @@ export function CartesianDisplaySection({
               </div>
             );
           })}
+        </div>
+      )}
+
+      {seriesNames.length > 0 && (
+        <div className="space-y-1.5 border-t pt-2">
+          <div className="text-xs text-muted-foreground">Series</div>
+          {seriesNames.map((name, i) => (
+            <div key={name} className="flex items-center gap-2">
+              <input
+                type="color"
+                aria-label={`color ${name}`}
+                className="h-7 w-8 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+                value={config.seriesColors?.[name] ?? defaultColor(i)}
+                onChange={(e) => onChange({ seriesColors: { ...config.seriesColors, [name]: e.target.value } })}
+              />
+              <Input
+                className="h-7 flex-1"
+                aria-label={`label ${name}`}
+                placeholder={name}
+                value={config.seriesLabels?.[name] ?? ""}
+                onChange={(e) => {
+                  const next = { ...config.seriesLabels };
+                  if (e.target.value) next[name] = e.target.value; else delete next[name];
+                  onChange({ seriesLabels: next });
+                }}
+              />
+            </div>
+          ))}
         </div>
       )}
 
@@ -104,6 +138,23 @@ export function CartesianDisplaySection({
           <Input className="h-8" value={config.yLabel ?? ""} onChange={(e) => onChange({ yLabel: e.target.value })} />
         </label>
       </div>
+
+      {kind !== "scatter" && (
+        <div className="grid grid-cols-2 gap-2 border-t pt-2">
+          <label className="space-y-1">
+            <span className="text-xs text-muted-foreground">Y min</span>
+            <Input className="h-8" type="number" placeholder="auto"
+              value={config.yMin ?? ""}
+              onChange={(e) => { const n = Number(e.target.value); onChange({ yMin: e.target.value === "" || Number.isNaN(n) ? undefined : n }); }} />
+          </label>
+          <label className="space-y-1">
+            <span className="text-xs text-muted-foreground">Y max</span>
+            <Input className="h-8" type="number" placeholder="auto"
+              value={config.yMax ?? ""}
+              onChange={(e) => { const n = Number(e.target.value); onChange({ yMax: e.target.value === "" || Number.isNaN(n) ? undefined : n }); }} />
+          </label>
+        </div>
+      )}
     </div>
   );
 }

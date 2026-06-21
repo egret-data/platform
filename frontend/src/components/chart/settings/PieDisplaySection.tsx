@@ -1,4 +1,5 @@
 import type { PieConfig } from "@/api/charts";
+import { SERIES_PALETTE } from "@/components/chart/echarts/palette";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
@@ -15,7 +16,7 @@ function Toggle({ id, label, checked, onChange }: { id: string; label: string; c
   );
 }
 
-export function PieDisplaySection({ config, onChange }: { config: PieConfig; onChange: (patch: Partial<PieConfig>) => void }) {
+export function PieDisplaySection({ config, onChange, sliceNames = [] }: { config: PieConfig; onChange: (patch: Partial<PieConfig>) => void; sliceNames?: string[] }) {
   return (
     <div className="space-y-2.5 pt-1.5">
       <Toggle id="pz-legend" label="Legend" checked={!!config.showLegend} onChange={(v) => onChange({ showLegend: v })} />
@@ -46,6 +47,24 @@ export function PieDisplaySection({ config, onChange }: { config: PieConfig; onC
           <span className="text-sm text-muted-foreground">%</span>
         </div>
       </div>
+
+      {sliceNames.length > 0 && (
+        <div className="space-y-1.5 border-t pt-2">
+          <div className="text-xs text-muted-foreground">Slice colors</div>
+          {sliceNames.map((name, i) => (
+            <div key={name} className="flex items-center gap-2">
+              <input
+                type="color"
+                aria-label={`color ${name}`}
+                className="h-7 w-8 shrink-0 cursor-pointer rounded border bg-transparent p-0.5"
+                value={config.sliceColors?.[name] ?? SERIES_PALETTE[i % SERIES_PALETTE.length]}
+                onChange={(e) => onChange({ sliceColors: { ...config.sliceColors, [name]: e.target.value } })}
+              />
+              <span className="flex-1 truncate text-sm">{name}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

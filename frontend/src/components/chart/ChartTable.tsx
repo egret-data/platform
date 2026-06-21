@@ -44,6 +44,48 @@ function SortableHeader({ id, disabled, children, className, style, onClick }: {
 
 const MIN_COL_WIDTH = 60;
 
+const fillTemplate = (tpl: string, value: string) => tpl.replace(/\{\{\s*value\s*\}\}/g, value);
+
+// Render a cell's content honouring its "Display as" (link/email/image) and mini-bar
+// settings — clean-room of Metabase's column formatting. Falls back to the formatted text.
+function renderTableCell(
+  raw: unknown, isNum: boolean, fmt: ColumnFormat | undefined, formatted: string, cap: number,
+): ReactNode {
+  const str = raw == null ? "" : String(raw);
+  switch (fmt?.view_as) {
+    case "link": {
+      const url = fmt.link_url ? fillTemplate(fmt.link_url, str) : str;
+      const text = fmt.link_text ? fillTemplate(fmt.link_text, str) : formatted;
+      return str === "" ? formatted : <a href={url} target="_blank" rel="noreferrer" className="text-primary underline">{text}</a>;
+    }
+    case "email":
+      return str === "" ? formatted : <a href={`mailto:${str}`} className="text-primary underline">{formatted}</a>;
+    case "image":
+      return str === "" ? null : <img src={str} alt="" className="max-h-10 rounded object-contain" />;
+    default:
+      break;
+  }
+  if (fmt?.show_mini_bar && isNum) {
+    const n = typeof raw === "number" ? raw : Number(raw);
+    if (Number.isFinite(n)) {
+      const pct = cap > 0 ? Math.min(100, (Math.abs(n) / cap) * 100) : 0;
+      return (
+        <div className="flex items-center justify-end gap-2">
+          <span>{formatted}</span>
+          <div className="relative h-2 w-12 shrink-0 rounded bg-muted">
+            <div
+              data-testid="mini-bar"
+              className="absolute inset-y-0 left-0 rounded"
+              style={{ width: `${pct}%`, background: n < 0 ? "hsl(var(--destructive))" : "hsl(var(--primary))" }}
+            />
+          </div>
+        </div>
+      );
+    }
+  }
+  return formatted;
+}
+
 export function ChartTable({
   columns, rows, columnSettings = {}, conditionalFormatting = [],
   tableState = {}, onTableStateChange, dimensionColumns, onCellDrill,
@@ -68,6 +110,22 @@ export function ChartTable({
     [rows, colIndexByName, conditionalFormatting],
   );
 
+  // Per-column extent (largest magnitude) for mini-bar sizing — only for numeric columns
+  // that opted in, so the common case stays free.
+  const miniBarCaps = useMemo(() => {
+    const caps: Record<string, number> = {};
+    columns.forEach((c, i) => {
+      if (!columnSettings[c.name]?.show_mini_bar || !isNumericType(c.type)) return;
+      let cap = 0;
+      for (const r of rows) {
+        const n = Number((r as unknown[])[i]);
+        if (Number.isFinite(n)) cap = Math.max(cap, Math.abs(n));
+      }
+      caps[c.name] = cap;
+    });
+    return caps;
+  }, [columns, rows, columnSettings]);
+
   const cols = useMemo<ColumnDef<unknown[]>[]>(
     () =>
       columns.map((c, i) => {
@@ -82,13 +140,17 @@ export function ChartTable({
             return v;
           },
           header: c.name,
-          cell: (ctx) => formatValue(ctx.getValue(), c.type, columnSettings[c.name]),
+          cell: (ctx) => {
+            const v = ctx.getValue();
+            const fmt = columnSettings[c.name];
+            return renderTableCell(v, isNum, fmt, formatValue(v, c.type, fmt), miniBarCaps[c.name] ?? 0);
+          },
           enableSorting: true,
           minSize: MIN_COL_WIDTH,
           meta: { isNum, name: c.name },
         };
       }),
-    [columns, columnSettings],
+    [columns, columnSettings, miniBarCaps],
   );
 
   // persisted widths → controlled sizing (reconcile stale keys), seeding a local sizing state
