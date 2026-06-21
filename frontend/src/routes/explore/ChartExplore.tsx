@@ -5,6 +5,7 @@ import { useDatasets, useDataset } from "@/api/datasets";
 import {
   useBuildChartData, useChart, useChartMutations,
   type QuerySpec, type VizType, type ChartParams, type TableState, type ChartFilter,
+  type CartesianConfig, type PieConfig, type ScalarConfig, type ProgressConfig, type GaugeConfig, type FunnelConfig, type WaterfallConfig, type SmartScalarConfig, isCartesianViz,
 } from "@/api/charts";
 import { useSubmitQuery, useQueryStatus, useResults } from "@/api/sqllab";
 import { ChartTable } from "@/components/chart/ChartTable";
@@ -18,6 +19,17 @@ import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { FormatSection } from "@/components/chart/settings/FormatSection";
 import { ConditionalFormattingSection } from "@/components/chart/settings/ConditionalFormattingSection";
 import { TableColumnsSection } from "@/components/chart/settings/TableColumnsSection";
+import { EChartsRenderer } from "@/components/chart/echarts/EChartsRenderer";
+import { buildCartesianOption } from "@/components/chart/echarts/options/cartesian";
+import { buildPieOption } from "@/components/chart/echarts/options/pie";
+import { BigNumber } from "@/components/chart/BigNumber";
+import { ProgressChart } from "@/components/chart/ProgressChart";
+import { buildGaugeOption } from "@/components/chart/echarts/options/gauge";
+import { buildFunnelOption } from "@/components/chart/echarts/options/funnel";
+import { buildWaterfallOption } from "@/components/chart/echarts/options/waterfall";
+import { SmartScalarChart } from "@/components/chart/SmartScalarChart";
+import { CartesianDisplaySection } from "@/components/chart/settings/CartesianDisplaySection";
+import { PieDisplaySection } from "@/components/chart/settings/PieDisplaySection";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -72,6 +84,16 @@ export default function ChartExplore() {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [pivotSort, setPivotSort] = useState<Record<string, "asc" | "desc">>({});
   const [tableState, setTableState] = useState<TableState>({});
+  const [cartesian, setCartesian] = useState<CartesianConfig>({ yMetrics: [] });
+  const [pie, setPie] = useState<PieConfig>({});
+  const [scalar, setScalar] = useState<ScalarConfig>({});
+  const [progress, setProgress] = useState<ProgressConfig>({});
+  const [gauge, setGauge] = useState<GaugeConfig>({});
+  const [funnel, setFunnel] = useState<FunnelConfig>({});
+  const [waterfall, setWaterfall] = useState<WaterfallConfig>({});
+  const [smart, setSmart] = useState<SmartScalarConfig>({});
+  const patchCartesian = (p: Partial<CartesianConfig>) => setCartesian((c) => ({ ...c, ...p }));
+  const patchPie = (p: Partial<PieConfig>) => setPie((c) => ({ ...c, ...p }));
   const [filters, setFilters] = useState<ChartFilter[]>([]);
   const [drillMenu, setDrillMenu] = useState<{ ctx: DrillContext; x: number; y: number } | null>(null);
   const [recordsFilters, setRecordsFilters] = useState<ChartFilter[] | null>(null);
@@ -90,6 +112,22 @@ export default function ChartExplore() {
       setShowRowTotals(p.showRowTotals ?? true);
       setShowColTotals(p.showColTotals ?? true);
       setCondense(p.condense ?? true);
+    } else if (isCartesianViz(c.viz_type)) {
+      setCartesian(p.cartesian ?? { yMetrics: p.spec?.metrics ?? [] });
+    } else if (c.viz_type === "pie") {
+      setPie(p.pie ?? {});
+    } else if (c.viz_type === "scalar") {
+      setScalar(p.scalar ?? { metric: p.spec?.metrics?.[0] });
+    } else if (c.viz_type === "progress") {
+      setProgress(p.progress ?? { metric: p.spec?.metrics?.[0] });
+    } else if (c.viz_type === "gauge") {
+      setGauge(p.gauge ?? { metric: p.spec?.metrics?.[0] });
+    } else if (c.viz_type === "funnel") {
+      setFunnel(p.funnel ?? { dimension: p.spec?.dimensions?.[0], metric: p.spec?.metrics?.[0] });
+    } else if (c.viz_type === "waterfall") {
+      setWaterfall(p.waterfall ?? { xAxis: p.spec?.dimensions?.[0], metric: p.spec?.metrics?.[0] });
+    } else if (c.viz_type === "smartscalar") {
+      setSmart(p.smartscalar ?? { dimension: p.spec?.dimensions?.[0], metric: p.spec?.metrics?.[0] });
     } else {
       setTableMetrics(p.spec?.metrics ?? []);
       setTableCols([...(p.spec?.dimensions ?? []), ...(p.spec?.columns ?? [])]);
@@ -114,6 +152,33 @@ export default function ChartExplore() {
   const metrics = detail.data?.metrics ?? [];
 
   function specForRun(): QuerySpec {
+    if (isCartesianViz(viz)) {
+      const dims = [cartesian.xAxis, cartesian.series].filter((d): d is string => !!d);
+      return { metrics: cartesian.yMetrics, dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
+    }
+    if (viz === "pie") {
+      const dims = pie.dimension ? [pie.dimension] : [];
+      return { metrics: pie.metric ? [pie.metric] : [], dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
+    }
+    if (viz === "scalar") {
+      return { metrics: scalar.metric ? [scalar.metric] : [], dimensions: [], columns: [], filters, orderby: [], row_limit: 1, rollup_groups: [] };
+    }
+    if (viz === "progress") {
+      return { metrics: progress.metric ? [progress.metric] : [], dimensions: [], columns: [], filters, orderby: [], row_limit: 1, rollup_groups: [] };
+    }
+    if (viz === "gauge") {
+      return { metrics: gauge.metric ? [gauge.metric] : [], dimensions: [], columns: [], filters, orderby: [], row_limit: 1, rollup_groups: [] };
+    }
+    if (viz === "funnel") {
+      return { metrics: funnel.metric ? [funnel.metric] : [], dimensions: funnel.dimension ? [funnel.dimension] : [], columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
+    }
+    if (viz === "waterfall") {
+      return { metrics: waterfall.metric ? [waterfall.metric] : [], dimensions: waterfall.xAxis ? [waterfall.xAxis] : [], columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
+    }
+    if (viz === "smartscalar") {
+      const dims = smart.dimension ? [smart.dimension] : [];
+      return { metrics: smart.metric ? [smart.metric] : [], dimensions: dims, columns: [], filters, orderby: smart.dimension ? [{ field: smart.dimension, desc: false }] : [], row_limit: rowLimit, rollup_groups: [] };
+    }
     if (viz === "pivot_table") {
       const dims = [...pRows, ...pCols];
       const groups = [pRows, pCols].filter((g) => g.length > 0);
@@ -138,7 +203,12 @@ export default function ChartExplore() {
   const resultColumns = (results.data?.columns ?? []).filter((c) => !c.name.startsWith("__grp_"));
   // In a pivot, only the value (metric) cells are formatted/colored — row/column dimension cells are
   // headers and never styled. So the Format/Conditional pickers should offer only the value columns.
-  const styleColumns = viz === "pivot_table" ? resultColumns.filter((c) => pVals.includes(c.name)) : resultColumns;
+  const styleColumns =
+    viz === "pivot_table" ? resultColumns.filter((c) => pVals.includes(c.name))
+    : isCartesianViz(viz) ? resultColumns.filter((c) => cartesian.yMetrics.includes(c.name))
+    : viz === "scalar" ? resultColumns.filter((c) => c.name === scalar.metric)
+    : viz === "pie" ? []   // pie value formatting handled in its tooltip; no column formatting UI
+    : resultColumns;
   const metricTypes = Object.fromEntries((detail.data?.metrics ?? []).map((m) => [m.metric_name, m.data_type ?? "double"]));
 
   async function run() {
@@ -146,6 +216,30 @@ export default function ChartExplore() {
     if (!datasetId) { toast.error("Pick a dataset first"); return; }
     if (viz === "pivot_table" && (pRows.length === 0 || pVals.length === 0)) {
       toast.error("Pivot needs at least one row dimension and one value"); return;
+    }
+    if (isCartesianViz(viz) && (!cartesian.xAxis || cartesian.yMetrics.length === 0)) {
+      toast.error("This chart needs an X-axis and at least one metric"); return;
+    }
+    if (viz === "pie" && (!pie.dimension || !pie.metric)) {
+      toast.error("Pie needs a dimension and a metric"); return;
+    }
+    if (viz === "scalar" && !scalar.metric) {
+      toast.error("Big number needs a metric"); return;
+    }
+    if (viz === "progress" && !progress.metric) {
+      toast.error("Progress needs a metric"); return;
+    }
+    if (viz === "gauge" && !gauge.metric) {
+      toast.error("Gauge needs a metric"); return;
+    }
+    if (viz === "funnel" && (!funnel.dimension || !funnel.metric)) {
+      toast.error("Funnel needs a dimension and a metric"); return;
+    }
+    if (viz === "waterfall" && (!waterfall.xAxis || !waterfall.metric)) {
+      toast.error("Waterfall needs an x-axis and a metric"); return;
+    }
+    if (viz === "smartscalar" && (!smart.dimension || !smart.metric)) {
+      toast.error("Trend needs a time dimension and a metric"); return;
     }
     try {
       const { sql, database_id } = await build.mutateAsync({ dataset_id: datasetId, query_spec: specForRun() });
@@ -166,9 +260,18 @@ export default function ChartExplore() {
   const [saveDesc, setSaveDesc] = useState("");
 
   function paramsForSave(): ChartParams {
-    return viz === "pivot_table"
-      ? { spec: specForRun(), rows: pRows, cols: pCols, metrics: pVals, showRowTotals, showColTotals, condense, columnSettings, conditionalFormatting, collapsedRows: [...collapsed], pivotSort }
-      : { spec: specForRun(), columnSettings, conditionalFormatting, tableState };
+    if (viz === "pivot_table") {
+      return { spec: specForRun(), rows: pRows, cols: pCols, metrics: pVals, showRowTotals, showColTotals, condense, columnSettings, conditionalFormatting, collapsedRows: [...collapsed], pivotSort };
+    }
+    if (isCartesianViz(viz)) return { spec: specForRun(), cartesian, columnSettings };
+    if (viz === "pie") return { spec: specForRun(), pie };
+    if (viz === "scalar") return { spec: specForRun(), scalar, columnSettings };
+    if (viz === "progress") return { spec: specForRun(), progress, columnSettings };
+    if (viz === "gauge") return { spec: specForRun(), gauge, columnSettings };
+    if (viz === "funnel") return { spec: specForRun(), funnel, columnSettings };
+    if (viz === "waterfall") return { spec: specForRun(), waterfall, columnSettings };
+    if (viz === "smartscalar") return { spec: specForRun(), smartscalar: smart, columnSettings };
+    return { spec: specForRun(), columnSettings, conditionalFormatting, tableState };
   }
 
   async function save() {
@@ -207,6 +310,7 @@ export default function ChartExplore() {
   function resetControls() {
     setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]);
     setColumnSettings({}); setConditionalFormatting([]); setCollapsed(new Set()); setPivotSort({}); setTableState({}); setFilters([]); setQueryId(null);
+    setCartesian({ yMetrics: [] }); setPie({}); setScalar({}); setProgress({}); setGauge({}); setFunnel({}); setWaterfall({}); setSmart({});
   }
 
   const isRunning = status.data?.status === "queued" || status.data?.status === "running";
@@ -302,6 +406,191 @@ export default function ChartExplore() {
               </>
             )}
 
+            {isCartesianViz(viz) && (
+              <>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">X-axis</Label>
+                  <Select value={cartesian.xAxis ?? ""} onValueChange={(v) => patchCartesian({ xAxis: v || undefined })}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
+                    <SelectContent>
+                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <FieldZone label="Y-axis" selected={cartesian.yMetrics} onChange={(v) => patchCartesian({ yMetrics: v })}
+                  options={metrics.map((m) => m.metric_name)} />
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Series</Label>
+                  <Select value={cartesian.series ?? "__none"} onValueChange={(v) => patchCartesian({ series: v === "__none" ? undefined : v })}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none">None</SelectItem>
+                      {columns.filter((c) => c.column_name !== cartesian.xAxis).map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                  {cartesian.series && cartesian.yMetrics.length > 1 && (
+                    <p className="text-xs text-muted-foreground">With a series, only the first metric is plotted.</p>
+                  )}
+                </div>
+              </>
+            )}
+
+            {viz === "pie" && (
+              <>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Dimension</Label>
+                  <Select value={pie.dimension ?? ""} onValueChange={(v) => patchPie({ dimension: v || undefined })}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
+                    <SelectContent>
+                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
+                  <Select value={pie.metric ?? ""} onValueChange={(v) => patchPie({ metric: v || undefined })}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
+                    <SelectContent>
+                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </>
+            )}
+
+            {viz === "scalar" && (
+              <div className="space-y-1">
+                <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
+                <Select value={scalar.metric ?? ""} onValueChange={(v) => setScalar({ metric: v || undefined })}>
+                  <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
+                  <SelectContent>
+                    {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+
+            {viz === "progress" && (
+              <>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
+                  <Select value={progress.metric ?? ""} onValueChange={(v) => setProgress((p) => ({ ...p, metric: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
+                    <SelectContent>
+                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label htmlFor="progress-goal" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Goal</Label>
+                  <Input id="progress-goal" type="number" value={progress.goal ?? ""}
+                    onChange={(e) => { const n = Number(e.target.value); setProgress((p) => ({ ...p, goal: e.target.value === "" || Number.isNaN(n) ? undefined : n })); }}
+                    className="h-8 text-sm" placeholder="Target value" />
+                </div>
+              </>
+            )}
+
+            {viz === "gauge" && (
+              <>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
+                  <Select value={gauge.metric ?? ""} onValueChange={(v) => setGauge((g) => ({ ...g, metric: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
+                    <SelectContent>
+                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <Label htmlFor="gauge-min" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Min</Label>
+                    <Input id="gauge-min" type="number" value={gauge.min ?? ""}
+                      onChange={(e) => { const n = Number(e.target.value); setGauge((g) => ({ ...g, min: e.target.value === "" || Number.isNaN(n) ? undefined : n })); }}
+                      className="h-8 text-sm" placeholder="0" />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="gauge-max" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Max</Label>
+                    <Input id="gauge-max" type="number" value={gauge.max ?? ""}
+                      onChange={(e) => { const n = Number(e.target.value); setGauge((g) => ({ ...g, max: e.target.value === "" || Number.isNaN(n) ? undefined : n })); }}
+                      className="h-8 text-sm" placeholder="auto" />
+                  </div>
+                </div>
+              </>
+            )}
+
+            {viz === "funnel" && (
+              <>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Stage (dimension)</Label>
+                  <Select value={funnel.dimension ?? ""} onValueChange={(v) => setFunnel((f) => ({ ...f, dimension: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
+                    <SelectContent>
+                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
+                  <Select value={funnel.metric ?? ""} onValueChange={(v) => setFunnel((f) => ({ ...f, metric: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
+                    <SelectContent>
+                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </>
+            )}
+
+            {viz === "waterfall" && (
+              <>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">X-axis (steps)</Label>
+                  <Select value={waterfall.xAxis ?? ""} onValueChange={(v) => setWaterfall((w) => ({ ...w, xAxis: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
+                    <SelectContent>
+                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric (delta)</Label>
+                  <Select value={waterfall.metric ?? ""} onValueChange={(v) => setWaterfall((w) => ({ ...w, metric: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
+                    <SelectContent>
+                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Checkbox id="wf-total" checked={!!waterfall.showTotal} onCheckedChange={() => setWaterfall((w) => ({ ...w, showTotal: !w.showTotal }))} />
+                  <Label htmlFor="wf-total" className="cursor-pointer text-sm font-normal">Show total bar</Label>
+                </div>
+              </>
+            )}
+
+            {viz === "smartscalar" && (
+              <>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Time / order dimension</Label>
+                  <Select value={smart.dimension ?? ""} onValueChange={(v) => setSmart((s) => ({ ...s, dimension: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
+                    <SelectContent>
+                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
+                  <Select value={smart.metric ?? ""} onValueChange={(v) => setSmart((s) => ({ ...s, metric: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
+                    <SelectContent>
+                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </>
+            )}
+
             <div className="space-y-1">
               <Label htmlFor="row-limit" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Row limit</Label>
               <Input id="row-limit" type="number" min={1} max={10000} value={rowLimit}
@@ -332,6 +621,19 @@ export default function ChartExplore() {
               </div>
             )}
 
+            {isCartesianViz(viz) && (
+              <div className="space-y-1">
+                <SectionLabel>Options</SectionLabel>
+                <CartesianDisplaySection kind={viz} config={cartesian} onChange={patchCartesian} />
+              </div>
+            )}
+            {viz === "pie" && (
+              <div className="space-y-1">
+                <SectionLabel>Options</SectionLabel>
+                <PieDisplaySection config={pie} onChange={patchPie} />
+              </div>
+            )}
+
             {resultColumns.length === 0 ? (
               <p className="text-xs text-muted-foreground">Run the chart to configure column formatting.</p>
             ) : (
@@ -342,14 +644,18 @@ export default function ChartExplore() {
                     <TableColumnsSection columns={resultColumns} value={tableState} onChange={setTableState} />
                   </div>
                 )}
-                <div className="space-y-1.5">
-                  <SectionLabel>Formatting</SectionLabel>
-                  <FormatSection columns={styleColumns} value={columnSettings} onChange={setColumnSettings} />
-                </div>
-                <div className="space-y-1.5">
-                  <SectionLabel>Conditional formatting</SectionLabel>
-                  <ConditionalFormattingSection columns={styleColumns} rules={conditionalFormatting} isPivot={viz === "pivot_table"} onChange={setConditionalFormatting} />
-                </div>
+                {styleColumns.length > 0 && (
+                  <div className="space-y-1.5">
+                    <SectionLabel>Formatting</SectionLabel>
+                    <FormatSection columns={styleColumns} value={columnSettings} onChange={setColumnSettings} />
+                  </div>
+                )}
+                {(viz === "table" || viz === "pivot_table") && (
+                  <div className="space-y-1.5">
+                    <SectionLabel>Conditional formatting</SectionLabel>
+                    <ConditionalFormattingSection columns={styleColumns} rules={conditionalFormatting} isPivot={viz === "pivot_table"} onChange={setConditionalFormatting} />
+                  </div>
+                )}
               </>
             )}
           </TabsContent>
@@ -411,12 +717,83 @@ export default function ChartExplore() {
             onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })}
           />
         )}
-        {finished && results.data && viz !== "pivot_table" && (
+        {finished && results.data && viz === "table" && (
           <ChartTable columns={results.data.columns} rows={results.data.rows}
             columnSettings={columnSettings} conditionalFormatting={conditionalFormatting}
             tableState={tableState} onTableStateChange={setTableState}
             dimensionColumns={tableMetrics.length > 0 ? tableCols : []}
             onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })} />
+        )}
+        {finished && results.data && isCartesianViz(viz) && (
+          <div className="h-[60vh] rounded-md border p-2">
+            {results.data.rows.length === 0
+              ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
+              : <EChartsRenderer option={buildCartesianOption(results.data.columns, results.data.rows, {
+                  kind: viz, xAxis: cartesian.xAxis, yMetrics: cartesian.yMetrics, series: cartesian.series,
+                  stacked: cartesian.stacked, horizontal: cartesian.horizontal, smooth: cartesian.smooth,
+                  showLabels: cartesian.showLabels, showLegend: cartesian.showLegend,
+                  xLabel: cartesian.xLabel, yLabel: cartesian.yLabel, seriesTypes: cartesian.seriesTypes,
+                  rightAxisMetrics: cartesian.rightAxisMetrics, logScale: cartesian.logScale,
+                  normalized: cartesian.normalized, goalValue: cartesian.goalValue, goalLabel: cartesian.goalLabel,
+                  trendLine: cartesian.trendLine, connectNulls: cartesian.connectNulls, step: cartesian.step,
+                  columnSettings, metricTypes,
+                })} />}
+          </div>
+        )}
+        {finished && results.data && viz === "pie" && (
+          <div className="h-[60vh] rounded-md border p-2">
+            {results.data.rows.length === 0
+              ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
+              : <EChartsRenderer option={buildPieOption(results.data.columns, results.data.rows, {
+                  dimension: pie.dimension, metric: pie.metric, donut: pie.donut,
+                  showLegend: pie.showLegend, showLabels: pie.showLabels,
+                  sliceThreshold: pie.sliceThreshold, sortRows: pie.sortRows,
+                  showTotal: pie.showTotal, percentVisibility: pie.percentVisibility,
+                  columnSettings, metricTypes,
+                })} />}
+          </div>
+        )}
+        {finished && results.data && viz === "scalar" && (
+          <div className="rounded-md border">
+            <BigNumber columns={results.data.columns} rows={results.data.rows} metric={scalar.metric} format={scalar.metric ? columnSettings[scalar.metric] : undefined} />
+          </div>
+        )}
+        {finished && results.data && viz === "progress" && (
+          <div className="rounded-md border">
+            <ProgressChart columns={results.data.columns} rows={results.data.rows} metric={progress.metric} goal={progress.goal}
+              format={progress.metric ? columnSettings[progress.metric] : undefined} />
+          </div>
+        )}
+        {finished && results.data && viz === "gauge" && (
+          <div className="h-[50vh] rounded-md border p-2">
+            <EChartsRenderer option={buildGaugeOption(results.data.columns, results.data.rows, {
+              metric: gauge.metric, min: gauge.min, max: gauge.max, columnSettings, metricTypes,
+            })} />
+          </div>
+        )}
+        {finished && results.data && viz === "funnel" && (
+          <div className="h-[60vh] rounded-md border p-2">
+            {results.data.rows.length === 0
+              ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
+              : <EChartsRenderer option={buildFunnelOption(results.data.columns, results.data.rows, {
+                  dimension: funnel.dimension, metric: funnel.metric, columnSettings, metricTypes,
+                })} />}
+          </div>
+        )}
+        {finished && results.data && viz === "waterfall" && (
+          <div className="h-[60vh] rounded-md border p-2">
+            {results.data.rows.length === 0
+              ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
+              : <EChartsRenderer option={buildWaterfallOption(results.data.columns, results.data.rows, {
+                  xAxis: waterfall.xAxis, metric: waterfall.metric, showTotal: waterfall.showTotal, columnSettings, metricTypes,
+                })} />}
+          </div>
+        )}
+        {finished && results.data && viz === "smartscalar" && (
+          <div className="rounded-md border">
+            <SmartScalarChart columns={results.data.columns} rows={results.data.rows} dimension={smart.dimension} metric={smart.metric}
+              format={smart.metric ? columnSettings[smart.metric] : undefined} />
+          </div>
         )}
         {!queryId && !build.isPending && !submit.isPending && (
           <p className="text-sm text-muted-foreground">Configure the controls on the left and click Run.</p>

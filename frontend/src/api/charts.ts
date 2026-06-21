@@ -2,7 +2,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, apiJson } from "./client";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 
-export type VizType = "table" | "pivot_table";
+export type VizType =
+  | "table" | "pivot_table"
+  | "bar" | "row" | "line" | "area" | "scatter" | "combo" | "pie" | "scalar" | "progress" | "gauge" | "funnel" | "waterfall" | "smartscalar";
+
+export const CARTESIAN_VIZ = ["bar", "row", "line", "area", "scatter", "combo"] as const;
+export type CartesianViz = (typeof CARTESIAN_VIZ)[number];
+export const isCartesianViz = (v: VizType): v is CartesianViz =>
+  (CARTESIAN_VIZ as readonly string[]).includes(v);
 export type FilterOp =
   | "eq" | "ne" | "gt" | "ge" | "lt" | "le" | "like" | "in" | "not_in" | "is_null" | "is_not_null";
 
@@ -32,6 +39,64 @@ export interface TableState {
   columnOrder?: string[];   // table viz only: column names in display order
 }
 
+export interface CartesianConfig {
+  xAxis?: string;            // single dimension (category / x)
+  yMetrics: string[];        // one or more metrics (y)
+  series?: string;           // optional 2nd dimension (breakout)
+  stacked?: boolean;         // bar/area
+  horizontal?: boolean;      // bar
+  smooth?: boolean;          // line/area
+  showLabels?: boolean;      // data labels
+  showLegend?: boolean;      // legend visibility
+  xLabel?: string;
+  yLabel?: string;
+  seriesTypes?: Record<string, "bar" | "line">;  // combo only: metric -> type
+  rightAxisMetrics?: string[];   // metrics plotted against a 2nd (right) Y axis
+  logScale?: boolean;            // value axis uses a log scale
+  normalized?: boolean;          // 100% stacking
+  goalValue?: number;            // horizontal goal/reference line
+  goalLabel?: string;
+  trendLine?: boolean;           // overlay a least-squares trend line
+  connectNulls?: boolean;        // line: bridge null gaps
+  step?: boolean;                // line: step interpolation
+}
+export interface PieConfig {
+  dimension?: string;
+  metric?: string;
+  donut?: boolean;
+  showLegend?: boolean;
+  showLabels?: boolean;
+  sliceThreshold?: number;   // percent; slices below this fold into "Other" (default 2.5, 0 = off)
+  sortRows?: boolean;        // sort slices by value desc (default true)
+  showTotal?: boolean;       // donut only: grand total in the centre
+  percentVisibility?: "off" | "inside" | "both";  // percent in slice labels (default off)
+}
+export interface ScalarConfig {
+  metric?: string;
+}
+export interface ProgressConfig {
+  metric?: string;
+  goal?: number;
+}
+export interface GaugeConfig {
+  metric?: string;
+  min?: number;
+  max?: number;
+}
+export interface FunnelConfig {
+  dimension?: string;
+  metric?: string;
+}
+export interface WaterfallConfig {
+  xAxis?: string;
+  metric?: string;
+  showTotal?: boolean;
+}
+export interface SmartScalarConfig {
+  dimension?: string;
+  metric?: string;
+}
+
 export interface ChartParams {
   spec: QuerySpec;
   // pivot-only layout (ignored for table viz)
@@ -46,6 +111,14 @@ export interface ChartParams {
   tableState?: TableState;
   collapsedRows?: string[];                     // pivot only: serialized collapsed row-group paths
   pivotSort?: Record<string, "asc" | "desc">;   // pivot only: row-dimension name -> direction
+  cartesian?: CartesianConfig;   // cartesian-family viz only
+  pie?: PieConfig;               // pie viz only
+  scalar?: ScalarConfig;         // big-number viz only
+  progress?: ProgressConfig;     // progress viz only
+  gauge?: GaugeConfig;           // gauge viz only
+  funnel?: FunnelConfig;         // funnel viz only
+  waterfall?: WaterfallConfig;   // waterfall viz only
+  smartscalar?: SmartScalarConfig; // trend viz only
 }
 
 export interface Chart {
