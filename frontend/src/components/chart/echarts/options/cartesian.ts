@@ -19,8 +19,21 @@ export interface CartesianBuildConfig {
   xLabel?: string;
   yLabel?: string;
   seriesTypes?: Record<string, "bar" | "line">;
+  rightAxisMetrics?: string[];   // metrics plotted against a second (right) Y axis
+  logScale?: boolean;            // value axis uses a log scale
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
+}
+
+// Right-axis is active only when it splits the metrics (≥1 left and ≥1 right) on a
+// vertical chart — clean-room of Metabase's left/right axis split.
+function rightMetrics(cfg: CartesianBuildConfig): string[] {
+  return (cfg.rightAxisMetrics ?? []).filter((m) => cfg.yMetrics.includes(m));
+}
+function isDualAxis(cfg: CartesianBuildConfig): boolean {
+  const horizontal = !!cfg.horizontal && cfg.kind !== "scatter";
+  const right = rightMetrics(cfg);
+  return !horizontal && right.length > 0 && right.length < cfg.yMetrics.length;
 }
 
 // ECharts series type for a metric under the active kind.
@@ -118,6 +131,7 @@ function decorateSeries(
   if (cfg.kind === "area") out.areaStyle = { opacity: CHART_THEME.areaOpacity };
   if (type === "line") { out.smooth = !!cfg.smooth; out.lineStyle = { width: CHART_THEME.lineWidth }; out.symbolSize = CHART_THEME.symbolSize; }
   if (type === "scatter") { out.symbolSize = CHART_THEME.symbolSize; out.itemStyle = { color: seriesColor(colorIdx), opacity: CHART_THEME.scatterOpacity }; }
+  if (isDualAxis(cfg) && rightMetrics(cfg).includes(metric)) out.yAxisIndex = 1;
   if (cfg.showLabels) {
     out.label = {
       show: true, fontSize: CHART_THEME.labelFontSize, fontWeight: CHART_THEME.labelWeight,
@@ -131,8 +145,8 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   const horizontal = !!cfg.horizontal && cfg.kind !== "scatter";
   const gridLine = resolveColor(CHART_THEME.gridLine, COLOR_FALLBACK.gridLine);
   const axisLabelColor = resolveColor(CHART_THEME.axisLabel, COLOR_FALLBACK.axisLabel);
-  const valueFmt = (v: number) => {
-    const m = cfg.yMetrics[0];
+  const fmtFor = (metrics: string[]) => (v: number) => {
+    const m = metrics[0];
     return m ? formatValue(v, cfg.metricTypes?.[m] ?? "double", cfg.columnSettings?.[m]) : String(v);
   };
   const categoryAxis = {
@@ -141,18 +155,37 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor },
     axisLine: { lineStyle: { color: gridLine } },
   };
-  const valueAxis = {
-    type: "value" as const, name: cfg.yLabel,
-    axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: valueFmt },
-    splitLine: { lineStyle: { color: gridLine } },
-  };
+  const mkValueAxis = (metrics: string[], position?: "left" | "right") => ({
+    type: cfg.logScale ? ("log" as const) : ("value" as const),
+    name: position === "right" ? undefined : cfg.yLabel,
+    position,
+    axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: fmtFor(metrics) },
+    // A second (right) axis omits gridlines to avoid doubling them up.
+    splitLine: position === "right" ? { show: false } : { lineStyle: { color: gridLine } },
+  });
+
+  let xAxis: unknown;
+  let yAxis: unknown;
+  if (horizontal) {
+    xAxis = mkValueAxis(cfg.yMetrics);
+    yAxis = categoryAxis;
+  } else if (isDualAxis(cfg)) {
+    const right = rightMetrics(cfg);
+    const left = cfg.yMetrics.filter((m) => !right.includes(m));
+    xAxis = categoryAxis;
+    yAxis = [mkValueAxis(left, "left"), mkValueAxis(right, "right")];
+  } else {
+    xAxis = categoryAxis;
+    yAxis = mkValueAxis(cfg.yMetrics);
+  }
+
   return {
     color: undefined,
     grid: CHART_THEME.grid,
     tooltip: { trigger: cfg.kind === "scatter" ? "item" : "axis" },
     legend: cfg.showLegend ? { bottom: 0, type: "scroll" } : undefined,
-    xAxis: horizontal ? valueAxis : categoryAxis,
-    yAxis: horizontal ? categoryAxis : valueAxis,
+    xAxis,
+    yAxis,
     series,
   };
 }

@@ -32,6 +32,31 @@ export function CartesianDisplaySection({
       {canStack && <Toggle id="cz-stacked" label="Stacked" checked={!!config.stacked} onChange={(v) => onChange({ stacked: v })} />}
       {isBar && <Toggle id="cz-horizontal" label="Horizontal" checked={!!config.horizontal} onChange={(v) => onChange({ horizontal: v })} />}
       {isLineish && <Toggle id="cz-smooth" label="Smooth" checked={!!config.smooth} onChange={(v) => onChange({ smooth: v })} />}
+      {kind !== "scatter" && <Toggle id="cz-log" label="Log scale" checked={!!config.logScale} onChange={(v) => onChange({ logScale: v })} />}
+
+      {config.yMetrics.length > 1 && !config.horizontal && (
+        <div className="space-y-1.5 border-t pt-2">
+          <div className="text-xs text-muted-foreground">Y axis</div>
+          {config.yMetrics.map((m) => {
+            const onRight = (config.rightAxisMetrics ?? []).includes(m);
+            return (
+              <div key={m} className="flex items-center justify-between gap-2">
+                <Label className="truncate text-sm font-normal">{m}</Label>
+                <Select value={onRight ? "right" : "left"} onValueChange={(v) => {
+                  const rest = (config.rightAxisMetrics ?? []).filter((x) => x !== m);
+                  onChange({ rightAxisMetrics: v === "right" ? [...rest, m] : rest });
+                }}>
+                  <SelectTrigger aria-label={`axis ${m}`} className="h-7 w-24"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="left">Left</SelectItem>
+                    <SelectItem value="right">Right</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {kind === "combo" && config.yMetrics.length > 0 && (
         <div className="space-y-1.5 border-t pt-2">

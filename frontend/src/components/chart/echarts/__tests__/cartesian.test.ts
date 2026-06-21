@@ -157,3 +157,40 @@ describe("buildCartesianOption — data shaping (Metabase parity 1c)", () => {
     expect(opt.series[0].data).toEqual([1, 2]);
   });
 });
+
+// Phase 1d — dual Y-axis + log scale, clean-room from Metabase's cartesian axis model
+// (leftAxisModel/rightAxisModel, yAxisIndex per series, log scale).
+describe("buildCartesianOption — dual axis & scale (Metabase parity 1d)", () => {
+  const cols = [{ name: "x", type: "varchar" }, { name: "rev", type: "double" }, { name: "cnt", type: "bigint" }];
+  const rows = [["A", 100, 3], ["B", 200, 5]];
+
+  it("puts right-axis metrics on yAxisIndex 1 and builds two value axes", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "combo", xAxis: "x", yMetrics: ["rev", "cnt"], rightAxisMetrics: ["cnt"], seriesTypes: { rev: "bar", cnt: "line" } }) as any;
+    expect(Array.isArray(opt.yAxis)).toBe(true);
+    expect(opt.yAxis).toHaveLength(2);
+    expect(opt.yAxis[1].position).toBe("right");
+    expect(opt.series.find((s: any) => s.name === "cnt").yAxisIndex).toBe(1);
+    expect(opt.series.find((s: any) => s.name === "rev").yAxisIndex ?? 0).toBe(0);
+  });
+  it("stays single-axis when no metric is on the right", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "x", yMetrics: ["rev", "cnt"] }) as any;
+    expect(Array.isArray(opt.yAxis)).toBe(false);
+  });
+  it("stays single-axis when every metric is on the right", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "x", yMetrics: ["rev"], rightAxisMetrics: ["rev"] }) as any;
+    expect(Array.isArray(opt.yAxis)).toBe(false);
+  });
+  it("log scale sets the value-axis type to log", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "x", yMetrics: ["rev"], logScale: true }) as any;
+    expect(opt.yAxis.type).toBe("log");
+  });
+  it("log scale applies to the value axis even when horizontal", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "x", yMetrics: ["rev"], horizontal: true, logScale: true }) as any;
+    expect(opt.xAxis.type).toBe("log");
+    expect(opt.yAxis.type).toBe("category");
+  });
+  it("the right axis formats labels with its own metric's settings", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "combo", xAxis: "x", yMetrics: ["rev", "cnt"], rightAxisMetrics: ["cnt"], metricTypes: { rev: "double", cnt: "bigint" }, columnSettings: { cnt: { suffix: " orders" } } }) as any;
+    expect(opt.yAxis[1].axisLabel.formatter(5)).toBe("5 orders");
+  });
+});

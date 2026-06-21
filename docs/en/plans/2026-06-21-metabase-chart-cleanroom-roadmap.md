@@ -26,8 +26,10 @@ Reference (read-to-understand only): `metabase/frontend/src/metabase/visualizati
   numeric ascending, nominal preserved); drop null-dimension rows. Auto by column type,
   no new config. (mb: cartesian/model/dataset.ts) — per-series missing-value strategy
   (gap vs zero) deferred to 2a.
-- [ ] **1d. Cartesian axes** — log / pow y-scale; dual Y-axis (left/right per metric);
-  auto axis range. (mb: cartesian/model/axis.ts, option/axis.ts)
+- [x] **1d. Cartesian axes** — dual Y-axis (per-metric left/right, second axis on the
+  right with its own formatter; series get yAxisIndex) + log scale toggle. Wired into
+  the Display tab. Verified live (combo: order_count line now legible on the right axis).
+  (mb: cartesian/model/axis.ts, option/axis.ts) — pow scale + auto-range heuristics deferred.
 - [ ] **1e. Cartesian overlays** — goal line, trend line, stack totals labels,
   100%-normalized stacking. (mb: cartesian/option/{goal-line,trend-line}.ts, model/stack.ts)
 
