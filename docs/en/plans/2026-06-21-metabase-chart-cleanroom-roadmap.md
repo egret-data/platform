@@ -13,9 +13,12 @@ Reference (read-to-understand only): `metabase/frontend/src/metabase/visualizati
 
 ## Phase group 1 — Close fidelity gaps on existing cartesian + pie (Scope A)
 
-- [~] **1a. Pie data robustness** — sort by value desc; drop zeros; negative handling
+- [x] **1a. Pie data robustness** — sort by value desc; drop zeros; negative handling
   (all-negative → abs, mixed → drop negatives); group sub-threshold slices into a
   single "Other" (≥2 only), muted color. (mb: pie/model/index.ts, constants.ts SLICE_THRESHOLD=2.5%)
+  Done in `3cce13c`. Also fixed a latent bug (`b0e649a`): CSS-var chart colors don't
+  resolve in ECharts' SVG attributes — added `resolveColor()` (gridlines/axis/Other
+  were rendering black). Verified live.
 - [ ] **1b. Pie donut polish** — centre total (show on hover / always), percent-visibility
   modes (inside / legend / both), auto decimal places for %. (mb: pie/option.ts, format.ts)
 - [ ] **1c. Cartesian data shaping** — sort dimension (numeric/time) before plotting;
