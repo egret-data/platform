@@ -187,6 +187,8 @@ export function buildCartesianOption(
     const mi = idx[metric];
     const seriesValues = distinct(xrows.map((r) => r[gi]));
     const cell = new Map(xrows.map((r) => [`${catKey(r[xi])} ${catKey(r[gi])}`, r[mi] as number | null]));
+    // Grouped bars (>1 series, not stacked) must auto-size to sit side by side.
+    const grouped = !cfg.stacked && seriesTypeFor(cfg.kind, metric, cfg.seriesTypes) === "bar" && seriesValues.length > 1;
     const series = seriesValues.map((sv, si) => {
       const data = categories.map((c) => {
         const v = cell.get(`${catKey(c)} ${catKey(sv)}`);
@@ -194,7 +196,7 @@ export function buildCartesianOption(
       });
       // Metabase parity: null / empty-string breakout values render as "(empty)".
       const name = sv == null || sv === "" ? "(empty)" : String(sv);
-      return decorateSeries({ name, data }, metric, si, cfg, fmt);
+      return decorateSeries({ name, data }, metric, si, cfg, fmt, grouped);
     });
     if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
     if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
@@ -203,13 +205,15 @@ export function buildCartesianOption(
   }
 
   const rowByCat = new Map(xrows.map((r) => [catKey(r[xi]), r]));
+  const barMetrics = cfg.yMetrics.filter((m) => seriesTypeFor(cfg.kind, m, cfg.seriesTypes) === "bar").length;
+  const grouped = !cfg.stacked && barMetrics > 1;
   const series = cfg.yMetrics.map((metric, si) => {
     const mi = idx[metric];
     const data = categories.map((c) => {
       const r = rowByCat.get(catKey(c));
       return r == null ? null : (r[mi] as number | null);
     });
-    return decorateSeries({ name: metric, data }, metric, si, cfg, fmt);
+    return decorateSeries({ name: metric, data }, metric, si, cfg, fmt, grouped);
   });
   if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
   if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
@@ -224,6 +228,7 @@ function decorateSeries(
   colorIdx: number,
   cfg: CartesianBuildConfig,
   fmt: (metric: string, v: unknown) => string,
+  grouped = false,
 ) {
   const type = seriesTypeFor(cfg.kind, metric, cfg.seriesTypes);
   const out: Record<string, unknown> = {
@@ -231,7 +236,9 @@ function decorateSeries(
     type,
     itemStyle: { color: seriesColor(colorIdx) },
   };
-  if (type === "bar") { out.barWidth = CHART_THEME.barWidth; out.barMinHeight = BAR_MIN_HEIGHT; }
+  // Only pin the bar width for a single bar per category; grouped bars must let
+  // ECharts auto-size and place them side by side (otherwise they overlap).
+  if (type === "bar") { if (!grouped) out.barWidth = CHART_THEME.barWidth; out.barMinHeight = BAR_MIN_HEIGHT; }
   if (type === "bar" || cfg.kind === "area") {
     if (cfg.stacked) out.stack = "total";
   }

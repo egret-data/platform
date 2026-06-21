@@ -91,6 +91,17 @@ describe("buildCartesianOption — Metabase-parity styling & axes", () => {
     const opt = buildCartesianOption(cols, rows, base) as any;
     expect(opt.series[0].barWidth).toBe(CHART_THEME.barWidth);
   });
+  it("grouped (non-stacked, >1 bar) series drop the fixed barWidth so they sit side by side", () => {
+    const c = [{ name: "p", type: "varchar" }, { name: "s", type: "varchar" }, { name: "rev", type: "double" }];
+    const r = [["A", "X", 1], ["A", "Y", 2], ["B", "X", 3]];
+    const breakout = buildCartesianOption(c, r, { kind: "bar", xAxis: "p", yMetrics: ["rev"], series: "s" }) as any;
+    expect(breakout.series[0].barWidth).toBeUndefined();
+    const multi = buildCartesianOption(cols, rows, { ...base, yMetrics: ["rev", "cnt"] }) as any;
+    expect(multi.series[0].barWidth).toBeUndefined();
+    // stacked bars stack (don't group) → keep the fixed width
+    const stacked = buildCartesianOption(c, r, { kind: "bar", xAxis: "p", yMetrics: ["rev"], series: "s", stacked: true }) as any;
+    expect(stacked.series[0].barWidth).toBe(CHART_THEME.barWidth);
+  });
   it("line series are smooth when configured and carry a lineStyle width", () => {
     const opt = buildCartesianOption(cols, rows, { ...base, kind: "line", smooth: true }) as any;
     expect(opt.series[0].smooth).toBe(true);
