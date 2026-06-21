@@ -213,9 +213,16 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     };
   }
 
+  // Reserve room below the plot so a bottom legend (and the x-axis title) don't
+  // overlap the category labels.
+  const grid = {
+    ...CHART_THEME.grid,
+    bottom: (CHART_THEME.grid.bottom as number) + (cfg.showLegend ? 28 : 0) + (cfg.xLabel ? 22 : 0),
+  };
+
   return {
     color: undefined,
-    grid: CHART_THEME.grid,
+    grid,
     tooltip: { trigger: cfg.kind === "scatter" ? "item" : "axis" },
     legend: cfg.showLegend ? { bottom: 0, type: "scroll" } : undefined,
     xAxis,

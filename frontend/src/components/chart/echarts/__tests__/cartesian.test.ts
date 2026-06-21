@@ -111,6 +111,11 @@ describe("buildCartesianOption — Metabase-parity styling & axes", () => {
   it("grid reserves room for labels (containLabel)", () => {
     expect((buildCartesianOption(cols, rows, base) as any).grid.containLabel).toBe(true);
   });
+  it("reserves extra bottom space so a legend does not overlap the x labels", () => {
+    const noLegend = (buildCartesianOption(cols, rows, base) as any).grid.bottom;
+    const withLegend = (buildCartesianOption(cols, rows, { ...base, showLegend: true }) as any).grid.bottom;
+    expect(withLegend).toBeGreaterThan(noLegend);
+  });
   it("value axis formats labels via column type / settings", () => {
     const opt = buildCartesianOption(cols, rows, { ...base, metricTypes: { rev: "double" }, columnSettings: { rev: { number_style: "currency", currency: "USD", decimals: 0 } } }) as any;
     expect(opt.yAxis.axisLabel.formatter(1000)).toBe("$1,000");
