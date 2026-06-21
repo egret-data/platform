@@ -1,5 +1,21 @@
 import { describe, it, expect } from "vitest";
 import { formatValue } from "../format";
+import { isNumericType, isTemporalType } from "../format-types";
+
+describe("type detection across engines", () => {
+  it("recognises Trino SQL type names", () => {
+    expect(isNumericType("bigint")).toBe(true);
+    expect(isNumericType("double")).toBe(true);
+    expect(isNumericType("varchar(15)")).toBe(false);
+  });
+  it("recognises MySQL-protocol enum names from StarRocks", () => {
+    expect(isNumericType("MYSQL_TYPE_LONGLONG")).toBe(true);  // bigint
+    expect(isNumericType("MYSQL_TYPE_DOUBLE")).toBe(true);
+    expect(isNumericType("MYSQL_TYPE_NEWDECIMAL")).toBe(true);
+    expect(isNumericType("MYSQL_TYPE_VAR_STRING")).toBe(false);
+    expect(isTemporalType("MYSQL_TYPE_DATETIME")).toBe(true);
+  });
+});
 
 describe("formatValue numbers", () => {
   it("null/empty → empty string", () => {

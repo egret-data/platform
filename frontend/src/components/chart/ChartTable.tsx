@@ -13,7 +13,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { formatValue } from "./format";
 import { buildConditional } from "./conditional";
-import type { ColumnFormat, Rule } from "./format-types";
+import { isNumericType, type ColumnFormat, type Rule } from "./format-types";
 import type { TableState } from "@/api/charts";
 import { Button } from "@/components/ui/button";
 import { tableCellDrill, type DrillContext } from "./drill";
@@ -42,7 +42,6 @@ function SortableHeader({ id, disabled, children, className, style, onClick }: {
   );
 }
 
-const NUMERIC = /int|double|decimal|real|numeric|float|bigint/i;
 const MIN_COL_WIDTH = 60;
 
 export function ChartTable({
@@ -72,7 +71,7 @@ export function ChartTable({
   const cols = useMemo<ColumnDef<unknown[]>[]>(
     () =>
       columns.map((c, i) => {
-        const isNum = NUMERIC.test(c.type);
+        const isNum = isNumericType(c.type);
         return {
           id: `col_${i}`,
           accessorFn: (row) => {
