@@ -5,6 +5,7 @@ import { useDatasets, useDataset } from "@/api/datasets";
 import {
   useBuildChartData, useChart, useChartMutations,
   type QuerySpec, type VizType, type ChartParams, type TableState, type ChartFilter,
+  type CartesianConfig, type PieConfig, type ScalarConfig, isCartesianViz,
 } from "@/api/charts";
 import { useSubmitQuery, useQueryStatus, useResults } from "@/api/sqllab";
 import { ChartTable } from "@/components/chart/ChartTable";
@@ -18,6 +19,12 @@ import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { FormatSection } from "@/components/chart/settings/FormatSection";
 import { ConditionalFormattingSection } from "@/components/chart/settings/ConditionalFormattingSection";
 import { TableColumnsSection } from "@/components/chart/settings/TableColumnsSection";
+import { EChartsRenderer } from "@/components/chart/echarts/EChartsRenderer";
+import { buildCartesianOption } from "@/components/chart/echarts/options/cartesian";
+import { buildPieOption } from "@/components/chart/echarts/options/pie";
+import { BigNumber } from "@/components/chart/BigNumber";
+import { CartesianDisplaySection } from "@/components/chart/settings/CartesianDisplaySection";
+import { PieDisplaySection } from "@/components/chart/settings/PieDisplaySection";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -72,6 +79,11 @@ export default function ChartExplore() {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [pivotSort, setPivotSort] = useState<Record<string, "asc" | "desc">>({});
   const [tableState, setTableState] = useState<TableState>({});
+  const [cartesian, setCartesian] = useState<CartesianConfig>({ yMetrics: [] });
+  const [pie, setPie] = useState<PieConfig>({});
+  const [scalar, setScalar] = useState<ScalarConfig>({});
+  const patchCartesian = (p: Partial<CartesianConfig>) => setCartesian((c) => ({ ...c, ...p }));
+  const patchPie = (p: Partial<PieConfig>) => setPie((c) => ({ ...c, ...p }));
   const [filters, setFilters] = useState<ChartFilter[]>([]);
   const [drillMenu, setDrillMenu] = useState<{ ctx: DrillContext; x: number; y: number } | null>(null);
   const [recordsFilters, setRecordsFilters] = useState<ChartFilter[] | null>(null);
@@ -90,6 +102,12 @@ export default function ChartExplore() {
       setShowRowTotals(p.showRowTotals ?? true);
       setShowColTotals(p.showColTotals ?? true);
       setCondense(p.condense ?? true);
+    } else if (isCartesianViz(c.viz_type)) {
+      setCartesian(p.cartesian ?? { yMetrics: p.spec?.metrics ?? [] });
+    } else if (c.viz_type === "pie") {
+      setPie(p.pie ?? {});
+    } else if (c.viz_type === "scalar") {
+      setScalar(p.scalar ?? { metric: p.spec?.metrics?.[0] });
     } else {
       setTableMetrics(p.spec?.metrics ?? []);
       setTableCols([...(p.spec?.dimensions ?? []), ...(p.spec?.columns ?? [])]);
@@ -114,6 +132,17 @@ export default function ChartExplore() {
   const metrics = detail.data?.metrics ?? [];
 
   function specForRun(): QuerySpec {
+    if (isCartesianViz(viz)) {
+      const dims = [cartesian.xAxis, cartesian.series].filter((d): d is string => !!d);
+      return { metrics: cartesian.yMetrics, dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
+    }
+    if (viz === "pie") {
+      const dims = pie.dimension ? [pie.dimension] : [];
+      return { metrics: pie.metric ? [pie.metric] : [], dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
+    }
+    if (viz === "scalar") {
+      return { metrics: scalar.metric ? [scalar.metric] : [], dimensions: [], columns: [], filters, orderby: [], row_limit: 1, rollup_groups: [] };
+    }
     if (viz === "pivot_table") {
       const dims = [...pRows, ...pCols];
       const groups = [pRows, pCols].filter((g) => g.length > 0);
@@ -138,7 +167,12 @@ export default function ChartExplore() {
   const resultColumns = (results.data?.columns ?? []).filter((c) => !c.name.startsWith("__grp_"));
   // In a pivot, only the value (metric) cells are formatted/colored — row/column dimension cells are
   // headers and never styled. So the Format/Conditional pickers should offer only the value columns.
-  const styleColumns = viz === "pivot_table" ? resultColumns.filter((c) => pVals.includes(c.name)) : resultColumns;
+  const styleColumns =
+    viz === "pivot_table" ? resultColumns.filter((c) => pVals.includes(c.name))
+    : isCartesianViz(viz) ? resultColumns.filter((c) => cartesian.yMetrics.includes(c.name))
+    : viz === "scalar" ? resultColumns.filter((c) => c.name === scalar.metric)
+    : viz === "pie" ? []   // pie value formatting handled in its tooltip; no column formatting UI
+    : resultColumns;
   const metricTypes = Object.fromEntries((detail.data?.metrics ?? []).map((m) => [m.metric_name, m.data_type ?? "double"]));
 
   async function run() {
@@ -146,6 +180,15 @@ export default function ChartExplore() {
     if (!datasetId) { toast.error("Pick a dataset first"); return; }
     if (viz === "pivot_table" && (pRows.length === 0 || pVals.length === 0)) {
       toast.error("Pivot needs at least one row dimension and one value"); return;
+    }
+    if (isCartesianViz(viz) && (!cartesian.xAxis || cartesian.yMetrics.length === 0)) {
+      toast.error("This chart needs an X-axis and at least one metric"); return;
+    }
+    if (viz === "pie" && (!pie.dimension || !pie.metric)) {
+      toast.error("Pie needs a dimension and a metric"); return;
+    }
+    if (viz === "scalar" && !scalar.metric) {
+      toast.error("Big number needs a metric"); return;
     }
     try {
       const { sql, database_id } = await build.mutateAsync({ dataset_id: datasetId, query_spec: specForRun() });
@@ -166,9 +209,13 @@ export default function ChartExplore() {
   const [saveDesc, setSaveDesc] = useState("");
 
   function paramsForSave(): ChartParams {
-    return viz === "pivot_table"
-      ? { spec: specForRun(), rows: pRows, cols: pCols, metrics: pVals, showRowTotals, showColTotals, condense, columnSettings, conditionalFormatting, collapsedRows: [...collapsed], pivotSort }
-      : { spec: specForRun(), columnSettings, conditionalFormatting, tableState };
+    if (viz === "pivot_table") {
+      return { spec: specForRun(), rows: pRows, cols: pCols, metrics: pVals, showRowTotals, showColTotals, condense, columnSettings, conditionalFormatting, collapsedRows: [...collapsed], pivotSort };
+    }
+    if (isCartesianViz(viz)) return { spec: specForRun(), cartesian, columnSettings };
+    if (viz === "pie") return { spec: specForRun(), pie };
+    if (viz === "scalar") return { spec: specForRun(), scalar, columnSettings };
+    return { spec: specForRun(), columnSettings, conditionalFormatting, tableState };
   }
 
   async function save() {
@@ -207,6 +254,7 @@ export default function ChartExplore() {
   function resetControls() {
     setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]);
     setColumnSettings({}); setConditionalFormatting([]); setCollapsed(new Set()); setPivotSort({}); setTableState({}); setFilters([]); setQueryId(null);
+    setCartesian({ yMetrics: [] }); setPie({}); setScalar({});
   }
 
   const isRunning = status.data?.status === "queued" || status.data?.status === "running";
@@ -302,6 +350,70 @@ export default function ChartExplore() {
               </>
             )}
 
+            {isCartesianViz(viz) && (
+              <>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">X-axis</Label>
+                  <Select value={cartesian.xAxis ?? ""} onValueChange={(v) => patchCartesian({ xAxis: v || undefined })}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
+                    <SelectContent>
+                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <FieldZone label="Y-axis" selected={cartesian.yMetrics} onChange={(v) => patchCartesian({ yMetrics: v })}
+                  options={metrics.map((m) => m.metric_name)} />
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Series</Label>
+                  <Select value={cartesian.series ?? "__none"} onValueChange={(v) => patchCartesian({ series: v === "__none" ? undefined : v })}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none">None</SelectItem>
+                      {columns.filter((c) => c.column_name !== cartesian.xAxis).map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                  {cartesian.series && cartesian.yMetrics.length > 1 && (
+                    <p className="text-xs text-muted-foreground">With a series, only the first metric is plotted.</p>
+                  )}
+                </div>
+              </>
+            )}
+
+            {viz === "pie" && (
+              <>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Dimension</Label>
+                  <Select value={pie.dimension ?? ""} onValueChange={(v) => patchPie({ dimension: v || undefined })}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
+                    <SelectContent>
+                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
+                  <Select value={pie.metric ?? ""} onValueChange={(v) => patchPie({ metric: v || undefined })}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
+                    <SelectContent>
+                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </>
+            )}
+
+            {viz === "scalar" && (
+              <div className="space-y-1">
+                <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
+                <Select value={scalar.metric ?? ""} onValueChange={(v) => setScalar({ metric: v || undefined })}>
+                  <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
+                  <SelectContent>
+                    {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+
             <div className="space-y-1">
               <Label htmlFor="row-limit" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Row limit</Label>
               <Input id="row-limit" type="number" min={1} max={10000} value={rowLimit}
@@ -332,6 +444,19 @@ export default function ChartExplore() {
               </div>
             )}
 
+            {isCartesianViz(viz) && (
+              <div className="space-y-1">
+                <SectionLabel>Options</SectionLabel>
+                <CartesianDisplaySection kind={viz} config={cartesian} onChange={patchCartesian} />
+              </div>
+            )}
+            {viz === "pie" && (
+              <div className="space-y-1">
+                <SectionLabel>Options</SectionLabel>
+                <PieDisplaySection config={pie} onChange={patchPie} />
+              </div>
+            )}
+
             {resultColumns.length === 0 ? (
               <p className="text-xs text-muted-foreground">Run the chart to configure column formatting.</p>
             ) : (
@@ -342,14 +467,18 @@ export default function ChartExplore() {
                     <TableColumnsSection columns={resultColumns} value={tableState} onChange={setTableState} />
                   </div>
                 )}
-                <div className="space-y-1.5">
-                  <SectionLabel>Formatting</SectionLabel>
-                  <FormatSection columns={styleColumns} value={columnSettings} onChange={setColumnSettings} />
-                </div>
-                <div className="space-y-1.5">
-                  <SectionLabel>Conditional formatting</SectionLabel>
-                  <ConditionalFormattingSection columns={styleColumns} rules={conditionalFormatting} isPivot={viz === "pivot_table"} onChange={setConditionalFormatting} />
-                </div>
+                {styleColumns.length > 0 && (
+                  <div className="space-y-1.5">
+                    <SectionLabel>Formatting</SectionLabel>
+                    <FormatSection columns={styleColumns} value={columnSettings} onChange={setColumnSettings} />
+                  </div>
+                )}
+                {(viz === "table" || viz === "pivot_table") && (
+                  <div className="space-y-1.5">
+                    <SectionLabel>Conditional formatting</SectionLabel>
+                    <ConditionalFormattingSection columns={styleColumns} rules={conditionalFormatting} isPivot={viz === "pivot_table"} onChange={setConditionalFormatting} />
+                  </div>
+                )}
               </>
             )}
           </TabsContent>
@@ -411,12 +540,40 @@ export default function ChartExplore() {
             onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })}
           />
         )}
-        {finished && results.data && viz !== "pivot_table" && (
+        {finished && results.data && viz === "table" && (
           <ChartTable columns={results.data.columns} rows={results.data.rows}
             columnSettings={columnSettings} conditionalFormatting={conditionalFormatting}
             tableState={tableState} onTableStateChange={setTableState}
             dimensionColumns={tableMetrics.length > 0 ? tableCols : []}
             onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })} />
+        )}
+        {finished && results.data && isCartesianViz(viz) && (
+          <div className="h-[60vh] rounded-md border p-2">
+            {results.data.rows.length === 0
+              ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
+              : <EChartsRenderer option={buildCartesianOption(results.data.columns, results.data.rows, {
+                  kind: viz, xAxis: cartesian.xAxis, yMetrics: cartesian.yMetrics, series: cartesian.series,
+                  stacked: cartesian.stacked, horizontal: cartesian.horizontal, smooth: cartesian.smooth,
+                  showLabels: cartesian.showLabels, showLegend: cartesian.showLegend,
+                  xLabel: cartesian.xLabel, yLabel: cartesian.yLabel, seriesTypes: cartesian.seriesTypes,
+                  columnSettings, metricTypes,
+                })} />}
+          </div>
+        )}
+        {finished && results.data && viz === "pie" && (
+          <div className="h-[60vh] rounded-md border p-2">
+            {results.data.rows.length === 0
+              ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
+              : <EChartsRenderer option={buildPieOption(results.data.columns, results.data.rows, {
+                  dimension: pie.dimension, metric: pie.metric, donut: pie.donut,
+                  showLegend: pie.showLegend, showLabels: pie.showLabels, columnSettings, metricTypes,
+                })} />}
+          </div>
+        )}
+        {finished && results.data && viz === "scalar" && (
+          <div className="rounded-md border">
+            <BigNumber columns={results.data.columns} rows={results.data.rows} metric={scalar.metric} format={scalar.metric ? columnSettings[scalar.metric] : undefined} />
+          </div>
         )}
         {!queryId && !build.isPending && !submit.isPending && (
           <p className="text-sm text-muted-foreground">Configure the controls on the left and click Run.</p>
