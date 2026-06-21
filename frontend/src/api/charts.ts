@@ -4,7 +4,7 @@ import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 
 export type VizType =
   | "table" | "pivot_table"
-  | "bar" | "row" | "line" | "area" | "scatter" | "combo" | "pie" | "scalar" | "progress" | "gauge" | "funnel" | "waterfall" | "smartscalar";
+  | "bar" | "row" | "line" | "area" | "scatter" | "combo" | "pie" | "scalar" | "progress" | "gauge" | "funnel" | "waterfall" | "smartscalar" | "boxplot" | "sankey";
 
 export const CARTESIAN_VIZ = ["bar", "row", "line", "area", "scatter", "combo"] as const;
 export type CartesianViz = (typeof CARTESIAN_VIZ)[number];
@@ -59,6 +59,7 @@ export interface CartesianConfig {
   trendLine?: boolean;           // overlay a least-squares trend line
   connectNulls?: boolean;        // line: bridge null gaps
   step?: boolean;                // line: step interpolation
+  showStackTotal?: boolean;      // label the total atop each stacked column
 }
 export interface PieConfig {
   dimension?: string;
@@ -96,6 +97,15 @@ export interface SmartScalarConfig {
   dimension?: string;
   metric?: string;
 }
+export interface BoxplotConfig {
+  category?: string;
+  value?: string;
+}
+export interface SankeyConfig {
+  source?: string;
+  target?: string;
+  metric?: string;
+}
 
 export interface ChartParams {
   spec: QuerySpec;
@@ -119,6 +129,8 @@ export interface ChartParams {
   funnel?: FunnelConfig;         // funnel viz only
   waterfall?: WaterfallConfig;   // waterfall viz only
   smartscalar?: SmartScalarConfig; // trend viz only
+  boxplot?: BoxplotConfig;       // boxplot viz only
+  sankey?: SankeyConfig;         // sankey viz only
 }
 
 export interface Chart {

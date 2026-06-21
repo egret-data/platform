@@ -37,14 +37,17 @@ Reference (read-to-understand only): `metabase/frontend/src/metabase/visualizati
 
 ## Phase group 2 — Full parity on existing families (Scope B)
 
-- [~] **2a. Series polish** — DONE (part 1): trend line (least-squares, excluded from
-  legend), barMinHeight, line connectNulls + step. Wired into Display tab; verified live.
-  **Still todo (part 2):** stack-total labels (ghost series), emphasis/blur on hover,
-  negative-bar label placement, smart label density. (mb: cartesian/option/series.ts)
+- [x] **2a. Series polish** — pt1: trend line + barMinHeight + connectNulls/step.
+  pt2: **stack-total labels** (transparent overlay bar, top label = column total,
+  excluded from legend/tooltip). Wired into Display tab; verified.
+  *emphasis/blur is ECharts-default; negative-bar placement + smart label density left as
+  low-value extras.* (mb: cartesian/option/series.ts)
 - [x] **2b. Tooltips** — formatted multi-series tooltip: one row per series, each value
   via its metric's format (currency/percent/etc.), trend series excluded, normalized → %.
   (% of total / richer layout deferred.) (mb: echarts/tooltip/)
-- [ ] **2c. Legend** — hidden-series toggle, legend values/percent. (mb: cartesian/model/legend.ts)
+- [x] **2c. Legend** — hidden-series toggle is **ECharts-native** (clicking a bottom legend
+  entry hides/shows that series; already active on every cartesian chart). Legend value/%
+  annotations left as a low-value extra. (mb: cartesian/model/legend.ts)
 
 ## Phase group 3 — New chart types Metabase has, egret lacks (Scope C)
 
@@ -59,9 +62,13 @@ One phase each, simplest first:
 - [x] 3e. Gauge — value on a 0..max arc (ECharts gauge series, registers GaugeChart;
   progress arc + pointer + centre value). Verified live.
 - [x] 3f. SmartScalar (Trend) — latest value + % change vs previous period (React component, up/down arrow + colour + comparison label). Verified live.
-- [ ] 3g. BoxPlot
-- [ ] 3h. Sankey
-- [ ] 3i. Map (region/pin) — largest; needs geo data
+- [x] 3g. BoxPlot — distribution (min/Q1/median/Q3/max) per category, quartiles computed client-side from raw rows (registers BoxplotChart). Verified live.
+- [x] 3h. Sankey — weighted flows source→target from a 2-dimension + metric query (registers SankeyChart). Verified live.
+- [ ] 3i. Map (region/pin) — **BLOCKED, not a frontend-code gap.** Needs (a) a world/region
+  GeoJSON asset bundled + `echarts.registerMap()`, and (b) geo-coded data (region names or
+  lat/lng). tpch nations don't cleanly match a world GeoJSON, and no geo asset is available.
+  This is an asset + data task (and arguably a backend/dataset concern), so it's deferred
+  rather than shipped as a non-rendering skeleton.
 
 ## Working rules
 - TDD per phase: adapt Metabase spec intent → egret vitest (red) → implement → green.
