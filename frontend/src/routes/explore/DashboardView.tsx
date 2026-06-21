@@ -6,6 +6,7 @@ import "react-resizable/css/styles.css";
 import { useDashboard, useDashboardMutations, type CardInput, type DashboardCard as Card } from "@/api/dashboards";
 import { useCharts, type Chart } from "@/api/charts";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { GRID_COLS, CARD_MIN_SIZE, CARD_DEFAULT_SIZE } from "@/components/chart/dashboard-grid";
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
 import { toast } from "sonner";
@@ -47,6 +48,23 @@ export default function DashboardView() {
   function removeCard(cardId: string) {
     setDraftCards(cards.filter((c) => c.id !== cardId));
   }
+
+  const [replacingId, setReplacingId] = useState<string | null>(null);
+
+  function duplicateCard(cardId: string) {
+    setDraftCards((prev) => {
+      const base = prev ?? dashboard.cards;
+      const src = base.find((c) => c.id === cardId);
+      if (!src) return base;
+      const maxY = base.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
+      return [...base, { ...src, id: `new-dup-${cardSeqRef.current++}`, grid_row: maxY, options: { ...src.options } }];
+    });
+  }
+  function replaceCard(cardId: string, chart: Chart) {
+    setDraftCards((prev) => (prev ?? dashboard.cards).map((c) => (c.id === cardId ? { ...c, chart_id: chart.id, options: {} } : c)));
+    setReplacingId(null);
+  }
+
   function addVirtualCard(card_type: "text" | "heading" | "link", options: Record<string, unknown>) {
     setDraftCards((prev) => {
       const base = prev ?? dashboard.cards;
@@ -147,12 +165,16 @@ export default function DashboardView() {
           {cards.map((c) => (
             <div key={c.id} className={`relative overflow-hidden ${c.card_type === "heading" ? "" : "rounded-md border bg-background"}`}>
               {editing && (
-                <button
-                  type="button"
-                  aria-label={`remove card ${chartById.get(c.chart_id ?? "")?.name ?? ""}`.trim() || "remove card"}
-                  className="absolute right-1 top-1 z-10 rounded bg-background/80 px-1 text-xs text-destructive"
-                  onClick={() => removeCard(c.id)}
-                >✕</button>
+                <div className="absolute right-1 top-1 z-10 flex gap-1">
+                  <button type="button" aria-label={`duplicate card ${c.id}`} className="rounded bg-background/80 px-1 text-xs"
+                    onClick={() => duplicateCard(c.id)}>⧉</button>
+                  {c.card_type === "chart" && (
+                    <button type="button" aria-label={`replace card ${c.id}`} className="rounded bg-background/80 px-1 text-xs"
+                      onClick={() => setReplacingId(c.id)}>↺</button>
+                  )}
+                  <button type="button" aria-label={`remove card ${chartById.get(c.chart_id ?? "")?.name ?? ""}`.trim() || "remove card"}
+                    className="rounded bg-background/80 px-1 text-xs text-destructive" onClick={() => removeCard(c.id)}>✕</button>
+                </div>
               )}
               {editing && c.card_type === "chart" && (
                 <input aria-label="card title" placeholder="Title (blank = chart name)" className="m-1 w-[calc(100%-0.5rem)] rounded border px-1 text-xs"
@@ -181,6 +203,18 @@ export default function DashboardView() {
           ))}
         </Grid>
       )}
+      <Dialog open={replacingId !== null} onOpenChange={(o) => { if (!o) setReplacingId(null); }}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Replace chart</DialogTitle></DialogHeader>
+          <div className="flex flex-wrap gap-1 py-2">
+            {(charts ?? []).map((ch) => (
+              <Button key={ch.id} size="sm" variant="outline" aria-label={`use ${ch.name}`} onClick={() => replaceCard(replacingId!, ch)}>
+                {ch.name}
+              </Button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

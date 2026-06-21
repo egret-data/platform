@@ -106,3 +106,21 @@ describe("DashboardView (Phase B — card variety)", () => {
     expect(screen.getByLabelText(/card title/i)).toBeInTheDocument();
   });
 });
+
+describe("DashboardView (Phase B — duplicate/replace)", () => {
+  it("duplicates a card", () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    const before = screen.getAllByRole("button", { name: /remove card/i }).length;
+    fireEvent.click(screen.getAllByRole("button", { name: /duplicate card/i })[0]);
+    const after = screen.getAllByRole("button", { name: /remove card/i }).length;
+    expect(after).toBe(before + 1);
+  });
+  it("replaces a chart card's chart via the picker", () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    fireEvent.click(screen.getAllByRole("button", { name: /replace card/i })[0]);
+    fireEvent.click(screen.getByRole("button", { name: /^use sales$/i }));
+    expect(screen.getAllByRole("button", { name: /remove card/i }).length).toBeGreaterThan(0);
+  });
+});
