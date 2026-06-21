@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildCartesianOption } from "../options/cartesian";
-import { CHART_THEME, SERIES_PALETTE } from "../palette";
+import { CHART_THEME, SERIES_PALETTE, SUMMARIZE_COLOR } from "../palette";
 
 const columns = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }, { name: "cnt", type: "bigint" }];
 const rows = [["EU", 10, 3], ["US", 20, 5]];
@@ -87,6 +87,10 @@ describe("buildCartesianOption — Metabase-parity styling & axes", () => {
     expect(opt.series[0].itemStyle.color).toBe(SERIES_PALETTE[0]);
     expect(opt.series[1].itemStyle.color).toBe(SERIES_PALETTE[1]);
   });
+  it("colours a lone series with the summarize green (Metabase parity)", () => {
+    const opt = buildCartesianOption(cols, rows, base) as any; // single metric
+    expect(opt.series[0].itemStyle.color).toBe(SUMMARIZE_COLOR);
+  });
   it("bar series carry barWidth", () => {
     const opt = buildCartesianOption(cols, rows, base) as any;
     expect(opt.series[0].barWidth).toBe(CHART_THEME.barWidth);
@@ -122,10 +126,11 @@ describe("buildCartesianOption — Metabase-parity styling & axes", () => {
   it("grid reserves room for labels (containLabel)", () => {
     expect((buildCartesianOption(cols, rows, base) as any).grid.containLabel).toBe(true);
   });
-  it("reserves extra bottom space so a legend does not overlap the x labels", () => {
-    const noLegend = (buildCartesianOption(cols, rows, base) as any).grid.bottom;
-    const withLegend = (buildCartesianOption(cols, rows, { ...base, showLegend: true }) as any).grid.bottom;
-    expect(withLegend).toBeGreaterThan(noLegend);
+  it("reserves top space for the legend (Metabase puts it on top)", () => {
+    const noLegend = (buildCartesianOption(cols, rows, base) as any).grid.top;
+    const withLegend = (buildCartesianOption(cols, rows, { ...base, showLegend: true }) as any) as any;
+    expect(withLegend.grid.top).toBeGreaterThan(noLegend);
+    expect(withLegend.legend.top).toBe(0);
   });
   it("value axis formats labels via column type / settings", () => {
     const opt = buildCartesianOption(cols, rows, { ...base, metricTypes: { rev: "double" }, columnSettings: { rev: { number_style: "currency", currency: "USD", decimals: 0 } } }) as any;
@@ -290,10 +295,10 @@ describe("buildCartesianOption — row chart (Metabase parity 3a)", () => {
     expect(opt.xAxis.type).toBe("value");
     expect(opt.series[0].type).toBe("bar");
   });
-  it("sorts categories ascending by value so the largest bar is on top", () => {
+  it("keeps the dimension order (Metabase doesn't value-sort rows)", () => {
     const opt = buildCartesianOption(cols, rows, { kind: "row", xAxis: "p", yMetrics: ["rev"] }) as any;
-    expect(opt.yAxis.data).toEqual(["A", "C", "B"]);
-    expect(opt.series[0].data).toEqual([10, 20, 30]);
+    expect(opt.yAxis.data).toEqual(["A", "B", "C"]);
+    expect(opt.series[0].data).toEqual([10, 30, 20]);
   });
   it("places data labels at the bar end when showLabels", () => {
     const opt = buildCartesianOption(cols, rows, { kind: "row", xAxis: "p", yMetrics: ["rev"], showLabels: true }) as any;

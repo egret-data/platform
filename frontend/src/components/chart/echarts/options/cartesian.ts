@@ -3,7 +3,7 @@ import type { CartesianViz } from "@/api/charts";
 import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
 import { formatValue } from "../../format";
-import { CHART_THEME, COLOR_FALLBACK, resolveColor, seriesColor } from "../palette";
+import { CHART_THEME, COLOR_FALLBACK, resolveColor, seriesColor, SUMMARIZE_COLOR } from "../palette";
 
 export interface ResultColumn { name: string; type: string }
 export interface CartesianBuildConfig {
@@ -166,19 +166,8 @@ export function buildCartesianOption(
   const xType = columns[xi].type;
   const xrows = rows.filter((r) => r[xi] != null);
   const catKey = (v: unknown) => String(v);
-  let categories = sortCategories(distinct(xrows.map((r) => r[xi])), xType);
+  const categories = sortCategories(distinct(xrows.map((r) => r[xi])), xType);
 
-  // Row chart: order categories by the first metric's value, ascending — ECharts
-  // puts y-axis index 0 at the bottom, so ascending puts the largest bar on top.
-  if (cfg.kind === "row" && cfg.yMetrics.length > 0) {
-    const m0 = idx[cfg.yMetrics[0]];
-    const totals = new Map<string, number>();
-    for (const r of xrows) {
-      const v = Number(r[m0]);
-      if (Number.isFinite(v)) totals.set(catKey(r[xi]), (totals.get(catKey(r[xi])) ?? 0) + v);
-    }
-    categories = [...categories].sort((a, b) => (totals.get(catKey(a)) ?? 0) - (totals.get(catKey(b)) ?? 0));
-  }
 
   // Breakout: one ECharts series per distinct series value (first y-metric only).
   if (cfg.series != null && idx[cfg.series] != null) {
@@ -207,13 +196,15 @@ export function buildCartesianOption(
   const rowByCat = new Map(xrows.map((r) => [catKey(r[xi]), r]));
   const barMetrics = cfg.yMetrics.filter((m) => seriesTypeFor(cfg.kind, m, cfg.seriesTypes) === "bar").length;
   const grouped = !cfg.stacked && barMetrics > 1;
+  // Metabase tints a lone series with its summarize green rather than accent blue.
+  const singleColor = cfg.yMetrics.length === 1 ? SUMMARIZE_COLOR : undefined;
   const series = cfg.yMetrics.map((metric, si) => {
     const mi = idx[metric];
     const data = categories.map((c) => {
       const r = rowByCat.get(catKey(c));
       return r == null ? null : (r[mi] as number | null);
     });
-    return decorateSeries({ name: metric, data }, metric, si, cfg, fmt, grouped);
+    return decorateSeries({ name: metric, data }, metric, si, cfg, fmt, grouped, singleColor);
   });
   if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
   if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
@@ -229,12 +220,14 @@ function decorateSeries(
   cfg: CartesianBuildConfig,
   fmt: (metric: string, v: unknown) => string,
   grouped = false,
+  colorOverride?: string,
 ) {
   const type = seriesTypeFor(cfg.kind, metric, cfg.seriesTypes);
+  const color = colorOverride ?? seriesColor(colorIdx);
   const out: Record<string, unknown> = {
     ...s,
     type,
-    itemStyle: { color: seriesColor(colorIdx) },
+    itemStyle: { color },
   };
   // Only pin the bar width for a single bar per category; grouped bars must let
   // ECharts auto-size and place them side by side (otherwise they overlap).
@@ -250,7 +243,7 @@ function decorateSeries(
     out.connectNulls = cfg.connectNulls ?? true; // Metabase connects across nulls by default
     if (cfg.step) out.step = "middle";
   }
-  if (type === "scatter") { out.symbolSize = CHART_THEME.symbolSize; out.itemStyle = { color: seriesColor(colorIdx), opacity: CHART_THEME.scatterOpacity }; }
+  if (type === "scatter") { out.symbolSize = CHART_THEME.symbolSize; out.itemStyle = { color, opacity: CHART_THEME.scatterOpacity }; }
   if (isDualAxis(cfg) && rightMetrics(cfg).includes(metric)) out.yAxisIndex = 1;
   if (cfg.showLabels) {
     out.label = {
@@ -314,17 +307,18 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     };
   }
 
-  // Reserve room below the plot so a bottom legend (and the x-axis title) don't
-  // overlap the category labels.
+  // Metabase puts the legend along the top; reserve room there for it, and below
+  // only for the x-axis title.
   const grid = {
     ...CHART_THEME.grid,
-    bottom: (CHART_THEME.grid.bottom as number) + (cfg.showLegend ? 28 : 0) + (cfg.xLabel ? 22 : 0),
+    top: (CHART_THEME.grid.top as number) + (cfg.showLegend ? 24 : 0),
+    bottom: (CHART_THEME.grid.bottom as number) + (cfg.xLabel ? 22 : 0),
   };
 
   // Trend series stay out of the legend.
   const legendNames = series.filter((s) => !(s as SeriesLike).__trend && !(s as SeriesLike).__total).map((s) => (s as SeriesLike).name);
   const legend = cfg.showLegend
-    ? { bottom: 0, type: "scroll" as const, ...(legendNames.length !== series.length ? { data: legendNames } : {}) }
+    ? { top: 0, left: "center" as const, type: "scroll" as const, ...(legendNames.length !== series.length ? { data: legendNames } : {}) }
     : undefined;
 
   // Formatted tooltip — one row per (non-trend) series, value via its metric's format.
