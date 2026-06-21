@@ -59,6 +59,7 @@ export interface CartesianConfig {
   trendLine?: boolean;           // overlay a least-squares trend line
   connectNulls?: boolean;        // line: bridge null gaps
   step?: boolean;                // line: step interpolation
+  showStackTotal?: boolean;      // label the total atop each stacked column
 }
 export interface PieConfig {
   dimension?: string;

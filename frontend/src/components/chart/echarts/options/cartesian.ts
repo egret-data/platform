@@ -27,13 +27,37 @@ export interface CartesianBuildConfig {
   trendLine?: boolean;           // overlay a least-squares trend line per series
   connectNulls?: boolean;        // line: bridge gaps across null points
   step?: boolean;                // line: step interpolation
+  showStackTotal?: boolean;      // label the total atop each stacked column
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
 }
 
 const BAR_MIN_HEIGHT = 1; // keep sub-pixel bars visible, like Metabase's barMinHeight
 
-interface SeriesLike { name?: string; data: (number | null)[]; yAxisIndex?: number; itemStyle?: { color?: string }; __trend?: boolean }
+interface SeriesLike { name?: string; data: (number | null)[]; yAxisIndex?: number; itemStyle?: { color?: string }; __trend?: boolean; __total?: boolean }
+
+// A transparent overlay bar whose top label shows each column's stack total —
+// clean-room of Metabase's getStackTotalsSeries.
+function stackTotalSeries(series: SeriesLike[], cfg: CartesianBuildConfig): SeriesLike {
+  const values = series.filter((s) => !s.__trend && !s.__total);
+  const n = values[0]?.data.length ?? 0;
+  const totals: (number | null)[] = [];
+  for (let i = 0; i < n; i++) {
+    let t = 0; let any = false;
+    for (const s of values) { const v = s.data[i]; if (typeof v === "number") { t += v; any = true; } }
+    totals.push(any ? t : null);
+  }
+  const m = cfg.yMetrics[0];
+  const fmt = (v: number) => (m ? formatValue(v, cfg.metricTypes?.[m] ?? "double", cfg.columnSettings?.[m]) : String(v));
+  return {
+    data: totals,
+    __total: true,
+    ...{ type: "bar", barGap: "-100%", barWidth: CHART_THEME.barWidth, silent: true, legendHoverLink: false, tooltip: { show: false },
+      itemStyle: { color: "transparent" }, emphasis: { itemStyle: { color: "transparent" } },
+      label: { show: true, position: "top", fontSize: CHART_THEME.labelFontSize, fontWeight: CHART_THEME.labelWeight,
+        formatter: (p: { value: unknown }) => (p.value == null ? "" : fmt(Number(p.value))) } },
+  } as SeriesLike;
+}
 
 // Least-squares fit y = m·i + b over the non-null points, evaluated at every index.
 function trendData(data: (number | null)[]): (number | null)[] | null {
@@ -174,6 +198,7 @@ export function buildCartesianOption(
     });
     if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
     if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
+    if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
     return baseOption(cfg, categories as (string | number)[], series);
   }
 
@@ -188,6 +213,7 @@ export function buildCartesianOption(
   });
   if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
   if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
+  if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
   return baseOption(cfg, categories as (string | number)[], series);
 }
 
@@ -289,7 +315,7 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   };
 
   // Trend series stay out of the legend.
-  const legendNames = series.filter((s) => !(s as SeriesLike).__trend).map((s) => (s as SeriesLike).name);
+  const legendNames = series.filter((s) => !(s as SeriesLike).__trend && !(s as SeriesLike).__total).map((s) => (s as SeriesLike).name);
   const legend = cfg.showLegend
     ? { bottom: 0, type: "scroll" as const, ...(legendNames.length !== series.length ? { data: legendNames } : {}) }
     : undefined;
@@ -303,7 +329,7 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   type TipParam = { axisValueLabel?: string; name?: string; seriesName?: string; value?: unknown; marker?: string };
   const tooltipFormatter = (params: TipParam | TipParam[]) => {
     const arr = Array.isArray(params) ? params : [params];
-    const visible = arr.filter((p) => p.value != null && !(typeof p.seriesName === "string" && p.seriesName.endsWith(" trend")));
+    const visible = arr.filter((p) => p.value != null && p.seriesName && !p.seriesName.endsWith(" trend"));
     if (visible.length === 0) return "";
     const header = visible[0].axisValueLabel ?? visible[0].name ?? "";
     const lines = visible.map((p) => `${p.marker ?? ""} ${p.seriesName ?? ""}: <b>${tipFmt(p.seriesName ?? "", Number(p.value))}</b>`);

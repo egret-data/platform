@@ -320,3 +320,26 @@ describe("buildCartesianOption — formatted tooltip (Metabase parity 2b)", () =
     expect(html).toContain("77%");
   });
 });
+
+// Phase 2a-pt2 — stack-total labels, clean-room from Metabase's getStackTotalsSeries.
+describe("buildCartesianOption — stack totals (Metabase parity 2a-pt2)", () => {
+  const cols = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }, { name: "cnt", type: "bigint" }];
+  const rows = [["EU", 10, 3], ["US", 20, 5]];
+
+  it("showStackTotal adds a transparent total-label series summing the stack", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev", "cnt"], stacked: true, showStackTotal: true }) as any;
+    const total = opt.series.find((s: any) => s.__total);
+    expect(total).toBeTruthy();
+    expect(total.itemStyle.color).toBe("transparent");
+    expect(total.data).toEqual([13, 25]); // EU 10+3, US 20+5
+    expect(total.label.show).toBe(true);
+  });
+  it("no total series unless stacked + showStackTotal", () => {
+    expect((buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev", "cnt"], showStackTotal: true }) as any).series.some((s: any) => s.__total)).toBe(false);
+    expect((buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev", "cnt"], stacked: true }) as any).series.some((s: any) => s.__total)).toBe(false);
+  });
+  it("the total series is excluded from the legend", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev", "cnt"], stacked: true, showStackTotal: true, showLegend: true }) as any;
+    expect(opt.legend.data).toEqual(["rev", "cnt"]);
+  });
+});

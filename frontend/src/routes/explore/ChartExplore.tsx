@@ -814,6 +814,7 @@ export default function ChartExplore() {
                   rightAxisMetrics: cartesian.rightAxisMetrics, logScale: cartesian.logScale,
                   normalized: cartesian.normalized, goalValue: cartesian.goalValue, goalLabel: cartesian.goalLabel,
                   trendLine: cartesian.trendLine, connectNulls: cartesian.connectNulls, step: cartesian.step,
+                  showStackTotal: cartesian.showStackTotal,
                   columnSettings, metricTypes,
                 })} />}
           </div>
