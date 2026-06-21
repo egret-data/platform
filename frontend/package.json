@@ -42,8 +42,10 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-grid-layout": "^1.5.3",
+    "react-markdown": "^9.1.0",
     "react-resizable-panels": "^3.0.6",
     "react-router-dom": "^6.26.0",
+    "remark-gfm": "^4.0.1",
     "sonner": "^2.0.7",
     "sql-formatter": "^15.8.1",
     "tailwind-merge": "^3.4.0"
