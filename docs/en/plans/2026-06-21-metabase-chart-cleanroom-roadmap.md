@@ -30,12 +30,15 @@ Reference (read-to-understand only): `metabase/frontend/src/metabase/visualizati
   right with its own formatter; series get yAxisIndex) + log scale toggle. Wired into
   the Display tab. Verified live (combo: order_count line now legible on the right axis).
   (mb: cartesian/model/axis.ts, option/axis.ts) — pow scale + auto-range heuristics deferred.
-- [ ] **1e. Cartesian overlays** — goal line, trend line, stack totals labels,
-  100%-normalized stacking. (mb: cartesian/option/{goal-line,trend-line}.ts, model/stack.ts)
+- [x] **1e. Cartesian overlays (part 1)** — goal line (markLine + label) + 100%-normalized
+  stacking (value axis capped to 100%). Wired into the Display tab. Verified live.
+  Registers MarkLineComponent. (mb: cartesian/option/goal-line.ts, model/stack.ts)
+  **Deferred to 2a:** trend line (regression) + stack-total labels (ghost series).
 
 ## Phase group 2 — Full parity on existing families (Scope B)
 
-- [ ] **2a. Series polish** — barMinHeight, connectNulls/step interpolation, emphasis/blur,
+- [ ] **2a. Series polish** — trend line (regression, deferred from 1e), stack-total labels
+  (deferred from 1e), barMinHeight, connectNulls/step interpolation, emphasis/blur,
   negative-bar label placement, smart label density. (mb: cartesian/option/series.ts)
 - [ ] **2b. Tooltips** — rich multi-series tooltip with formatted rows + % of total.
   (mb: echarts/tooltip/)

@@ -557,6 +557,7 @@ export default function ChartExplore() {
                   showLabels: cartesian.showLabels, showLegend: cartesian.showLegend,
                   xLabel: cartesian.xLabel, yLabel: cartesian.yLabel, seriesTypes: cartesian.seriesTypes,
                   rightAxisMetrics: cartesian.rightAxisMetrics, logScale: cartesian.logScale,
+                  normalized: cartesian.normalized, goalValue: cartesian.goalValue, goalLabel: cartesian.goalLabel,
                   columnSettings, metricTypes,
                 })} />}
           </div>

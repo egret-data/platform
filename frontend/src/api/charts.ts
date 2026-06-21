@@ -53,6 +53,9 @@ export interface CartesianConfig {
   seriesTypes?: Record<string, "bar" | "line">;  // combo only: metric -> type
   rightAxisMetrics?: string[];   // metrics plotted against a 2nd (right) Y axis
   logScale?: boolean;            // value axis uses a log scale
+  normalized?: boolean;          // 100% stacking
+  goalValue?: number;            // horizontal goal/reference line
+  goalLabel?: string;
 }
 export interface PieConfig {
   dimension?: string;

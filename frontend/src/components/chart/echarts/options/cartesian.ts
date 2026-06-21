@@ -21,8 +21,26 @@ export interface CartesianBuildConfig {
   seriesTypes?: Record<string, "bar" | "line">;
   rightAxisMetrics?: string[];   // metrics plotted against a second (right) Y axis
   logScale?: boolean;            // value axis uses a log scale
+  normalized?: boolean;          // 100% stacking — each category's values sum to 100
+  goalValue?: number;            // horizontal reference (goal) line
+  goalLabel?: string;
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
+}
+
+const isNormalized = (cfg: CartesianBuildConfig) => !!cfg.normalized && !!cfg.stacked;
+
+// 100% stacking — rewrite each category column so its series values sum to 100.
+function normalizeStacks(series: { data: (number | null)[] }[]) {
+  const n = series[0]?.data.length ?? 0;
+  for (let i = 0; i < n; i++) {
+    let total = 0;
+    for (const s of series) { const v = s.data[i]; if (typeof v === "number") total += v; }
+    for (const s of series) {
+      const v = s.data[i];
+      s.data[i] = typeof v === "number" ? (total > 0 ? (v / total) * 100 : 0) : null;
+    }
+  }
 }
 
 // Right-axis is active only when it splits the metrics (≥1 left and ≥1 right) on a
@@ -95,6 +113,7 @@ export function buildCartesianOption(
       const name = sv == null || sv === "" ? "(empty)" : String(sv);
       return decorateSeries({ name, data }, metric, si, cfg, fmt);
     });
+    if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
     return baseOption(cfg, categories as (string | number)[], series);
   }
 
@@ -107,6 +126,7 @@ export function buildCartesianOption(
     });
     return decorateSeries({ name: metric, data }, metric, si, cfg, fmt);
   });
+  if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
   return baseOption(cfg, categories as (string | number)[], series);
 }
 
@@ -145,7 +165,9 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   const horizontal = !!cfg.horizontal && cfg.kind !== "scatter";
   const gridLine = resolveColor(CHART_THEME.gridLine, COLOR_FALLBACK.gridLine);
   const axisLabelColor = resolveColor(CHART_THEME.axisLabel, COLOR_FALLBACK.axisLabel);
+  const normalized = isNormalized(cfg);
   const fmtFor = (metrics: string[]) => (v: number) => {
+    if (normalized) return `${Math.round(v)}%`;
     const m = metrics[0];
     return m ? formatValue(v, cfg.metricTypes?.[m] ?? "double", cfg.columnSettings?.[m]) : String(v);
   };
@@ -159,6 +181,7 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     type: cfg.logScale ? ("log" as const) : ("value" as const),
     name: position === "right" ? undefined : cfg.yLabel,
     position,
+    ...(normalized ? { max: 100 } : {}),
     axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: fmtFor(metrics) },
     // A second (right) axis omits gridlines to avoid doubling them up.
     splitLine: position === "right" ? { show: false } : { lineStyle: { color: gridLine } },
@@ -177,6 +200,17 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   } else {
     xAxis = categoryAxis;
     yAxis = mkValueAxis(cfg.yMetrics);
+  }
+
+  // Goal line — a horizontal reference at goalValue, drawn via the first series' markLine.
+  if (cfg.goalValue != null && series.length > 0) {
+    (series[0] as Record<string, unknown>).markLine = {
+      silent: true,
+      symbol: "none",
+      data: [{ yAxis: cfg.goalValue }],
+      label: { formatter: cfg.goalLabel ?? "Goal", position: "insideEndTop", color: axisLabelColor },
+      lineStyle: { color: axisLabelColor, type: "dashed" },
+    };
   }
 
   return {

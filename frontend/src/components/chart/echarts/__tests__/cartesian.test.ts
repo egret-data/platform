@@ -194,3 +194,35 @@ describe("buildCartesianOption — dual axis & scale (Metabase parity 1d)", () =
     expect(opt.yAxis[1].axisLabel.formatter(5)).toBe("5 orders");
   });
 });
+
+// Phase 1e — overlays: goal line + 100% normalized stacking, clean-room from
+// Metabase's cartesian option/goal-line.ts + model/stack.ts (normalized stack type).
+describe("buildCartesianOption — overlays (Metabase parity 1e)", () => {
+  const cols = [{ name: "x", type: "varchar" }, { name: "rev", type: "double" }, { name: "cnt", type: "bigint" }];
+  const rows = [["A", 30, 1], ["B", 70, 3]];
+
+  it("goalValue adds a markLine on the first series with the goal label", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "x", yMetrics: ["rev"], goalValue: 50, goalLabel: "Target" }) as any;
+    const ml = opt.series[0].markLine;
+    expect(ml.data[0].yAxis).toBe(50);
+    expect(ml.label.formatter).toBe("Target");
+  });
+  it("no markLine without a goalValue", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "x", yMetrics: ["rev"] }) as any;
+    expect(opt.series[0].markLine).toBeUndefined();
+  });
+  it("normalized stacking turns each category's values into percentages summing to 100", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "x", yMetrics: ["rev", "cnt"], stacked: true, normalized: true }) as any;
+    const a0 = opt.series[0].data[0], a1 = opt.series[1].data[0];
+    expect(a0).toBeCloseTo((30 / 31) * 100, 4);
+    expect(Math.round(a0 + a1)).toBe(100);
+  });
+  it("normalized only applies when stacked", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "x", yMetrics: ["rev", "cnt"], normalized: true }) as any;
+    expect(opt.series[0].data[0]).toBe(30);
+  });
+  it("normalized value axis formats as percent", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "x", yMetrics: ["rev", "cnt"], stacked: true, normalized: true }) as any;
+    expect(opt.yAxis.axisLabel.formatter(50)).toBe("50%");
+  });
+});

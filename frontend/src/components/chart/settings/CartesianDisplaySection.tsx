@@ -30,6 +30,7 @@ export function CartesianDisplaySection({
       <Toggle id="cz-legend" label="Legend" checked={!!config.showLegend} onChange={(v) => onChange({ showLegend: v })} />
       <Toggle id="cz-labels" label="Data labels" checked={!!config.showLabels} onChange={(v) => onChange({ showLabels: v })} />
       {canStack && <Toggle id="cz-stacked" label="Stacked" checked={!!config.stacked} onChange={(v) => onChange({ stacked: v })} />}
+      {canStack && config.stacked && <Toggle id="cz-normalized" label="100% stacked" checked={!!config.normalized} onChange={(v) => onChange({ normalized: v })} />}
       {isBar && <Toggle id="cz-horizontal" label="Horizontal" checked={!!config.horizontal} onChange={(v) => onChange({ horizontal: v })} />}
       {isLineish && <Toggle id="cz-smooth" label="Smooth" checked={!!config.smooth} onChange={(v) => onChange({ smooth: v })} />}
       {kind !== "scatter" && <Toggle id="cz-log" label="Log scale" checked={!!config.logScale} onChange={(v) => onChange({ logScale: v })} />}
@@ -75,6 +76,19 @@ export function CartesianDisplaySection({
           ))}
         </div>
       )}
+
+      <div className="grid grid-cols-2 gap-2 border-t pt-2">
+        <label className="space-y-1">
+          <span className="text-xs text-muted-foreground">Goal value</span>
+          <Input className="h-8" type="number" placeholder="none"
+            value={config.goalValue ?? ""}
+            onChange={(e) => { const n = Number(e.target.value); onChange({ goalValue: e.target.value === "" || Number.isNaN(n) ? undefined : n }); }} />
+        </label>
+        <label className="space-y-1">
+          <span className="text-xs text-muted-foreground">Goal label</span>
+          <Input className="h-8" placeholder="Goal" value={config.goalLabel ?? ""} onChange={(e) => onChange({ goalLabel: e.target.value || undefined })} />
+        </label>
+      </div>
 
       <div className="grid grid-cols-2 gap-2 border-t pt-2">
         <label className="space-y-1">

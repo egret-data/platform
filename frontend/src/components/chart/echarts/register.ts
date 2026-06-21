@@ -2,7 +2,7 @@ import { use } from "echarts/core";
 import { SVGRenderer } from "echarts/renderers";
 import { BarChart, LineChart, ScatterChart, PieChart } from "echarts/charts";
 import {
-  GridComponent, TooltipComponent, LegendComponent, DatasetComponent, GraphicComponent,
+  GridComponent, TooltipComponent, LegendComponent, DatasetComponent, GraphicComponent, MarkLineComponent,
 } from "echarts/components";
 
 let registered = false;
@@ -13,7 +13,7 @@ export function registerEChartsModules() {
   use([
     SVGRenderer,
     BarChart, LineChart, ScatterChart, PieChart,
-    GridComponent, TooltipComponent, LegendComponent, DatasetComponent, GraphicComponent,
+    GridComponent, TooltipComponent, LegendComponent, DatasetComponent, GraphicComponent, MarkLineComponent,
   ]);
   registered = true;
 }
