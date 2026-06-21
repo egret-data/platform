@@ -124,3 +124,11 @@ describe("DashboardView (Phase B — duplicate/replace)", () => {
     expect(screen.getAllByRole("button", { name: /remove card/i }).length).toBeGreaterThan(0);
   });
 });
+
+describe("DashboardView (Phase B — view controls)", () => {
+  it("shows an auto-refresh control and a fullscreen toggle in view mode", () => {
+    renderAt();
+    expect(screen.getByLabelText(/auto-refresh/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /fullscreen/i })).toBeInTheDocument();
+  });
+});

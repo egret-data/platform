@@ -5,6 +5,7 @@ import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 import { useDashboard, useDashboardMutations, type CardInput, type DashboardCard as Card } from "@/api/dashboards";
 import { useCharts, type Chart } from "@/api/charts";
+import { useDashboardViewControls } from "@/api/useDashboardViewControls";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { GRID_COLS, CARD_MIN_SIZE, CARD_DEFAULT_SIZE } from "@/components/chart/dashboard-grid";
@@ -23,6 +24,7 @@ export default function DashboardView() {
   const [draftCards, setDraftCards] = useState<Card[] | null>(null);
   const cardSeqRef = useRef(0);
   const chartById = useMemo(() => new Map((charts ?? []).map((c) => [c.id, c])), [charts]);
+  const view = useDashboardViewControls();
 
   useEffect(() => {
     setEditing(false);
@@ -119,10 +121,36 @@ export default function DashboardView() {
   }
 
   return (
-    <div className="p-4">
+    <div className={view.isFullscreen ? "fixed inset-0 z-50 overflow-auto bg-background p-4" : "p-4"}>
       <div className="mb-3 flex items-center justify-between">
         <h1 className="text-lg font-semibold">{dash.name}</h1>
         <div className="flex gap-2">
+          {!editing && (
+            <>
+              <label className="flex items-center gap-1 text-xs text-muted-foreground">
+                <span className="sr-only">Auto-refresh</span>
+                <select aria-label="auto-refresh" className="h-8 rounded border bg-background px-1 text-xs"
+                  value={view.refreshSeconds ?? 0}
+                  onChange={(e) => view.setRefreshSeconds(Number(e.target.value) || null)}>
+                  <option value={0}>No refresh</option>
+                  <option value={60}>1 min</option>
+                  <option value={300}>5 min</option>
+                  <option value={600}>10 min</option>
+                  <option value={900}>15 min</option>
+                  <option value={1800}>30 min</option>
+                  <option value={3600}>60 min</option>
+                </select>
+              </label>
+              <Button size="sm" variant="outline" aria-label="fullscreen"
+                onClick={() => {
+                  const next = !view.isFullscreen;
+                  view.setFullscreen(next);
+                  try { if (next) document.documentElement.requestFullscreen?.(); else if (document.fullscreenElement) document.exitFullscreen?.(); } catch { /* ignore */ }
+                }}>
+                {view.isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+              </Button>
+            </>
+          )}
           {editing ? (
             <>
               <Button size="sm" variant="ghost" onClick={cancelEdit}>Cancel</Button>
@@ -197,7 +225,7 @@ export default function DashboardView() {
                 </div>
               )}
               {(!editing || c.card_type === "chart") && (
-                <DashboardCardView ws={ws} card={c} chart={chartById.get(c.chart_id ?? "")} />
+                <DashboardCardView ws={ws} card={c} chart={chartById.get(c.chart_id ?? "")} refreshNonce={view.refreshNonce} />
               )}
             </div>
           ))}
