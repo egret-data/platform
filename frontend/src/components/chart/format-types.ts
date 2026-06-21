@@ -17,6 +17,11 @@ export interface ColumnFormat {
   time_enabled?: "minutes" | "seconds" | "milliseconds" | null;
   time_style?: "h:mm A" | "HH:mm";
   column_title?: string;
+  // "Display as" — render the cell value as a link / email / image instead of plain text.
+  view_as?: "auto" | "text" | "link" | "email" | "image";
+  link_text?: string;  // link only: display-text template; {{value}} → the cell value
+  link_url?: string;   // link only: href template; {{value}} → the cell value (defaults to the value)
+  show_mini_bar?: boolean;  // numeric: draw an in-cell bar sized to the column's extent
 }
 
 export type FormattingOperator =

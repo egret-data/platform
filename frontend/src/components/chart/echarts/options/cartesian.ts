@@ -29,13 +29,35 @@ export interface CartesianBuildConfig {
   connectNulls?: boolean;        // line: bridge gaps across null points
   step?: boolean;                // line: step interpolation
   showStackTotal?: boolean;      // label the total atop each stacked column
+  seriesColors?: Record<string, string>;  // series name -> colour override (Metabase series settings)
+  seriesLabels?: Record<string, string>;  // series name -> display label override
+  yMin?: number;                 // manual value-axis minimum (auto when undefined)
+  yMax?: number;                 // manual value-axis maximum
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
 }
 
+// The series names a cartesian chart will render — its y-metrics, or the distinct
+// breakout values (null/empty folded to "(empty)", matching the renderer). Used by the
+// settings panel to list series for per-series colour / rename without rebuilding the chart.
+export function cartesianSeriesNames(
+  columns: ResultColumn[],
+  rows: unknown[][],
+  cfg: { yMetrics: string[]; xAxis?: string; series?: string },
+): string[] {
+  const idx = Object.fromEntries(columns.map((c, i) => [c.name, i]));
+  if (cfg.series != null && idx[cfg.series] != null) {
+    const gi = idx[cfg.series];
+    const xi = cfg.xAxis != null ? idx[cfg.xAxis] : undefined;
+    const valid = xi == null ? rows : rows.filter((r) => r[xi] != null);
+    return distinct(valid.map((r) => r[gi])).map((sv) => (sv == null || sv === "" ? "(empty)" : String(sv)));
+  }
+  return [...cfg.yMetrics];
+}
+
 const BAR_MIN_HEIGHT = 1; // keep sub-pixel bars visible, like Metabase's barMinHeight
 
-interface SeriesLike { name?: string; data: (number | null)[]; yAxisIndex?: number; itemStyle?: { color?: string }; __trend?: boolean; __total?: boolean }
+interface SeriesLike { name?: string; data: (number | null)[]; yAxisIndex?: number; itemStyle?: { color?: string }; __trend?: boolean; __total?: boolean; __metric?: string }
 
 // A transparent overlay bar whose top label shows each column's stack total —
 // clean-room of Metabase's getStackTotalsSeries.
@@ -250,9 +272,13 @@ function decorateSeries(
   colorOverride?: string,
 ) {
   const type = seriesTypeFor(cfg.kind, metric, cfg.seriesTypes);
-  const color = colorOverride ?? seriesColor(colorIdx);
+  // Per-series colour (keyed by the original series name) wins over the single-series
+  // green and the palette slot — clean-room of Metabase's series colour settings.
+  const color = cfg.seriesColors?.[s.name] ?? colorOverride ?? seriesColor(colorIdx);
   const out: Record<string, unknown> = {
     ...s,
+    name: cfg.seriesLabels?.[s.name] ?? s.name,  // display label override (legend/tooltip)
+    __metric: metric,                            // keep the source metric for tooltip formatting
     type,
     itemStyle: { color },
   };
@@ -303,6 +329,9 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     name: position === "right" ? undefined : cfg.yLabel,
     position,
     ...(normalized ? { max: 100 } : {}),
+    // Manual axis range (Metabase y-axis min/max) overrides the auto extent.
+    ...(cfg.yMin != null ? { min: cfg.yMin } : {}),
+    ...(cfg.yMax != null ? { max: cfg.yMax } : {}),
     axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: fmtFor(metrics) },
     // A second (right) axis omits gridlines to avoid doubling them up.
     splitLine: position === "right" ? { show: false } : { lineStyle: { color: gridLine } },
@@ -349,9 +378,14 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     : undefined;
 
   // Formatted tooltip — one row per (non-trend) series, value via its metric's format.
+  // Series may be renamed, so resolve the source metric from each series' __metric.
+  const metricByName = new Map<string, string>();
+  for (const s of series as SeriesLike[]) {
+    if (s.name != null && s.__metric != null) metricByName.set(s.name, s.__metric);
+  }
   const tipFmt = (name: string, v: number) => {
     if (normalized) return `${Math.round(v)}%`;
-    const m = cfg.yMetrics.includes(name) ? name : cfg.yMetrics[0];
+    const m = metricByName.get(name) ?? (cfg.yMetrics.includes(name) ? name : cfg.yMetrics[0]);
     return m ? formatValue(v, cfg.metricTypes?.[m] ?? "double", cfg.columnSettings?.[m]) : String(v);
   };
   type TipParam = { axisValueLabel?: string; name?: string; seriesName?: string; value?: unknown; marker?: string };

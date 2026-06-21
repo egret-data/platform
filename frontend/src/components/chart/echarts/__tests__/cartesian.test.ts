@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildCartesianOption } from "../options/cartesian";
+import { buildCartesianOption, cartesianSeriesNames } from "../options/cartesian";
 import { CHART_THEME, SERIES_PALETTE, SUMMARIZE_COLOR } from "../palette";
 
 const columns = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }, { name: "cnt", type: "bigint" }];
@@ -377,5 +377,74 @@ describe("buildCartesianOption — stack totals (Metabase parity 2a-pt2)", () =>
   it("the total series is excluded from the legend", () => {
     const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev", "cnt"], stacked: true, showStackTotal: true, showLegend: true }) as any;
     expect(opt.legend.data).toEqual(["rev", "cnt"]);
+  });
+});
+
+describe("buildCartesianOption — per-series color (Metabase parity)", () => {
+  const cols = [{ name: "region", type: "varchar" }, { name: "yr", type: "varchar" }, { name: "rev", type: "double" }, { name: "cnt", type: "bigint" }];
+  const rows = [["EU", "2023", 1, 9], ["US", "2024", 2, 8]];
+
+  it("overrides a metric series colour by series name", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev", "cnt"], seriesColors: { cnt: "#ff0000" } }) as any;
+    expect(opt.series.find((s: any) => s.name === "cnt").itemStyle.color).toBe("#ff0000");
+    // untouched series keep their palette slot
+    expect(opt.series.find((s: any) => s.name === "rev").itemStyle.color).toBe(SERIES_PALETTE[0]);
+  });
+  it("override beats the single-series summarize green", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev"], seriesColors: { rev: "#123456" } }) as any;
+    expect(opt.series[0].itemStyle.color).toBe("#123456");
+  });
+  it("overrides a breakout series colour by its value", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev"], series: "yr", seriesColors: { "2024": "#00ff00" } }) as any;
+    expect(opt.series.find((s: any) => s.name === "2024").itemStyle.color).toBe("#00ff00");
+  });
+});
+
+describe("buildCartesianOption — manual Y-axis range (Metabase parity)", () => {
+  const cols = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }];
+  const rows = [["EU", 10], ["US", 20]];
+  it("applies yMin/yMax to the value axis", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev"], yMin: 0, yMax: 100 }) as any;
+    expect(opt.yAxis.min).toBe(0);
+    expect(opt.yAxis.max).toBe(100);
+  });
+  it("applies the range to the value (x) axis when horizontal", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev"], horizontal: true, yMin: 5, yMax: 50 }) as any;
+    expect(opt.xAxis.min).toBe(5);
+    expect(opt.xAxis.max).toBe(50);
+  });
+  it("leaves axis auto-ranged when unset", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev"] }) as any;
+    expect(opt.yAxis.min).toBeUndefined();
+    expect(opt.yAxis.max).toBeUndefined();
+  });
+});
+
+describe("buildCartesianOption — series rename (Metabase parity)", () => {
+  const cols = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }, { name: "cnt", type: "bigint" }];
+  const rows = [["EU", 10, 3], ["US", 20, 5]];
+  it("renames the series shown in legend while keeping per-metric format", () => {
+    const opt = buildCartesianOption(cols, rows, {
+      kind: "bar", xAxis: "region", yMetrics: ["rev", "cnt"], showLegend: true,
+      seriesLabels: { rev: "Revenue" },
+      metricTypes: { rev: "double", cnt: "bigint" },
+      columnSettings: { rev: { prefix: "$", decimals: 0 } },
+    }) as any;
+    expect(opt.series[0].name).toBe("Revenue");
+    expect(opt.series[1].name).toBe("cnt");  // un-renamed series keep their metric name
+    // tooltip still formats the renamed series with rev's settings ($)
+    const tip = opt.tooltip.formatter([{ axisValueLabel: "EU", seriesName: "Revenue", value: 10, marker: "" }]);
+    expect(tip).toContain("$10");
+  });
+});
+
+describe("cartesianSeriesNames helper", () => {
+  const cols = [{ name: "region", type: "varchar" }, { name: "yr", type: "varchar" }, { name: "rev", type: "double" }, { name: "cnt", type: "bigint" }];
+  const rows = [["EU", "2023", 1, 9], ["US", "", 2, 8]];
+  it("returns the y-metrics when there is no breakout", () => {
+    expect(cartesianSeriesNames(cols, rows, { yMetrics: ["rev", "cnt"] })).toEqual(["rev", "cnt"]);
+  });
+  it("returns distinct breakout values, mapping null/empty to (empty)", () => {
+    expect(cartesianSeriesNames(cols, rows, { yMetrics: ["rev"], series: "yr" })).toEqual(["2023", "(empty)"]);
   });
 });

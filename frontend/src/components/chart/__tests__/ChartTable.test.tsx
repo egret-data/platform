@@ -47,6 +47,72 @@ describe("ChartTable", () => {
   });
 });
 
+describe("ChartTable — view-as (Metabase parity)", () => {
+  it("renders a link with default href = value", () => {
+    render(
+      <ChartTable
+        columns={[{ name: "site", type: "varchar" }]}
+        rows={[["https://example.com"]]}
+        columnSettings={{ site: { view_as: "link" } }}
+      />,
+    );
+    const a = screen.getByRole("link", { name: "https://example.com" });
+    expect(a).toHaveAttribute("href", "https://example.com");
+    expect(a).toHaveAttribute("target", "_blank");
+  });
+  it("applies link_text and link_url templates with {{value}}", () => {
+    render(
+      <ChartTable
+        columns={[{ name: "id", type: "varchar" }]}
+        rows={[["42"]]}
+        columnSettings={{ id: { view_as: "link", link_text: "Order {{value}}", link_url: "/orders/{{value}}" } }}
+      />,
+    );
+    const a = screen.getByRole("link", { name: "Order 42" });
+    expect(a).toHaveAttribute("href", "/orders/42");
+  });
+  it("renders an email as a mailto link", () => {
+    render(
+      <ChartTable
+        columns={[{ name: "email", type: "varchar" }]}
+        rows={[["a@b.com"]]}
+        columnSettings={{ email: { view_as: "email" } }}
+      />,
+    );
+    expect(screen.getByRole("link", { name: "a@b.com" })).toHaveAttribute("href", "mailto:a@b.com");
+  });
+  it("renders an image with the value as src", () => {
+    render(
+      <ChartTable
+        columns={[{ name: "img", type: "varchar" }]}
+        rows={[["/logo.png"]]}
+        columnSettings={{ img: { view_as: "image" } }}
+      />,
+    );
+    expect(document.querySelector("img")).toHaveAttribute("src", "/logo.png");
+  });
+});
+
+describe("ChartTable — mini bar (Metabase parity)", () => {
+  it("draws an in-cell bar alongside the formatted number", () => {
+    render(
+      <ChartTable
+        columns={[{ name: "rev", type: "double" }]}
+        rows={[[20], [80], [100]]}
+        columnSettings={{ rev: { show_mini_bar: true } }}
+      />,
+    );
+    // number still shows
+    expect(screen.getByText("80")).toBeInTheDocument();
+    const bars = document.querySelectorAll('[data-testid="mini-bar"]');
+    expect(bars.length).toBe(3);
+    // the 100 row fills the track fully; the 20 row is a fifth of it
+    const widths = Array.from(bars).map((b) => (b as HTMLElement).style.width);
+    expect(widths).toContain("100%");
+    expect(widths).toContain("20%");
+  });
+});
+
 describe("ChartTable interactions", () => {
   it("hides a column listed in hiddenColumns", () => {
     render(<ChartTable columns={COLS} rows={mkRows(3)} tableState={{ hiddenColumns: ["a"] }} />);

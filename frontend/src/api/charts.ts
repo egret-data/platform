@@ -61,6 +61,10 @@ export interface CartesianConfig {
   connectNulls?: boolean;        // line: bridge null gaps
   step?: boolean;                // line: step interpolation
   showStackTotal?: boolean;      // label the total atop each stacked column
+  seriesColors?: Record<string, string>;  // series name -> colour override
+  seriesLabels?: Record<string, string>;  // series name -> display label override
+  yMin?: number;                 // manual value-axis minimum (auto when undefined)
+  yMax?: number;                 // manual value-axis maximum
 }
 export interface PieConfig {
   dimension?: string;
@@ -72,6 +76,7 @@ export interface PieConfig {
   sortRows?: boolean;        // sort slices by value desc (default true)
   showTotal?: boolean;       // donut only: grand total in the centre
   percentVisibility?: "off" | "inside" | "both";  // percent in slice labels (default off)
+  sliceColors?: Record<string, string>;  // per-slice colour override keyed by dimension value
 }
 export interface ScalarConfig {
   metric?: string;
