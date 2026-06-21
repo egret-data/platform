@@ -4,9 +4,9 @@ import { SERIES_PALETTE } from "./echarts/palette";
 
 interface ResultColumn { name: string; type: string }
 
-const MAIN = SERIES_PALETTE[0]; // #509EE3
-const LIGHT = "#D9ECFB";        // track, in progress
-const DARK = "#2C6FA8";         // track, goal exceeded
+const MAIN = SERIES_PALETTE[1]; // green #88BF4D (Metabase progress colour)
+const LIGHT = "#E3F0D4";        // light green track, in progress
+const DARK = "#5A8A2E";         // dark green track, goal exceeded
 
 /**
  * Metabase-style Progress: one metric vs a goal, as a horizontal bar.
@@ -39,22 +39,29 @@ export function ProgressChart({
   const fmt = (v: number) => formatValue(v, type, format);
 
   return (
-    <div className="flex h-[40vh] flex-col justify-center gap-4 px-8">
-      <div className="flex items-baseline justify-between">
-        <div className="text-[2rem] font-bold tabular-nums text-foreground">{hasValue ? fmt(value) : "—"}</div>
-        {hasGoal && <div className="text-sm text-muted-foreground">Goal {fmt(goal)}</div>}
-      </div>
+    <div className="flex h-[40vh] flex-col justify-center px-10">
       <div className="relative">
-        {hasGoal && (
+        {/* The value floats above the fill end, like Metabase. */}
+        <div data-progress-value className="absolute -top-7 -translate-x-1/2 whitespace-nowrap text-sm font-semibold tabular-nums text-foreground"
+          style={{ left: `${arrowPercent * 100}%` }}>
+          {hasValue ? fmt(value) : "—"}
+        </div>
+        {hasGoal && hasValue && (
           <div
             data-progress-pointer
-            className="absolute -top-2 h-0 w-0 -translate-x-1/2 border-x-8 border-x-transparent"
-            style={{ left: `${arrowPercent * 100}%`, borderTop: `8px solid ${exceeded ? DARK : MAIN}` }}
+            className="absolute -top-2 h-0 w-0 -translate-x-1/2 border-x-[6px] border-x-transparent"
+            style={{ left: `${arrowPercent * 100}%`, borderTop: `7px solid ${exceeded ? DARK : MAIN}` }}
           />
         )}
-        <div className="h-4 w-full overflow-hidden rounded" style={{ backgroundColor: exceeded ? DARK : LIGHT }}>
+        <div className="h-5 w-full overflow-hidden rounded" style={{ backgroundColor: exceeded ? DARK : LIGHT }}>
           <div data-progress-fill className="h-full rounded" style={{ width: `${barPercent * 100}%`, backgroundColor: MAIN }} />
         </div>
+        {hasGoal && (
+          <div className="mt-1 flex justify-between text-xs text-muted-foreground">
+            <span>{fmt(0)}</span>
+            <span>Goal {fmt(goal)}</span>
+          </div>
+        )}
       </div>
     </div>
   );

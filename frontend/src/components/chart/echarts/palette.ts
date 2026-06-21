@@ -32,6 +32,10 @@ export const CHART_THEME = {
 
 export const seriesColor = (i: number) => SERIES_PALETTE[i % SERIES_PALETTE.length];
 
+// Metabase colours a single (un-broken-out) series with its "summarize" green
+// (palm/50 = hsl(89 48% 40%)) rather than the first accent.
+export const SUMMARIZE_COLOR = "#689735";
+
 /** Muted color for the aggregated "Other" pie slice (Metabase uses text-tertiary). */
 export const OTHER_SLICE_COLOR = "var(--muted-foreground)";
 

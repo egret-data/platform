@@ -1,5 +1,6 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
+import { isNumericType, isTemporalType } from "../../format-types";
 import { formatValue } from "../../format";
 import { CHART_THEME, SERIES_PALETTE, COLOR_FALLBACK, resolveColor } from "../palette";
 
@@ -15,7 +16,7 @@ export interface WaterfallBuildConfig {
 
 const INCREASE = SERIES_PALETTE[1]; // green
 const DECREASE = SERIES_PALETTE[3]; // red
-const TOTAL = SERIES_PALETTE[0];    // blue
+const TOTAL = "#4C5773";            // dark navy, like Metabase's total bar
 
 // Metabase-style Waterfall: sequential deltas with a running total. Built from two
 // stacked bar series — a transparent base that floats the visible delta bar.
@@ -34,8 +35,16 @@ export function buildWaterfallOption(columns: ResultColumn[], rows: unknown[][],
   const bars: { value: number; itemStyle: { color: string } }[] = [];
 
   if (xi != null && mi != null) {
+    // Order steps by the x column (temporal chronological, numeric ascending, nominal
+    // kept as-is) so the running total builds in a sensible sequence — Metabase parity.
+    const xType = columns[xi].type;
+    const ordered = isTemporalType(xType)
+      ? [...rows].sort((a, b) => Date.parse(String(a[xi])) - Date.parse(String(b[xi])))
+      : isNumericType(xType)
+        ? [...rows].sort((a, b) => Number(a[xi]) - Number(b[xi]))
+        : rows;
     let running = 0;
-    for (const r of rows) {
+    for (const r of ordered) {
       const delta = Number(r[mi]);
       if (!Number.isFinite(delta)) continue;
       const before = running;

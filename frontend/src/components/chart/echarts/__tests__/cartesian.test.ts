@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildCartesianOption } from "../options/cartesian";
-import { CHART_THEME, SERIES_PALETTE } from "../palette";
+import { CHART_THEME, SERIES_PALETTE, SUMMARIZE_COLOR } from "../palette";
 
 const columns = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }, { name: "cnt", type: "bigint" }];
 const rows = [["EU", 10, 3], ["US", 20, 5]];
@@ -87,9 +87,24 @@ describe("buildCartesianOption — Metabase-parity styling & axes", () => {
     expect(opt.series[0].itemStyle.color).toBe(SERIES_PALETTE[0]);
     expect(opt.series[1].itemStyle.color).toBe(SERIES_PALETTE[1]);
   });
+  it("colours a lone series with the summarize green (Metabase parity)", () => {
+    const opt = buildCartesianOption(cols, rows, base) as any; // single metric
+    expect(opt.series[0].itemStyle.color).toBe(SUMMARIZE_COLOR);
+  });
   it("bar series carry barWidth", () => {
     const opt = buildCartesianOption(cols, rows, base) as any;
     expect(opt.series[0].barWidth).toBe(CHART_THEME.barWidth);
+  });
+  it("grouped (non-stacked, >1 bar) series drop the fixed barWidth so they sit side by side", () => {
+    const c = [{ name: "p", type: "varchar" }, { name: "s", type: "varchar" }, { name: "rev", type: "double" }];
+    const r = [["A", "X", 1], ["A", "Y", 2], ["B", "X", 3]];
+    const breakout = buildCartesianOption(c, r, { kind: "bar", xAxis: "p", yMetrics: ["rev"], series: "s" }) as any;
+    expect(breakout.series[0].barWidth).toBeUndefined();
+    const multi = buildCartesianOption(cols, rows, { ...base, yMetrics: ["rev", "cnt"] }) as any;
+    expect(multi.series[0].barWidth).toBeUndefined();
+    // stacked bars stack (don't group) → keep the fixed width
+    const stacked = buildCartesianOption(c, r, { kind: "bar", xAxis: "p", yMetrics: ["rev"], series: "s", stacked: true }) as any;
+    expect(stacked.series[0].barWidth).toBe(CHART_THEME.barWidth);
   });
   it("line series are smooth when configured and carry a lineStyle width", () => {
     const opt = buildCartesianOption(cols, rows, { ...base, kind: "line", smooth: true }) as any;
@@ -111,10 +126,11 @@ describe("buildCartesianOption — Metabase-parity styling & axes", () => {
   it("grid reserves room for labels (containLabel)", () => {
     expect((buildCartesianOption(cols, rows, base) as any).grid.containLabel).toBe(true);
   });
-  it("reserves extra bottom space so a legend does not overlap the x labels", () => {
-    const noLegend = (buildCartesianOption(cols, rows, base) as any).grid.bottom;
-    const withLegend = (buildCartesianOption(cols, rows, { ...base, showLegend: true }) as any).grid.bottom;
-    expect(withLegend).toBeGreaterThan(noLegend);
+  it("reserves top space for the legend (Metabase puts it on top)", () => {
+    const noLegend = (buildCartesianOption(cols, rows, base) as any).grid.top;
+    const withLegend = (buildCartesianOption(cols, rows, { ...base, showLegend: true }) as any) as any;
+    expect(withLegend.grid.top).toBeGreaterThan(noLegend);
+    expect(withLegend.legend.top).toBe(0);
   });
   it("value axis formats labels via column type / settings", () => {
     const opt = buildCartesianOption(cols, rows, { ...base, metricTypes: { rev: "double" }, columnSettings: { rev: { number_style: "currency", currency: "USD", decimals: 0 } } }) as any;
@@ -128,6 +144,22 @@ describe("buildCartesianOption — Metabase-parity styling & axes", () => {
     const opt = buildCartesianOption(cols, rows, { ...base, showLabels: true, metricTypes: { rev: "double" }, columnSettings: { rev: { prefix: "$", decimals: 0 } } }) as any;
     expect(opt.series[0].label.show).toBe(true);
     expect(opt.series[0].label.formatter({ value: 10 })).toBe("$10");
+  });
+});
+
+describe("buildCartesianOption — metric-vs-metric scatter (Metabase parity)", () => {
+  const cols = [{ name: "d", type: "varchar" }, { name: "x", type: "double" }, { name: "y", type: "double" }];
+  const rows = [["A", 1, 10], ["B", 2, 20]];
+  it("plots (xMetric, yMetric) points on two value axes", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "scatter", xAxis: "d", xMetric: "x", yMetrics: ["y"] }) as any;
+    expect(opt.xAxis.type).toBe("value");
+    expect(opt.yAxis.type).toBe("value");
+    expect(opt.series[0].type).toBe("scatter");
+    expect(opt.series[0].data).toEqual([{ value: [1, 10], name: "A" }, { value: [2, 20], name: "B" }]);
+  });
+  it("falls back to a category scatter without xMetric", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "scatter", xAxis: "d", yMetrics: ["y"] }) as any;
+    expect(opt.xAxis.type).toBe("category");
   });
 });
 
@@ -243,9 +275,13 @@ describe("buildCartesianOption — series polish & trend (Metabase parity 2a)", 
     expect(opt.series[0].barMinHeight).toBeGreaterThan(0);
   });
   it("line connectNulls + step come from config", () => {
-    const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"], connectNulls: true, step: true }) as any;
-    expect(opt.series[0].connectNulls).toBe(true);
+    const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"], connectNulls: false, step: true }) as any;
+    expect(opt.series[0].connectNulls).toBe(false);
     expect(opt.series[0].step).toBe("middle");
+  });
+  it("lines connect across nulls by default (Metabase parity)", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"] }) as any;
+    expect(opt.series[0].connectNulls).toBe(true);
   });
   it("trendLine appends a dashed least-squares trend series per metric", () => {
     const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"], trendLine: true }) as any;
@@ -275,10 +311,10 @@ describe("buildCartesianOption — row chart (Metabase parity 3a)", () => {
     expect(opt.xAxis.type).toBe("value");
     expect(opt.series[0].type).toBe("bar");
   });
-  it("sorts categories ascending by value so the largest bar is on top", () => {
+  it("keeps the dimension order (Metabase doesn't value-sort rows)", () => {
     const opt = buildCartesianOption(cols, rows, { kind: "row", xAxis: "p", yMetrics: ["rev"] }) as any;
-    expect(opt.yAxis.data).toEqual(["A", "C", "B"]);
-    expect(opt.series[0].data).toEqual([10, 20, 30]);
+    expect(opt.yAxis.data).toEqual(["A", "B", "C"]);
+    expect(opt.series[0].data).toEqual([10, 30, 20]);
   });
   it("places data labels at the bar end when showLabels", () => {
     const opt = buildCartesianOption(cols, rows, { kind: "row", xAxis: "p", yMetrics: ["rev"], showLabels: true }) as any;

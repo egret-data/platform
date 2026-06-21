@@ -162,7 +162,8 @@ export default function ChartExplore() {
   function specForRun(): QuerySpec {
     if (isCartesianViz(viz)) {
       const dims = [cartesian.xAxis, cartesian.series].filter((d): d is string => !!d);
-      return { metrics: cartesian.yMetrics, dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
+      const mets = viz === "scatter" && cartesian.xMetric ? [cartesian.xMetric, ...cartesian.yMetrics] : cartesian.yMetrics;
+      return { metrics: mets, dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
     }
     if (viz === "pie") {
       const dims = pie.dimension ? [pie.dimension] : [];
@@ -440,6 +441,18 @@ export default function ChartExplore() {
                     </SelectContent>
                   </Select>
                 </div>
+                {viz === "scatter" && (
+                  <div className="space-y-1">
+                    <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">X metric (optional)</Label>
+                    <Select value={cartesian.xMetric ?? "__none"} onValueChange={(v) => patchCartesian({ xMetric: v === "__none" ? undefined : v })}>
+                      <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__none">None — use the dimension</SelectItem>
+                        {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
                 <FieldZone label="Y-axis" selected={cartesian.yMetrics} onChange={(v) => patchCartesian({ yMetrics: v })}
                   options={metrics.map((m) => m.metric_name)} />
                 <div className="space-y-1">
@@ -807,7 +820,7 @@ export default function ChartExplore() {
             {results.data.rows.length === 0
               ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
               : <EChartsRenderer option={buildCartesianOption(results.data.columns, results.data.rows, {
-                  kind: viz, xAxis: cartesian.xAxis, yMetrics: cartesian.yMetrics, series: cartesian.series,
+                  kind: viz, xAxis: cartesian.xAxis, xMetric: cartesian.xMetric, yMetrics: cartesian.yMetrics, series: cartesian.series,
                   stacked: cartesian.stacked, horizontal: cartesian.horizontal, smooth: cartesian.smooth,
                   showLabels: cartesian.showLabels, showLegend: cartesian.showLegend,
                   xLabel: cartesian.xLabel, yLabel: cartesian.yLabel, seriesTypes: cartesian.seriesTypes,

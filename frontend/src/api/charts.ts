@@ -41,6 +41,7 @@ export interface TableState {
 
 export interface CartesianConfig {
   xAxis?: string;            // single dimension (category / x)
+  xMetric?: string;          // scatter only: a metric on the x-axis (metric-vs-metric)
   yMetrics: string[];        // one or more metrics (y)
   series?: string;           // optional 2nd dimension (breakout)
   stacked?: boolean;         // bar/area

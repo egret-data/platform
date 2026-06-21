@@ -18,9 +18,17 @@ function quantile(sorted: number[], q: number): number {
   const rest = pos - base;
   return sorted[base + 1] !== undefined ? sorted[base] + rest * (sorted[base + 1] - sorted[base]) : sorted[base];
 }
-function fiveNumber(values: number[]): [number, number, number, number, number] {
+// Tukey box: whiskers reach the furthest point within 1.5·IQR of the quartiles;
+// points beyond are outliers. Also returns the mean. Matches Metabase's box plot.
+function boxStats(values: number[]) {
   const s = [...values].sort((a, b) => a - b);
-  return [s[0], quantile(s, 0.25), quantile(s, 0.5), quantile(s, 0.75), s[s.length - 1]];
+  const q1 = quantile(s, 0.25), med = quantile(s, 0.5), q3 = quantile(s, 0.75);
+  const iqr = q3 - q1;
+  const lowFence = q1 - 1.5 * iqr, highFence = q3 + 1.5 * iqr;
+  const inRange = s.filter((v) => v >= lowFence && v <= highFence);
+  const outliers = s.filter((v) => v < lowFence || v > highFence);
+  const mean = s.reduce((t, v) => t + v, 0) / s.length;
+  return { box: [inRange[0] ?? s[0], q1, med, q3, inRange[inRange.length - 1] ?? s[s.length - 1]], outliers, mean };
 }
 
 // Metabase-style Box plot: the distribution (min/Q1/median/Q3/max) of a value per
@@ -41,7 +49,10 @@ export function buildBoxplotOption(columns: ResultColumn[], rows: unknown[][], c
     }
   }
   const categories = [...groups.keys()];
-  const data = categories.map((k) => fiveNumber(groups.get(k)!));
+  const stats = categories.map((k) => boxStats(groups.get(k)!));
+  const data = stats.map((s) => s.box);
+  const outlierPoints = stats.flatMap((s, i) => s.outliers.map((v) => [i, v]));
+  const meanPoints = stats.map((s, i) => [i, s.mean]);
 
   const gridLine = resolveColor(CHART_THEME.gridLine, COLOR_FALLBACK.gridLine);
   const axisLabelColor = resolveColor(CHART_THEME.axisLabel, COLOR_FALLBACK.axisLabel);
@@ -61,10 +72,17 @@ export function buildBoxplotOption(columns: ResultColumn[], rows: unknown[][], c
       axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: (v: number) => fmt(v) },
       splitLine: { lineStyle: { color: gridLine } },
     },
-    series: [{
-      type: "boxplot",
-      data,
-      itemStyle: { color: SERIES_PALETTE[0], borderColor: SERIES_PALETTE[7] },
-    }],
+    series: [
+      {
+        type: "boxplot",
+        data,
+        // Light green box with a green outline, like Metabase.
+        itemStyle: { color: "#E3F0D4", borderColor: SERIES_PALETTE[1] },
+      },
+      // Outliers (beyond 1.5·IQR) as individual points.
+      { type: "scatter", data: outlierPoints, symbolSize: 6, itemStyle: { color: SERIES_PALETTE[1] }, tooltip: { trigger: "item" } },
+      // Mean as a diamond.
+      { type: "scatter", data: meanPoints, symbol: "diamond", symbolSize: 9, itemStyle: { color: SERIES_PALETTE[7] }, tooltip: { trigger: "item" } },
+    ],
   };
 }
