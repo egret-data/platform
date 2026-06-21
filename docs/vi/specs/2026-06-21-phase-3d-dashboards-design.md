@@ -14,7 +14,7 @@ canvas — **bám sát Metabase cả về hành vi lẫn style**, đúng mức �
 
 ## Vì sao bám Metabase
 
-Dashboard của Metabase là một **lưới 18 cột** chứa các *dashcard*. Mỗi dashcard
+Dashboard của Metabase là một **lưới 24 cột** chứa các *dashcard*. Mỗi dashcard
 trỏ tới một saved question và được định vị bằng `(col, row, size_x, size_y)` theo
 đơn vị ô lưới. Chỉnh sửa là một chế độ riêng (bút chì → kéo/resize/thêm/xoá →
 Save); xem thì chạy query từng card độc lập rồi render. **Parameter/filter** cấp
@@ -31,7 +31,7 @@ Tính năng lớn nên chia 4 phase. **Spec này mô tả toàn bộ thiết k�
 sản phẩm của PR đầu tiên.** Các phase sau có plan triển khai riêng nhưng dùng
 chung data model này.
 
-- **Phase A — Lõi (PR này):** CRUD dashboard, lưới 18 cột chứa *question card*
+- **Phase A — Lõi (PR này):** CRUD dashboard, lưới 24 cột chứa *question card*
   (mỗi card là một saved chart), view mode (chạy + render mọi card) và edit mode
   (kéo / resize / thêm từ saved charts / xoá / lưu layout).
 - **Phase B — Đa dạng card + hoàn thiện:** text / heading / link card (markdown),
@@ -57,7 +57,7 @@ Mô phỏng đúng slice `chart` sẵn có trong `egret-bi`.
 
 **Migration `0015_dashboard.sql`:** bảng `dashboards` (unique tên theo workspace)
 và `dashboard_cards` (`chart_id` nullable cho text card phase sau; `card_type`;
-`grid_col`/`grid_row`/`size_x`/`size_y` theo lưới 18 cột; `options` jsonb;
+`grid_col`/`grid_row`/`size_x`/`size_y` theo lưới 24 cột; `options` jsonb;
 `ordinal`). Perm `dashboard:read` / `dashboard:manage` cấp cho ws_editor +
 ws_admin. Dùng `grid_col` / `grid_row` (không phải `col` / `row`) vì `row` là từ
 khoá trong Postgres.
@@ -113,7 +113,7 @@ không biết gì về render, cả hai test độc lập được.
   `api/charts.ts`.
 - **`Dashboards.tsx`** — trang list (mô phỏng `Charts.tsx`): tên (link), số card,
   updated-at, **+ Dashboard**, delete. Thay placeholder hiện tại.
-- **`DashboardView.tsx`** — lưới, dùng **react-grid-layout** (18 cột, row height
+- **`DashboardView.tsx`** — lưới, dùng **react-grid-layout** (24 cột, row height
   kiểu Metabase), hai chế độ:
   - **View mode:** mỗi card → `useChartData` + `<ChartRenderer>`; loading / error
     từng card; card không kéo được.
@@ -123,6 +123,23 @@ không biết gì về render, cả hai test độc lập được.
 
 react-grid-layout là thư viện lưới-dashboard de-facto và chính Metabase dùng; có
 sẵn drag, resize, collision. Tương thích React 18.
+
+**Sizing lưới (theo hằng số Metabase).** 24 cột (`GRID_WIDTH = 24`). Row height
+suy ra từ width chứ không cố định: `rowHeight = max(width / 24 / (10/9), 40px)` —
+tỉ lệ ô `10/9` với tối thiểu `40px` (`GRID_ASPECT_RATIO`, `MIN_ROW_HEIGHT`). Card
+có **min size** theo từng loại viz (scalar nhỏ được, table cần to hơn) và
+**default size** khi mới thả (Metabase chọn default theo display type). Phase A
+dùng một default (vd 6×4) và một min toàn cục; min theo từng viz làm sau.
+
+**Đã validate với Metabase + Superset (2026-06-21).** Metabase xác nhận mô hình:
+lưới 24 cột, dashcard phẳng `{col, row, size_x, size_y}`, PUT cả dashboard, fetch
+song song từng card (mỗi dashcard một request, không batch), `react-grid-layout`,
+edit mode tường minh. Superset đi hướng khác — cây component lồng nhau
+(`ROW`/`COLUMN`/`TABS` chứa `CHART`/`MARKDOWN`), 12 cột, `react-dnd`, PUT cả
+`position_json` — qua đó xác nhận lưu cả-layout và fetch độc lập từng chart là
+chuẩn ngành, đồng thời cho thấy mô hình cây nặng hơn mức ta cần. Ta giữ phẳng
+(kiểu Metabase) cho Phase A; **native-filter scoping** của Superset (`targets` +
+`chartsInScope`) định hướng Phase C và **tabs** first-class định hướng Phase D.
 
 ## Xử lý lỗi
 

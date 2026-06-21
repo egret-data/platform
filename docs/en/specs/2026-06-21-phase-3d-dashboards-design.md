@@ -11,7 +11,7 @@ fidelity bar we held for Table, Pivot, and Charts.
 
 ## Why match Metabase
 
-Metabase's dashboard is a fixed **18-column grid** of *dashcards*. Each dashcard
+Metabase's dashboard is a fixed **24-column grid** of *dashcards*. Each dashcard
 references a saved question and is positioned by `(col, row, size_x, size_y)` in
 grid units. Editing is an explicit mode (pencil → drag/resize/add/remove → Save);
 viewing runs every card's query independently and renders it. Dashboard-level
@@ -28,7 +28,7 @@ The feature is large, so it ships in four phases. **This spec covers the full
 A→D design; Phase A is the deliverable of the first PR.** Later phases get their
 own implementation plans built on this same data model.
 
-- **Phase A — Core (this PR):** dashboard CRUD, an 18-column grid of *question
+- **Phase A — Core (this PR):** dashboard CRUD, a 24-column grid of *question
   cards* (each a saved chart), view mode (run + render every card) and edit mode
   (drag / resize / add from saved charts / remove / save layout).
 - **Phase B — Card variety + polish:** text / heading / link cards (markdown),
@@ -62,7 +62,7 @@ CREATE TABLE dashboards (
 CREATE TABLE dashboard_cards (
     id, dashboard_id, chart_id?,        -- chart_id nullable (Phase B text cards)
     card_type DEFAULT 'chart',
-    grid_col, grid_row, size_x, size_y, -- 18-col grid units
+    grid_col, grid_row, size_x, size_y, -- 24-col grid units
     options jsonb DEFAULT '{}',         -- text body, overrides, click behaviour (later)
     ordinal                             -- placement order
 );
@@ -126,7 +126,7 @@ rendering, and both are testable in isolation.
   `api/charts.ts`.
 - **`Dashboards.tsx`** — list page (mirror `Charts.tsx`): name (link), card
   count, updated-at, **+ Dashboard**, delete. Replaces the current placeholder.
-- **`DashboardView.tsx`** — the grid, using **react-grid-layout** (18 columns,
+- **`DashboardView.tsx`** — the grid, using **react-grid-layout** (24 columns,
   Metabase-like row height), with two modes:
   - **View mode:** each card → `useChartData` + `<ChartRenderer>`; per-card
     loading / error; cards are not draggable.
@@ -136,6 +136,26 @@ rendering, and both are testable in isolation.
 
 react-grid-layout is the de-facto dashboard-grid library and what Metabase itself
 uses; it gives drag, resize, and collision out of the box. React 18 compatible.
+
+**Grid sizing (Metabase's constants).** 24 columns
+(`GRID_WIDTH = 24`). Row height is derived from width, not fixed:
+`rowHeight = max(width / 24 / (10/9), 40px)` — a `10/9` cell aspect ratio with a
+`40px` minimum (`GRID_ASPECT_RATIO`, `MIN_ROW_HEIGHT`). Cards have a per-viz
+**minimum size** (e.g. a scalar can be small, a table needs more) and a
+sensible **default size** when first dropped (Metabase picks a default per
+display type). Phase A uses one default (e.g. 6×4) and a global minimum;
+per-viz minimums can follow.
+
+**Validated against Metabase + Superset (2026-06-21).** Metabase confirms the
+model: 24-col grid, flat `{col, row, size_x, size_y}` dashcards, whole-dashboard
+PUT, parallel per-card fetch (one query request per dashcard, no batch),
+`react-grid-layout`, explicit edit mode. Superset takes a different shape — a
+nested component **tree** (`ROW`/`COLUMN`/`TABS` containing `CHART`/`MARKDOWN`),
+12 columns, `react-dnd`, a whole-document `position_json` PUT — which confirms
+whole-layout persistence and independent per-chart fetch are industry-normal
+while showing the tree model is heavier than we need. We stay flat (Metabase
+style) for Phase A; Superset's **native-filter scoping** (`targets` +
+`chartsInScope`) informs Phase C and its first-class **tabs** inform Phase D.
 
 ## Data flow
 
