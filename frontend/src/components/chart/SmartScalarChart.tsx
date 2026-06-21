@@ -39,19 +39,21 @@ export function SmartScalarChart({
   const up = change > 0;
   const down = change < 0;
 
+  const dimType = di >= 0 ? columns[di].type : "varchar";
   const fmt = (v: number) => formatValue(v, type, format);
-  const prevLabel = prevRow && di >= 0 ? String(prevRow[di] ?? "") : "previous";
+  const curLabel = curRow && di >= 0 ? formatValue(curRow[di], dimType) : "";
 
   return (
-    <div className="flex h-[40vh] flex-col items-center justify-center gap-2">
+    <div className="flex h-[40vh] flex-col items-center justify-center gap-1">
       <div className="text-[2.5rem] font-bold leading-none tabular-nums text-foreground">{hasCur ? fmt(current) : "—"}</div>
+      {curLabel && <div className="text-sm text-muted-foreground">{curLabel}</div>}
       {hasComparison && (
-        <div className="flex items-center gap-2 text-sm">
+        <div className="flex items-center gap-1.5 text-sm">
           <span data-trend className="flex items-center gap-1 font-medium" style={{ color: up ? UP : down ? DOWN : undefined }}>
             {up ? "▲" : down ? "▼" : "•"}{" "}
-            {Number.isFinite(pct) ? `${(Math.abs(pct) * 100).toFixed(1)}%` : fmt(Math.abs(change))}
+            {Number.isFinite(pct) ? `${(Math.abs(pct) * 100).toFixed(2)}%` : fmt(Math.abs(change))}
           </span>
-          <span className="text-muted-foreground">vs {prevLabel}</span>
+          <span className="text-muted-foreground">vs previous: {fmt(previous)}</span>
         </div>
       )}
     </div>

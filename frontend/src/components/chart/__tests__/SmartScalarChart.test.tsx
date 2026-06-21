@@ -5,11 +5,12 @@ import { SmartScalarChart } from "../SmartScalarChart";
 const cols = [{ name: "mo", type: "varchar" }, { name: "rev", type: "double" }];
 
 describe("SmartScalarChart", () => {
-  it("shows the latest value and the % change vs the previous period", () => {
+  it("shows the latest value, its period, and the % change + previous value", () => {
     render(<SmartScalarChart columns={cols} rows={[["Jan", 100], ["Feb", 120]]} dimension="mo" metric="rev" format={{ decimals: 0 }} />);
     expect(screen.getByText("120")).toBeInTheDocument();
-    expect(screen.getByText(/20\.0%/)).toBeInTheDocument();
-    expect(screen.getByText(/vs Jan/)).toBeInTheDocument();
+    expect(screen.getByText("Feb")).toBeInTheDocument();            // current period label
+    expect(screen.getByText(/20\.00%/)).toBeInTheDocument();
+    expect(screen.getByText(/vs previous: 100/)).toBeInTheDocument(); // previous value
   });
   it("marks a decrease with a down arrow", () => {
     const { container } = render(<SmartScalarChart columns={cols} rows={[["Jan", 100], ["Feb", 80]]} dimension="mo" metric="rev" />);
