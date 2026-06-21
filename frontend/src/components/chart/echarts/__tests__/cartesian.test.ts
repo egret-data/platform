@@ -147,6 +147,22 @@ describe("buildCartesianOption — Metabase-parity styling & axes", () => {
   });
 });
 
+describe("buildCartesianOption — metric-vs-metric scatter (Metabase parity)", () => {
+  const cols = [{ name: "d", type: "varchar" }, { name: "x", type: "double" }, { name: "y", type: "double" }];
+  const rows = [["A", 1, 10], ["B", 2, 20]];
+  it("plots (xMetric, yMetric) points on two value axes", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "scatter", xAxis: "d", xMetric: "x", yMetrics: ["y"] }) as any;
+    expect(opt.xAxis.type).toBe("value");
+    expect(opt.yAxis.type).toBe("value");
+    expect(opt.series[0].type).toBe("scatter");
+    expect(opt.series[0].data).toEqual([{ value: [1, 10], name: "A" }, { value: [2, 20], name: "B" }]);
+  });
+  it("falls back to a category scatter without xMetric", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "scatter", xAxis: "d", yMetrics: ["y"] }) as any;
+    expect(opt.xAxis.type).toBe("category");
+  });
+});
+
 // Phase 1c — cartesian data shaping, clean-room from Metabase's cartesian/model/dataset.ts
 // (sort dimension by axis type; drop null-dimension rows).
 describe("buildCartesianOption — data shaping (Metabase parity 1c)", () => {

@@ -9,6 +9,7 @@ export interface ResultColumn { name: string; type: string }
 export interface CartesianBuildConfig {
   kind: CartesianViz;
   xAxis?: string;
+  xMetric?: string;        // scatter only: a metric on the x-axis (metric-vs-metric)
   yMetrics: string[];
   series?: string;
   stacked?: boolean;
@@ -148,11 +149,37 @@ function sortCategories(cats: unknown[], type: string): unknown[] {
   return cats;
 }
 
+// Metric-vs-metric scatter (Metabase's true scatter): each dimension row is a point
+// at (xMetric, yMetric) on two value axes.
+function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBuildConfig): EChartsCoreOption {
+  const idx = Object.fromEntries(columns.map((c, i) => [c.name, i]));
+  const di = cfg.xAxis != null ? idx[cfg.xAxis] : undefined;
+  const xi = idx[cfg.xMetric!];
+  const yMetric = cfg.yMetrics[0];
+  const yi = idx[yMetric];
+  const gridLine = resolveColor(CHART_THEME.gridLine, COLOR_FALLBACK.gridLine);
+  const axisLabelColor = resolveColor(CHART_THEME.axisLabel, COLOR_FALLBACK.axisLabel);
+  const fmtM = (m: string, v: unknown) => formatValue(v, cfg.metricTypes?.[m] ?? "double", cfg.columnSettings?.[m]);
+  const data = rows
+    .map((r) => ({ value: [Number(r[xi]), Number(r[yi])], name: di != null ? String(r[di] ?? "") : "" }))
+    .filter((p) => Number.isFinite(p.value[0]) && Number.isFinite(p.value[1]));
+  return {
+    grid: { ...CHART_THEME.grid, bottom: (CHART_THEME.grid.bottom as number) + 22 },
+    tooltip: { trigger: "item", formatter: (p: { data: { name: string }; value: number[] }) => `${p.data.name}<br/>${cfg.xMetric}: ${fmtM(cfg.xMetric!, p.value[0])}<br/>${yMetric}: ${fmtM(yMetric, p.value[1])}` },
+    xAxis: { type: "value", name: cfg.xMetric, nameLocation: "middle", nameGap: 28, axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: (v: number) => fmtM(cfg.xMetric!, v) }, splitLine: { lineStyle: { color: gridLine } } },
+    yAxis: { type: "value", name: yMetric, axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: (v: number) => fmtM(yMetric, v) }, splitLine: { lineStyle: { color: gridLine } } },
+    series: [{ type: "scatter", symbolSize: 10, itemStyle: { color: SUMMARIZE_COLOR, opacity: CHART_THEME.scatterOpacity }, data }],
+  };
+}
+
 export function buildCartesianOption(
   columns: ResultColumn[],
   rows: unknown[][],
   cfg: CartesianBuildConfig,
 ): EChartsCoreOption {
+  if (cfg.kind === "scatter" && cfg.xMetric && cfg.yMetrics.length > 0) {
+    return scatterXY(columns, rows, cfg);
+  }
   const idx = Object.fromEntries(columns.map((c, i) => [c.name, i]));
   const xi = cfg.xAxis != null ? idx[cfg.xAxis] : undefined;
   const fmt = (metric: string, v: unknown) =>
