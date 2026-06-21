@@ -58,6 +58,8 @@ export interface PieConfig {
   donut?: boolean;
   showLegend?: boolean;
   showLabels?: boolean;
+  sliceThreshold?: number;   // percent; slices below this fold into "Other" (default 2.5, 0 = off)
+  sortRows?: boolean;        // sort slices by value desc (default true)
 }
 export interface ScalarConfig {
   metric?: string;

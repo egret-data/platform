@@ -6,10 +6,10 @@ const cols = [{ name: "region", type: "varchar" }, { name: "rev", type: "double"
 const rows = [["EU", 10], ["US", 30]];
 
 describe("buildPieOption", () => {
-  it("maps rows to {name, value} slices", () => {
+  it("maps rows to {name, value} slices, sorted by value desc", () => {
     const opt = buildPieOption(cols, rows, { dimension: "region", metric: "rev" }) as any;
     expect(opt.series[0].type).toBe("pie");
-    expect(opt.series[0].data).toEqual([{ name: "EU", value: 10 }, { name: "US", value: 30 }]);
+    expect(opt.series[0].data).toEqual([{ name: "US", value: 30 }, { name: "EU", value: 10 }]);
     expect(opt.series[0].radius).toEqual(["0%", "70%"]);
   });
   it("donut sets an inner radius", () => {
@@ -45,5 +45,47 @@ describe("buildPieOption — Metabase-parity", () => {
   it("showLabels toggles slice labels", () => {
     expect((buildPieOption(cols, rows, { ...base, showLabels: true }) as any).series[0].label.show).toBe(true);
     expect((buildPieOption(cols, rows, base) as any).series[0].label.show).toBe(false);
+  });
+});
+
+// Phase 1a — pie data robustness, clean-room from Metabase's pie/model/index.ts
+// (negative/zero handling) + constants.ts (SLICE_THRESHOLD = 2.5%) + "Other" grouping.
+describe("buildPieOption — data robustness (Metabase parity)", () => {
+  const cols = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+  const slices = (rows: unknown[][], extra: Record<string, unknown> = {}) =>
+    (buildPieOption(cols, rows, { dimension: "d", metric: "m", ...extra }) as any).series[0].data;
+
+  it("drops zero-value slices", () => {
+    expect(slices([["A", 10], ["B", 0], ["C", 5]]).map((s: any) => s.name)).toEqual(["A", "C"]);
+  });
+  it("drops negative slices when signs are mixed", () => {
+    expect(slices([["A", 10], ["B", -3], ["C", 5]]).map((s: any) => s.name)).toEqual(["A", "C"]);
+  });
+  it("uses absolute values when every slice is negative", () => {
+    expect(slices([["A", -10], ["B", -30]])).toEqual([{ name: "B", value: 30 }, { name: "A", value: 10 }]);
+  });
+  it("sorts slices by value descending by default", () => {
+    expect(slices([["A", 5], ["B", 30], ["C", 10]]).map((s: any) => s.name)).toEqual(["B", "C", "A"]);
+  });
+  it("preserves input order when sortRows is false", () => {
+    expect(slices([["A", 5], ["B", 30]], { sortRows: false }).map((s: any) => s.name)).toEqual(["A", "B"]);
+  });
+  it("groups sub-threshold slices (<2.5%) into a single Other slice", () => {
+    const d = slices([["A", 50], ["B", 45], ["C", 2], ["D", 2], ["E", 1]]); // C,D,E each <2.5% of 100
+    expect(d.map((s: any) => s.name)).toEqual(["A", "B", "Other"]);
+    expect(d.find((s: any) => s.name === "Other").value).toBe(5);
+  });
+  it("does not create Other for a single sub-threshold slice", () => {
+    const d = slices([["A", 50], ["B", 49], ["C", 1]]); // only C <2.5%
+    expect(d.map((s: any) => s.name)).toEqual(["A", "B", "C"]);
+  });
+  it("the threshold is configurable and 0 disables Other grouping", () => {
+    const d = slices([["A", 50], ["B", 45], ["C", 2], ["D", 2], ["E", 1]], { sliceThreshold: 0 });
+    expect(d.map((s: any) => s.name)).toEqual(["A", "B", "C", "D", "E"]);
+  });
+  it("the Other slice is muted; normal slices defer to the palette", () => {
+    const d = slices([["A", 50], ["B", 45], ["C", 2], ["D", 2], ["E", 1]]);
+    expect(d.find((s: any) => s.name === "Other").itemStyle.color).toBeTruthy();
+    expect(d.find((s: any) => s.name === "A").itemStyle).toBeUndefined();
   });
 });

@@ -566,7 +566,9 @@ export default function ChartExplore() {
               ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
               : <EChartsRenderer option={buildPieOption(results.data.columns, results.data.rows, {
                   dimension: pie.dimension, metric: pie.metric, donut: pie.donut,
-                  showLegend: pie.showLegend, showLabels: pie.showLabels, columnSettings, metricTypes,
+                  showLegend: pie.showLegend, showLabels: pie.showLabels,
+                  sliceThreshold: pie.sliceThreshold, sortRows: pie.sortRows,
+                  columnSettings, metricTypes,
                 })} />}
           </div>
         )}

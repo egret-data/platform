@@ -1,6 +1,7 @@
 import type { PieConfig } from "@/api/charts";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Input } from "@/components/ui/input";
 
 function Toggle({ id, label, checked, onChange }: { id: string; label: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
@@ -17,6 +18,17 @@ export function PieDisplaySection({ config, onChange }: { config: PieConfig; onC
       <Toggle id="pz-legend" label="Legend" checked={!!config.showLegend} onChange={(v) => onChange({ showLegend: v })} />
       <Toggle id="pz-donut" label="Donut" checked={!!config.donut} onChange={(v) => onChange({ donut: v })} />
       <Toggle id="pz-labels" label="Show labels" checked={!!config.showLabels} onChange={(v) => onChange({ showLabels: v })} />
+      <Toggle id="pz-sort" label="Sort by value" checked={config.sortRows !== false} onChange={(v) => onChange({ sortRows: v })} />
+      <div className="flex items-center justify-between gap-2">
+        <Label htmlFor="pz-threshold" className="text-sm font-normal">Group slices below</Label>
+        <div className="flex items-center gap-1">
+          <Input id="pz-threshold" aria-label="Group slices below" type="number" min={0} max={100} step={0.5}
+            className="h-7 w-16 text-sm"
+            value={config.sliceThreshold ?? 2.5}
+            onChange={(e) => { const n = Number(e.target.value); onChange({ sliceThreshold: Number.isNaN(n) ? 0 : n }); }} />
+          <span className="text-sm text-muted-foreground">%</span>
+        </div>
+      </div>
     </div>
   );
 }

@@ -31,3 +31,6 @@ export const CHART_THEME = {
 } as const;
 
 export const seriesColor = (i: number) => SERIES_PALETTE[i % SERIES_PALETTE.length];
+
+/** Muted color for the aggregated "Other" pie slice (Metabase uses text-tertiary). */
+export const OTHER_SLICE_COLOR = "hsl(var(--muted-foreground))";
