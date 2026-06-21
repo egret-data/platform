@@ -240,7 +240,7 @@ function decorateSeries(
     out.smooth = !!cfg.smooth;
     out.lineStyle = { width: CHART_THEME.lineWidth };
     out.symbolSize = CHART_THEME.symbolSize;
-    out.connectNulls = !!cfg.connectNulls;
+    out.connectNulls = cfg.connectNulls ?? true; // Metabase connects across nulls by default
     if (cfg.step) out.step = "middle";
   }
   if (type === "scatter") { out.symbolSize = CHART_THEME.symbolSize; out.itemStyle = { color: seriesColor(colorIdx), opacity: CHART_THEME.scatterOpacity }; }

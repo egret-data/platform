@@ -24,4 +24,11 @@ describe("buildWaterfallOption", () => {
   it("empty when x or metric is missing", () => {
     expect((buildWaterfallOption(cols, rows, {}) as any).series[1].data).toEqual([]);
   });
+  it("orders temporal steps chronologically regardless of row order (Metabase parity)", () => {
+    const dcols = [{ name: "d", type: "date" }, { name: "v", type: "double" }];
+    const unordered = [["2024-03-01", 5], ["2024-01-01", 10], ["2024-02-01", -3]];
+    const opt = buildWaterfallOption(dcols, unordered, { xAxis: "d", metric: "v" }) as any;
+    expect(opt.xAxis.data).toEqual(["2024-01-01", "2024-02-01", "2024-03-01"]);
+    expect(opt.series[0].data).toEqual([0, 7, 7]); // base: Jan 0, Feb min(10,7)=7, Mar min(7,12)=7
+  });
 });

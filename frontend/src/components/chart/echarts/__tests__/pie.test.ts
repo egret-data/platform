@@ -122,6 +122,6 @@ describe("buildPieOption — donut total & percent (Metabase parity 1b)", () => 
   it("percent without labels shows just the percent", () => {
     const o = opt({ percentVisibility: "inside" });
     expect(o.series[0].label.show).toBe(true);
-    expect(labelText(o, { name: "A", percent: 33.333 })).toBe("33.3%");
+    expect(labelText(o, { name: "A", percent: 33.333 })).toBe("33.33%");
   });
 });

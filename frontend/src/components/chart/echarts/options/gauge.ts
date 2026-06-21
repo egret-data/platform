@@ -12,8 +12,9 @@ export interface GaugeBuildConfig {
   metricTypes?: Record<string, string>;
 }
 
-const MAIN = SERIES_PALETTE[0]; // #509EE3
-const TRACK = "#D9ECFB";
+const ZONE_LOW = SERIES_PALETTE[3];  // red
+const ZONE_MID = SERIES_PALETTE[4];  // yellow
+const ZONE_HIGH = SERIES_PALETTE[1]; // green
 
 // Metabase-style Gauge: one value on an arc between min and max.
 export function buildGaugeOption(columns: ResultColumn[], rows: unknown[][], cfg: GaugeBuildConfig): EChartsCoreOption {
@@ -21,7 +22,7 @@ export function buildGaugeOption(columns: ResultColumn[], rows: unknown[][], cfg
   const raw = mi >= 0 && rows.length > 0 ? rows[0][mi] : undefined;
   const value = raw != null && Number.isFinite(Number(raw)) ? Number(raw) : 0;
   const min = cfg.min ?? 0;
-  const max = cfg.max ?? (value > min ? value * 1.25 : min + 100);
+  const max = cfg.max ?? (value > min ? value * 2 : min + 100); // Metabase auto-range ≈ 2× value
 
   const fmt = (v: unknown) =>
     cfg.metric ? formatValue(v, cfg.metricTypes?.[cfg.metric] ?? "double", cfg.columnSettings?.[cfg.metric]) : String(v);
@@ -33,12 +34,12 @@ export function buildGaugeOption(columns: ResultColumn[], rows: unknown[][], cfg
       type: "gauge",
       min, max,
       startAngle: 210, endAngle: -30,
-      progress: { show: true, width: 16, itemStyle: { color: MAIN } },
-      axisLine: { lineStyle: { width: 16, color: [[1, TRACK]] } },
+      // Three coloured zones (red / yellow / green), like Metabase's default gauge.
+      axisLine: { lineStyle: { width: 18, color: [[1 / 3, ZONE_LOW], [2 / 3, ZONE_MID], [1, ZONE_HIGH]] } },
       axisTick: { show: false },
       splitLine: { show: false },
-      axisLabel: { formatter: (v: number) => fmt(v), distance: 16, fontSize: 11, color: axisLabelColor },
-      pointer: { show: true, itemStyle: { color: MAIN } },
+      axisLabel: { formatter: (v: number) => fmt(v), distance: 18, fontSize: 11, color: axisLabelColor },
+      pointer: { show: true, itemStyle: { color: textColor } },
       anchor: { show: false },
       title: { show: false },
       detail: { valueAnimation: false, formatter: (v: number) => fmt(v), fontSize: 24, fontWeight: 700, offsetCenter: [0, "55%"], color: textColor },

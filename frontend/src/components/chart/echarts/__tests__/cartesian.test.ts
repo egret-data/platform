@@ -243,9 +243,13 @@ describe("buildCartesianOption — series polish & trend (Metabase parity 2a)", 
     expect(opt.series[0].barMinHeight).toBeGreaterThan(0);
   });
   it("line connectNulls + step come from config", () => {
-    const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"], connectNulls: true, step: true }) as any;
-    expect(opt.series[0].connectNulls).toBe(true);
+    const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"], connectNulls: false, step: true }) as any;
+    expect(opt.series[0].connectNulls).toBe(false);
     expect(opt.series[0].step).toBe("middle");
+  });
+  it("lines connect across nulls by default (Metabase parity)", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"] }) as any;
+    expect(opt.series[0].connectNulls).toBe(true);
   });
   it("trendLine appends a dashed least-squares trend series per metric", () => {
     const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"], trendLine: true }) as any;

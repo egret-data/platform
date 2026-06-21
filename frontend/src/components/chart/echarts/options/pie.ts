@@ -73,7 +73,7 @@ export function buildPieOption(columns: ResultColumn[], rows: unknown[][], cfg: 
   // Label: name (showLabels) and/or percent (percentVisibility) — Metabase getSliceLabel.
   const showName = !!cfg.showLabels;
   const showPercent = cfg.percentVisibility === "inside" || cfg.percentVisibility === "both";
-  const pct = (p: number) => `${Math.round(p * 10) / 10}%`;
+  const pct = (p: number) => `${parseFloat(p.toFixed(2))}%`; // up to 2 decimals, like Metabase
   const labelFormatter = (p: { name: string; percent: number }) => {
     const name = showName ? p.name : undefined;
     const percent = showPercent ? pct(p.percent) : undefined;
