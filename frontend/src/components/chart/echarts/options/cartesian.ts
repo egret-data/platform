@@ -33,6 +33,8 @@ export interface CartesianBuildConfig {
   seriesLabels?: Record<string, string>;  // series name -> display label override
   yMin?: number;                 // manual value-axis minimum (auto when undefined)
   yMax?: number;                 // manual value-axis maximum
+  showMarkers?: boolean;         // line/area: show the point symbols (off by default, like Metabase)
+  xScale?: "ordinal" | "linear" | "timeseries";  // x-axis scale (default ordinal/category)
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
 }
@@ -147,6 +149,23 @@ function isDualAxis(cfg: CartesianBuildConfig): boolean {
 const isHorizontal = (cfg: CartesianBuildConfig) =>
   cfg.kind === "row" || (!!cfg.horizontal && cfg.kind !== "scatter");
 
+// A non-ordinal x-scale (linear/timeseries) positions points by their real x value
+// instead of evenly-spaced categories — only on a vertical chart.
+const usesXScale = (cfg: CartesianBuildConfig) =>
+  !isHorizontal(cfg) && (cfg.xScale === "linear" || cfg.xScale === "timeseries");
+
+// Re-key category-aligned series onto real x coordinates: each value becomes an
+// [x, y] pair, dropping points whose x can't be parsed. Mutates the series in place.
+function applyXScale(categories: unknown[], series: unknown[], cfg: CartesianBuildConfig) {
+  const coord = (c: unknown) => (cfg.xScale === "timeseries" ? Date.parse(String(c)) : Number(c));
+  const xs = categories.map(coord);
+  for (const s of series as { data: (number | null)[] }[]) {
+    s.data = s.data
+      .map((y, i) => [xs[i], y] as unknown as number | null)
+      .filter((p) => Number.isFinite((p as unknown as [number, unknown])[0]));
+  }
+}
+
 // ECharts series type for a metric under the active kind.
 function seriesTypeFor(kind: CartesianViz, metric: string, seriesTypes?: Record<string, "bar" | "line">) {
   if (kind === "combo") return seriesTypes?.[metric] ?? "bar";
@@ -239,6 +258,7 @@ export function buildCartesianOption(
     if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
     if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
     if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
+    if (usesXScale(cfg)) applyXScale(categories, series, cfg);
     return baseOption(cfg, categories as (string | number)[], series);
   }
 
@@ -258,6 +278,7 @@ export function buildCartesianOption(
   if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
   if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
   if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
+  if (usesXScale(cfg)) applyXScale(categories, series, cfg);
   return baseOption(cfg, categories as (string | number)[], series);
 }
 
@@ -293,6 +314,7 @@ function decorateSeries(
     out.smooth = !!cfg.smooth;
     out.lineStyle = { width: CHART_THEME.lineWidth };
     out.symbolSize = CHART_THEME.symbolSize;
+    out.showSymbol = cfg.showMarkers !== false;  // markers shown unless explicitly turned off
     out.connectNulls = cfg.connectNulls ?? true; // Metabase connects across nulls by default
     if (cfg.step) out.step = "middle";
   }
@@ -302,7 +324,8 @@ function decorateSeries(
     out.label = {
       show: true, fontSize: CHART_THEME.labelFontSize, fontWeight: CHART_THEME.labelWeight,
       position: isHorizontal(cfg) ? "right" : "top",
-      formatter: (p: { value: unknown }) => fmt(metric, p.value),
+      // On a value/time x-axis the datum is an [x, y] pair — label the y.
+      formatter: (p: { value: unknown }) => fmt(metric, Array.isArray(p.value) ? p.value[1] : p.value),
     };
   }
   return out;
@@ -324,6 +347,16 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor },
     axisLine: { lineStyle: { color: gridLine } },
   };
+  // Non-ordinal x: a value (linear) or time (timeseries) axis positioning points by
+  // their real coordinate. Series carry [x, y] pairs (see applyXScale).
+  const scaleAxis = {
+    type: cfg.xScale === "timeseries" ? ("time" as const) : ("value" as const),
+    name: cfg.xLabel, nameLocation: "middle" as const, nameGap: 28,
+    axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor },
+    axisLine: { lineStyle: { color: gridLine } },
+    splitLine: { show: false as const },
+  };
+  const xCategory = usesXScale(cfg) ? scaleAxis : categoryAxis;
   const mkValueAxis = (metrics: string[], position?: "left" | "right") => ({
     type: cfg.logScale ? ("log" as const) : ("value" as const),
     name: position === "right" ? undefined : cfg.yLabel,
@@ -345,10 +378,10 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   } else if (isDualAxis(cfg)) {
     const right = rightMetrics(cfg);
     const left = cfg.yMetrics.filter((m) => !right.includes(m));
-    xAxis = categoryAxis;
+    xAxis = xCategory;
     yAxis = [mkValueAxis(left, "left"), mkValueAxis(right, "right")];
   } else {
-    xAxis = categoryAxis;
+    xAxis = xCategory;
     yAxis = mkValueAxis(cfg.yMetrics);
   }
 
@@ -394,7 +427,9 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     const visible = arr.filter((p) => p.value != null && p.seriesName && !p.seriesName.endsWith(" trend"));
     if (visible.length === 0) return "";
     const header = visible[0].axisValueLabel ?? visible[0].name ?? "";
-    const lines = visible.map((p) => `${p.marker ?? ""} ${p.seriesName ?? ""}: <b>${tipFmt(p.seriesName ?? "", Number(p.value))}</b>`);
+    // On a value/time x-axis the datum is an [x, y] pair — take y.
+    const yOf = (v: unknown) => (Array.isArray(v) ? Number(v[1]) : Number(v));
+    const lines = visible.map((p) => `${p.marker ?? ""} ${p.seriesName ?? ""}: <b>${tipFmt(p.seriesName ?? "", yOf(p.value))}</b>`);
     return `${header}<br/>${lines.join("<br/>")}`;
   };
 
