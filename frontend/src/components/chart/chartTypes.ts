@@ -1,5 +1,5 @@
 import {
-  Table2, LayoutGrid, BarChart3, LineChart, AreaChart, ScatterChart, Spline, PieChart, Hash,
+  Table2, LayoutGrid, BarChart3, BarChartHorizontal, LineChart, AreaChart, ScatterChart, Spline, PieChart, Hash,
   type LucideIcon,
 } from "lucide-react";
 import type { VizType } from "@/api/charts";
@@ -25,6 +25,7 @@ export const CHART_TYPES: ChartTypeMeta[] = [
     icon: LayoutGrid,
   },
   { key: "bar", name: "Bar", description: "Compare a metric across a category, optionally broken out by a series.", icon: BarChart3 },
+  { key: "row", name: "Row", description: "Horizontal bars, sorted by value — good for ranking many categories.", icon: BarChartHorizontal },
   { key: "line", name: "Line", description: "Trend a metric over an ordered category such as time.", icon: LineChart },
   { key: "area", name: "Area", description: "Line chart with the area below filled; good for stacked totals.", icon: AreaChart },
   { key: "scatter", name: "Scatter", description: "Plot points for a metric against a category.", icon: ScatterChart },

@@ -92,16 +92,20 @@ function rightMetrics(cfg: CartesianBuildConfig): string[] {
   return (cfg.rightAxisMetrics ?? []).filter((m) => cfg.yMetrics.includes(m));
 }
 function isDualAxis(cfg: CartesianBuildConfig): boolean {
-  const horizontal = !!cfg.horizontal && cfg.kind !== "scatter";
   const right = rightMetrics(cfg);
-  return !horizontal && right.length > 0 && right.length < cfg.yMetrics.length;
+  return !isHorizontal(cfg) && right.length > 0 && right.length < cfg.yMetrics.length;
 }
+
+// A row chart is a horizontal bar chart.
+const isHorizontal = (cfg: CartesianBuildConfig) =>
+  cfg.kind === "row" || (!!cfg.horizontal && cfg.kind !== "scatter");
 
 // ECharts series type for a metric under the active kind.
 function seriesTypeFor(kind: CartesianViz, metric: string, seriesTypes?: Record<string, "bar" | "line">) {
   if (kind === "combo") return seriesTypes?.[metric] ?? "bar";
   if (kind === "area") return "line";
   if (kind === "scatter") return "scatter";
+  if (kind === "row") return "bar";
   return kind; // "bar" | "line"
 }
 
@@ -137,8 +141,20 @@ export function buildCartesianOption(
   // Drop rows with a null x value, then order categories by the x column's type.
   const xType = columns[xi].type;
   const xrows = rows.filter((r) => r[xi] != null);
-  const categories = sortCategories(distinct(xrows.map((r) => r[xi])), xType);
   const catKey = (v: unknown) => String(v);
+  let categories = sortCategories(distinct(xrows.map((r) => r[xi])), xType);
+
+  // Row chart: order categories by the first metric's value, ascending — ECharts
+  // puts y-axis index 0 at the bottom, so ascending puts the largest bar on top.
+  if (cfg.kind === "row" && cfg.yMetrics.length > 0) {
+    const m0 = idx[cfg.yMetrics[0]];
+    const totals = new Map<string, number>();
+    for (const r of xrows) {
+      const v = Number(r[m0]);
+      if (Number.isFinite(v)) totals.set(catKey(r[xi]), (totals.get(catKey(r[xi])) ?? 0) + v);
+    }
+    categories = [...categories].sort((a, b) => (totals.get(catKey(a)) ?? 0) - (totals.get(catKey(b)) ?? 0));
+  }
 
   // Breakout: one ECharts series per distinct series value (first y-metric only).
   if (cfg.series != null && idx[cfg.series] != null) {
@@ -206,6 +222,7 @@ function decorateSeries(
   if (cfg.showLabels) {
     out.label = {
       show: true, fontSize: CHART_THEME.labelFontSize, fontWeight: CHART_THEME.labelWeight,
+      position: isHorizontal(cfg) ? "right" : "top",
       formatter: (p: { value: unknown }) => fmt(metric, p.value),
     };
   }
@@ -213,7 +230,7 @@ function decorateSeries(
 }
 
 function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], series: unknown[]): EChartsCoreOption {
-  const horizontal = !!cfg.horizontal && cfg.kind !== "scatter";
+  const horizontal = isHorizontal(cfg);
   const gridLine = resolveColor(CHART_THEME.gridLine, COLOR_FALLBACK.gridLine);
   const axisLabelColor = resolveColor(CHART_THEME.axisLabel, COLOR_FALLBACK.axisLabel);
   const normalized = isNormalized(cfg);

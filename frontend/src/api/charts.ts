@@ -4,9 +4,9 @@ import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 
 export type VizType =
   | "table" | "pivot_table"
-  | "bar" | "line" | "area" | "scatter" | "combo" | "pie" | "scalar";
+  | "bar" | "row" | "line" | "area" | "scatter" | "combo" | "pie" | "scalar";
 
-export const CARTESIAN_VIZ = ["bar", "line", "area", "scatter", "combo"] as const;
+export const CARTESIAN_VIZ = ["bar", "row", "line", "area", "scatter", "combo"] as const;
 export type CartesianViz = (typeof CARTESIAN_VIZ)[number];
 export const isCartesianViz = (v: VizType): v is CartesianViz =>
   (CARTESIAN_VIZ as readonly string[]).includes(v);

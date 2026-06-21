@@ -22,9 +22,9 @@ export function CartesianDisplaySection({
   config: CartesianConfig;
   onChange: (patch: Partial<CartesianConfig>) => void;
 }) {
-  const isBar = kind === "bar";
+  const isBar = kind === "bar";   // Horizontal toggle is for vertical bar only (row is always horizontal)
   const isLineish = kind === "line" || kind === "area";
-  const canStack = kind === "bar" || kind === "area";
+  const canStack = kind === "bar" || kind === "row" || kind === "area";
   return (
     <div className="space-y-2.5 pt-1.5">
       <Toggle id="cz-legend" label="Legend" checked={!!config.showLegend} onChange={(v) => onChange({ showLegend: v })} />
@@ -38,7 +38,7 @@ export function CartesianDisplaySection({
       {kind !== "scatter" && <Toggle id="cz-trend" label="Trend line" checked={!!config.trendLine} onChange={(v) => onChange({ trendLine: v })} />}
       {kind !== "scatter" && <Toggle id="cz-log" label="Log scale" checked={!!config.logScale} onChange={(v) => onChange({ logScale: v })} />}
 
-      {config.yMetrics.length > 1 && !config.horizontal && (
+      {config.yMetrics.length > 1 && !config.horizontal && kind !== "row" && (
         <div className="space-y-1.5 border-t pt-2">
           <div className="text-xs text-muted-foreground">Y axis</div>
           {config.yMetrics.map((m) => {

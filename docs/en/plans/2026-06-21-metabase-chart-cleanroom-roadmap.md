@@ -48,7 +48,9 @@ Reference (read-to-understand only): `metabase/frontend/src/metabase/visualizati
 ## Phase group 3 — New chart types Metabase has, egret lacks (Scope C)
 
 One phase each, simplest first:
-- [ ] 3a. Row chart (horizontal bar variant)
+- [x] 3a. Row chart — horizontal bars, categories sorted by value (largest on top),
+  value labels at bar ends. New viz_type "row" reusing the cartesian builder + gallery
+  entry. Verified live. (mb: visualizations/RowChart)
 - [ ] 3b. Waterfall
 - [ ] 3c. Funnel
 - [ ] 3d. Progress

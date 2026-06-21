@@ -262,3 +262,26 @@ describe("buildCartesianOption — series polish & trend (Metabase parity 2a)", 
     expect(opt.series).toHaveLength(1);
   });
 });
+
+// Phase 3a — Row chart, clean-room from Metabase's RowChart (horizontal bars,
+// categories sorted by value so the largest sits on top).
+describe("buildCartesianOption — row chart (Metabase parity 3a)", () => {
+  const cols = [{ name: "p", type: "varchar" }, { name: "rev", type: "double" }];
+  const rows = [["A", 10], ["B", 30], ["C", 20]];
+
+  it("renders horizontal bars with categories on the y-axis", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "row", xAxis: "p", yMetrics: ["rev"] }) as any;
+    expect(opt.yAxis.type).toBe("category");
+    expect(opt.xAxis.type).toBe("value");
+    expect(opt.series[0].type).toBe("bar");
+  });
+  it("sorts categories ascending by value so the largest bar is on top", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "row", xAxis: "p", yMetrics: ["rev"] }) as any;
+    expect(opt.yAxis.data).toEqual(["A", "C", "B"]);
+    expect(opt.series[0].data).toEqual([10, 20, 30]);
+  });
+  it("places data labels at the bar end when showLabels", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "row", xAxis: "p", yMetrics: ["rev"], showLabels: true }) as any;
+    expect(opt.series[0].label.position).toBe("right");
+  });
+});
