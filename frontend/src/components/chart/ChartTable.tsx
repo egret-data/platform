@@ -46,6 +46,13 @@ const MIN_COL_WIDTH = 60;
 
 const fillTemplate = (tpl: string, value: string) => tpl.replace(/\{\{\s*value\s*\}\}/g, value);
 
+const URL_RE = /^https?:\/\/\S+$/i;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const linkEl = (href: string, text: string) => (
+  <a href={href} target="_blank" rel="noreferrer" className="text-primary underline">{text}</a>
+);
+
 // Render a cell's content honouring its "Display as" (link/email/image) and mini-bar
 // settings — clean-room of Metabase's column formatting. Falls back to the formatted text.
 function renderTableCell(
@@ -56,7 +63,7 @@ function renderTableCell(
     case "link": {
       const url = fmt.link_url ? fillTemplate(fmt.link_url, str) : str;
       const text = fmt.link_text ? fillTemplate(fmt.link_text, str) : formatted;
-      return str === "" ? formatted : <a href={url} target="_blank" rel="noreferrer" className="text-primary underline">{text}</a>;
+      return str === "" ? formatted : linkEl(url, text);
     }
     case "email":
       return str === "" ? formatted : <a href={`mailto:${str}`} className="text-primary underline">{formatted}</a>;
@@ -64,6 +71,12 @@ function renderTableCell(
       return str === "" ? null : <img src={str} alt="" className="max-h-10 rounded object-contain" />;
     default:
       break;
+  }
+  // "Automatic" (the default): auto-link bare URLs / emails in text columns, like Metabase.
+  if (!isNum && fmt?.view_as !== "text") {
+    const t = str.trim();
+    if (URL_RE.test(t)) return linkEl(t, formatted);
+    if (EMAIL_RE.test(t)) return <a href={`mailto:${t}`} className="text-primary underline">{formatted}</a>;
   }
   if (fmt?.show_mini_bar && isNum) {
     const n = typeof raw === "number" ? raw : Number(raw);

@@ -438,6 +438,44 @@ describe("buildCartesianOption — series rename (Metabase parity)", () => {
   });
 });
 
+describe("buildCartesianOption — point markers (Metabase parity)", () => {
+  const cols = [{ name: "m", type: "varchar" }, { name: "rev", type: "double" }];
+  const rows = [["Jan", 10], ["Feb", 20]];
+  it("shows symbols by default and hides them when showMarkers=false", () => {
+    const shown = buildCartesianOption(cols, rows, { kind: "line", xAxis: "m", yMetrics: ["rev"] }) as any;
+    expect(shown.series[0].showSymbol).toBe(true);
+    const hidden = buildCartesianOption(cols, rows, { kind: "line", xAxis: "m", yMetrics: ["rev"], showMarkers: false }) as any;
+    expect(hidden.series[0].showSymbol).toBe(false);
+  });
+});
+
+describe("buildCartesianOption — x-axis scale (Metabase parity)", () => {
+  const cols = [{ name: "x", type: "double" }, { name: "rev", type: "double" }];
+  const rows = [["1", 10], ["3", 30], ["2", 20]];
+  it("ordinal (default) keeps a category axis with aligned arrays", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"] }) as any;
+    expect(opt.xAxis.type).toBe("category");
+    expect(opt.series[0].data).toEqual([10, 20, 30]); // sorted numeric categories
+  });
+  it("linear scale uses a value axis with [x,y] pairs", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"], xScale: "linear" }) as any;
+    expect(opt.xAxis.type).toBe("value");
+    expect(opt.series[0].data).toEqual([[1, 10], [2, 20], [3, 30]]);
+  });
+  it("timeseries scale uses a time axis with parsed-timestamp pairs", () => {
+    const tcols = [{ name: "d", type: "date" }, { name: "rev", type: "double" }];
+    const trows = [["2024-01-01", 10], ["2024-01-03", 30]];
+    const opt = buildCartesianOption(tcols, trows, { kind: "line", xAxis: "d", yMetrics: ["rev"], xScale: "timeseries" }) as any;
+    expect(opt.xAxis.type).toBe("time");
+    expect(opt.series[0].data).toEqual([[Date.parse("2024-01-01"), 10], [Date.parse("2024-01-03"), 30]]);
+  });
+  it("tooltip reads y from [x,y] pairs on a scaled axis", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"], xScale: "linear", metricTypes: { rev: "double" }, columnSettings: { rev: { prefix: "$" } } }) as any;
+    const tip = opt.tooltip.formatter([{ axisValueLabel: "2", seriesName: "rev", value: [2, 20], marker: "" }]);
+    expect(tip).toContain("$20");
+  });
+});
+
 describe("cartesianSeriesNames helper", () => {
   const cols = [{ name: "region", type: "varchar" }, { name: "yr", type: "varchar" }, { name: "rev", type: "double" }, { name: "cnt", type: "bigint" }];
   const rows = [["EU", "2023", 1, 9], ["US", "", 2, 8]];

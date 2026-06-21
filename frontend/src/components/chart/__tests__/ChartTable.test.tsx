@@ -93,6 +93,26 @@ describe("ChartTable — view-as (Metabase parity)", () => {
   });
 });
 
+describe("ChartTable — automatic link detection (Metabase parity)", () => {
+  it("auto-links a bare URL in a text column (default view)", () => {
+    render(<ChartTable columns={[{ name: "site", type: "varchar" }]} rows={[["https://example.com"]]} />);
+    expect(screen.getByRole("link", { name: "https://example.com" })).toHaveAttribute("href", "https://example.com");
+  });
+  it("auto-links a bare email as mailto", () => {
+    render(<ChartTable columns={[{ name: "who", type: "varchar" }]} rows={[["a@b.com"]]} />);
+    expect(screen.getByRole("link", { name: "a@b.com" })).toHaveAttribute("href", "mailto:a@b.com");
+  });
+  it("does NOT auto-link plain text or numbers", () => {
+    render(<ChartTable columns={[{ name: "region", type: "varchar" }, { name: "rev", type: "double" }]} rows={[["EU", 10]]} />);
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+  });
+  it("view_as=text disables auto-linking", () => {
+    render(<ChartTable columns={[{ name: "site", type: "varchar" }]} rows={[["https://example.com"]]} columnSettings={{ site: { view_as: "text" } }} />);
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    expect(screen.getByText("https://example.com")).toBeInTheDocument();
+  });
+});
+
 describe("ChartTable — mini bar (Metabase parity)", () => {
   it("draws an in-cell bar alongside the formatted number", () => {
     render(

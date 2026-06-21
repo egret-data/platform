@@ -843,6 +843,7 @@ export default function ChartExplore() {
                   showStackTotal: cartesian.showStackTotal,
                   seriesColors: cartesian.seriesColors, seriesLabels: cartesian.seriesLabels,
                   yMin: cartesian.yMin, yMax: cartesian.yMax,
+                  showMarkers: cartesian.showMarkers, xScale: cartesian.xScale,
                   columnSettings, metricTypes,
                 })} />}
           </div>

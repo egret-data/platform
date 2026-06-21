@@ -42,8 +42,23 @@ export function CartesianDisplaySection({
       {isLineish && <Toggle id="cz-smooth" label="Smooth" checked={!!config.smooth} onChange={(v) => onChange({ smooth: v })} />}
       {isLineish && <Toggle id="cz-connect" label="Connect gaps" checked={!!config.connectNulls} onChange={(v) => onChange({ connectNulls: v })} />}
       {isLineish && <Toggle id="cz-step" label="Step" checked={!!config.step} onChange={(v) => onChange({ step: v })} />}
+      {isLineish && <Toggle id="cz-markers" label="Show markers" checked={config.showMarkers !== false} onChange={(v) => onChange({ showMarkers: v })} />}
       {kind !== "scatter" && <Toggle id="cz-trend" label="Trend line" checked={!!config.trendLine} onChange={(v) => onChange({ trendLine: v })} />}
       {kind !== "scatter" && <Toggle id="cz-log" label="Log scale" checked={!!config.logScale} onChange={(v) => onChange({ logScale: v })} />}
+
+      {kind !== "scatter" && kind !== "row" && !config.horizontal && (
+        <div className="flex items-center justify-between gap-2">
+          <Label className="text-sm font-normal">X axis scale</Label>
+          <Select value={config.xScale ?? "ordinal"} onValueChange={(v) => onChange({ xScale: v as CartesianConfig["xScale"] })}>
+            <SelectTrigger aria-label="X axis scale" className="h-7 w-28"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ordinal">Ordinal</SelectItem>
+              <SelectItem value="linear">Linear</SelectItem>
+              <SelectItem value="timeseries">Timeseries</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
 
       {config.yMetrics.length > 1 && !config.horizontal && kind !== "row" && (
         <div className="space-y-1.5 border-t pt-2">

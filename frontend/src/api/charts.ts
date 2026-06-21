@@ -65,6 +65,8 @@ export interface CartesianConfig {
   seriesLabels?: Record<string, string>;  // series name -> display label override
   yMin?: number;                 // manual value-axis minimum (auto when undefined)
   yMax?: number;                 // manual value-axis maximum
+  showMarkers?: boolean;         // line/area: show point symbols (default true)
+  xScale?: "ordinal" | "linear" | "timeseries";  // x-axis scale (default ordinal)
 }
 export interface PieConfig {
   dimension?: string;
