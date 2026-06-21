@@ -51,7 +51,7 @@ One phase each, simplest first:
 - [x] 3a. Row chart — horizontal bars, categories sorted by value (largest on top),
   value labels at bar ends. New viz_type "row" reusing the cartesian builder + gallery
   entry. Verified live. (mb: visualizations/RowChart)
-- [ ] 3b. Waterfall
+- [x] 3b. Waterfall — sequential deltas with a running total, built from a transparent base + a coloured delta bar (increase/decrease/total), optional Total bar. No new ECharts registration (reuses BarChart). Verified live.
 - [x] 3c. Funnel — ECharts funnel series (stages sorted descending, palette, inside labels). Verified live.
 - [x] 3d. Progress — value-vs-goal bar (React component, fill = value/goal, overshoot
   shown, pointer + recoloured track). Verified live.

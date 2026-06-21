@@ -5,7 +5,7 @@ import { useDatasets, useDataset } from "@/api/datasets";
 import {
   useBuildChartData, useChart, useChartMutations,
   type QuerySpec, type VizType, type ChartParams, type TableState, type ChartFilter,
-  type CartesianConfig, type PieConfig, type ScalarConfig, type ProgressConfig, type GaugeConfig, type FunnelConfig, isCartesianViz,
+  type CartesianConfig, type PieConfig, type ScalarConfig, type ProgressConfig, type GaugeConfig, type FunnelConfig, type WaterfallConfig, isCartesianViz,
 } from "@/api/charts";
 import { useSubmitQuery, useQueryStatus, useResults } from "@/api/sqllab";
 import { ChartTable } from "@/components/chart/ChartTable";
@@ -26,6 +26,7 @@ import { BigNumber } from "@/components/chart/BigNumber";
 import { ProgressChart } from "@/components/chart/ProgressChart";
 import { buildGaugeOption } from "@/components/chart/echarts/options/gauge";
 import { buildFunnelOption } from "@/components/chart/echarts/options/funnel";
+import { buildWaterfallOption } from "@/components/chart/echarts/options/waterfall";
 import { CartesianDisplaySection } from "@/components/chart/settings/CartesianDisplaySection";
 import { PieDisplaySection } from "@/components/chart/settings/PieDisplaySection";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
@@ -88,6 +89,7 @@ export default function ChartExplore() {
   const [progress, setProgress] = useState<ProgressConfig>({});
   const [gauge, setGauge] = useState<GaugeConfig>({});
   const [funnel, setFunnel] = useState<FunnelConfig>({});
+  const [waterfall, setWaterfall] = useState<WaterfallConfig>({});
   const patchCartesian = (p: Partial<CartesianConfig>) => setCartesian((c) => ({ ...c, ...p }));
   const patchPie = (p: Partial<PieConfig>) => setPie((c) => ({ ...c, ...p }));
   const [filters, setFilters] = useState<ChartFilter[]>([]);
@@ -120,6 +122,8 @@ export default function ChartExplore() {
       setGauge(p.gauge ?? { metric: p.spec?.metrics?.[0] });
     } else if (c.viz_type === "funnel") {
       setFunnel(p.funnel ?? { dimension: p.spec?.dimensions?.[0], metric: p.spec?.metrics?.[0] });
+    } else if (c.viz_type === "waterfall") {
+      setWaterfall(p.waterfall ?? { xAxis: p.spec?.dimensions?.[0], metric: p.spec?.metrics?.[0] });
     } else {
       setTableMetrics(p.spec?.metrics ?? []);
       setTableCols([...(p.spec?.dimensions ?? []), ...(p.spec?.columns ?? [])]);
@@ -163,6 +167,9 @@ export default function ChartExplore() {
     }
     if (viz === "funnel") {
       return { metrics: funnel.metric ? [funnel.metric] : [], dimensions: funnel.dimension ? [funnel.dimension] : [], columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
+    }
+    if (viz === "waterfall") {
+      return { metrics: waterfall.metric ? [waterfall.metric] : [], dimensions: waterfall.xAxis ? [waterfall.xAxis] : [], columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
     }
     if (viz === "pivot_table") {
       const dims = [...pRows, ...pCols];
@@ -220,6 +227,9 @@ export default function ChartExplore() {
     if (viz === "funnel" && (!funnel.dimension || !funnel.metric)) {
       toast.error("Funnel needs a dimension and a metric"); return;
     }
+    if (viz === "waterfall" && (!waterfall.xAxis || !waterfall.metric)) {
+      toast.error("Waterfall needs an x-axis and a metric"); return;
+    }
     try {
       const { sql, database_id } = await build.mutateAsync({ dataset_id: datasetId, query_spec: specForRun() });
       const ack = await submit.mutateAsync({ database_id, sql, limit: rowLimit });
@@ -248,6 +258,7 @@ export default function ChartExplore() {
     if (viz === "progress") return { spec: specForRun(), progress, columnSettings };
     if (viz === "gauge") return { spec: specForRun(), gauge, columnSettings };
     if (viz === "funnel") return { spec: specForRun(), funnel, columnSettings };
+    if (viz === "waterfall") return { spec: specForRun(), waterfall, columnSettings };
     return { spec: specForRun(), columnSettings, conditionalFormatting, tableState };
   }
 
@@ -287,7 +298,7 @@ export default function ChartExplore() {
   function resetControls() {
     setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]);
     setColumnSettings({}); setConditionalFormatting([]); setCollapsed(new Set()); setPivotSort({}); setTableState({}); setFilters([]); setQueryId(null);
-    setCartesian({ yMetrics: [] }); setPie({}); setScalar({}); setProgress({}); setGauge({}); setFunnel({});
+    setCartesian({ yMetrics: [] }); setPie({}); setScalar({}); setProgress({}); setGauge({}); setFunnel({}); setWaterfall({});
   }
 
   const isRunning = status.data?.status === "queued" || status.data?.status === "running";
@@ -518,6 +529,33 @@ export default function ChartExplore() {
               </>
             )}
 
+            {viz === "waterfall" && (
+              <>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">X-axis (steps)</Label>
+                  <Select value={waterfall.xAxis ?? ""} onValueChange={(v) => setWaterfall((w) => ({ ...w, xAxis: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a dimension…" /></SelectTrigger>
+                    <SelectContent>
+                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric (delta)</Label>
+                  <Select value={waterfall.metric ?? ""} onValueChange={(v) => setWaterfall((w) => ({ ...w, metric: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
+                    <SelectContent>
+                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Checkbox id="wf-total" checked={!!waterfall.showTotal} onCheckedChange={() => setWaterfall((w) => ({ ...w, showTotal: !w.showTotal }))} />
+                  <Label htmlFor="wf-total" className="cursor-pointer text-sm font-normal">Show total bar</Label>
+                </div>
+              </>
+            )}
+
             <div className="space-y-1">
               <Label htmlFor="row-limit" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Row limit</Label>
               <Input id="row-limit" type="number" min={1} max={10000} value={rowLimit}
@@ -704,6 +742,15 @@ export default function ChartExplore() {
               ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
               : <EChartsRenderer option={buildFunnelOption(results.data.columns, results.data.rows, {
                   dimension: funnel.dimension, metric: funnel.metric, columnSettings, metricTypes,
+                })} />}
+          </div>
+        )}
+        {finished && results.data && viz === "waterfall" && (
+          <div className="h-[60vh] rounded-md border p-2">
+            {results.data.rows.length === 0
+              ? <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
+              : <EChartsRenderer option={buildWaterfallOption(results.data.columns, results.data.rows, {
+                  xAxis: waterfall.xAxis, metric: waterfall.metric, showTotal: waterfall.showTotal, columnSettings, metricTypes,
                 })} />}
           </div>
         )}
