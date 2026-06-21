@@ -33,11 +33,14 @@ export function buildFunnelOption(columns: ResultColumn[], rows: unknown[][], cf
     tooltip: { trigger: "item", formatter: (p: { name: string; value: unknown; percent: number }) => `${p.name}: ${fmt(p.value)} (${p.percent}%)` },
     series: [{
       type: "funnel",
+      orient: "horizontal",   // Metabase renders funnels left→right
       sort: "descending",
       funnelAlign: "center",
       gap: 2,
       left: "5%",
       right: "5%",
+      top: "6%",
+      bottom: "6%",
       data,
       label: { show: cfg.showLabels !== false, position: "inside", formatter: (p: { name: string; value: unknown }) => `${p.name}: ${fmt(p.value)}` },
     }],
