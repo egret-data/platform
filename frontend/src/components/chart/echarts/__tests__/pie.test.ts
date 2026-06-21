@@ -89,3 +89,39 @@ describe("buildPieOption — data robustness (Metabase parity)", () => {
     expect(d.find((s: any) => s.name === "A").itemStyle).toBeUndefined();
   });
 });
+
+// Phase 1b — donut centre total + percent visibility, clean-room from Metabase's
+// pie/option.ts (getTotalGraphicOption + getSliceLabel / pie.percent_visibility).
+describe("buildPieOption — donut total & percent (Metabase parity 1b)", () => {
+  const cols = [{ name: "d", type: "varchar" }, { name: "m", type: "double" }];
+  const rows = [["A", 30], ["B", 70]];
+  const opt = (extra: Record<string, unknown> = {}) =>
+    buildPieOption(cols, rows, { dimension: "d", metric: "m", ...extra }) as any;
+  const labelText = (o: any, p: { name: string; percent: number }) => o.series[0].label.formatter(p);
+
+  it("renders a centre total only for donut + showTotal", () => {
+    expect(opt({ showTotal: true }).graphic).toBeFalsy();           // not a donut
+    expect(opt({ donut: true }).graphic).toBeFalsy();               // showTotal off
+    expect(opt({ donut: true, showTotal: true }).graphic).toBeTruthy();
+  });
+  it("centre total shows the formatted grand total + a Total caption", () => {
+    const g = opt({ donut: true, showTotal: true, metricTypes: { m: "double" }, columnSettings: { m: { prefix: "$", decimals: 0 } } }).graphic;
+    const texts = g.map((e: any) => e.style?.text);
+    expect(texts).toContain("$100");
+    expect(texts).toContain("Total");
+  });
+  it("percentVisibility defaults off → label is the name only", () => {
+    const o = opt({ showLabels: true });
+    expect(o.series[0].label.show).toBe(true);
+    expect(labelText(o, { name: "A", percent: 30 })).toBe("A");
+  });
+  it("percentVisibility inside → name + percent", () => {
+    const o = opt({ showLabels: true, percentVisibility: "inside" });
+    expect(labelText(o, { name: "A", percent: 30 })).toBe("A: 30%");
+  });
+  it("percent without labels shows just the percent", () => {
+    const o = opt({ percentVisibility: "inside" });
+    expect(o.series[0].label.show).toBe(true);
+    expect(labelText(o, { name: "A", percent: 33.333 })).toBe("33.3%");
+  });
+});

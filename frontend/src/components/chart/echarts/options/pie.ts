@@ -14,6 +14,10 @@ export interface PieBuildConfig {
   sliceThreshold?: number;
   /** Sort slices by value descending. Default true. */
   sortRows?: boolean;
+  /** Donut only: show the grand total in the centre. */
+  showTotal?: boolean;
+  /** Whether the slice's percent appears in its label. Default "off". */
+  percentVisibility?: "off" | "inside" | "both";
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
 }
@@ -66,16 +70,37 @@ export function buildPieOption(columns: ResultColumn[], rows: unknown[][], cfg: 
   const fmt = (v: unknown) =>
     cfg.metric ? formatValue(v, cfg.metricTypes?.[cfg.metric] ?? "double", cfg.columnSettings?.[cfg.metric]) : String(v);
 
+  // Label: name (showLabels) and/or percent (percentVisibility) — Metabase getSliceLabel.
+  const showName = !!cfg.showLabels;
+  const showPercent = cfg.percentVisibility === "inside" || cfg.percentVisibility === "both";
+  const pct = (p: number) => `${Math.round(p * 10) / 10}%`;
+  const labelFormatter = (p: { name: string; percent: number }) => {
+    const name = showName ? p.name : undefined;
+    const percent = showPercent ? pct(p.percent) : undefined;
+    if (name != null && percent != null) return `${name}: ${percent}`;
+    return name ?? percent ?? "";
+  };
+
+  // Donut centre total — Metabase getTotalGraphicOption (static total; no hover swap yet).
+  const total = data.reduce((t, s) => t + s.value, 0);
+  const graphic = cfg.donut && cfg.showTotal && data.length > 0
+    ? [
+        { type: "text", left: "center", top: "43%", style: { text: fmt(total), fontSize: 22, fontWeight: 700, fill: resolveColor("var(--foreground)", COLOR_FALLBACK.text), textAlign: "center" } },
+        { type: "text", left: "center", top: "53%", style: { text: "Total", fontSize: 13, fill: resolveColor(OTHER_SLICE_COLOR, COLOR_FALLBACK.axisLabel), textAlign: "center" } },
+      ]
+    : undefined;
+
   return {
     color: SERIES_PALETTE,
     tooltip: { trigger: "item", formatter: (p: { name: string; value: unknown; percent: number }) => `${p.name}: ${fmt(p.value)} (${p.percent}%)` },
     legend: cfg.showLegend ? { bottom: 0, type: "scroll" } : undefined,
+    graphic,
     series: [{
       type: "pie",
       radius: cfg.donut ? ["45%", "70%"] : ["0%", "70%"],
       center: ["50%", "48%"],
       data,
-      label: { show: !!cfg.showLabels, formatter: "{b}: {d}%" },
+      label: { show: showName || showPercent, formatter: labelFormatter },
     }],
   };
 }

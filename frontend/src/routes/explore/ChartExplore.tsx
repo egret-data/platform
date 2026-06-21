@@ -568,6 +568,7 @@ export default function ChartExplore() {
                   dimension: pie.dimension, metric: pie.metric, donut: pie.donut,
                   showLegend: pie.showLegend, showLabels: pie.showLabels,
                   sliceThreshold: pie.sliceThreshold, sortRows: pie.sortRows,
+                  showTotal: pie.showTotal, percentVisibility: pie.percentVisibility,
                   columnSettings, metricTypes,
                 })} />}
           </div>

@@ -60,6 +60,8 @@ export interface PieConfig {
   showLabels?: boolean;
   sliceThreshold?: number;   // percent; slices below this fold into "Other" (default 2.5, 0 = off)
   sortRows?: boolean;        // sort slices by value desc (default true)
+  showTotal?: boolean;       // donut only: grand total in the centre
+  percentVisibility?: "off" | "inside" | "both";  // percent in slice labels (default off)
 }
 export interface ScalarConfig {
   metric?: string;

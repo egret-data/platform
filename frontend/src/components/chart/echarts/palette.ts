@@ -62,4 +62,5 @@ export function resolveColor(expr: string, fallback: string): string {
 export const COLOR_FALLBACK = {
   gridLine: "#e5e7eb",     // ≈ --border (very light gray)
   axisLabel: "#6b7280",    // ≈ --muted-foreground (slate)
+  text: "#111827",         // ≈ --foreground (near-black)
 } as const;
