@@ -24,8 +24,51 @@ export interface CartesianBuildConfig {
   normalized?: boolean;          // 100% stacking — each category's values sum to 100
   goalValue?: number;            // horizontal reference (goal) line
   goalLabel?: string;
+  trendLine?: boolean;           // overlay a least-squares trend line per series
+  connectNulls?: boolean;        // line: bridge gaps across null points
+  step?: boolean;                // line: step interpolation
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
+}
+
+const BAR_MIN_HEIGHT = 1; // keep sub-pixel bars visible, like Metabase's barMinHeight
+
+interface SeriesLike { name?: string; data: (number | null)[]; yAxisIndex?: number; itemStyle?: { color?: string }; __trend?: boolean }
+
+// Least-squares fit y = m·i + b over the non-null points, evaluated at every index.
+function trendData(data: (number | null)[]): (number | null)[] | null {
+  const pts: [number, number][] = [];
+  data.forEach((v, i) => { if (typeof v === "number") pts.push([i, v]); });
+  if (pts.length < 2) return null;
+  const n = pts.length;
+  const sx = pts.reduce((s, p) => s + p[0], 0);
+  const sy = pts.reduce((s, p) => s + p[1], 0);
+  const sxy = pts.reduce((s, p) => s + p[0] * p[1], 0);
+  const sxx = pts.reduce((s, p) => s + p[0] * p[0], 0);
+  const denom = n * sxx - sx * sx;
+  if (denom === 0) return null;
+  const m = (n * sxy - sx * sy) / denom;
+  const b = (sy - m * sx) / n;
+  return data.map((_, i) => m * i + b);
+}
+
+// One dashed trend series per source series, sharing its axis + color, kept out of the legend.
+function trendSeries(series: SeriesLike[]): SeriesLike[] {
+  const out: SeriesLike[] = [];
+  for (const s of series) {
+    const fit = trendData(s.data);
+    if (!fit) continue;
+    out.push({
+      name: `${s.name ?? ""} trend`,
+      data: fit,
+      yAxisIndex: s.yAxisIndex ?? 0,
+      __trend: true,
+      ...{ type: "line", symbol: "none", smooth: false, silent: true, legendHoverLink: false, z: 3,
+        lineStyle: { type: "dashed", width: 1.5, color: s.itemStyle?.color },
+        tooltip: { show: false } },
+    } as SeriesLike);
+  }
+  return out;
 }
 
 const isNormalized = (cfg: CartesianBuildConfig) => !!cfg.normalized && !!cfg.stacked;
@@ -114,6 +157,7 @@ export function buildCartesianOption(
       return decorateSeries({ name, data }, metric, si, cfg, fmt);
     });
     if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
+    if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
     return baseOption(cfg, categories as (string | number)[], series);
   }
 
@@ -127,6 +171,7 @@ export function buildCartesianOption(
     return decorateSeries({ name: metric, data }, metric, si, cfg, fmt);
   });
   if (isNormalized(cfg)) normalizeStacks(series as unknown as { data: (number | null)[] }[]);
+  if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
   return baseOption(cfg, categories as (string | number)[], series);
 }
 
@@ -144,12 +189,18 @@ function decorateSeries(
     type,
     itemStyle: { color: seriesColor(colorIdx) },
   };
-  if (type === "bar") out.barWidth = CHART_THEME.barWidth;
+  if (type === "bar") { out.barWidth = CHART_THEME.barWidth; out.barMinHeight = BAR_MIN_HEIGHT; }
   if (type === "bar" || cfg.kind === "area") {
     if (cfg.stacked) out.stack = "total";
   }
   if (cfg.kind === "area") out.areaStyle = { opacity: CHART_THEME.areaOpacity };
-  if (type === "line") { out.smooth = !!cfg.smooth; out.lineStyle = { width: CHART_THEME.lineWidth }; out.symbolSize = CHART_THEME.symbolSize; }
+  if (type === "line") {
+    out.smooth = !!cfg.smooth;
+    out.lineStyle = { width: CHART_THEME.lineWidth };
+    out.symbolSize = CHART_THEME.symbolSize;
+    out.connectNulls = !!cfg.connectNulls;
+    if (cfg.step) out.step = "middle";
+  }
   if (type === "scatter") { out.symbolSize = CHART_THEME.symbolSize; out.itemStyle = { color: seriesColor(colorIdx), opacity: CHART_THEME.scatterOpacity }; }
   if (isDualAxis(cfg) && rightMetrics(cfg).includes(metric)) out.yAxisIndex = 1;
   if (cfg.showLabels) {
@@ -220,11 +271,17 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     bottom: (CHART_THEME.grid.bottom as number) + (cfg.showLegend ? 28 : 0) + (cfg.xLabel ? 22 : 0),
   };
 
+  // Trend series stay out of the legend.
+  const legendNames = series.filter((s) => !(s as SeriesLike).__trend).map((s) => (s as SeriesLike).name);
+  const legend = cfg.showLegend
+    ? { bottom: 0, type: "scroll" as const, ...(legendNames.length !== series.length ? { data: legendNames } : {}) }
+    : undefined;
+
   return {
     color: undefined,
     grid,
     tooltip: { trigger: cfg.kind === "scatter" ? "item" : "axis" },
-    legend: cfg.showLegend ? { bottom: 0, type: "scroll" } : undefined,
+    legend,
     xAxis,
     yAxis,
     series,

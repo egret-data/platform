@@ -56,6 +56,9 @@ export interface CartesianConfig {
   normalized?: boolean;          // 100% stacking
   goalValue?: number;            // horizontal goal/reference line
   goalLabel?: string;
+  trendLine?: boolean;           // overlay a least-squares trend line
+  connectNulls?: boolean;        // line: bridge null gaps
+  step?: boolean;                // line: step interpolation
 }
 export interface PieConfig {
   dimension?: string;

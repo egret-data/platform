@@ -37,8 +37,9 @@ Reference (read-to-understand only): `metabase/frontend/src/metabase/visualizati
 
 ## Phase group 2 — Full parity on existing families (Scope B)
 
-- [ ] **2a. Series polish** — trend line (regression, deferred from 1e), stack-total labels
-  (deferred from 1e), barMinHeight, connectNulls/step interpolation, emphasis/blur,
+- [~] **2a. Series polish** — DONE (part 1): trend line (least-squares, excluded from
+  legend), barMinHeight, line connectNulls + step. Wired into Display tab; verified live.
+  **Still todo (part 2):** stack-total labels (ghost series), emphasis/blur on hover,
   negative-bar label placement, smart label density. (mb: cartesian/option/series.ts)
 - [ ] **2b. Tooltips** — rich multi-series tooltip with formatted rows + % of total.
   (mb: echarts/tooltip/)

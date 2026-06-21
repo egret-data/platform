@@ -231,3 +231,34 @@ describe("buildCartesianOption — overlays (Metabase parity 1e)", () => {
     expect(opt.yAxis.axisLabel.formatter(50)).toBe("50%");
   });
 });
+
+// Phase 2a — trend line + series polish, clean-room from Metabase's cartesian
+// model/trend-line.ts (least-squares) + option/series.ts (barMinHeight, connectNulls/step).
+describe("buildCartesianOption — series polish & trend (Metabase parity 2a)", () => {
+  const cols = [{ name: "x", type: "varchar" }, { name: "rev", type: "double" }];
+  const rows = [["A", 10], ["B", 20], ["C", 30]];
+
+  it("bar series get a minimum height so tiny bars stay visible", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "x", yMetrics: ["rev"] }) as any;
+    expect(opt.series[0].barMinHeight).toBeGreaterThan(0);
+  });
+  it("line connectNulls + step come from config", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"], connectNulls: true, step: true }) as any;
+    expect(opt.series[0].connectNulls).toBe(true);
+    expect(opt.series[0].step).toBe("middle");
+  });
+  it("trendLine appends a dashed least-squares trend series per metric", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"], trendLine: true }) as any;
+    expect(opt.series).toHaveLength(2);
+    expect(opt.series[1].lineStyle.type).toBe("dashed");
+    expect(opt.series[1].data).toEqual([10, 20, 30]); // perfectly linear → fit equals data
+  });
+  it("trend series are excluded from the legend", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"], trendLine: true, showLegend: true }) as any;
+    expect(opt.legend.data).toEqual(["rev"]);
+  });
+  it("no trend series without trendLine", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "x", yMetrics: ["rev"] }) as any;
+    expect(opt.series).toHaveLength(1);
+  });
+});

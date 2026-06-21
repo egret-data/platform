@@ -33,6 +33,9 @@ export function CartesianDisplaySection({
       {canStack && config.stacked && <Toggle id="cz-normalized" label="100% stacked" checked={!!config.normalized} onChange={(v) => onChange({ normalized: v })} />}
       {isBar && <Toggle id="cz-horizontal" label="Horizontal" checked={!!config.horizontal} onChange={(v) => onChange({ horizontal: v })} />}
       {isLineish && <Toggle id="cz-smooth" label="Smooth" checked={!!config.smooth} onChange={(v) => onChange({ smooth: v })} />}
+      {isLineish && <Toggle id="cz-connect" label="Connect gaps" checked={!!config.connectNulls} onChange={(v) => onChange({ connectNulls: v })} />}
+      {isLineish && <Toggle id="cz-step" label="Step" checked={!!config.step} onChange={(v) => onChange({ step: v })} />}
+      {kind !== "scatter" && <Toggle id="cz-trend" label="Trend line" checked={!!config.trendLine} onChange={(v) => onChange({ trendLine: v })} />}
       {kind !== "scatter" && <Toggle id="cz-log" label="Log scale" checked={!!config.logScale} onChange={(v) => onChange({ logScale: v })} />}
 
       {config.yMetrics.length > 1 && !config.horizontal && (

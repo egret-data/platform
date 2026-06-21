@@ -558,6 +558,7 @@ export default function ChartExplore() {
                   xLabel: cartesian.xLabel, yLabel: cartesian.yLabel, seriesTypes: cartesian.seriesTypes,
                   rightAxisMetrics: cartesian.rightAxisMetrics, logScale: cartesian.logScale,
                   normalized: cartesian.normalized, goalValue: cartesian.goalValue, goalLabel: cartesian.goalLabel,
+                  trendLine: cartesian.trendLine, connectNulls: cartesian.connectNulls, step: cartesian.step,
                   columnSettings, metricTypes,
                 })} />}
           </div>
