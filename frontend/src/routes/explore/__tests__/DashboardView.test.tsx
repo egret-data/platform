@@ -77,3 +77,32 @@ describe("DashboardView (edit mode)", () => {
     }
   });
 });
+
+describe("DashboardView (Phase B — card variety)", () => {
+  it("adds a text card and edits its body", () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    fireEvent.click(screen.getByRole("button", { name: /add text/i }));
+    const editor = screen.getByLabelText(/text body/i);
+    fireEvent.change(editor, { target: { value: "## Notes" } });
+    expect((editor as HTMLTextAreaElement).value).toBe("## Notes");
+  });
+  it("adds a heading card", () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    fireEvent.click(screen.getByRole("button", { name: /add heading/i }));
+    expect(screen.getByLabelText(/heading text/i)).toBeInTheDocument();
+  });
+  it("adds a link card with url + label", () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    fireEvent.click(screen.getByRole("button", { name: /add link/i }));
+    expect(screen.getByLabelText(/link url/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/link label/i)).toBeInTheDocument();
+  });
+  it("offers a title input on a chart card in edit mode", () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    expect(screen.getByLabelText(/card title/i)).toBeInTheDocument();
+  });
+});

@@ -47,6 +47,17 @@ export default function DashboardView() {
   function removeCard(cardId: string) {
     setDraftCards(cards.filter((c) => c.id !== cardId));
   }
+  function addVirtualCard(card_type: "text" | "heading" | "link", options: Record<string, unknown>) {
+    const maxY = cards.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
+    const newCard: Card = {
+      id: `new-${card_type}-${cardSeqRef.current++}`, chart_id: null, card_type,
+      grid_col: 0, grid_row: maxY, size_x: CARD_DEFAULT_SIZE.w, size_y: card_type === "heading" ? 1 : CARD_DEFAULT_SIZE.h, options,
+    };
+    setDraftCards([...cards, newCard]);
+  }
+  function updateCardOptions(cardId: string, patch: Record<string, unknown>) {
+    setDraftCards(cards.map((c) => (c.id === cardId ? { ...c, options: { ...c.options, ...patch } } : c)));
+  }
 
   // The cards are the single source of truth for positions: the RGL layout is derived
   // from them, and drag/resize writes positions straight back into the draft. This keeps
@@ -108,6 +119,11 @@ export default function DashboardView() {
               </Button>
             ))}
           </div>
+          <div className="mt-2 flex gap-1 border-t pt-2">
+            <Button size="sm" variant="outline" aria-label="Add Text" onClick={() => addVirtualCard("text", { text: "" })}>+ Text</Button>
+            <Button size="sm" variant="outline" aria-label="Add Heading" onClick={() => addVirtualCard("heading", { text: "" })}>+ Heading</Button>
+            <Button size="sm" variant="outline" aria-label="Add Link" onClick={() => addVirtualCard("link", { url: "", label: "" })}>+ Link</Button>
+          </div>
         </aside>
       )}
       {cards.length === 0 ? (
@@ -132,7 +148,29 @@ export default function DashboardView() {
                   onClick={() => removeCard(c.id)}
                 >✕</button>
               )}
-              <DashboardCardView ws={ws} card={c} chart={chartById.get(c.chart_id ?? "")} />
+              {editing && c.card_type === "chart" && (
+                <input aria-label="card title" placeholder="Title (blank = chart name)" className="m-1 w-[calc(100%-0.5rem)] rounded border px-1 text-xs"
+                  value={(c.options.title as string) ?? ""} onChange={(e) => updateCardOptions(c.id, { title: e.target.value })} />
+              )}
+              {editing && c.card_type === "text" && (
+                <textarea aria-label="text body" className="m-1 h-[calc(100%-1rem)] w-[calc(100%-0.5rem)] resize-none rounded border p-1 text-xs"
+                  value={(c.options.text as string) ?? ""} onChange={(e) => updateCardOptions(c.id, { text: e.target.value })} />
+              )}
+              {editing && c.card_type === "heading" && (
+                <input aria-label="heading text" className="m-1 w-[calc(100%-0.5rem)] rounded border px-1 text-sm"
+                  value={(c.options.text as string) ?? ""} onChange={(e) => updateCardOptions(c.id, { text: e.target.value })} />
+              )}
+              {editing && c.card_type === "link" && (
+                <div className="m-1 flex flex-col gap-1">
+                  <input aria-label="link url" placeholder="https://…" className="rounded border px-1 text-xs"
+                    value={(c.options.url as string) ?? ""} onChange={(e) => updateCardOptions(c.id, { url: e.target.value })} />
+                  <input aria-label="link label" placeholder="Label (optional)" className="rounded border px-1 text-xs"
+                    value={(c.options.label as string) ?? ""} onChange={(e) => updateCardOptions(c.id, { label: e.target.value })} />
+                </div>
+              )}
+              {(!editing || c.card_type === "chart") && (
+                <DashboardCardView ws={ws} card={c} chart={chartById.get(c.chart_id ?? "")} />
+              )}
             </div>
           ))}
         </Grid>
