@@ -274,6 +274,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         authz: Authorizer::new(db.clone()),
         charts: egret_bi::ChartRepo::new(db.clone()),
         datasets: egret_bi::DatasetRepo::new(db.clone()),
+        dashboards: egret_bi::DashboardRepo::new(db.clone()),
     });
 
     let app = build_router(AppState {

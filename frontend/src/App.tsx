@@ -21,6 +21,7 @@ import DatasetDetail from "@/routes/explore/DatasetDetail";
 import Charts from "@/routes/explore/Charts";
 import ChartExplore from "@/routes/explore/ChartExplore";
 import Dashboards from "@/routes/explore/Dashboards";
+import DashboardView from "@/routes/explore/DashboardView";
 import Notebooks from "@/routes/explore/Notebooks";
 import Databases from "@/routes/admin/Databases";
 import Catalog from "@/routes/admin/Catalog";
@@ -52,6 +53,7 @@ function ExploreRoutes() {
           <Route path="charts/new" element={<ChartExplore />} />
           <Route path="charts/:id" element={<ChartExplore />} />
           <Route path="dashboards" element={<Dashboards />} />
+          <Route path="dashboards/:id" element={<DashboardView />} />
           <Route path="notebooks" element={<Notebooks />} />
           <Route path="*" element={<Navigate to="sql-lab" replace />} />
         </Routes>

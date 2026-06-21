@@ -2,6 +2,7 @@
 
 mod chart;
 pub mod chartquery;
+mod dashboard;
 mod dataset;
 mod error;
 mod expr;
@@ -12,10 +13,11 @@ mod schema;
 mod typegen;
 
 pub use chart::{Chart, ChartRepo};
+pub use dashboard::{Dashboard, DashboardCard, DashboardRepo, NewCard};
 pub use dataset::{Dataset, DatasetColumn, DatasetRepo, Metric, NewColumn, SourceSpec};
 pub use error::{BiApiError, BiError};
 pub use expr::{validate_expression, DescribedExpr};
-pub use routes::{chart_router, dataset_router, sqllab_router, BiState};
+pub use routes::{chart_router, dashboard_router, dataset_router, sqllab_router, BiState};
 pub use saved::{SavedQuery, SavedQueryRepo};
 pub use schema::SchemaService;
 pub use typegen::{generic_type, GenericType};
