@@ -285,3 +285,38 @@ describe("buildCartesianOption — row chart (Metabase parity 3a)", () => {
     expect(opt.series[0].label.position).toBe("right");
   });
 });
+
+// Phase 2b — formatted tooltip, clean-room from Metabase's echarts/tooltip
+// (per-series formatted rows, trend/base series excluded).
+describe("buildCartesianOption — formatted tooltip (Metabase parity 2b)", () => {
+  const cols = [{ name: "region", type: "varchar" }, { name: "rev", type: "double" }, { name: "cnt", type: "bigint" }];
+  const rows = [["EU", 10, 3], ["US", 20, 5]];
+
+  it("formats each series value with its metric settings", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev"], metricTypes: { rev: "double" }, columnSettings: { rev: { prefix: "$", decimals: 0 } } }) as any;
+    const html = opt.tooltip.formatter([{ axisValueLabel: "EU", seriesName: "rev", value: 10, marker: "" }]);
+    expect(html).toContain("EU");
+    expect(html).toContain("$10");
+  });
+  it("uses the right metric's format for each series (multi-metric)", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev", "cnt"], metricTypes: { rev: "double", cnt: "bigint" }, columnSettings: { cnt: { suffix: " orders" } } }) as any;
+    const html = opt.tooltip.formatter([
+      { axisValueLabel: "EU", seriesName: "rev", value: 10, marker: "" },
+      { axisValueLabel: "EU", seriesName: "cnt", value: 3, marker: "" },
+    ]);
+    expect(html).toContain("3 orders");
+  });
+  it("excludes trend series from the tooltip", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "line", xAxis: "region", yMetrics: ["rev"], trendLine: true }) as any;
+    const html = opt.tooltip.formatter([
+      { axisValueLabel: "EU", seriesName: "rev", value: 10, marker: "" },
+      { axisValueLabel: "EU", seriesName: "rev trend", value: 9, marker: "" },
+    ]);
+    expect(html).not.toContain("trend");
+  });
+  it("formats normalized values as percent", () => {
+    const opt = buildCartesianOption(cols, rows, { kind: "bar", xAxis: "region", yMetrics: ["rev", "cnt"], stacked: true, normalized: true }) as any;
+    const html = opt.tooltip.formatter([{ axisValueLabel: "EU", seriesName: "rev", value: 76.9, marker: "" }]);
+    expect(html).toContain("77%");
+  });
+});

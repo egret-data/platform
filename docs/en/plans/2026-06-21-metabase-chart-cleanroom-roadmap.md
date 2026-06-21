@@ -41,8 +41,9 @@ Reference (read-to-understand only): `metabase/frontend/src/metabase/visualizati
   legend), barMinHeight, line connectNulls + step. Wired into Display tab; verified live.
   **Still todo (part 2):** stack-total labels (ghost series), emphasis/blur on hover,
   negative-bar label placement, smart label density. (mb: cartesian/option/series.ts)
-- [ ] **2b. Tooltips** — rich multi-series tooltip with formatted rows + % of total.
-  (mb: echarts/tooltip/)
+- [x] **2b. Tooltips** — formatted multi-series tooltip: one row per series, each value
+  via its metric's format (currency/percent/etc.), trend series excluded, normalized → %.
+  (% of total / richer layout deferred.) (mb: echarts/tooltip/)
 - [ ] **2c. Legend** — hidden-series toggle, legend values/percent. (mb: cartesian/model/legend.ts)
 
 ## Phase group 3 — New chart types Metabase has, egret lacks (Scope C)

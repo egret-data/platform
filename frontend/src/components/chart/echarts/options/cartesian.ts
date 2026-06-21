@@ -294,10 +294,26 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
     ? { bottom: 0, type: "scroll" as const, ...(legendNames.length !== series.length ? { data: legendNames } : {}) }
     : undefined;
 
+  // Formatted tooltip — one row per (non-trend) series, value via its metric's format.
+  const tipFmt = (name: string, v: number) => {
+    if (normalized) return `${Math.round(v)}%`;
+    const m = cfg.yMetrics.includes(name) ? name : cfg.yMetrics[0];
+    return m ? formatValue(v, cfg.metricTypes?.[m] ?? "double", cfg.columnSettings?.[m]) : String(v);
+  };
+  type TipParam = { axisValueLabel?: string; name?: string; seriesName?: string; value?: unknown; marker?: string };
+  const tooltipFormatter = (params: TipParam | TipParam[]) => {
+    const arr = Array.isArray(params) ? params : [params];
+    const visible = arr.filter((p) => p.value != null && !(typeof p.seriesName === "string" && p.seriesName.endsWith(" trend")));
+    if (visible.length === 0) return "";
+    const header = visible[0].axisValueLabel ?? visible[0].name ?? "";
+    const lines = visible.map((p) => `${p.marker ?? ""} ${p.seriesName ?? ""}: <b>${tipFmt(p.seriesName ?? "", Number(p.value))}</b>`);
+    return `${header}<br/>${lines.join("<br/>")}`;
+  };
+
   return {
     color: undefined,
     grid,
-    tooltip: { trigger: cfg.kind === "scatter" ? "item" : "axis" },
+    tooltip: { trigger: cfg.kind === "scatter" ? "item" : "axis", formatter: tooltipFormatter },
     legend,
     xAxis,
     yAxis,
