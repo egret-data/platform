@@ -5,7 +5,7 @@ import { useDatasets, useDataset } from "@/api/datasets";
 import {
   useBuildChartData, useChart, useChartMutations,
   type QuerySpec, type VizType, type ChartParams, type TableState, type ChartFilter,
-  type CartesianConfig, type PieConfig, type ScalarConfig, type ProgressConfig, isCartesianViz,
+  type CartesianConfig, type PieConfig, type ScalarConfig, type ProgressConfig, type GaugeConfig, isCartesianViz,
 } from "@/api/charts";
 import { useSubmitQuery, useQueryStatus, useResults } from "@/api/sqllab";
 import { ChartTable } from "@/components/chart/ChartTable";
@@ -24,6 +24,7 @@ import { buildCartesianOption } from "@/components/chart/echarts/options/cartesi
 import { buildPieOption } from "@/components/chart/echarts/options/pie";
 import { BigNumber } from "@/components/chart/BigNumber";
 import { ProgressChart } from "@/components/chart/ProgressChart";
+import { buildGaugeOption } from "@/components/chart/echarts/options/gauge";
 import { CartesianDisplaySection } from "@/components/chart/settings/CartesianDisplaySection";
 import { PieDisplaySection } from "@/components/chart/settings/PieDisplaySection";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
@@ -84,6 +85,7 @@ export default function ChartExplore() {
   const [pie, setPie] = useState<PieConfig>({});
   const [scalar, setScalar] = useState<ScalarConfig>({});
   const [progress, setProgress] = useState<ProgressConfig>({});
+  const [gauge, setGauge] = useState<GaugeConfig>({});
   const patchCartesian = (p: Partial<CartesianConfig>) => setCartesian((c) => ({ ...c, ...p }));
   const patchPie = (p: Partial<PieConfig>) => setPie((c) => ({ ...c, ...p }));
   const [filters, setFilters] = useState<ChartFilter[]>([]);
@@ -112,6 +114,8 @@ export default function ChartExplore() {
       setScalar(p.scalar ?? { metric: p.spec?.metrics?.[0] });
     } else if (c.viz_type === "progress") {
       setProgress(p.progress ?? { metric: p.spec?.metrics?.[0] });
+    } else if (c.viz_type === "gauge") {
+      setGauge(p.gauge ?? { metric: p.spec?.metrics?.[0] });
     } else {
       setTableMetrics(p.spec?.metrics ?? []);
       setTableCols([...(p.spec?.dimensions ?? []), ...(p.spec?.columns ?? [])]);
@@ -149,6 +153,9 @@ export default function ChartExplore() {
     }
     if (viz === "progress") {
       return { metrics: progress.metric ? [progress.metric] : [], dimensions: [], columns: [], filters, orderby: [], row_limit: 1, rollup_groups: [] };
+    }
+    if (viz === "gauge") {
+      return { metrics: gauge.metric ? [gauge.metric] : [], dimensions: [], columns: [], filters, orderby: [], row_limit: 1, rollup_groups: [] };
     }
     if (viz === "pivot_table") {
       const dims = [...pRows, ...pCols];
@@ -200,6 +207,9 @@ export default function ChartExplore() {
     if (viz === "progress" && !progress.metric) {
       toast.error("Progress needs a metric"); return;
     }
+    if (viz === "gauge" && !gauge.metric) {
+      toast.error("Gauge needs a metric"); return;
+    }
     try {
       const { sql, database_id } = await build.mutateAsync({ dataset_id: datasetId, query_spec: specForRun() });
       const ack = await submit.mutateAsync({ database_id, sql, limit: rowLimit });
@@ -226,6 +236,7 @@ export default function ChartExplore() {
     if (viz === "pie") return { spec: specForRun(), pie };
     if (viz === "scalar") return { spec: specForRun(), scalar, columnSettings };
     if (viz === "progress") return { spec: specForRun(), progress, columnSettings };
+    if (viz === "gauge") return { spec: specForRun(), gauge, columnSettings };
     return { spec: specForRun(), columnSettings, conditionalFormatting, tableState };
   }
 
@@ -265,7 +276,7 @@ export default function ChartExplore() {
   function resetControls() {
     setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]);
     setColumnSettings({}); setConditionalFormatting([]); setCollapsed(new Set()); setPivotSort({}); setTableState({}); setFilters([]); setQueryId(null);
-    setCartesian({ yMetrics: [] }); setPie({}); setScalar({}); setProgress({});
+    setCartesian({ yMetrics: [] }); setPie({}); setScalar({}); setProgress({}); setGauge({});
   }
 
   const isRunning = status.data?.status === "queued" || status.data?.status === "running";
@@ -445,6 +456,34 @@ export default function ChartExplore() {
               </>
             )}
 
+            {viz === "gauge" && (
+              <>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
+                  <Select value={gauge.metric ?? ""} onValueChange={(v) => setGauge((g) => ({ ...g, metric: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
+                    <SelectContent>
+                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <Label htmlFor="gauge-min" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Min</Label>
+                    <Input id="gauge-min" type="number" value={gauge.min ?? ""}
+                      onChange={(e) => { const n = Number(e.target.value); setGauge((g) => ({ ...g, min: e.target.value === "" || Number.isNaN(n) ? undefined : n })); }}
+                      className="h-8 text-sm" placeholder="0" />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="gauge-max" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Max</Label>
+                    <Input id="gauge-max" type="number" value={gauge.max ?? ""}
+                      onChange={(e) => { const n = Number(e.target.value); setGauge((g) => ({ ...g, max: e.target.value === "" || Number.isNaN(n) ? undefined : n })); }}
+                      className="h-8 text-sm" placeholder="auto" />
+                  </div>
+                </div>
+              </>
+            )}
+
             <div className="space-y-1">
               <Label htmlFor="row-limit" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Row limit</Label>
               <Input id="row-limit" type="number" min={1} max={10000} value={rowLimit}
@@ -616,6 +655,13 @@ export default function ChartExplore() {
           <div className="rounded-md border">
             <ProgressChart columns={results.data.columns} rows={results.data.rows} metric={progress.metric} goal={progress.goal}
               format={progress.metric ? columnSettings[progress.metric] : undefined} />
+          </div>
+        )}
+        {finished && results.data && viz === "gauge" && (
+          <div className="h-[50vh] rounded-md border p-2">
+            <EChartsRenderer option={buildGaugeOption(results.data.columns, results.data.rows, {
+              metric: gauge.metric, min: gauge.min, max: gauge.max, columnSettings, metricTypes,
+            })} />
           </div>
         )}
         {!queryId && !build.isPending && !submit.isPending && (

@@ -4,7 +4,7 @@ import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 
 export type VizType =
   | "table" | "pivot_table"
-  | "bar" | "row" | "line" | "area" | "scatter" | "combo" | "pie" | "scalar" | "progress";
+  | "bar" | "row" | "line" | "area" | "scatter" | "combo" | "pie" | "scalar" | "progress" | "gauge";
 
 export const CARTESIAN_VIZ = ["bar", "row", "line", "area", "scatter", "combo"] as const;
 export type CartesianViz = (typeof CARTESIAN_VIZ)[number];
@@ -78,6 +78,11 @@ export interface ProgressConfig {
   metric?: string;
   goal?: number;
 }
+export interface GaugeConfig {
+  metric?: string;
+  min?: number;
+  max?: number;
+}
 
 export interface ChartParams {
   spec: QuerySpec;
@@ -97,6 +102,7 @@ export interface ChartParams {
   pie?: PieConfig;               // pie viz only
   scalar?: ScalarConfig;         // big-number viz only
   progress?: ProgressConfig;     // progress viz only
+  gauge?: GaugeConfig;           // gauge viz only
 }
 
 export interface Chart {

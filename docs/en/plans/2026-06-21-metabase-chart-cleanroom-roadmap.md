@@ -53,8 +53,10 @@ One phase each, simplest first:
   entry. Verified live. (mb: visualizations/RowChart)
 - [ ] 3b. Waterfall
 - [ ] 3c. Funnel
-- [ ] 3d. Progress
-- [ ] 3e. Gauge
+- [x] 3d. Progress — value-vs-goal bar (React component, fill = value/goal, overshoot
+  shown, pointer + recoloured track). Verified live.
+- [x] 3e. Gauge — value on a 0..max arc (ECharts gauge series, registers GaugeChart;
+  progress arc + pointer + centre value). Verified live.
 - [ ] 3f. SmartScalar (trend vs previous period)
 - [ ] 3g. BoxPlot
 - [ ] 3h. Sankey
