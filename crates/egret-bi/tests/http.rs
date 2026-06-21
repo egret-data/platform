@@ -2,8 +2,8 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use egret_bi::{
-    chart_router, dataset_router, sqllab_router, BiState, ChartRepo, DatasetRepo, SavedQueryRepo,
-    SchemaService,
+    chart_router, dashboard_router, dataset_router, sqllab_router, BiState, ChartRepo,
+    DashboardRepo, DatasetRepo, SavedQueryRepo, SchemaService,
 };
 use egret_metastore::Db;
 use tower::ServiceExt;
@@ -24,7 +24,8 @@ fn build_state(db: Db) -> BiState {
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
         authz: egret_workspace::rbac::Authorizer::new(db.clone()),
         charts: ChartRepo::new(db.clone()),
-        datasets: DatasetRepo::new(db),
+        datasets: DatasetRepo::new(db.clone()),
+        dashboards: DashboardRepo::new(db),
     }
 }
 
@@ -103,6 +104,25 @@ async fn chart_list_requires_auth() {
         .oneshot(
             Request::builder()
                 .uri("/ws/eng/charts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn dashboard_list_requires_auth() {
+    let Some(st) = state().await else {
+        eprintln!("skip");
+        return;
+    };
+    let app = dashboard_router().with_state(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/ws/eng/dashboards")
                 .body(Body::empty())
                 .unwrap(),
         )

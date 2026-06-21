@@ -19,9 +19,10 @@ use crate::dataset::{NewColumn, SourceSpec};
 use crate::error::BiApiError;
 use crate::expr::validate_expression;
 use crate::model::{
-    AddColumnBody, ChartDataBody, ChartDataResponse, CreateChart, CreateDataset, CreateSource,
-    DatasetDetailDto, DatasetSummaryDto, MetricBody, SaveQuery, SavedQueryDto, UpdateChart,
-    UpdateColumnBody, UpdateDataset,
+    AddColumnBody, ChartDataBody, ChartDataResponse, CreateChart, CreateDashboard, CreateDataset,
+    CreateSource, DashboardDetailDto, DashboardSummaryDto, DatasetDetailDto, DatasetSummaryDto,
+    MetricBody, SaveQuery, SavedQueryDto, UpdateChart, UpdateColumnBody, UpdateDashboard,
+    UpdateDataset,
 };
 use crate::saved::SavedQueryRepo;
 use crate::schema::SchemaService;
@@ -37,6 +38,7 @@ pub struct BiState {
     pub authz: Authorizer,
     pub datasets: crate::dataset::DatasetRepo,
     pub charts: crate::chart::ChartRepo,
+    pub dashboards: crate::dashboard::DashboardRepo,
 }
 impl FromRef<BiState> for SessionService {
     fn from_ref(s: &BiState) -> Self {
@@ -59,6 +61,8 @@ const DS_READ: &str = "dataset:read";
 const DS_MANAGE: &str = "dataset:manage";
 const CH_READ: &str = "chart:read";
 const CH_MANAGE: &str = "chart:manage";
+const DB_READ: &str = "dashboard:read";
+const DB_MANAGE: &str = "dashboard:manage";
 
 pub fn sqllab_router() -> Router<BiState> {
     Router::new()
@@ -943,4 +947,173 @@ async fn ch_data(
         sql,
         database_id: ds.database_id.to_string(),
     }))
+}
+
+// ── Dashboard routes ─────────────────────────────────────────────────────────
+
+pub fn dashboard_router() -> Router<BiState> {
+    Router::new()
+        .route("/ws/{workspace}/dashboards", post(db_create).get(db_list))
+        .route(
+            "/ws/{workspace}/dashboards/{id}",
+            get(db_get).put(db_update).delete(db_remove),
+        )
+}
+
+async fn require_dashboard_in_ws(
+    st: &BiState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> Result<(), BiApiError> {
+    match st
+        .dashboards
+        .dashboard_workspace(id)
+        .await
+        .map_err(BiApiError::from)?
+    {
+        Some(w) if w == ctx.workspace_id.0 => Ok(()),
+        _ => Err(Error::NotFound("dashboard".into()).into()),
+    }
+}
+
+async fn require_dashboard_owner(
+    st: &BiState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> Result<(), BiApiError> {
+    let owner = st.dashboards.owner(id).await.map_err(BiApiError::from)?;
+    if is_admin(ctx) || owner == Some(ctx.principal.user_id.0) {
+        Ok(())
+    } else {
+        Err(Error::Forbidden.into())
+    }
+}
+
+/// Every chart referenced by a card must live in the same workspace as the dashboard,
+/// else embedding it is a cross-workspace leak. Returns NotFound on any foreign chart.
+async fn require_cards_in_ws(
+    st: &BiState,
+    ctx: &egret_core::WorkspaceContext,
+    cards: &[crate::model::CardInput],
+) -> Result<(), BiApiError> {
+    for c in cards {
+        if let Some(chart_id) = c.chart_id {
+            match st
+                .charts
+                .chart_workspace(chart_id)
+                .await
+                .map_err(BiApiError::from)?
+            {
+                Some(w) if w == ctx.workspace_id.0 => {}
+                _ => return Err(Error::NotFound("chart".into()).into()),
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn db_list(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<Vec<DashboardSummaryDto>>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DB_READ)
+        .await
+        .map_err(BiApiError::from)?;
+    let rows = st
+        .dashboards
+        .list_by_workspace(ctx.workspace_id.0)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(d, n)| crate::model::dashboard_summary_dto(d, n))
+            .collect(),
+    ))
+}
+
+async fn db_create(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Json(b): Json<CreateDashboard>,
+) -> Result<Json<DashboardDetailDto>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DB_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    let d = st
+        .dashboards
+        .create(
+            ctx.workspace_id.0,
+            &b.name,
+            &b.description,
+            Some(ctx.principal.user_id.0),
+        )
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(load_dashboard(&st, d.id).await?))
+}
+
+async fn db_get(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<DashboardDetailDto>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DB_READ)
+        .await
+        .map_err(BiApiError::from)?;
+    require_dashboard_in_ws(&st, &ctx, id).await?;
+    Ok(Json(load_dashboard(&st, id).await?))
+}
+
+async fn db_update(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+    Json(b): Json<UpdateDashboard>,
+) -> Result<Json<DashboardDetailDto>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DB_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_dashboard_in_ws(&st, &ctx, id).await?;
+    require_dashboard_owner(&st, &ctx, id).await?;
+    require_cards_in_ws(&st, &ctx, &b.cards).await?;
+    st.dashboards
+        .update_meta(id, &b.name, &b.description)
+        .await
+        .map_err(BiApiError::from)?;
+    let cards: Vec<crate::dashboard::NewCard> = b.cards.into_iter().map(|c| c.into_new()).collect();
+    st.dashboards
+        .replace_cards(id, &cards)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(load_dashboard(&st, id).await?))
+}
+
+async fn db_remove(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DB_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_dashboard_in_ws(&st, &ctx, id).await?;
+    require_dashboard_owner(&st, &ctx, id).await?;
+    st.dashboards.delete(id).await.map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn load_dashboard(st: &BiState, id: Uuid) -> Result<DashboardDetailDto, BiApiError> {
+    let d = st
+        .dashboards
+        .get(id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("dashboard".into()))?;
+    let cards = st.dashboards.cards(id).await.map_err(BiApiError::from)?;
+    Ok(crate::model::dashboard_detail_dto(d, cards))
 }

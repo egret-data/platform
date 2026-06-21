@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::chart::Chart;
 use crate::chartquery::QuerySpec;
+use crate::dashboard::{Dashboard, DashboardCard, NewCard};
 use crate::dataset::{Dataset, DatasetColumn, Metric};
 
 #[derive(Debug, Deserialize)]
@@ -280,6 +281,127 @@ pub struct ChartDataBody {
 pub struct ChartDataResponse {
     pub sql: String,
     pub database_id: String,
+}
+
+// ── Dashboard DTOs ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct DashboardSummaryDto {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub created_by: Option<String>,
+    pub card_count: i64,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DashboardCardDto {
+    pub id: String,
+    pub chart_id: Option<String>,
+    pub card_type: String,
+    pub grid_col: i32,
+    pub grid_row: i32,
+    pub size_x: i32,
+    pub size_y: i32,
+    pub options: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DashboardDetailDto {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub created_by: Option<String>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub cards: Vec<DashboardCardDto>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateDashboard {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// Card as supplied by the client when saving a layout.
+#[derive(Debug, Deserialize)]
+pub struct CardInput {
+    #[serde(default)]
+    pub chart_id: Option<Uuid>,
+    #[serde(default = "default_card_type")]
+    pub card_type: String,
+    pub grid_col: i32,
+    pub grid_row: i32,
+    pub size_x: i32,
+    pub size_y: i32,
+    #[serde(default = "empty_obj")]
+    pub options: serde_json::Value,
+}
+
+fn default_card_type() -> String {
+    "chart".into()
+}
+fn empty_obj() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateDashboard {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub cards: Vec<CardInput>,
+}
+
+impl CardInput {
+    pub fn into_new(self) -> NewCard {
+        NewCard {
+            chart_id: self.chart_id,
+            card_type: self.card_type,
+            grid_col: self.grid_col,
+            grid_row: self.grid_row,
+            size_x: self.size_x,
+            size_y: self.size_y,
+            options: self.options,
+        }
+    }
+}
+
+pub fn dashboard_summary_dto(d: Dashboard, card_count: i64) -> DashboardSummaryDto {
+    DashboardSummaryDto {
+        id: d.id.to_string(),
+        name: d.name,
+        description: d.description,
+        created_by: d.created_by.map(|u| u.to_string()),
+        card_count,
+        updated_at: d.updated_at,
+    }
+}
+
+pub fn dashboard_card_dto(c: DashboardCard) -> DashboardCardDto {
+    DashboardCardDto {
+        id: c.id.to_string(),
+        chart_id: c.chart_id.map(|i| i.to_string()),
+        card_type: c.card_type,
+        grid_col: c.grid_col,
+        grid_row: c.grid_row,
+        size_x: c.size_x,
+        size_y: c.size_y,
+        options: c.options,
+    }
+}
+
+pub fn dashboard_detail_dto(d: Dashboard, cards: Vec<DashboardCard>) -> DashboardDetailDto {
+    DashboardDetailDto {
+        id: d.id.to_string(),
+        name: d.name,
+        description: d.description,
+        created_by: d.created_by.map(|u| u.to_string()),
+        updated_at: d.updated_at,
+        cards: cards.into_iter().map(dashboard_card_dto).collect(),
+    }
 }
 
 #[cfg(test)]
