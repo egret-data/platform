@@ -271,4 +271,58 @@ impl DashboardRepo {
                 .flatten(),
         )
     }
+
+    /// Deep-copy a dashboard (row + tabs + cards) under a new owner, in one transaction.
+    /// The copy's name is "<name> (copy)"; tab references on cards are remapped to the copy's tabs.
+    /// Returns None if the source doesn't exist.
+    pub async fn duplicate(
+        &self,
+        src_id: Uuid,
+        new_owner: Option<Uuid>,
+    ) -> Result<Option<Dashboard>, BiError> {
+        let Some(src) = self.get(src_id).await? else {
+            return Ok(None);
+        };
+        let src_tabs = self.tabs(src_id).await?;
+        let src_cards = self.cards(src_id).await?;
+
+        let mut tx = self.db.pool.begin().await?;
+        let copy: Dashboard = sqlx::query_as::<_, Dashboard>(&format!(
+            "INSERT INTO dashboards (workspace_id, name, description, parameters, created_by, width) \
+             VALUES ($1,$2,$3,$4,$5,$6) RETURNING {COLS}"
+        ))
+        .bind(src.workspace_id)
+        .bind(format!("{} (copy)", src.name))
+        .bind(&src.description)
+        .bind(&src.parameters)
+        .bind(new_owner)
+        .bind(&src.width)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_conflict_err)?;
+
+        let mut tab_map: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
+        for t in &src_tabs {
+            let nid: Uuid = sqlx::query_scalar(
+                "INSERT INTO dashboard_tabs (dashboard_id, name, position) VALUES ($1,$2,$3) RETURNING id",
+            )
+            .bind(copy.id).bind(&t.name).bind(t.position)
+            .fetch_one(&mut *tx).await?;
+            tab_map.insert(t.id, nid);
+        }
+        for c in &src_cards {
+            let new_tab = c.tab_id.and_then(|old| tab_map.get(&old).copied());
+            sqlx::query(
+                "INSERT INTO dashboard_cards \
+                 (dashboard_id, chart_id, card_type, grid_col, grid_row, size_x, size_y, options, ordinal, tab_id) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+            )
+            .bind(copy.id).bind(c.chart_id).bind(&c.card_type)
+            .bind(c.grid_col).bind(c.grid_row).bind(c.size_x).bind(c.size_y)
+            .bind(&c.options).bind(c.ordinal).bind(new_tab)
+            .execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(Some(copy))
+    }
 }

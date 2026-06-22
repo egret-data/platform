@@ -958,6 +958,10 @@ pub fn dashboard_router() -> Router<BiState> {
             "/ws/{workspace}/dashboards/{id}",
             get(db_get).put(db_update).delete(db_remove),
         )
+        .route(
+            "/ws/{workspace}/dashboards/{id}/duplicate",
+            post(db_duplicate),
+        )
 }
 
 async fn require_dashboard_in_ws(
@@ -1112,6 +1116,25 @@ async fn db_remove(
     require_dashboard_owner(&st, &ctx, id).await?;
     st.dashboards.delete(id).await.map_err(BiApiError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn db_duplicate(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<DashboardDetailDto>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DB_READ)
+        .await
+        .map_err(BiApiError::from)?;
+    require_dashboard_in_ws(&st, &ctx, id).await?;
+    let copy = st
+        .dashboards
+        .duplicate(id, Some(ctx.principal.user_id.0))
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("dashboard".into()))?;
+    Ok(Json(load_dashboard(&st, copy.id).await?))
 }
 
 async fn load_dashboard(st: &BiState, id: Uuid) -> Result<DashboardDetailDto, BiApiError> {

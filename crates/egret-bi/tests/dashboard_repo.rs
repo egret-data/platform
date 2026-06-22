@@ -9,6 +9,7 @@ struct Fixture {
     ws: Uuid,
     dataset: Uuid,
     user: Uuid,
+    db: Db,
 }
 
 async fn setup() -> Option<Fixture> {
@@ -58,10 +59,11 @@ async fn setup() -> Option<Fixture> {
 
     Some(Fixture {
         repo: DashboardRepo::new(db.clone()),
-        charts: ChartRepo::new(db),
+        charts: ChartRepo::new(db.clone()),
         ws: wid,
         dataset: ds.id,
         user: uid,
+        db,
     })
 }
 
@@ -321,4 +323,78 @@ async fn dashboard_width_defaults_full_and_round_trips() {
         .await
         .unwrap();
     assert_eq!(f.repo.get(d.id).await.unwrap().unwrap().width, "fixed");
+}
+
+#[tokio::test]
+async fn duplicate_copies_tabs_and_cards_with_new_owner() {
+    let Some(fx) = setup().await else { return };
+    let src = fx
+        .repo
+        .create(fx.ws, "Orig", "desc", Some(fx.user))
+        .await
+        .unwrap();
+    let tabs = vec![
+        NewTab {
+            name: "T1".into(),
+            position: 0,
+        },
+        NewTab {
+            name: "T2".into(),
+            position: 1,
+        },
+    ];
+    let cards = vec![
+        NewCard {
+            chart_id: None,
+            card_type: "text".into(),
+            grid_col: 0,
+            grid_row: 0,
+            size_x: 4,
+            size_y: 2,
+            options: serde_json::json!({"text":"hi"}),
+            tab_index: Some(0),
+        },
+        NewCard {
+            chart_id: None,
+            card_type: "heading".into(),
+            grid_col: 0,
+            grid_row: 2,
+            size_x: 4,
+            size_y: 1,
+            options: serde_json::json!({"text":"h"}),
+            tab_index: Some(1),
+        },
+    ];
+    fx.repo.replace_layout(src.id, &tabs, &cards).await.unwrap();
+
+    let other: Uuid =
+        sqlx::query_scalar("INSERT INTO users (email, provider) VALUES ($1,'local') RETURNING id")
+            .bind(format!("u_{}@t.local", Uuid::new_v4().simple()))
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    let copy = fx
+        .repo
+        .duplicate(src.id, Some(other))
+        .await
+        .unwrap()
+        .expect("copy");
+
+    assert_ne!(copy.id, src.id);
+    assert_eq!(copy.name, "Orig (copy)");
+    assert_eq!(copy.created_by, Some(other));
+    assert_eq!(fx.repo.tabs(copy.id).await.unwrap().len(), 2);
+    let copy_cards = fx.repo.cards(copy.id).await.unwrap();
+    assert_eq!(copy_cards.len(), 2);
+    let copy_tab_ids: std::collections::HashSet<Uuid> = fx
+        .repo
+        .tabs(copy.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
+    for c in &copy_cards {
+        assert!(c.tab_id.map(|t| copy_tab_ids.contains(&t)).unwrap_or(true));
+    }
 }
