@@ -179,6 +179,11 @@ describe("DashboardView (Phase C — mapping + injection)", () => {
     expect(screen.queryByLabelText("column to filter on")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Region" }));
     expect(screen.getAllByLabelText("column to filter on").length).toBeGreaterThan(0);
+    // Picking a real column must persist through updateCardOptions and read back as
+    // the (controlled) select's value on re-render — the load-bearing round-trip.
+    const select = screen.getAllByLabelText("column to filter on")[0] as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "region" } });
+    expect((screen.getAllByLabelText("column to filter on")[0] as HTMLSelectElement).value).toBe("region");
   });
 });
 
