@@ -13,7 +13,7 @@ export interface ChartData {
 }
 
 /** Run a saved chart's query via the existing build->submit->poll pipeline. */
-export function useChartData(ws: string, chart: Chart | null, nonce?: number): ChartData {
+export function useChartData(ws: string, chart: Chart | null, nonce?: number, enabled = true): ChartData {
   const build = useBuildChartData(ws);
   const submit = useSubmitQuery(ws);
   const [queryId, setQueryId] = useState<string | null>(null);
@@ -25,7 +25,7 @@ export function useChartData(ws: string, chart: Chart | null, nonce?: number): C
   const specKey = chart ? `${chart.id}:${JSON.stringify(chart.params.spec)}` : "";
   useEffect(() => {
     let cancelled = false;
-    if (!chart) return;
+    if (!chart || !enabled) return;
     setQueryId(null);
     setError(null);
     (async () => {
@@ -39,13 +39,13 @@ export function useChartData(ws: string, chart: Chart | null, nonce?: number): C
       }
     })();
     return () => { cancelled = true; };
-  }, [ws, specKey, nonce]);
+  }, [ws, specKey, nonce, enabled]);
 
   const failed = status.data?.status === "failed" || status.data?.status === "cancelled";
   return {
     columns: results.data?.columns ?? [],
     rows: results.data?.rows ?? [],
-    isLoading: !!chart && !error && !failed && !(finished && results.data),
+    isLoading: enabled && !!chart && !error && !failed && !(finished && results.data),
     error: error ?? (failed ? (status.data?.error ?? "Query failed") : null),
   };
 }
