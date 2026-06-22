@@ -113,6 +113,7 @@ export function paramToFilters(
         if (isBlank(value)) return [];
         const [y, m] = String(value).split("-").map(Number);
         if (!y || !m) return [];
+        // Date.UTC(y, m, 0) = day 0 of month m+1 (m is 1-based) = last day of month m.
         const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
         const mm = String(m).padStart(2, "0");
         return [mkf("ge", `${y}-${mm}-01`), mkf("le", `${y}-${mm}-${String(last).padStart(2, "0")}`)];

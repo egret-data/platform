@@ -23,6 +23,10 @@ describe("paramToFilters — tier2d types", () => {
   it("month-year 'YYYY-MM' → ge first-of-month + le last-of-month", () => {
     expect(paramToFilters(p({ type: "date", operator: "month-year" }), "2024-03", "d"))
       .toEqual([{ col: "d", op: "ge", value: "2024-03-01" }, { col: "d", op: "le", value: "2024-03-31" }]);
+    expect(paramToFilters(p({ type: "date", operator: "month-year" }), "2024-04", "d"))
+      .toEqual([{ col: "d", op: "ge", value: "2024-04-01" }, { col: "d", op: "le", value: "2024-04-30" }]);
+    expect(paramToFilters(p({ type: "date", operator: "month-year" }), "2024-02", "d"))
+      .toEqual([{ col: "d", op: "ge", value: "2024-02-01" }, { col: "d", op: "le", value: "2024-02-29" }]);
     expect(paramToFilters(p({ type: "date", operator: "month-year" }), "", "d")).toEqual([]);
   });
   it("quarter-year 'YYYY-Q' → ge quarter-start + le quarter-end", () => {
