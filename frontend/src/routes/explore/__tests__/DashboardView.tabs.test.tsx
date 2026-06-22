@@ -71,6 +71,8 @@ describe("DashboardView tab edit affordances", () => {
   it("a card shows a move-to-tab control in edit mode with >=2 tabs", () => {
     renderView();
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    expect(screen.getByLabelText("move card c1 to tab")).toBeTruthy();
+    // the move-to-tab control now lives in the card settings panel
+    fireEvent.click(screen.getByRole("button", { name: "card settings" }));
+    expect(screen.getByLabelText("move card to tab")).toBeTruthy();
   });
 });

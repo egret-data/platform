@@ -16,12 +16,20 @@ const inp = "h-8 w-full rounded border bg-background px-2 text-sm";
 const sel = "h-8 rounded border bg-background px-1 text-sm";
 
 export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptions, onMoveToTab }: Props) {
+  const moveToTab = tabs.length >= 2 ? (
+    <label className="flex items-center justify-between gap-2 text-sm"><span>Move to tab</span>
+      <select aria-label="move card to tab" className={sel} value={card.tabKey ?? ""} onChange={(e) => onMoveToTab(e.target.value)}>
+        {tabs.map((t) => <option key={t.key} value={t.key}>{t.name}</option>)}
+      </select>
+    </label>
+  ) : null;
   if (card.card_type === "text" || card.card_type === "heading") {
     return (
       <div className="flex flex-col gap-2 p-3">
         <div className="text-sm font-medium">{card.card_type === "heading" ? "Heading" : "Text"}</div>
         <textarea aria-label={card.card_type === "heading" ? "heading text" : "text body"} className={`${inp} h-24 py-1`}
           value={(card.options.text as string) ?? ""} onChange={(e) => onUpdateOptions({ text: e.target.value })} />
+        {moveToTab}
       </div>
     );
   }
@@ -31,6 +39,7 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
         <div className="text-sm font-medium">Link</div>
         <input aria-label="link url" placeholder="https://…" className={inp} value={(card.options.url as string) ?? ""} onChange={(e) => onUpdateOptions({ url: e.target.value })} />
         <input aria-label="link label" placeholder="Label (optional)" className={inp} value={(card.options.label as string) ?? ""} onChange={(e) => onUpdateOptions({ label: e.target.value })} />
+        {moveToTab}
       </div>
     );
   }
@@ -89,13 +98,7 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
         })}
       </div>
 
-      {tabs.length >= 2 && (
-        <label className="flex items-center justify-between gap-2 text-sm"><span>Move to tab</span>
-          <select aria-label="move card to tab" className={sel} value={card.tabKey ?? ""} onChange={(e) => onMoveToTab(e.target.value)}>
-            {tabs.map((t) => <option key={t.key} value={t.key}>{t.name}</option>)}
-          </select>
-        </label>
-      )}
+      {moveToTab}
     </div>
   );
 }
