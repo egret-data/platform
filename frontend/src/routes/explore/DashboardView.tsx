@@ -45,6 +45,7 @@ export default function DashboardView() {
   const [draftCards, setDraftCards] = useState<DraftCard[] | null>(null);
   const [draftParameters, setDraftParameters] = useState<DashboardParameter[] | null>(null);
   const [draftTabs, setDraftTabs] = useState<DraftTab[] | null>(null);
+  const [draftWidth, setDraftWidth] = useState<"fixed" | "full">("full");
   const serverTabCount = dash?.tabs?.length ?? 0;
   const { activeTabPos, setActiveTabPos } = useDashboardTabs(editing ? (draftTabs?.length ?? 0) : serverTabCount);
   const cardSeqRef = useRef(0);
@@ -77,6 +78,7 @@ export default function DashboardView() {
   if (isLoading || !dash) return <div className="p-4 text-muted-foreground">Loading…</div>;
 
   const dashboard = dash;
+  const effectiveWidth = editing ? draftWidth : dashboard.width;
   const cards = editing && draftCards ? draftCards : dashboard.cards;
   // Fallback DraftCard[] for the draft setters (each runs only while editing, so draftCards is
   // non-null and this is effectively dead — but it keeps the setters typed as DraftCard[]).
@@ -110,6 +112,7 @@ export default function DashboardView() {
     setDraftCards(dc);
     setDraftParameters((dashboard.parameters ?? []).map((p) => ({ ...p })));
     setDraftTabs(dt);
+    setDraftWidth(dashboard.width);
     setEditing(true);
   }
   function cancelEdit() { setEditing(false); setDraftCards(null); setDraftParameters(null); setDraftTabs(null); }
@@ -188,7 +191,7 @@ export default function DashboardView() {
   async function onSave() {
     const { tabs: tabPayload, cards: cardPayload } = serializeLayout(draftTabs ?? [], (cards as DraftCard[]));
     try {
-      await update.mutateAsync({ id: dashboard.id, name: dashboard.name, description: dashboard.description, parameters, tabs: tabPayload, cards: cardPayload });
+      await update.mutateAsync({ id: dashboard.id, name: dashboard.name, description: dashboard.description, parameters, tabs: tabPayload, width: draftWidth, cards: cardPayload });
       setEditing(false); setDraftCards(null); setDraftTabs(null);
       toast.success("Saved");
     } catch (e) { toast.error(String(e)); }
@@ -196,6 +199,7 @@ export default function DashboardView() {
 
   return (
     <div className={view.isFullscreen ? "fixed inset-0 z-50 overflow-auto bg-muted/30 p-4" : "min-h-full bg-muted/30 p-4"}>
+      <div className={effectiveWidth === "fixed" ? "mx-auto w-full max-w-[1200px]" : ""}>
       <div className="mb-3 flex items-center justify-between">
         <h1 className="text-lg font-semibold">{dash.name}</h1>
         <div className="flex gap-2">
@@ -229,6 +233,10 @@ export default function DashboardView() {
           )}
           {editing ? (
             <>
+              <div className="flex items-center gap-1 rounded border p-0.5">
+                <button type="button" aria-label="width full" className={`rounded px-2 py-0.5 text-xs ${draftWidth === "full" ? "bg-accent" : ""}`} onClick={() => setDraftWidth("full")}>Full</button>
+                <button type="button" aria-label="width fixed" className={`rounded px-2 py-0.5 text-xs ${draftWidth === "fixed" ? "bg-accent" : ""}`} onClick={() => setDraftWidth("fixed")}>Fixed</button>
+              </div>
               <Button size="sm" variant="ghost" onClick={cancelEdit}>Cancel</Button>
               <Button size="sm" onClick={onSave} disabled={update.isPending}>Save</Button>
             </>
@@ -507,6 +515,7 @@ export default function DashboardView() {
         columns={(recordsDataset.data?.columns ?? []).map((c) => ({ name: c.column_name, type: c.data_type ?? "varchar" }))}
         filters={records?.filters ?? []}
       />
+      </div>
     </div>
   );
 }
