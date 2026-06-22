@@ -29,7 +29,7 @@ vi.mock("@/api/dashboards", () => ({
 beforeEach(() => { dashState.current = dashState.loaded; });
 vi.mock("@/api/charts", async (orig) => ({
   ...(await orig<typeof import("@/api/charts")>()),
-  useCharts: () => ({ data: [{ id: "c1", dataset_id: "ds1", name: "Sales", viz_type: "table", description: "", params: { spec: { metrics: [], dimensions: [], columns: [], filters: [], orderby: [], row_limit: 1000, rollup_groups: [] } }, created_by: null, updated_at: "" }] }),
+  useCharts: () => ({ data: [{ id: "c1", dataset_id: "ds1", name: "Sales", viz_type: "table", description: "", params: { spec: { metrics: [], dimensions: ["region"], columns: [], filters: [], orderby: [], row_limit: 1000, rollup_groups: [] } }, created_by: null, updated_at: "" }] }),
   useChart: () => ({ data: undefined }),
 }));
 vi.mock("@/api/useChartData", () => ({
@@ -153,6 +153,15 @@ describe("DashboardView (Phase C — parameters)", () => {
     dashState.current = { data: { ...(dashState.loaded.data as object), parameters: [{ id: "p1", name: "Region", slug: "region", type: "text", operator: "is" }] }, isLoading: false };
     renderAt();
     expect(screen.getByLabelText("Region")).toBeInTheDocument();
+  });
+});
+
+describe("DashboardView (Phase C — mapping + injection)", () => {
+  it("shows a per-card mapping dropdown for each parameter in edit mode", () => {
+    dashState.current = { data: { ...(dashState.loaded.data as object), parameters: [{ id: "p1", name: "Region", slug: "region", type: "text", operator: "is" }] }, isLoading: false };
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    expect(screen.getByLabelText(/map Region/i)).toBeInTheDocument();
   });
 });
 

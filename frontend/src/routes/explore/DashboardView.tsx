@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import RGL, { WidthProvider, type Layout } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
@@ -13,11 +13,20 @@ import { GRID_COLS, CARD_MIN_SIZE, CARD_DEFAULT_SIZE } from "@/components/chart/
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
 import { DashboardFilterBar } from "@/components/chart/dashboard/DashboardFilterBar";
 import { ParameterEditor } from "@/components/chart/dashboard/ParameterEditor";
-import { slugify } from "@/components/chart/dashboard/params";
+import { slugify, applyParamsToChart } from "@/components/chart/dashboard/params";
+import { useColumnValues } from "@/api/useColumnValues";
 import { toast } from "sonner";
 
 const Grid = WidthProvider(RGL);
 const ROW_PX = 90;
+
+/** Loads distinct column values for one category/id parameter (hook is called
+ * unconditionally inside this child so the Rules of Hooks are respected). */
+function ParamOptions({ ws, datasetId, column, slug, onLoaded }: { ws: string; datasetId: string | null; column: string | null; slug: string; onLoaded: (slug: string, values: string[]) => void }) {
+  const { values } = useColumnValues(ws, datasetId, column, !!datasetId && !!column);
+  useEffect(() => { if (values.length) onLoaded(slug, values); }, [slug, values, onLoaded]);
+  return null;
+}
 
 export default function DashboardView() {
   const { workspace: ws, id } = useParams() as { workspace: string; id: string };
@@ -34,6 +43,9 @@ export default function DashboardView() {
   const paramSource = editing && draftParameters ? draftParameters : (dash?.parameters ?? []);
   const paramsState = useDashboardParams(paramSource);
   const [replacingId, setReplacingId] = useState<string | null>(null);
+  // category/id dropdown options, keyed by param slug; populated by <ParamOptions> children.
+  const [optionsBySlug, setOptionsBySlug] = useState<Record<string, string[]>>({});
+  const onOptionsLoaded = useCallback((slug: string, vals: string[]) => setOptionsBySlug((m) => ({ ...m, [slug]: vals })), []);
 
   useEffect(() => {
     setEditing(false);
@@ -211,8 +223,18 @@ export default function DashboardView() {
           </div>
         </aside>
       )}
-      {/* TODO(PC-T9): optionsBySlug — category/id dropdown population */}
-      <DashboardFilterBar parameters={parameters} values={paramsState.values} onChange={paramsState.setValue} optionsBySlug={{}} />
+      {/* For each category/id parameter, load distinct values from the first card that maps it. */}
+      {parameters
+        .filter((p) => p.type === "category" || p.type === "id")
+        .map((p) => {
+          const card = cards.find((c) => c.card_type === "chart" && ((c.options.paramMappings as Record<string, string>) ?? {})[p.id]);
+          if (!card) return null;
+          const ch = chartById.get(card.chart_id ?? "");
+          const column = ((card.options.paramMappings as Record<string, string>) ?? {})[p.id] ?? null;
+          if (!ch || !column) return null;
+          return <ParamOptions key={p.id} ws={ws} datasetId={ch.dataset_id} column={column} slug={p.slug} onLoaded={onOptionsLoaded} />;
+        })}
+      <DashboardFilterBar parameters={parameters} values={paramsState.values} onChange={paramsState.setValue} optionsBySlug={optionsBySlug} />
       {cards.length === 0 ? (
         <p className="text-muted-foreground">No cards yet. Click Edit to add charts.</p>
       ) : (
@@ -225,7 +247,11 @@ export default function DashboardView() {
           layout={layout}
           onLayoutChange={onLayoutChange}
         >
-          {cards.map((c) => (
+          {cards.map((c) => {
+            const baseChart = chartById.get(c.chart_id ?? "");
+            const mappings = (c.options.paramMappings as Record<string, string>) ?? {};
+            const injected = baseChart ? applyParamsToChart(baseChart, parameters, paramsState.values, mappings) : undefined;
+            return (
             <div key={c.id} className={`relative overflow-hidden ${c.card_type === "heading" ? "" : "rounded-md border bg-background"}`}>
               {editing && (
                 <div className="absolute right-1 top-1 z-10 flex gap-1">
@@ -243,6 +269,26 @@ export default function DashboardView() {
                 <input aria-label="card title" placeholder="Title (blank = chart name)" className="m-1 w-[calc(100%-0.5rem)] rounded border px-1 text-xs"
                   value={(c.options.title as string) ?? ""} onChange={(e) => updateCardOptions(c.id, { title: e.target.value })} />
               )}
+              {editing && parameters.length > 0 && c.card_type === "chart" && (() => {
+                const ch = chartById.get(c.chart_id ?? "");
+                const cols = ch ? [...ch.params.spec.dimensions, ...ch.params.spec.columns] : [];
+                const cardMappings = (c.options.paramMappings as Record<string, string>) ?? {};
+                return (
+                  <div className="m-1 flex flex-col gap-0.5 border-t pt-1">
+                    {parameters.map((p) => (
+                      <label key={p.id} className="flex items-center justify-between gap-1 text-[10px] text-muted-foreground">
+                        <span>{p.name}</span>
+                        <select aria-label={`map ${p.name}`} className="h-6 rounded border bg-background text-[10px]"
+                          value={cardMappings[p.id] ?? ""}
+                          onChange={(e) => updateCardOptions(c.id, { paramMappings: { ...cardMappings, [p.id]: e.target.value } })}>
+                          <option value="">none</option>
+                          {cols.map((col) => <option key={col} value={col}>{col}</option>)}
+                        </select>
+                      </label>
+                    ))}
+                  </div>
+                );
+              })()}
               {editing && c.card_type === "text" && (
                 <textarea aria-label="text body" className="m-1 h-[calc(100%-1rem)] w-[calc(100%-0.5rem)] resize-none rounded border p-1 text-xs"
                   value={(c.options.text as string) ?? ""} onChange={(e) => updateCardOptions(c.id, { text: e.target.value })} />
@@ -260,10 +306,11 @@ export default function DashboardView() {
                 </div>
               )}
               {(!editing || c.card_type === "chart") && (
-                <DashboardCardView ws={ws} card={c} chart={chartById.get(c.chart_id ?? "")} refreshNonce={view.refreshNonce} />
+                <DashboardCardView ws={ws} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values} />
               )}
             </div>
-          ))}
+            );
+          })}
         </Grid>
       )}
       <Dialog open={replacingId !== null} onOpenChange={(o) => { if (!o) setReplacingId(null); }}>
