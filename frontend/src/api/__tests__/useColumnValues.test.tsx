@@ -30,6 +30,14 @@ describe("useColumnValues", () => {
     await waitFor(() => expect(result.current.values.length).toBe(2));
     expect(result.current.values).toEqual(["EU", "US"]);
   });
+  it("queries the column via `columns` (not a dimensions-only group-by the engine would reject)", async () => {
+    const { result } = renderHook(() => useColumnValues("eng", "ds1", "region", true), { wrapper });
+    await waitFor(() => expect(result.current.values.length).toBe(2));
+    const dataCall = apiJson.mock.calls.find(([url]) => String(url).endsWith("/charts/data"));
+    const body = JSON.parse((dataCall![1] as { body: string }).body);
+    expect(body.query_spec.columns).toEqual(["region"]);
+    expect(body.query_spec.dimensions).toEqual([]);
+  });
   it("is inert when disabled", () => {
     const { result } = renderHook(() => useColumnValues("eng", "ds1", "region", false), { wrapper });
     expect(result.current.values).toEqual([]);
