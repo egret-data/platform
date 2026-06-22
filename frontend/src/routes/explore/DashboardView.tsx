@@ -195,7 +195,7 @@ export default function DashboardView() {
   }
 
   return (
-    <div className={view.isFullscreen ? "fixed inset-0 z-50 overflow-auto bg-background p-4" : "p-4"}>
+    <div className={view.isFullscreen ? "fixed inset-0 z-50 overflow-auto bg-muted/30 p-4" : "min-h-full bg-muted/30 p-4"}>
       <div className="mb-3 flex items-center justify-between">
         <h1 className="text-lg font-semibold">{dash.name}</h1>
         <div className="flex gap-2">
@@ -313,6 +313,7 @@ export default function DashboardView() {
           className="layout"
           cols={GRID_COLS}
           rowHeight={ROW_PX}
+          margin={[12, 12]}
           isDraggable={editing}
           isResizable={editing}
           layout={layout}
@@ -323,7 +324,7 @@ export default function DashboardView() {
             const mappings = (c.options.paramMappings as Record<string, string>) ?? {};
             const injected = baseChart ? applyParamsToChart(baseChart, parameters, paramsState.values, mappings) : undefined;
             return (
-            <div key={c.id} className={`relative overflow-hidden ${c.card_type === "heading" ? "" : "rounded-md border bg-background"}`}>
+            <div key={c.id} className={`relative overflow-hidden ${c.card_type === "heading" ? "" : "rounded-lg border bg-card shadow-sm"}`}>
               {editing && (
                 <div className="absolute right-1 top-1 z-10 flex gap-1">
                   <button type="button" aria-label={`duplicate card ${c.id}`} className="rounded bg-background/80 px-1 text-xs"
