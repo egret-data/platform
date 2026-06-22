@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { GRID_COLS, CARD_MIN_SIZE, CARD_DEFAULT_SIZE } from "@/components/chart/dashboard-grid";
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
+import { CardFilterMapOverlay } from "@/components/chart/dashboard/CardFilterMapOverlay";
 import { DashboardFilterBar } from "@/components/chart/dashboard/DashboardFilterBar";
 import { EditSidebar, type EditPanel } from "@/components/chart/dashboard/EditSidebar";
 import { EditFilterChips } from "@/components/chart/dashboard/EditFilterChips";
@@ -202,6 +203,8 @@ export default function DashboardView() {
     } catch (e) { toast.error(String(e)); }
   }
 
+  const activeParamId = editing && editPanel?.kind === "filter" ? editPanel.paramId : null;
+
   return (
     <div className={view.isFullscreen ? "fixed inset-0 z-50 overflow-auto bg-muted/30 p-4" : "min-h-full bg-muted/30 p-4"}>
       {editing && (
@@ -343,6 +346,13 @@ export default function DashboardView() {
                 <DashboardCardView ws={ws} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values}
                   blocked={!editing && requiredUnset}
                   onValueClick={editing ? undefined : (ctx, x, y) => onCardValueClick(c, ctx, x, y)} />
+                {activeParamId && c.card_type === "chart" && baseChart && (
+                  <CardFilterMapOverlay
+                    columns={[...baseChart.params.spec.dimensions, ...baseChart.params.spec.columns]}
+                    value={mappings[activeParamId] ?? ""}
+                    onChange={(col) => updateCardOptions(c.id, { paramMappings: { ...mappings, [activeParamId]: col } })}
+                  />
+                )}
               </div>
             </div>
             );

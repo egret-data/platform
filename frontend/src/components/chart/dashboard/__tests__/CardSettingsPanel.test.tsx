@@ -16,11 +16,9 @@ describe("CardSettingsPanel (chart card)", () => {
     fireEvent.change(screen.getByLabelText("card title"), { target: { value: "Hi" } });
     expect(onUpdateOptions).toHaveBeenCalledWith({ title: "Hi" });
   });
-  it("maps a parameter to a column", () => {
-    const onUpdateOptions = vi.fn();
-    render(<CardSettingsPanel card={card()} chart={chart} parameters={[param]} tabs={tabs} onUpdateOptions={onUpdateOptions} onMoveToTab={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText("map Region"), { target: { value: "region" } });
-    expect(onUpdateOptions).toHaveBeenCalledWith({ paramMappings: { pr: "region" } });
+  it("no longer shows the per-param mapping (moved to in-card overlay)", () => {
+    render(<CardSettingsPanel card={card()} chart={chart} parameters={[param]} tabs={tabs} onUpdateOptions={vi.fn()} onMoveToTab={vi.fn()} />);
+    expect(screen.queryByLabelText(/^map /)).toBeNull();
   });
   it("sets on-click to cross-filter", () => {
     const onUpdateOptions = vi.fn();

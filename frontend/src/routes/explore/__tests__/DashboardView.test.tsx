@@ -172,12 +172,13 @@ describe("DashboardView (Phase C — parameters)", () => {
 });
 
 describe("DashboardView (Phase C — mapping + injection)", () => {
-  it("shows a per-card mapping dropdown for each parameter in edit mode", () => {
+  it("shows an in-card column-to-filter overlay when a filter is selected in edit mode", () => {
     dashState.current = { data: { ...(dashState.loaded.data as object), parameters: [{ id: "p1", name: "Region", slug: "region", type: "text", operator: "is" }] }, isLoading: false };
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
-    fireEvent.click(screen.getByRole("button", { name: "card settings" }));
-    expect(screen.getByLabelText(/map Region/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText("column to filter on")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Region" }));
+    expect(screen.getAllByLabelText("column to filter on").length).toBeGreaterThan(0);
   });
 });
 
