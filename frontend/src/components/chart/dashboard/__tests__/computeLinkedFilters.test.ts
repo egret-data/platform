@@ -30,4 +30,9 @@ describe("computeLinkedFilters", () => {
   it("returns [] when there are no filteringParameters", () => {
     expect(computeLinkedFilters(param({ id: "1" }), {}, [], {})).toEqual([]);
   });
+
+  it("ignores a dangling linked id not present in parameters", () => {
+    const ghost = param({ id: "1", filteringParameters: ["missing"] });
+    expect(computeLinkedFilters(ghost, { missing: "some_col" }, [ghost], { whatever: "x" })).toEqual([]);
+  });
 });
