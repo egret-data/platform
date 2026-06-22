@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { DashboardCardView } from "../DashboardCardView";
 import type { DashboardCard } from "@/api/dashboards";
 import type { Chart } from "@/api/charts";
@@ -7,7 +7,10 @@ import type { Chart } from "@/api/charts";
 vi.mock("@/api/useChartData", () => ({
   useChartData: () => ({ columns: [{ name: "rev", type: "double" }], rows: [[5]], isLoading: false, error: null }),
 }));
-vi.mock("@/components/chart/ChartRenderer", () => ({ ChartRenderer: () => <div data-testid="chart" /> }));
+vi.mock("@/components/chart/ChartRenderer", () => ({
+  ChartRenderer: ({ onValueClick }: { onValueClick?: (ctx: unknown, x: number, y: number) => void }) =>
+    <button data-testid="chart" onClick={() => onValueClick?.({ dims: [{ col: "region", value: "EU" }] }, 1, 2)} />,
+}));
 
 const chart: Chart = {
   id: "c1", dataset_id: "ds1", name: "Sales", viz_type: "table", description: "",
@@ -45,5 +48,11 @@ describe("DashboardCardView", () => {
   it("routes a link card", () => {
     render(<DashboardCardView ws="eng" card={card({ card_type: "link", options: { url: "https://x.com", label: "X" } })} chart={undefined} />);
     expect(screen.getByRole("link", { name: "X" })).toHaveAttribute("href", "https://x.com");
+  });
+  it("threads onValueClick to a chart card", () => {
+    const onValueClick = vi.fn();
+    render(<DashboardCardView ws="eng" card={card({ chart_id: "c1" })} chart={chart} onValueClick={onValueClick} />);
+    fireEvent.click(screen.getByTestId("chart"));
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "region", value: "EU" }] }, 1, 2);
   });
 });
