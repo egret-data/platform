@@ -371,6 +371,7 @@ impl CardInput {
             size_x: self.size_x,
             size_y: self.size_y,
             options: self.options,
+            tab_index: None,
         }
     }
 }

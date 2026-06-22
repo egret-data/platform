@@ -1,5 +1,5 @@
 //! DB-gated DashboardRepo tests. Self-skip without DATABASE_URL.
-use egret_bi::{ChartRepo, DashboardRepo, DatasetRepo, NewCard, SourceSpec};
+use egret_bi::{ChartRepo, DashboardRepo, DatasetRepo, NewCard, NewTab, SourceSpec};
 use egret_metastore::Db;
 use uuid::Uuid;
 
@@ -103,6 +103,7 @@ async fn dashboard_crud_cards_and_unique_conflict() {
             size_x: 6,
             size_y: 4,
             options: serde_json::json!({}),
+            tab_index: None,
         },
         NewCard {
             chart_id: Some(chart.id),
@@ -112,6 +113,7 @@ async fn dashboard_crud_cards_and_unique_conflict() {
             size_x: 6,
             size_y: 4,
             options: serde_json::json!({ "title": "copy" }),
+            tab_index: None,
         },
     ];
     f.repo.replace_cards(d.id, &cards).await.unwrap();
@@ -139,6 +141,7 @@ async fn dashboard_crud_cards_and_unique_conflict() {
                 size_x: 12,
                 size_y: 8,
                 options: serde_json::json!({}),
+                tab_index: None,
             }],
         )
         .await
@@ -172,5 +175,47 @@ async fn dashboard_crud_cards_and_unique_conflict() {
     // deleting the dashboard cascades its cards
     f.repo.delete(d.id).await.unwrap();
     assert!(f.repo.get(d.id).await.unwrap().is_none());
+    assert!(f.repo.cards(d.id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn replace_layout_tabs_and_card_assignment() {
+    let Some(f) = setup().await else { eprintln!("skip"); return; };
+    let params = serde_json::json!({ "spec": { "metrics": ["revenue"], "row_limit": 100 } });
+    let chart = f.charts.create(f.ws, f.dataset, "Sales", "", "bar", &params, Some(f.user)).await.unwrap();
+    let d = f.repo.create(f.ws, "Tabbed", "", Some(f.user)).await.unwrap();
+
+    let tabs = vec![
+        NewTab { name: "Overview".into(), position: 0 },
+        NewTab { name: "Detail".into(),   position: 1 },
+    ];
+    let cards = vec![
+        NewCard { chart_id: Some(chart.id), card_type: "chart".into(), grid_col: 0, grid_row: 0, size_x: 6, size_y: 4, options: serde_json::json!({}), tab_index: Some(0) },
+        NewCard { chart_id: Some(chart.id), card_type: "chart".into(), grid_col: 0, grid_row: 0, size_x: 6, size_y: 4, options: serde_json::json!({}), tab_index: Some(1) },
+    ];
+    f.repo.replace_layout(d.id, &tabs, &cards).await.unwrap();
+
+    let got_tabs = f.repo.tabs(d.id).await.unwrap();
+    assert_eq!(got_tabs.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), vec!["Overview", "Detail"]);
+    let got_cards = f.repo.cards(d.id).await.unwrap();
+    assert_eq!(got_cards.len(), 2);
+    assert_eq!(got_cards[0].tab_id, Some(got_tabs[0].id));
+    assert_eq!(got_cards[1].tab_id, Some(got_tabs[1].id));
+
+    f.repo.replace_layout(d.id, &[], &[
+        NewCard { chart_id: Some(chart.id), card_type: "chart".into(), grid_col: 0, grid_row: 0, size_x: 6, size_y: 4, options: serde_json::json!({}), tab_index: None },
+    ]).await.unwrap();
+    assert!(f.repo.tabs(d.id).await.unwrap().is_empty());
+    assert_eq!(f.repo.cards(d.id).await.unwrap()[0].tab_id, None);
+
+    let bad = f.repo.replace_layout(d.id, &[NewTab { name: "Only".into(), position: 0 }], &[
+        NewCard { chart_id: Some(chart.id), card_type: "chart".into(), grid_col: 0, grid_row: 0, size_x: 6, size_y: 4, options: serde_json::json!({}), tab_index: Some(5) },
+    ]).await;
+    assert!(matches!(bad, Err(egret_bi::BiError::BadRequest(_))));
+
+    f.repo.replace_layout(d.id, &[NewTab { name: "T".into(), position: 0 }], &[
+        NewCard { chart_id: Some(chart.id), card_type: "chart".into(), grid_col: 0, grid_row: 0, size_x: 6, size_y: 4, options: serde_json::json!({}), tab_index: Some(0) },
+    ]).await.unwrap();
+    f.repo.replace_layout(d.id, &[], &[]).await.unwrap();
     assert!(f.repo.cards(d.id).await.unwrap().is_empty());
 }
