@@ -91,7 +91,7 @@ export default function DashboardView() {
     const maxY = cards.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
     const newCard: Card = {
       id: `new-${chart.id}-${cardSeqRef.current++}`, chart_id: chart.id, card_type: "chart",
-      grid_col: 0, grid_row: maxY, size_x: CARD_DEFAULT_SIZE.w, size_y: CARD_DEFAULT_SIZE.h, options: {},
+      grid_col: 0, grid_row: maxY, size_x: CARD_DEFAULT_SIZE.w, size_y: CARD_DEFAULT_SIZE.h, options: {}, tab_id: null,
     };
     setDraftCards([...cards, newCard]);
   }
@@ -119,7 +119,7 @@ export default function DashboardView() {
       const maxY = base.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
       const newCard: Card = {
         id: `new-${card_type}-${cardSeqRef.current++}`, chart_id: null, card_type,
-        grid_col: 0, grid_row: maxY, size_x: CARD_DEFAULT_SIZE.w, size_y: card_type === "heading" ? 1 : CARD_DEFAULT_SIZE.h, options,
+        grid_col: 0, grid_row: maxY, size_x: CARD_DEFAULT_SIZE.w, size_y: card_type === "heading" ? 1 : CARD_DEFAULT_SIZE.h, options, tab_id: null,
       };
       return [...base, newCard];
     });
@@ -160,9 +160,10 @@ export default function DashboardView() {
     const payload: CardInput[] = cards.map((c) => ({
       chart_id: c.chart_id, card_type: c.card_type,
       grid_col: c.grid_col, grid_row: c.grid_row, size_x: c.size_x, size_y: c.size_y, options: c.options,
+      tab_index: null,
     }));
     try {
-      await update.mutateAsync({ id: dashboard.id, name: dashboard.name, description: dashboard.description, parameters, cards: payload });
+      await update.mutateAsync({ id: dashboard.id, name: dashboard.name, description: dashboard.description, parameters, tabs: [], cards: payload });
       setEditing(false); setDraftCards(null);
       toast.success("Saved");
     } catch (e) { toast.error(String(e)); }
