@@ -242,7 +242,7 @@ trong `egret-core`**, có thể test độc lập. Crate `*-server` tổng hợp
 
 | Crate | Trách nhiệm | Public interface |
 |---|---|---|
-| `egret-bi` | Semantic layer: **dataset** (logical table, column, metric, computed), **SQL Lab** saved query, **chart** (viz config → ECharts spec), **dashboard** (layout, cross-filter), query qua `egret-engine`, caching | `DatasetService`, `ChartService`, `DashboardService`, `SqlLabService` |
+| `egret-bi` | Semantic layer: **dataset** (logical table, column, metric, computed), **SQL Lab** saved query, **chart** (viz config → ECharts spec), **dashboard** (layout lưới nhiều tab, parameter/filter, click behaviour: cross-filter/URL/drill-through), query qua `egret-engine`, caching | `DatasetService`, `ChartService`, `DashboardService`, `SqlLabService` |
 | `egret-notebook` | Notebook model (cells), **kernel session** Jupyter/Spark (giao thức), thực thi, gắn `sparklabx/kernel` | `NotebookService`, `KernelGateway` |
 | `egret-dataapi` | **Data API Builder**: API definition, **dynamic-SQL template engine** (MyBatis-style: if/foreach/where), param binding, multi-statement + transaction, publish/version/**hot-reload**, **gateway runtime** (token/api-key, IP allow/deny, rate-limit, cache, call-log) | `ApiDefService`, `ApiGateway`, `SqlTemplate` |
 | `egret-workflow` | **Automation engine**: DAG model, **triggers** (cron via `tokio-cron-scheduler`, webhook, on-event), **executors** (run-query, send-email, http-request, transform, branch, call-dataapi, export), run engine + history, retry/alert | `WorkflowService`, `WorkflowRunner`, `NodeExecutor` trait |

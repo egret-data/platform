@@ -16,7 +16,7 @@ API builder) và n8n (workflow automation) — với frontend kế thừa design
 - 🗄️ **Database management** — đăng ký/monitor database (MVP: Trino, StarRocks)
 - 🛡️ **Apache Ranger API** — tương thích Ranger Admin REST để Trino/StarRocks tải policy
 - 🧊 **Iceberg REST Catalog** — catalog tích hợp engine (tham khảo Lakekeeper)
-- 📊 **BI / Explorer** — SQL Lab, dataset, chart (ECharts), dashboard, notebook
+- 📊 **BI / Explorer** — SQL Lab, dataset, chart (ECharts), dashboard (nhiều tab, filter, click behaviour), notebook
 - 🔌 **Data API Builder** — cấu hình HTTP API từ SQL (dynamic SQL kiểu MyBatis)
 - ⚙️ **Workflow Automation** — tự động hoá kiểu n8n (schedule, gửi mail, gọi API)
 - 🏢 **Multi-workspace** · 🔐 **OIDC / SSO**

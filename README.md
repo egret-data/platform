@@ -17,7 +17,7 @@ inherits the sparklabx design system.
 - 🗄️ **Database management** — register/monitor databases (MVP: Trino, StarRocks)
 - 🛡️ **Apache Ranger API** — Ranger Admin REST-compatible so Trino/StarRocks download policies
 - 🧊 **Iceberg REST Catalog** — engine-integrated catalog (references Lakekeeper)
-- 📊 **BI / Explorer** — SQL Lab, dataset, chart (ECharts), dashboard, notebook
+- 📊 **BI / Explorer** — SQL Lab, dataset, chart (ECharts), dashboard (multi-tab, filters, click behaviour), notebook
 - 🔌 **Data API Builder** — configure HTTP APIs from SQL (MyBatis-style dynamic SQL)
 - ⚙️ **Workflow Automation** — n8n-style automation (schedule, send email, call APIs)
 - 🏢 **Multi-workspace** · 🔐 **OIDC / SSO**
