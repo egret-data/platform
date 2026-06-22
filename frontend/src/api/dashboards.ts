@@ -15,9 +15,25 @@ export interface DashboardSummary {
   id: string; name: string; description: string;
   created_by: string | null; card_count: number; updated_at: string;
 }
+export type ParamType = "text" | "number" | "date" | "id" | "category";
+export type ParamOperator =
+  | "is" | "is-not" | "contains" | "starts-with" | "ends-with"   // text
+  | "=" | "!=" | "between" | ">=" | "<="                         // number
+  | "range" | "relative" | "single";                            // date
+export interface DashboardParameter {
+  id: string;
+  name: string;
+  slug: string;
+  type: ParamType;
+  operator: ParamOperator;
+  default?: unknown;
+  required?: boolean;
+}
+
 export interface DashboardDetail {
   id: string; name: string; description: string;
   created_by: string | null; updated_at: string;
+  parameters: DashboardParameter[];
   cards: DashboardCard[];
 }
 export interface CardInput {
@@ -62,7 +78,7 @@ export function useDashboardMutations(ws: string) {
     onSuccess: () => invalidate(),
   });
   const update = useMutation({
-    mutationFn: ({ id, ...b }: { id: string; name: string; description?: string; cards: CardInput[] }) =>
+    mutationFn: ({ id, ...b }: { id: string; name: string; description?: string; parameters: DashboardParameter[]; cards: CardInput[] }) =>
       apiJson<DashboardDetail>(`/ws/${ws}/dashboards/${id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(b) }),
     onSuccess: (d) => invalidate(d.id),
   });

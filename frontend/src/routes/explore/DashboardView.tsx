@@ -115,7 +115,7 @@ export default function DashboardView() {
       grid_col: c.grid_col, grid_row: c.grid_row, size_x: c.size_x, size_y: c.size_y, options: c.options,
     }));
     try {
-      await update.mutateAsync({ id: dashboard.id, name: dashboard.name, description: dashboard.description, cards: payload });
+      await update.mutateAsync({ id: dashboard.id, name: dashboard.name, description: dashboard.description, parameters: [], cards: payload }); // TODO(PC-T8): send real parameters
       setEditing(false); setDraftCards(null);
       toast.success("Saved");
     } catch (e) { toast.error(String(e)); }
