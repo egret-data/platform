@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useBuildChartData } from "@/api/charts";
 import type { QuerySpec } from "@/api/charts";
 import { useSubmitQuery, useQueryStatus, useResults } from "@/api/sqllab";
@@ -32,7 +32,9 @@ export function useColumnValues(ws: string, datasetId: string | null, column: st
     return () => { cancelled = true; };
   }, [ws, key]);
 
-  const raw = results.data?.rows ?? [];
-  const values = Array.from(new Set(raw.map((r) => r[0]).filter((v) => v != null).map(String)));
+  const values = useMemo(() => {
+    const raw = results.data?.rows ?? [];
+    return Array.from(new Set(raw.map((r) => r[0]).filter((v) => v != null).map(String)));
+  }, [results.data]);
   return { values, isLoading: enabled && !error && !(finished && results.data), error };
 }

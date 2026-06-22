@@ -35,6 +35,10 @@ vi.mock("@/api/charts", async (orig) => ({
 vi.mock("@/api/useChartData", () => ({
   useChartData: () => ({ columns: [{ name: "rev", type: "double" }], rows: [[5]], isLoading: false, error: null }),
 }));
+vi.mock("@/api/useColumnValues", () => ({
+  // fresh array each call — would loop without the idempotent guard
+  useColumnValues: () => ({ values: ["new", "paid"].slice(), isLoading: false, error: null }),
+}));
 
 function renderAt() {
   const qc = new QueryClient();
@@ -162,6 +166,21 @@ describe("DashboardView (Phase C — mapping + injection)", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
     expect(screen.getByLabelText(/map Region/i)).toBeInTheDocument();
+  });
+});
+
+describe("DashboardView (Phase C — category options no render loop)", () => {
+  it("renders with a category param mapped to a card without exceeding update depth", () => {
+    dashState.current = {
+      data: {
+        ...(dashState.loaded.data as object),
+        parameters: [{ id: "p1", name: "Status", slug: "status", type: "category", operator: "is" }],
+        cards: [{ id: "k1", chart_id: "c1", card_type: "chart", grid_col: 0, grid_row: 0, size_x: 6, size_y: 4, options: { paramMappings: { p1: "region" } } }],
+      },
+      isLoading: false,
+    };
+    expect(() => renderAt()).not.toThrow();
+    expect(screen.getByLabelText("Status")).toBeInTheDocument();
   });
 });
 

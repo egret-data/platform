@@ -45,7 +45,9 @@ export default function DashboardView() {
   const [replacingId, setReplacingId] = useState<string | null>(null);
   // category/id dropdown options, keyed by param slug; populated by <ParamOptions> children.
   const [optionsBySlug, setOptionsBySlug] = useState<Record<string, string[]>>({});
-  const onOptionsLoaded = useCallback((slug: string, vals: string[]) => setOptionsBySlug((m) => ({ ...m, [slug]: vals })), []);
+  const onOptionsLoaded = useCallback((slug: string, vals: string[]) => {
+    setOptionsBySlug((m) => (m[slug]?.join("") === vals.join("") ? m : { ...m, [slug]: vals }));
+  }, []);
 
   useEffect(() => {
     setEditing(false);
