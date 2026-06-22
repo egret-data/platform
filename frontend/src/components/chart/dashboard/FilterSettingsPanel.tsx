@@ -57,6 +57,7 @@ export function FilterSettingsPanel({ param, allParameters, onChange, onDelete }
         </div>
       )}
 
+      {/* MVP: default is entered as plain text; multi-value/range defaults aren't round-tripped. */}
       <label className="flex flex-col gap-1 text-xs text-muted-foreground">Default value
         <input aria-label="default value" className={cls}
           value={Array.isArray(param.default) ? (param.default as unknown[]).join(", ") : String(param.default ?? "")}

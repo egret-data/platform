@@ -29,6 +29,13 @@ describe("FilterSettingsPanel tier2d", () => {
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ default: "West" }));
   });
 
+  it("clearing the default writes undefined", () => {
+    const onChange = vi.fn();
+    render(<FilterSettingsPanel param={p({ default: "West" })} allParameters={[p({})]} onChange={onChange} onDelete={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("default value"), { target: { value: "" } });
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ default: undefined }));
+  });
+
   it("linked-filters checkbox writes filteringParameters with other param ids", () => {
     const onChange = vi.fn();
     const other = p({ id: "2", name: "City", slug: "city" });
