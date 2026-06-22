@@ -1,6 +1,7 @@
 // src/components/chart/ChartRenderer.tsx
 import type { ChartParams, VizType } from "@/api/charts";
 import { isCartesianViz } from "@/api/charts";
+import type { DrillContext } from "@/components/chart/drill";
 import { EChartsRenderer } from "@/components/chart/echarts/EChartsRenderer";
 import { buildCartesianOption } from "@/components/chart/echarts/options/cartesian";
 import { buildPieOption } from "@/components/chart/echarts/options/pie";
@@ -26,9 +27,10 @@ export interface ChartRendererProps {
   rows: unknown[][];
   /** metric_name -> data_type, for metric value formatting. Optional; defaults to {}. */
   metricTypes?: Record<string, string>;
+  onValueClick?: (ctx: DrillContext, x: number, y: number) => void;
 }
 
-export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {} }: ChartRendererProps) {
+export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}, onValueClick }: ChartRendererProps) {
   const cartesian = params.cartesian ?? { yMetrics: [] };
   const pie = params.pie ?? {};
   const scalar = params.scalar ?? {};
@@ -53,6 +55,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
         conditionalFormatting={conditionalFormatting}
         tableState={tableState}
         dimensionColumns={dimensionColumns}
+        onCellDrill={onValueClick}
       />
     );
   }
@@ -75,6 +78,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
         columnSettings={columnSettings}
         conditionalFormatting={conditionalFormatting}
         metricTypes={metricTypes}
+        onCellDrill={onValueClick}
       />
     );
   }
@@ -97,7 +101,13 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
               yMin: cartesian.yMin, yMax: cartesian.yMax,
               showMarkers: cartesian.showMarkers, xScale: cartesian.xScale,
               columnSettings, metricTypes,
-            })} />}
+            })}
+            onPointClick={onValueClick && cartesian.xAxis ? (p) => {
+              const dims: { col: string; value: unknown }[] = [{ col: cartesian.xAxis as string, value: p.name }];
+              if (cartesian.series && p.seriesName != null) dims.push({ col: cartesian.series, value: p.seriesName });
+              onValueClick({ dims }, p.x, p.y);
+            } : undefined}
+          />}
       </div>
     );
   }
@@ -114,7 +124,9 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
               showTotal: pie.showTotal, percentVisibility: pie.percentVisibility,
               sliceColors: pie.sliceColors,
               columnSettings, metricTypes,
-            })} />}
+            })}
+            onPointClick={onValueClick && pie.dimension ? (p) => onValueClick({ dims: [{ col: pie.dimension as string, value: p.name }] }, p.x, p.y) : undefined}
+          />}
       </div>
     );
   }
