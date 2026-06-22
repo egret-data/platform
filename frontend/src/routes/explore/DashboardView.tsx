@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Pencil } from "lucide-react";
 import { useParams } from "react-router-dom";
 import RGL, { WidthProvider, type Layout } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
@@ -203,6 +204,11 @@ export default function DashboardView() {
 
   return (
     <div className={view.isFullscreen ? "fixed inset-0 z-50 overflow-auto bg-muted/30 p-4" : "min-h-full bg-muted/30 p-4"}>
+      {editing && (
+        <div className="-mx-4 -mt-4 mb-4 flex items-center gap-2 bg-primary px-4 py-2 text-sm font-medium text-primary-foreground">
+          <Pencil className="h-4 w-4" /> You're editing this dashboard
+        </div>
+      )}
       <div className={effectiveWidth === "fixed" ? "mx-auto w-full max-w-[1200px]" : ""}>
       <div className="mb-3 flex items-center justify-between">
         <h1 className="text-lg font-semibold">{dash.name}</h1>
@@ -294,7 +300,13 @@ export default function DashboardView() {
         : <DashboardFilterBar parameters={parameters} values={paramsState.values} onChange={paramsState.setValue} optionsBySlug={optionsBySlug} />}
       <div className={editing ? "flex gap-4" : ""}>
         <div className={editing ? "min-w-0 flex-1" : ""}>
-      {cards.length === 0 ? (
+      {(cards.length === 0 || (tabs.length > 0 && visibleCards.length === 0)) && editing ? (
+        <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed py-20 text-center">
+          <Pencil className="h-8 w-8 text-muted-foreground/40" />
+          <p className="text-sm text-muted-foreground">{cards.length === 0 ? "This dashboard is empty." : "No cards on this tab."}</p>
+          <button type="button" className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90" onClick={() => setEditPanel({ kind: "add" })}>Add a chart</button>
+        </div>
+      ) : cards.length === 0 ? (
         <p className="text-muted-foreground">No cards yet. Click Edit to add charts.</p>
       ) : tabs.length > 0 && visibleCards.length === 0 ? (
         <p className="py-12 text-center text-muted-foreground">No cards on this tab.</p>
@@ -316,9 +328,9 @@ export default function DashboardView() {
             const mappings = (c.options.paramMappings as Record<string, string>) ?? {};
             const injected = baseChart ? applyParamsToChart(baseChart, parameters, paramsState.values, mappings) : undefined;
             return (
-            <div key={c.id} className={`group relative overflow-hidden ${c.card_type === "heading" ? "" : "rounded-lg border bg-card shadow-sm"} ${editing && editPanel?.kind === "card" && editPanel.cardId === c.id ? "ring-2 ring-primary" : ""}`}>
+            <div key={c.id} className="group relative h-full">
               {editing && (
-                <div className="dash-draghandle absolute inset-x-0 top-0 z-10 flex h-7 cursor-move items-center justify-end gap-1 bg-gradient-to-b from-card/95 via-card/70 to-transparent px-1 opacity-0 transition-opacity group-hover:opacity-100">
+                <div className="dash-nodrag absolute -top-3.5 left-1/2 z-30 -translate-x-1/2 opacity-0 transition-opacity group-hover:opacity-100">
                   <CardEditToolbar cardType={c.card_type}
                     onSettings={() => setEditPanel({ kind: "card", cardId: c.id })}
                     onDuplicate={() => duplicateCard(c.id)}
@@ -326,9 +338,12 @@ export default function DashboardView() {
                     onRemove={() => removeCard(c.id)} />
                 </div>
               )}
-              <DashboardCardView ws={ws} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values}
-                blocked={!editing && requiredUnset}
-                onValueClick={editing ? undefined : (ctx, x, y) => onCardValueClick(c, ctx, x, y)} />
+              <div className={`relative h-full overflow-hidden ${c.card_type === "heading" ? "" : "rounded-lg border bg-card shadow-sm"} ${editing && editPanel?.kind === "card" && editPanel.cardId === c.id ? "ring-2 ring-primary" : ""}`}>
+                {editing && <div className="dash-draghandle absolute inset-x-0 top-0 z-10 h-6 cursor-move" title="Drag to move" />}
+                <DashboardCardView ws={ws} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values}
+                  blocked={!editing && requiredUnset}
+                  onValueClick={editing ? undefined : (ctx, x, y) => onCardValueClick(c, ctx, x, y)} />
+              </div>
             </div>
             );
           })}
