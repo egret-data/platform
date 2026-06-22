@@ -5,6 +5,7 @@ import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 import { useDashboard, useDashboardMutations, type CardInput, type DashboardCard as Card, type DashboardParameter } from "@/api/dashboards";
 import { useCharts, type Chart, type ChartFilter } from "@/api/charts";
+import { useDataset } from "@/api/datasets";
 import { resolveClick, type ClickBehavior } from "@/components/chart/dashboard/click-behavior";
 import { DrillMenu } from "@/components/chart/DrillMenu";
 import { DrillRecordsDialog } from "@/components/chart/DrillRecordsDialog";
@@ -55,6 +56,8 @@ export default function DashboardView() {
   // Drill state — must be declared above the early return (Rules of Hooks).
   const [drillMenu, setDrillMenu] = useState<{ ctx: DrillContext; x: number; y: number; datasetId: string | null } | null>(null);
   const [records, setRecords] = useState<{ filters: ChartFilter[]; datasetId: string | null } | null>(null);
+  // Load the drilled dataset's columns so the records dialog can SELECT them (no-op while records is null).
+  const recordsDataset = useDataset(ws, records?.datasetId ?? null);
 
   useEffect(() => {
     setEditing(false);
@@ -404,7 +407,7 @@ export default function DashboardView() {
         open={records !== null}
         onOpenChange={(o) => { if (!o) setRecords(null); }}
         ws={ws} datasetId={records?.datasetId ?? null}
-        columns={[]}
+        columns={(recordsDataset.data?.columns ?? []).map((c) => ({ name: c.column_name, type: c.data_type ?? "varchar" }))}
         filters={records?.filters ?? []}
       />
     </div>
