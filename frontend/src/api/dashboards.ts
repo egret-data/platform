@@ -95,5 +95,10 @@ export function useDashboardMutations(ws: string) {
     mutationFn: (id: string) => apiFetch(`/ws/${ws}/dashboards/${id}`, { method: "DELETE" }),
     onSuccess: () => invalidate(),
   });
-  return { create, update, remove };
+  const duplicate = useMutation({
+    mutationFn: (id: string) =>
+      apiJson<DashboardDetail>(`/ws/${ws}/dashboards/${id}/duplicate`, { method: "POST" }),
+    onSuccess: () => invalidate(),
+  });
+  return { create, update, remove, duplicate };
 }

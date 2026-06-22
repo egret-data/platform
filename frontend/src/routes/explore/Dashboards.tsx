@@ -12,7 +12,7 @@ export default function Dashboards() {
   const ws = useParams().workspace!;
   const nav = useNavigate();
   const { data, isLoading } = useDashboards(ws);
-  const { create, remove } = useDashboardMutations(ws);
+  const { create, remove, duplicate } = useDashboardMutations(ws);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
 
@@ -56,7 +56,12 @@ export default function Dashboards() {
                 <td className="py-1 pr-3"><Link className="hover:underline" to={`/explore/${ws}/dashboards/${d.id}`}>{d.name}</Link></td>
                 <td className="pr-3 text-muted-foreground">{d.card_count}</td>
                 <td className="pr-3 text-muted-foreground">{new Date(d.updated_at).toLocaleString()}</td>
-                <td>
+                <td className="flex gap-1">
+                  <Button size="sm" variant="ghost" aria-label={`duplicate ${d.name}`}
+                    onClick={async () => {
+                      try { const copy = await duplicate.mutateAsync(d.id); nav(`/explore/${ws}/dashboards/${copy.id}`); }
+                      catch (e) { toast.error(String(e)); }
+                    }}>Duplicate</Button>
                   <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive"
                     onClick={async () => { try { await remove.mutateAsync(d.id); } catch (e) { toast.error(String(e)); } }}>
                     Delete
