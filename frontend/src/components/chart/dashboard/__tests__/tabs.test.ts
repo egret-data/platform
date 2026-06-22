@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { startTabsDraft, serializeLayout, addTab, renameTab, reorderTab, type DraftCard, type DraftTab } from "../tabs";
+import { startTabsDraft, serializeLayout, addTab, renameTab, reorderTab, deleteTab, duplicateTab, moveCardToTab, type DraftCard, type DraftTab } from "../tabs";
 import type { DashboardCard, DashboardTab } from "@/api/dashboards";
 
 const card = (id: string, tab_id: string | null): DashboardCard => ({
@@ -75,5 +75,48 @@ describe("reorderTab", () => {
     const out = reorderTab(start.draftTabs, 0, 2);
     expect(out.map((t) => t.name)).toEqual(["Tab 2", "Tab 3", "Tab 1"]);
     expect(out.map((t) => t.position)).toEqual([0, 1, 2]);
+  });
+});
+
+const positioned = (id: string, tabKey: string | null, row: number, h = 4): DraftCard =>
+  ({ ...card(id, null), tabKey, grid_row: row, size_y: h });
+
+describe("deleteTab", () => {
+  it("reassign mode moves the tab's cards to the target tab", () => {
+    const tabs: DraftTab[] = [{ key: "ka", name: "A", position: 0 }, { key: "kb", name: "B", position: 1 }];
+    const cards = [positioned("k1", "ka", 0), positioned("k2", "kb", 0)];
+    const out = deleteTab(tabs, cards, "ka", { mode: "reassign", toKey: "kb" });
+    expect(out.draftTabs.map((t) => t.name)).toEqual(["B"]);
+    expect(out.draftCards.every((c) => c.tabKey === "kb")).toBe(true);
+  });
+  it("delete-cards mode drops the tab and its cards", () => {
+    const tabs: DraftTab[] = [{ key: "ka", name: "A", position: 0 }, { key: "kb", name: "B", position: 1 }];
+    const cards = [positioned("k1", "ka", 0), positioned("k2", "kb", 0)];
+    const out = deleteTab(tabs, cards, "ka", { mode: "delete" });
+    expect(out.draftCards.map((c) => c.id)).toEqual(["k2"]);
+  });
+});
+
+describe("duplicateTab", () => {
+  it("clones the tab's cards into a new tab with fresh ids", () => {
+    const tabs: DraftTab[] = [{ key: "ka", name: "A", position: 0 }];
+    const cards = [positioned("k1", "ka", 0)];
+    const out = duplicateTab(tabs, cards, "ka");
+    expect(out.draftTabs).toHaveLength(2);
+    const newKey = out.draftTabs[1].key;
+    const clones = out.draftCards.filter((c) => c.tabKey === newKey);
+    expect(clones).toHaveLength(1);
+    expect(clones[0].id).not.toBe("k1");
+    expect(out.activeTabPos).toBe(1);
+  });
+});
+
+describe("moveCardToTab", () => {
+  it("reassigns a card and stacks it below the destination's max row", () => {
+    const cards = [positioned("k1", "ka", 0, 4), positioned("k2", "kb", 0, 4)];
+    const out = moveCardToTab(cards, "k1", "kb");
+    const moved = out.find((c) => c.id === "k1")!;
+    expect(moved.tabKey).toBe("kb");
+    expect(moved.grid_row).toBe(4);
   });
 });

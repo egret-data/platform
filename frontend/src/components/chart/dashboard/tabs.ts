@@ -79,3 +79,61 @@ export function reorderTab(draftTabs: DraftTab[], fromPos: number, toPos: number
   ordered.splice(toPos, 0, moved);
   return ordered.map((t, i) => ({ ...t, position: i }));
 }
+
+/** Next free grid row on a tab: below the current max (row + height) of its cards. */
+function nextRowFor(cards: DraftCard[]): number {
+  return cards.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
+}
+
+/** Delete the tab with `key`. `reassign` moves its cards to `toKey`; `delete` drops them.
+ *  Positions on the remaining tabs are renumbered. (Callers gate this to >= 2 tabs.) */
+export function deleteTab(
+  draftTabs: DraftTab[],
+  draftCards: DraftCard[],
+  key: string,
+  opts: { mode: "reassign"; toKey: string } | { mode: "delete" },
+): { draftTabs: DraftTab[]; draftCards: DraftCard[] } {
+  const remaining = draftTabs
+    .filter((t) => t.key !== key)
+    .sort((a, b) => a.position - b.position)
+    .map((t, i) => ({ ...t, position: i }));
+  let cards: DraftCard[];
+  if (opts.mode === "reassign") {
+    const dest = draftCards.filter((c) => c.tabKey === opts.toKey);
+    let row = nextRowFor(dest);
+    cards = draftCards.map((c) => {
+      if (c.tabKey !== key) return c;
+      const placed = { ...c, tabKey: opts.toKey, grid_row: row };
+      row += c.size_y;
+      return placed;
+    });
+  } else {
+    cards = draftCards.filter((c) => c.tabKey !== key);
+  }
+  return { draftTabs: remaining, draftCards: cards };
+}
+
+/** Duplicate the tab with `key`: a new tab inserted right after it, holding deep copies of its
+ *  cards (fresh client ids, same grid). Activates the new tab. */
+export function duplicateTab(
+  draftTabs: DraftTab[],
+  draftCards: DraftCard[],
+  key: string,
+): { draftTabs: DraftTab[]; draftCards: DraftCard[]; activeTabPos: number } {
+  const ordered = [...draftTabs].sort((a, b) => a.position - b.position);
+  const srcPos = ordered.findIndex((t) => t.key === key);
+  const newKey = newTabKey();
+  const newTab = { key: newKey, name: `${ordered[srcPos].name} copy`, position: srcPos + 1 };
+  const next = [...ordered.slice(0, srcPos + 1), newTab, ...ordered.slice(srcPos + 1)]
+    .map((t, i) => ({ ...t, position: i }));
+  const clones = draftCards
+    .filter((c) => c.tabKey === key)
+    .map((c) => ({ ...c, id: `new-dup-${seq++}`, tabKey: newKey }));
+  return { draftTabs: next, draftCards: [...draftCards, ...clones], activeTabPos: srcPos + 1 };
+}
+
+/** Move the card `cardId` to tab `toKey`, stacking it below that tab's current max row. */
+export function moveCardToTab(draftCards: DraftCard[], cardId: string, toKey: string): DraftCard[] {
+  const row = nextRowFor(draftCards.filter((c) => c.tabKey === toKey));
+  return draftCards.map((c) => (c.id === cardId ? { ...c, tabKey: toKey, grid_col: 0, grid_row: row } : c));
+}
