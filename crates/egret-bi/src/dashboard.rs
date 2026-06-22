@@ -24,6 +24,7 @@ pub struct Dashboard {
     pub created_by: Option<Uuid>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub width: String,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -77,7 +78,8 @@ pub struct NewCard {
     pub tab_index: Option<usize>,
 }
 
-const COLS: &str = "id, workspace_id, name, description, parameters, created_by, updated_at, width";
+const COLS: &str =
+    "id, workspace_id, name, description, parameters, created_by, updated_at, width, deleted_at";
 const CARD_COLS: &str =
     "id, dashboard_id, chart_id, card_type, grid_col, grid_row, size_x, size_y, options, ordinal, tab_id";
 
@@ -126,20 +128,42 @@ impl DashboardRepo {
     }
 
     /// Dashboards in a workspace, each with its card count, newest first.
+    /// `trashed` selects the trash bin (soft-deleted) instead of the live list.
     pub async fn list_by_workspace(
         &self,
         workspace_id: Uuid,
+        trashed: bool,
     ) -> Result<Vec<(Dashboard, i64)>, BiError> {
+        let pred = if trashed {
+            "deleted_at IS NOT NULL"
+        } else {
+            "deleted_at IS NULL"
+        };
         let sql = format!(
             "SELECT {COLS}, \
              (SELECT count(*) FROM dashboard_cards c WHERE c.dashboard_id = dashboards.id) AS card_count \
-             FROM dashboards WHERE workspace_id = $1 ORDER BY updated_at DESC"
+             FROM dashboards WHERE workspace_id = $1 AND {pred} ORDER BY updated_at DESC"
         );
         let rows = sqlx::query_as::<_, DashboardWithCount>(&sql)
             .bind(workspace_id)
             .fetch_all(&self.db.pool)
             .await?;
         Ok(rows.into_iter().map(|r| (r.dash, r.card_count)).collect())
+    }
+
+    /// Soft-delete (trashed=true → deleted_at=now()) or restore (false → NULL).
+    pub async fn set_trashed(&self, id: Uuid, trashed: bool) -> Result<(), BiError> {
+        let sql = if trashed {
+            "UPDATE dashboards SET deleted_at = now() WHERE id = $1"
+        } else {
+            "UPDATE dashboards SET deleted_at = NULL WHERE id = $1"
+        };
+        sqlx::query(sql)
+            .bind(id)
+            .execute(&self.db.pool)
+            .await
+            .map_err(map_conflict_err)?;
+        Ok(())
     }
 
     /// Update dashboard metadata only (name/description). Card layout goes through

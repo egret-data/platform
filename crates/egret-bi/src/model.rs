@@ -324,6 +324,7 @@ pub struct DashboardDetailDto {
     pub created_by: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub width: String,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
     pub tabs: Vec<DashboardTabDto>,
     pub cards: Vec<DashboardCardDto>,
 }
@@ -478,6 +479,7 @@ pub fn dashboard_detail_dto(
         created_by: d.created_by.map(|u| u.to_string()),
         updated_at: d.updated_at,
         width: d.width,
+        deleted_at: d.deleted_at,
         tabs: tabs.into_iter().map(dashboard_tab_dto).collect(),
         cards: cards.into_iter().map(dashboard_card_dto).collect(),
     }

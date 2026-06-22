@@ -962,6 +962,8 @@ pub fn dashboard_router() -> Router<BiState> {
             "/ws/{workspace}/dashboards/{id}/duplicate",
             post(db_duplicate),
         )
+        .route("/ws/{workspace}/dashboards/{id}/trash", post(db_trash))
+        .route("/ws/{workspace}/dashboards/{id}/restore", post(db_restore))
 }
 
 async fn require_dashboard_in_ws(
@@ -1016,9 +1018,16 @@ async fn require_cards_in_ws(
     Ok(())
 }
 
+#[derive(serde::Deserialize)]
+struct ListQuery {
+    #[serde(default)]
+    trashed: bool,
+}
+
 async fn db_list(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
+    AxQuery(q): AxQuery<ListQuery>,
 ) -> Result<Json<Vec<DashboardSummaryDto>>, BiApiError> {
     st.authz
         .require_workspace(&ctx, DB_READ)
@@ -1026,7 +1035,7 @@ async fn db_list(
         .map_err(BiApiError::from)?;
     let rows = st
         .dashboards
-        .list_by_workspace(ctx.workspace_id.0)
+        .list_by_workspace(ctx.workspace_id.0, q.trashed)
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(
@@ -1115,6 +1124,42 @@ async fn db_remove(
     require_dashboard_in_ws(&st, &ctx, id).await?;
     require_dashboard_owner(&st, &ctx, id).await?;
     st.dashboards.delete(id).await.map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn db_trash(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DB_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_dashboard_in_ws(&st, &ctx, id).await?;
+    require_dashboard_owner(&st, &ctx, id).await?;
+    st.dashboards
+        .set_trashed(id, true)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn db_restore(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DB_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_dashboard_in_ws(&st, &ctx, id).await?;
+    require_dashboard_owner(&st, &ctx, id).await?;
+    st.dashboards
+        .set_trashed(id, false)
+        .await
+        .map_err(BiApiError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

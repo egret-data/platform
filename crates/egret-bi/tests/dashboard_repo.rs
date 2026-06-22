@@ -91,7 +91,7 @@ async fn dashboard_crud_cards_and_unique_conflict() {
     assert_eq!(d.description, "overview");
 
     // list reports a card count of 0 before any cards are placed
-    let listed = f.repo.list_by_workspace(f.ws).await.unwrap();
+    let listed = f.repo.list_by_workspace(f.ws, false).await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].1, 0);
 
@@ -128,7 +128,7 @@ async fn dashboard_crud_cards_and_unique_conflict() {
     assert_eq!(got[1].options, serde_json::json!({ "title": "copy" }));
 
     // card_count now reflects the placed cards
-    let listed = f.repo.list_by_workspace(f.ws).await.unwrap();
+    let listed = f.repo.list_by_workspace(f.ws, false).await.unwrap();
     assert_eq!(listed[0].1, 2);
 
     // replace_layout is a full swap, not an append
@@ -323,6 +323,35 @@ async fn dashboard_width_defaults_full_and_round_trips() {
         .await
         .unwrap();
     assert_eq!(f.repo.get(d.id).await.unwrap().unwrap().width, "fixed");
+}
+
+#[tokio::test]
+async fn trash_hides_from_live_list_and_restore_brings_back() {
+    let Some(fx) = setup().await else { return };
+    let d = fx
+        .repo
+        .create(fx.ws, "ToTrash", "", Some(fx.user))
+        .await
+        .unwrap();
+
+    fx.repo.set_trashed(d.id, true).await.unwrap();
+    let live: Vec<_> = fx.repo.list_by_workspace(fx.ws, false).await.unwrap();
+    assert!(
+        live.iter().all(|(x, _)| x.id != d.id),
+        "trashed must be hidden from live list"
+    );
+    let trashed: Vec<_> = fx.repo.list_by_workspace(fx.ws, true).await.unwrap();
+    assert!(
+        trashed.iter().any(|(x, _)| x.id == d.id),
+        "trash list must include it"
+    );
+
+    fx.repo.set_trashed(d.id, false).await.unwrap();
+    let live2: Vec<_> = fx.repo.list_by_workspace(fx.ws, false).await.unwrap();
+    assert!(
+        live2.iter().any(|(x, _)| x.id == d.id),
+        "restore returns it to live list"
+    );
 }
 
 #[tokio::test]
