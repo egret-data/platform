@@ -20,6 +20,7 @@ pub struct Dashboard {
     pub workspace_id: Uuid,
     pub name: String,
     pub description: String,
+    pub parameters: serde_json::Value,
     pub created_by: Option<Uuid>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -58,7 +59,7 @@ pub struct NewCard {
     pub options: serde_json::Value,
 }
 
-const COLS: &str = "id, workspace_id, name, description, created_by, updated_at";
+const COLS: &str = "id, workspace_id, name, description, parameters, created_by, updated_at";
 const CARD_COLS: &str =
     "id, dashboard_id, chart_id, card_type, grid_col, grid_row, size_x, size_y, options, ordinal";
 
@@ -125,19 +126,23 @@ impl DashboardRepo {
 
     /// Update dashboard metadata only (name/description). Card layout goes through
     /// `replace_cards`; callers that change both run them together.
-    pub async fn update_meta(
+    pub async fn update(
         &self,
         id: Uuid,
         name: &str,
         description: &str,
+        parameters: &serde_json::Value,
     ) -> Result<(), BiError> {
-        sqlx::query("UPDATE dashboards SET name=$2, description=$3, updated_at=now() WHERE id=$1")
-            .bind(id)
-            .bind(name)
-            .bind(description)
-            .execute(&self.db.pool)
-            .await
-            .map_err(map_conflict_err)?;
+        sqlx::query(
+            "UPDATE dashboards SET name=$2, description=$3, parameters=$4, updated_at=now() WHERE id=$1",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(description)
+        .bind(parameters)
+        .execute(&self.db.pool)
+        .await
+        .map_err(map_conflict_err)?;
         Ok(())
     }
 

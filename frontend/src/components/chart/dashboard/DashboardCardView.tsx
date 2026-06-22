@@ -1,10 +1,11 @@
-import type { DashboardCard } from "@/api/dashboards";
+import type { DashboardCard, DashboardParameter } from "@/api/dashboards";
 import type { Chart } from "@/api/charts";
 import { useChartData } from "@/api/useChartData";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
 import { TextCard } from "./TextCard";
 import { HeadingCard } from "./HeadingCard";
 import { LinkCard } from "./LinkCard";
+import { interpolateParams } from "./params";
 
 function asString(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
@@ -29,9 +30,15 @@ function ChartCardTile({ ws, card, chart, refreshNonce }: { ws: string; card: Da
 }
 
 /** Render one dashboard card by its card_type. */
-export function DashboardCardView({ ws, card, chart, refreshNonce }: { ws: string; card: DashboardCard; chart: Chart | undefined; refreshNonce?: number }) {
-  if (card.card_type === "text") return <TextCard text={asString(card.options.text) ?? ""} />;
-  if (card.card_type === "heading") return <HeadingCard text={asString(card.options.text) ?? ""} />;
+export function DashboardCardView({ ws, card, chart, refreshNonce, parameters, paramValues }: { ws: string; card: DashboardCard; chart: Chart | undefined; refreshNonce?: number; parameters?: DashboardParameter[]; paramValues?: Record<string, unknown> }) {
+  if (card.card_type === "text") {
+    const text = interpolateParams(asString(card.options.text) ?? "", parameters ?? [], paramValues ?? {});
+    return <TextCard text={text} />;
+  }
+  if (card.card_type === "heading") {
+    const text = interpolateParams(asString(card.options.text) ?? "", parameters ?? [], paramValues ?? {});
+    return <HeadingCard text={text} />;
+  }
   if (card.card_type === "link") return <LinkCard url={asString(card.options.url)} label={asString(card.options.label)} />;
   return <ChartCardTile ws={ws} card={card} chart={chart} refreshNonce={refreshNonce} />;
 }

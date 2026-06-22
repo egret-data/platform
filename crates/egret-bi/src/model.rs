@@ -312,6 +312,7 @@ pub struct DashboardDetailDto {
     pub id: String,
     pub name: String,
     pub description: String,
+    pub parameters: serde_json::Value,
     pub created_by: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub cards: Vec<DashboardCardDto>,
@@ -345,12 +346,17 @@ fn default_card_type() -> String {
 fn empty_obj() -> serde_json::Value {
     serde_json::json!({})
 }
+fn empty_arr() -> serde_json::Value {
+    serde_json::json!([])
+}
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateDashboard {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default = "empty_arr")]
+    pub parameters: serde_json::Value,
     #[serde(default)]
     pub cards: Vec<CardInput>,
 }
@@ -398,6 +404,7 @@ pub fn dashboard_detail_dto(d: Dashboard, cards: Vec<DashboardCard>) -> Dashboar
         id: d.id.to_string(),
         name: d.name,
         description: d.description,
+        parameters: d.parameters,
         created_by: d.created_by.map(|u| u.to_string()),
         updated_at: d.updated_at,
         cards: cards.into_iter().map(dashboard_card_dto).collect(),

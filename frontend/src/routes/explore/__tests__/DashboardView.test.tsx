@@ -10,6 +10,7 @@ const { updateSpy, dashState } = vi.hoisted(() => {
   const loaded = {
     data: {
       id: "d1", name: "Ops", description: "", created_by: null, updated_at: "",
+      parameters: [],
       cards: [{ id: "k1", chart_id: "c1", card_type: "chart", grid_col: 0, grid_row: 0, size_x: 6, size_y: 4, options: {} }],
     },
     isLoading: false,
@@ -28,11 +29,15 @@ vi.mock("@/api/dashboards", () => ({
 beforeEach(() => { dashState.current = dashState.loaded; });
 vi.mock("@/api/charts", async (orig) => ({
   ...(await orig<typeof import("@/api/charts")>()),
-  useCharts: () => ({ data: [{ id: "c1", dataset_id: "ds1", name: "Sales", viz_type: "table", description: "", params: { spec: { metrics: [], dimensions: [], columns: [], filters: [], orderby: [], row_limit: 1000, rollup_groups: [] } }, created_by: null, updated_at: "" }] }),
+  useCharts: () => ({ data: [{ id: "c1", dataset_id: "ds1", name: "Sales", viz_type: "table", description: "", params: { spec: { metrics: [], dimensions: ["region"], columns: [], filters: [], orderby: [], row_limit: 1000, rollup_groups: [] } }, created_by: null, updated_at: "" }] }),
   useChart: () => ({ data: undefined }),
 }));
 vi.mock("@/api/useChartData", () => ({
   useChartData: () => ({ columns: [{ name: "rev", type: "double" }], rows: [[5]], isLoading: false, error: null }),
+}));
+vi.mock("@/api/useColumnValues", () => ({
+  // fresh array each call — would loop without the idempotent guard
+  useColumnValues: () => ({ values: ["new", "paid"].slice(), isLoading: false, error: null }),
 }));
 
 function renderAt() {
@@ -138,6 +143,44 @@ describe("DashboardView (Phase B — view controls)", () => {
     renderAt();
     expect(screen.getByLabelText(/auto-refresh/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /fullscreen/i })).toBeInTheDocument();
+  });
+});
+
+describe("DashboardView (Phase C — parameters)", () => {
+  it("adds a filter parameter in edit mode", () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    fireEvent.click(screen.getByRole("button", { name: /\+ filter/i }));
+    expect(screen.getByLabelText(/parameter name/i)).toBeInTheDocument();
+  });
+  it("renders the filter bar in view mode when the dashboard has parameters", () => {
+    dashState.current = { data: { ...(dashState.loaded.data as object), parameters: [{ id: "p1", name: "Region", slug: "region", type: "text", operator: "is" }] }, isLoading: false };
+    renderAt();
+    expect(screen.getByLabelText("Region")).toBeInTheDocument();
+  });
+});
+
+describe("DashboardView (Phase C — mapping + injection)", () => {
+  it("shows a per-card mapping dropdown for each parameter in edit mode", () => {
+    dashState.current = { data: { ...(dashState.loaded.data as object), parameters: [{ id: "p1", name: "Region", slug: "region", type: "text", operator: "is" }] }, isLoading: false };
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    expect(screen.getByLabelText(/map Region/i)).toBeInTheDocument();
+  });
+});
+
+describe("DashboardView (Phase C — category options no render loop)", () => {
+  it("renders with a category param mapped to a card without exceeding update depth", () => {
+    dashState.current = {
+      data: {
+        ...(dashState.loaded.data as object),
+        parameters: [{ id: "p1", name: "Status", slug: "status", type: "category", operator: "is" }],
+        cards: [{ id: "k1", chart_id: "c1", card_type: "chart", grid_col: 0, grid_row: 0, size_x: 6, size_y: 4, options: { paramMappings: { p1: "region" } } }],
+      },
+      isLoading: false,
+    };
+    expect(() => renderAt()).not.toThrow();
+    expect(screen.getByLabelText("Status")).toBeInTheDocument();
   });
 });
 

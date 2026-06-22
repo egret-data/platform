@@ -146,10 +146,24 @@ async fn dashboard_crud_cards_and_unique_conflict() {
     assert_eq!(f.repo.cards(d.id).await.unwrap().len(), 1);
 
     // metadata update + guards
-    f.repo.update_meta(d.id, "Ops v2", "").await.unwrap();
+    f.repo
+        .update(d.id, "Ops v2", "", &serde_json::json!([]))
+        .await
+        .unwrap();
     assert_eq!(f.repo.get(d.id).await.unwrap().unwrap().name, "Ops v2");
     assert_eq!(f.repo.dashboard_workspace(d.id).await.unwrap(), Some(f.ws));
     assert_eq!(f.repo.owner(d.id).await.unwrap(), Some(f.user));
+
+    // parameters round-trip
+    let dash_params = serde_json::json!([{ "id": "p1", "name": "Region", "slug": "region", "type": "text", "operator": "is" }]);
+    f.repo
+        .update(d.id, "Ops v2", "", &dash_params)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.repo.get(d.id).await.unwrap().unwrap().parameters,
+        dash_params
+    );
 
     // duplicate name → Conflict
     let dup = f.repo.create(f.ws, "Ops v2", "", Some(f.user)).await;
