@@ -4,7 +4,11 @@ import RGL, { WidthProvider, type Layout } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 import { useDashboard, useDashboardMutations, type CardInput, type DashboardCard as Card, type DashboardParameter } from "@/api/dashboards";
-import { useCharts, type Chart } from "@/api/charts";
+import { useCharts, type Chart, type ChartFilter } from "@/api/charts";
+import { resolveClick, type ClickBehavior } from "@/components/chart/dashboard/click-behavior";
+import { DrillMenu } from "@/components/chart/DrillMenu";
+import { DrillRecordsDialog } from "@/components/chart/DrillRecordsDialog";
+import { type DrillContext } from "@/components/chart/drill";
 import { useDashboardViewControls } from "@/api/useDashboardViewControls";
 import { useDashboardParams } from "@/api/useDashboardParams";
 import { Button } from "@/components/ui/button";
@@ -48,6 +52,9 @@ export default function DashboardView() {
   const onOptionsLoaded = useCallback((slug: string, vals: string[]) => {
     setOptionsBySlug((m) => (m[slug]?.join("") === vals.join("") ? m : { ...m, [slug]: vals }));
   }, []);
+  // Drill state — must be declared above the early return (Rules of Hooks).
+  const [drillMenu, setDrillMenu] = useState<{ ctx: DrillContext; x: number; y: number; datasetId: string | null } | null>(null);
+  const [records, setRecords] = useState<{ filters: ChartFilter[]; datasetId: string | null } | null>(null);
 
   useEffect(() => {
     setEditing(false);
@@ -60,6 +67,15 @@ export default function DashboardView() {
   const dashboard = dash;
   const cards = editing && draftCards ? draftCards : dashboard.cards;
   const parameters = editing && draftParameters ? draftParameters : (dashboard.parameters ?? []);
+
+  function onCardValueClick(card: Card, ctx: DrillContext, x: number, y: number) {
+    const cb = card.options.clickBehavior as ClickBehavior | undefined;
+    const r = resolveClick(cb, ctx, parameters, paramsState.values);
+    const datasetId = chartById.get(card.chart_id ?? "")?.dataset_id ?? null;
+    if (r.kind === "url") { if (r.href) window.open(r.href, "_blank", "noreferrer"); return; }
+    if (r.kind === "crossfilter") { for (const s of r.sets) paramsState.setValue(s.slug, s.value); return; }
+    setDrillMenu({ ctx, x, y, datasetId });
+  }
 
   function startEdit() {
     setDraftCards(dashboard.cards.map((c) => ({ ...c })));
@@ -308,7 +324,8 @@ export default function DashboardView() {
                 </div>
               )}
               {(!editing || c.card_type === "chart") && (
-                <DashboardCardView ws={ws} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values} />
+                <DashboardCardView ws={ws} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values}
+                  onValueClick={(ctx, x, y) => onCardValueClick(c, ctx, x, y)} />
               )}
             </div>
             );
@@ -327,6 +344,24 @@ export default function DashboardView() {
           </div>
         </DialogContent>
       </Dialog>
+      {drillMenu && (
+        <DrillMenu ctx={drillMenu.ctx} x={drillMenu.x} y={drillMenu.y}
+          onFilterBy={(f) => {
+            if (!("value" in f)) return;
+            const target = parameters.find((p) =>
+              dashboard.cards.some((c) => ((c.options.paramMappings as Record<string, string>) ?? {})[p.id] === f.col));
+            if (target) paramsState.setValue(target.slug, f.value);
+          }}
+          onSeeRecords={(fs) => setRecords({ filters: fs, datasetId: drillMenu.datasetId })}
+          onClose={() => setDrillMenu(null)} />
+      )}
+      <DrillRecordsDialog
+        open={records !== null}
+        onOpenChange={(o) => { if (!o) setRecords(null); }}
+        ws={ws} datasetId={records?.datasetId ?? null}
+        columns={[]}
+        filters={records?.filters ?? []}
+      />
     </div>
   );
 }
