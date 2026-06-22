@@ -24,7 +24,7 @@ export function DashboardTabBar({ tabs, activeTabPos, editing, onSelect, onAdd, 
     <div className="mb-3 flex items-center gap-1 border-b" role="tablist">
       {ordered.map((t, pos) => {
         const active = pos === activeTabPos;
-        const cls = `flex items-center gap-1 px-3 py-1.5 text-sm border-b-2 ${active ? "border-foreground font-medium" : "border-transparent text-muted-foreground"}`;
+        const cls = `flex items-center gap-1 px-3 py-1.5 text-sm border-b-2 ${active ? "border-primary text-primary font-medium" : "border-transparent text-muted-foreground"}`;
         if (renaming === t.key && editing) {
           return (
             <input key={t.key} autoFocus aria-label={`rename tab ${t.name}`} defaultValue={t.name}

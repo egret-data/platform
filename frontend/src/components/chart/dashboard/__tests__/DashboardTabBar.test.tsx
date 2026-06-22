@@ -36,4 +36,9 @@ describe("DashboardTabBar", () => {
       onSelect={vi.fn()} onAdd={vi.fn()} onRename={vi.fn()} onReorder={vi.fn()} onDelete={vi.fn()} onDuplicate={vi.fn()} />);
     expect((screen.getByRole("button", { name: "delete tab A" }) as HTMLButtonElement).disabled).toBe(true);
   });
+  it("active tab uses the brand colour", () => {
+    render(<DashboardTabBar tabs={tabs} activeTabPos={0} editing={false}
+      onSelect={vi.fn()} onAdd={vi.fn()} onRename={vi.fn()} onReorder={vi.fn()} onDelete={vi.fn()} onDuplicate={vi.fn()} />);
+    expect(screen.getByRole("tab", { name: "A" }).className).toContain("border-primary");
+  });
 });
