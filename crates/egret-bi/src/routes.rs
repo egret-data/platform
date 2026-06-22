@@ -1081,7 +1081,7 @@ async fn db_update(
     require_dashboard_owner(&st, &ctx, id).await?;
     require_cards_in_ws(&st, &ctx, &b.cards).await?;
     st.dashboards
-        .update_meta(id, &b.name, &b.description)
+        .update(id, &b.name, &b.description, &b.parameters)
         .await
         .map_err(BiApiError::from)?;
     let cards: Vec<crate::dashboard::NewCard> = b.cards.into_iter().map(|c| c.into_new()).collect();
