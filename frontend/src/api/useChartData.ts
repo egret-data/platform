@@ -13,7 +13,7 @@ export interface ChartData {
 }
 
 /** Run a saved chart's query via the existing build->submit->poll pipeline. */
-export function useChartData(ws: string, chart: Chart | null): ChartData {
+export function useChartData(ws: string, chart: Chart | null, nonce?: number): ChartData {
   const build = useBuildChartData(ws);
   const submit = useSubmitQuery(ws);
   const [queryId, setQueryId] = useState<string | null>(null);
@@ -31,6 +31,7 @@ export function useChartData(ws: string, chart: Chart | null): ChartData {
     (async () => {
       try {
         const { sql, database_id } = await build.mutateAsync({ dataset_id: chart.dataset_id, query_spec: chart.params.spec });
+        if (cancelled) return;
         const q = await submit.mutateAsync({ database_id, sql, limit: chart.params.spec.row_limit });
         if (!cancelled) setQueryId(q.id);
       } catch (e) {
@@ -38,7 +39,7 @@ export function useChartData(ws: string, chart: Chart | null): ChartData {
       }
     })();
     return () => { cancelled = true; };
-  }, [ws, specKey]);
+  }, [ws, specKey, nonce]);
 
   const failed = status.data?.status === "failed" || status.data?.status === "cancelled";
   return {

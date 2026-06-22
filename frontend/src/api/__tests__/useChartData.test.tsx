@@ -39,4 +39,17 @@ describe("useChartData", () => {
     expect(result.current.isLoading).toBe(false);
     expect(result.current.error).toBeNull();
   });
+
+  it("refetches when the nonce changes", async () => {
+    let nonce = 0;
+    const { result, rerender } = renderHook(() => useChartData("eng", chart, nonce), { wrapper });
+    await waitFor(() => expect(result.current.rows).toEqual([[5]]));
+    const buildCalls = apiJson.mock.calls.filter((c: unknown[]) => String(c[0]).endsWith("/charts/data")).length;
+    nonce = 1;
+    rerender();
+    await waitFor(() => {
+      const after = apiJson.mock.calls.filter((c: unknown[]) => String(c[0]).endsWith("/charts/data")).length;
+      expect(after).toBe(buildCalls + 1);
+    });
+  });
 });
