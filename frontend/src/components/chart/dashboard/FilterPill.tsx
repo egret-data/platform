@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Calendar, Hash, MapPin, Tag, ToggleLeft, Type, X } from "lucide-react";
 import type { DashboardParameter } from "@/api/dashboards";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -73,6 +73,12 @@ function FilterControl({ param, value, options, onChange }: Props) {
     const [y = "", q = ""] = String(value ?? "").split("-");
     return { y, q };
   });
+  // Re-seed local quarter-year state when the external value changes (e.g. the
+  // clear-X button or a programmatic default), so local state never goes stale.
+  useEffect(() => {
+    const [y2 = "", q2 = ""] = String(value ?? "").split("-");
+    setQy({ y: y2, q: q2 });
+  }, [value]);
   const input = "h-8 w-full rounded border bg-background px-2 text-sm";
   const widget = param.widget ?? "dropdown";
   const listType = param.type === "category" || param.type === "location";
