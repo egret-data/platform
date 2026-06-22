@@ -386,15 +386,17 @@ async fn duplicate_copies_tabs_and_cards_with_new_owner() {
     assert_eq!(fx.repo.tabs(copy.id).await.unwrap().len(), 2);
     let copy_cards = fx.repo.cards(copy.id).await.unwrap();
     assert_eq!(copy_cards.len(), 2);
-    let copy_tab_ids: std::collections::HashSet<Uuid> = fx
-        .repo
-        .tabs(copy.id)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|t| t.id)
-        .collect();
-    for c in &copy_cards {
-        assert!(c.tab_id.map(|t| copy_tab_ids.contains(&t)).unwrap_or(true));
+    let copy_tabs = fx.repo.tabs(copy.id).await.unwrap();
+    let copy_tab_ids: std::collections::HashSet<Uuid> = copy_tabs.iter().map(|t| t.id).collect();
+    let card_tab_ids: Vec<Uuid> = copy_cards.iter().filter_map(|c| c.tab_id).collect();
+    assert_eq!(card_tab_ids.len(), 2, "both copy cards should be on a tab");
+    for t in &card_tab_ids {
+        assert!(copy_tab_ids.contains(t), "card tab must belong to the copy");
     }
+    let distinct: std::collections::HashSet<Uuid> = card_tab_ids.iter().copied().collect();
+    assert_eq!(
+        distinct.len(),
+        2,
+        "the two cards must map to two distinct copy tabs (remap not collapsed)"
+    );
 }
