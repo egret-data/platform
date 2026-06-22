@@ -244,7 +244,7 @@ the router.
 
 | Crate | Responsibility | Public interface |
 |---|---|---|
-| `egret-bi` | Semantic layer: **dataset** (logical table, column, metric, computed), **SQL Lab** saved query, **chart** (viz config → ECharts spec), **dashboard** (layout, cross-filter), querying via `egret-engine`, caching | `DatasetService`, `ChartService`, `DashboardService`, `SqlLabService` |
+| `egret-bi` | Semantic layer: **dataset** (logical table, column, metric, computed), **SQL Lab** saved query, **chart** (viz config → ECharts spec), **dashboard** (multi-tab grid layout, parameters/filters, click behaviour: cross-filter/URL/drill-through), querying via `egret-engine`, caching | `DatasetService`, `ChartService`, `DashboardService`, `SqlLabService` |
 | `egret-notebook` | Notebook model (cells), **kernel session** Jupyter/Spark (protocol), execution, attaches `sparklabx/kernel` | `NotebookService`, `KernelGateway` |
 | `egret-dataapi` | **Data API Builder**: API definitions, **dynamic-SQL template engine** (MyBatis-style: if/foreach/where), param binding, multi-statement + transaction, publish/version/**hot-reload**, **gateway runtime** (token/api-key, IP allow/deny, rate-limit, cache, call-log) | `ApiDefService`, `ApiGateway`, `SqlTemplate` |
 | `egret-workflow` | **Automation engine**: DAG model, **triggers** (cron via `tokio-cron-scheduler`, webhook, on-event), **executors** (run-query, send-email, http-request, transform, branch, call-dataapi, export), run engine + history, retry/alert | `WorkflowService`, `WorkflowRunner`, `NodeExecutor` trait |
