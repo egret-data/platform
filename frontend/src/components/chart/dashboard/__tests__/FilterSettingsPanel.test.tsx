@@ -42,3 +42,31 @@ describe("FilterSettingsPanel tier2d", () => {
     expect(screen.queryByLabelText("link Region")).toBeNull();
   });
 });
+
+describe("FilterSettingsPanel base", () => {
+  it("edits name and required, and deletes", () => {
+    const onChange = vi.fn();
+    const onDelete = vi.fn();
+    render(<FilterSettingsPanel param={p({})} allParameters={[p({})]} onChange={onChange} onDelete={onDelete} />);
+    fireEvent.change(screen.getByLabelText("parameter name"), { target: { value: "Reg" } });
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ name: "Reg" }));
+    fireEvent.click(screen.getByLabelText("parameter required"));
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ required: true }));
+    fireEvent.click(screen.getByRole("button", { name: "delete filter" }));
+    expect(onDelete).toHaveBeenCalled();
+  });
+
+  it("changing type resets the operator to the first for that type", () => {
+    const onChange = vi.fn();
+    render(<FilterSettingsPanel param={p({})} allParameters={[p({})]} onChange={onChange} onDelete={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("parameter type"), { target: { value: "number" } });
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ type: "number", operator: "=" }));
+  });
+
+  it("clicking delete filter fires onDelete", () => {
+    const onDelete = vi.fn();
+    render(<FilterSettingsPanel param={p({})} allParameters={[p({})]} onChange={vi.fn()} onDelete={onDelete} />);
+    fireEvent.click(screen.getByLabelText("delete filter"));
+    expect(onDelete).toHaveBeenCalled();
+  });
+});
