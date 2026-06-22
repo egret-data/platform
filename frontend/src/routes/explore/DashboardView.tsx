@@ -307,6 +307,51 @@ export default function DashboardView() {
                   </div>
                 );
               })()}
+              {editing && c.card_type === "chart" && (() => {
+                const cb = (c.options.clickBehavior as ClickBehavior | undefined) ?? { type: "menu" };
+                const ch = chartById.get(c.chart_id ?? "");
+                const cols = ch ? [...ch.params.spec.dimensions, ...ch.params.spec.columns] : [];
+                return (
+                  <div className="m-1 flex flex-col gap-0.5 border-t pt-1 text-[10px] text-muted-foreground">
+                    <label className="flex items-center justify-between gap-1">
+                      <span>On click</span>
+                      <select aria-label="on click" className="h-6 rounded border bg-background text-[10px]"
+                        value={cb.type}
+                        onChange={(e) => {
+                          const t = e.target.value as ClickBehavior["type"];
+                          updateCardOptions(c.id, { clickBehavior:
+                            t === "url" ? { type: "url", template: "" }
+                            : t === "crossfilter" ? { type: "crossfilter", parameterMapping: {} }
+                            : { type: "menu" } });
+                        }}>
+                        <option value="menu">Menu</option>
+                        <option value="crossfilter">Cross-filter</option>
+                        <option value="url">Custom URL</option>
+                      </select>
+                    </label>
+                    {cb.type === "url" && (
+                      <input aria-label="url template" placeholder="https://…/{{column}}?p={{slug}}"
+                        className="rounded border bg-background px-1 text-[10px]"
+                        value={cb.template}
+                        onChange={(e) => updateCardOptions(c.id, { clickBehavior: { type: "url", template: e.target.value } })} />
+                    )}
+                    {cb.type === "crossfilter" && parameters.map((p) => {
+                      const mapping = (cb.parameterMapping ?? {});
+                      return (
+                        <label key={p.id} className="flex items-center justify-between gap-1">
+                          <span>{p.name} ←</span>
+                          <select aria-label={`crossfilter ${p.name}`} className="h-6 rounded border bg-background text-[10px]"
+                            value={mapping[p.id] ?? ""}
+                            onChange={(e) => updateCardOptions(c.id, { clickBehavior: { type: "crossfilter", parameterMapping: { ...mapping, [p.id]: e.target.value } } })}>
+                            <option value="">none</option>
+                            {cols.map((col) => <option key={col} value={col}>{col}</option>)}
+                          </select>
+                        </label>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
               {editing && c.card_type === "text" && (
                 <textarea aria-label="text body" className="m-1 h-[calc(100%-1rem)] w-[calc(100%-0.5rem)] resize-none rounded border p-1 text-xs"
                   value={(c.options.text as string) ?? ""} onChange={(e) => updateCardOptions(c.id, { text: e.target.value })} />
