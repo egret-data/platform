@@ -10,6 +10,7 @@ const { updateSpy, dashState } = vi.hoisted(() => {
   const loaded = {
     data: {
       id: "d1", name: "Ops", description: "", created_by: null, updated_at: "",
+      parameters: [],
       cards: [{ id: "k1", chart_id: "c1", card_type: "chart", grid_col: 0, grid_row: 0, size_x: 6, size_y: 4, options: {} }],
     },
     isLoading: false,
@@ -138,6 +139,20 @@ describe("DashboardView (Phase B — view controls)", () => {
     renderAt();
     expect(screen.getByLabelText(/auto-refresh/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /fullscreen/i })).toBeInTheDocument();
+  });
+});
+
+describe("DashboardView (Phase C — parameters)", () => {
+  it("adds a filter parameter in edit mode", () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    fireEvent.click(screen.getByRole("button", { name: /\+ filter/i }));
+    expect(screen.getByLabelText(/parameter name/i)).toBeInTheDocument();
+  });
+  it("renders the filter bar in view mode when the dashboard has parameters", () => {
+    dashState.current = { data: { ...(dashState.loaded.data as object), parameters: [{ id: "p1", name: "Region", slug: "region", type: "text", operator: "is" }] }, isLoading: false };
+    renderAt();
+    expect(screen.getByLabelText("Region")).toBeInTheDocument();
   });
 });
 

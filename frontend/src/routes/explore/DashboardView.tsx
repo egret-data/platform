@@ -3,13 +3,17 @@ import { useParams } from "react-router-dom";
 import RGL, { WidthProvider, type Layout } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
-import { useDashboard, useDashboardMutations, type CardInput, type DashboardCard as Card } from "@/api/dashboards";
+import { useDashboard, useDashboardMutations, type CardInput, type DashboardCard as Card, type DashboardParameter } from "@/api/dashboards";
 import { useCharts, type Chart } from "@/api/charts";
 import { useDashboardViewControls } from "@/api/useDashboardViewControls";
+import { useDashboardParams } from "@/api/useDashboardParams";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { GRID_COLS, CARD_MIN_SIZE, CARD_DEFAULT_SIZE } from "@/components/chart/dashboard-grid";
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
+import { DashboardFilterBar } from "@/components/chart/dashboard/DashboardFilterBar";
+import { ParameterEditor } from "@/components/chart/dashboard/ParameterEditor";
+import { slugify } from "@/components/chart/dashboard/params";
 import { toast } from "sonner";
 
 const Grid = WidthProvider(RGL);
@@ -22,23 +26,33 @@ export default function DashboardView() {
   const { update } = useDashboardMutations(ws);
   const [editing, setEditing] = useState(false);
   const [draftCards, setDraftCards] = useState<Card[] | null>(null);
+  const [draftParameters, setDraftParameters] = useState<DashboardParameter[] | null>(null);
   const cardSeqRef = useRef(0);
   const chartById = useMemo(() => new Map((charts ?? []).map((c) => [c.id, c])), [charts]);
   const view = useDashboardViewControls();
+  // Hook must run before the early return — use `dash?` since dash may be undefined while loading.
+  const paramSource = editing && draftParameters ? draftParameters : (dash?.parameters ?? []);
+  const paramsState = useDashboardParams(paramSource);
   const [replacingId, setReplacingId] = useState<string | null>(null);
 
   useEffect(() => {
     setEditing(false);
     setDraftCards(null);
+    setDraftParameters(null);
   }, [id]);
 
   if (isLoading || !dash) return <div className="p-4 text-muted-foreground">Loading…</div>;
 
   const dashboard = dash;
   const cards = editing && draftCards ? draftCards : dashboard.cards;
+  const parameters = editing && draftParameters ? draftParameters : (dashboard.parameters ?? []);
 
-  function startEdit() { setDraftCards(dashboard.cards.map((c) => ({ ...c }))); setEditing(true); }
-  function cancelEdit() { setEditing(false); setDraftCards(null); }
+  function startEdit() {
+    setDraftCards(dashboard.cards.map((c) => ({ ...c })));
+    setDraftParameters((dashboard.parameters ?? []).map((p) => ({ ...p })));
+    setEditing(true);
+  }
+  function cancelEdit() { setEditing(false); setDraftCards(null); setDraftParameters(null); }
 
   function addCard(chart: Chart) {
     const maxY = cards.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
@@ -115,7 +129,7 @@ export default function DashboardView() {
       grid_col: c.grid_col, grid_row: c.grid_row, size_x: c.size_x, size_y: c.size_y, options: c.options,
     }));
     try {
-      await update.mutateAsync({ id: dashboard.id, name: dashboard.name, description: dashboard.description, parameters: [], cards: payload }); // TODO(PC-T8): send real parameters
+      await update.mutateAsync({ id: dashboard.id, name: dashboard.name, description: dashboard.description, parameters, cards: payload });
       setEditing(false); setDraftCards(null);
       toast.success("Saved");
     } catch (e) { toast.error(String(e)); }
@@ -179,8 +193,26 @@ export default function DashboardView() {
             <Button size="sm" variant="outline" aria-label="Add Heading" onClick={() => addVirtualCard("heading", { text: "" })}>+ Heading</Button>
             <Button size="sm" variant="outline" aria-label="Add Link" onClick={() => addVirtualCard("link", { url: "", label: "" })}>+ Link</Button>
           </div>
+          <div className="mt-2 rounded-md border p-2">
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-xs font-medium text-muted-foreground">Filters</span>
+              <Button size="sm" variant="outline" onClick={() => {
+                const slug = slugify("filter", parameters.map((p) => p.slug));
+                setDraftParameters([...parameters, { id: `new-${slug}-${cardSeqRef.current++}`, name: "Filter", slug, type: "text", operator: "is" }]);
+              }}>+ Filter</Button>
+            </div>
+            <div className="flex flex-col gap-1">
+              {parameters.map((p) => (
+                <ParameterEditor key={p.id} param={p}
+                  onChange={(next) => setDraftParameters(parameters.map((x) => x.id === p.id ? { ...next, slug: x.slug } : x))}
+                  onDelete={() => setDraftParameters(parameters.filter((x) => x.id !== p.id))} />
+              ))}
+            </div>
+          </div>
         </aside>
       )}
+      {/* TODO(PC-T9): optionsBySlug — category/id dropdown population */}
+      <DashboardFilterBar parameters={parameters} values={paramsState.values} onChange={paramsState.setValue} optionsBySlug={{}} />
       {cards.length === 0 ? (
         <p className="text-muted-foreground">No cards yet. Click Edit to add charts.</p>
       ) : (
