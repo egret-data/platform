@@ -151,7 +151,7 @@ async fn dashboard_crud_cards_and_unique_conflict() {
 
     // metadata update + guards
     f.repo
-        .update(d.id, "Ops v2", "", &serde_json::json!([]))
+        .update(d.id, "Ops v2", "", &serde_json::json!([]), "full")
         .await
         .unwrap();
     assert_eq!(f.repo.get(d.id).await.unwrap().unwrap().name, "Ops v2");
@@ -161,7 +161,7 @@ async fn dashboard_crud_cards_and_unique_conflict() {
     // parameters round-trip
     let dash_params = serde_json::json!([{ "id": "p1", "name": "Region", "slug": "region", "type": "text", "operator": "is" }]);
     f.repo
-        .update(d.id, "Ops v2", "", &dash_params)
+        .update(d.id, "Ops v2", "", &dash_params, "full")
         .await
         .unwrap();
     assert_eq!(
@@ -305,4 +305,20 @@ async fn replace_layout_tabs_and_card_assignment() {
         .unwrap();
     f.repo.replace_layout(d.id, &[], &[]).await.unwrap();
     assert!(f.repo.cards(d.id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn dashboard_width_defaults_full_and_round_trips() {
+    let Some(f) = setup().await else {
+        eprintln!("skip");
+        return;
+    };
+    let d = f.repo.create(f.ws, "Wide", "", Some(f.user)).await.unwrap();
+    assert_eq!(f.repo.get(d.id).await.unwrap().unwrap().width, "full");
+
+    f.repo
+        .update(d.id, "Wide", "", &serde_json::json!([]), "fixed")
+        .await
+        .unwrap();
+    assert_eq!(f.repo.get(d.id).await.unwrap().unwrap().width, "fixed");
 }

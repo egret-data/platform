@@ -1081,8 +1081,13 @@ async fn db_update(
     require_dashboard_owner(&st, &ctx, id).await?;
     require_cards_in_ws(&st, &ctx, &b.cards).await?;
     crate::model::validate_layout(&b.tabs, &b.cards).map_err(BiApiError::from)?;
+    if b.width != "fixed" && b.width != "full" {
+        return Err(
+            egret_core::Error::InvalidInput("width must be 'fixed' or 'full'".into()).into(),
+        );
+    }
     st.dashboards
-        .update(id, &b.name, &b.description, &b.parameters)
+        .update(id, &b.name, &b.description, &b.parameters, &b.width)
         .await
         .map_err(BiApiError::from)?;
     let tabs: Vec<crate::dashboard::NewTab> = b.tabs.into_iter().map(|t| t.into_new()).collect();

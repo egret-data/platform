@@ -23,6 +23,7 @@ pub struct Dashboard {
     pub parameters: serde_json::Value,
     pub created_by: Option<Uuid>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub width: String,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -76,7 +77,7 @@ pub struct NewCard {
     pub tab_index: Option<usize>,
 }
 
-const COLS: &str = "id, workspace_id, name, description, parameters, created_by, updated_at";
+const COLS: &str = "id, workspace_id, name, description, parameters, created_by, updated_at, width";
 const CARD_COLS: &str =
     "id, dashboard_id, chart_id, card_type, grid_col, grid_row, size_x, size_y, options, ordinal, tab_id";
 
@@ -149,14 +150,16 @@ impl DashboardRepo {
         name: &str,
         description: &str,
         parameters: &serde_json::Value,
+        width: &str,
     ) -> Result<(), BiError> {
         sqlx::query(
-            "UPDATE dashboards SET name=$2, description=$3, parameters=$4, updated_at=now() WHERE id=$1",
+            "UPDATE dashboards SET name=$2, description=$3, parameters=$4, width=$5, updated_at=now() WHERE id=$1",
         )
         .bind(id)
         .bind(name)
         .bind(description)
         .bind(parameters)
+        .bind(width)
         .execute(&self.db.pool)
         .await
         .map_err(map_conflict_err)?;
