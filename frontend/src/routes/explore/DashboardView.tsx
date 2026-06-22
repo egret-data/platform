@@ -22,7 +22,7 @@ import { DashboardFilterBar } from "@/components/chart/dashboard/DashboardFilter
 import { EditSidebar, type EditPanel } from "@/components/chart/dashboard/EditSidebar";
 import { EditFilterChips } from "@/components/chart/dashboard/EditFilterChips";
 import { CardEditToolbar } from "@/components/chart/dashboard/CardEditToolbar";
-import { slugify, applyParamsToChart, isBlank } from "@/components/chart/dashboard/params";
+import { slugify, applyParamsToChart, computeLinkedFilters, isBlank } from "@/components/chart/dashboard/params";
 import { useColumnValues } from "@/api/useColumnValues";
 import { useDashboardTabs } from "@/api/useDashboardTabs";
 import { DashboardTabBar } from "@/components/chart/dashboard/DashboardTabBar";
@@ -34,8 +34,8 @@ const ROW_PX = 90;
 
 /** Loads distinct column values for one category/id parameter (hook is called
  * unconditionally inside this child so the Rules of Hooks are respected). */
-function ParamOptions({ ws, datasetId, column, slug, onLoaded }: { ws: string; datasetId: string | null; column: string | null; slug: string; onLoaded: (slug: string, values: string[]) => void }) {
-  const { values } = useColumnValues(ws, datasetId, column, !!datasetId && !!column);
+function ParamOptions({ ws, datasetId, column, slug, filters, onLoaded }: { ws: string; datasetId: string | null; column: string | null; slug: string; filters: ChartFilter[]; onLoaded: (slug: string, values: string[]) => void }) {
+  const { values } = useColumnValues(ws, datasetId, column, !!datasetId && !!column, filters);
   useEffect(() => { if (values.length) onLoaded(slug, values); }, [slug, values, onLoaded]);
   return null;
 }
@@ -267,14 +267,16 @@ export default function DashboardView() {
       </div>
       {/* For each category/id parameter, load distinct values from the first card that maps it. */}
       {parameters
-        .filter((p) => p.type === "category" || p.type === "id")
+        .filter((p) => p.type === "category" || p.type === "id" || p.type === "location")
         .map((p) => {
           const card = cards.find((c) => c.card_type === "chart" && ((c.options.paramMappings as Record<string, string>) ?? {})[p.id]);
           if (!card) return null;
           const ch = chartById.get(card.chart_id ?? "");
-          const column = ((card.options.paramMappings as Record<string, string>) ?? {})[p.id] ?? null;
+          const cardMappings = (card.options.paramMappings as Record<string, string>) ?? {};
+          const column = cardMappings[p.id] ?? null;
           if (!ch || !column) return null;
-          return <ParamOptions key={p.id} ws={ws} datasetId={ch.dataset_id} column={column} slug={p.slug} onLoaded={onOptionsLoaded} />;
+          const filters = computeLinkedFilters(p, cardMappings, parameters, paramsState.values);
+          return <ParamOptions key={p.id} ws={ws} datasetId={ch.dataset_id} column={column} slug={p.slug} filters={filters} onLoaded={onOptionsLoaded} />;
         })}
       {(editing || tabs.length >= 2) && (
         <DashboardTabBar

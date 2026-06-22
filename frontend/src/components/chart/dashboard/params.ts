@@ -198,6 +198,31 @@ export function applyParamsToChart(
   };
 }
 
+/**
+ * Filters that constrain a parameter's option list to values consistent with its linked
+ * parameters' current values. Each linked param must be mapped on the SAME card (so we can read
+ * its column from `mappings`); linked params with no value or no mapping are ignored.
+ */
+export function computeLinkedFilters(
+  param: DashboardParameter,
+  mappings: Record<string, string>,
+  parameters: DashboardParameter[],
+  values: Record<string, unknown>,
+  now: Date = new Date(),
+): ChartFilter[] {
+  const out: ChartFilter[] = [];
+  for (const linkedId of param.filteringParameters ?? []) {
+    const linked = parameters.find((p) => p.id === linkedId);
+    if (!linked) continue;
+    const col = mappings[linkedId];
+    if (!col) continue;
+    const v = values[linked.slug];
+    if (isBlank(v)) continue;
+    out.push(...paramToFilters(linked, v, col, now));
+  }
+  return out;
+}
+
 export function interpolateParams(
   text: string,
   parameters: DashboardParameter[],
