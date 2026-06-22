@@ -1,7 +1,7 @@
 //! Dashboard repository: a dashboard row plus its placed cards (grid layout).
 //!
-//! Card layout is saved whole-list: the client sends the full set of cards on each
-//! update and `replace_cards` swaps them in a transaction (Metabase-style layout PUT),
+//! Card layout is saved whole-list: the client sends the full set of tabs + cards on each
+//! update and `replace_layout` swaps them in a transaction (Metabase-style layout PUT),
 //! which keeps grid edits atomic and avoids per-card diffing.
 
 use egret_metastore::Db;
@@ -142,7 +142,7 @@ impl DashboardRepo {
     }
 
     /// Update dashboard metadata only (name/description). Card layout goes through
-    /// `replace_cards`; callers that change both run them together.
+    /// `replace_layout`; callers that change both run them together.
     pub async fn update(
         &self,
         id: Uuid,
@@ -242,11 +242,6 @@ impl DashboardRepo {
         }
         tx.commit().await?;
         Ok(())
-    }
-
-    /// TEMPORARY back-compat shim (removed in Task 2 when the router moves to replace_layout).
-    pub async fn replace_cards(&self, dashboard_id: Uuid, cards: &[NewCard]) -> Result<(), BiError> {
-        self.replace_layout(dashboard_id, &[], cards).await
     }
 
     /// The workspace a dashboard belongs to (for the nested-ownership guard). None if absent.

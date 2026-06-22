@@ -305,6 +305,14 @@ pub struct DashboardCardDto {
     pub size_x: i32,
     pub size_y: i32,
     pub options: serde_json::Value,
+    pub tab_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DashboardTabDto {
+    pub id: String,
+    pub name: String,
+    pub position: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -315,6 +323,7 @@ pub struct DashboardDetailDto {
     pub parameters: serde_json::Value,
     pub created_by: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub tabs: Vec<DashboardTabDto>,
     pub cards: Vec<DashboardCardDto>,
 }
 
@@ -338,6 +347,14 @@ pub struct CardInput {
     pub size_y: i32,
     #[serde(default = "empty_obj")]
     pub options: serde_json::Value,
+    #[serde(default)]
+    pub tab_index: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NewTabInput {
+    pub name: String,
+    pub position: i32,
 }
 
 fn default_card_type() -> String {
@@ -358,6 +375,8 @@ pub struct UpdateDashboard {
     #[serde(default = "empty_arr")]
     pub parameters: serde_json::Value,
     #[serde(default)]
+    pub tabs: Vec<NewTabInput>,
+    #[serde(default)]
     pub cards: Vec<CardInput>,
 }
 
@@ -371,9 +390,40 @@ impl CardInput {
             size_x: self.size_x,
             size_y: self.size_y,
             options: self.options,
-            tab_index: None,
+            tab_index: self.tab_index,
         }
     }
+}
+
+impl NewTabInput {
+    pub fn into_new(self) -> crate::dashboard::NewTab {
+        crate::dashboard::NewTab { name: self.name, position: self.position }
+    }
+}
+
+/// Mirror Metabase's "can't mix tabs and null-tab cards": with tabs, every card needs an
+/// in-range `tab_index`; without tabs, no card may carry one.
+pub fn validate_layout(tabs: &[NewTabInput], cards: &[CardInput]) -> Result<(), egret_core::Error> {
+    for c in cards {
+        match c.tab_index {
+            Some(i) if i >= tabs.len() => {
+                return Err(egret_core::Error::InvalidInput(format!(
+                    "card tab_index {i} out of range (0..{})", tabs.len()
+                )));
+            }
+            None if !tabs.is_empty() => {
+                return Err(egret_core::Error::InvalidInput(
+                    "every card needs a tab_index when the dashboard has tabs".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+pub fn dashboard_tab_dto(t: crate::dashboard::DashboardTab) -> DashboardTabDto {
+    DashboardTabDto { id: t.id.to_string(), name: t.name, position: t.position }
 }
 
 pub fn dashboard_summary_dto(d: Dashboard, card_count: i64) -> DashboardSummaryDto {
@@ -397,10 +447,15 @@ pub fn dashboard_card_dto(c: DashboardCard) -> DashboardCardDto {
         size_x: c.size_x,
         size_y: c.size_y,
         options: c.options,
+        tab_id: c.tab_id.map(|i| i.to_string()),
     }
 }
 
-pub fn dashboard_detail_dto(d: Dashboard, cards: Vec<DashboardCard>) -> DashboardDetailDto {
+pub fn dashboard_detail_dto(
+    d: Dashboard,
+    tabs: Vec<crate::dashboard::DashboardTab>,
+    cards: Vec<DashboardCard>,
+) -> DashboardDetailDto {
     DashboardDetailDto {
         id: d.id.to_string(),
         name: d.name,
@@ -408,6 +463,7 @@ pub fn dashboard_detail_dto(d: Dashboard, cards: Vec<DashboardCard>) -> Dashboar
         parameters: d.parameters,
         created_by: d.created_by.map(|u| u.to_string()),
         updated_at: d.updated_at,
+        tabs: tabs.into_iter().map(dashboard_tab_dto).collect(),
         cards: cards.into_iter().map(dashboard_card_dto).collect(),
     }
 }
@@ -425,5 +481,21 @@ mod tests {
             serde_json::to_value(&c).unwrap(),
             serde_json::json!({"name":"id","type":"bigint"})
         );
+    }
+
+    #[test]
+    fn validate_layout_rejects_mixed_and_out_of_range() {
+        use super::{validate_layout, CardInput, NewTabInput};
+        let tab = || NewTabInput { name: "T".into(), position: 0 };
+        let card = |ti: Option<usize>| CardInput {
+            chart_id: None, card_type: "chart".into(),
+            grid_col: 0, grid_row: 0, size_x: 6, size_y: 4,
+            options: serde_json::json!({}), tab_index: ti,
+        };
+        assert!(validate_layout(&[tab()], &[card(None)]).is_err());     // tabs but card has no index
+        assert!(validate_layout(&[], &[card(Some(0))]).is_err());       // no tabs but card has index
+        assert!(validate_layout(&[tab()], &[card(Some(1))]).is_err());  // out of range
+        assert!(validate_layout(&[tab()], &[card(Some(0))]).is_ok());   // valid with tabs
+        assert!(validate_layout(&[], &[card(None)]).is_ok());           // valid tabless
     }
 }

@@ -116,7 +116,7 @@ async fn dashboard_crud_cards_and_unique_conflict() {
             tab_index: None,
         },
     ];
-    f.repo.replace_cards(d.id, &cards).await.unwrap();
+    f.repo.replace_layout(d.id, &[], &cards).await.unwrap();
 
     let got = f.repo.cards(d.id).await.unwrap();
     assert_eq!(got.len(), 2);
@@ -129,10 +129,11 @@ async fn dashboard_crud_cards_and_unique_conflict() {
     let listed = f.repo.list_by_workspace(f.ws).await.unwrap();
     assert_eq!(listed[0].1, 2);
 
-    // replace_cards is a full swap, not an append
+    // replace_layout is a full swap, not an append
     f.repo
-        .replace_cards(
+        .replace_layout(
             d.id,
+            &[],
             &[NewCard {
                 chart_id: Some(chart.id),
                 card_type: "chart".into(),
