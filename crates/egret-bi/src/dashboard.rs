@@ -214,9 +214,13 @@ impl DashboardRepo {
 
         let mut tx = self.db.pool.begin().await?;
         sqlx::query("DELETE FROM dashboard_cards WHERE dashboard_id = $1")
-            .bind(dashboard_id).execute(&mut *tx).await?;
+            .bind(dashboard_id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM dashboard_tabs WHERE dashboard_id = $1")
-            .bind(dashboard_id).execute(&mut *tx).await?;
+            .bind(dashboard_id)
+            .execute(&mut *tx)
+            .await?;
 
         let mut tab_ids: Vec<Uuid> = Vec::with_capacity(tabs.len());
         for t in tabs {

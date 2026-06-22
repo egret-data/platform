@@ -397,7 +397,10 @@ impl CardInput {
 
 impl NewTabInput {
     pub fn into_new(self) -> crate::dashboard::NewTab {
-        crate::dashboard::NewTab { name: self.name, position: self.position }
+        crate::dashboard::NewTab {
+            name: self.name,
+            position: self.position,
+        }
     }
 }
 
@@ -408,7 +411,8 @@ pub fn validate_layout(tabs: &[NewTabInput], cards: &[CardInput]) -> Result<(), 
         match c.tab_index {
             Some(i) if i >= tabs.len() => {
                 return Err(egret_core::Error::InvalidInput(format!(
-                    "card tab_index {i} out of range (0..{})", tabs.len()
+                    "card tab_index {i} out of range (0..{})",
+                    tabs.len()
                 )));
             }
             None if !tabs.is_empty() => {
@@ -423,7 +427,11 @@ pub fn validate_layout(tabs: &[NewTabInput], cards: &[CardInput]) -> Result<(), 
 }
 
 pub fn dashboard_tab_dto(t: crate::dashboard::DashboardTab) -> DashboardTabDto {
-    DashboardTabDto { id: t.id.to_string(), name: t.name, position: t.position }
+    DashboardTabDto {
+        id: t.id.to_string(),
+        name: t.name,
+        position: t.position,
+    }
 }
 
 pub fn dashboard_summary_dto(d: Dashboard, card_count: i64) -> DashboardSummaryDto {
@@ -486,16 +494,24 @@ mod tests {
     #[test]
     fn validate_layout_rejects_mixed_and_out_of_range() {
         use super::{validate_layout, CardInput, NewTabInput};
-        let tab = || NewTabInput { name: "T".into(), position: 0 };
-        let card = |ti: Option<usize>| CardInput {
-            chart_id: None, card_type: "chart".into(),
-            grid_col: 0, grid_row: 0, size_x: 6, size_y: 4,
-            options: serde_json::json!({}), tab_index: ti,
+        let tab = || NewTabInput {
+            name: "T".into(),
+            position: 0,
         };
-        assert!(validate_layout(&[tab()], &[card(None)]).is_err());     // tabs but card has no index
-        assert!(validate_layout(&[], &[card(Some(0))]).is_err());       // no tabs but card has index
-        assert!(validate_layout(&[tab()], &[card(Some(1))]).is_err());  // out of range
-        assert!(validate_layout(&[tab()], &[card(Some(0))]).is_ok());   // valid with tabs
-        assert!(validate_layout(&[], &[card(None)]).is_ok());           // valid tabless
+        let card = |ti: Option<usize>| CardInput {
+            chart_id: None,
+            card_type: "chart".into(),
+            grid_col: 0,
+            grid_row: 0,
+            size_x: 6,
+            size_y: 4,
+            options: serde_json::json!({}),
+            tab_index: ti,
+        };
+        assert!(validate_layout(&[tab()], &[card(None)]).is_err()); // tabs but card has no index
+        assert!(validate_layout(&[], &[card(Some(0))]).is_err()); // no tabs but card has index
+        assert!(validate_layout(&[tab()], &[card(Some(1))]).is_err()); // out of range
+        assert!(validate_layout(&[tab()], &[card(Some(0))]).is_ok()); // valid with tabs
+        assert!(validate_layout(&[], &[card(None)]).is_ok()); // valid tabless
     }
 }
