@@ -370,7 +370,7 @@ export default function DashboardView() {
               )}
               {(!editing || c.card_type === "chart") && (
                 <DashboardCardView ws={ws} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values}
-                  onValueClick={(ctx, x, y) => onCardValueClick(c, ctx, x, y)} />
+                  onValueClick={editing ? undefined : (ctx, x, y) => onCardValueClick(c, ctx, x, y)} />
               )}
             </div>
             );
