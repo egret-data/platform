@@ -54,7 +54,8 @@ describe("DashboardView click behaviour", () => {
   it("cross-filters when a card's click behaviour is crossfilter", () => {
     renderAt();
     fireEvent.click(screen.getByTestId("cardclick-k1"));
-    expect((screen.getByLabelText("Region") as HTMLInputElement).value).toBe("EU");
+    // The region filter is now a pill; the crossfilter value shows in its summary.
+    expect(screen.getByLabelText("Region").textContent).toContain("EU");
   });
 
   it("passes the dataset's columns into the See-these-records dialog", () => {

@@ -22,7 +22,10 @@ export function useColumnValues(ws: string, datasetId: string | null, column: st
     setQueryId(null); setError(null);
     (async () => {
       try {
-        const spec: QuerySpec = { metrics: [], dimensions: [column], columns: [], filters: [], orderby: [], row_limit: 1000, rollup_groups: [] };
+        // Select the column directly rather than as a group-by dimension: the engine query
+        // builder requires at least one metric or column, so a dimensions-only spec is rejected
+        // (400). Rows are deduped client-side below, so a plain column select is correct.
+        const spec: QuerySpec = { metrics: [], dimensions: [], columns: [column], filters: [], orderby: [], row_limit: 1000, rollup_groups: [] };
         const { sql, database_id } = await build.mutateAsync({ dataset_id: datasetId, query_spec: spec });
         if (cancelled) return;
         const q = await submit.mutateAsync({ database_id, sql, limit: 1000 });

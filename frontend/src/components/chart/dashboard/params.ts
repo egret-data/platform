@@ -10,7 +10,29 @@ export function slugify(name: string, existing: string[]): string {
   return `${base}_${i}`;
 }
 
-const isBlank = (v: unknown) => v === undefined || v === null || v === "";
+export const isBlank = (v: unknown) => v === undefined || v === null || v === "";
+
+const RELATIVE_LABELS: Record<string, string> = {
+  last7: "Last 7 days", last30: "Last 30 days", last90: "Last 90 days", last365: "Last 365 days",
+};
+
+/** A short human summary of a parameter's current value for the filter pill. */
+export function summarize(param: DashboardParameter, value: unknown): string {
+  if (isBlank(value)) return "";
+  if (Array.isArray(value)) {
+    const vals = value.filter((v) => !isBlank(v));
+    if (vals.length === 0) return "";
+    if (vals.length === 1) return String(vals[0]);
+    if (vals.length === 2 && (param.operator === "between" || param.operator === "range")) {
+      return `${vals[0]} – ${vals[1]}`;
+    }
+    return `${vals.length} selections`;
+  }
+  if (param.type === "date" && param.operator === "relative") {
+    return RELATIVE_LABELS[String(value)] ?? String(value);
+  }
+  return String(value);
+}
 
 const RELATIVE_DAYS: Record<string, number> = {
   last7: 7,
