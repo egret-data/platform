@@ -67,7 +67,8 @@ describe("DashboardView (edit mode)", () => {
   it("adds a card from the saved-charts sidebar and removes it", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
-    const addBtn = screen.getByRole("button", { name: /add sales/i });
+    // entering edit shows the Add panel; the chart's name button adds a card
+    const addBtn = screen.getByRole("button", { name: "Sales" });
     fireEvent.click(addBtn);
     expect(screen.getAllByRole("button", { name: /remove card/i }).length).toBeGreaterThan(0);
   });
@@ -78,7 +79,7 @@ describe("DashboardView (edit mode)", () => {
     updateSpy.mockClear();
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
-    fireEvent.click(screen.getByRole("button", { name: /add sales/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Sales" }));
     fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
     expect(updateSpy).toHaveBeenCalledTimes(1);
     const payload = updateSpy.mock.calls[0][0];
@@ -92,10 +93,17 @@ describe("DashboardView (edit mode)", () => {
 });
 
 describe("DashboardView (Phase B — card variety)", () => {
+  // After adding a virtual card, its editor now lives in the CardSettingsPanel —
+  // open the new card's "card settings" (the last toolbar) to reach it.
+  function openLastCardSettings() {
+    const gear = screen.getAllByRole("button", { name: "card settings" });
+    fireEvent.click(gear[gear.length - 1]);
+  }
   it("adds a text card and edits its body", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
     fireEvent.click(screen.getByRole("button", { name: /add text/i }));
+    openLastCardSettings();
     const editor = screen.getByLabelText(/text body/i);
     fireEvent.change(editor, { target: { value: "## Notes" } });
     expect((editor as HTMLTextAreaElement).value).toBe("## Notes");
@@ -104,18 +112,21 @@ describe("DashboardView (Phase B — card variety)", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
     fireEvent.click(screen.getByRole("button", { name: /add heading/i }));
+    openLastCardSettings();
     expect(screen.getByLabelText(/heading text/i)).toBeInTheDocument();
   });
   it("adds a link card with url + label", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
     fireEvent.click(screen.getByRole("button", { name: /add link/i }));
+    openLastCardSettings();
     expect(screen.getByLabelText(/link url/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/link label/i)).toBeInTheDocument();
   });
   it("offers a title input on a chart card in edit mode", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    fireEvent.click(screen.getByRole("button", { name: "card settings" }));
     expect(screen.getByLabelText(/card title/i)).toBeInTheDocument();
   });
 });
@@ -165,6 +176,7 @@ describe("DashboardView (Phase C — mapping + injection)", () => {
     dashState.current = { data: { ...(dashState.loaded.data as object), parameters: [{ id: "p1", name: "Region", slug: "region", type: "text", operator: "is" }] }, isLoading: false };
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    fireEvent.click(screen.getByRole("button", { name: "card settings" }));
     expect(screen.getByLabelText(/map Region/i)).toBeInTheDocument();
   });
 });
@@ -214,6 +226,7 @@ describe("DashboardView (Phase D1 — on-click config)", () => {
     };
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    fireEvent.click(screen.getByRole("button", { name: "card settings" }));
     fireEvent.change(screen.getByLabelText(/on click/i), { target: { value: "url" } });
     const tpl = screen.getByLabelText(/url template/i);
     fireEvent.change(tpl, { target: { value: "https://x.com/{{region}}" } });

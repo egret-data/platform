@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Pencil } from "lucide-react";
 import { useParams } from "react-router-dom";
 import RGL, { WidthProvider, type Layout } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
@@ -17,7 +18,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { GRID_COLS, CARD_MIN_SIZE, CARD_DEFAULT_SIZE } from "@/components/chart/dashboard-grid";
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
 import { DashboardFilterBar } from "@/components/chart/dashboard/DashboardFilterBar";
-import { ParameterEditor } from "@/components/chart/dashboard/ParameterEditor";
+import { EditSidebar, type EditPanel } from "@/components/chart/dashboard/EditSidebar";
+import { EditFilterChips } from "@/components/chart/dashboard/EditFilterChips";
+import { CardEditToolbar } from "@/components/chart/dashboard/CardEditToolbar";
 import { slugify, applyParamsToChart, isBlank } from "@/components/chart/dashboard/params";
 import { useColumnValues } from "@/api/useColumnValues";
 import { useDashboardTabs } from "@/api/useDashboardTabs";
@@ -54,6 +57,7 @@ export default function DashboardView() {
   // Hook must run before the early return — use `dash?` since dash may be undefined while loading.
   const paramSource = editing && draftParameters ? draftParameters : (dash?.parameters ?? []);
   const paramsState = useDashboardParams(paramSource);
+  const [editPanel, setEditPanel] = useState<EditPanel>(null);
   const [replacingId, setReplacingId] = useState<string | null>(null);
   const [deletingTabKey, setDeletingTabKey] = useState<string | null>(null);
   const [reassignTo, setReassignTo] = useState<string | null>(null);
@@ -114,8 +118,9 @@ export default function DashboardView() {
     setDraftTabs(dt);
     setDraftWidth(dashboard.width);
     setEditing(true);
+    setEditPanel({ kind: "add" });
   }
-  function cancelEdit() { setEditing(false); setDraftCards(null); setDraftParameters(null); setDraftTabs(null); }
+  function cancelEdit() { setEditing(false); setDraftCards(null); setDraftParameters(null); setDraftTabs(null); setEditPanel(null); }
 
   function addCard(chart: Chart) {
     const maxY = cards.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
@@ -192,13 +197,18 @@ export default function DashboardView() {
     const { tabs: tabPayload, cards: cardPayload } = serializeLayout(draftTabs ?? [], (cards as DraftCard[]));
     try {
       await update.mutateAsync({ id: dashboard.id, name: dashboard.name, description: dashboard.description, parameters, tabs: tabPayload, width: draftWidth, cards: cardPayload });
-      setEditing(false); setDraftCards(null); setDraftTabs(null);
+      setEditing(false); setDraftCards(null); setDraftTabs(null); setEditPanel(null);
       toast.success("Saved");
     } catch (e) { toast.error(String(e)); }
   }
 
   return (
     <div className={view.isFullscreen ? "fixed inset-0 z-50 overflow-auto bg-muted/30 p-4" : "min-h-full bg-muted/30 p-4"}>
+      {editing && (
+        <div className="-mx-4 -mt-4 mb-4 flex items-center gap-2 bg-primary px-4 py-2 text-sm font-medium text-primary-foreground">
+          <Pencil className="h-4 w-4" /> You're editing this dashboard
+        </div>
+      )}
       <div className={effectiveWidth === "fixed" ? "mx-auto w-full max-w-[1200px]" : ""}>
       <div className="mb-3 flex items-center justify-between">
         <h1 className="text-lg font-semibold">{dash.name}</h1>
@@ -233,6 +243,13 @@ export default function DashboardView() {
           )}
           {editing ? (
             <>
+              <Button size="sm" variant="outline" onClick={() => setEditPanel({ kind: "add" })}>+ Chart</Button>
+              <Button size="sm" variant="outline" onClick={() => {
+                const slug = slugify("filter", parameters.map((p) => p.slug));
+                const id = `new-${slug}-${cardSeqRef.current++}`;
+                setDraftParameters([...parameters, { id, name: "Filter", slug, type: "text", operator: "is" }]);
+                setEditPanel({ kind: "filter", paramId: id });
+              }}>+ Filter</Button>
               <div className="flex items-center gap-1 rounded border p-0.5">
                 <button type="button" aria-label="width full" className={`rounded px-2 py-0.5 text-xs ${draftWidth === "full" ? "bg-accent" : ""}`} onClick={() => setDraftWidth("full")}>Full</button>
                 <button type="button" aria-label="width fixed" className={`rounded px-2 py-0.5 text-xs ${draftWidth === "fixed" ? "bg-accent" : ""}`} onClick={() => setDraftWidth("fixed")}>Fixed</button>
@@ -245,39 +262,6 @@ export default function DashboardView() {
           )}
         </div>
       </div>
-      {editing && (
-        <aside className="mb-3 rounded-md border p-2">
-          <div className="mb-1 text-xs font-medium text-muted-foreground">Add a chart</div>
-          <div className="flex flex-wrap gap-1">
-            {(charts ?? []).map((c) => (
-              <Button key={c.id} size="sm" variant="outline" aria-label={`add ${c.name}`} onClick={() => addCard(c)}>
-                {c.name}
-              </Button>
-            ))}
-          </div>
-          <div className="mt-2 flex gap-1 border-t pt-2">
-            <Button size="sm" variant="outline" aria-label="Add Text" onClick={() => addVirtualCard("text", { text: "" })}>+ Text</Button>
-            <Button size="sm" variant="outline" aria-label="Add Heading" onClick={() => addVirtualCard("heading", { text: "" })}>+ Heading</Button>
-            <Button size="sm" variant="outline" aria-label="Add Link" onClick={() => addVirtualCard("link", { url: "", label: "" })}>+ Link</Button>
-          </div>
-          <div className="mt-2 rounded-md border p-2">
-            <div className="mb-1 flex items-center justify-between">
-              <span className="text-xs font-medium text-muted-foreground">Filters</span>
-              <Button size="sm" variant="outline" onClick={() => {
-                const slug = slugify("filter", parameters.map((p) => p.slug));
-                setDraftParameters([...parameters, { id: `new-${slug}-${cardSeqRef.current++}`, name: "Filter", slug, type: "text", operator: "is" }]);
-              }}>+ Filter</Button>
-            </div>
-            <div className="flex flex-col gap-1">
-              {parameters.map((p) => (
-                <ParameterEditor key={p.id} param={p}
-                  onChange={(next) => setDraftParameters(parameters.map((x) => x.id === p.id ? { ...next, slug: x.slug } : x))}
-                  onDelete={() => setDraftParameters(parameters.filter((x) => x.id !== p.id))} />
-              ))}
-            </div>
-          </div>
-        </aside>
-      )}
       {/* For each category/id parameter, load distinct values from the first card that maps it. */}
       {parameters
         .filter((p) => p.type === "category" || p.type === "id")
@@ -311,8 +295,18 @@ export default function DashboardView() {
           onDuplicate={(key) => { const r = duplicateTab(draftTabs ?? [], (cards as DraftCard[]), key); setDraftTabs(r.draftTabs); setDraftCards(r.draftCards); setActiveTabPos(r.activeTabPos); }}
         />
       )}
-      <DashboardFilterBar parameters={parameters} values={paramsState.values} onChange={paramsState.setValue} optionsBySlug={optionsBySlug} />
-      {cards.length === 0 ? (
+      {editing
+        ? <EditFilterChips parameters={parameters} activeId={editPanel?.kind === "filter" ? editPanel.paramId : null} onSelect={(id) => setEditPanel({ kind: "filter", paramId: id })} />
+        : <DashboardFilterBar parameters={parameters} values={paramsState.values} onChange={paramsState.setValue} optionsBySlug={optionsBySlug} />}
+      <div className={editing ? "flex gap-4" : ""}>
+        <div className={editing ? "min-w-0 flex-1" : ""}>
+      {(cards.length === 0 || (tabs.length > 0 && visibleCards.length === 0)) && editing ? (
+        <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed py-20 text-center">
+          <Pencil className="h-8 w-8 text-muted-foreground/40" />
+          <p className="text-sm text-muted-foreground">{cards.length === 0 ? "This dashboard is empty." : "No cards on this tab."}</p>
+          <button type="button" className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90" onClick={() => setEditPanel({ kind: "add" })}>Add a chart</button>
+        </div>
+      ) : cards.length === 0 ? (
         <p className="text-muted-foreground">No cards yet. Click Edit to add charts.</p>
       ) : tabs.length > 0 && visibleCards.length === 0 ? (
         <p className="py-12 text-center text-muted-foreground">No cards on this tab.</p>
@@ -322,6 +316,8 @@ export default function DashboardView() {
           cols={GRID_COLS}
           rowHeight={ROW_PX}
           margin={[12, 12]}
+          draggableHandle=".dash-draghandle"
+          draggableCancel=".dash-nodrag"
           isDraggable={editing}
           isResizable={editing}
           layout={layout}
@@ -332,124 +328,47 @@ export default function DashboardView() {
             const mappings = (c.options.paramMappings as Record<string, string>) ?? {};
             const injected = baseChart ? applyParamsToChart(baseChart, parameters, paramsState.values, mappings) : undefined;
             return (
-            <div key={c.id} className={`relative overflow-hidden ${c.card_type === "heading" ? "" : "rounded-lg border bg-card shadow-sm"}`}>
+            <div key={c.id} className="group relative h-full">
               {editing && (
-                <div className="absolute right-1 top-1 z-10 flex gap-1">
-                  <button type="button" aria-label={`duplicate card ${c.id}`} className="rounded bg-background/80 px-1 text-xs"
-                    onClick={() => duplicateCard(c.id)}>⧉</button>
-                  {c.card_type === "chart" && (
-                    <button type="button" aria-label={`replace card ${c.id}`} className="rounded bg-background/80 px-1 text-xs"
-                      onClick={() => setReplacingId(c.id)}>↺</button>
-                  )}
-                  <button type="button" aria-label={`remove card ${chartById.get(c.chart_id ?? "")?.name ?? ""}`.trim() || "remove card"}
-                    className="rounded bg-background/80 px-1 text-xs text-destructive" onClick={() => removeCard(c.id)}>✕</button>
+                <div className="dash-nodrag absolute -top-3.5 left-1/2 z-30 -translate-x-1/2 opacity-0 transition-opacity group-hover:opacity-100">
+                  <CardEditToolbar cardType={c.card_type}
+                    onSettings={() => setEditPanel({ kind: "card", cardId: c.id })}
+                    onDuplicate={() => duplicateCard(c.id)}
+                    onReplace={() => setReplacingId(c.id)}
+                    onRemove={() => removeCard(c.id)} />
                 </div>
               )}
-              {editing && tabs.length >= 2 && (
-                <label className="m-1 flex items-center justify-between gap-1 border-t pt-1 text-[10px] text-muted-foreground">
-                  <span>Move to tab</span>
-                  <select aria-label={`move card ${c.id} to tab`} className="h-6 rounded border bg-background text-[10px]"
-                    value={(c as DraftCard).tabKey ?? ""}
-                    onChange={(e) => setDraftCards(moveCardToTab((cards as DraftCard[]), c.id, e.target.value))}>
-                    {tabs.map((t) => <option key={t.key} value={t.key}>{t.name}</option>)}
-                  </select>
-                </label>
-              )}
-              {editing && c.card_type === "chart" && (
-                <input aria-label="card title" placeholder="Title (blank = chart name)" className="m-1 w-[calc(100%-0.5rem)] rounded border px-1 text-xs"
-                  value={(c.options.title as string) ?? ""} onChange={(e) => updateCardOptions(c.id, { title: e.target.value })} />
-              )}
-              {editing && parameters.length > 0 && c.card_type === "chart" && (() => {
-                const ch = chartById.get(c.chart_id ?? "");
-                const cols = ch ? [...ch.params.spec.dimensions, ...ch.params.spec.columns] : [];
-                const cardMappings = (c.options.paramMappings as Record<string, string>) ?? {};
-                return (
-                  <div className="m-1 flex flex-col gap-0.5 border-t pt-1">
-                    {parameters.map((p) => (
-                      <label key={p.id} className="flex items-center justify-between gap-1 text-[10px] text-muted-foreground">
-                        <span>{p.name}</span>
-                        <select aria-label={`map ${p.name}`} className="h-6 rounded border bg-background text-[10px]"
-                          value={cardMappings[p.id] ?? ""}
-                          onChange={(e) => updateCardOptions(c.id, { paramMappings: { ...cardMappings, [p.id]: e.target.value } })}>
-                          <option value="">none</option>
-                          {cols.map((col) => <option key={col} value={col}>{col}</option>)}
-                        </select>
-                      </label>
-                    ))}
-                  </div>
-                );
-              })()}
-              {editing && c.card_type === "chart" && (() => {
-                const cb = (c.options.clickBehavior as ClickBehavior | undefined) ?? { type: "menu" };
-                const ch = chartById.get(c.chart_id ?? "");
-                const cols = ch ? [...ch.params.spec.dimensions, ...ch.params.spec.columns] : [];
-                return (
-                  <div className="m-1 flex flex-col gap-0.5 border-t pt-1 text-[10px] text-muted-foreground">
-                    <label className="flex items-center justify-between gap-1">
-                      <span>On click</span>
-                      <select aria-label="on click" className="h-6 rounded border bg-background text-[10px]"
-                        value={cb.type}
-                        onChange={(e) => {
-                          const t = e.target.value as ClickBehavior["type"];
-                          updateCardOptions(c.id, { clickBehavior:
-                            t === "url" ? { type: "url", template: "" }
-                            : t === "crossfilter" ? { type: "crossfilter", parameterMapping: {} }
-                            : { type: "menu" } });
-                        }}>
-                        <option value="menu">Menu</option>
-                        <option value="crossfilter">Cross-filter</option>
-                        <option value="url">Custom URL</option>
-                      </select>
-                    </label>
-                    {cb.type === "url" && (
-                      <input aria-label="url template" placeholder="https://…/{{column}}?p={{slug}}"
-                        className="rounded border bg-background px-1 text-[10px]"
-                        value={cb.template}
-                        onChange={(e) => updateCardOptions(c.id, { clickBehavior: { type: "url", template: e.target.value } })} />
-                    )}
-                    {cb.type === "crossfilter" && parameters.map((p) => {
-                      const mapping = (cb.parameterMapping ?? {});
-                      return (
-                        <label key={p.id} className="flex items-center justify-between gap-1">
-                          <span>{p.name} ←</span>
-                          <select aria-label={`crossfilter ${p.name}`} className="h-6 rounded border bg-background text-[10px]"
-                            value={mapping[p.id] ?? ""}
-                            onChange={(e) => updateCardOptions(c.id, { clickBehavior: { type: "crossfilter", parameterMapping: { ...mapping, [p.id]: e.target.value } } })}>
-                            <option value="">none</option>
-                            {cols.map((col) => <option key={col} value={col}>{col}</option>)}
-                          </select>
-                        </label>
-                      );
-                    })}
-                  </div>
-                );
-              })()}
-              {editing && c.card_type === "text" && (
-                <textarea aria-label="text body" className="m-1 h-[calc(100%-1rem)] w-[calc(100%-0.5rem)] resize-none rounded border p-1 text-xs"
-                  value={(c.options.text as string) ?? ""} onChange={(e) => updateCardOptions(c.id, { text: e.target.value })} />
-              )}
-              {editing && c.card_type === "heading" && (
-                <input aria-label="heading text" className="m-1 w-[calc(100%-0.5rem)] rounded border px-1 text-sm"
-                  value={(c.options.text as string) ?? ""} onChange={(e) => updateCardOptions(c.id, { text: e.target.value })} />
-              )}
-              {editing && c.card_type === "link" && (
-                <div className="m-1 flex flex-col gap-1">
-                  <input aria-label="link url" placeholder="https://…" className="rounded border px-1 text-xs"
-                    value={(c.options.url as string) ?? ""} onChange={(e) => updateCardOptions(c.id, { url: e.target.value })} />
-                  <input aria-label="link label" placeholder="Label (optional)" className="rounded border px-1 text-xs"
-                    value={(c.options.label as string) ?? ""} onChange={(e) => updateCardOptions(c.id, { label: e.target.value })} />
-                </div>
-              )}
-              {(!editing || c.card_type === "chart") && (
+              <div className={`relative h-full overflow-hidden ${c.card_type === "heading" ? "" : "rounded-lg border bg-card shadow-sm"} ${editing && editPanel?.kind === "card" && editPanel.cardId === c.id ? "ring-2 ring-primary" : ""}`}>
+                {editing && <div className="dash-draghandle absolute inset-x-0 top-0 z-10 h-6 cursor-move" title="Drag to move" />}
                 <DashboardCardView ws={ws} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values}
                   blocked={!editing && requiredUnset}
                   onValueClick={editing ? undefined : (ctx, x, y) => onCardValueClick(c, ctx, x, y)} />
-              )}
+              </div>
             </div>
             );
           })}
         </Grid>
       )}
+        </div>
+        {editing && (
+          <EditSidebar
+            panel={editPanel}
+            charts={charts ?? []}
+            parameters={parameters}
+            tabs={tabs}
+            cardForPanel={editPanel?.kind === "card" ? (cards as DraftCard[]).find((c) => c.id === editPanel.cardId) : undefined}
+            chartForCard={editPanel?.kind === "card" ? chartById.get((cards as DraftCard[]).find((c) => c.id === editPanel.cardId)?.chart_id ?? "") : undefined}
+            paramForPanel={editPanel?.kind === "filter" ? parameters.find((p) => p.id === editPanel.paramId) : undefined}
+            onAddChart={(c) => addCard(c)}
+            onAddVirtual={(t) => addVirtualCard(t, t === "link" ? { url: "", label: "" } : { text: "" })}
+            onUpdateCardOptions={(patch) => { if (editPanel?.kind === "card") updateCardOptions(editPanel.cardId, patch); }}
+            onMoveCardToTab={(tabKey) => { if (editPanel?.kind === "card") setDraftCards(moveCardToTab((cards as DraftCard[]), editPanel.cardId, tabKey)); }}
+            onChangeParam={(next) => setDraftParameters(parameters.map((x) => x.id === next.id ? { ...next, slug: x.slug } : x))}
+            onDeleteParam={() => { if (editPanel?.kind === "filter") { const id = editPanel.paramId; setDraftParameters(parameters.filter((x) => x.id !== id)); setEditPanel({ kind: "add" }); } }}
+            onClose={() => setEditPanel({ kind: "add" })}
+          />
+        )}
+      </div>
       <Dialog open={deletingTabKey !== null} onOpenChange={(o) => { if (!o) { setDeletingTabKey(null); setReassignTo(null); } }}>
         <DialogContent>
           <DialogHeader><DialogTitle>Delete tab</DialogTitle></DialogHeader>
