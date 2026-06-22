@@ -23,8 +23,9 @@ export function DrillRecordsDialog({
   const finished = status.data?.status === "finished";
   const results = useResults(ws, queryId, 0, finished);
 
+  const colKey = columns.map((c) => c.name).join(",");
   useEffect(() => {
-    if (!open || !datasetId) return;
+    if (!open || !datasetId || columns.length === 0) return;
     setQueryId(null);
     setError(null);
     const spec: QuerySpec = {
@@ -40,7 +41,7 @@ export function DrillRecordsDialog({
       } catch (e) { if (!aborted) setError(String(e)); }
     })();
     return () => { aborted = true; };
-  }, [open]);
+  }, [open, datasetId, colKey]);
 
   const summary = filters.length
     ? filters.map((f) => ("value" in f ? `${f.col} = ${String(f.value)}` : `${f.col} ${f.op}`)).join(", ")
