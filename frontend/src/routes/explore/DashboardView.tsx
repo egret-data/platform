@@ -3,7 +3,7 @@ import { useParams } from "react-router-dom";
 import RGL, { WidthProvider, type Layout } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
-import { useDashboard, useDashboardMutations, type CardInput, type DashboardCard as Card, type DashboardParameter } from "@/api/dashboards";
+import { useDashboard, useDashboardMutations, type DashboardCard as Card, type DashboardParameter } from "@/api/dashboards";
 import { useCharts, type Chart, type ChartFilter } from "@/api/charts";
 import { useDataset } from "@/api/datasets";
 import { resolveClick, type ClickBehavior } from "@/components/chart/dashboard/click-behavior";
@@ -20,6 +20,9 @@ import { DashboardFilterBar } from "@/components/chart/dashboard/DashboardFilter
 import { ParameterEditor } from "@/components/chart/dashboard/ParameterEditor";
 import { slugify, applyParamsToChart } from "@/components/chart/dashboard/params";
 import { useColumnValues } from "@/api/useColumnValues";
+import { useDashboardTabs } from "@/api/useDashboardTabs";
+import { DashboardTabBar } from "@/components/chart/dashboard/DashboardTabBar";
+import { startTabsDraft, serializeLayout, addTab, renameTab, reorderTab, deleteTab, duplicateTab, type DraftTab, type DraftCard } from "@/components/chart/dashboard/tabs";
 import { toast } from "sonner";
 
 const Grid = WidthProvider(RGL);
@@ -39,8 +42,11 @@ export default function DashboardView() {
   const { data: charts } = useCharts(ws);
   const { update } = useDashboardMutations(ws);
   const [editing, setEditing] = useState(false);
-  const [draftCards, setDraftCards] = useState<Card[] | null>(null);
+  const [draftCards, setDraftCards] = useState<DraftCard[] | null>(null);
   const [draftParameters, setDraftParameters] = useState<DashboardParameter[] | null>(null);
+  const [draftTabs, setDraftTabs] = useState<DraftTab[] | null>(null);
+  const serverTabCount = dash?.tabs?.length ?? 0;
+  const { activeTabPos, setActiveTabPos } = useDashboardTabs(editing ? (draftTabs?.length ?? 0) : serverTabCount);
   const cardSeqRef = useRef(0);
   const chartById = useMemo(() => new Map((charts ?? []).map((c) => [c.id, c])), [charts]);
   const view = useDashboardViewControls();
@@ -63,13 +69,26 @@ export default function DashboardView() {
     setEditing(false);
     setDraftCards(null);
     setDraftParameters(null);
+    setDraftTabs(null);
   }, [id]);
 
   if (isLoading || !dash) return <div className="p-4 text-muted-foreground">Loading…</div>;
 
   const dashboard = dash;
   const cards = editing && draftCards ? draftCards : dashboard.cards;
+  // Fallback DraftCard[] for the draft setters (each runs only while editing, so draftCards is
+  // non-null and this is effectively dead — but it keeps the setters typed as DraftCard[]).
+  const cardsAsDraft = (): DraftCard[] => dashboard.cards.map((c) => ({ ...c, tabKey: c.tab_id }));
   const parameters = editing && draftParameters ? draftParameters : (dashboard.parameters ?? []);
+  const tabs: DraftTab[] = editing
+    ? (draftTabs ?? [])
+    : (dashboard.tabs ?? []).map((t, i) => ({ key: t.id, name: t.name, position: i }));
+  const activeTab = tabs[activeTabPos] ?? null;
+  const visibleCards = tabs.length === 0
+    ? cards
+    : cards.filter((c) =>
+        editing ? (c as DraftCard).tabKey === activeTab?.key : c.tab_id === activeTab?.key,
+      );
 
   function onCardValueClick(card: Card, ctx: DrillContext, x: number, y: number) {
     const cb = card.options.clickBehavior as ClickBehavior | undefined;
@@ -81,27 +100,30 @@ export default function DashboardView() {
   }
 
   function startEdit() {
-    setDraftCards(dashboard.cards.map((c) => ({ ...c })));
+    const { draftTabs: dt, draftCards: dc } = startTabsDraft(dashboard.tabs ?? [], dashboard.cards);
+    setDraftCards(dc);
     setDraftParameters((dashboard.parameters ?? []).map((p) => ({ ...p })));
+    setDraftTabs(dt);
     setEditing(true);
   }
-  function cancelEdit() { setEditing(false); setDraftCards(null); setDraftParameters(null); }
+  function cancelEdit() { setEditing(false); setDraftCards(null); setDraftParameters(null); setDraftTabs(null); }
 
   function addCard(chart: Chart) {
     const maxY = cards.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
-    const newCard: Card = {
+    const newCard: DraftCard = {
       id: `new-${chart.id}-${cardSeqRef.current++}`, chart_id: chart.id, card_type: "chart",
       grid_col: 0, grid_row: maxY, size_x: CARD_DEFAULT_SIZE.w, size_y: CARD_DEFAULT_SIZE.h, options: {}, tab_id: null,
+      tabKey: activeTab?.key ?? null,
     };
-    setDraftCards([...cards, newCard]);
+    setDraftCards([...(cards as DraftCard[]), newCard]);
   }
   function removeCard(cardId: string) {
-    setDraftCards(cards.filter((c) => c.id !== cardId));
+    setDraftCards((cards as DraftCard[]).filter((c) => c.id !== cardId));
   }
 
   function duplicateCard(cardId: string) {
     setDraftCards((prev) => {
-      const base = prev ?? dashboard.cards;
+      const base = prev ?? cardsAsDraft();
       const src = base.find((c) => c.id === cardId);
       if (!src) return base;
       const maxY = base.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
@@ -109,24 +131,25 @@ export default function DashboardView() {
     });
   }
   function replaceCard(cardId: string, chart: Chart) {
-    setDraftCards((prev) => (prev ?? dashboard.cards).map((c) => (c.id === cardId ? { ...c, chart_id: chart.id, options: {} } : c)));
+    setDraftCards((prev) => (prev ?? cardsAsDraft()).map((c) => (c.id === cardId ? { ...c, chart_id: chart.id, options: {} } : c)));
     setReplacingId(null);
   }
 
   function addVirtualCard(card_type: "text" | "heading" | "link", options: Record<string, unknown>) {
     setDraftCards((prev) => {
-      const base = prev ?? dashboard.cards;
+      const base = prev ?? cardsAsDraft();
       const maxY = base.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
-      const newCard: Card = {
+      const newCard: DraftCard = {
         id: `new-${card_type}-${cardSeqRef.current++}`, chart_id: null, card_type,
         grid_col: 0, grid_row: maxY, size_x: CARD_DEFAULT_SIZE.w, size_y: card_type === "heading" ? 1 : CARD_DEFAULT_SIZE.h, options, tab_id: null,
+        tabKey: activeTab?.key ?? null,
       };
       return [...base, newCard];
     });
   }
   function updateCardOptions(cardId: string, patch: Record<string, unknown>) {
     setDraftCards((prev) => {
-      const base = prev ?? dashboard.cards;
+      const base = prev ?? cardsAsDraft();
       return base.map((c) => (c.id === cardId ? { ...c, options: { ...c.options, ...patch } } : c));
     });
   }
@@ -134,7 +157,7 @@ export default function DashboardView() {
   // The cards are the single source of truth for positions: the RGL layout is derived
   // from them, and drag/resize writes positions straight back into the draft. This keeps
   // every grid item sized from its card (a newly added card is never auto-placed at 1x1).
-  const layout: Layout[] = cards.map((c) => ({
+  const layout: Layout[] = visibleCards.map((c) => ({
     i: c.id, x: c.grid_col, y: c.grid_row, w: c.size_x, h: c.size_y,
     // clamp the minimums to the card's own size so a short card (e.g. a 1-row
     // heading) never has minH/minW larger than its height/width (RGL warns).
@@ -144,7 +167,7 @@ export default function DashboardView() {
   function onLayoutChange(next: Layout[]) {
     if (!editing) return;
     setDraftCards((prev) => {
-      const base = prev ?? dashboard.cards;
+      const base = prev ?? cardsAsDraft();
       let changed = false;
       const merged = base.map((c) => {
         const l = next.find((x) => x.i === c.id);
@@ -157,14 +180,10 @@ export default function DashboardView() {
   }
 
   async function onSave() {
-    const payload: CardInput[] = cards.map((c) => ({
-      chart_id: c.chart_id, card_type: c.card_type,
-      grid_col: c.grid_col, grid_row: c.grid_row, size_x: c.size_x, size_y: c.size_y, options: c.options,
-      tab_index: null,
-    }));
+    const { tabs: tabPayload, cards: cardPayload } = serializeLayout(draftTabs ?? [], (cards as DraftCard[]));
     try {
-      await update.mutateAsync({ id: dashboard.id, name: dashboard.name, description: dashboard.description, parameters, tabs: [], cards: payload });
-      setEditing(false); setDraftCards(null);
+      await update.mutateAsync({ id: dashboard.id, name: dashboard.name, description: dashboard.description, parameters, tabs: tabPayload, cards: cardPayload });
+      setEditing(false); setDraftCards(null); setDraftTabs(null);
       toast.success("Saved");
     } catch (e) { toast.error(String(e)); }
   }
@@ -256,6 +275,17 @@ export default function DashboardView() {
           if (!ch || !column) return null;
           return <ParamOptions key={p.id} ws={ws} datasetId={ch.dataset_id} column={column} slug={p.slug} onLoaded={onOptionsLoaded} />;
         })}
+      {(editing || tabs.length >= 2) && (
+        <DashboardTabBar
+          tabs={tabs} activeTabPos={activeTabPos} editing={editing}
+          onSelect={setActiveTabPos}
+          onAdd={() => { const r = addTab(draftTabs ?? [], (cards as DraftCard[])); setDraftTabs(r.draftTabs); setDraftCards(r.draftCards); setActiveTabPos(r.activeTabPos); }}
+          onRename={(key, name) => setDraftTabs(renameTab(draftTabs ?? [], key, name))}
+          onReorder={(from, to) => setDraftTabs(reorderTab(draftTabs ?? [], from, to))}
+          onDelete={(key) => { const r = deleteTab(draftTabs ?? [], (cards as DraftCard[]), key, { mode: "delete" }); setDraftTabs(r.draftTabs); setDraftCards(r.draftCards); setActiveTabPos(Math.min(activeTabPos, r.draftTabs.length - 1)); }}
+          onDuplicate={(key) => { const r = duplicateTab(draftTabs ?? [], (cards as DraftCard[]), key); setDraftTabs(r.draftTabs); setDraftCards(r.draftCards); setActiveTabPos(r.activeTabPos); }}
+        />
+      )}
       <DashboardFilterBar parameters={parameters} values={paramsState.values} onChange={paramsState.setValue} optionsBySlug={optionsBySlug} />
       {cards.length === 0 ? (
         <p className="text-muted-foreground">No cards yet. Click Edit to add charts.</p>
@@ -269,7 +299,7 @@ export default function DashboardView() {
           layout={layout}
           onLayoutChange={onLayoutChange}
         >
-          {cards.map((c) => {
+          {visibleCards.map((c) => {
             const baseChart = chartById.get(c.chart_id ?? "");
             const mappings = (c.options.paramMappings as Record<string, string>) ?? {};
             const injected = baseChart ? applyParamsToChart(baseChart, parameters, paramsState.values, mappings) : undefined;
