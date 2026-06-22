@@ -4,7 +4,12 @@ import RGL, { WidthProvider, type Layout } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 import { useDashboard, useDashboardMutations, type CardInput, type DashboardCard as Card, type DashboardParameter } from "@/api/dashboards";
-import { useCharts, type Chart } from "@/api/charts";
+import { useCharts, type Chart, type ChartFilter } from "@/api/charts";
+import { useDataset } from "@/api/datasets";
+import { resolveClick, type ClickBehavior } from "@/components/chart/dashboard/click-behavior";
+import { DrillMenu } from "@/components/chart/DrillMenu";
+import { DrillRecordsDialog } from "@/components/chart/DrillRecordsDialog";
+import { type DrillContext } from "@/components/chart/drill";
 import { useDashboardViewControls } from "@/api/useDashboardViewControls";
 import { useDashboardParams } from "@/api/useDashboardParams";
 import { Button } from "@/components/ui/button";
@@ -48,6 +53,11 @@ export default function DashboardView() {
   const onOptionsLoaded = useCallback((slug: string, vals: string[]) => {
     setOptionsBySlug((m) => (m[slug]?.join("") === vals.join("") ? m : { ...m, [slug]: vals }));
   }, []);
+  // Drill state — must be declared above the early return (Rules of Hooks).
+  const [drillMenu, setDrillMenu] = useState<{ ctx: DrillContext; x: number; y: number; datasetId: string | null } | null>(null);
+  const [records, setRecords] = useState<{ filters: ChartFilter[]; datasetId: string | null } | null>(null);
+  // Load the drilled dataset's columns so the records dialog can SELECT them (no-op while records is null).
+  const recordsDataset = useDataset(ws, records?.datasetId ?? null);
 
   useEffect(() => {
     setEditing(false);
@@ -60,6 +70,15 @@ export default function DashboardView() {
   const dashboard = dash;
   const cards = editing && draftCards ? draftCards : dashboard.cards;
   const parameters = editing && draftParameters ? draftParameters : (dashboard.parameters ?? []);
+
+  function onCardValueClick(card: Card, ctx: DrillContext, x: number, y: number) {
+    const cb = card.options.clickBehavior as ClickBehavior | undefined;
+    const r = resolveClick(cb, ctx, parameters, paramsState.values);
+    const datasetId = chartById.get(card.chart_id ?? "")?.dataset_id ?? null;
+    if (r.kind === "url") { if (r.href) window.open(r.href, "_blank", "noreferrer"); return; }
+    if (r.kind === "crossfilter") { for (const s of r.sets) paramsState.setValue(s.slug, s.value); return; }
+    setDrillMenu({ ctx, x, y, datasetId });
+  }
 
   function startEdit() {
     setDraftCards(dashboard.cards.map((c) => ({ ...c })));
@@ -291,6 +310,51 @@ export default function DashboardView() {
                   </div>
                 );
               })()}
+              {editing && c.card_type === "chart" && (() => {
+                const cb = (c.options.clickBehavior as ClickBehavior | undefined) ?? { type: "menu" };
+                const ch = chartById.get(c.chart_id ?? "");
+                const cols = ch ? [...ch.params.spec.dimensions, ...ch.params.spec.columns] : [];
+                return (
+                  <div className="m-1 flex flex-col gap-0.5 border-t pt-1 text-[10px] text-muted-foreground">
+                    <label className="flex items-center justify-between gap-1">
+                      <span>On click</span>
+                      <select aria-label="on click" className="h-6 rounded border bg-background text-[10px]"
+                        value={cb.type}
+                        onChange={(e) => {
+                          const t = e.target.value as ClickBehavior["type"];
+                          updateCardOptions(c.id, { clickBehavior:
+                            t === "url" ? { type: "url", template: "" }
+                            : t === "crossfilter" ? { type: "crossfilter", parameterMapping: {} }
+                            : { type: "menu" } });
+                        }}>
+                        <option value="menu">Menu</option>
+                        <option value="crossfilter">Cross-filter</option>
+                        <option value="url">Custom URL</option>
+                      </select>
+                    </label>
+                    {cb.type === "url" && (
+                      <input aria-label="url template" placeholder="https://…/{{column}}?p={{slug}}"
+                        className="rounded border bg-background px-1 text-[10px]"
+                        value={cb.template}
+                        onChange={(e) => updateCardOptions(c.id, { clickBehavior: { type: "url", template: e.target.value } })} />
+                    )}
+                    {cb.type === "crossfilter" && parameters.map((p) => {
+                      const mapping = (cb.parameterMapping ?? {});
+                      return (
+                        <label key={p.id} className="flex items-center justify-between gap-1">
+                          <span>{p.name} ←</span>
+                          <select aria-label={`crossfilter ${p.name}`} className="h-6 rounded border bg-background text-[10px]"
+                            value={mapping[p.id] ?? ""}
+                            onChange={(e) => updateCardOptions(c.id, { clickBehavior: { type: "crossfilter", parameterMapping: { ...mapping, [p.id]: e.target.value } } })}>
+                            <option value="">none</option>
+                            {cols.map((col) => <option key={col} value={col}>{col}</option>)}
+                          </select>
+                        </label>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
               {editing && c.card_type === "text" && (
                 <textarea aria-label="text body" className="m-1 h-[calc(100%-1rem)] w-[calc(100%-0.5rem)] resize-none rounded border p-1 text-xs"
                   value={(c.options.text as string) ?? ""} onChange={(e) => updateCardOptions(c.id, { text: e.target.value })} />
@@ -308,7 +372,8 @@ export default function DashboardView() {
                 </div>
               )}
               {(!editing || c.card_type === "chart") && (
-                <DashboardCardView ws={ws} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values} />
+                <DashboardCardView ws={ws} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values}
+                  onValueClick={editing ? undefined : (ctx, x, y) => onCardValueClick(c, ctx, x, y)} />
               )}
             </div>
             );
@@ -327,6 +392,24 @@ export default function DashboardView() {
           </div>
         </DialogContent>
       </Dialog>
+      {drillMenu && (
+        <DrillMenu ctx={drillMenu.ctx} x={drillMenu.x} y={drillMenu.y}
+          onFilterBy={(f) => {
+            if (!("value" in f)) return;
+            const target = parameters.find((p) =>
+              dashboard.cards.some((c) => ((c.options.paramMappings as Record<string, string>) ?? {})[p.id] === f.col));
+            if (target) paramsState.setValue(target.slug, f.value);
+          }}
+          onSeeRecords={(fs) => setRecords({ filters: fs, datasetId: drillMenu.datasetId })}
+          onClose={() => setDrillMenu(null)} />
+      )}
+      <DrillRecordsDialog
+        open={records !== null}
+        onOpenChange={(o) => { if (!o) setRecords(null); }}
+        ws={ws} datasetId={records?.datasetId ?? null}
+        columns={(recordsDataset.data?.columns ?? []).map((c) => ({ name: c.column_name, type: c.data_type ?? "varchar" }))}
+        filters={records?.filters ?? []}
+      />
     </div>
   );
 }

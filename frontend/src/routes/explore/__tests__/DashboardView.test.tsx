@@ -204,3 +204,19 @@ describe("DashboardView (Rules of Hooks)", () => {
     expect(screen.getByText("Ops")).toBeInTheDocument();
   });
 });
+
+describe("DashboardView (Phase D1 — on-click config)", () => {
+  it("sets a card's click behaviour to a custom URL in edit mode", () => {
+    dashState.current = {
+      data: { ...(dashState.loaded.data as object),
+        cards: [{ id: "k1", chart_id: "c1", card_type: "chart", grid_col: 0, grid_row: 0, size_x: 6, size_y: 4, options: {} }] },
+      isLoading: false,
+    };
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    fireEvent.change(screen.getByLabelText(/on click/i), { target: { value: "url" } });
+    const tpl = screen.getByLabelText(/url template/i);
+    fireEvent.change(tpl, { target: { value: "https://x.com/{{region}}" } });
+    expect((tpl as HTMLInputElement).value).toBe("https://x.com/{{region}}");
+  });
+});

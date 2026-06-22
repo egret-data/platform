@@ -1,11 +1,13 @@
 // src/components/chart/__tests__/ChartRenderer.test.tsx
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { ChartRenderer } from "../ChartRenderer";
 import type { ChartParams } from "@/api/charts";
 
 vi.mock("@/components/chart/echarts/EChartsRenderer", () => ({
-  EChartsRenderer: () => <div data-testid="echarts" />,
+  EChartsRenderer: ({ onPointClick }: { onPointClick?: (p: { name?: string; seriesName?: string; value?: unknown; x: number; y: number }) => void }) => (
+    <button data-testid="echarts" onClick={() => onPointClick?.({ name: "EU", seriesName: "rev", value: 10, x: 3, y: 4 })} />
+  ),
 }));
 
 const params = (p: Partial<ChartParams> = {}): ChartParams => ({
@@ -119,5 +121,38 @@ describe("ChartRenderer", () => {
     );
     // PivotTable renders rowDim names as column headers
     expect(screen.getByText("region")).toBeInTheDocument();
+  });
+
+  it("calls onValueClick with the xAxis dim when a cartesian point is clicked", () => {
+    const onValueClick = vi.fn();
+    render(
+      <ChartRenderer
+        vizType="bar"
+        params={params({ cartesian: { xAxis: "region", yMetrics: ["rev"] } })}
+        columns={[{ name: "region", type: "varchar" }, { name: "rev", type: "double" }]}
+        rows={[["EU", 10]]}
+        onValueClick={onValueClick}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("echarts"));
+    expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "region", value: "EU" }] }, 3, 4);
+  });
+
+  it("wires onCellDrill on a table card when onValueClick is set", () => {
+    const onValueClick = vi.fn();
+    render(
+      <ChartRenderer
+        vizType="table"
+        params={params({ spec: { metrics: ["rev"], dimensions: ["region"], columns: [], filters: [], orderby: [], row_limit: 1000, rollup_groups: [] } })}
+        columns={[{ name: "region", type: "varchar" }, { name: "rev", type: "double" }]}
+        rows={[["EU", 10]]}
+        onValueClick={onValueClick}
+      />,
+    );
+    // a dimension cell is now clickable (cursor-pointer); clicking it fires onValueClick
+    const cell = screen.getByText("EU").closest("td")!;
+    expect(cell.className).toContain("cursor-pointer");
+    fireEvent.click(cell);
+    expect(onValueClick).toHaveBeenCalled();
   });
 });
