@@ -304,6 +304,7 @@ export default function DashboardView() {
           cols={GRID_COLS}
           rowHeight={ROW_PX}
           margin={[12, 12]}
+          draggableCancel=".dash-nodrag"
           isDraggable={editing}
           isResizable={editing}
           layout={layout}

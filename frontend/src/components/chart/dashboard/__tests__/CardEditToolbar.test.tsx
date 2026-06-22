@@ -13,4 +13,9 @@ describe("CardEditToolbar", () => {
     rerender(<CardEditToolbar cardType="text" {...fns} />);
     expect(screen.queryByRole("button", { name: "replace card" })).toBeNull();
   });
+  it("carries the dash-nodrag class so react-grid-layout doesn't hijack toolbar clicks", () => {
+    const fns = { onSettings: vi.fn(), onDuplicate: vi.fn(), onReplace: vi.fn(), onRemove: vi.fn() };
+    const { container } = render(<CardEditToolbar cardType="chart" {...fns} />);
+    expect(container.querySelector(".dash-nodrag")).toBeTruthy();
+  });
 });
