@@ -46,3 +46,36 @@ export function serializeLayout(
     })),
   };
 }
+
+/** Add a tab. On a tabless dashboard that has cards, the first add creates Tab 1 (holding the
+ *  existing cards) + an empty Tab 2 and activates Tab 2 (Metabase's first-tab behaviour);
+ *  every later add appends one empty tab and activates it. Returns the new active position. */
+export function addTab(
+  draftTabs: DraftTab[],
+  draftCards: DraftCard[],
+): { draftTabs: DraftTab[]; draftCards: DraftCard[]; activeTabPos: number } {
+  if (draftTabs.length === 0) {
+    const tab1 = { key: newTabKey(), name: "Tab 1", position: 0 };
+    const tab2 = { key: newTabKey(), name: "Tab 2", position: 1 };
+    return {
+      draftTabs: [tab1, tab2],
+      draftCards: draftCards.map((c) => ({ ...c, tabKey: tab1.key })),
+      activeTabPos: 1,
+    };
+  }
+  const next = [...draftTabs, { key: newTabKey(), name: `Tab ${draftTabs.length + 1}`, position: draftTabs.length }];
+  return { draftTabs: next, draftCards, activeTabPos: next.length - 1 };
+}
+
+/** Rename the tab with `key`. */
+export function renameTab(draftTabs: DraftTab[], key: string, name: string): DraftTab[] {
+  return draftTabs.map((t) => (t.key === key ? { ...t, name } : t));
+}
+
+/** Move the tab at `fromPos` to `toPos` (positions renumbered 0..n-1). */
+export function reorderTab(draftTabs: DraftTab[], fromPos: number, toPos: number): DraftTab[] {
+  const ordered = [...draftTabs].sort((a, b) => a.position - b.position);
+  const [moved] = ordered.splice(fromPos, 1);
+  ordered.splice(toPos, 0, moved);
+  return ordered.map((t, i) => ({ ...t, position: i }));
+}

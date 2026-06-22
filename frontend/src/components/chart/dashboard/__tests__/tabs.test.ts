@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { startTabsDraft, serializeLayout, type DraftCard, type DraftTab } from "../tabs";
+import { startTabsDraft, serializeLayout, addTab, renameTab, reorderTab, type DraftCard, type DraftTab } from "../tabs";
 import type { DashboardCard, DashboardTab } from "@/api/dashboards";
 
 const card = (id: string, tab_id: string | null): DashboardCard => ({
@@ -40,5 +40,40 @@ describe("serializeLayout", () => {
     const out = serializeLayout([], draftCards);
     expect(out.tabs).toEqual([]);
     expect(out.cards[0].tab_index).toBeNull();
+  });
+});
+
+describe("addTab", () => {
+  it("first add on a tabless dashboard splits existing cards onto Tab 1 + empty Tab 2", () => {
+    const draftCards: DraftCard[] = [{ ...card("k1", null), tabKey: null }];
+    const r = addTab([], draftCards);
+    expect(r.draftTabs.map((t) => t.name)).toEqual(["Tab 1", "Tab 2"]);
+    const k1Tab = r.draftTabs[0].key;
+    expect(r.draftCards.find((c) => c.id === "k1")!.tabKey).toBe(k1Tab);
+    expect(r.activeTabPos).toBe(1);
+  });
+  it("subsequent add appends one empty tab and activates it", () => {
+    const start = addTab([], [{ ...card("k1", null), tabKey: null }]);
+    const r = addTab(start.draftTabs, start.draftCards);
+    expect(r.draftTabs.map((t) => t.name)).toEqual(["Tab 1", "Tab 2", "Tab 3"]);
+    expect(r.activeTabPos).toBe(2);
+  });
+});
+
+describe("renameTab", () => {
+  it("renames by key", () => {
+    const start = addTab([], [{ ...card("k1", null), tabKey: null }]);
+    const out = renameTab(start.draftTabs, start.draftTabs[0].key, "Sales");
+    expect(out[0].name).toBe("Sales");
+    expect(out[1].name).toBe("Tab 2");
+  });
+});
+
+describe("reorderTab", () => {
+  it("moves a tab from one position to another and renumbers", () => {
+    const start = addTab(addTab([], [{ ...card("k1", null), tabKey: null }]).draftTabs, []);
+    const out = reorderTab(start.draftTabs, 0, 2);
+    expect(out.map((t) => t.name)).toEqual(["Tab 2", "Tab 3", "Tab 1"]);
+    expect(out.map((t) => t.position)).toEqual([0, 1, 2]);
   });
 });
