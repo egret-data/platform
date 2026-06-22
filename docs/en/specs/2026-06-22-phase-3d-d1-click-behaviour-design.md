@@ -54,10 +54,15 @@ Per-card, in the existing `dashboard_cards.options` jsonb:
 ```ts
 type ClickBehavior =
   | { type: "menu" }                                    // default (or options.clickBehavior absent)
-  | { type: "crossfilter"; parameterId: string }        // click value → set this dashboard parameter
-  | { type: "url"; template: string };                  // click → open URL ({{column}} tokens)
+  | { type: "crossfilter"; parameterMapping: Record<string, string> }  // { [parameterId]: clickedColumn } — sets each mapped param
+  | { type: "url"; template: string };                  // click → open URL ({{column}} + {{slug}} tokens)
 // options.clickBehavior?: ClickBehavior
 ```
+
+**Cross-filter is multi-parameter** (Metabase parity): `parameterMapping` maps each
+target `parameterId` to the **clicked column** whose value feeds it, so one click can set
+several dashboard parameters at once, each from its own column. (This is independent of
+Phase C's `paramMappings`, which controls how a parameter *filters* a card.)
 
 ## Value-click plumbing (the one piece of new infrastructure)
 
@@ -82,15 +87,17 @@ ChartExplore and unmapped cards unaffected).
 
 ## Click resolution (pure helper)
 
-`resolveClick(clickBehavior, ctx, card, parameters)` decides what a click does
+`resolveClick(clickBehavior, ctx, parameters, paramValues)` decides what a click does
 (`components/chart/dashboard/click-behavior.ts`, unit-tested):
 
-- `url` → substitute `{{col}}`/`{{value}}` in `template` from `ctx.dims` (first dim is
-  the primary), guard to `^https?://` (reuse the Phase-B safe-URL pattern); returns
-  `{ kind: "url", href }`.
-- `crossfilter` → find the clicked dim whose column equals the parameter's mapping on this
-  card (`card.options.paramMappings[parameterId]`), else the primary dim; returns
-  `{ kind: "crossfilter", parameterId, value }`.
+- `url` → substitute `{{column}}`/`{{value}}` from `ctx.dims`, then `{{slug}}` from the
+  current dashboard parameter values (reuse Phase C's `interpolateParams(text, parameters,
+  paramValues)`), guard the result to `^https?://` (reuse the Phase-B safe-URL pattern);
+  returns `{ kind: "url", href }`.
+- `crossfilter` → for each `(parameterId → clickedColumn)` in `parameterMapping`, find the
+  clicked dim whose `col === clickedColumn`; returns `{ kind: "crossfilter", sets: { slug,
+  value }[] }` (one entry per resolvable parameter; parameters whose column wasn't clicked
+  are skipped).
 - `menu` / unset → returns `{ kind: "menu", ctx }` (open the drill menu).
 
 ## Frontend wiring
@@ -100,15 +107,16 @@ ChartExplore and unmapped cards unaffected).
 - **`DashboardView`** provides the per-card `onValueClick`: it reads the card's
   `options.clickBehavior`, calls `resolveClick`, and:
   - `url` → `window.open(href, "_blank", "noreferrer")`.
-  - `crossfilter` → `paramsState.setValue(param.slug, value)` (Phase C) → mapped cards
-    refetch.
+  - `crossfilter` → for each `{ slug, value }` in `sets`, `paramsState.setValue(slug,
+    value)` (Phase C) → mapped cards refetch.
   - `menu` → opens the existing **`DrillMenu`** at the cursor. The menu's "Filter dashboard
     by {col} is {val}" entries cross-filter any dashboard parameter mapped (Phase C) to that
     column; "See these records" opens **`DrillRecordsDialog`** for the card's dataset +
     `drillFilters(ctx)`.
   - Drill-menu + records-dialog state lives in `DashboardView` (mirrors ChartExplore).
 - **Edit mode** — an **"On click"** control per chart card: Menu (default) / Cross-filter
-  (→ a parameter `<select>`) / Custom URL (→ a `template` input with a `{{column}}` hint),
+  (→ a small list of `parameter → clicked-column` rows the user adds, building
+  `parameterMapping`) / Custom URL (→ a `template` input hinting `{{column}}` and `{{slug}}`),
   writing `options.clickBehavior` via the existing `updateCardOptions`.
 
 ## Data flow
@@ -118,8 +126,8 @@ value click on a card
   → ChartRenderer (onValueClick) builds DrillContext
   → DashboardView.onValueClick(card, ctx)
        → resolveClick(card.options.clickBehavior, ctx, card, parameters)
-            ├ url        → window.open(interpolated href)
-            ├ crossfilter→ paramsState.setValue(slug, value)  → mapped cards refetch (Phase C)
+            ├ url        → window.open(interpolated href: {{column}} + {{slug}})
+            ├ crossfilter→ setValue(slug,value) for each mapped param → mapped cards refetch (Phase C)
             └ menu       → <DrillMenu> → Filter (cross-filter mapped param) | See records (<DrillRecordsDialog>)
 ```
 
@@ -134,8 +142,9 @@ value click on a card
 
 ## Testing
 
-- **Vitest:** `resolveClick` (url interpolation + safe-URL guard; crossfilter value
-  resolution via paramMappings vs primary dim; menu fallthrough); `ChartRenderer` calls
+- **Vitest:** `resolveClick` (url interpolation of `{{column}}` + `{{slug}}` + safe-URL
+  guard; multi-param crossfilter resolving one `{slug,value}` per mapped clicked column;
+  menu fallthrough); `ChartRenderer` calls
   `onValueClick` with the right `DrillContext` for a table cell and for an ECharts point
   (mock the echarts click); `EChartsRenderer` registers the click handler; the edit-mode
   "On click" config writes `options.clickBehavior`; DashboardView cross-filter sets the

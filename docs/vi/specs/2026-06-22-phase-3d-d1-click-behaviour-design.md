@@ -48,10 +48,15 @@ Per-card, trong `dashboard_cards.options` jsonb:
 ```ts
 type ClickBehavior =
   | { type: "menu" }                                    // mặc định (hoặc absent)
-  | { type: "crossfilter"; parameterId: string }        // bấm giá trị → đặt parameter này
-  | { type: "url"; template: string };                  // bấm → mở URL ({{column}} token)
+  | { type: "crossfilter"; parameterMapping: Record<string, string> }  // { [parameterId]: cột bấm } — đặt từng param
+  | { type: "url"; template: string };                  // bấm → mở URL ({{column}} + {{slug}})
 // options.clickBehavior?: ClickBehavior
 ```
+
+**Cross-filter là multi-param** (Metabase parity): `parameterMapping` map mỗi
+`parameterId` đích → **cột được bấm** cấp giá trị cho nó, nên một click đặt được nhiều
+parameter cùng lúc, mỗi cái từ cột riêng. (Độc lập với `paramMappings` của Phase C — thứ
+điều khiển param *lọc* card thế nào.)
 
 ## Plumbing value-click (mảnh hạ tầng mới duy nhất)
 
@@ -73,13 +78,14 @@ map không đổi).
 
 ## Resolve click (helper thuần)
 
-`resolveClick(clickBehavior, ctx, card, parameters)` quyết định click làm gì
+`resolveClick(clickBehavior, ctx, parameters, paramValues)` quyết định click làm gì
 (`components/chart/dashboard/click-behavior.ts`, unit-test):
-- `url` → nội suy `{{col}}`/`{{value}}` trong `template` từ `ctx.dims` (dim đầu là primary),
-  guard `^https?://` (dùng lại pattern safe-URL của Phase B); trả `{ kind:"url", href }`.
-- `crossfilter` → tìm dim bấm có cột = mapping của param trên card này
-  (`card.options.paramMappings[parameterId]`), nếu không thì primary dim; trả
-  `{ kind:"crossfilter", parameterId, value }`.
+- `url` → nội suy `{{column}}`/`{{value}}` từ `ctx.dims`, rồi `{{slug}}` từ giá trị param
+  dashboard hiện tại (dùng lại `interpolateParams` của Phase C), guard `^https?://` (pattern
+  safe-URL Phase B); trả `{ kind:"url", href }`.
+- `crossfilter` → với mỗi `(parameterId → cột bấm)` trong `parameterMapping`, tìm dim bấm có
+  `col === cột`; trả `{ kind:"crossfilter", sets: { slug, value }[] }` (mỗi param resolve được
+  một entry; param mà cột không được bấm thì bỏ qua).
 - `menu` / unset → `{ kind:"menu", ctx }` (mở drill menu).
 
 ## Đấu nối frontend
@@ -88,14 +94,16 @@ map không đổi).
 - **`DashboardView`** cấp `onValueClick` per-card: đọc `options.clickBehavior`, gọi
   `resolveClick`, rồi:
   - `url` → `window.open(href, "_blank", "noreferrer")`.
-  - `crossfilter` → `paramsState.setValue(param.slug, value)` (Phase C) → card map refetch.
+  - `crossfilter` → với mỗi `{ slug, value }` trong `sets`, `paramsState.setValue(slug,
+    value)` (Phase C) → card map refetch.
   - `menu` → mở **`DrillMenu`** tại con trỏ. Mục "Filter dashboard by {col} is {val}"
     cross-filter parameter nào map (Phase C) tới cột đó; "See these records" mở
     **`DrillRecordsDialog`** cho dataset của card + `drillFilters(ctx)`.
   - State drill-menu + records-dialog ở `DashboardView` (giống ChartExplore).
 - **Edit mode** — control **"On click"** per chart card: Menu (mặc định) / Cross-filter
-  (→ `<select>` parameter) / Custom URL (→ input `template` kèm gợi ý `{{column}}`), ghi
-  `options.clickBehavior` qua `updateCardOptions`.
+  (→ danh sách dòng `parameter → cột bấm` user thêm, dựng `parameterMapping`) / Custom URL
+  (→ input `template` gợi ý `{{column}}` và `{{slug}}`), ghi `options.clickBehavior` qua
+  `updateCardOptions`.
 
 ## Luồng dữ liệu
 
@@ -104,8 +112,8 @@ bấm giá trị trên card
   → ChartRenderer (onValueClick) dựng DrillContext
   → DashboardView.onValueClick(card, ctx)
        → resolveClick(card.options.clickBehavior, ctx, card, parameters)
-            ├ url        → window.open(href nội suy)
-            ├ crossfilter→ paramsState.setValue(slug, value)  → card map refetch (Phase C)
+            ├ url        → window.open(href nội suy: {{column}} + {{slug}})
+            ├ crossfilter→ setValue(slug,value) cho từng param map → card map refetch (Phase C)
             └ menu       → <DrillMenu> → Filter (cross-filter param map) | See records (<DrillRecordsDialog>)
 ```
 
@@ -120,8 +128,9 @@ bấm giá trị trên card
 
 ## Kiểm thử
 
-- **Vitest:** `resolveClick` (nội suy url + guard safe-URL; resolve giá trị crossfilter qua
-  paramMappings vs primary dim; menu fallthrough); `ChartRenderer` gọi `onValueClick` đúng
+- **Vitest:** `resolveClick` (nội suy url `{{column}}` + `{{slug}}` + guard safe-URL;
+  crossfilter multi-param resolve mỗi cột bấm thành một `{slug,value}`; menu fallthrough);
+  `ChartRenderer` gọi `onValueClick` đúng
   `DrillContext` cho cell table và cho point ECharts (mock click echarts); `EChartsRenderer`
   đăng ký click handler; config "On click" ghi `options.clickBehavior`; cross-filter của
   DashboardView đặt giá trị param; drill menu + records dialog mở.
