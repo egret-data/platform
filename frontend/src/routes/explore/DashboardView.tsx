@@ -22,7 +22,7 @@ import { slugify, applyParamsToChart } from "@/components/chart/dashboard/params
 import { useColumnValues } from "@/api/useColumnValues";
 import { useDashboardTabs } from "@/api/useDashboardTabs";
 import { DashboardTabBar } from "@/components/chart/dashboard/DashboardTabBar";
-import { startTabsDraft, serializeLayout, addTab, renameTab, reorderTab, deleteTab, duplicateTab, type DraftTab, type DraftCard } from "@/components/chart/dashboard/tabs";
+import { startTabsDraft, serializeLayout, addTab, renameTab, reorderTab, deleteTab, duplicateTab, moveCardToTab, type DraftTab, type DraftCard } from "@/components/chart/dashboard/tabs";
 import { toast } from "sonner";
 
 const Grid = WidthProvider(RGL);
@@ -54,6 +54,8 @@ export default function DashboardView() {
   const paramSource = editing && draftParameters ? draftParameters : (dash?.parameters ?? []);
   const paramsState = useDashboardParams(paramSource);
   const [replacingId, setReplacingId] = useState<string | null>(null);
+  const [deletingTabKey, setDeletingTabKey] = useState<string | null>(null);
+  const [reassignTo, setReassignTo] = useState<string | null>(null);
   // category/id dropdown options, keyed by param slug; populated by <ParamOptions> children.
   const [optionsBySlug, setOptionsBySlug] = useState<Record<string, string[]>>({});
   const onOptionsLoaded = useCallback((slug: string, vals: string[]) => {
@@ -282,7 +284,18 @@ export default function DashboardView() {
           onAdd={() => { const r = addTab(draftTabs ?? [], (cards as DraftCard[])); setDraftTabs(r.draftTabs); setDraftCards(r.draftCards); setActiveTabPos(r.activeTabPos); }}
           onRename={(key, name) => setDraftTabs(renameTab(draftTabs ?? [], key, name))}
           onReorder={(from, to) => setDraftTabs(reorderTab(draftTabs ?? [], from, to))}
-          onDelete={(key) => { const r = deleteTab(draftTabs ?? [], (cards as DraftCard[]), key, { mode: "delete" }); setDraftTabs(r.draftTabs); setDraftCards(r.draftCards); setActiveTabPos(Math.min(activeTabPos, r.draftTabs.length - 1)); }}
+          onDelete={(key) => {
+            const hasCards = (cards as DraftCard[]).some((c) => c.tabKey === key);
+            if (!hasCards) {
+              const r = deleteTab(draftTabs ?? [], (cards as DraftCard[]), key, { mode: "delete" });
+              setDraftTabs(r.draftTabs); setDraftCards(r.draftCards);
+              setActiveTabPos(Math.min(activeTabPos, r.draftTabs.length - 1));
+            } else {
+              const firstOther = (draftTabs ?? []).find((t) => t.key !== key) ?? null;
+              setReassignTo(firstOther ? firstOther.key : null);
+              setDeletingTabKey(key);
+            }
+          }}
           onDuplicate={(key) => { const r = duplicateTab(draftTabs ?? [], (cards as DraftCard[]), key); setDraftTabs(r.draftTabs); setDraftCards(r.draftCards); setActiveTabPos(r.activeTabPos); }}
         />
       )}
@@ -316,6 +329,16 @@ export default function DashboardView() {
                   <button type="button" aria-label={`remove card ${chartById.get(c.chart_id ?? "")?.name ?? ""}`.trim() || "remove card"}
                     className="rounded bg-background/80 px-1 text-xs text-destructive" onClick={() => removeCard(c.id)}>✕</button>
                 </div>
+              )}
+              {editing && tabs.length >= 2 && (
+                <label className="m-1 flex items-center justify-between gap-1 border-t pt-1 text-[10px] text-muted-foreground">
+                  <span>Move to tab</span>
+                  <select aria-label={`move card ${c.id} to tab`} className="h-6 rounded border bg-background text-[10px]"
+                    value={(c as DraftCard).tabKey ?? ""}
+                    onChange={(e) => setDraftCards(moveCardToTab((cards as DraftCard[]), c.id, e.target.value))}>
+                    {tabs.map((t) => <option key={t.key} value={t.key}>{t.name}</option>)}
+                  </select>
+                </label>
               )}
               {editing && c.card_type === "chart" && (
                 <input aria-label="card title" placeholder="Title (blank = chart name)" className="m-1 w-[calc(100%-0.5rem)] rounded border px-1 text-xs"
@@ -411,6 +434,41 @@ export default function DashboardView() {
           })}
         </Grid>
       )}
+      <Dialog open={deletingTabKey !== null} onOpenChange={(o) => { if (!o) { setDeletingTabKey(null); setReassignTo(null); } }}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Delete tab</DialogTitle></DialogHeader>
+          <p className="text-sm text-muted-foreground">This tab has cards. Move them to another tab, or delete them with the tab.</p>
+          <div className="flex flex-col gap-2 py-2">
+            <label className="flex items-center gap-2 text-sm">
+              <span>Move cards to</span>
+              <select aria-label="reassign target" className="h-8 rounded border bg-background px-1 text-sm"
+                value={reassignTo ?? ""} onChange={(e) => setReassignTo(e.target.value)}>
+                {(draftTabs ?? []).filter((t) => t.key !== deletingTabKey).map((t) => (
+                  <option key={t.key} value={t.key}>{t.name}</option>
+                ))}
+              </select>
+            </label>
+            <div className="flex justify-end gap-2">
+              <Button size="sm" variant="outline" aria-label="reassign and delete"
+                onClick={() => {
+                  if (!deletingTabKey || !reassignTo) return;
+                  const r = deleteTab(draftTabs ?? [], (cards as DraftCard[]), deletingTabKey, { mode: "reassign", toKey: reassignTo });
+                  setDraftTabs(r.draftTabs); setDraftCards(r.draftCards);
+                  setActiveTabPos(Math.min(activeTabPos, r.draftTabs.length - 1));
+                  setDeletingTabKey(null); setReassignTo(null);
+                }}>reassign and delete</Button>
+              <Button size="sm" variant="ghost" className="text-destructive" aria-label="delete cards too"
+                onClick={() => {
+                  if (!deletingTabKey) return;
+                  const r = deleteTab(draftTabs ?? [], (cards as DraftCard[]), deletingTabKey, { mode: "delete" });
+                  setDraftTabs(r.draftTabs); setDraftCards(r.draftCards);
+                  setActiveTabPos(Math.min(activeTabPos, r.draftTabs.length - 1));
+                  setDeletingTabKey(null); setReassignTo(null);
+                }}>delete cards too</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
       <Dialog open={replacingId !== null} onOpenChange={(o) => { if (!o) setReplacingId(null); }}>
         <DialogContent>
           <DialogHeader><DialogTitle>Replace chart</DialogTitle></DialogHeader>

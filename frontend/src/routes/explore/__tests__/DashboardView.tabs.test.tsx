@@ -57,3 +57,20 @@ describe("DashboardView tabs", () => {
     expect(screen.getByTestId("card-c2")).toBeTruthy();
   });
 });
+
+describe("DashboardView tab edit affordances", () => {
+  it("deleting a tab with cards opens a reassign dialog and reassigns", () => {
+    renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "delete tab A" }));
+    const target = screen.getByLabelText("reassign target") as HTMLSelectElement;
+    fireEvent.change(target, { target: { value: target.options[0].value } });
+    fireEvent.click(screen.getByRole("button", { name: "reassign and delete" }));
+    expect(screen.queryByRole("tab", { name: "A" })).toBeNull();
+  });
+  it("a card shows a move-to-tab control in edit mode with >=2 tabs", () => {
+    renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByLabelText("move card c1 to tab")).toBeTruthy();
+  });
+});
