@@ -4,7 +4,7 @@ import { EditSidebar } from "../EditSidebar";
 
 const noop = vi.fn();
 const common = { charts: [], parameters: [], tabs: [], cardForPanel: undefined, chartForCard: undefined, paramForPanel: undefined,
-  onAddChart: noop, onAddVirtual: noop, onUpdateCardOptions: noop, onMoveCardToTab: noop, onChangeParam: noop, onDeleteParam: noop };
+  onAddChart: noop, onAddVirtual: noop, onUpdateCardOptions: noop, onMoveCardToTab: noop, onChangeParam: noop, onDeleteParam: noop, onClose: noop };
 
 describe("EditSidebar", () => {
   it("renders the Add panel for kind 'add'", () => {

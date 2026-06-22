@@ -25,12 +25,19 @@ interface Props {
   onMoveCardToTab: (tabKey: string) => void;
   onChangeParam: (next: DashboardParameter) => void;
   onDeleteParam: () => void;
+  onClose: () => void;
 }
 
 export function EditSidebar(props: Props) {
   const { panel } = props;
+  const onPanel = panel?.kind === "card" || panel?.kind === "filter";
   return (
-    <aside className="w-[340px] shrink-0 self-start rounded-lg border bg-card">
+    <aside className="sticky top-4 max-h-[calc(100vh-7rem)] w-[340px] shrink-0 self-start overflow-auto rounded-lg border bg-card">
+      {onPanel && (
+        <div className="flex items-center justify-between border-b px-3 py-2">
+          <button type="button" aria-label="back to add" className="text-xs text-muted-foreground hover:text-foreground" onClick={props.onClose}>‹ Add cards</button>
+        </div>
+      )}
       {panel?.kind === "add" && <AddPanel charts={props.charts} onAddChart={props.onAddChart} onAddVirtual={props.onAddVirtual} />}
       {panel?.kind === "card" && props.cardForPanel && (
         <CardSettingsPanel card={props.cardForPanel} chart={props.chartForCard} parameters={props.parameters} tabs={props.tabs}

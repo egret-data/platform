@@ -13,7 +13,10 @@ export function AddPanel({ charts, onAddChart, onAddVirtual }: Props) {
       <div className="-mx-1 flex max-h-[60vh] flex-col overflow-auto px-1">
         {shown.length === 0 ? <p className="px-1 py-2 text-xs text-muted-foreground">No charts</p>
           : shown.map((c) => (
-            <button key={c.id} type="button" aria-label={c.name} className="rounded px-2 py-1.5 text-left text-sm hover:bg-accent/40" onClick={() => onAddChart(c)}>{c.name}</button>
+            <button key={c.id} type="button" aria-label={c.name} className="group flex items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent/60" onClick={() => onAddChart(c)}>
+              <span className="truncate">{c.name}</span>
+              <span className="shrink-0 text-xs text-primary opacity-0 transition-opacity group-hover:opacity-100">+ Add</span>
+            </button>
           ))}
       </div>
       <div className="flex gap-1 border-t pt-2">

@@ -304,6 +304,7 @@ export default function DashboardView() {
           cols={GRID_COLS}
           rowHeight={ROW_PX}
           margin={[12, 12]}
+          draggableHandle=".dash-draghandle"
           draggableCancel=".dash-nodrag"
           isDraggable={editing}
           isResizable={editing}
@@ -315,13 +316,15 @@ export default function DashboardView() {
             const mappings = (c.options.paramMappings as Record<string, string>) ?? {};
             const injected = baseChart ? applyParamsToChart(baseChart, parameters, paramsState.values, mappings) : undefined;
             return (
-            <div key={c.id} className={`relative overflow-hidden ${c.card_type === "heading" ? "" : "rounded-lg border bg-card shadow-sm"} ${editing && editPanel?.kind === "card" && editPanel.cardId === c.id ? "ring-2 ring-primary" : ""}`}>
+            <div key={c.id} className={`group relative overflow-hidden ${c.card_type === "heading" ? "" : "rounded-lg border bg-card shadow-sm"} ${editing && editPanel?.kind === "card" && editPanel.cardId === c.id ? "ring-2 ring-primary" : ""}`}>
               {editing && (
-                <CardEditToolbar cardType={c.card_type}
-                  onSettings={() => setEditPanel({ kind: "card", cardId: c.id })}
-                  onDuplicate={() => duplicateCard(c.id)}
-                  onReplace={() => setReplacingId(c.id)}
-                  onRemove={() => removeCard(c.id)} />
+                <div className="dash-draghandle absolute inset-x-0 top-0 z-10 flex h-7 cursor-move items-center justify-end gap-1 bg-gradient-to-b from-card/95 via-card/70 to-transparent px-1 opacity-0 transition-opacity group-hover:opacity-100">
+                  <CardEditToolbar cardType={c.card_type}
+                    onSettings={() => setEditPanel({ kind: "card", cardId: c.id })}
+                    onDuplicate={() => duplicateCard(c.id)}
+                    onReplace={() => setReplacingId(c.id)}
+                    onRemove={() => removeCard(c.id)} />
+                </div>
               )}
               <DashboardCardView ws={ws} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values}
                 blocked={!editing && requiredUnset}
@@ -347,6 +350,7 @@ export default function DashboardView() {
             onMoveCardToTab={(tabKey) => { if (editPanel?.kind === "card") setDraftCards(moveCardToTab((cards as DraftCard[]), editPanel.cardId, tabKey)); }}
             onChangeParam={(next) => setDraftParameters(parameters.map((x) => x.id === next.id ? { ...next, slug: x.slug } : x))}
             onDeleteParam={() => { if (editPanel?.kind === "filter") { const id = editPanel.paramId; setDraftParameters(parameters.filter((x) => x.id !== id)); setEditPanel({ kind: "add" }); } }}
+            onClose={() => setEditPanel({ kind: "add" })}
           />
         )}
       </div>
