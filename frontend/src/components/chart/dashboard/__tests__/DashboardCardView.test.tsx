@@ -18,7 +18,7 @@ const chart: Chart = {
   created_by: null, updated_at: "",
 };
 const card = (over: Partial<DashboardCard>): DashboardCard => ({
-  id: "k", chart_id: null, card_type: "chart", grid_col: 0, grid_row: 0, size_x: 6, size_y: 4, options: {}, ...over,
+  id: "k", chart_id: null, card_type: "chart", grid_col: 0, grid_row: 0, size_x: 6, size_y: 4, options: {}, tab_id: null, ...over,
 });
 
 describe("DashboardCardView", () => {

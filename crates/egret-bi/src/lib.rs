@@ -13,7 +13,7 @@ mod schema;
 mod typegen;
 
 pub use chart::{Chart, ChartRepo};
-pub use dashboard::{Dashboard, DashboardCard, DashboardRepo, NewCard};
+pub use dashboard::{Dashboard, DashboardCard, DashboardRepo, DashboardTab, NewCard, NewTab};
 pub use dataset::{Dataset, DatasetColumn, DatasetRepo, Metric, NewColumn, SourceSpec};
 pub use error::{BiApiError, BiError};
 pub use expr::{validate_expression, DescribedExpr};

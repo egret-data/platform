@@ -1080,13 +1080,15 @@ async fn db_update(
     require_dashboard_in_ws(&st, &ctx, id).await?;
     require_dashboard_owner(&st, &ctx, id).await?;
     require_cards_in_ws(&st, &ctx, &b.cards).await?;
+    crate::model::validate_layout(&b.tabs, &b.cards).map_err(BiApiError::from)?;
     st.dashboards
         .update(id, &b.name, &b.description, &b.parameters)
         .await
         .map_err(BiApiError::from)?;
+    let tabs: Vec<crate::dashboard::NewTab> = b.tabs.into_iter().map(|t| t.into_new()).collect();
     let cards: Vec<crate::dashboard::NewCard> = b.cards.into_iter().map(|c| c.into_new()).collect();
     st.dashboards
-        .replace_cards(id, &cards)
+        .replace_layout(id, &tabs, &cards)
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(load_dashboard(&st, id).await?))
@@ -1114,6 +1116,7 @@ async fn load_dashboard(st: &BiState, id: Uuid) -> Result<DashboardDetailDto, Bi
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("dashboard".into()))?;
+    let tabs = st.dashboards.tabs(id).await.map_err(BiApiError::from)?;
     let cards = st.dashboards.cards(id).await.map_err(BiApiError::from)?;
-    Ok(crate::model::dashboard_detail_dto(d, cards))
+    Ok(crate::model::dashboard_detail_dto(d, tabs, cards))
 }

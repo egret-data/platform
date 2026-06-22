@@ -1,7 +1,7 @@
 //! Dashboard repository: a dashboard row plus its placed cards (grid layout).
 //!
-//! Card layout is saved whole-list: the client sends the full set of cards on each
-//! update and `replace_cards` swaps them in a transaction (Metabase-style layout PUT),
+//! Card layout is saved whole-list: the client sends the full set of tabs + cards on each
+//! update and `replace_layout` swaps them in a transaction (Metabase-style layout PUT),
 //! which keeps grid edits atomic and avoids per-card diffing.
 
 use egret_metastore::Db;
@@ -37,6 +37,21 @@ pub struct DashboardCard {
     pub size_y: i32,
     pub options: serde_json::Value,
     pub ordinal: i32,
+    pub tab_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DashboardTab {
+    pub id: Uuid,
+    pub name: String,
+    pub position: i32,
+}
+
+/// A tab as supplied by the client when saving a layout (no server id yet).
+#[derive(Debug, Clone)]
+pub struct NewTab {
+    pub name: String,
+    pub position: i32,
 }
 
 /// Private struct for list() — sqlx tuple FromRow is version-sensitive; use flatten instead.
@@ -57,11 +72,13 @@ pub struct NewCard {
     pub size_x: i32,
     pub size_y: i32,
     pub options: serde_json::Value,
+    /// 0-based index into the layout's `tabs`; `None` for a tabless dashboard.
+    pub tab_index: Option<usize>,
 }
 
 const COLS: &str = "id, workspace_id, name, description, parameters, created_by, updated_at";
 const CARD_COLS: &str =
-    "id, dashboard_id, chart_id, card_type, grid_col, grid_row, size_x, size_y, options, ordinal";
+    "id, dashboard_id, chart_id, card_type, grid_col, grid_row, size_x, size_y, options, ordinal, tab_id";
 
 /// Map a unique-violation to a Conflict; pass everything else through.
 fn map_conflict_err(e: sqlx::Error) -> BiError {
@@ -125,7 +142,7 @@ impl DashboardRepo {
     }
 
     /// Update dashboard metadata only (name/description). Card layout goes through
-    /// `replace_cards`; callers that change both run them together.
+    /// `replace_layout`; callers that change both run them together.
     pub async fn update(
         &self,
         id: Uuid,
@@ -165,34 +182,67 @@ impl DashboardRepo {
             .await?)
     }
 
-    /// Atomically replace the dashboard's full card set with `cards` (in supplied order).
-    pub async fn replace_cards(
+    /// All tabs on a dashboard, ordered by position.
+    pub async fn tabs(&self, dashboard_id: Uuid) -> Result<Vec<DashboardTab>, BiError> {
+        Ok(sqlx::query_as::<_, DashboardTab>(
+            "SELECT id, name, position FROM dashboard_tabs WHERE dashboard_id = $1 ORDER BY position, id",
+        )
+        .bind(dashboard_id)
+        .fetch_all(&self.db.pool)
+        .await?)
+    }
+
+    /// Atomically replace the dashboard's full tab + card set (in supplied order).
+    /// Cards reference their tab by `tab_index` into `tabs`; `None` means no tab.
+    pub async fn replace_layout(
         &self,
         dashboard_id: Uuid,
+        tabs: &[NewTab],
         cards: &[NewCard],
     ) -> Result<(), BiError> {
+        for c in cards {
+            match c.tab_index {
+                Some(i) if i >= tabs.len() => {
+                    return Err(BiError::BadRequest(format!(
+                        "card tab_index {i} out of range (0..{})",
+                        tabs.len()
+                    )));
+                }
+                _ => {}
+            }
+        }
+
         let mut tx = self.db.pool.begin().await?;
         sqlx::query("DELETE FROM dashboard_cards WHERE dashboard_id = $1")
             .bind(dashboard_id)
             .execute(&mut *tx)
             .await?;
-        for (i, c) in cards.iter().enumerate() {
-            sqlx::query(
-                "INSERT INTO dashboard_cards \
-                 (dashboard_id, chart_id, card_type, grid_col, grid_row, size_x, size_y, options, ordinal) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
-            )
+        sqlx::query("DELETE FROM dashboard_tabs WHERE dashboard_id = $1")
             .bind(dashboard_id)
-            .bind(c.chart_id)
-            .bind(&c.card_type)
-            .bind(c.grid_col)
-            .bind(c.grid_row)
-            .bind(c.size_x)
-            .bind(c.size_y)
-            .bind(&c.options)
-            .bind(i as i32)
             .execute(&mut *tx)
             .await?;
+
+        let mut tab_ids: Vec<Uuid> = Vec::with_capacity(tabs.len());
+        for t in tabs {
+            let id: Uuid = sqlx::query_scalar(
+                "INSERT INTO dashboard_tabs (dashboard_id, name, position) VALUES ($1,$2,$3) RETURNING id",
+            )
+            .bind(dashboard_id).bind(&t.name).bind(t.position)
+            .fetch_one(&mut *tx).await?;
+            tab_ids.push(id);
+        }
+
+        for (i, c) in cards.iter().enumerate() {
+            let tab_id = c.tab_index.map(|idx| tab_ids[idx]);
+            sqlx::query(
+                "INSERT INTO dashboard_cards \
+                 (dashboard_id, chart_id, card_type, grid_col, grid_row, size_x, size_y, options, ordinal, tab_id) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+            )
+            .bind(dashboard_id).bind(c.chart_id).bind(&c.card_type)
+            .bind(c.grid_col).bind(c.grid_row).bind(c.size_x).bind(c.size_y)
+            .bind(&c.options).bind(i as i32).bind(tab_id)
+            .execute(&mut *tx).await?;
         }
         tx.commit().await?;
         Ok(())

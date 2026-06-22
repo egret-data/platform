@@ -10,6 +10,12 @@ export interface DashboardCard {
   size_x: number;
   size_y: number;
   options: Record<string, unknown>;
+  tab_id: string | null;
+}
+export interface DashboardTab {
+  id: string;
+  name: string;
+  position: number;
 }
 export interface DashboardSummary {
   id: string; name: string; description: string;
@@ -34,6 +40,7 @@ export interface DashboardDetail {
   id: string; name: string; description: string;
   created_by: string | null; updated_at: string;
   parameters: DashboardParameter[];
+  tabs: DashboardTab[];
   cards: DashboardCard[];
 }
 export interface CardInput {
@@ -44,6 +51,7 @@ export interface CardInput {
   size_x: number;
   size_y: number;
   options?: Record<string, unknown>;
+  tab_index: number | null;
 }
 
 export const dashboardKeys = {
@@ -78,7 +86,7 @@ export function useDashboardMutations(ws: string) {
     onSuccess: () => invalidate(),
   });
   const update = useMutation({
-    mutationFn: ({ id, ...b }: { id: string; name: string; description?: string; parameters: DashboardParameter[]; cards: CardInput[] }) =>
+    mutationFn: ({ id, ...b }: { id: string; name: string; description?: string; parameters: DashboardParameter[]; tabs: { name: string; position: number }[]; cards: CardInput[] }) =>
       apiJson<DashboardDetail>(`/ws/${ws}/dashboards/${id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(b) }),
     onSuccess: (d) => invalidate(d.id),
   });
