@@ -4,6 +4,7 @@ import { OPERATORS } from "./ParameterEditor";
 interface Props {
   param: DashboardParameter;
   allParameters: DashboardParameter[];
+  cardColumns?: { cardId: string; label: string; columns: string[] }[];
   onChange: (next: DashboardParameter) => void;
   onDelete: () => void;
 }
@@ -14,7 +15,7 @@ const WIDGETS: { v: ParamWidget; label: string }[] = [
   { v: "input", label: "Input box" },
 ];
 
-export function FilterSettingsPanel({ param, allParameters, onChange, onDelete }: Props) {
+export function FilterSettingsPanel({ param, allParameters, cardColumns = [], onChange, onDelete }: Props) {
   const cls = "h-8 w-full rounded border bg-background px-2 text-sm";
   const showOp = param.type === "text" || param.type === "number" || param.type === "date";
   const showWidget = param.type === "category" || param.type === "id" || param.type === "location" || param.type === "text";
@@ -54,6 +55,43 @@ export function FilterSettingsPanel({ param, allParameters, onChange, onDelete }
                 onChange={() => onChange({ ...param, widget: w.v })} /> {w.label}
             </label>
           ))}
+        </div>
+      )}
+
+      {showWidget && (
+        <div className="flex flex-col gap-1">
+          <div className="text-xs text-muted-foreground">Where do values come from?</div>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="radio" name={`vs-${param.id}`} aria-label="values from distinct" checked={(param.valuesSource?.type ?? "distinct") === "distinct"}
+              onChange={() => onChange({ ...param, valuesSource: { type: "distinct" } })} /> From the data (distinct)
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="radio" name={`vs-${param.id}`} aria-label="values from custom" checked={param.valuesSource?.type === "static"}
+              onChange={() => onChange({ ...param, valuesSource: { type: "static", static: param.valuesSource?.static ?? [] } })} /> Custom list
+          </label>
+          {param.valuesSource?.type === "static" && (
+            <textarea aria-label="custom values" className="h-20 w-full rounded border bg-background px-2 py-1 text-sm"
+              value={(param.valuesSource.static ?? []).join("\n")}
+              onChange={(e) => onChange({ ...param, valuesSource: { type: "static", static: e.target.value.split("\n").map((s) => s.trim()).filter(Boolean) } })} />
+          )}
+          <label className="flex items-center gap-2 text-sm">
+            <input type="radio" name={`vs-${param.id}`} aria-label="values from card" checked={param.valuesSource?.type === "card"}
+              onChange={() => onChange({ ...param, valuesSource: { type: "card", cardId: cardColumns[0]?.cardId, column: undefined } })} /> From a card column
+          </label>
+          {param.valuesSource?.type === "card" && (
+            <div className="flex gap-1">
+              <select aria-label="values card" className={cls} value={param.valuesSource.cardId ?? ""}
+                onChange={(e) => onChange({ ...param, valuesSource: { type: "card", cardId: e.target.value, column: param.valuesSource?.column } })}>
+                <option value="">card…</option>
+                {cardColumns.map((c) => <option key={c.cardId} value={c.cardId}>{c.label}</option>)}
+              </select>
+              <select aria-label="values column" className={cls} value={param.valuesSource.column ?? ""}
+                onChange={(e) => onChange({ ...param, valuesSource: { type: "card", cardId: param.valuesSource?.cardId, column: e.target.value } })}>
+                <option value="">column…</option>
+                {(cardColumns.find((c) => c.cardId === param.valuesSource?.cardId)?.columns ?? []).map((col) => <option key={col} value={col}>{col}</option>)}
+              </select>
+            </div>
+          )}
         </div>
       )}
 

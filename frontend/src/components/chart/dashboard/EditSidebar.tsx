@@ -19,6 +19,7 @@ interface Props {
   cardForPanel: DraftCard | undefined;
   chartForCard: Chart | undefined;
   paramForPanel: DashboardParameter | undefined;
+  cardColumns?: { cardId: string; label: string; columns: string[] }[];
   onAddChart: (c: Chart) => void;
   onAddVirtual: (t: "text" | "heading" | "link") => void;
   onUpdateCardOptions: (patch: Record<string, unknown>) => void;
@@ -44,7 +45,7 @@ export function EditSidebar(props: Props) {
           onUpdateOptions={props.onUpdateCardOptions} onMoveToTab={props.onMoveCardToTab} />
       )}
       {panel?.kind === "filter" && props.paramForPanel && (
-        <FilterSettingsPanel param={props.paramForPanel} allParameters={props.parameters} onChange={props.onChangeParam} onDelete={props.onDeleteParam} />
+        <FilterSettingsPanel param={props.paramForPanel} allParameters={props.parameters} cardColumns={props.cardColumns ?? []} onChange={props.onChangeParam} onDelete={props.onDeleteParam} />
       )}
     </aside>
   );
