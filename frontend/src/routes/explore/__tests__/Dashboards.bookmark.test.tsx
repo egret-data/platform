@@ -22,4 +22,25 @@ describe("Dashboards bookmark", () => {
     fireEvent.click(screen.getByRole("button", { name: "bookmark One" }));
     await waitFor(() => expect(apiJson).toHaveBeenCalledWith("/ws/eng/dashboards/d1/bookmark", expect.objectContaining({ method: "POST" })));
   });
+
+  it("clicking a bookmarked star removes it (DELETE /bookmark)", async () => {
+    apiJson.mockResolvedValue([{ id: "d1", name: "One", description: "", created_by: null, card_count: 0, updated_at: new Date().toISOString(), bookmarked: true }]);
+    render(<Dashboards />, { wrapper: wrap });
+    await screen.findByText("One");
+    fireEvent.click(screen.getByRole("button", { name: "unbookmark One" }));
+    await waitFor(() => expect(apiJson).toHaveBeenCalledWith("/ws/eng/dashboards/d1/bookmark", expect.objectContaining({ method: "DELETE" })));
+  });
+
+  it("the Bookmarks filter hides non-bookmarked dashboards", async () => {
+    apiJson.mockResolvedValue([
+      { id: "d1", name: "Starred", description: "", created_by: null, card_count: 0, updated_at: new Date().toISOString(), bookmarked: true },
+      { id: "d2", name: "Plain", description: "", created_by: null, card_count: 0, updated_at: new Date().toISOString(), bookmarked: false },
+    ]);
+    render(<Dashboards />, { wrapper: wrap });
+    await screen.findByText("Starred");
+    expect(screen.getByText("Plain")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "★ Bookmarks" }));
+    expect(screen.getByText("Starred")).toBeTruthy();
+    expect(screen.queryByText("Plain")).toBeNull();
+  });
 });

@@ -36,8 +36,10 @@ export default function Dashboards() {
       <div className="mb-3 flex items-center justify-between">
         <h1 className="text-lg font-semibold">{showTrash ? "Trash" : "Dashboards"}</h1>
         <div className="flex gap-2">
-          <Button size="sm" variant={onlyBookmarked ? "default" : "outline"} onClick={() => setOnlyBookmarked((v) => !v)}>★ Bookmarks</Button>
-          <Button size="sm" variant={showTrash ? "default" : "outline"} onClick={() => setShowTrash((v) => !v)}>
+          {!showTrash && (
+            <Button size="sm" variant={onlyBookmarked ? "default" : "outline"} onClick={() => setOnlyBookmarked((v) => !v)}>★ Bookmarks</Button>
+          )}
+          <Button size="sm" variant={showTrash ? "default" : "outline"} onClick={() => { const next = !showTrash; setShowTrash(next); if (next) setOnlyBookmarked(false); }}>
             {showTrash ? "← Dashboards" : "Trash"}
           </Button>
           <Dialog open={open} onOpenChange={setOpen}>
