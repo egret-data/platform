@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { useDatasets, useDataset } from "@/api/datasets";
@@ -32,15 +32,12 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import { FieldZone } from "@/components/chart/config/FieldZone";
+import { SectionLabel } from "@/components/chart/settings/SectionLabel";
 
 const UNDERLINE_LIST = "h-auto w-full justify-start gap-4 rounded-none border-b bg-transparent p-0";
 const UNDERLINE_TRIGGER = "rounded-none border-b-2 border-transparent px-0 pb-2 text-sm data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none";
 
 const isValidViz = (v: string | null): v is VizType => CHART_TYPES.some((t) => t.key === v);
-
-function SectionLabel({ children }: { children: ReactNode }) {
-  return <div className="border-b pb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">{children}</div>;
-}
 
 export default function ChartExplore() {
   const ws = useParams().workspace!;

@@ -1,4 +1,3 @@
-import { type ReactNode } from "react";
 import { type VizType, type ChartParams, isCartesianViz } from "@/api/charts";
 import { cartesianSeriesNames } from "@/components/chart/echarts/options/cartesian";
 import { CartesianDisplaySection } from "./CartesianDisplaySection";
@@ -6,12 +5,9 @@ import { PieDisplaySection } from "./PieDisplaySection";
 import { TableColumnsSection } from "./TableColumnsSection";
 import { FormatSection } from "./FormatSection";
 import { ConditionalFormattingSection } from "./ConditionalFormattingSection";
+import { SectionLabel } from "./SectionLabel";
 
 interface ResultColumn { name: string; type: string }
-
-function SectionLabel({ children }: { children: ReactNode }) {
-  return <div className="border-b pb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">{children}</div>;
-}
 
 interface Props {
   vizType: VizType;
