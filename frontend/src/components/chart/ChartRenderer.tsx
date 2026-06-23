@@ -85,7 +85,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
 
   if (isCartesianViz(vizType)) {
     return (
-      <div className="h-[60vh] rounded-md border p-2">
+      <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
           : <EChartsRenderer option={buildCartesianOption(columns, rows, {
@@ -114,7 +114,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
 
   if (vizType === "pie") {
     return (
-      <div className="h-[60vh] rounded-md border p-2">
+      <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
           : <EChartsRenderer option={buildPieOption(columns, rows, {
@@ -133,7 +133,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
 
   if (vizType === "scalar") {
     return (
-      <div className="rounded-md border">
+      <div className="h-full w-full">
         <BigNumber
           columns={columns}
           rows={rows}
@@ -146,7 +146,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
 
   if (vizType === "progress") {
     return (
-      <div className="rounded-md border">
+      <div className="h-full w-full">
         <ProgressChart
           columns={columns}
           rows={rows}
@@ -160,7 +160,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
 
   if (vizType === "gauge") {
     return (
-      <div className="h-[50vh] rounded-md border p-2">
+      <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
           : <EChartsRenderer option={buildGaugeOption(columns, rows, {
@@ -172,7 +172,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
 
   if (vizType === "funnel") {
     return (
-      <div className="h-[60vh] rounded-md border p-2">
+      <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
           : <EChartsRenderer option={buildFunnelOption(columns, rows, {
@@ -184,7 +184,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
 
   if (vizType === "waterfall") {
     return (
-      <div className="h-[60vh] rounded-md border p-2">
+      <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
           : <EChartsRenderer option={buildWaterfallOption(columns, rows, {
@@ -196,7 +196,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
 
   if (vizType === "smartscalar") {
     return (
-      <div className="rounded-md border">
+      <div className="h-full w-full">
         <SmartScalarChart
           columns={columns}
           rows={rows}
@@ -210,7 +210,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
 
   if (vizType === "boxplot") {
     return (
-      <div className="h-[60vh] rounded-md border p-2">
+      <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
           : <EChartsRenderer option={buildBoxplotOption(columns, rows, {
@@ -222,7 +222,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
 
   if (vizType === "sankey") {
     return (
-      <div className="h-[60vh] rounded-md border p-2">
+      <div className="h-full w-full">
         {rows.length === 0
           ? <EmptyState />
           : <EChartsRenderer option={buildSankeyOption(columns, rows, {

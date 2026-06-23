@@ -785,13 +785,17 @@ export default function ChartExplore() {
         )}
         {finished && results.data && viz !== "table" && viz !== "pivot_table" && (
           <ChartErrorBoundary resetKey={`${viz}:${results.data.columns.length}:${results.data.rows.length}`}>
-            <ChartRenderer
-              vizType={viz}
-              params={paramsForSave()}
-              columns={results.data.columns}
-              rows={results.data.rows}
-              metricTypes={metricTypes}
-            />
+            {/* ChartRenderer fills its parent; the preview owns the height + frame
+                (dashboard cards size it to the grid cell instead). */}
+            <div className="h-[70vh] rounded-md border p-2">
+              <ChartRenderer
+                vizType={viz}
+                params={paramsForSave()}
+                columns={results.data.columns}
+                rows={results.data.rows}
+                metricTypes={metricTypes}
+              />
+            </div>
           </ChartErrorBoundary>
         )}
         </div>
