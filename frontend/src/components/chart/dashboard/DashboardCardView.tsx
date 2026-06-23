@@ -15,7 +15,7 @@ function asString(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 
-function ChartCardTile({ ws, card, chart, refreshNonce, onValueClick, blocked, editing, autoHeight, onAutoHeight }: { ws: string; card: DashboardCard; chart: Chart | undefined; refreshNonce?: number; onValueClick?: (ctx: DrillContext, x: number, y: number) => void; blocked?: boolean; editing?: boolean; autoHeight?: boolean; onAutoHeight?: (rows: number) => void }) {
+function ChartCardTile({ ws, card, chart, refreshNonce, onValueClick, blocked, editing, autoHeight, onAutoHeight, rowHeight }: { ws: string; card: DashboardCard; chart: Chart | undefined; refreshNonce?: number; onValueClick?: (ctx: DrillContext, x: number, y: number) => void; blocked?: boolean; editing?: boolean; autoHeight?: boolean; onAutoHeight?: (rows: number) => void; rowHeight?: number }) {
   const data = useChartData(ws, chart ?? null, refreshNonce, !blocked);
   // Ref the render-only container (NOT the whole tile), so the PNG export targets the
   // chart's <svg> and not the export menu's own Download icon. Also keeps PNG hidden for
@@ -43,7 +43,7 @@ function ChartCardTile({ ws, card, chart, refreshNonce, onValueClick, blocked, e
               const eff = applyVizOverride(chart, card.options.vizOverride as Record<string, unknown> | undefined);
               return <ChartRenderer vizType={eff.viz_type} params={eff.params} columns={data.columns} rows={data.rows} onValueClick={onValueClick} />;
             })();
-          return autoHeight && onAutoHeight ? <AutoHeightMeasure onRows={onAutoHeight}>{body}</AutoHeightMeasure> : body;
+          return autoHeight && onAutoHeight ? <AutoHeightMeasure rowHeight={rowHeight ?? 0} onRows={onAutoHeight}>{body}</AutoHeightMeasure> : body;
         })()}
       </div>
     </div>
@@ -51,8 +51,8 @@ function ChartCardTile({ ws, card, chart, refreshNonce, onValueClick, blocked, e
 }
 
 /** Render one dashboard card by its card_type. */
-export function DashboardCardView({ ws, card, chart, refreshNonce, parameters, paramValues, onValueClick, blocked, editing, autoHeight, onAutoHeight }: { ws: string; card: DashboardCard; chart: Chart | undefined; refreshNonce?: number; parameters?: DashboardParameter[]; paramValues?: Record<string, unknown>; onValueClick?: (ctx: DrillContext, x: number, y: number) => void; blocked?: boolean; editing?: boolean; autoHeight?: boolean; onAutoHeight?: (rows: number) => void }) {
-  const wrap = (body: React.ReactNode) => (autoHeight && onAutoHeight ? <AutoHeightMeasure onRows={onAutoHeight}>{body}</AutoHeightMeasure> : body);
+export function DashboardCardView({ ws, card, chart, refreshNonce, parameters, paramValues, onValueClick, blocked, editing, autoHeight, onAutoHeight, rowHeight }: { ws: string; card: DashboardCard; chart: Chart | undefined; refreshNonce?: number; parameters?: DashboardParameter[]; paramValues?: Record<string, unknown>; onValueClick?: (ctx: DrillContext, x: number, y: number) => void; blocked?: boolean; editing?: boolean; autoHeight?: boolean; onAutoHeight?: (rows: number) => void; rowHeight?: number }) {
+  const wrap = (body: React.ReactNode) => (autoHeight && onAutoHeight ? <AutoHeightMeasure rowHeight={rowHeight ?? 0} onRows={onAutoHeight}>{body}</AutoHeightMeasure> : body);
   if (card.card_type === "text") {
     const text = interpolateParams(asString(card.options.text) ?? "", parameters ?? [], paramValues ?? {});
     return wrap(<TextCard text={text} />);
@@ -62,5 +62,5 @@ export function DashboardCardView({ ws, card, chart, refreshNonce, parameters, p
     return wrap(<HeadingCard text={text} />);
   }
   if (card.card_type === "link") return wrap(<LinkCard url={asString(card.options.url)} label={asString(card.options.label)} />);
-  return <ChartCardTile ws={ws} card={card} chart={chart} refreshNonce={refreshNonce} onValueClick={onValueClick} blocked={blocked} editing={editing} autoHeight={autoHeight} onAutoHeight={onAutoHeight} />;
+  return <ChartCardTile ws={ws} card={card} chart={chart} refreshNonce={refreshNonce} onValueClick={onValueClick} blocked={blocked} editing={editing} autoHeight={autoHeight} onAutoHeight={onAutoHeight} rowHeight={rowHeight} />;
 }
