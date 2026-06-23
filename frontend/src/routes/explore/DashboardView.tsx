@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Pencil } from "lucide-react";
+import { Pencil, Star } from "lucide-react";
 import { useParams } from "react-router-dom";
 import RGL, { WidthProvider, type Layout } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
@@ -43,7 +43,7 @@ export default function DashboardView() {
   const { workspace: ws, id } = useParams() as { workspace: string; id: string };
   const { data: dash, isLoading } = useDashboard(ws, id);
   const { data: charts } = useCharts(ws);
-  const { update, restore: restoreMut } = useDashboardMutations(ws);
+  const { update, restore: restoreMut, addBookmark, removeBookmark } = useDashboardMutations(ws);
   const [editing, setEditing] = useState(false);
   const [draftCards, setDraftCards] = useState<DraftCard[] | null>(null);
   const [draftParameters, setDraftParameters] = useState<DashboardParameter[] | null>(null);
@@ -221,6 +221,10 @@ export default function DashboardView() {
         <div className="flex gap-2">
           {!editing && (
             <>
+              <Button size="sm" variant="ghost" aria-label={dash.bookmarked ? "remove bookmark" : "add bookmark"}
+                onClick={async () => { try { await (dash.bookmarked ? removeBookmark : addBookmark).mutateAsync(dash.id); } catch (e) { toast.error(String(e)); } }}>
+                <Star className={`h-4 w-4 ${dash.bookmarked ? "fill-amber-400 text-amber-400" : ""}`} />
+              </Button>
               <label className="flex items-center gap-1 text-xs text-muted-foreground">
                 <span className="sr-only">Auto-refresh</span>
                 <select aria-label="auto-refresh" className="h-8 rounded border bg-background px-1 text-xs"

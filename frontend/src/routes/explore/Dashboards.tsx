@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Star } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { useDashboards, useDashboardMutations, type DashboardSummary } from "@/api/dashboards";
@@ -14,10 +15,12 @@ export default function Dashboards() {
   const nav = useNavigate();
   const [showTrash, setShowTrash] = useState(false);
   const { data, isLoading } = useDashboards(ws, { trashed: showTrash });
-  const { create, remove, duplicate, trash, restore } = useDashboardMutations(ws);
+  const { create, remove, duplicate, trash, restore, addBookmark, removeBookmark } = useDashboardMutations(ws);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
+  const [onlyBookmarked, setOnlyBookmarked] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<DashboardSummary | null>(null);
+  const rows = (data ?? []).filter((d) => !onlyBookmarked || d.bookmarked);
 
   async function onCreate() {
     if (!name.trim()) { toast.error("Name required"); return; }
@@ -33,6 +36,7 @@ export default function Dashboards() {
       <div className="mb-3 flex items-center justify-between">
         <h1 className="text-lg font-semibold">{showTrash ? "Trash" : "Dashboards"}</h1>
         <div className="flex gap-2">
+          <Button size="sm" variant={onlyBookmarked ? "default" : "outline"} onClick={() => setOnlyBookmarked((v) => !v)}>★ Bookmarks</Button>
           <Button size="sm" variant={showTrash ? "default" : "outline"} onClick={() => setShowTrash((v) => !v)}>
             {showTrash ? "← Dashboards" : "Trash"}
           </Button>
@@ -51,17 +55,25 @@ export default function Dashboards() {
       </div>
       {isLoading ? (
         <p className="text-muted-foreground">Loading…</p>
-      ) : !data?.length ? (
-        <p className="text-muted-foreground">{showTrash ? "Trash is empty." : "No dashboards yet."}</p>
+      ) : !rows.length ? (
+        <p className="text-muted-foreground">{onlyBookmarked ? "No bookmarked dashboards." : showTrash ? "Trash is empty." : "No dashboards yet."}</p>
       ) : (
         <table className="w-full text-sm">
           <thead className="text-left text-muted-foreground">
             <tr><th className="py-1 pr-3">Name</th><th className="pr-3">Cards</th><th className="pr-3">Updated</th><th /></tr>
           </thead>
           <tbody>
-            {data.map((d) => (
+            {rows.map((d) => (
               <tr key={d.id} className="border-t">
-                <td className="py-1 pr-3"><Link className="hover:underline" to={`/explore/${ws}/dashboards/${d.id}`}>{d.name}</Link></td>
+                <td className="py-1 pr-3">
+                  <span className="inline-flex items-center gap-1">
+                    <Button size="sm" variant="ghost" aria-label={`${d.bookmarked ? "unbookmark" : "bookmark"} ${d.name}`}
+                      onClick={async () => { try { await (d.bookmarked ? removeBookmark : addBookmark).mutateAsync(d.id); } catch (e) { toast.error(String(e)); } }}>
+                      <Star className={`h-4 w-4 ${d.bookmarked ? "fill-amber-400 text-amber-400" : "text-muted-foreground"}`} />
+                    </Button>
+                    <Link className="hover:underline" to={`/explore/${ws}/dashboards/${d.id}`}>{d.name}</Link>
+                  </span>
+                </td>
                 <td className="pr-3 text-muted-foreground">{d.card_count}</td>
                 <td className="pr-3 text-muted-foreground">{new Date(d.updated_at).toLocaleString()}</td>
                 <td className="flex gap-1">

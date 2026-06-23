@@ -21,6 +21,7 @@ export interface DashboardSummary {
   id: string; name: string; description: string;
   created_by: string | null; card_count: number; updated_at: string;
   deleted_at?: string | null;
+  bookmarked?: boolean;
 }
 export type ParamType = "text" | "number" | "date" | "id" | "category";
 export type ParamOperator =
@@ -45,6 +46,7 @@ export interface DashboardDetail {
   width: "fixed" | "full";
   cards: DashboardCard[];
   deleted_at?: string | null;
+  bookmarked?: boolean;
 }
 export interface CardInput {
   chart_id: string | null;
@@ -111,5 +113,13 @@ export function useDashboardMutations(ws: string) {
     mutationFn: (id: string) => apiJson(`/ws/${ws}/dashboards/${id}/restore`, { method: "POST" }),
     onSuccess: () => invalidate(),
   });
-  return { create, update, remove, duplicate, trash, restore };
+  const addBookmark = useMutation({
+    mutationFn: (id: string) => apiJson(`/ws/${ws}/dashboards/${id}/bookmark`, { method: "POST" }),
+    onSuccess: () => invalidate(),
+  });
+  const removeBookmark = useMutation({
+    mutationFn: (id: string) => apiJson(`/ws/${ws}/dashboards/${id}/bookmark`, { method: "DELETE" }),
+    onSuccess: () => invalidate(),
+  });
+  return { create, update, remove, duplicate, trash, restore, addBookmark, removeBookmark };
 }
