@@ -16,7 +16,8 @@ import { useDashboardViewControls } from "@/api/useDashboardViewControls";
 import { useDashboardParams } from "@/api/useDashboardParams";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { GRID_COLS, CARD_MIN_SIZE, CARD_DEFAULT_SIZE } from "@/components/chart/dashboard-grid";
+import { GRID_COLS, CARD_MIN_SIZE, CARD_DEFAULT_SIZE, ROW_PX, toLayoutRows, fromLayoutRows } from "@/components/chart/dashboard-grid";
+import { GridOverlay } from "@/components/chart/dashboard/GridOverlay";
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
 import { DashboardInfoSidebar } from "@/components/chart/dashboard/DashboardInfoSidebar";
 import { CardFilterMapOverlay } from "@/components/chart/dashboard/CardFilterMapOverlay";
@@ -33,7 +34,6 @@ import { startTabsDraft, serializeLayout, addTab, renameTab, reorderTab, deleteT
 import { toast } from "sonner";
 
 const Grid = WidthProvider(RGL);
-const ROW_PX = 90;
 
 /** Loads distinct column values for one category/id parameter (hook is called
  * unconditionally inside this child so the Rules of Hooks are respected). */
@@ -186,10 +186,10 @@ export default function DashboardView() {
   // from them, and drag/resize writes positions straight back into the draft. This keeps
   // every grid item sized from its card (a newly added card is never auto-placed at 1x1).
   const layout: Layout[] = visibleCards.map((c) => ({
-    i: c.id, x: c.grid_col, y: c.grid_row, w: c.size_x, h: c.size_y,
+    i: c.id, x: c.grid_col, y: toLayoutRows(c.grid_row), w: c.size_x, h: toLayoutRows(c.size_y),
     // clamp the minimums to the card's own size so a short card (e.g. a 1-row
     // heading) never has minH/minW larger than its height/width (RGL warns).
-    minW: Math.min(CARD_MIN_SIZE.w, c.size_x), minH: Math.min(CARD_MIN_SIZE.h, c.size_y),
+    minW: Math.min(CARD_MIN_SIZE.w, c.size_x), minH: toLayoutRows(Math.min(CARD_MIN_SIZE.h, c.size_y)),
   }));
 
   function onLayoutChange(next: Layout[]) {
@@ -199,9 +199,12 @@ export default function DashboardView() {
       let changed = false;
       const merged = base.map((c) => {
         const l = next.find((x) => x.i === c.id);
-        if (!l || (l.x === c.grid_col && l.y === c.grid_row && l.w === c.size_x && l.h === c.size_y)) return c;
+        if (!l) return c;
+        const row = Math.max(0, fromLayoutRows(l.y));
+        const sizeY = Math.max(1, fromLayoutRows(l.h));
+        if (l.x === c.grid_col && row === c.grid_row && l.w === c.size_x && sizeY === c.size_y) return c;
         changed = true;
-        return { ...c, grid_col: l.x, grid_row: l.y, size_x: l.w, size_y: l.h };
+        return { ...c, grid_col: l.x, grid_row: row, size_x: l.w, size_y: sizeY };
       });
       return changed ? merged : base;   // same ref when nothing moved → no re-render loop
     });
@@ -377,18 +380,21 @@ export default function DashboardView() {
       ) : tabs.length > 0 && visibleCards.length === 0 ? (
         <p className="py-12 text-center text-muted-foreground">No cards on this tab.</p>
       ) : (
-        <Grid
-          className="layout"
-          cols={GRID_COLS}
-          rowHeight={ROW_PX}
-          margin={[12, 12]}
-          draggableHandle=".dash-draghandle"
-          draggableCancel=".dash-nodrag"
-          isDraggable={editing}
-          isResizable={editing}
-          layout={layout}
-          onLayoutChange={onLayoutChange}
-        >
+        <div className="relative">
+          {editing && <GridOverlay cols={GRID_COLS} rowPx={ROW_PX} />}
+          <Grid
+            className="layout relative z-10"
+            cols={GRID_COLS}
+            rowHeight={ROW_PX}
+            margin={[12, 12]}
+            draggableHandle=".dash-draghandle"
+            draggableCancel=".dash-nodrag"
+            isDraggable={editing}
+            isResizable={editing}
+            resizeHandles={["s", "e", "se"]}
+            layout={layout}
+            onLayoutChange={onLayoutChange}
+          >
           {visibleCards.map((c) => {
             const baseChart = chartById.get(c.chart_id ?? "");
             const mappings = (c.options.paramMappings as Record<string, string>) ?? {};
@@ -421,7 +427,8 @@ export default function DashboardView() {
             </div>
             );
           })}
-        </Grid>
+          </Grid>
+        </div>
       )}
         </div>
         {editing && (sidebarCollapsed ? (
