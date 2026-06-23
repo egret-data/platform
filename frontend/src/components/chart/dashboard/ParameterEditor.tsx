@@ -3,9 +3,11 @@ import type { DashboardParameter, ParamType, ParamOperator } from "@/api/dashboa
 export const OPERATORS: Record<ParamType, ParamOperator[]> = {
   text: ["is", "is-not", "contains", "starts-with", "ends-with"],
   number: ["=", "!=", "between", ">=", "<="],
-  date: ["range", "relative", "single"],
+  date: ["range", "relative", "single", "month-year", "quarter-year"],
   id: ["is"],
   category: ["is"],
+  boolean: ["is"],
+  location: ["is", "is-not"],
 };
 
 export function ParameterEditor({ param, onChange, onDelete }: {

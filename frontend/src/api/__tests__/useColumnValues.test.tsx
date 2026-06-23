@@ -38,6 +38,22 @@ describe("useColumnValues", () => {
     expect(body.query_spec.columns).toEqual(["region"]);
     expect(body.query_spec.dimensions).toEqual([]);
   });
+  it("passes the filters arg into the option query spec", async () => {
+    const filters = [{ col: "country", op: "in" as const, value: ["US"] }];
+    const { result } = renderHook(() => useColumnValues("eng", "ds1", "city", true, filters), { wrapper });
+    await waitFor(() => expect(result.current.values.length).toBeGreaterThan(0));
+    const dataCall = apiJson.mock.calls.find(([url]) => String(url).endsWith("/charts/data"));
+    const body = JSON.parse((dataCall![1] as { body: string }).body);
+    expect(body.query_spec.filters).toEqual(filters);
+    expect(body.query_spec.columns).toEqual(["city"]);
+  });
+  it("defaults filters to [] when omitted", async () => {
+    const { result } = renderHook(() => useColumnValues("eng", "ds1", "city", true), { wrapper });
+    await waitFor(() => expect(result.current.values.length).toBeGreaterThan(0));
+    const dataCall = apiJson.mock.calls.find(([url]) => String(url).endsWith("/charts/data"));
+    const body = JSON.parse((dataCall![1] as { body: string }).body);
+    expect(body.query_spec.filters).toEqual([]);
+  });
   it("is inert when disabled", () => {
     const { result } = renderHook(() => useColumnValues("eng", "ds1", "region", false), { wrapper });
     expect(result.current.values).toEqual([]);

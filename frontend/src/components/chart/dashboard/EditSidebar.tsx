@@ -44,7 +44,7 @@ export function EditSidebar(props: Props) {
           onUpdateOptions={props.onUpdateCardOptions} onMoveToTab={props.onMoveCardToTab} />
       )}
       {panel?.kind === "filter" && props.paramForPanel && (
-        <FilterSettingsPanel param={props.paramForPanel} onChange={props.onChangeParam} onDelete={props.onDeleteParam} />
+        <FilterSettingsPanel param={props.paramForPanel} allParameters={props.parameters} onChange={props.onChangeParam} onDelete={props.onDeleteParam} />
       )}
     </aside>
   );
