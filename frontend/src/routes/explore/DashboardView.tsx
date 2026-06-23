@@ -234,6 +234,20 @@ export default function DashboardView() {
       return { cardId: c.id, label: ch?.name ?? "Card", columns: ch ? [...ch.params.spec.dimensions, ...ch.params.spec.columns] : [] };
     });
 
+  // Per-card viz override panel data. Result columns aren't readily available in DashboardView, so
+  // offer the chart's spec dimensions/columns as the formatting column list (mirrors cardColumns).
+  const vizForPanel = (() => {
+    if (editPanel?.kind !== "viz") return undefined;
+    const card = (cards as DraftCard[]).find((c) => c.id === editPanel.cardId);
+    const chart = card ? chartById.get(card.chart_id ?? "") : undefined;
+    if (!card || !chart) return undefined;
+    return {
+      chart,
+      override: card.options.vizOverride as Record<string, unknown> | undefined,
+      columns: [...chart.params.spec.dimensions, ...chart.params.spec.columns].map((name) => ({ name, type: "" })),
+    };
+  })();
+
   return (
     <div className={view.isFullscreen ? "fixed inset-0 z-50 overflow-auto bg-muted/30 p-4" : "min-h-full bg-muted/30 p-4"}>
       {editing && (
@@ -381,6 +395,7 @@ export default function DashboardView() {
                 <div className="dash-nodrag absolute -top-3.5 left-1/2 z-30 -translate-x-1/2 opacity-0 transition-opacity group-hover:opacity-100">
                   <CardEditToolbar cardType={c.card_type}
                     onSettings={() => setEditPanel({ kind: "card", cardId: c.id })}
+                    onViz={() => setEditPanel({ kind: "viz", cardId: c.id })}
                     onDuplicate={() => duplicateCard(c.id)}
                     onReplace={() => setReplacingId(c.id)}
                     onRemove={() => removeCard(c.id)} />
@@ -411,6 +426,8 @@ export default function DashboardView() {
             charts={charts ?? []}
             parameters={parameters}
             cardColumns={cardColumns}
+            vizForPanel={vizForPanel}
+            onChangeVizOverride={(next) => { if (editPanel?.kind === "viz") updateCardOptions(editPanel.cardId, { vizOverride: next }); }}
             tabs={tabs}
             cardForPanel={editPanel?.kind === "card" ? (cards as DraftCard[]).find((c) => c.id === editPanel.cardId) : undefined}
             chartForCard={editPanel?.kind === "card" ? chartById.get((cards as DraftCard[]).find((c) => c.id === editPanel.cardId)?.chart_id ?? "") : undefined}

@@ -4,10 +4,12 @@ import type { DraftCard, DraftTab } from "./tabs";
 import { AddPanel } from "./AddPanel";
 import { CardSettingsPanel } from "./CardSettingsPanel";
 import { FilterSettingsPanel } from "./FilterSettingsPanel";
+import { CardVizPanel } from "./CardVizPanel";
 
 export type EditPanel =
   | { kind: "add" }
   | { kind: "card"; cardId: string }
+  | { kind: "viz"; cardId: string }
   | { kind: "filter"; paramId: string }
   | null;
 
@@ -20,6 +22,8 @@ interface Props {
   chartForCard: Chart | undefined;
   paramForPanel: DashboardParameter | undefined;
   cardColumns?: { cardId: string; label: string; columns: string[] }[];
+  vizForPanel?: { chart: Chart; override: Record<string, unknown> | undefined; columns: { name: string; type: string }[]; rows?: unknown[][] };
+  onChangeVizOverride?: (next: Record<string, unknown> | undefined) => void;
   onAddChart: (c: Chart) => void;
   onAddVirtual: (t: "text" | "heading" | "link") => void;
   onUpdateCardOptions: (patch: Record<string, unknown>) => void;
@@ -31,7 +35,7 @@ interface Props {
 
 export function EditSidebar(props: Props) {
   const { panel } = props;
-  const onPanel = panel?.kind === "card" || panel?.kind === "filter";
+  const onPanel = panel?.kind === "card" || panel?.kind === "filter" || panel?.kind === "viz";
   return (
     <aside className="sticky top-4 max-h-[calc(100vh-7rem)] w-[340px] shrink-0 self-start overflow-auto rounded-lg border bg-card">
       {onPanel && (
@@ -43,6 +47,10 @@ export function EditSidebar(props: Props) {
       {panel?.kind === "card" && props.cardForPanel && (
         <CardSettingsPanel card={props.cardForPanel} chart={props.chartForCard} parameters={props.parameters} tabs={props.tabs}
           onUpdateOptions={props.onUpdateCardOptions} onMoveToTab={props.onMoveCardToTab} />
+      )}
+      {panel?.kind === "viz" && props.vizForPanel && props.onChangeVizOverride && (
+        <CardVizPanel chart={props.vizForPanel.chart} override={props.vizForPanel.override}
+          columns={props.vizForPanel.columns} rows={props.vizForPanel.rows} onChange={props.onChangeVizOverride} />
       )}
       {panel?.kind === "filter" && props.paramForPanel && (
         <FilterSettingsPanel param={props.paramForPanel} allParameters={props.parameters} cardColumns={props.cardColumns ?? []} onChange={props.onChangeParam} onDelete={props.onDeleteParam} />
