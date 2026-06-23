@@ -25,7 +25,7 @@ export interface DashboardSummary {
 }
 export type ParamType = "text" | "number" | "date" | "id" | "category" | "boolean" | "location";
 export type ParamOperator =
-  | "is" | "is-not" | "contains" | "starts-with" | "ends-with"        // text / category / location
+  | "is" | "is-not" | "contains" | "does-not-contain" | "starts-with" | "ends-with"        // text / category / location
   | "=" | "!=" | "between" | ">=" | "<="                              // number
   | "range" | "relative" | "single" | "month-year" | "quarter-year" | "all-options";  // date
 export type ParamWidget = "dropdown" | "search" | "input";

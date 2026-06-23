@@ -6,10 +6,12 @@ describe("OPERATORS", () => {
     expect(OPERATORS.boolean).toEqual(["is"]);
     expect(OPERATORS.location).toEqual(["is", "is-not"]);
   });
-  it("adds month-year and quarter-year to date, keeps does-not-contain absent", () => {
+  it("adds month-year and quarter-year to date", () => {
     expect(OPERATORS.date).toContain("month-year");
     expect(OPERATORS.date).toContain("quarter-year");
-    expect(OPERATORS.text).not.toContain("does-not-contain");
+  });
+  it("text includes does-not-contain", () => {
+    expect(OPERATORS.text).toContain("does-not-contain");
   });
   it("date includes the all-options operator", () => {
     expect(OPERATORS.date).toContain("all-options");

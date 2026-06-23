@@ -1,7 +1,7 @@
 import type { DashboardParameter, ParamType, ParamOperator } from "@/api/dashboards";
 
 export const OPERATORS: Record<ParamType, ParamOperator[]> = {
-  text: ["is", "is-not", "contains", "starts-with", "ends-with"],
+  text: ["is", "is-not", "contains", "does-not-contain", "starts-with", "ends-with"],
   number: ["=", "!=", "between", ">=", "<="],
   date: ["range", "relative", "single", "month-year", "quarter-year", "all-options"],
   id: ["is"],

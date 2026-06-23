@@ -111,6 +111,8 @@ export function paramToFilters(
           return [mkf("ne", v)];
         case "contains":
           return [mkf("like", `%${v}%`)];
+        case "does-not-contain":
+          return [mkf("not_like", `%${v}%`)];
         case "starts-with":
           return [mkf("like", `${v}%`)];
         case "ends-with":
