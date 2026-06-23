@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
-import { useDashboards, useDashboardMutations } from "@/api/dashboards";
+import { useDashboards, useDashboardMutations, type DashboardSummary } from "@/api/dashboards";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger,
 } from "@/components/ui/dialog";
+import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 
 export default function Dashboards() {
   const ws = useParams().workspace!;
@@ -16,6 +17,7 @@ export default function Dashboards() {
   const { create, remove, duplicate, trash, restore } = useDashboardMutations(ws);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
+  const [pendingDelete, setPendingDelete] = useState<DashboardSummary | null>(null);
 
   async function onCreate() {
     if (!name.trim()) { toast.error("Name required"); return; }
@@ -68,7 +70,7 @@ export default function Dashboards() {
                       <Button size="sm" variant="ghost" aria-label={`restore ${d.name}`}
                         onClick={async () => { try { await restore.mutateAsync(d.id); } catch (e) { toast.error(String(e)); } }}>Restore</Button>
                       <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" aria-label={`delete ${d.name} permanently`}
-                        onClick={async () => { if (!confirm(`Permanently delete "${d.name}"?`)) return; try { await remove.mutateAsync(d.id); } catch (e) { toast.error(String(e)); } }}>Delete permanently</Button>
+                        onClick={() => setPendingDelete(d)}>Delete permanently</Button>
                     </>
                   ) : (
                     <>
@@ -84,6 +86,17 @@ export default function Dashboards() {
           </tbody>
         </table>
       )}
+      <ConfirmDeleteDialog
+        open={pendingDelete !== null}
+        onOpenChange={(o) => { if (!o) setPendingDelete(null); }}
+        title="Delete permanently"
+        description={`Permanently delete "${pendingDelete?.name ?? ""}"? This cannot be undone.`}
+        onConfirm={async () => {
+          if (!pendingDelete) return;
+          try { await remove.mutateAsync(pendingDelete.id); } catch (e) { toast.error(String(e)); }
+          setPendingDelete(null);
+        }}
+      />
     </div>
   );
 }
