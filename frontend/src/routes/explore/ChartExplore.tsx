@@ -16,13 +16,8 @@ import { DrillRecordsDialog } from "@/components/chart/DrillRecordsDialog";
 import type { DrillContext } from "@/components/chart/drill";
 import { ChartTypeGallery } from "@/components/chart/ChartTypeGallery";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
-import { FormatSection } from "@/components/chart/settings/FormatSection";
-import { ConditionalFormattingSection } from "@/components/chart/settings/ConditionalFormattingSection";
-import { TableColumnsSection } from "@/components/chart/settings/TableColumnsSection";
-import { cartesianSeriesNames } from "@/components/chart/echarts/options/cartesian";
+import { ChartSettingsSections } from "@/components/chart/settings/ChartSettingsSections";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
-import { CartesianDisplaySection } from "@/components/chart/settings/CartesianDisplaySection";
-import { PieDisplaySection } from "@/components/chart/settings/PieDisplaySection";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -208,28 +203,7 @@ export default function ChartExplore() {
   const finished = status.data?.status === "finished";
   const results = useResults(ws, queryId, 0, finished);
   const resultColumns = (results.data?.columns ?? []).filter((c) => !c.name.startsWith("__grp_"));
-  // In a pivot, only the value (metric) cells are formatted/colored — row/column dimension cells are
-  // headers and never styled. So the Format/Conditional pickers should offer only the value columns.
-  const styleColumns =
-    viz === "pivot_table" ? resultColumns.filter((c) => pVals.includes(c.name))
-    : isCartesianViz(viz) ? resultColumns.filter((c) => cartesian.yMetrics.includes(c.name))
-    : viz === "scalar" ? resultColumns.filter((c) => c.name === scalar.metric)
-    : viz === "pie" ? []   // pie value formatting handled in its tooltip; no column formatting UI
-    : resultColumns;
   const metricTypes = Object.fromEntries((detail.data?.metrics ?? []).map((m) => [m.metric_name, m.data_type ?? "double"]));
-  // Series the cartesian chart will draw — used by the Options panel to offer per-series
-  // colour / rename controls (empty until results arrive).
-  const cartesianSeries = isCartesianViz(viz) && results.data
-    ? cartesianSeriesNames(results.data.columns, results.data.rows, cartesian)
-    : [];
-  // Distinct slice (dimension) values for the pie per-slice colour controls.
-  const pieSlices = viz === "pie" && results.data && pie.dimension
-    ? Array.from(new Set(
-        results.data.rows
-          .map((r) => String(r[results.data!.columns.findIndex((c) => c.name === pie.dimension)] ?? ""))
-          .filter((v) => v !== ""),
-      ))
-    : [];
 
   async function run() {
     setQueryId(null);
@@ -300,6 +274,18 @@ export default function ChartExplore() {
     if (viz === "boxplot") return { spec: specForRun(), boxplot: box, columnSettings };
     if (viz === "sankey") return { spec: specForRun(), sankey, columnSettings };
     return { spec: specForRun(), columnSettings, conditionalFormatting, tableState };
+  }
+
+  // Distribute a ChartParams emitted by ChartSettingsSections back into the local
+  // display state. The settings component only edits these five display fields,
+  // so we only fan those out (everything else in ChartExplore's state model is
+  // left untouched).
+  function applyParamsBack(next: ChartParams) {
+    if (next.cartesian) setCartesian(next.cartesian);
+    if (next.pie) setPie(next.pie);
+    if (next.tableState) setTableState(next.tableState);
+    if (next.columnSettings) setColumnSettings(next.columnSettings);
+    if (next.conditionalFormatting) setConditionalFormatting(next.conditionalFormatting);
   }
 
   async function save() {
@@ -716,43 +702,13 @@ export default function ChartExplore() {
               </div>
             )}
 
-            {isCartesianViz(viz) && (
-              <div className="space-y-1">
-                <SectionLabel>Options</SectionLabel>
-                <CartesianDisplaySection kind={viz} config={cartesian} onChange={patchCartesian} seriesNames={cartesianSeries} />
-              </div>
-            )}
-            {viz === "pie" && (
-              <div className="space-y-1">
-                <SectionLabel>Options</SectionLabel>
-                <PieDisplaySection config={pie} onChange={patchPie} sliceNames={pieSlices} />
-              </div>
-            )}
-
-            {resultColumns.length === 0 ? (
-              <p className="text-xs text-muted-foreground">Run the chart to configure column formatting.</p>
-            ) : (
-              <>
-                {viz === "table" && (
-                  <div className="space-y-1.5">
-                    <SectionLabel>Columns</SectionLabel>
-                    <TableColumnsSection columns={resultColumns} value={tableState} onChange={setTableState} />
-                  </div>
-                )}
-                {styleColumns.length > 0 && (
-                  <div className="space-y-1.5">
-                    <SectionLabel>Formatting</SectionLabel>
-                    <FormatSection columns={styleColumns} value={columnSettings} onChange={setColumnSettings} />
-                  </div>
-                )}
-                {(viz === "table" || viz === "pivot_table") && (
-                  <div className="space-y-1.5">
-                    <SectionLabel>Conditional formatting</SectionLabel>
-                    <ConditionalFormattingSection columns={styleColumns} rules={conditionalFormatting} isPivot={viz === "pivot_table"} onChange={setConditionalFormatting} />
-                  </div>
-                )}
-              </>
-            )}
+            <ChartSettingsSections
+              vizType={viz}
+              params={paramsForSave()}
+              columns={resultColumns}
+              rows={results.data?.rows}
+              onChange={applyParamsBack}
+            />
           </TabsContent>
         </Tabs>
       </div>
