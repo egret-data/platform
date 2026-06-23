@@ -1,4 +1,4 @@
-import type { ChartFilter, ValueFilterOp, Chart } from "@/api/charts";
+import type { ChartFilter, ValueFilterOp, Chart, ChartParams, VizType } from "@/api/charts";
 import type { DashboardParameter } from "@/api/dashboards";
 
 export function slugify(name: string, existing: string[]): string {
@@ -307,4 +307,26 @@ export function interpolateParams(
     const v = values[slug];
     return v == null ? "" : Array.isArray(v) ? v.join(", ") : String(v);
   });
+}
+
+/** Merge a display-only override over a chart's params (never the query `spec`); optionally override viz_type. */
+export function applyVizOverride(
+  chart: Chart,
+  override?: Record<string, unknown>,
+): { viz_type: VizType; params: ChartParams } {
+  if (!override) return { viz_type: chart.viz_type, params: chart.params };
+  const { viz_type: ovViz, spec: _ignoredSpec, ...display } = override as { viz_type?: VizType; spec?: unknown };
+  const params: ChartParams = { ...chart.params };
+  const baseParams = chart.params as unknown as Record<string, unknown>;
+  const target = params as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(display)) {
+    const baseVal = baseParams[k];
+    // deep-merge plain objects (config sub-objects like cartesian/pie); replace arrays/primitives
+    target[k] =
+      baseVal && typeof baseVal === "object" && !Array.isArray(baseVal) && v && typeof v === "object" && !Array.isArray(v)
+        ? { ...(baseVal as object), ...(v as object) }
+        : v;
+  }
+  params.spec = chart.params.spec; // query is always the chart's spec (+ dashboard injection upstream)
+  return { viz_type: ovViz ?? chart.viz_type, params };
 }
