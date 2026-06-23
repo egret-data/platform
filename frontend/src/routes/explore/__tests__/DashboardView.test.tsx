@@ -144,7 +144,7 @@ describe("DashboardView (Phase B — duplicate/replace)", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
     fireEvent.click(screen.getAllByRole("button", { name: /replace card/i })[0]);
-    fireEvent.click(screen.getByRole("button", { name: /^use sales$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^sales$/i }));
     expect(screen.getAllByRole("button", { name: /remove card/i }).length).toBeGreaterThan(0);
   });
 });

@@ -28,6 +28,7 @@ import { slugify, applyParamsToChart, computeLinkedFilters, isBlank } from "@/co
 import { useColumnValues } from "@/api/useColumnValues";
 import { useDashboardTabs } from "@/api/useDashboardTabs";
 import { DashboardTabBar } from "@/components/chart/dashboard/DashboardTabBar";
+import { ChartPickerList } from "@/components/chart/dashboard/ChartPickerList";
 import { startTabsDraft, serializeLayout, addTab, renameTab, reorderTab, deleteTab, duplicateTab, moveCardToTab, type DraftTab, type DraftCard } from "@/components/chart/dashboard/tabs";
 import { toast } from "sonner";
 
@@ -490,13 +491,7 @@ export default function DashboardView() {
       <Dialog open={replacingId !== null} onOpenChange={(o) => { if (!o) setReplacingId(null); }}>
         <DialogContent>
           <DialogHeader><DialogTitle>Replace chart</DialogTitle></DialogHeader>
-          <div className="flex flex-wrap gap-1 py-2">
-            {(charts ?? []).map((ch) => (
-              <Button key={ch.id} size="sm" variant="outline" aria-label={`use ${ch.name}`} onClick={() => replaceCard(replacingId!, ch)}>
-                {ch.name}
-              </Button>
-            ))}
-          </div>
+          <ChartPickerList charts={charts ?? []} onPick={(ch) => replaceCard(replacingId!, ch)} autoFocus />
         </DialogContent>
       </Dialog>
       {drillMenu && (
