@@ -304,12 +304,12 @@ export default function DashboardView() {
           )}
           {editing ? (
             <>
-              <Button size="sm" variant="outline" onClick={() => setEditPanel({ kind: "add" })}>+ Chart</Button>
+              <Button size="sm" variant="outline" onClick={() => openPanel({ kind: "add" })}>+ Chart</Button>
               <Button size="sm" variant="outline" onClick={() => {
                 const slug = slugify("filter", parameters.map((p) => p.slug));
                 const id = `new-${slug}-${cardSeqRef.current++}`;
                 setDraftParameters([...parameters, { id, name: "Filter", slug, type: "text", operator: "is" }]);
-                setEditPanel({ kind: "filter", paramId: id });
+                openPanel({ kind: "filter", paramId: id });
               }}>+ Filter</Button>
               <div className="flex items-center gap-1 rounded border p-0.5">
                 <button type="button" aria-label="width full" className={`rounded px-2 py-0.5 text-xs ${draftWidth === "full" ? "bg-accent" : ""}`} onClick={() => setDraftWidth("full")}>Full</button>
@@ -370,7 +370,7 @@ export default function DashboardView() {
         <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed py-20 text-center">
           <Pencil className="h-8 w-8 text-muted-foreground/40" />
           <p className="text-sm text-muted-foreground">{cards.length === 0 ? "This dashboard is empty." : "No cards on this tab."}</p>
-          <button type="button" className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90" onClick={() => setEditPanel({ kind: "add" })}>Add a chart</button>
+          <button type="button" className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90" onClick={() => openPanel({ kind: "add" })}>Add a chart</button>
         </div>
       ) : cards.length === 0 ? (
         <p className="text-muted-foreground">No cards yet. Click Edit to add charts.</p>
