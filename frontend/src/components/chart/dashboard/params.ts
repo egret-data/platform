@@ -28,6 +28,13 @@ export function summarize(param: DashboardParameter, value: unknown): string {
     }
     return `${vals.length} selections`;
   }
+  if (param.type === "boolean") {
+    return value === true || value === "true" ? "True" : "False";
+  }
+  if (param.type === "date" && param.operator === "quarter-year") {
+    const [y, q] = String(value).split("-");
+    return q ? `Q${q} ${y}` : String(value);
+  }
   if (param.type === "date" && param.operator === "relative") {
     return RELATIVE_LABELS[String(value)] ?? String(value);
   }
@@ -102,6 +109,27 @@ export function paramToFilters(
         if (!isBlank(end)) out.push(mkf("le", String(end)));
         return out;
       }
+      if (param.operator === "month-year") {
+        if (isBlank(value)) return [];
+        const [y, m] = String(value).split("-").map(Number);
+        if (!y || !m) return [];
+        // Date.UTC(y, m, 0) = day 0 of month m+1 (m is 1-based) = last day of month m.
+        const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+        const mm = String(m).padStart(2, "0");
+        return [mkf("ge", `${y}-${mm}-01`), mkf("le", `${y}-${mm}-${String(last).padStart(2, "0")}`)];
+      }
+      if (param.operator === "quarter-year") {
+        if (isBlank(value)) return [];
+        const [y, q] = String(value).split("-").map(Number);
+        if (!y || !q || q < 1 || q > 4) return [];
+        const startM = (q - 1) * 3 + 1;
+        const endM = q * 3;
+        const lastDay = new Date(Date.UTC(y, endM, 0)).getUTCDate();
+        return [
+          mkf("ge", `${y}-${String(startM).padStart(2, "0")}-01`),
+          mkf("le", `${y}-${String(endM).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`),
+        ];
+      }
       // relative
       const days = RELATIVE_DAYS[String(value)];
       if (!days) return [];
@@ -121,6 +149,22 @@ export function paramToFilters(
           ? []
           : [value];
       return arr.length ? [mkf("in", arr)] : [];
+    }
+
+    case "boolean": {
+      if (isBlank(value)) return [];
+      const b = value === true || value === "true";
+      return [mkf("eq", b)];
+    }
+
+    case "location": {
+      const arr = Array.isArray(value)
+        ? value.filter((v) => !isBlank(v))
+        : isBlank(value)
+          ? []
+          : [value];
+      if (!arr.length) return [];
+      return [mkf(param.operator === "is-not" ? "not_in" : "in", arr)];
     }
 
     default:
@@ -152,6 +196,31 @@ export function applyParamsToChart(
       },
     },
   };
+}
+
+/**
+ * Filters that constrain a parameter's option list to values consistent with its linked
+ * parameters' current values. Each linked param must be mapped on the SAME card (so we can read
+ * its column from `mappings`); linked params with no value or no mapping are ignored.
+ */
+export function computeLinkedFilters(
+  param: DashboardParameter,
+  mappings: Record<string, string>,
+  parameters: DashboardParameter[],
+  values: Record<string, unknown>,
+  now: Date = new Date(),
+): ChartFilter[] {
+  const out: ChartFilter[] = [];
+  for (const linkedId of param.filteringParameters ?? []) {
+    const linked = parameters.find((p) => p.id === linkedId);
+    if (!linked) continue;
+    const col = mappings[linkedId];
+    if (!col) continue;
+    const v = values[linked.slug];
+    if (isBlank(v)) continue;
+    out.push(...paramToFilters(linked, v, col, now));
+  }
+  return out;
 }
 
 export function interpolateParams(

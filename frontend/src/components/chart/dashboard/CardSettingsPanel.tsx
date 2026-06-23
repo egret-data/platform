@@ -45,7 +45,6 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
   }
 
   const cols = chart ? [...chart.params.spec.dimensions, ...chart.params.spec.columns] : [];
-  const mappings = (card.options.paramMappings as Record<string, string>) ?? {};
   const cb = (card.options.clickBehavior as ClickBehavior | undefined) ?? { type: "menu" };
   return (
     <div className="flex flex-col gap-3 p-3">
@@ -53,22 +52,6 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
       <label className="flex flex-col gap-1 text-xs text-muted-foreground">Title
         <input aria-label="card title" placeholder="Blank = chart name" className={inp} value={(card.options.title as string) ?? ""} onChange={(e) => onUpdateOptions({ title: e.target.value })} />
       </label>
-
-      {parameters.length > 0 && (
-        <div className="flex flex-col gap-1">
-          <div className="text-xs font-medium text-muted-foreground">Filters</div>
-          {parameters.map((p) => (
-            <label key={p.id} className="flex items-center justify-between gap-2 text-sm">
-              <span>{p.name}</span>
-              <select aria-label={`map ${p.name}`} className={sel} value={mappings[p.id] ?? ""}
-                onChange={(e) => onUpdateOptions({ paramMappings: { ...mappings, [p.id]: e.target.value } })}>
-                <option value="">none</option>
-                {cols.map((col) => <option key={col} value={col}>{col}</option>)}
-              </select>
-            </label>
-          ))}
-        </div>
-      )}
 
       <div className="flex flex-col gap-1">
         <label className="flex items-center justify-between gap-2 text-sm"><span>On click</span>

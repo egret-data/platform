@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Calendar, Hash, Tag, Type, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Calendar, Hash, MapPin, Tag, ToggleLeft, Type, X } from "lucide-react";
 import type { DashboardParameter } from "@/api/dashboards";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Input } from "@/components/ui/input";
@@ -15,12 +15,15 @@ function iconFor(p: DashboardParameter) {
   if (p.type === "date") return Calendar;
   if (p.type === "number" || p.type === "id") return Hash;
   if (p.type === "category") return Tag;
+  if (p.type === "location") return MapPin;
+  if (p.type === "boolean") return ToggleLeft;
   return Type;
 }
 
 /** Cleared value for a parameter: [] for multi-value, "" otherwise. */
 function clearedValue(p: DashboardParameter): unknown {
-  return p.type === "category" || (p.type === "number" && p.operator === "between") ||
+  return p.type === "category" || p.type === "location" ||
+    (p.type === "number" && p.operator === "between") ||
     (p.type === "date" && p.operator === "range") ? [] : "";
 }
 
@@ -66,10 +69,66 @@ export function FilterPill({ param, value, options, onChange }: Props) {
 
 function FilterControl({ param, value, options, onChange }: Props) {
   const [search, setSearch] = useState("");
+  const [qy, setQy] = useState(() => {
+    const [y = "", q = ""] = String(value ?? "").split("-");
+    return { y, q };
+  });
+  // Re-seed local quarter-year state when the external value changes (e.g. the
+  // clear-X button or a programmatic default), so local state never goes stale.
+  useEffect(() => {
+    const [y2 = "", q2 = ""] = String(value ?? "").split("-");
+    setQy({ y: y2, q: q2 });
+  }, [value]);
   const input = "h-8 w-full rounded border bg-background px-2 text-sm";
+  const widget = param.widget ?? "dropdown";
+  const listType = param.type === "category" || param.type === "location";
 
-  if (param.type === "category" || (param.type === "id" && options.length > 0)) {
-    const multi = param.type === "category";
+  // boolean: 3-state Any / True / False
+  if (param.type === "boolean") {
+    return (
+      <select aria-label={`${param.name} value`} className={input}
+        value={value === true || value === "true" ? "true" : value === false || value === "false" ? "false" : ""}
+        onChange={(e) => onChange(e.target.value)}>
+        <option value="">Any</option>
+        <option value="true">True</option>
+        <option value="false">False</option>
+      </select>
+    );
+  }
+
+  // month-year
+  if (param.type === "date" && param.operator === "month-year") {
+    return <input aria-label={`${param.name} value`} type="month" className={input}
+      value={String(value ?? "")} onChange={(e) => onChange(e.target.value)} />;
+  }
+
+  // quarter-year: year input + quarter select, encoded as "YYYY-Q"
+  if (param.type === "date" && param.operator === "quarter-year") {
+    const emit = (y: string, quarter: string) => {
+      setQy({ y, q: quarter });
+      onChange(y ? `${y}-${quarter || "1"}` : "");
+    };
+    return (
+      <div className="flex items-center gap-1">
+        <input aria-label={`${param.name} year`} type="number" placeholder="Year" className={input}
+          value={qy.y} onChange={(e) => emit(e.target.value, qy.q)} />
+        <select aria-label={`${param.name} quarter`} className={input} value={qy.q || "1"}
+          onChange={(e) => emit(qy.y || String(new Date().getUTCFullYear()), e.target.value)}>
+          <option value="1">Q1</option><option value="2">Q2</option><option value="3">Q3</option><option value="4">Q4</option>
+        </select>
+      </div>
+    );
+  }
+
+  // widget=input on a list-ish type → single free-text value
+  if (widget === "input" && (listType || param.type === "id" || param.type === "text")) {
+    return <Input aria-label={`${param.name} value`} className={input}
+      value={String(value ?? "")} onChange={(e) => onChange(e.target.value)} />;
+  }
+
+  // dropdown / search list for category, location, and id-with-options
+  if (listType || (param.type === "id" && options.length > 0)) {
+    const multi = listType;
     const selected = Array.isArray(value) ? (value as string[]) : isBlank(value) ? [] : [String(value)];
     const shown = options.filter((o) => o.toLowerCase().includes(search.toLowerCase()));
     const toggle = (o: string) => {
