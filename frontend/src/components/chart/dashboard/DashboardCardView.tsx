@@ -3,6 +3,7 @@ import type { DashboardCard, DashboardParameter } from "@/api/dashboards";
 import type { Chart } from "@/api/charts";
 import { useChartData } from "@/api/useChartData";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
+import { ChartErrorBoundary } from "@/components/chart/ChartErrorBoundary";
 import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
 import type { DrillContext } from "@/components/chart/drill";
 import { TextCard } from "./TextCard";
@@ -41,7 +42,11 @@ function ChartCardTile({ ws, card, chart, refreshNonce, onValueClick, blocked, e
             : data.isLoading ? <div className="text-sm text-muted-foreground">Loading…</div>
             : (() => {
               const eff = applyVizOverride(chart, card.options.vizOverride as Record<string, unknown> | undefined);
-              return <ChartRenderer vizType={eff.viz_type} params={eff.params} columns={data.columns} rows={data.rows} onValueClick={onValueClick} />;
+              return (
+                <ChartErrorBoundary resetKey={`${chart.id}:${eff.viz_type}:${data.columns?.length ?? 0}:${data.rows?.length ?? 0}`}>
+                  <ChartRenderer vizType={eff.viz_type} params={eff.params} columns={data.columns} rows={data.rows} onValueClick={onValueClick} />
+                </ChartErrorBoundary>
+              );
             })();
           return autoHeight && onAutoHeight ? <AutoHeightMeasure rowHeight={rowHeight ?? 0} onRows={onAutoHeight}>{body}</AutoHeightMeasure> : body;
         })()}
