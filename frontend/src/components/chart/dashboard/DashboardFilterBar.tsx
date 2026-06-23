@@ -21,7 +21,7 @@ export function DashboardFilterBar({ parameters, values, onChange, optionsBySlug
     <div className="mb-3 flex flex-col gap-1">
       <div className="flex flex-wrap items-center gap-2">
         {parameters.map((p) => (
-          <FilterPill key={p.id} param={p} value={values[p.slug]} options={optionsBySlug[p.slug] ?? []} onChange={(v) => onChange(p.slug, v)} />
+          <FilterPill key={p.id || p.slug} param={p} value={values[p.slug]} options={optionsBySlug[p.slug] ?? []} onChange={(v) => onChange(p.slug, v)} />
         ))}
       </div>
       {missingRequired.length > 0 && (
