@@ -43,7 +43,7 @@ export default function DashboardView() {
   const { workspace: ws, id } = useParams() as { workspace: string; id: string };
   const { data: dash, isLoading } = useDashboard(ws, id);
   const { data: charts } = useCharts(ws);
-  const { update } = useDashboardMutations(ws);
+  const { update, restore: restoreMut } = useDashboardMutations(ws);
   const [editing, setEditing] = useState(false);
   const [draftCards, setDraftCards] = useState<DraftCard[] | null>(null);
   const [draftParameters, setDraftParameters] = useState<DashboardParameter[] | null>(null);
@@ -210,6 +210,12 @@ export default function DashboardView() {
         </div>
       )}
       <div className={effectiveWidth === "fixed" ? "mx-auto w-full max-w-[1200px]" : ""}>
+      {dash.deleted_at && (
+        <div className="mb-3 flex items-center justify-between rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
+          <span>This dashboard is in the trash.</span>
+          <Button size="sm" variant="outline" onClick={async () => { try { await restoreMut.mutateAsync(dash.id); } catch (e) { toast.error(String(e)); } }}>Restore</Button>
+        </div>
+      )}
       <div className="mb-3 flex items-center justify-between">
         <h1 className="text-lg font-semibold">{dash.name}</h1>
         <div className="flex gap-2">

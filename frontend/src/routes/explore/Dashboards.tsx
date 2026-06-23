@@ -11,8 +11,9 @@ import {
 export default function Dashboards() {
   const ws = useParams().workspace!;
   const nav = useNavigate();
-  const { data, isLoading } = useDashboards(ws);
-  const { create, remove, duplicate } = useDashboardMutations(ws);
+  const [showTrash, setShowTrash] = useState(false);
+  const { data, isLoading } = useDashboards(ws, { trashed: showTrash });
+  const { create, remove, duplicate, trash, restore } = useDashboardMutations(ws);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
 
@@ -28,23 +29,28 @@ export default function Dashboards() {
   return (
     <div className="p-4">
       <div className="mb-3 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Dashboards</h1>
-        <Dialog open={open} onOpenChange={setOpen}>
-          <DialogTrigger asChild><Button size="sm">+ Dashboard</Button></DialogTrigger>
-          <DialogContent>
-            <DialogHeader><DialogTitle>New dashboard</DialogTitle></DialogHeader>
-            <div className="flex gap-2 py-2">
-              <Input autoFocus placeholder="Name" value={name} onChange={(e) => setName(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") onCreate(); }} />
-              <Button onClick={onCreate} disabled={create.isPending}>Create</Button>
-            </div>
-          </DialogContent>
-        </Dialog>
+        <h1 className="text-lg font-semibold">{showTrash ? "Trash" : "Dashboards"}</h1>
+        <div className="flex gap-2">
+          <Button size="sm" variant={showTrash ? "default" : "outline"} onClick={() => setShowTrash((v) => !v)}>
+            {showTrash ? "← Dashboards" : "Trash"}
+          </Button>
+          <Dialog open={open} onOpenChange={setOpen}>
+            <DialogTrigger asChild><Button size="sm">+ Dashboard</Button></DialogTrigger>
+            <DialogContent>
+              <DialogHeader><DialogTitle>New dashboard</DialogTitle></DialogHeader>
+              <div className="flex gap-2 py-2">
+                <Input autoFocus placeholder="Name" value={name} onChange={(e) => setName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") onCreate(); }} />
+                <Button onClick={onCreate} disabled={create.isPending}>Create</Button>
+              </div>
+            </DialogContent>
+          </Dialog>
+        </div>
       </div>
       {isLoading ? (
         <p className="text-muted-foreground">Loading…</p>
       ) : !data?.length ? (
-        <p className="text-muted-foreground">No dashboards yet.</p>
+        <p className="text-muted-foreground">{showTrash ? "Trash is empty." : "No dashboards yet."}</p>
       ) : (
         <table className="w-full text-sm">
           <thead className="text-left text-muted-foreground">
@@ -57,15 +63,21 @@ export default function Dashboards() {
                 <td className="pr-3 text-muted-foreground">{d.card_count}</td>
                 <td className="pr-3 text-muted-foreground">{new Date(d.updated_at).toLocaleString()}</td>
                 <td className="flex gap-1">
-                  <Button size="sm" variant="ghost" aria-label={`duplicate ${d.name}`}
-                    onClick={async () => {
-                      try { const copy = await duplicate.mutateAsync(d.id); nav(`/explore/${ws}/dashboards/${copy.id}`); }
-                      catch (e) { toast.error(String(e)); }
-                    }}>Duplicate</Button>
-                  <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive"
-                    onClick={async () => { try { await remove.mutateAsync(d.id); } catch (e) { toast.error(String(e)); } }}>
-                    Delete
-                  </Button>
+                  {showTrash ? (
+                    <>
+                      <Button size="sm" variant="ghost" aria-label={`restore ${d.name}`}
+                        onClick={async () => { try { await restore.mutateAsync(d.id); } catch (e) { toast.error(String(e)); } }}>Restore</Button>
+                      <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" aria-label={`delete ${d.name} permanently`}
+                        onClick={async () => { if (!confirm(`Permanently delete "${d.name}"?`)) return; try { await remove.mutateAsync(d.id); } catch (e) { toast.error(String(e)); } }}>Delete permanently</Button>
+                    </>
+                  ) : (
+                    <>
+                      <Button size="sm" variant="ghost" aria-label={`duplicate ${d.name}`}
+                        onClick={async () => { try { const c = await duplicate.mutateAsync(d.id); nav(`/explore/${ws}/dashboards/${c.id}`); } catch (e) { toast.error(String(e)); } }}>Duplicate</Button>
+                      <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" aria-label={`move ${d.name} to trash`}
+                        onClick={async () => { try { await trash.mutateAsync(d.id); } catch (e) { toast.error(String(e)); } }}>Delete</Button>
+                    </>
+                  )}
                 </td>
               </tr>
             ))}
