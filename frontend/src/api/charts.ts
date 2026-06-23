@@ -11,7 +11,7 @@ export type CartesianViz = (typeof CARTESIAN_VIZ)[number];
 export const isCartesianViz = (v: VizType): v is CartesianViz =>
   (CARTESIAN_VIZ as readonly string[]).includes(v);
 export type FilterOp =
-  | "eq" | "ne" | "gt" | "ge" | "lt" | "le" | "like" | "in" | "not_in" | "is_null" | "is_not_null";
+  | "eq" | "ne" | "gt" | "ge" | "lt" | "le" | "like" | "not_like" | "in" | "not_in" | "is_null" | "is_not_null";
 
 export type NullFilterOp = "is_null" | "is_not_null";
 export type ValueFilterOp = Exclude<FilterOp, NullFilterOp>;

@@ -55,6 +55,7 @@ pub enum FilterOp {
     Lt,
     Le,
     Like,
+    NotLike,
     In,
     NotIn,
     IsNull,
@@ -174,6 +175,7 @@ fn render_filter(engine: Engine, columns: &[DatasetColumn], f: &Filter) -> Resul
                 FilterOp::Lt => "<",
                 FilterOp::Le => "<=",
                 FilterOp::Like => "LIKE",
+                FilterOp::NotLike => "NOT LIKE",
                 _ => unreachable!("handled above"),
             };
             format!("{lhs} {op} {lit}")
@@ -537,6 +539,27 @@ mod tests {
         assert!(sql.contains("\"qty\" > 10"), "{sql}");
         assert!(sql.contains("\"region\" IN ('A', 'B')"), "{sql}");
         assert!(sql.contains("\"qty\" IS NOT NULL"), "{sql}");
+    }
+
+    #[test]
+    fn not_like_filter_renders_not_like() {
+        let cols = vec![col("region", "string", None)];
+        let metrics = vec![metric("revenue", "SUM(price)")];
+        let spec = QuerySpec {
+            metrics: vec!["revenue".into()],
+            dimensions: vec!["region".into()],
+            columns: vec![],
+            filters: vec![Filter {
+                col: "region".into(),
+                op: FilterOp::NotLike,
+                value: serde_json::json!("%spam%"),
+            }],
+            orderby: vec![],
+            row_limit: 100,
+            rollup_groups: vec![],
+        };
+        let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
+        assert!(sql.contains("\"region\" NOT LIKE '%spam%'"), "{sql}");
     }
 
     #[test]
