@@ -18,7 +18,7 @@ export function BigNumber({
   const text = raw == null ? "—" : formatValue(raw, type, format);
 
   return (
-    <div className="flex h-[60vh] flex-col items-center justify-center">
+    <div className="flex h-full min-h-[5rem] flex-col items-center justify-center">
       <div className="text-[2.5rem] font-bold leading-none tabular-nums text-foreground">{text}</div>
       {metric && <div className="mt-2 text-sm text-muted-foreground">{metric}</div>}
     </div>
