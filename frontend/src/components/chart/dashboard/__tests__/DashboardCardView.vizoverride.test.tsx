@@ -1,0 +1,34 @@
+import { describe, it, expect, vi } from "vitest";
+import { render } from "@testing-library/react";
+
+const seen: { vizType?: string; params?: unknown } = {};
+vi.mock("@/components/chart/ChartRenderer", () => ({
+  ChartRenderer: (props: { vizType: string; params: unknown }) => {
+    seen.vizType = props.vizType;
+    seen.params = props.params;
+    return null;
+  },
+}));
+vi.mock("@/api/useChartData", () => ({
+  useChartData: () => ({ columns: [{ name: "rev", type: "number" }], rows: [[1]], isLoading: false, error: null }),
+}));
+
+import { DashboardCardView } from "../DashboardCardView";
+
+const chart = {
+  id: "c", dataset_id: "d", name: "C", description: "", created_by: null, updated_at: "", viz_type: "bar",
+  params: { spec: { metrics: ["rev"], dimensions: [], columns: [], filters: [], orderby: [], row_limit: 100, rollup_groups: [] }, cartesian: { yMetrics: ["rev"], stacked: false } },
+} as never;
+const card = {
+  id: "k", card_type: "chart", chart_id: "c",
+  options: { vizOverride: { viz_type: "line", cartesian: { stacked: true } } },
+} as never;
+
+describe("DashboardCardView vizOverride", () => {
+  it("renders ChartRenderer with the overridden viz_type + merged display, spec intact", () => {
+    render(<DashboardCardView ws="eng" card={card} chart={chart} refreshNonce={0} parameters={[]} paramValues={{}} />);
+    expect(seen.vizType).toBe("line");
+    expect((seen.params as { cartesian: { stacked: boolean } }).cartesian.stacked).toBe(true);
+    expect((seen.params as { spec: unknown }).spec).toEqual((chart as { params: { spec: unknown } }).params.spec);
+  });
+});
