@@ -20,6 +20,8 @@ export interface DashboardTab {
 export interface DashboardSummary {
   id: string; name: string; description: string;
   created_by: string | null; card_count: number; updated_at: string;
+  deleted_at?: string | null;
+  bookmarked?: boolean;
 }
 export type ParamType = "text" | "number" | "date" | "id" | "category" | "boolean" | "location";
 export type ParamOperator =
@@ -46,6 +48,8 @@ export interface DashboardDetail {
   tabs: DashboardTab[];
   width: "fixed" | "full";
   cards: DashboardCard[];
+  deleted_at?: string | null;
+  bookmarked?: boolean;
 }
 export interface CardInput {
   chart_id: string | null;
@@ -63,10 +67,11 @@ export const dashboardKeys = {
   one: (ws: string, id: string) => ["dashboards", ws, id] as const,
 };
 
-export function useDashboards(ws: string) {
+export function useDashboards(ws: string, opts?: { trashed?: boolean }) {
+  const trashed = !!opts?.trashed;
   return useQuery<DashboardSummary[]>({
-    queryKey: dashboardKeys.list(ws),
-    queryFn: () => apiJson<DashboardSummary[]>(`/ws/${ws}/dashboards`),
+    queryKey: [...dashboardKeys.list(ws), { trashed }],
+    queryFn: () => apiJson<DashboardSummary[]>(`/ws/${ws}/dashboards${trashed ? "?trashed=true" : ""}`),
   });
 }
 
@@ -98,5 +103,26 @@ export function useDashboardMutations(ws: string) {
     mutationFn: (id: string) => apiFetch(`/ws/${ws}/dashboards/${id}`, { method: "DELETE" }),
     onSuccess: () => invalidate(),
   });
-  return { create, update, remove };
+  const duplicate = useMutation({
+    mutationFn: (id: string) =>
+      apiJson<DashboardDetail>(`/ws/${ws}/dashboards/${id}/duplicate`, { method: "POST" }),
+    onSuccess: () => invalidate(),
+  });
+  const trash = useMutation({
+    mutationFn: (id: string) => apiJson(`/ws/${ws}/dashboards/${id}/trash`, { method: "POST" }),
+    onSuccess: () => invalidate(),
+  });
+  const restore = useMutation({
+    mutationFn: (id: string) => apiJson(`/ws/${ws}/dashboards/${id}/restore`, { method: "POST" }),
+    onSuccess: () => invalidate(),
+  });
+  const addBookmark = useMutation({
+    mutationFn: (id: string) => apiJson(`/ws/${ws}/dashboards/${id}/bookmark`, { method: "POST" }),
+    onSuccess: () => invalidate(),
+  });
+  const removeBookmark = useMutation({
+    mutationFn: (id: string) => apiJson(`/ws/${ws}/dashboards/${id}/bookmark`, { method: "DELETE" }),
+    onSuccess: () => invalidate(),
+  });
+  return { create, update, remove, duplicate, trash, restore, addBookmark, removeBookmark };
 }

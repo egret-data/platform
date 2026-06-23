@@ -24,6 +24,7 @@ pub struct Dashboard {
     pub created_by: Option<Uuid>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub width: String,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -63,6 +64,14 @@ struct DashboardWithCount {
     card_count: i64,
 }
 
+#[derive(sqlx::FromRow)]
+struct DashboardWithCountBm {
+    #[sqlx(flatten)]
+    dash: Dashboard,
+    card_count: i64,
+    bookmarked: bool,
+}
+
 /// A card as supplied by the client when saving a layout (no server id yet).
 #[derive(Debug, Clone)]
 pub struct NewCard {
@@ -77,7 +86,8 @@ pub struct NewCard {
     pub tab_index: Option<usize>,
 }
 
-const COLS: &str = "id, workspace_id, name, description, parameters, created_by, updated_at, width";
+const COLS: &str =
+    "id, workspace_id, name, description, parameters, created_by, updated_at, width, deleted_at";
 const CARD_COLS: &str =
     "id, dashboard_id, chart_id, card_type, grid_col, grid_row, size_x, size_y, options, ordinal, tab_id";
 
@@ -126,20 +136,42 @@ impl DashboardRepo {
     }
 
     /// Dashboards in a workspace, each with its card count, newest first.
+    /// `trashed` selects the trash bin (soft-deleted) instead of the live list.
     pub async fn list_by_workspace(
         &self,
         workspace_id: Uuid,
+        trashed: bool,
     ) -> Result<Vec<(Dashboard, i64)>, BiError> {
+        let pred = if trashed {
+            "deleted_at IS NOT NULL"
+        } else {
+            "deleted_at IS NULL"
+        };
         let sql = format!(
             "SELECT {COLS}, \
              (SELECT count(*) FROM dashboard_cards c WHERE c.dashboard_id = dashboards.id) AS card_count \
-             FROM dashboards WHERE workspace_id = $1 ORDER BY updated_at DESC"
+             FROM dashboards WHERE workspace_id = $1 AND {pred} ORDER BY updated_at DESC"
         );
         let rows = sqlx::query_as::<_, DashboardWithCount>(&sql)
             .bind(workspace_id)
             .fetch_all(&self.db.pool)
             .await?;
         Ok(rows.into_iter().map(|r| (r.dash, r.card_count)).collect())
+    }
+
+    /// Soft-delete (trashed=true → deleted_at=now()) or restore (false → NULL).
+    pub async fn set_trashed(&self, id: Uuid, trashed: bool) -> Result<(), BiError> {
+        let sql = if trashed {
+            "UPDATE dashboards SET deleted_at = now() WHERE id = $1"
+        } else {
+            "UPDATE dashboards SET deleted_at = NULL WHERE id = $1"
+        };
+        sqlx::query(sql)
+            .bind(id)
+            .execute(&self.db.pool)
+            .await
+            .map_err(map_conflict_err)?;
+        Ok(())
     }
 
     /// Update dashboard metadata only (name/description). Card layout goes through
@@ -166,12 +198,92 @@ impl DashboardRepo {
         Ok(())
     }
 
+    /// Permanently delete a dashboard. Cards/tabs cascade via FK; polymorphic bookmark rows do not, so purge them in the same transaction.
     pub async fn delete(&self, id: Uuid) -> Result<(), BiError> {
+        let mut tx = self.db.pool.begin().await?;
+        // bookmarks are polymorphic (no FK on entity_id) so they don't cascade — purge manually.
+        sqlx::query("DELETE FROM bookmarks WHERE entity_type='dashboard' AND entity_id=$1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM dashboards WHERE id=$1")
             .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn add_bookmark(
+        &self,
+        user: Uuid,
+        entity_type: &str,
+        entity_id: Uuid,
+    ) -> Result<(), BiError> {
+        sqlx::query(
+            "INSERT INTO bookmarks (user_id, entity_type, entity_id) VALUES ($1,$2,$3) \
+             ON CONFLICT (user_id, entity_type, entity_id) DO NOTHING",
+        )
+        .bind(user)
+        .bind(entity_type)
+        .bind(entity_id)
+        .execute(&self.db.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn remove_bookmark(
+        &self,
+        user: Uuid,
+        entity_type: &str,
+        entity_id: Uuid,
+    ) -> Result<(), BiError> {
+        sqlx::query("DELETE FROM bookmarks WHERE user_id=$1 AND entity_type=$2 AND entity_id=$3")
+            .bind(user)
+            .bind(entity_type)
+            .bind(entity_id)
             .execute(&self.db.pool)
             .await?;
         Ok(())
+    }
+
+    pub async fn is_bookmarked(&self, user: Uuid, id: Uuid) -> Result<bool, BiError> {
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM bookmarks WHERE user_id=$1 AND entity_type='dashboard' AND entity_id=$2)",
+        )
+        .bind(user)
+        .bind(id)
+        .fetch_one(&self.db.pool)
+        .await?)
+    }
+
+    /// Like `list_by_workspace` but also returns a per-user `bookmarked` flag.
+    pub async fn list_by_workspace_for(
+        &self,
+        workspace_id: Uuid,
+        user: Uuid,
+        trashed: bool,
+    ) -> Result<Vec<(Dashboard, i64, bool)>, BiError> {
+        let pred = if trashed {
+            "deleted_at IS NOT NULL"
+        } else {
+            "deleted_at IS NULL"
+        };
+        let sql = format!(
+            "SELECT {COLS}, \
+             (SELECT count(*) FROM dashboard_cards c WHERE c.dashboard_id = dashboards.id) AS card_count, \
+             EXISTS (SELECT 1 FROM bookmarks b WHERE b.user_id = $2 AND b.entity_type='dashboard' AND b.entity_id = dashboards.id) AS bookmarked \
+             FROM dashboards WHERE workspace_id = $1 AND {pred} ORDER BY updated_at DESC"
+        );
+        let rows = sqlx::query_as::<_, DashboardWithCountBm>(&sql)
+            .bind(workspace_id)
+            .bind(user)
+            .fetch_all(&self.db.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.dash, r.card_count, r.bookmarked))
+            .collect())
     }
 
     /// All cards on a dashboard, in placement order.
@@ -270,5 +382,59 @@ impl DashboardRepo {
                 .await?
                 .flatten(),
         )
+    }
+
+    /// Deep-copy a dashboard (row + tabs + cards) under a new owner, in one transaction.
+    /// The copy's name is "<name> (copy)"; tab references on cards are remapped to the copy's tabs.
+    /// Returns None if the source doesn't exist.
+    pub async fn duplicate(
+        &self,
+        src_id: Uuid,
+        new_owner: Option<Uuid>,
+    ) -> Result<Option<Dashboard>, BiError> {
+        let Some(src) = self.get(src_id).await? else {
+            return Ok(None);
+        };
+        let src_tabs = self.tabs(src_id).await?;
+        let src_cards = self.cards(src_id).await?;
+
+        let mut tx = self.db.pool.begin().await?;
+        let copy: Dashboard = sqlx::query_as::<_, Dashboard>(&format!(
+            "INSERT INTO dashboards (workspace_id, name, description, parameters, created_by, width) \
+             VALUES ($1,$2,$3,$4,$5,$6) RETURNING {COLS}"
+        ))
+        .bind(src.workspace_id)
+        .bind(format!("{} (copy)", src.name))
+        .bind(&src.description)
+        .bind(&src.parameters)
+        .bind(new_owner)
+        .bind(&src.width)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_conflict_err)?;
+
+        let mut tab_map: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
+        for t in &src_tabs {
+            let nid: Uuid = sqlx::query_scalar(
+                "INSERT INTO dashboard_tabs (dashboard_id, name, position) VALUES ($1,$2,$3) RETURNING id",
+            )
+            .bind(copy.id).bind(&t.name).bind(t.position)
+            .fetch_one(&mut *tx).await?;
+            tab_map.insert(t.id, nid);
+        }
+        for c in &src_cards {
+            let new_tab = c.tab_id.and_then(|old| tab_map.get(&old).copied());
+            sqlx::query(
+                "INSERT INTO dashboard_cards \
+                 (dashboard_id, chart_id, card_type, grid_col, grid_row, size_x, size_y, options, ordinal, tab_id) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+            )
+            .bind(copy.id).bind(c.chart_id).bind(&c.card_type)
+            .bind(c.grid_col).bind(c.grid_row).bind(c.size_x).bind(c.size_y)
+            .bind(&c.options).bind(c.ordinal).bind(new_tab)
+            .execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(Some(copy))
     }
 }

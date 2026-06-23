@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Pencil } from "lucide-react";
+import { Info, Pencil, Star } from "lucide-react";
 import { useParams } from "react-router-dom";
 import RGL, { WidthProvider, type Layout } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { GRID_COLS, CARD_MIN_SIZE, CARD_DEFAULT_SIZE } from "@/components/chart/dashboard-grid";
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
+import { DashboardInfoSidebar } from "@/components/chart/dashboard/DashboardInfoSidebar";
 import { CardFilterMapOverlay } from "@/components/chart/dashboard/CardFilterMapOverlay";
 import { DashboardFilterBar } from "@/components/chart/dashboard/DashboardFilterBar";
 import { EditSidebar, type EditPanel } from "@/components/chart/dashboard/EditSidebar";
@@ -44,8 +45,9 @@ export default function DashboardView() {
   const { workspace: ws, id } = useParams() as { workspace: string; id: string };
   const { data: dash, isLoading } = useDashboard(ws, id);
   const { data: charts } = useCharts(ws);
-  const { update } = useDashboardMutations(ws);
+  const { update, restore: restoreMut, addBookmark, removeBookmark } = useDashboardMutations(ws);
   const [editing, setEditing] = useState(false);
+  const [showInfo, setShowInfo] = useState(false);
   const [draftCards, setDraftCards] = useState<DraftCard[] | null>(null);
   const [draftParameters, setDraftParameters] = useState<DashboardParameter[] | null>(null);
   const [draftTabs, setDraftTabs] = useState<DraftTab[] | null>(null);
@@ -203,6 +205,19 @@ export default function DashboardView() {
     } catch (e) { toast.error(String(e)); }
   }
 
+  // Description-only save from the info sidebar: rebuild the SAME whole-layout PUT body from the
+  // server dashboard (single source of truth in view mode) via the same startTabsDraft +
+  // serializeLayout machinery the Save button uses, so the layout is preserved unchanged and only
+  // `description` differs.
+  function saveDescription(next: string) {
+    const { draftTabs: dt, draftCards: dc } = startTabsDraft(dashboard.tabs ?? [], dashboard.cards);
+    const { tabs: tabPayload, cards: cardPayload } = serializeLayout(dt, dc);
+    update
+      .mutateAsync({ id: dashboard.id, name: dashboard.name, description: next, parameters: dashboard.parameters ?? [], tabs: tabPayload, width: dashboard.width, cards: cardPayload })
+      .then(() => toast.success("Saved"))
+      .catch((e) => toast.error(String(e)));
+  }
+
   const activeParamId = editing && editPanel?.kind === "filter" ? editPanel.paramId : null;
 
   return (
@@ -213,11 +228,21 @@ export default function DashboardView() {
         </div>
       )}
       <div className={effectiveWidth === "fixed" ? "mx-auto w-full max-w-[1200px]" : ""}>
+      {dash.deleted_at && (
+        <div className="mb-3 flex items-center justify-between rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
+          <span>This dashboard is in the trash.</span>
+          <Button size="sm" variant="outline" onClick={async () => { try { await restoreMut.mutateAsync(dash.id); } catch (e) { toast.error(String(e)); } }}>Restore</Button>
+        </div>
+      )}
       <div className="mb-3 flex items-center justify-between">
         <h1 className="text-lg font-semibold">{dash.name}</h1>
         <div className="flex gap-2">
           {!editing && (
             <>
+              <Button size="sm" variant="ghost" aria-label={dash.bookmarked ? "remove bookmark" : "add bookmark"}
+                onClick={async () => { try { await (dash.bookmarked ? removeBookmark : addBookmark).mutateAsync(dash.id); } catch (e) { toast.error(String(e)); } }}>
+                <Star className={`h-4 w-4 ${dash.bookmarked ? "fill-amber-400 text-amber-400" : ""}`} />
+              </Button>
               <label className="flex items-center gap-1 text-xs text-muted-foreground">
                 <span className="sr-only">Auto-refresh</span>
                 <select aria-label="auto-refresh" className="h-8 rounded border bg-background px-1 text-xs"
@@ -242,6 +267,7 @@ export default function DashboardView() {
                 }}>
                 {view.isFullscreen ? "Exit fullscreen" : "Fullscreen"}
               </Button>
+              <Button size="sm" variant="ghost" aria-label="dashboard info" onClick={() => setShowInfo((v) => !v)}><Info className="h-4 w-4" /></Button>
             </>
           )}
           {editing ? (
@@ -303,8 +329,8 @@ export default function DashboardView() {
       {editing
         ? <EditFilterChips parameters={parameters} activeId={editPanel?.kind === "filter" ? editPanel.paramId : null} onSelect={(id) => setEditPanel({ kind: "filter", paramId: id })} />
         : <DashboardFilterBar parameters={parameters} values={paramsState.values} onChange={paramsState.setValue} optionsBySlug={optionsBySlug} />}
-      <div className={editing ? "flex gap-4" : ""}>
-        <div className={editing ? "min-w-0 flex-1" : ""}>
+      <div className={editing || showInfo ? "flex gap-4" : ""}>
+        <div className={editing || showInfo ? "min-w-0 flex-1" : ""}>
       {(cards.length === 0 || (tabs.length > 0 && visibleCards.length === 0)) && editing ? (
         <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed py-20 text-center">
           <Pencil className="h-8 w-8 text-muted-foreground/40" />
@@ -378,6 +404,16 @@ export default function DashboardView() {
             onChangeParam={(next) => setDraftParameters(parameters.map((x) => x.id === next.id ? { ...next, slug: x.slug } : x))}
             onDeleteParam={() => { if (editPanel?.kind === "filter") { const id = editPanel.paramId; setDraftParameters(parameters.filter((x) => x.id !== id)); setEditPanel({ kind: "add" }); } }}
             onClose={() => setEditPanel({ kind: "add" })}
+          />
+        )}
+        {!editing && showInfo && (
+          <DashboardInfoSidebar
+            name={dash.name}
+            description={dash.description}
+            ownerLabel={dash.created_by}
+            updatedAt={dash.updated_at}
+            onClose={() => setShowInfo(false)}
+            onSaveDescription={saveDescription}
           />
         )}
       </div>

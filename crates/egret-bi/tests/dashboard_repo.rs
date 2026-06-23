@@ -9,6 +9,7 @@ struct Fixture {
     ws: Uuid,
     dataset: Uuid,
     user: Uuid,
+    db: Db,
 }
 
 async fn setup() -> Option<Fixture> {
@@ -58,10 +59,11 @@ async fn setup() -> Option<Fixture> {
 
     Some(Fixture {
         repo: DashboardRepo::new(db.clone()),
-        charts: ChartRepo::new(db),
+        charts: ChartRepo::new(db.clone()),
         ws: wid,
         dataset: ds.id,
         user: uid,
+        db,
     })
 }
 
@@ -89,7 +91,7 @@ async fn dashboard_crud_cards_and_unique_conflict() {
     assert_eq!(d.description, "overview");
 
     // list reports a card count of 0 before any cards are placed
-    let listed = f.repo.list_by_workspace(f.ws).await.unwrap();
+    let listed = f.repo.list_by_workspace(f.ws, false).await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].1, 0);
 
@@ -126,7 +128,7 @@ async fn dashboard_crud_cards_and_unique_conflict() {
     assert_eq!(got[1].options, serde_json::json!({ "title": "copy" }));
 
     // card_count now reflects the placed cards
-    let listed = f.repo.list_by_workspace(f.ws).await.unwrap();
+    let listed = f.repo.list_by_workspace(f.ws, false).await.unwrap();
     assert_eq!(listed[0].1, 2);
 
     // replace_layout is a full swap, not an append
@@ -321,4 +323,191 @@ async fn dashboard_width_defaults_full_and_round_trips() {
         .await
         .unwrap();
     assert_eq!(f.repo.get(d.id).await.unwrap().unwrap().width, "fixed");
+}
+
+#[tokio::test]
+async fn trash_hides_from_live_list_and_restore_brings_back() {
+    let Some(fx) = setup().await else { return };
+    let d = fx
+        .repo
+        .create(fx.ws, "ToTrash", "", Some(fx.user))
+        .await
+        .unwrap();
+
+    fx.repo.set_trashed(d.id, true).await.unwrap();
+    let live: Vec<_> = fx.repo.list_by_workspace(fx.ws, false).await.unwrap();
+    assert!(
+        live.iter().all(|(x, _)| x.id != d.id),
+        "trashed must be hidden from live list"
+    );
+    let trashed: Vec<_> = fx.repo.list_by_workspace(fx.ws, true).await.unwrap();
+    assert!(
+        trashed.iter().any(|(x, _)| x.id == d.id),
+        "trash list must include it"
+    );
+
+    fx.repo.set_trashed(d.id, false).await.unwrap();
+    let live2: Vec<_> = fx.repo.list_by_workspace(fx.ws, false).await.unwrap();
+    assert!(
+        live2.iter().any(|(x, _)| x.id == d.id),
+        "restore returns it to live list"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_copies_tabs_and_cards_with_new_owner() {
+    let Some(fx) = setup().await else { return };
+    let src = fx
+        .repo
+        .create(fx.ws, "Orig", "desc", Some(fx.user))
+        .await
+        .unwrap();
+    let tabs = vec![
+        NewTab {
+            name: "T1".into(),
+            position: 0,
+        },
+        NewTab {
+            name: "T2".into(),
+            position: 1,
+        },
+    ];
+    let cards = vec![
+        NewCard {
+            chart_id: None,
+            card_type: "text".into(),
+            grid_col: 0,
+            grid_row: 0,
+            size_x: 4,
+            size_y: 2,
+            options: serde_json::json!({"text":"hi"}),
+            tab_index: Some(0),
+        },
+        NewCard {
+            chart_id: None,
+            card_type: "heading".into(),
+            grid_col: 0,
+            grid_row: 2,
+            size_x: 4,
+            size_y: 1,
+            options: serde_json::json!({"text":"h"}),
+            tab_index: Some(1),
+        },
+    ];
+    fx.repo.replace_layout(src.id, &tabs, &cards).await.unwrap();
+
+    let other: Uuid =
+        sqlx::query_scalar("INSERT INTO users (email, provider) VALUES ($1,'local') RETURNING id")
+            .bind(format!("u_{}@t.local", Uuid::new_v4().simple()))
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    let copy = fx
+        .repo
+        .duplicate(src.id, Some(other))
+        .await
+        .unwrap()
+        .expect("copy");
+
+    assert_ne!(copy.id, src.id);
+    assert_eq!(copy.name, "Orig (copy)");
+    assert_eq!(copy.created_by, Some(other));
+    assert_eq!(fx.repo.tabs(copy.id).await.unwrap().len(), 2);
+    let copy_cards = fx.repo.cards(copy.id).await.unwrap();
+    assert_eq!(copy_cards.len(), 2);
+    let copy_tabs = fx.repo.tabs(copy.id).await.unwrap();
+    let copy_tab_ids: std::collections::HashSet<Uuid> = copy_tabs.iter().map(|t| t.id).collect();
+    let card_tab_ids: Vec<Uuid> = copy_cards.iter().filter_map(|c| c.tab_id).collect();
+    assert_eq!(card_tab_ids.len(), 2, "both copy cards should be on a tab");
+    for t in &card_tab_ids {
+        assert!(copy_tab_ids.contains(t), "card tab must belong to the copy");
+    }
+    let distinct: std::collections::HashSet<Uuid> = card_tab_ids.iter().copied().collect();
+    assert_eq!(
+        distinct.len(),
+        2,
+        "the two cards must map to two distinct copy tabs (remap not collapsed)"
+    );
+}
+
+#[tokio::test]
+async fn bookmark_toggles_and_shows_in_list_flag() {
+    let Some(fx) = setup().await else { return };
+    let d = fx
+        .repo
+        .create(fx.ws, "Fav", "", Some(fx.user))
+        .await
+        .unwrap();
+
+    fx.repo
+        .add_bookmark(fx.user, "dashboard", d.id)
+        .await
+        .unwrap();
+    fx.repo
+        .add_bookmark(fx.user, "dashboard", d.id)
+        .await
+        .unwrap(); // idempotent
+    let listed = fx
+        .repo
+        .list_by_workspace_for(fx.ws, fx.user, false)
+        .await
+        .unwrap();
+    let row = listed
+        .iter()
+        .find(|(x, _, _)| x.id == d.id)
+        .expect("listed");
+    assert!(row.2, "bookmarked flag should be true");
+
+    fx.repo
+        .remove_bookmark(fx.user, "dashboard", d.id)
+        .await
+        .unwrap();
+    let listed2 = fx
+        .repo
+        .list_by_workspace_for(fx.ws, fx.user, false)
+        .await
+        .unwrap();
+    let row2 = listed2
+        .iter()
+        .find(|(x, _, _)| x.id == d.id)
+        .expect("listed");
+    assert!(!row2.2, "bookmarked flag should be false after removal");
+}
+
+#[tokio::test]
+async fn permanent_delete_purges_bookmarks() {
+    let Some(fx) = setup().await else { return };
+    let d = fx
+        .repo
+        .create(fx.ws, "Doomed", "", Some(fx.user))
+        .await
+        .unwrap();
+    fx.repo
+        .add_bookmark(fx.user, "dashboard", d.id)
+        .await
+        .unwrap();
+
+    // sanity: bookmark exists
+    let before: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bookmarks WHERE entity_type='dashboard' AND entity_id=$1",
+    )
+    .bind(d.id)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(before, 1, "bookmark should exist before delete");
+
+    fx.repo.delete(d.id).await.unwrap();
+
+    let after: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bookmarks WHERE entity_type='dashboard' AND entity_id=$1",
+    )
+    .bind(d.id)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        after, 0,
+        "permanent delete must purge the dashboard's bookmark rows"
+    );
 }
