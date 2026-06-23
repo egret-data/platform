@@ -46,10 +46,10 @@ export function FilterPill({ param, value, options, onChange }: Props) {
   const summary = summarize(param, value);
   const set = hasValue(value);
   return (
-    <div className={`inline-flex items-center rounded-full border text-sm transition-colors ${set ? "border-primary/40 bg-primary/5" : "bg-background hover:bg-accent/40"}`}>
+    <div className={`inline-flex h-8 items-center rounded-sm border px-2 text-sm transition-colors ${set ? "border-primary/40 bg-secondary" : "bg-background hover:bg-accent/40"}`}>
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
-          <button type="button" aria-label={param.name} className="flex items-center gap-1.5 rounded-full px-3 py-1.5">
+          <button type="button" aria-label={param.name} className="flex h-full items-center gap-1.5">
             <Icon className="h-3.5 w-3.5 text-muted-foreground" />
             <span>{param.name}{param.required ? " *" : ""}{set && summary ? <span className="text-muted-foreground">: {summary}</span> : null}</span>
           </button>
@@ -59,7 +59,7 @@ export function FilterPill({ param, value, options, onChange }: Props) {
         </PopoverContent>
       </Popover>
       {set && (
-        <button type="button" aria-label={`clear ${param.name}`} className="pr-2.5 text-muted-foreground hover:text-foreground"
+        <button type="button" aria-label={`clear ${param.name}`} className="pl-1.5 text-muted-foreground hover:text-foreground"
           onClick={() => onChange(clearedValue(param))}>
           <X className="h-3.5 w-3.5" />
         </button>

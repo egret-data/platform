@@ -101,6 +101,7 @@
   --primary: oklch(0.59 0.15 185);
   --primary-foreground: oklch(0.99 0 0);
   --secondary: oklch(0.95 0.01 258.36);
+  --dashboard: oklch(0.955 0.004 270); /* Metabase-style light-gray dashboard canvas (cards float on this) */
   --secondary-foreground: oklch(0.21 0.11 263.16);
   --muted: oklch(0.22 0.11 263.03 / 3%);
   --muted-foreground: oklch(0.49 0.07 270.49);
@@ -140,6 +141,7 @@
   --primary: oklch(0.66 0.13 185);
   --primary-foreground: oklch(0.1 0 0);
   --secondary: oklch(0.27 0.01 286.1);
+  --dashboard: oklch(0.16 0 0); /* darker than --card (0.21) so cards still pop in dark mode */
   --secondary-foreground: oklch(0.99 0 0);
   --muted: oklch(0.27 0.01 286.1);
   --muted-foreground: oklch(0.71 0.01 286.09);
@@ -171,6 +173,7 @@
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
   --color-secondary: var(--secondary);
+  --color-dashboard: var(--dashboard);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);

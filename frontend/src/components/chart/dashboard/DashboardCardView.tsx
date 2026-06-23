@@ -33,7 +33,7 @@ function ChartCardTile({ ws, card, chart, refreshNonce, onValueClick, blocked, e
           <ChartExportMenu title={headerText || chart?.name} columns={data.columns} rows={data.rows} containerRef={chartRef} />
         </div>
       )}
-      {showHeader && <div className="px-3 pt-2 pb-1 text-sm font-medium">{headerText}</div>}
+      {showHeader && <div className="px-4 pt-3 pb-2 text-sm font-medium text-foreground">{headerText}</div>}
       <div ref={chartRef} className="min-h-0 flex-1 overflow-auto px-2 pb-2">
         {(() => {
           const body = blocked ? <div className="flex h-full items-center justify-center px-3 text-center text-sm text-muted-foreground">Set the required filters to load this card</div>

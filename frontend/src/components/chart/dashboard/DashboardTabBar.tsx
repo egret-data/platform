@@ -22,10 +22,10 @@ export function DashboardTabBar({ tabs, activeTabPos, editing, onSelect, onAdd, 
   const [dragFrom, setDragFrom] = useState<number | null>(null);
 
   return (
-    <div className="mb-3 flex items-center gap-1 border-b" role="tablist">
+    <div className="mb-3 flex items-center gap-1 border-b-2 border-border" role="tablist">
       {ordered.map((t, pos) => {
         const active = pos === activeTabPos;
-        const cls = `flex items-center gap-1 px-3 py-1.5 text-sm border-b-2 ${active ? "border-primary text-primary font-medium" : "border-transparent text-muted-foreground"}`;
+        const cls = `-mb-[2px] flex items-center gap-1 px-3 py-1.5 text-sm border-b-2 ${active ? "border-primary text-primary font-medium" : "border-transparent text-muted-foreground"}`;
         if (renaming === t.key && editing) {
           return (
             <input key={t.key} autoFocus aria-label={`rename tab ${t.name}`} defaultValue={t.name}
