@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, Link, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { useDatasets, useDataset } from "@/api/datasets";
@@ -18,6 +18,7 @@ import { ChartTypeGallery } from "@/components/chart/ChartTypeGallery";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { ChartSettingsSections } from "@/components/chart/settings/ChartSettingsSections";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
+import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -326,6 +327,7 @@ export default function ChartExplore() {
 
   const isRunning = status.data?.status === "queued" || status.data?.status === "running";
   const vizMeta = CHART_TYPES.find((t) => t.key === viz);
+  const previewRef = useRef<HTMLDivElement>(null);
 
   // ── New-chart gallery: shown when creating a chart with no type chosen yet ──
   if (!id && !typeParam) {
@@ -717,6 +719,13 @@ export default function ChartExplore() {
             {(build.isPending || submit.isPending) ? "Building…" : "Run"}
           </Button>
           <Button variant="outline" size="sm" onClick={() => setSaveOpen(true)}>{id ? "Update" : "Save"}</Button>
+          <ChartExportMenu
+            title={saveName || undefined}
+            columns={resultColumns}
+            rows={results.data?.rows ?? []}
+            containerRef={previewRef}
+            disabled={!finished || resultColumns.length === 0}
+          />
           {build.data?.sql && (
             <details className="ml-auto text-xs text-muted-foreground">
               <summary className="cursor-pointer select-none hover:text-foreground">View SQL</summary>
@@ -733,6 +742,7 @@ export default function ChartExplore() {
         )}
         {isRunning && <p className="text-sm text-muted-foreground">Running…</p>}
 
+        <div ref={previewRef} className="contents">
         {finished && results.data && viz === "pivot_table" && (
           <PivotTable
             input={{
@@ -781,6 +791,7 @@ export default function ChartExplore() {
             metricTypes={metricTypes}
           />
         )}
+        </div>
         {!queryId && !build.isPending && !submit.isPending && (
           <p className="text-sm text-muted-foreground">Configure the controls on the left and click Run.</p>
         )}

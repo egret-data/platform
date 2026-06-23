@@ -404,7 +404,7 @@ export default function DashboardView() {
               <div className={`relative h-full overflow-hidden ${c.card_type === "heading" ? "" : "rounded-lg border bg-card shadow-sm"} ${editing && editPanel?.kind === "card" && editPanel.cardId === c.id ? "ring-2 ring-primary" : ""}`}>
                 {editing && <div className="dash-draghandle absolute inset-x-0 top-0 z-10 h-6 cursor-move" title="Drag to move" />}
                 <DashboardCardView ws={ws} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values}
-                  blocked={!editing && requiredUnset}
+                  blocked={!editing && requiredUnset} editing={editing}
                   onValueClick={editing ? undefined : (ctx, x, y) => onCardValueClick(c, ctx, x, y)} />
                 {activeParamId && c.card_type === "chart" && baseChart && (
                   <CardFilterMapOverlay
