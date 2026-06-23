@@ -16,21 +16,24 @@ function asString(v: unknown): string | undefined {
 
 function ChartCardTile({ ws, card, chart, refreshNonce, onValueClick, blocked, editing }: { ws: string; card: DashboardCard; chart: Chart | undefined; refreshNonce?: number; onValueClick?: (ctx: DrillContext, x: number, y: number) => void; blocked?: boolean; editing?: boolean }) {
   const data = useChartData(ws, chart ?? null, refreshNonce, !blocked);
-  const tileRef = useRef<HTMLDivElement>(null);
+  // Ref the render-only container (NOT the whole tile), so the PNG export targets the
+  // chart's <svg> and not the export menu's own Download icon. Also keeps PNG hidden for
+  // table/pivot cards (their render container has no <svg>).
+  const chartRef = useRef<HTMLDivElement>(null);
   const titleOverride = asString(card.options.title);          // undefined → use chart name; "" → hide
   const headerText = titleOverride || chart?.name || "";
   const showHeader = titleOverride !== "" && headerText !== "";
   const canExport = !editing && !blocked && !data.isLoading && !data.error && (data.columns?.length ?? 0) > 0;
   if (!chart) return <div className="flex h-full items-center justify-center text-sm text-muted-foreground">Chart not found</div>;
   return (
-    <div ref={tileRef} className="group relative flex h-full flex-col">
+    <div className="group relative flex h-full flex-col">
       {canExport && (
         <div className="dash-nodrag absolute right-1 top-1 z-10 opacity-0 transition-opacity group-hover:opacity-100">
-          <ChartExportMenu title={headerText || chart?.name} columns={data.columns} rows={data.rows} containerRef={tileRef} />
+          <ChartExportMenu title={headerText || chart?.name} columns={data.columns} rows={data.rows} containerRef={chartRef} />
         </div>
       )}
       {showHeader && <div className="px-3 pt-2 pb-1 text-sm font-medium">{headerText}</div>}
-      <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">
+      <div ref={chartRef} className="min-h-0 flex-1 overflow-auto px-2 pb-2">
         {blocked ? <div className="flex h-full items-center justify-center px-3 text-center text-sm text-muted-foreground">Set the required filters to load this card</div>
           : data.error ? <div className="text-sm text-destructive">{data.error}</div>
           : data.isLoading ? <div className="text-sm text-muted-foreground">Loading…</div>
