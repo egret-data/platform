@@ -5,6 +5,7 @@ import { AddPanel } from "./AddPanel";
 import { CardSettingsPanel } from "./CardSettingsPanel";
 import { FilterSettingsPanel } from "./FilterSettingsPanel";
 import { CardVizPanel } from "./CardVizPanel";
+import { PanelLeftClose } from "lucide-react";
 
 export type EditPanel =
   | { kind: "add" }
@@ -31,6 +32,7 @@ interface Props {
   onChangeParam: (next: DashboardParameter) => void;
   onDeleteParam: () => void;
   onClose: () => void;
+  onCollapse: () => void;
 }
 
 export function EditSidebar(props: Props) {
@@ -38,11 +40,12 @@ export function EditSidebar(props: Props) {
   const onPanel = panel?.kind === "card" || panel?.kind === "filter" || panel?.kind === "viz";
   return (
     <aside className="sticky top-4 max-h-[calc(100vh-7rem)] w-[340px] shrink-0 self-start overflow-auto rounded-lg border bg-card">
-      {onPanel && (
-        <div className="flex items-center justify-between border-b px-3 py-2">
-          <button type="button" aria-label="back to add" className="text-xs text-muted-foreground hover:text-foreground" onClick={props.onClose}>‹ Add cards</button>
-        </div>
-      )}
+      <div className="flex items-center justify-between border-b px-2 py-1.5">
+        {onPanel
+          ? <button type="button" aria-label="back to add" className="text-xs text-muted-foreground hover:text-foreground" onClick={props.onClose}>‹ Add cards</button>
+          : <span className="px-1 text-xs font-medium text-muted-foreground">Add cards</span>}
+        <button type="button" aria-label="collapse sidebar" title="Hide panel" className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground" onClick={props.onCollapse}><PanelLeftClose className="h-4 w-4" /></button>
+      </div>
       {panel?.kind === "add" && <AddPanel charts={props.charts} onAddChart={props.onAddChart} onAddVirtual={props.onAddVirtual} />}
       {panel?.kind === "card" && props.cardForPanel && (
         <CardSettingsPanel card={props.cardForPanel} chart={props.chartForCard} parameters={props.parameters} tabs={props.tabs}

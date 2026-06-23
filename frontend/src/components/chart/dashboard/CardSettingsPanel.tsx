@@ -23,12 +23,20 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
       </select>
     </label>
   ) : null;
+  const eligibleChart = card.card_type === "chart" && (chart?.viz_type === "table" || chart?.viz_type === "pivot_table");
+  const eligible = card.card_type === "text" || card.card_type === "heading" || card.card_type === "link" || eligibleChart;
+  const autoHeightRow = eligible ? (
+    <label className="flex items-center justify-between gap-2 text-sm"><span>Auto height</span>
+      <input type="checkbox" aria-label="auto height" checked={!!card.options.autoHeight} onChange={(e) => onUpdateOptions({ autoHeight: e.target.checked })} />
+    </label>
+  ) : null;
   if (card.card_type === "text" || card.card_type === "heading") {
     return (
       <div className="flex flex-col gap-2 p-3">
         <div className="text-sm font-medium">{card.card_type === "heading" ? "Heading" : "Text"}</div>
         <textarea aria-label={card.card_type === "heading" ? "heading text" : "text body"} className={`${inp} h-24 py-1`}
           value={(card.options.text as string) ?? ""} onChange={(e) => onUpdateOptions({ text: e.target.value })} />
+        {autoHeightRow}
         {moveToTab}
       </div>
     );
@@ -39,6 +47,7 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
         <div className="text-sm font-medium">Link</div>
         <input aria-label="link url" placeholder="https://…" className={inp} value={(card.options.url as string) ?? ""} onChange={(e) => onUpdateOptions({ url: e.target.value })} />
         <input aria-label="link label" placeholder="Label (optional)" className={inp} value={(card.options.label as string) ?? ""} onChange={(e) => onUpdateOptions({ label: e.target.value })} />
+        {autoHeightRow}
         {moveToTab}
       </div>
     );
@@ -81,6 +90,7 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
         })}
       </div>
 
+      {autoHeightRow}
       {moveToTab}
     </div>
   );

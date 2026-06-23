@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Info, Pencil, Star } from "lucide-react";
+import { Info, Pencil, Star, PanelLeftOpen } from "lucide-react";
 import { useParams } from "react-router-dom";
-import RGL, { WidthProvider, type Layout } from "react-grid-layout";
-import "react-grid-layout/css/styles.css";
-import "react-resizable/css/styles.css";
+import { type Layout } from "react-grid-layout";
 import { useDashboard, useDashboardMutations, type DashboardCard as Card, type DashboardParameter } from "@/api/dashboards";
 import { useCharts, type Chart, type ChartFilter } from "@/api/charts";
 import { useDataset } from "@/api/datasets";
@@ -16,7 +14,8 @@ import { useDashboardViewControls } from "@/api/useDashboardViewControls";
 import { useDashboardParams } from "@/api/useDashboardParams";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { GRID_COLS, CARD_MIN_SIZE, CARD_DEFAULT_SIZE } from "@/components/chart/dashboard-grid";
+import { sizeForViz, getPositionForNewDashCard } from "@/components/chart/dashboard-grid";
+import { DashboardGridLayout } from "@/components/chart/dashboard/DashboardGridLayout";
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
 import { DashboardInfoSidebar } from "@/components/chart/dashboard/DashboardInfoSidebar";
 import { CardFilterMapOverlay } from "@/components/chart/dashboard/CardFilterMapOverlay";
@@ -28,11 +27,9 @@ import { slugify, applyParamsToChart, computeLinkedFilters, isBlank } from "@/co
 import { useColumnValues } from "@/api/useColumnValues";
 import { useDashboardTabs } from "@/api/useDashboardTabs";
 import { DashboardTabBar } from "@/components/chart/dashboard/DashboardTabBar";
+import { ChartPickerList } from "@/components/chart/dashboard/ChartPickerList";
 import { startTabsDraft, serializeLayout, addTab, renameTab, reorderTab, deleteTab, duplicateTab, moveCardToTab, type DraftTab, type DraftCard } from "@/components/chart/dashboard/tabs";
 import { toast } from "sonner";
-
-const Grid = WidthProvider(RGL);
-const ROW_PX = 90;
 
 /** Loads distinct column values for one category/id parameter (hook is called
  * unconditionally inside this child so the Rules of Hooks are respected). */
@@ -62,6 +59,7 @@ export default function DashboardView() {
   const serverTabCount = dash?.tabs?.length ?? 0;
   const { activeTabPos, setActiveTabPos } = useDashboardTabs(editing ? (draftTabs?.length ?? 0) : serverTabCount);
   const cardSeqRef = useRef(0);
+  const interactingRef = useRef(false);
   const chartById = useMemo(() => new Map((charts ?? []).map((c) => [c.id, c])), [charts]);
   const view = useDashboardViewControls();
   // Hook must run before the early return — use `dash?` since dash may be undefined while loading.
@@ -69,6 +67,9 @@ export default function DashboardView() {
   const paramsState = useDashboardParams(paramSource);
   const [editPanel, setEditPanel] = useState<EditPanel>(null);
   const [replacingId, setReplacingId] = useState<string | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // Opening any settings panel must reveal the sidebar even if the user collapsed it.
+  const openPanel = useCallback((p: EditPanel) => { setEditPanel(p); setSidebarCollapsed(false); }, []);
   const [deletingTabKey, setDeletingTabKey] = useState<string | null>(null);
   const [reassignTo, setReassignTo] = useState<string | null>(null);
   // category/id dropdown options, keyed by param slug; populated by <ParamOptions> children.
@@ -133,10 +134,11 @@ export default function DashboardView() {
   function cancelEdit() { setEditing(false); setDraftCards(null); setDraftParameters(null); setDraftTabs(null); setEditPanel(null); }
 
   function addCard(chart: Chart) {
-    const maxY = cards.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
+    const { w, h } = sizeForViz(chart.viz_type).default;
+    const pos = getPositionForNewDashCard(cards, w, h);
     const newCard: DraftCard = {
       id: `new-${chart.id}-${cardSeqRef.current++}`, chart_id: chart.id, card_type: "chart",
-      grid_col: 0, grid_row: maxY, size_x: CARD_DEFAULT_SIZE.w, size_y: CARD_DEFAULT_SIZE.h, options: {}, tab_id: null,
+      grid_col: pos.grid_col, grid_row: pos.grid_row, size_x: w, size_y: h, options: {}, tab_id: null,
       tabKey: activeTab?.key ?? null,
     };
     setDraftCards([...(cards as DraftCard[]), newCard]);
@@ -162,10 +164,11 @@ export default function DashboardView() {
   function addVirtualCard(card_type: "text" | "heading" | "link", options: Record<string, unknown>) {
     setDraftCards((prev) => {
       const base = prev ?? cardsAsDraft();
-      const maxY = base.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
+      const { w, h } = sizeForViz(card_type).default;
+      const pos = getPositionForNewDashCard(base, w, h);
       const newCard: DraftCard = {
         id: `new-${card_type}-${cardSeqRef.current++}`, chart_id: null, card_type,
-        grid_col: 0, grid_row: maxY, size_x: CARD_DEFAULT_SIZE.w, size_y: card_type === "heading" ? 1 : CARD_DEFAULT_SIZE.h, options, tab_id: null,
+        grid_col: pos.grid_col, grid_row: pos.grid_row, size_x: w, size_y: h, options, tab_id: null,
         tabKey: activeTab?.key ?? null,
       };
       return [...base, newCard];
@@ -181,12 +184,32 @@ export default function DashboardView() {
   // The cards are the single source of truth for positions: the RGL layout is derived
   // from them, and drag/resize writes positions straight back into the draft. This keeps
   // every grid item sized from its card (a newly added card is never auto-placed at 1x1).
-  const layout: Layout[] = visibleCards.map((c) => ({
-    i: c.id, x: c.grid_col, y: c.grid_row, w: c.size_x, h: c.size_y,
-    // clamp the minimums to the card's own size so a short card (e.g. a 1-row
-    // heading) never has minH/minW larger than its height/width (RGL warns).
-    minW: Math.min(CARD_MIN_SIZE.w, c.size_x), minH: Math.min(CARD_MIN_SIZE.h, c.size_y),
-  }));
+  const vizKeyOf = (c: DraftCard) => (c.card_type === "chart" ? (chartById.get(c.chart_id ?? "")?.viz_type ?? "") : c.card_type);
+  const layout: Layout[] = visibleCards.map((c) => {
+    const autoH = !!c.options.autoHeight;
+    const min = sizeForViz(vizKeyOf(c as DraftCard)).min;
+    return {
+      i: c.id, x: c.grid_col, y: c.grid_row, w: c.size_x, h: c.size_y,
+      // clamp mins to the card's own size so RGL never warns (minW/minH > current).
+      minW: Math.min(min.w, c.size_x),
+      minH: autoH ? c.size_y : Math.min(min.h, c.size_y),
+      ...(autoH ? { maxH: c.size_y } : {}),
+    };
+  });
+
+  function applyAutoHeight(cardId: string, rows: number) {
+    if (interactingRef.current) return;            // never fight an active drag/resize
+    setDraftCards((prev) => {
+      const base = prev ?? cardsAsDraft();
+      let changed = false;
+      const merged = base.map((c) => {
+        if (c.id !== cardId || c.size_y === rows) return c;
+        changed = true;
+        return { ...c, size_y: rows };
+      });
+      return changed ? merged : base;
+    });
+  }
 
   function onLayoutChange(next: Layout[]) {
     if (!editing) return;
@@ -195,9 +218,11 @@ export default function DashboardView() {
       let changed = false;
       const merged = base.map((c) => {
         const l = next.find((x) => x.i === c.id);
-        if (!l || (l.x === c.grid_col && l.y === c.grid_row && l.w === c.size_x && l.h === c.size_y)) return c;
+        if (!l) return c;
+        const row = Math.max(0, l.y);
+        if (l.x === c.grid_col && row === c.grid_row && l.w === c.size_x && l.h === c.size_y) return c;
         changed = true;
-        return { ...c, grid_col: l.x, grid_row: l.y, size_x: l.w, size_y: l.h };
+        return { ...c, grid_col: l.x, grid_row: row, size_x: l.w, size_y: l.h };
       });
       return changed ? merged : base;   // same ref when nothing moved → no re-render loop
     });
@@ -300,12 +325,12 @@ export default function DashboardView() {
           )}
           {editing ? (
             <>
-              <Button size="sm" variant="outline" onClick={() => setEditPanel({ kind: "add" })}>+ Chart</Button>
+              <Button size="sm" variant="outline" onClick={() => openPanel({ kind: "add" })}>+ Chart</Button>
               <Button size="sm" variant="outline" onClick={() => {
                 const slug = slugify("filter", parameters.map((p) => p.slug));
                 const id = `new-${slug}-${cardSeqRef.current++}`;
                 setDraftParameters([...parameters, { id, name: "Filter", slug, type: "text", operator: "is" }]);
-                setEditPanel({ kind: "filter", paramId: id });
+                openPanel({ kind: "filter", paramId: id });
               }}>+ Filter</Button>
               <div className="flex items-center gap-1 rounded border p-0.5">
                 <button type="button" aria-label="width full" className={`rounded px-2 py-0.5 text-xs ${draftWidth === "full" ? "bg-accent" : ""}`} onClick={() => setDraftWidth("full")}>Full</button>
@@ -358,7 +383,7 @@ export default function DashboardView() {
         />
       )}
       {editing
-        ? <EditFilterChips parameters={parameters} activeId={editPanel?.kind === "filter" ? editPanel.paramId : null} onSelect={(id) => setEditPanel({ kind: "filter", paramId: id })} />
+        ? <EditFilterChips parameters={parameters} activeId={editPanel?.kind === "filter" ? editPanel.paramId : null} onSelect={(id) => openPanel({ kind: "filter", paramId: id })} />
         : <DashboardFilterBar parameters={parameters} values={paramsState.values} onChange={paramsState.setValue} optionsBySlug={optionsBySlug} />}
       <div className={editing || showInfo ? "flex gap-4" : ""}>
         <div className={editing || showInfo ? "min-w-0 flex-1" : ""}>
@@ -366,26 +391,23 @@ export default function DashboardView() {
         <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed py-20 text-center">
           <Pencil className="h-8 w-8 text-muted-foreground/40" />
           <p className="text-sm text-muted-foreground">{cards.length === 0 ? "This dashboard is empty." : "No cards on this tab."}</p>
-          <button type="button" className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90" onClick={() => setEditPanel({ kind: "add" })}>Add a chart</button>
+          <button type="button" className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90" onClick={() => openPanel({ kind: "add" })}>Add a chart</button>
         </div>
       ) : cards.length === 0 ? (
         <p className="text-muted-foreground">No cards yet. Click Edit to add charts.</p>
       ) : tabs.length > 0 && visibleCards.length === 0 ? (
         <p className="py-12 text-center text-muted-foreground">No cards on this tab.</p>
       ) : (
-        <Grid
-          className="layout"
-          cols={GRID_COLS}
-          rowHeight={ROW_PX}
-          margin={[12, 12]}
-          draggableHandle=".dash-draghandle"
-          draggableCancel=".dash-nodrag"
-          isDraggable={editing}
-          isResizable={editing}
+        <DashboardGridLayout
+          editing={editing}
           layout={layout}
           onLayoutChange={onLayoutChange}
+          onResizeStart={() => { interactingRef.current = true; }}
+          onResizeStop={() => { interactingRef.current = false; }}
+          onDragStart={() => { interactingRef.current = true; }}
+          onDragStop={() => { interactingRef.current = false; }}
         >
-          {visibleCards.map((c) => {
+          {(rowHeight) => visibleCards.map((c) => {
             const baseChart = chartById.get(c.chart_id ?? "");
             const mappings = (c.options.paramMappings as Record<string, string>) ?? {};
             const injected = baseChart ? applyParamsToChart(baseChart, parameters, paramsState.values, mappings) : undefined;
@@ -394,8 +416,8 @@ export default function DashboardView() {
               {editing && (
                 <div className="dash-nodrag absolute -top-3.5 left-1/2 z-30 -translate-x-1/2 opacity-0 transition-opacity group-hover:opacity-100">
                   <CardEditToolbar cardType={c.card_type}
-                    onSettings={() => setEditPanel({ kind: "card", cardId: c.id })}
-                    onViz={() => setEditPanel({ kind: "viz", cardId: c.id })}
+                    onSettings={() => openPanel({ kind: "card", cardId: c.id })}
+                    onViz={() => openPanel({ kind: "viz", cardId: c.id })}
                     onDuplicate={() => duplicateCard(c.id)}
                     onReplace={() => setReplacingId(c.id)}
                     onRemove={() => removeCard(c.id)} />
@@ -405,6 +427,9 @@ export default function DashboardView() {
                 {editing && <div className="dash-draghandle absolute inset-x-0 top-0 z-10 h-6 cursor-move" title="Drag to move" />}
                 <DashboardCardView ws={ws} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values}
                   blocked={!editing && requiredUnset} editing={editing}
+                  autoHeight={!!c.options.autoHeight}
+                  rowHeight={rowHeight}
+                  onAutoHeight={editing ? (rows) => applyAutoHeight(c.id, rows) : undefined}
                   onValueClick={editing ? undefined : (ctx, x, y) => onCardValueClick(c, ctx, x, y)} />
                 {activeParamId && c.card_type === "chart" && baseChart && (
                   <CardFilterMapOverlay
@@ -417,10 +442,16 @@ export default function DashboardView() {
             </div>
             );
           })}
-        </Grid>
+        </DashboardGridLayout>
       )}
         </div>
-        {editing && (
+        {editing && (sidebarCollapsed ? (
+          <div className="sticky top-4 self-start">
+            <button type="button" aria-label="expand sidebar" title="Show panel" className="inline-flex size-9 items-center justify-center rounded-lg border bg-card text-muted-foreground hover:bg-accent hover:text-foreground" onClick={() => setSidebarCollapsed(false)}>
+              <PanelLeftOpen className="h-4 w-4" />
+            </button>
+          </div>
+        ) : (
           <EditSidebar
             panel={editPanel}
             charts={charts ?? []}
@@ -439,8 +470,9 @@ export default function DashboardView() {
             onChangeParam={(next) => setDraftParameters(parameters.map((x) => x.id === next.id ? { ...next, slug: x.slug } : x))}
             onDeleteParam={() => { if (editPanel?.kind === "filter") { const id = editPanel.paramId; setDraftParameters(parameters.filter((x) => x.id !== id)); setEditPanel({ kind: "add" }); } }}
             onClose={() => setEditPanel({ kind: "add" })}
+            onCollapse={() => setSidebarCollapsed(true)}
           />
-        )}
+        ))}
         {!editing && showInfo && (
           <DashboardInfoSidebar
             name={dash.name}
@@ -490,13 +522,7 @@ export default function DashboardView() {
       <Dialog open={replacingId !== null} onOpenChange={(o) => { if (!o) setReplacingId(null); }}>
         <DialogContent>
           <DialogHeader><DialogTitle>Replace chart</DialogTitle></DialogHeader>
-          <div className="flex flex-wrap gap-1 py-2">
-            {(charts ?? []).map((ch) => (
-              <Button key={ch.id} size="sm" variant="outline" aria-label={`use ${ch.name}`} onClick={() => replaceCard(replacingId!, ch)}>
-                {ch.name}
-              </Button>
-            ))}
-          </div>
+          <ChartPickerList charts={charts ?? []} onPick={(ch) => replaceCard(replacingId!, ch)} autoFocus />
         </DialogContent>
       </Dialog>
       {drillMenu && (

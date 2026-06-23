@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Copy, X, Plus } from "lucide-react";
 import type { DraftTab } from "./tabs";
 
 interface Props {
@@ -34,7 +35,7 @@ export function DashboardTabBar({ tabs, activeTabPos, editing, onSelect, onAdd, 
           );
         }
         return (
-          <div key={t.key} className="flex items-center"
+          <div key={t.key} className="group flex items-center"
             draggable={editing}
             onDragStart={() => setDragFrom(pos)}
             onDragOver={(e) => editing && e.preventDefault()}
@@ -46,16 +47,16 @@ export function DashboardTabBar({ tabs, activeTabPos, editing, onSelect, onAdd, 
             </button>
             {editing && (
               <>
-                <button type="button" aria-label={`duplicate tab ${t.name}`} className="px-1 text-xs text-muted-foreground" onClick={() => onDuplicate(t.key)}>⧉</button>
-                <button type="button" aria-label={`delete tab ${t.name}`} className="px-1 text-xs text-destructive disabled:opacity-40"
-                  disabled={ordered.length < 2} onClick={() => onDelete(t.key)}>✕</button>
+                <button type="button" aria-label={`duplicate tab ${t.name}`} title="Duplicate tab" className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100" onClick={() => onDuplicate(t.key)}><Copy className="h-3.5 w-3.5" /></button>
+                <button type="button" aria-label={`delete tab ${t.name}`} title="Delete tab" className="rounded p-0.5 text-destructive opacity-0 transition-opacity hover:bg-accent group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-30"
+                  disabled={ordered.length < 2} onClick={() => onDelete(t.key)}><X className="h-3.5 w-3.5" /></button>
               </>
             )}
           </div>
         );
       })}
       {editing && (
-        <button type="button" aria-label="add tab" className="px-2 py-1 text-sm text-muted-foreground hover:text-foreground" onClick={onAdd}>+</button>
+        <button type="button" aria-label="add tab" title="Add tab" className="inline-flex items-center rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground" onClick={onAdd}><Plus className="h-4 w-4" /></button>
       )}
     </div>
   );
