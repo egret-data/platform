@@ -23,19 +23,25 @@ interface Props {
 export function DashboardGridLayout({ editing, layout, onLayoutChange, onResizeStart, onResizeStop, onDragStart, onDragStop, children }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
+  // CSS custom properties do NOT resolve inside an SVG embedded as a background-image data-URL
+  // (the SVG is an isolated document), so we must read --border to a concrete color and bake it in.
+  // Re-read when editing toggles so a theme change between sessions is picked up.
+  const [stroke, setStroke] = useState("oklch(0.85 0 0)");
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     setWidth(el.clientWidth);
+    const border = getComputedStyle(document.documentElement).getPropertyValue("--border").trim();
+    if (border) setStroke(border);
     if (typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(() => setWidth(el.clientWidth));
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [editing]);
 
   const rowHeight = gridRowHeight(width);
   const background = editing && width > 0
-    ? generateGridBackground({ cellWidth: cellWidth(width), rowHeight, cols: GRID_COLS, marginX: GRID_MARGIN[0], marginY: GRID_MARGIN[1], stroke: "var(--border)" })
+    ? generateGridBackground({ cellWidth: cellWidth(width), rowHeight, cols: GRID_COLS, marginX: GRID_MARGIN[0], marginY: GRID_MARGIN[1], stroke })
     : undefined;
 
   return (

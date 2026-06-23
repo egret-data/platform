@@ -8,8 +8,10 @@ interface GridBackgroundOptions {
 }
 
 /** A repeating SVG grid (one cell-rect per column, one row tall) as a CSS background url().
- *  Mirrors Metabase's generateGridBackground. `stroke` should be an OKLCH-safe color such as
- *  `var(--border)` — NOT `hsl(var(--border))`, which double-wraps and renders nothing. */
+ *  Mirrors Metabase's generateGridBackground. `stroke` MUST be a CONCRETE color (e.g. the
+ *  resolved value of `getComputedStyle(...).getPropertyValue("--border")`) — a CSS custom
+ *  property like `var(--border)` does NOT resolve inside an SVG embedded as a data-URL
+ *  background (the SVG is an isolated document) and renders nothing. */
 export function generateGridBackground({ cellWidth, rowHeight, cols, marginX, marginY, stroke }: GridBackgroundOptions): string {
   const w = Math.round(cellWidth);
   const h = Math.round(rowHeight);
