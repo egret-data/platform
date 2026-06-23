@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 interface Props {
   name: string;
@@ -11,6 +11,9 @@ interface Props {
 
 export function DashboardInfoSidebar({ name, description, ownerLabel, updatedAt, onSaveDescription, onClose }: Props) {
   const [draft, setDraft] = useState(description);
+  // Re-sync if the description changes underneath us (e.g. a concurrent edit refetch);
+  // [description] compares by value, so this only fires on a genuine external change.
+  useEffect(() => { setDraft(description); }, [description]);
   return (
     <aside className="sticky top-4 max-h-[calc(100vh-7rem)] w-[300px] shrink-0 self-start overflow-auto rounded-lg border bg-card p-3 text-sm">
       <div className="mb-2 flex items-center justify-between">

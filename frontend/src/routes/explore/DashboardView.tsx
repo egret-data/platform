@@ -213,6 +213,7 @@ export default function DashboardView() {
     const { tabs: tabPayload, cards: cardPayload } = serializeLayout(dt, dc);
     update
       .mutateAsync({ id: dashboard.id, name: dashboard.name, description: next, parameters: dashboard.parameters ?? [], tabs: tabPayload, width: dashboard.width, cards: cardPayload })
+      .then(() => toast.success("Saved"))
       .catch((e) => toast.error(String(e)));
   }
 
