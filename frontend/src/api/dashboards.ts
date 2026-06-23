@@ -27,7 +27,7 @@ export type ParamType = "text" | "number" | "date" | "id" | "category" | "boolea
 export type ParamOperator =
   | "is" | "is-not" | "contains" | "starts-with" | "ends-with"        // text / category / location
   | "=" | "!=" | "between" | ">=" | "<="                              // number
-  | "range" | "relative" | "single" | "month-year" | "quarter-year";  // date
+  | "range" | "relative" | "single" | "month-year" | "quarter-year" | "all-options";  // date
 export type ParamWidget = "dropdown" | "search" | "input";
 export interface DashboardParameter {
   id: string;
