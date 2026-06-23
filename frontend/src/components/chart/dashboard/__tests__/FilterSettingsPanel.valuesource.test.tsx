@@ -48,4 +48,8 @@ describe("FilterSettingsPanel value sources", () => {
     fireEvent.change(screen.getByLabelText("values column"), { target: { value: "city" } });
     expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ valuesSource: { type: "card", cardId: "c1", column: "city" } }));
   });
+  it("does not offer value sources for a text parameter", () => {
+    render(<FilterSettingsPanel param={p({ type: "text", operator: "is" })} allParameters={[p({})]} onChange={vi.fn()} onDelete={vi.fn()} />);
+    expect(screen.queryByLabelText("values from custom")).toBeNull();
+  });
 });

@@ -19,6 +19,7 @@ export function FilterSettingsPanel({ param, allParameters, cardColumns = [], on
   const cls = "h-8 w-full rounded border bg-background px-2 text-sm";
   const showOp = param.type === "text" || param.type === "number" || param.type === "date";
   const showWidget = param.type === "category" || param.type === "id" || param.type === "location" || param.type === "text";
+  const showValueSource = param.type === "category" || param.type === "id" || param.type === "location";
   const others = allParameters.filter((o) => o.id !== param.id);
   const linked = param.filteringParameters ?? [];
   const toggleLink = (id: string) =>
@@ -58,7 +59,7 @@ export function FilterSettingsPanel({ param, allParameters, cardColumns = [], on
         </div>
       )}
 
-      {showWidget && (
+      {showValueSource && (
         <div className="flex flex-col gap-1">
           <div className="text-xs text-muted-foreground">Where do values come from?</div>
           <label className="flex items-center gap-2 text-sm">
