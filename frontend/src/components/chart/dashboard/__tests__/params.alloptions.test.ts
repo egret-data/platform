@@ -15,6 +15,13 @@ describe("paramToFilters all-options", () => {
     const f = paramToFilters(p({}), { mode: "relative", dir: "next", n: 2, unit: "month" }, "d", NOW);
     expect(f).toEqual([{ col: "d", op: "ge", value: "2026-06-15" }, { col: "d", op: "le", value: "2026-08-15" }]);
   });
+  it("relative covers week and quarter multipliers", () => {
+    // NOW = 2026-06-15
+    expect(paramToFilters(p({}), { mode: "relative", dir: "past", n: 2, unit: "week" }, "d", NOW))
+      .toEqual([{ col: "d", op: "ge", value: "2026-06-01" }, { col: "d", op: "le", value: "2026-06-15" }]);
+    expect(paramToFilters(p({}), { mode: "relative", dir: "next", n: 1, unit: "quarter" }, "d", NOW))
+      .toEqual([{ col: "d", op: "ge", value: "2026-06-15" }, { col: "d", op: "le", value: "2026-09-15" }]);
+  });
   it("specific on → eq; before → lt; after → gt; between → ge+le", () => {
     expect(paramToFilters(p({}), { mode: "specific", op: "on", from: "2026-01-01" }, "d", NOW)).toEqual([{ col: "d", op: "eq", value: "2026-01-01" }]);
     expect(paramToFilters(p({}), { mode: "specific", op: "before", from: "2026-01-01" }, "d", NOW)).toEqual([{ col: "d", op: "lt", value: "2026-01-01" }]);

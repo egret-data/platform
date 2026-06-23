@@ -32,7 +32,7 @@ export function summarize(param: DashboardParameter, value: unknown): string {
     return value === true || value === "true" ? "True" : "False";
   }
   if (param.type === "date" && param.operator === "all-options") {
-    const v = value as { mode?: string; dir?: string; n?: number; unit?: string; op?: string; from?: string; to?: string } | undefined;
+    const v = value as AllOptVal | undefined;
     if (!v || !v.mode) return "";
     if (v.mode === "relative") {
       const unit = v.unit ?? "day";
@@ -64,7 +64,24 @@ const RELATIVE_DAYS: Record<string, number> = {
 
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 
-type DateUnit = "day" | "week" | "month" | "quarter" | "year";
+export type DateUnit = "day" | "week" | "month" | "quarter" | "year";
+
+/** Canonical value shape for a `date` parameter with the `all-options` operator. */
+export type DateAllOptionsValue =
+  | { mode: "relative"; dir: "past" | "next" | "current"; n: number; unit: DateUnit }
+  | { mode: "specific"; op: "on" | "before" | "after" | "between"; from: string; to?: string };
+
+/** Loosened, all-fields-optional read shape used when narrowing an unknown value. */
+type AllOptVal = {
+  mode?: "relative" | "specific";
+  dir?: "past" | "next" | "current";
+  n?: number;
+  unit?: DateUnit;
+  op?: "on" | "before" | "after" | "between";
+  from?: string;
+  to?: string;
+};
+
 function shift(d: Date, n: number, unit: DateUnit): Date {
   const r = new Date(d);
   if (unit === "day") r.setUTCDate(r.getUTCDate() + n);
@@ -125,7 +142,7 @@ export function paramToFilters(
 
     case "date": {
       if (param.operator === "all-options") {
-        const v = value as { mode?: string; dir?: string; n?: number; unit?: DateUnit; op?: string; from?: string; to?: string } | undefined;
+        const v = value as AllOptVal | undefined;
         if (!v || !v.mode) return [];
         if (v.mode === "relative") {
           const unit = v.unit ?? "day";
