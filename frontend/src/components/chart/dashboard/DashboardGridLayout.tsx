@@ -24,15 +24,22 @@ export function DashboardGridLayout({ editing, layout, onLayoutChange, onResizeS
   const ref = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   // CSS custom properties do NOT resolve inside an SVG embedded as a background-image data-URL
-  // (the SVG is an isolated document), so we must read --border to a concrete color and bake it in.
-  // Re-read when editing toggles so a theme change between sessions is picked up.
-  const [stroke, setStroke] = useState("oklch(0.85 0 0)");
+  // (the SVG is an isolated document), so we must read a CONCRETE color and bake it in. We want a
+  // grid a touch darker than --border (which is nearly invisible), so blend it toward --foreground
+  // via color-mix and read the computed result off a probe element. Theme-aware (re-read on edit).
+  const [stroke, setStroke] = useState("oklch(0.8 0 0)");
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     setWidth(el.clientWidth);
+    const probe = document.createElement("div");
+    probe.style.color = "color-mix(in oklch, var(--border) 80%, var(--foreground))";
+    el.appendChild(probe);
+    const mixed = getComputedStyle(probe).color;
+    probe.remove();
     const border = getComputedStyle(document.documentElement).getPropertyValue("--border").trim();
-    if (border) setStroke(border);
+    if (mixed) setStroke(mixed);          // preferred: border blended toward foreground (visible)
+    else if (border) setStroke(border);   // fallback: plain --border if color-mix is unavailable
     if (typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(() => setWidth(el.clientWidth));
     ro.observe(el);
