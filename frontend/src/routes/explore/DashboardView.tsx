@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Info, Pencil, Star } from "lucide-react";
+import { Info, Pencil, Star, PanelLeftOpen } from "lucide-react";
 import { useParams } from "react-router-dom";
 import RGL, { WidthProvider, type Layout } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
@@ -70,6 +70,9 @@ export default function DashboardView() {
   const paramsState = useDashboardParams(paramSource);
   const [editPanel, setEditPanel] = useState<EditPanel>(null);
   const [replacingId, setReplacingId] = useState<string | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // Opening any settings panel must reveal the sidebar even if the user collapsed it.
+  const openPanel = useCallback((p: EditPanel) => { setEditPanel(p); setSidebarCollapsed(false); }, []);
   const [deletingTabKey, setDeletingTabKey] = useState<string | null>(null);
   const [reassignTo, setReassignTo] = useState<string | null>(null);
   // category/id dropdown options, keyed by param slug; populated by <ParamOptions> children.
@@ -359,7 +362,7 @@ export default function DashboardView() {
         />
       )}
       {editing
-        ? <EditFilterChips parameters={parameters} activeId={editPanel?.kind === "filter" ? editPanel.paramId : null} onSelect={(id) => setEditPanel({ kind: "filter", paramId: id })} />
+        ? <EditFilterChips parameters={parameters} activeId={editPanel?.kind === "filter" ? editPanel.paramId : null} onSelect={(id) => openPanel({ kind: "filter", paramId: id })} />
         : <DashboardFilterBar parameters={parameters} values={paramsState.values} onChange={paramsState.setValue} optionsBySlug={optionsBySlug} />}
       <div className={editing || showInfo ? "flex gap-4" : ""}>
         <div className={editing || showInfo ? "min-w-0 flex-1" : ""}>
@@ -395,8 +398,8 @@ export default function DashboardView() {
               {editing && (
                 <div className="dash-nodrag absolute -top-3.5 left-1/2 z-30 -translate-x-1/2 opacity-0 transition-opacity group-hover:opacity-100">
                   <CardEditToolbar cardType={c.card_type}
-                    onSettings={() => setEditPanel({ kind: "card", cardId: c.id })}
-                    onViz={() => setEditPanel({ kind: "viz", cardId: c.id })}
+                    onSettings={() => openPanel({ kind: "card", cardId: c.id })}
+                    onViz={() => openPanel({ kind: "viz", cardId: c.id })}
                     onDuplicate={() => duplicateCard(c.id)}
                     onReplace={() => setReplacingId(c.id)}
                     onRemove={() => removeCard(c.id)} />
@@ -421,7 +424,13 @@ export default function DashboardView() {
         </Grid>
       )}
         </div>
-        {editing && (
+        {editing && (sidebarCollapsed ? (
+          <div className="sticky top-4 self-start">
+            <button type="button" aria-label="expand sidebar" title="Show panel" className="inline-flex size-9 items-center justify-center rounded-lg border bg-card text-muted-foreground hover:bg-accent hover:text-foreground" onClick={() => setSidebarCollapsed(false)}>
+              <PanelLeftOpen className="h-4 w-4" />
+            </button>
+          </div>
+        ) : (
           <EditSidebar
             panel={editPanel}
             charts={charts ?? []}
@@ -440,8 +449,9 @@ export default function DashboardView() {
             onChangeParam={(next) => setDraftParameters(parameters.map((x) => x.id === next.id ? { ...next, slug: x.slug } : x))}
             onDeleteParam={() => { if (editPanel?.kind === "filter") { const id = editPanel.paramId; setDraftParameters(parameters.filter((x) => x.id !== id)); setEditPanel({ kind: "add" }); } }}
             onClose={() => setEditPanel({ kind: "add" })}
+            onCollapse={() => setSidebarCollapsed(true)}
           />
-        )}
+        ))}
         {!editing && showInfo && (
           <DashboardInfoSidebar
             name={dash.name}
