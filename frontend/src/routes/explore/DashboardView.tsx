@@ -63,6 +63,7 @@ export default function DashboardView() {
   const serverTabCount = dash?.tabs?.length ?? 0;
   const { activeTabPos, setActiveTabPos } = useDashboardTabs(editing ? (draftTabs?.length ?? 0) : serverTabCount);
   const cardSeqRef = useRef(0);
+  const interactingRef = useRef(false);
   const chartById = useMemo(() => new Map((charts ?? []).map((c) => [c.id, c])), [charts]);
   const view = useDashboardViewControls();
   // Hook must run before the early return — use `dash?` since dash may be undefined while loading.
@@ -185,12 +186,33 @@ export default function DashboardView() {
   // The cards are the single source of truth for positions: the RGL layout is derived
   // from them, and drag/resize writes positions straight back into the draft. This keeps
   // every grid item sized from its card (a newly added card is never auto-placed at 1x1).
-  const layout: Layout[] = visibleCards.map((c) => ({
-    i: c.id, x: c.grid_col, y: toLayoutRows(c.grid_row), w: c.size_x, h: toLayoutRows(c.size_y),
-    // clamp the minimums to the card's own size so a short card (e.g. a 1-row
-    // heading) never has minH/minW larger than its height/width (RGL warns).
-    minW: Math.min(CARD_MIN_SIZE.w, c.size_x), minH: toLayoutRows(Math.min(CARD_MIN_SIZE.h, c.size_y)),
-  }));
+  const layout: Layout[] = visibleCards.map((c) => {
+    const h = toLayoutRows(c.size_y);
+    const autoH = !!c.options.autoHeight;
+    return {
+      i: c.id, x: c.grid_col, y: toLayoutRows(c.grid_row), w: c.size_x, h,
+      // clamp the minimums to the card's own size so a short card (e.g. a 1-row
+      // heading) never has minH/minW larger than its height/width (RGL warns).
+      // Auto-height cards lock vertical resize (minH === maxH === h); width stays resizable.
+      minW: Math.min(CARD_MIN_SIZE.w, c.size_x),
+      minH: autoH ? h : toLayoutRows(Math.min(CARD_MIN_SIZE.h, c.size_y)),
+      ...(autoH ? { maxH: h } : {}),
+    };
+  });
+
+  function applyAutoHeight(cardId: string, rows: number) {
+    if (interactingRef.current) return;            // never fight an active drag/resize
+    setDraftCards((prev) => {
+      const base = prev ?? cardsAsDraft();
+      let changed = false;
+      const merged = base.map((c) => {
+        if (c.id !== cardId || c.size_y === rows) return c;
+        changed = true;
+        return { ...c, size_y: rows };
+      });
+      return changed ? merged : base;
+    });
+  }
 
   function onLayoutChange(next: Layout[]) {
     if (!editing) return;
@@ -394,6 +416,10 @@ export default function DashboardView() {
             resizeHandles={["s", "e", "se"]}
             layout={layout}
             onLayoutChange={onLayoutChange}
+            onResizeStart={() => { interactingRef.current = true; }}
+            onResizeStop={() => { interactingRef.current = false; }}
+            onDragStart={() => { interactingRef.current = true; }}
+            onDragStop={() => { interactingRef.current = false; }}
           >
           {visibleCards.map((c) => {
             const baseChart = chartById.get(c.chart_id ?? "");
@@ -415,6 +441,8 @@ export default function DashboardView() {
                 {editing && <div className="dash-draghandle absolute inset-x-0 top-0 z-10 h-6 cursor-move" title="Drag to move" />}
                 <DashboardCardView ws={ws} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values}
                   blocked={!editing && requiredUnset} editing={editing}
+                  autoHeight={!!c.options.autoHeight}
+                  onAutoHeight={editing ? (rows) => applyAutoHeight(c.id, rows) : undefined}
                   onValueClick={editing ? undefined : (ctx, x, y) => onCardValueClick(c, ctx, x, y)} />
                 {activeParamId && c.card_type === "chart" && baseChart && (
                   <CardFilterMapOverlay
