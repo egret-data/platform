@@ -1,1 +1,18 @@
-/* resize-handle styles added in a follow-up */
+/* Metabase-style resize handle: subtle, hover-revealed, SE corner only.
+   The handle only renders while editing (RGL isResizable), so no edit-mode scoping is needed. */
+.react-grid-item > .react-resizable-handle {
+  opacity: 0;
+  transition: opacity 0.15s linear;
+}
+.react-grid-item:hover > .react-resizable-handle {
+  opacity: 1;
+}
+.react-grid-item > .react-resizable-handle.react-resizable-handle-se {
+  cursor: nwse-resize;
+}
+
+/* The dragging/resizing card floats above its neighbours. */
+.react-grid-item.react-draggable-dragging,
+.react-grid-item.resizing {
+  z-index: 3;
+}
