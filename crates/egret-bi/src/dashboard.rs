@@ -198,8 +198,10 @@ impl DashboardRepo {
         Ok(())
     }
 
+    /// Permanently delete a dashboard. Cards/tabs cascade via FK; polymorphic bookmark rows do not, so purge them in the same transaction.
     pub async fn delete(&self, id: Uuid) -> Result<(), BiError> {
         let mut tx = self.db.pool.begin().await?;
+        // bookmarks are polymorphic (no FK on entity_id) so they don't cascade — purge manually.
         sqlx::query("DELETE FROM bookmarks WHERE entity_type='dashboard' AND entity_id=$1")
             .bind(id)
             .execute(&mut *tx)
