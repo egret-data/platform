@@ -39,7 +39,7 @@ export function ProgressChart({
   const fmt = (v: number) => formatValue(v, type, format);
 
   return (
-    <div className="flex h-[40vh] flex-col justify-center px-10">
+    <div className="flex h-full min-h-[5rem] flex-col justify-center px-10">
       <div className="relative">
         {/* The value floats above the fill end, like Metabase. */}
         <div data-progress-value className="absolute -top-7 -translate-x-1/2 whitespace-nowrap text-sm font-semibold tabular-nums text-foreground"
