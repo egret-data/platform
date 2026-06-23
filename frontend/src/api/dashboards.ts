@@ -29,6 +29,12 @@ export type ParamOperator =
   | "=" | "!=" | "between" | ">=" | "<="                              // number
   | "range" | "relative" | "single" | "month-year" | "quarter-year" | "all-options";  // date
 export type ParamWidget = "dropdown" | "search" | "input";
+export interface ParamValuesSource {
+  type: "distinct" | "static" | "card";
+  static?: string[];
+  cardId?: string;
+  column?: string;
+}
 export interface DashboardParameter {
   id: string;
   name: string;
@@ -39,6 +45,7 @@ export interface DashboardParameter {
   required?: boolean;
   widget?: ParamWidget;            // how the value is picked in view mode
   filteringParameters?: string[];  // ids of params whose value constrains THIS param's option list
+  valuesSource?: ParamValuesSource;
 }
 
 export interface DashboardDetail {
