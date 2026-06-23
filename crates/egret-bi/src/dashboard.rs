@@ -64,6 +64,14 @@ struct DashboardWithCount {
     card_count: i64,
 }
 
+#[derive(sqlx::FromRow)]
+struct DashboardWithCountBm {
+    #[sqlx(flatten)]
+    dash: Dashboard,
+    card_count: i64,
+    bookmarked: bool,
+}
+
 /// A card as supplied by the client when saving a layout (no server id yet).
 #[derive(Debug, Clone)]
 pub struct NewCard {
@@ -191,11 +199,89 @@ impl DashboardRepo {
     }
 
     pub async fn delete(&self, id: Uuid) -> Result<(), BiError> {
+        let mut tx = self.db.pool.begin().await?;
+        sqlx::query("DELETE FROM bookmarks WHERE entity_type='dashboard' AND entity_id=$1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM dashboards WHERE id=$1")
             .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn add_bookmark(
+        &self,
+        user: Uuid,
+        entity_type: &str,
+        entity_id: Uuid,
+    ) -> Result<(), BiError> {
+        sqlx::query(
+            "INSERT INTO bookmarks (user_id, entity_type, entity_id) VALUES ($1,$2,$3) \
+             ON CONFLICT (user_id, entity_type, entity_id) DO NOTHING",
+        )
+        .bind(user)
+        .bind(entity_type)
+        .bind(entity_id)
+        .execute(&self.db.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn remove_bookmark(
+        &self,
+        user: Uuid,
+        entity_type: &str,
+        entity_id: Uuid,
+    ) -> Result<(), BiError> {
+        sqlx::query("DELETE FROM bookmarks WHERE user_id=$1 AND entity_type=$2 AND entity_id=$3")
+            .bind(user)
+            .bind(entity_type)
+            .bind(entity_id)
             .execute(&self.db.pool)
             .await?;
         Ok(())
+    }
+
+    pub async fn is_bookmarked(&self, user: Uuid, id: Uuid) -> Result<bool, BiError> {
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM bookmarks WHERE user_id=$1 AND entity_type='dashboard' AND entity_id=$2)",
+        )
+        .bind(user)
+        .bind(id)
+        .fetch_one(&self.db.pool)
+        .await?)
+    }
+
+    /// Like `list_by_workspace` but also returns a per-user `bookmarked` flag.
+    pub async fn list_by_workspace_for(
+        &self,
+        workspace_id: Uuid,
+        user: Uuid,
+        trashed: bool,
+    ) -> Result<Vec<(Dashboard, i64, bool)>, BiError> {
+        let pred = if trashed {
+            "deleted_at IS NOT NULL"
+        } else {
+            "deleted_at IS NULL"
+        };
+        let sql = format!(
+            "SELECT {COLS}, \
+             (SELECT count(*) FROM dashboard_cards c WHERE c.dashboard_id = dashboards.id) AS card_count, \
+             EXISTS (SELECT 1 FROM bookmarks b WHERE b.user_id = $2 AND b.entity_type='dashboard' AND b.entity_id = dashboards.id) AS bookmarked \
+             FROM dashboards WHERE workspace_id = $1 AND {pred} ORDER BY updated_at DESC"
+        );
+        let rows = sqlx::query_as::<_, DashboardWithCountBm>(&sql)
+            .bind(workspace_id)
+            .bind(user)
+            .fetch_all(&self.db.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.dash, r.card_count, r.bookmarked))
+            .collect())
     }
 
     /// All cards on a dashboard, in placement order.

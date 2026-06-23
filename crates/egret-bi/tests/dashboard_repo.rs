@@ -429,3 +429,47 @@ async fn duplicate_copies_tabs_and_cards_with_new_owner() {
         "the two cards must map to two distinct copy tabs (remap not collapsed)"
     );
 }
+
+#[tokio::test]
+async fn bookmark_toggles_and_shows_in_list_flag() {
+    let Some(fx) = setup().await else { return };
+    let d = fx
+        .repo
+        .create(fx.ws, "Fav", "", Some(fx.user))
+        .await
+        .unwrap();
+
+    fx.repo
+        .add_bookmark(fx.user, "dashboard", d.id)
+        .await
+        .unwrap();
+    fx.repo
+        .add_bookmark(fx.user, "dashboard", d.id)
+        .await
+        .unwrap(); // idempotent
+    let listed = fx
+        .repo
+        .list_by_workspace_for(fx.ws, fx.user, false)
+        .await
+        .unwrap();
+    let row = listed
+        .iter()
+        .find(|(x, _, _)| x.id == d.id)
+        .expect("listed");
+    assert!(row.2, "bookmarked flag should be true");
+
+    fx.repo
+        .remove_bookmark(fx.user, "dashboard", d.id)
+        .await
+        .unwrap();
+    let listed2 = fx
+        .repo
+        .list_by_workspace_for(fx.ws, fx.user, false)
+        .await
+        .unwrap();
+    let row2 = listed2
+        .iter()
+        .find(|(x, _, _)| x.id == d.id)
+        .expect("listed");
+    assert!(!row2.2, "bookmarked flag should be false after removal");
+}

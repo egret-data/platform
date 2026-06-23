@@ -964,6 +964,10 @@ pub fn dashboard_router() -> Router<BiState> {
         )
         .route("/ws/{workspace}/dashboards/{id}/trash", post(db_trash))
         .route("/ws/{workspace}/dashboards/{id}/restore", post(db_restore))
+        .route(
+            "/ws/{workspace}/dashboards/{id}/bookmark",
+            post(db_bookmark_add).delete(db_bookmark_remove),
+        )
 }
 
 async fn require_dashboard_in_ws(
@@ -1035,12 +1039,12 @@ async fn db_list(
         .map_err(BiApiError::from)?;
     let rows = st
         .dashboards
-        .list_by_workspace(ctx.workspace_id.0, q.trashed)
+        .list_by_workspace_for(ctx.workspace_id.0, ctx.principal.user_id.0, q.trashed)
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(
         rows.into_iter()
-            .map(|(d, n)| crate::model::dashboard_summary_dto(d, n))
+            .map(|(d, n, bm)| crate::model::dashboard_summary_dto(d, n, bm))
             .collect(),
     ))
 }
@@ -1064,7 +1068,9 @@ async fn db_create(
         )
         .await
         .map_err(BiApiError::from)?;
-    Ok(Json(load_dashboard(&st, d.id).await?))
+    Ok(Json(
+        load_dashboard(&st, d.id, ctx.principal.user_id.0).await?,
+    ))
 }
 
 async fn db_get(
@@ -1077,7 +1083,9 @@ async fn db_get(
         .await
         .map_err(BiApiError::from)?;
     require_dashboard_in_ws(&st, &ctx, id).await?;
-    Ok(Json(load_dashboard(&st, id).await?))
+    Ok(Json(
+        load_dashboard(&st, id, ctx.principal.user_id.0).await?,
+    ))
 }
 
 async fn db_update(
@@ -1109,7 +1117,9 @@ async fn db_update(
         .replace_layout(id, &tabs, &cards)
         .await
         .map_err(BiApiError::from)?;
-    Ok(Json(load_dashboard(&st, id).await?))
+    Ok(Json(
+        load_dashboard(&st, id, ctx.principal.user_id.0).await?,
+    ))
 }
 
 async fn db_remove(
@@ -1179,10 +1189,50 @@ async fn db_duplicate(
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("dashboard".into()))?;
-    Ok(Json(load_dashboard(&st, copy.id).await?))
+    Ok(Json(
+        load_dashboard(&st, copy.id, ctx.principal.user_id.0).await?,
+    ))
 }
 
-async fn load_dashboard(st: &BiState, id: Uuid) -> Result<DashboardDetailDto, BiApiError> {
+async fn db_bookmark_add(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DB_READ)
+        .await
+        .map_err(BiApiError::from)?;
+    require_dashboard_in_ws(&st, &ctx, id).await?;
+    st.dashboards
+        .add_bookmark(ctx.principal.user_id.0, "dashboard", id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn db_bookmark_remove(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DB_READ)
+        .await
+        .map_err(BiApiError::from)?;
+    require_dashboard_in_ws(&st, &ctx, id).await?;
+    st.dashboards
+        .remove_bookmark(ctx.principal.user_id.0, "dashboard", id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn load_dashboard(
+    st: &BiState,
+    id: Uuid,
+    user: Uuid,
+) -> Result<DashboardDetailDto, BiApiError> {
     let d = st
         .dashboards
         .get(id)
@@ -1191,5 +1241,12 @@ async fn load_dashboard(st: &BiState, id: Uuid) -> Result<DashboardDetailDto, Bi
         .ok_or(Error::NotFound("dashboard".into()))?;
     let tabs = st.dashboards.tabs(id).await.map_err(BiApiError::from)?;
     let cards = st.dashboards.cards(id).await.map_err(BiApiError::from)?;
-    Ok(crate::model::dashboard_detail_dto(d, tabs, cards))
+    let bookmarked = st
+        .dashboards
+        .is_bookmarked(user, id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(crate::model::dashboard_detail_dto(
+        d, tabs, cards, bookmarked,
+    ))
 }

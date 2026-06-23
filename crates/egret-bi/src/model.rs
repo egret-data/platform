@@ -293,6 +293,7 @@ pub struct DashboardSummaryDto {
     pub created_by: Option<String>,
     pub card_count: i64,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub bookmarked: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -325,6 +326,7 @@ pub struct DashboardDetailDto {
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub width: String,
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub bookmarked: bool,
     pub tabs: Vec<DashboardTabDto>,
     pub cards: Vec<DashboardCardDto>,
 }
@@ -441,7 +443,11 @@ pub fn dashboard_tab_dto(t: crate::dashboard::DashboardTab) -> DashboardTabDto {
     }
 }
 
-pub fn dashboard_summary_dto(d: Dashboard, card_count: i64) -> DashboardSummaryDto {
+pub fn dashboard_summary_dto(
+    d: Dashboard,
+    card_count: i64,
+    bookmarked: bool,
+) -> DashboardSummaryDto {
     DashboardSummaryDto {
         id: d.id.to_string(),
         name: d.name,
@@ -449,6 +455,7 @@ pub fn dashboard_summary_dto(d: Dashboard, card_count: i64) -> DashboardSummaryD
         created_by: d.created_by.map(|u| u.to_string()),
         card_count,
         updated_at: d.updated_at,
+        bookmarked,
     }
 }
 
@@ -470,6 +477,7 @@ pub fn dashboard_detail_dto(
     d: Dashboard,
     tabs: Vec<crate::dashboard::DashboardTab>,
     cards: Vec<DashboardCard>,
+    bookmarked: bool,
 ) -> DashboardDetailDto {
     DashboardDetailDto {
         id: d.id.to_string(),
@@ -480,6 +488,7 @@ pub fn dashboard_detail_dto(
         updated_at: d.updated_at,
         width: d.width,
         deleted_at: d.deleted_at,
+        bookmarked,
         tabs: tabs.into_iter().map(dashboard_tab_dto).collect(),
         cards: cards.into_iter().map(dashboard_card_dto).collect(),
     }
