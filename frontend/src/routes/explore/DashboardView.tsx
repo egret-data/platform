@@ -309,7 +309,7 @@ export default function DashboardView() {
       {parameters
         .filter((p) => p.type === "category" || p.type === "id" || p.type === "location")
         .map((p) => {
-          const resolved = resolveValuesSource(p, cards as never[], chartById as never);
+          const resolved = resolveValuesSource(p, cards, chartById);
           if (!resolved) return null;
           if (resolved.kind === "static") {
             return <StaticOptions key={p.id} slug={p.slug} values={resolved.values} onLoaded={onOptionsLoaded} />;
