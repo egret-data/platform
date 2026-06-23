@@ -18,7 +18,9 @@ export function GridOverlay({ cols, rowPx }: { cols: number; rowPx: number }) {
   return (
     <div ref={ref} aria-hidden className="pointer-events-none absolute inset-0 z-0"
       style={colW ? {
-        backgroundImage: "linear-gradient(to right, hsl(var(--border)) 1px, transparent 1px), linear-gradient(to bottom, hsl(var(--border)) 1px, transparent 1px)",
+        // egret uses OKLCH design tokens (Tailwind v4), so --border is a full color value — use it
+        // directly, NOT hsl(var(--border)) which would double-wrap (hsl(oklch(…))) and be invalid.
+        backgroundImage: "linear-gradient(to right, var(--border) 1px, transparent 1px), linear-gradient(to bottom, var(--border) 1px, transparent 1px)",
         backgroundSize: `${colW}px ${rowPx}px`,
         opacity: 0.4,
       } : undefined} />

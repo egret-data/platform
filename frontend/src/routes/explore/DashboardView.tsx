@@ -16,7 +16,7 @@ import { useDashboardViewControls } from "@/api/useDashboardViewControls";
 import { useDashboardParams } from "@/api/useDashboardParams";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { GRID_COLS, CARD_MIN_SIZE, CARD_DEFAULT_SIZE, ROW_PX, toLayoutRows, fromLayoutRows } from "@/components/chart/dashboard-grid";
+import { GRID_COLS, CARD_MIN_SIZE, CARD_DEFAULT_SIZE, ROW_PX, GRID_MARGIN_X, GRID_MARGIN_Y, toLayoutRows, fromLayoutRows } from "@/components/chart/dashboard-grid";
 import { GridOverlay } from "@/components/chart/dashboard/GridOverlay";
 import { DashboardCardView } from "@/components/chart/dashboard/DashboardCardView";
 import { DashboardInfoSidebar } from "@/components/chart/dashboard/DashboardInfoSidebar";
@@ -403,12 +403,12 @@ export default function DashboardView() {
         <p className="py-12 text-center text-muted-foreground">No cards on this tab.</p>
       ) : (
         <div className="relative">
-          {editing && <GridOverlay cols={GRID_COLS} rowPx={ROW_PX} />}
+          {editing && <GridOverlay cols={GRID_COLS} rowPx={ROW_PX + GRID_MARGIN_Y} />}
           <Grid
             className="layout relative z-10"
             cols={GRID_COLS}
             rowHeight={ROW_PX}
-            margin={[12, 12]}
+            margin={[GRID_MARGIN_X, GRID_MARGIN_Y]}
             draggableHandle=".dash-draghandle"
             draggableCancel=".dash-nodrag"
             isDraggable={editing}
