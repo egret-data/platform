@@ -18,6 +18,7 @@ import { ChartTypeGallery } from "@/components/chart/ChartTypeGallery";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { ChartSettingsSections } from "@/components/chart/settings/ChartSettingsSections";
 import { ChartRenderer } from "@/components/chart/ChartRenderer";
+import { ChartErrorBoundary } from "@/components/chart/ChartErrorBoundary";
 import { ChartExportMenu } from "@/components/chart/ChartExportMenu";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 import { Button } from "@/components/ui/button";
@@ -783,13 +784,15 @@ export default function ChartExplore() {
             onCellDrill={(ctx, x, y) => setDrillMenu({ ctx, x, y })} />
         )}
         {finished && results.data && viz !== "table" && viz !== "pivot_table" && (
-          <ChartRenderer
-            vizType={viz}
-            params={paramsForSave()}
-            columns={results.data.columns}
-            rows={results.data.rows}
-            metricTypes={metricTypes}
-          />
+          <ChartErrorBoundary resetKey={`${viz}:${results.data.columns.length}:${results.data.rows.length}`}>
+            <ChartRenderer
+              vizType={viz}
+              params={paramsForSave()}
+              columns={results.data.columns}
+              rows={results.data.rows}
+              metricTypes={metricTypes}
+            />
+          </ChartErrorBoundary>
         )}
         </div>
         {!queryId && !build.isPending && !submit.isPending && (
