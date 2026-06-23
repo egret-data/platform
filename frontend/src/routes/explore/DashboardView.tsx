@@ -287,8 +287,8 @@ export default function DashboardView() {
           <Button size="sm" variant="outline" onClick={async () => { try { await restoreMut.mutateAsync(dash.id); } catch (e) { toast.error(String(e)); } }}>Restore</Button>
         </div>
       )}
-      <div className="mb-3 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">{dash.name}</h1>
+      <div className="mb-3 flex items-center justify-between border-b pb-3">
+        <h1 className="text-xl font-bold">{dash.name}</h1>
         <div className="flex gap-2">
           {!editing && (
             <>
