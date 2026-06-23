@@ -473,3 +473,41 @@ async fn bookmark_toggles_and_shows_in_list_flag() {
         .expect("listed");
     assert!(!row2.2, "bookmarked flag should be false after removal");
 }
+
+#[tokio::test]
+async fn permanent_delete_purges_bookmarks() {
+    let Some(fx) = setup().await else { return };
+    let d = fx
+        .repo
+        .create(fx.ws, "Doomed", "", Some(fx.user))
+        .await
+        .unwrap();
+    fx.repo
+        .add_bookmark(fx.user, "dashboard", d.id)
+        .await
+        .unwrap();
+
+    // sanity: bookmark exists
+    let before: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bookmarks WHERE entity_type='dashboard' AND entity_id=$1",
+    )
+    .bind(d.id)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(before, 1, "bookmark should exist before delete");
+
+    fx.repo.delete(d.id).await.unwrap();
+
+    let after: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bookmarks WHERE entity_type='dashboard' AND entity_id=$1",
+    )
+    .bind(d.id)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        after, 0,
+        "permanent delete must purge the dashboard's bookmark rows"
+    );
+}
