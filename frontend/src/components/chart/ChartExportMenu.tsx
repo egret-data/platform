@@ -20,28 +20,17 @@ interface Props {
 }
 
 export function ChartExportMenu({ title, columns, rows, containerRef, disabled }: Props) {
-  const [open, setOpen] = useState(false);
   // PNG availability is read from the DOM when the menu opens (reflects the currently-rendered viz).
   const [hasSvg, setHasSvg] = useState(false);
 
-  const handleOpenChange = (next: boolean) => {
-    if (next) setHasSvg(!!containerRef.current?.querySelector("svg"));
-    setOpen(next);
-  };
-
   return (
-    <DropdownMenu open={open} onOpenChange={handleOpenChange}>
+    <DropdownMenu
+      onOpenChange={(open) => {
+        if (open) setHasSvg(!!containerRef.current?.querySelector("svg"));
+      }}
+    >
       <DropdownMenuTrigger asChild>
-        <Button
-          size="sm"
-          variant="ghost"
-          aria-label="export chart"
-          disabled={disabled}
-          // Radix's Trigger opens via pointer events, which jsdom (fireEvent.click) doesn't emit.
-          // Force-open on click so the menu is openable via plain click everywhere; Radix still
-          // handles closing (outside-click / Escape / item-select).
-          onClick={() => handleOpenChange(true)}
-        >
+        <Button size="sm" variant="ghost" aria-label="Export chart" disabled={disabled}>
           <Download className="h-4 w-4" />
         </Button>
       </DropdownMenuTrigger>
@@ -54,7 +43,7 @@ export function ChartExportMenu({ title, columns, rows, containerRef, disabled }
             onSelect={() => {
               const svg = containerRef.current?.querySelector("svg");
               if (svg)
-                downloadPng(title, svg as SVGElement).catch((e) => {
+                downloadPng(title, svg).catch((e) => {
                   console.error(e);
                   toast.error("Failed to export PNG");
                 });
