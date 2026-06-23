@@ -5,6 +5,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { isBlank, summarize } from "./params";
+import { DateFilterPicker } from "./DateFilterPicker";
 
 const RELATIVE = [
   { v: "last7", label: "Last 7 days" }, { v: "last30", label: "Last 30 days" },
@@ -94,6 +95,11 @@ function FilterControl({ param, value, options, onChange }: Props) {
         <option value="false">False</option>
       </select>
     );
+  }
+
+  // all-options: full relative/specific date picker
+  if (param.type === "date" && param.operator === "all-options") {
+    return <DateFilterPicker value={value as never} onChange={(v) => onChange(v)} />;
   }
 
   // month-year
