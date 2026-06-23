@@ -274,9 +274,9 @@ export default function DashboardView() {
   })();
 
   return (
-    <div className={view.isFullscreen ? "fixed inset-0 z-50 overflow-auto bg-muted/30 p-4" : "min-h-full bg-muted/30 p-4"}>
+    <div className={view.isFullscreen ? "fixed inset-0 z-50 overflow-auto bg-dashboard p-4" : "min-h-full bg-dashboard p-4"}>
       {editing && (
-        <div className="-mx-4 -mt-4 mb-4 flex items-center gap-2 bg-primary px-4 py-2 text-sm font-medium text-primary-foreground">
+        <div className="-mx-4 -mt-4 mb-4 flex items-center gap-2 bg-primary/90 px-4 py-2 text-sm font-medium text-primary-foreground">
           <Pencil className="h-4 w-4" /> You're editing this dashboard
         </div>
       )}
@@ -423,7 +423,7 @@ export default function DashboardView() {
                     onRemove={() => removeCard(c.id)} />
                 </div>
               )}
-              <div className={`relative h-full overflow-hidden ${c.card_type === "heading" ? "" : "rounded-lg border bg-card shadow-sm"} ${editing && editPanel?.kind === "card" && editPanel.cardId === c.id ? "ring-2 ring-primary" : ""}`}>
+              <div className={`relative h-full overflow-hidden ${c.card_type === "heading" ? "" : "rounded-sm border bg-card"} ${editing && editPanel?.kind === "card" && editPanel.cardId === c.id ? "ring-2 ring-primary" : ""}`}>
                 {editing && <div className="dash-draghandle absolute inset-x-0 top-0 z-10 h-6 cursor-move" title="Drag to move" />}
                 <DashboardCardView ws={ws} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values}
                   blocked={!editing && requiredUnset} editing={editing}
