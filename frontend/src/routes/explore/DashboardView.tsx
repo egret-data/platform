@@ -8,6 +8,7 @@ import { useDashboard, useDashboardMutations, type DashboardCard as Card, type D
 import { useCharts, type Chart, type ChartFilter } from "@/api/charts";
 import { useDataset } from "@/api/datasets";
 import { resolveClick, type ClickBehavior } from "@/components/chart/dashboard/click-behavior";
+import { resolveValuesSource } from "@/components/chart/dashboard/valuesSource";
 import { DrillMenu } from "@/components/chart/DrillMenu";
 import { DrillRecordsDialog } from "@/components/chart/DrillRecordsDialog";
 import { type DrillContext } from "@/components/chart/drill";
@@ -38,6 +39,12 @@ const ROW_PX = 90;
 function ParamOptions({ ws, datasetId, column, slug, filters, onLoaded }: { ws: string; datasetId: string | null; column: string | null; slug: string; filters: ChartFilter[]; onLoaded: (slug: string, values: string[]) => void }) {
   const { values } = useColumnValues(ws, datasetId, column, !!datasetId && !!column, filters);
   useEffect(() => { if (values.length) onLoaded(slug, values); }, [slug, values, onLoaded]);
+  return null;
+}
+
+/** Emits a static value list on mount (no query) for a 'static' value source. */
+function StaticOptions({ slug, values, onLoaded }: { slug: string; values: string[]; onLoaded: (slug: string, v: string[]) => void }) {
+  useEffect(() => { onLoaded(slug, values); }, [slug, values, onLoaded]);
   return null;
 }
 
@@ -219,6 +226,27 @@ export default function DashboardView() {
   }
 
   const activeParamId = editing && editPanel?.kind === "filter" ? editPanel.paramId : null;
+  // Per-card column lists for the filter value-source "card" picker (label + selectable columns).
+  const cardColumns = cards
+    .filter((c) => c.card_type === "chart")
+    .map((c) => {
+      const ch = chartById.get(c.chart_id ?? "");
+      return { cardId: c.id, label: ch?.name ?? "Card", columns: ch ? [...ch.params.spec.dimensions, ...ch.params.spec.columns] : [] };
+    });
+
+  // Per-card viz override panel data. Result columns aren't readily available in DashboardView, so
+  // offer the chart's spec dimensions/columns as the formatting column list (mirrors cardColumns).
+  const vizForPanel = (() => {
+    if (editPanel?.kind !== "viz") return undefined;
+    const card = (cards as DraftCard[]).find((c) => c.id === editPanel.cardId);
+    const chart = card ? chartById.get(card.chart_id ?? "") : undefined;
+    if (!card || !chart) return undefined;
+    return {
+      chart,
+      override: card.options.vizOverride as Record<string, unknown> | undefined,
+      columns: [...chart.params.spec.dimensions, ...chart.params.spec.columns].map((name) => ({ name, type: "" })),
+    };
+  })();
 
   return (
     <div className={view.isFullscreen ? "fixed inset-0 z-50 overflow-auto bg-muted/30 p-4" : "min-h-full bg-muted/30 p-4"}>
@@ -295,14 +323,17 @@ export default function DashboardView() {
       {parameters
         .filter((p) => p.type === "category" || p.type === "id" || p.type === "location")
         .map((p) => {
-          const card = cards.find((c) => c.card_type === "chart" && ((c.options.paramMappings as Record<string, string>) ?? {})[p.id]);
-          if (!card) return null;
-          const ch = chartById.get(card.chart_id ?? "");
-          const cardMappings = (card.options.paramMappings as Record<string, string>) ?? {};
-          const column = cardMappings[p.id] ?? null;
-          if (!ch || !column) return null;
-          const filters = computeLinkedFilters(p, cardMappings, parameters, paramsState.values);
-          return <ParamOptions key={p.id} ws={ws} datasetId={ch.dataset_id} column={column} slug={p.slug} filters={filters} onLoaded={onOptionsLoaded} />;
+          const resolved = resolveValuesSource(p, cards, chartById);
+          if (!resolved) return null;
+          if (resolved.kind === "static") {
+            return <StaticOptions key={p.id} slug={p.slug} values={resolved.values} onLoaded={onOptionsLoaded} />;
+          }
+          // query: compute linked filters from the param's mapped card (distinct semantics).
+          // For a 'card' source, linked filters don't meaningfully apply → pass [].
+          const mappedCard = cards.find((c) => c.card_type === "chart" && (((c.options.paramMappings as Record<string, string>) ?? {})[p.id]));
+          const cardMappings = (mappedCard?.options.paramMappings as Record<string, string>) ?? {};
+          const filters = p.valuesSource?.type === "card" ? [] : computeLinkedFilters(p, cardMappings, parameters, paramsState.values);
+          return <ParamOptions key={p.id} ws={ws} datasetId={resolved.datasetId} column={resolved.column} slug={p.slug} filters={filters} onLoaded={onOptionsLoaded} />;
         })}
       {(editing || tabs.length >= 2) && (
         <DashboardTabBar
@@ -364,6 +395,7 @@ export default function DashboardView() {
                 <div className="dash-nodrag absolute -top-3.5 left-1/2 z-30 -translate-x-1/2 opacity-0 transition-opacity group-hover:opacity-100">
                   <CardEditToolbar cardType={c.card_type}
                     onSettings={() => setEditPanel({ kind: "card", cardId: c.id })}
+                    onViz={() => setEditPanel({ kind: "viz", cardId: c.id })}
                     onDuplicate={() => duplicateCard(c.id)}
                     onReplace={() => setReplacingId(c.id)}
                     onRemove={() => removeCard(c.id)} />
@@ -393,6 +425,9 @@ export default function DashboardView() {
             panel={editPanel}
             charts={charts ?? []}
             parameters={parameters}
+            cardColumns={cardColumns}
+            vizForPanel={vizForPanel}
+            onChangeVizOverride={(next) => { if (editPanel?.kind === "viz") updateCardOptions(editPanel.cardId, { vizOverride: next }); }}
             tabs={tabs}
             cardForPanel={editPanel?.kind === "card" ? (cards as DraftCard[]).find((c) => c.id === editPanel.cardId) : undefined}
             chartForCard={editPanel?.kind === "card" ? chartById.get((cards as DraftCard[]).find((c) => c.id === editPanel.cardId)?.chart_id ?? "") : undefined}

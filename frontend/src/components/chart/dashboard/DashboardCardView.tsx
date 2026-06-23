@@ -6,7 +6,7 @@ import type { DrillContext } from "@/components/chart/drill";
 import { TextCard } from "./TextCard";
 import { HeadingCard } from "./HeadingCard";
 import { LinkCard } from "./LinkCard";
-import { interpolateParams } from "./params";
+import { applyVizOverride, interpolateParams } from "./params";
 
 function asString(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
@@ -25,7 +25,10 @@ function ChartCardTile({ ws, card, chart, refreshNonce, onValueClick, blocked }:
         {blocked ? <div className="flex h-full items-center justify-center px-3 text-center text-sm text-muted-foreground">Set the required filters to load this card</div>
           : data.error ? <div className="text-sm text-destructive">{data.error}</div>
           : data.isLoading ? <div className="text-sm text-muted-foreground">Loading…</div>
-          : <ChartRenderer vizType={chart.viz_type} params={chart.params} columns={data.columns} rows={data.rows} onValueClick={onValueClick} />}
+          : (() => {
+            const eff = applyVizOverride(chart, card.options.vizOverride as Record<string, unknown> | undefined);
+            return <ChartRenderer vizType={eff.viz_type} params={eff.params} columns={data.columns} rows={data.rows} onValueClick={onValueClick} />;
+          })()}
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import type { ChartFilter, ValueFilterOp, Chart } from "@/api/charts";
+import type { ChartFilter, ValueFilterOp, Chart, ChartParams, VizType } from "@/api/charts";
 import type { DashboardParameter } from "@/api/dashboards";
 
 export function slugify(name: string, existing: string[]): string {
@@ -31,6 +31,20 @@ export function summarize(param: DashboardParameter, value: unknown): string {
   if (param.type === "boolean") {
     return value === true || value === "true" ? "True" : "False";
   }
+  if (param.type === "date" && param.operator === "all-options") {
+    const v = value as AllOptVal | undefined;
+    if (!v || !v.mode) return "";
+    if (v.mode === "relative") {
+      const unit = v.unit ?? "day";
+      if (v.dir === "current") return `Current ${unit}`;
+      const word = v.dir === "next" ? "Next" : "Past";
+      const plural = (v.n ?? 0) === 1 ? unit : `${unit}s`;
+      return `${word} ${v.n} ${plural}`;
+    }
+    if (v.op === "between") return `${v.from} – ${v.to ?? ""}`.trim();
+    const opWord = v.op === "after" ? "After" : v.op === "before" ? "Before" : "On";
+    return v.from ? `${opWord} ${v.from}` : "";
+  }
   if (param.type === "date" && param.operator === "quarter-year") {
     const [y, q] = String(value).split("-");
     return q ? `Q${q} ${y}` : String(value);
@@ -49,6 +63,34 @@ const RELATIVE_DAYS: Record<string, number> = {
 };
 
 const iso = (d: Date) => d.toISOString().slice(0, 10);
+
+export type DateUnit = "day" | "week" | "month" | "quarter" | "year";
+
+/** Canonical value shape for a `date` parameter with the `all-options` operator. */
+export type DateAllOptionsValue =
+  | { mode: "relative"; dir: "past" | "next" | "current"; n: number; unit: DateUnit }
+  | { mode: "specific"; op: "on" | "before" | "after" | "between"; from: string; to?: string };
+
+/** Loosened, all-fields-optional read shape used when narrowing an unknown value. */
+type AllOptVal = {
+  mode?: "relative" | "specific";
+  dir?: "past" | "next" | "current";
+  n?: number;
+  unit?: DateUnit;
+  op?: "on" | "before" | "after" | "between";
+  from?: string;
+  to?: string;
+};
+
+function shift(d: Date, n: number, unit: DateUnit): Date {
+  const r = new Date(d);
+  if (unit === "day") r.setUTCDate(r.getUTCDate() + n);
+  else if (unit === "week") r.setUTCDate(r.getUTCDate() + n * 7);
+  else if (unit === "month") r.setUTCMonth(r.getUTCMonth() + n);
+  else if (unit === "quarter") r.setUTCMonth(r.getUTCMonth() + n * 3);
+  else r.setUTCFullYear(r.getUTCFullYear() + n);
+  return r;
+}
 
 export function paramToFilters(
   param: DashboardParameter,
@@ -99,6 +141,37 @@ export function paramToFilters(
     }
 
     case "date": {
+      if (param.operator === "all-options") {
+        const v = value as AllOptVal | undefined;
+        if (!v || !v.mode) return [];
+        if (v.mode === "relative") {
+          const unit = v.unit ?? "day";
+          if (v.dir === "current") {
+            return [mkf("ge", iso(now)), mkf("le", iso(now))];
+          }
+          const n = Number(v.n) || 0;
+          const other = v.dir === "next" ? shift(now, n, unit) : shift(now, -n, unit);
+          const [lo, hi] = v.dir === "next" ? [now, other] : [other, now];
+          return [mkf("ge", iso(lo)), mkf("le", iso(hi))];
+        }
+        if (isBlank(v.from)) return [];
+        const from = String(v.from);
+        switch (v.op) {
+          case "on":
+            return [mkf("eq", from)];
+          case "before":
+            return [mkf("lt", from)];
+          case "after":
+            return [mkf("gt", from)];
+          case "between": {
+            const out: ChartFilter[] = [mkf("ge", from)];
+            if (!isBlank(v.to)) out.push(mkf("le", String(v.to)));
+            return out;
+          }
+          default:
+            return [mkf("eq", from)];
+        }
+      }
       if (param.operator === "single") {
         return isBlank(value) ? [] : [mkf("eq", String(value))];
       }
@@ -234,4 +307,26 @@ export function interpolateParams(
     const v = values[slug];
     return v == null ? "" : Array.isArray(v) ? v.join(", ") : String(v);
   });
+}
+
+/** Merge a display-only override over a chart's params (never the query `spec`); optionally override viz_type. */
+export function applyVizOverride(
+  chart: Chart,
+  override?: Record<string, unknown>,
+): { viz_type: VizType; params: ChartParams } {
+  if (!override) return { viz_type: chart.viz_type, params: chart.params };
+  const { viz_type: ovViz, spec: _ignoredSpec, ...display } = override as { viz_type?: VizType; spec?: unknown };
+  const params: ChartParams = { ...chart.params };
+  const baseParams = chart.params as unknown as Record<string, unknown>;
+  const target = params as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(display)) {
+    const baseVal = baseParams[k];
+    // deep-merge plain objects (config sub-objects like cartesian/pie); replace arrays/primitives
+    target[k] =
+      baseVal && typeof baseVal === "object" && !Array.isArray(baseVal) && v && typeof v === "object" && !Array.isArray(v)
+        ? { ...(baseVal as object), ...(v as object) }
+        : v;
+  }
+  params.spec = chart.params.spec; // query is always the chart's spec (+ dashboard injection upstream)
+  return { viz_type: ovViz ?? chart.viz_type, params };
 }

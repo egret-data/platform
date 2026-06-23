@@ -11,4 +11,7 @@ describe("OPERATORS", () => {
     expect(OPERATORS.date).toContain("quarter-year");
     expect(OPERATORS.text).not.toContain("does-not-contain");
   });
+  it("date includes the all-options operator", () => {
+    expect(OPERATORS.date).toContain("all-options");
+  });
 });
