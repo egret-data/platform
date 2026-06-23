@@ -13,11 +13,17 @@ const input = "h-8 rounded border bg-background px-2 text-sm";
 
 export function DateFilterPicker({ value, onChange }: Props) {
   const [draft, setDraft] = useState<DateAllOptionsValue | undefined>(value);
-  useEffect(() => setDraft(value), [value]);
+  // Explicit user tab override; cleared whenever the value prop changes so the
+  // displayed tab follows the (re-synced) draft's mode.
+  const [tabOverride, setTabOverride] = useState<"relative" | "specific" | null>(null);
+  useEffect(() => {
+    setDraft(value);
+    setTabOverride(null);
+  }, [value]);
 
-  const [tab, setTab] = useState<"relative" | "specific">(
-    draft?.mode === "specific" ? "specific" : "relative",
-  );
+  const tab: "relative" | "specific" =
+    tabOverride ?? (draft?.mode === "specific" ? "specific" : "relative");
+  const setTab = setTabOverride;
 
   const rel: RelVal =
     draft?.mode === "relative" ? draft : { mode: "relative", dir: "past", n: 7, unit: "day" };
@@ -68,7 +74,7 @@ export function DateFilterPicker({ value, onChange }: Props) {
               min={1}
               className={`${input} w-16`}
               value={rel.n}
-              onChange={(e) => emit({ ...rel, n: Number(e.target.value) || 0 })}
+              onChange={(e) => emit({ ...rel, n: Math.max(1, Number(e.target.value) || 1) })}
             />
           )}
           <select
