@@ -44,8 +44,9 @@ export function svgToPngBlob(svg: SVGElement, scale = 2): Promise<Blob> {
     const xml = new XMLSerializer().serializeToString(svg);
     const svgUrl = URL.createObjectURL(new Blob([xml], { type: "image/svg+xml;charset=utf-8" }));
     const img = new Image();
+    const cleanup = () => URL.revokeObjectURL(svgUrl);
     img.onload = () => {
-      URL.revokeObjectURL(svgUrl);
+      cleanup();
       const canvas = document.createElement("canvas");
       canvas.width = w;
       canvas.height = h;
@@ -56,7 +57,7 @@ export function svgToPngBlob(svg: SVGElement, scale = 2): Promise<Blob> {
       ctx.drawImage(img, 0, 0, w, h);
       canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob failed"))), "image/png");
     };
-    img.onerror = () => { URL.revokeObjectURL(svgUrl); reject(new Error("svg image load failed")); };
+    img.onerror = () => { cleanup(); reject(new Error("svg image load failed")); };
     img.src = svgUrl;
   });
 }
