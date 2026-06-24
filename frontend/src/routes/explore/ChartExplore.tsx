@@ -124,6 +124,8 @@ export default function ChartExplore() {
       setBox(p.boxplot ?? { category: p.spec?.columns?.[0], value: p.spec?.columns?.[1] });
     } else if (c.viz_type === "sankey") {
       setSankey(p.sankey ?? { source: p.spec?.dimensions?.[0], target: p.spec?.dimensions?.[1], metric: p.spec?.metrics?.[0] });
+    } else if (c.viz_type === "object") {
+      setTableCols(p.spec?.columns ?? []);
     } else {
       setTableMetrics(p.spec?.metrics ?? []);
       setTableCols([...(p.spec?.dimensions ?? []), ...(p.spec?.columns ?? [])]);
@@ -225,6 +227,9 @@ export default function ChartExplore() {
         row_limit: rowLimit, rollup_groups: groups, temporal_units: pruneUnits(temporalUnits, dims),
       };
     }
+    if (viz === "object") {
+      return { metrics: [], dimensions: [], columns: tableCols, filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
+    }
     const agg = tableMetrics.length > 0;
     const dims = agg ? tableCols : [];
     return {
@@ -296,6 +301,7 @@ export default function ChartExplore() {
     if (viz === "sankey" && (!sankey.source || !sankey.target || !sankey.metric)) {
       toast.error("Sankey needs source, target and a metric"); return;
     }
+    if (viz === "object" && tableCols.length === 0) { toast.error("Object detail needs at least one column"); return; }
     try {
       const { sql, database_id } = await build.mutateAsync({ dataset_id: datasetId, query_spec: specForRun() });
       const ack = await submit.mutateAsync({ database_id, sql, limit: rowLimit });
@@ -349,6 +355,7 @@ export default function ChartExplore() {
     if (viz === "pivot_table" && (pRows.length === 0 || pVals.length === 0)) {
       toast.error("Pivot needs at least one row dimension and one value"); return;
     }
+    if (viz === "object" && tableCols.length === 0) { toast.error("Object detail needs at least one column"); return; }
     try {
       if (id) {
         await mutations.update.mutateAsync({ id, dataset_id: datasetId, name: saveName.trim(), description: saveDesc, viz_type: viz, params: paramsForSave() });
@@ -465,6 +472,21 @@ export default function ChartExplore() {
                 </div>
                 {unitList(tableMetrics.length > 0 ? tableCols : [])}
               </>
+            )}
+
+            {viz === "object" && (
+              <div className="space-y-1">
+                <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Fields</Label>
+                <div className="space-y-1 pt-1">
+                  {columns.length === 0 && <p className="text-xs italic text-muted-foreground">Select a dataset to see columns.</p>}
+                  {columns.map((col) => (
+                    <div key={col.column_name} className="flex items-center gap-2">
+                      <Checkbox id={`obj-${col.column_name}`} checked={tableCols.includes(col.column_name)} onCheckedChange={() => toggleTableCol(col.column_name)} />
+                      <Label htmlFor={`obj-${col.column_name}`} className="cursor-pointer text-sm font-normal">{col.column_name}</Label>
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
 
             {viz === "pivot_table" && (
