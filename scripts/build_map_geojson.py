@@ -4,7 +4,7 @@
 Each feature's properties are reduced to {key, name}:
   - US states:        key = 2-letter state abbreviation, name = full state name
   - World countries:  key = ISO-A2 (ISO_A2_EH fixes Natural Earth's -99 gaps), name = country name
-  - Vietnam provinces: key = province name (shapeName), name = province name
+  - Vietnam provinces: 34 merged provinces (2025) incl. Hoàng Sa & Trường Sa; key = name = ten_tinh
 Coordinates are rounded to 2 decimals to shrink the files. Requires network.
 """
 import json
@@ -29,16 +29,25 @@ US_ABBR = {
 
 
 def fetch(url):
-    with urllib.request.urlopen(url, timeout=60) as r:
+    with urllib.request.urlopen(url, timeout=180) as r:
         return json.loads(r.read().decode())
 
 
 def round_coords(obj, nd=2):
-    if isinstance(obj, list):
-        if obj and isinstance(obj[0], (int, float)):
-            return [round(float(x), nd) for x in obj]
-        return [round_coords(x, nd) for x in obj]
-    return obj
+    """Round coordinates to `nd` decimals and drop consecutive duplicate points within each ring
+    (rounding collapses many high-res vertices onto the same point — deduping shrinks the file)."""
+    if not isinstance(obj, list):
+        return obj
+    if obj and isinstance(obj[0], (int, float)):
+        return [round(float(x), nd) for x in obj]  # a single [lon, lat] point
+    rounded = [round_coords(x, nd) for x in obj]
+    if rounded and isinstance(rounded[0], list) and rounded[0] and isinstance(rounded[0][0], (int, float)):
+        ded = [rounded[0]]  # a ring (list of points) -> drop consecutive duplicates
+        for q in rounded[1:]:
+            if q != ded[-1]:
+                ded.append(q)
+        return ded
+    return rounded
 
 
 def normalize(features, key_of, name_of):
@@ -61,7 +70,7 @@ def write(name, fc):
     os.makedirs(OUT, exist_ok=True)
     path = os.path.join(OUT, name)
     with open(path, "w") as fh:
-        json.dump(fc, fh, separators=(",", ":"))
+        json.dump(fc, fh, separators=(",", ":"), ensure_ascii=False)
     print(f"  wrote {name}: {len(fc['features'])} features, {os.path.getsize(path)//1024} KB")
 
 
@@ -80,13 +89,13 @@ def main():
         name_of=lambda p: p.get("NAME", ""),
     ))
 
-    vmeta = fetch("https://www.geoboundaries.org/api/current/gbOpen/VNM/ADM1/")
-    vurl = vmeta["gjDownloadURL"] if isinstance(vmeta, dict) else vmeta[0]["gjDownloadURL"]
-    vn = fetch(vurl)
+    # Vietnam: the 34 merged provinces (2025 reorganization), including the Hoàng Sa (Paracel) and
+    # Trường Sa (Spratly) archipelagos. Key + label are the province name (ten_tinh).
+    vn = fetch("https://raw.githubusercontent.com/lamngockhuong/vietnam-3d-map/main/data/vietnam-provinces.geojson")
     write("vietnam-provinces.geo.json", normalize(
         vn["features"],
-        key_of=lambda p: p.get("shapeName", ""),
-        name_of=lambda p: p.get("shapeName", ""),
+        key_of=lambda p: p.get("ten_tinh", ""),
+        name_of=lambda p: p.get("ten_tinh", ""),
     ))
 
 
