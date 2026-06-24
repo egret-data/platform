@@ -261,8 +261,8 @@ export function buildCartesianOption(
     if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
     if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
     if (usesXScale(cfg)) applyXScale(categories, series, cfg);
-    const displayCats1 = isExtractUnit(cfg.xAxisUnit) ? categories.map((v) => temporalLabel(cfg.xAxisUnit, v)) : categories;
-    return baseOption(cfg, displayCats1 as (string | number)[], series);
+    const displayCats = isExtractUnit(cfg.xAxisUnit) ? categories.map((v) => temporalLabel(cfg.xAxisUnit, v)) : categories;
+    return baseOption(cfg, displayCats as (string | number)[], series);
   }
 
   const rowByCat = new Map(xrows.map((r) => [catKey(r[xi]), r]));

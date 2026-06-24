@@ -380,6 +380,7 @@ export default function ChartExplore() {
     setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]);
     setColumnSettings({}); setConditionalFormatting([]); setCollapsed(new Set()); setPivotSort({}); setTableState({}); setFilters([]); setQueryId(null);
     setCartesian({ yMetrics: [] }); setPie({}); setScalar({}); setProgress({}); setGauge({}); setFunnel({}); setWaterfall({}); setSmart({}); setBox({}); setSankey({});
+    setTemporalUnits({});
   }
 
   const isRunning = status.data?.status === "queued" || status.data?.status === "running";

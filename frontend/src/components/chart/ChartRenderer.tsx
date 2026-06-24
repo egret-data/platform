@@ -104,6 +104,9 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
               xAxisUnit: params.spec.temporal_units?.[cartesian.xAxis ?? ""],
             })}
             onPointClick={onValueClick && cartesian.xAxis ? (p) => {
+              // NOTE: for an extraction temporal unit (e.g. day_of_week) p.name is the display label
+              // ("Mon"), not the raw integer (1), so drill-through filters won't match the column.
+              // Tracked as a follow-up; extraction-grouped drill is an unusual path.
               const dims: { col: string; value: unknown }[] = [{ col: cartesian.xAxis as string, value: p.name }];
               if (cartesian.series && p.seriesName != null) dims.push({ col: cartesian.series, value: p.seriesName });
               onValueClick({ dims }, p.x, p.y);
