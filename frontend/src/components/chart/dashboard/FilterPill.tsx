@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Calendar, Hash, MapPin, Tag, ToggleLeft, Type, X } from "lucide-react";
+import { Calendar, Clock, Hash, MapPin, Tag, ToggleLeft, Type, X } from "lucide-react";
 import type { DashboardParameter } from "@/api/dashboards";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
+import { TEMPORAL_UNITS } from "@/components/chart/temporal-units";
 import { isBlank, summarize } from "./params";
 import { DateFilterPicker } from "./DateFilterPicker";
 
@@ -18,6 +19,7 @@ function iconFor(p: DashboardParameter) {
   if (p.type === "category") return Tag;
   if (p.type === "location") return MapPin;
   if (p.type === "boolean") return ToggleLeft;
+  if (p.type === "temporal_unit") return Clock;
   return Type;
 }
 
@@ -58,7 +60,7 @@ export function FilterPill({ param, value, options, onChange }: Props) {
           <FilterControl param={param} value={value} options={options} onChange={onChange} />
         </PopoverContent>
       </Popover>
-      {set && (
+      {set && param.type !== "temporal_unit" && (
         <button type="button" aria-label={`clear ${param.name}`} className="pl-1.5 text-muted-foreground hover:text-foreground"
           onClick={() => onChange(clearedValue(param))}>
           <X className="h-3.5 w-3.5" />
@@ -93,6 +95,25 @@ function FilterControl({ param, value, options, onChange }: Props) {
         <option value="">Any</option>
         <option value="true">True</option>
         <option value="false">False</option>
+      </select>
+    );
+  }
+
+  if (param.type === "temporal_unit") {
+    return (
+      <select aria-label={`${param.name} value`} className={input}
+        value={String(value ?? param.default ?? "month")}
+        onChange={(e) => onChange(e.target.value)}>
+        <optgroup label="Group by">
+          {TEMPORAL_UNITS.filter((u) => u.group === "trunc").map((u) => (
+            <option key={u.token} value={u.token}>{u.label}</option>
+          ))}
+        </optgroup>
+        <optgroup label="Extract">
+          {TEMPORAL_UNITS.filter((u) => u.group === "extract").map((u) => (
+            <option key={u.token} value={u.token}>{u.label}</option>
+          ))}
+        </optgroup>
       </select>
     );
   }

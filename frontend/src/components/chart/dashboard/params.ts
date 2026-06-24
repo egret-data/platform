@@ -1,5 +1,6 @@
 import type { ChartFilter, ValueFilterOp, Chart, ChartParams, VizType } from "@/api/charts";
 import type { DashboardParameter } from "@/api/dashboards";
+import { TEMPORAL_UNITS } from "@/components/chart/temporal-units";
 
 export function slugify(name: string, existing: string[]): string {
   const base =
@@ -19,6 +20,9 @@ const RELATIVE_LABELS: Record<string, string> = {
 /** A short human summary of a parameter's current value for the filter pill. */
 export function summarize(param: DashboardParameter, value: unknown): string {
   if (isBlank(value)) return "";
+  if (param.type === "temporal_unit") {
+    return TEMPORAL_UNITS.find((u) => u.token === value)?.label ?? String(value);
+  }
   if (Array.isArray(value)) {
     const vals = value.filter((v) => !isBlank(v));
     if (vals.length === 0) return "";
@@ -255,22 +259,27 @@ export function applyParamsToChart(
   now: Date = new Date(),
 ): Chart {
   const extra: ChartFilter[] = [];
+  const temporalOverrides: Record<string, string> = {};
   for (const param of parameters) {
     const column = mappings[param.id];
     if (!column) continue;
+    if (param.type === "temporal_unit") {
+      const raw = values[param.slug];
+      const unit = typeof raw === "string" && raw ? raw : param.default;
+      const current = chart.params.spec.temporal_units ?? {};
+      if (typeof unit === "string" && unit && column in current) {
+        temporalOverrides[column] = unit; // re-grid an already-grouped column
+      }
+      continue;
+    }
     extra.push(...paramToFilters(param, values[param.slug], column, now));
   }
-  if (extra.length === 0) return chart;
-  return {
-    ...chart,
-    params: {
-      ...chart.params,
-      spec: {
-        ...chart.params.spec,
-        filters: [...chart.params.spec.filters, ...extra],
-      },
-    },
-  };
+  if (extra.length === 0 && Object.keys(temporalOverrides).length === 0) return chart;
+  const spec = { ...chart.params.spec, filters: [...chart.params.spec.filters, ...extra] };
+  if (Object.keys(temporalOverrides).length > 0) {
+    spec.temporal_units = { ...(chart.params.spec.temporal_units ?? {}), ...temporalOverrides };
+  }
+  return { ...chart, params: { ...chart.params, spec } };
 }
 
 /**

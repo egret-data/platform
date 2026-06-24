@@ -56,4 +56,16 @@ describe("FilterPill", () => {
     fireEvent.click(screen.getByLabelText("Last 30 days"));
     expect(onChange).toHaveBeenCalledWith("last30");
   });
+
+  it("temporal_unit renders a unit dropdown and selects a unit", () => {
+    const onChange = vi.fn();
+    render(<FilterPill
+      param={{ id: "p", name: "Date grouping", slug: "dg", type: "temporal_unit", operator: "is", default: "month" }}
+      value="month" options={[]} onChange={onChange} />);
+    fireEvent.click(screen.getByLabelText("Date grouping"));
+    const sel = screen.getByLabelText("Date grouping value") as HTMLSelectElement;
+    expect(sel).toBeTruthy();
+    fireEvent.change(sel, { target: { value: "quarter" } });
+    expect(onChange).toHaveBeenCalledWith("quarter");
+  });
 });

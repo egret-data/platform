@@ -24,4 +24,15 @@ describe("ParameterEditor", () => {
     fireEvent.click(screen.getByRole("button", { name: /delete parameter/i }));
     expect(onDelete).toHaveBeenCalled();
   });
+  it("temporal_unit type sets default month and hides the operator", () => {
+    let p: DashboardParameter = { id: "p1", name: "P", slug: "p", type: "text", operator: "is" };
+    const onChange = (n: DashboardParameter) => { p = n; };
+    const { rerender } = render(<ParameterEditor param={p} onChange={onChange} onDelete={() => {}} />);
+    fireEvent.change(screen.getByLabelText("parameter type"), { target: { value: "temporal_unit" } });
+    expect(p.type).toBe("temporal_unit");
+    expect(p.default).toBe("month");
+    rerender(<ParameterEditor param={p} onChange={onChange} onDelete={() => {}} />);
+    expect(screen.queryByLabelText("parameter operator")).toBeNull();
+    expect(screen.getByLabelText("default unit")).toBeTruthy();
+  });
 });

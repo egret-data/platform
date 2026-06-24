@@ -433,7 +433,11 @@ export default function DashboardView() {
                   onValueClick={editing ? undefined : (ctx, x, y) => onCardValueClick(c, ctx, x, y)} />
                 {activeParamId && c.card_type === "chart" && baseChart && (
                   <CardFilterMapOverlay
-                    columns={[...baseChart.params.spec.dimensions, ...baseChart.params.spec.columns]}
+                    columns={
+                      parameters.find((pp) => pp.id === activeParamId)?.type === "temporal_unit"
+                        ? Object.keys(baseChart.params.spec.temporal_units ?? {})
+                        : [...baseChart.params.spec.dimensions, ...baseChart.params.spec.columns]
+                    }
                     value={mappings[activeParamId] ?? ""}
                     onChange={(col) => updateCardOptions(c.id, { paramMappings: { ...mappings, [activeParamId]: col } })}
                   />
