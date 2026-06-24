@@ -16,6 +16,7 @@ import { BigNumber } from "@/components/chart/BigNumber";
 import { ProgressChart } from "@/components/chart/ProgressChart";
 import { SmartScalarChart } from "@/components/chart/SmartScalarChart";
 import { ObjectDetail } from "@/components/chart/ObjectDetail";
+import { MapChart } from "@/components/chart/MapChart";
 
 const EmptyState = () => (
   <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No data</div>
@@ -49,6 +50,10 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
 
   if (vizType === "object") {
     return <ObjectDetail columns={columns} rows={rows} columnSettings={columnSettings} />;
+  }
+
+  if (vizType === "map") {
+    return <MapChart columns={columns} rows={rows} params={params} />;
   }
 
   if (vizType === "table") {
