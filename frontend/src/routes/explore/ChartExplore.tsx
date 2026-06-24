@@ -37,6 +37,7 @@ import { FieldZone } from "@/components/chart/config/FieldZone";
 import { SectionLabel } from "@/components/chart/settings/SectionLabel";
 import { pruneUnits } from "@/components/chart/temporal-units";
 import { TemporalUnitSelect } from "@/components/chart/TemporalUnitSelect";
+import { MAPS } from "@/components/chart/echarts/maps/registry";
 
 const UNDERLINE_LIST = "h-auto w-full justify-start gap-4 rounded-none border-b bg-transparent p-0";
 const UNDERLINE_TRIGGER = "rounded-none border-b-2 border-transparent px-0 pb-2 text-sm data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none";
@@ -85,6 +86,7 @@ export default function ChartExplore() {
   const [smart, setSmart] = useState<SmartScalarConfig>({});
   const [box, setBox] = useState<BoxplotConfig>({});
   const [sankey, setSankey] = useState<SankeyConfig>({});
+  const [mapCfg, setMapCfg] = useState<{ mapKey: string; region?: string; metric?: string }>({ mapKey: "us_states" });
   const patchCartesian = (p: Partial<CartesianConfig>) => setCartesian((c) => ({ ...c, ...p }));
   const patchPie = (p: Partial<PieConfig>) => setPie((c) => ({ ...c, ...p }));
   const [filters, setFilters] = useState<ChartFilter[]>([]);
@@ -127,6 +129,8 @@ export default function ChartExplore() {
       setSankey(p.sankey ?? { source: p.spec?.dimensions?.[0], target: p.spec?.dimensions?.[1], metric: p.spec?.metrics?.[0] });
     } else if (c.viz_type === "object") {
       setTableCols(p.spec?.columns ?? []);
+    } else if (c.viz_type === "map") {
+      setMapCfg(p.map ?? { mapKey: "us_states" });
     } else {
       setTableMetrics(p.spec?.metrics ?? []);
       setTableCols([...(p.spec?.dimensions ?? []), ...(p.spec?.columns ?? [])]);
@@ -231,6 +235,9 @@ export default function ChartExplore() {
     if (viz === "object") {
       return { metrics: [], dimensions: [], columns: tableCols, filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
     }
+    if (viz === "map") {
+      return { metrics: mapCfg.metric ? [mapCfg.metric] : [], dimensions: mapCfg.region ? [mapCfg.region] : [], columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
+    }
     const agg = tableMetrics.length > 0;
     const dims = agg ? tableCols : [];
     return {
@@ -302,6 +309,7 @@ export default function ChartExplore() {
     if (viz === "sankey" && (!sankey.source || !sankey.target || !sankey.metric)) {
       toast.error("Sankey needs source, target and a metric"); return;
     }
+    if (viz === "map" && (!mapCfg.region || !mapCfg.metric)) { toast.error("Map needs a region and a metric"); return; }
     if (viz === "object" && tableCols.length === 0) { toast.error("Object detail needs at least one column"); return; }
     try {
       const { sql, database_id } = await build.mutateAsync({ dataset_id: datasetId, query_spec: specForRun() });
@@ -336,6 +344,7 @@ export default function ChartExplore() {
     if (viz === "boxplot") return { spec: specForRun(), boxplot: box, columnSettings };
     if (viz === "sankey") return { spec: specForRun(), sankey, columnSettings };
     if (viz === "object") return { spec: specForRun(), columnSettings };
+    if (viz === "map") return { spec: specForRun(), map: mapCfg };
     return { spec: specForRun(), columnSettings, conditionalFormatting, tableState };
   }
 
@@ -357,6 +366,7 @@ export default function ChartExplore() {
     if (viz === "pivot_table" && (pRows.length === 0 || pVals.length === 0)) {
       toast.error("Pivot needs at least one row dimension and one value"); return;
     }
+    if (viz === "map" && (!mapCfg.region || !mapCfg.metric)) { toast.error("Map needs a region and a metric"); return; }
     if (viz === "object" && tableCols.length === 0) { toast.error("Object detail needs at least one column"); return; }
     try {
       if (id) {
@@ -489,6 +499,38 @@ export default function ChartExplore() {
                   ))}
                 </div>
               </div>
+            )}
+
+            {viz === "map" && (
+              <>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Map</Label>
+                  <Select value={mapCfg.mapKey} onValueChange={(v) => setMapCfg((m) => ({ ...m, mapKey: v }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {Object.values(MAPS).map((d) => <SelectItem key={d.key} value={d.key}>{d.label}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Region</Label>
+                  <Select value={mapCfg.region ?? ""} onValueChange={(v) => setMapCfg((m) => ({ ...m, region: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a region column…" /></SelectTrigger>
+                    <SelectContent>
+                      {columns.map((c) => <SelectItem key={c.column_name} value={c.column_name}>{c.column_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
+                  <Select value={mapCfg.metric ?? ""} onValueChange={(v) => setMapCfg((m) => ({ ...m, metric: v || undefined }))}>
+                    <SelectTrigger className="h-8 text-sm"><SelectValue placeholder="Pick a metric…" /></SelectTrigger>
+                    <SelectContent>
+                      {metrics.map((m) => <SelectItem key={m.metric_name} value={m.metric_name}>{m.metric_name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </>
             )}
 
             {viz === "pivot_table" && (
