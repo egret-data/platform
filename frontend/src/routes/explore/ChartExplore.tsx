@@ -59,6 +59,7 @@ export default function ChartExplore() {
 
   // table-mode controls
   const [tableMetrics, setTableMetrics] = useState<string[]>([]);
+  // Shared by the table and object-detail viz (both pick raw columns); cleared on dataset change.
   const [tableCols, setTableCols] = useState<string[]>([]);
   const [temporalUnits, setTemporalUnits] = useState<Record<string, string>>({});
   // pivot-mode controls (multi-dim ordered)
@@ -334,6 +335,7 @@ export default function ChartExplore() {
     if (viz === "smartscalar") return { spec: specForRun(), smartscalar: smart, columnSettings };
     if (viz === "boxplot") return { spec: specForRun(), boxplot: box, columnSettings };
     if (viz === "sankey") return { spec: specForRun(), sankey, columnSettings };
+    if (viz === "object") return { spec: specForRun(), columnSettings };
     return { spec: specForRun(), columnSettings, conditionalFormatting, tableState };
   }
 
