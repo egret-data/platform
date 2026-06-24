@@ -320,15 +320,20 @@ fn render_filter(engine: Engine, columns: &[DatasetColumn], f: &Filter) -> Resul
     Ok(pred)
 }
 
-/// Resolve an ORDER BY field (a metric or a column name) to its SQL expression.
+/// Resolve an ORDER BY field to SQL: a metric expression, a grouped dimension (with its temporal
+/// unit), or a bare column. Order matters — a dimension with a unit must match its GROUP BY expr.
 fn orderby_sql(
     engine: Engine,
     columns: &[DatasetColumn],
     metrics: &[Metric],
+    spec: &QuerySpec,
     field: &str,
 ) -> Result<String, BiError> {
     if let Some(m) = find_metric(metrics, field) {
         return Ok(m.expression.clone());
+    }
+    if spec.dimensions.iter().any(|d| d == field) {
+        return dim_expr(engine, columns, spec, field);
     }
     if let Some(c) = find_column(columns, field) {
         return Ok(column_sql(engine, c));
@@ -434,7 +439,7 @@ pub fn build(
         } else if !dim_exprs.is_empty() {
             sql.push_str(&format!("\nGROUP BY {}", dim_exprs.join(", ")));
         }
-        push_orderby(&mut sql, engine, columns, metrics, &spec.orderby)?;
+        push_orderby(&mut sql, engine, columns, metrics, spec)?;
         push_limit(&mut sql, spec.row_limit);
         Ok(sql)
     } else {
@@ -454,7 +459,7 @@ pub fn build(
         }
         let mut sql = format!("SELECT {}\nFROM {from}", select.join(", "));
         push_where(&mut sql, engine, columns, &spec.filters)?;
-        push_orderby(&mut sql, engine, columns, metrics, &spec.orderby)?;
+        push_orderby(&mut sql, engine, columns, metrics, spec)?;
         push_limit(&mut sql, spec.row_limit);
         Ok(sql)
     }
@@ -482,15 +487,16 @@ fn push_orderby(
     engine: Engine,
     columns: &[DatasetColumn],
     metrics: &[Metric],
-    orderby: &[OrderBy],
+    spec: &QuerySpec,
 ) -> Result<(), BiError> {
-    if orderby.is_empty() {
+    if spec.orderby.is_empty() {
         return Ok(());
     }
-    let parts = orderby
+    let parts = spec
+        .orderby
         .iter()
         .map(|o| {
-            let e = orderby_sql(engine, columns, metrics, &o.field)?;
+            let e = orderby_sql(engine, columns, metrics, spec, &o.field)?;
             Ok(format!("{e} {}", if o.desc { "DESC" } else { "ASC" }))
         })
         .collect::<Result<Vec<_>, BiError>>()?;
@@ -963,5 +969,25 @@ mod tests {
         let spec = spec_with_unit("created_at", "fortnight");
         let err = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap_err();
         assert!(matches!(err, BiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn orderby_on_grouped_temporal_dim_wraps_identically() {
+        let cols = vec![tcol("created_at")];
+        let metrics = vec![metric("revenue", "SUM(price)")];
+        let mut spec = spec_with_unit("created_at", "month");
+        spec.orderby = vec![OrderBy {
+            field: "created_at".into(),
+            desc: false,
+        }];
+        let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
+        assert!(
+            sql.contains("GROUP BY date_trunc('month', \"created_at\")"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("ORDER BY date_trunc('month', \"created_at\") ASC"),
+            "{sql}"
+        );
     }
 }
