@@ -28,6 +28,10 @@ pub struct QuerySpec {
     pub row_limit: i64,
     #[serde(default)]
     pub rollup_groups: Vec<Vec<String>>,
+    /// dimension column name -> temporal unit token (snake_case, e.g. "month", "day_of_week").
+    /// Empty (default) = no truncation = legacy behavior.
+    #[serde(default)]
+    pub temporal_units: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -60,6 +64,66 @@ pub enum FilterOp {
     NotIn,
     IsNull,
     IsNotNull,
+}
+
+/// A Metabase-style temporal grouping unit. Truncation variants bucket to a date/timestamp;
+/// extraction variants (`*Of*`) return an integer field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemporalUnit {
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Quarter,
+    Year,
+    MinuteOfHour,
+    HourOfDay,
+    DayOfWeek,
+    DayOfMonth,
+    DayOfYear,
+    WeekOfYear,
+    MonthOfYear,
+    QuarterOfYear,
+}
+
+impl TemporalUnit {
+    pub fn parse(token: &str) -> Option<Self> {
+        use TemporalUnit::*;
+        Some(match token {
+            "minute" => Minute,
+            "hour" => Hour,
+            "day" => Day,
+            "week" => Week,
+            "month" => Month,
+            "quarter" => Quarter,
+            "year" => Year,
+            "minute_of_hour" => MinuteOfHour,
+            "hour_of_day" => HourOfDay,
+            "day_of_week" => DayOfWeek,
+            "day_of_month" => DayOfMonth,
+            "day_of_year" => DayOfYear,
+            "week_of_year" => WeekOfYear,
+            "month_of_year" => MonthOfYear,
+            "quarter_of_year" => QuarterOfYear,
+            _ => return None,
+        })
+    }
+
+    pub fn is_extract(self) -> bool {
+        use TemporalUnit::*;
+        matches!(
+            self,
+            MinuteOfHour
+                | HourOfDay
+                | DayOfWeek
+                | DayOfMonth
+                | DayOfYear
+                | WeekOfYear
+                | MonthOfYear
+                | QuarterOfYear
+        )
+    }
 }
 
 /// Encode a filter value as a SQL literal, validated by the target column's generic type.
@@ -128,8 +192,82 @@ fn column_sql(engine: Engine, c: &DatasetColumn) -> String {
     }
 }
 
+/// Wrap an already-resolved column expression in its temporal grouping. `inner` is trusted
+/// (dataset-sourced); the unit string is a fixed literal, never user text.
+fn temporal_expr(engine: Engine, inner: &str, unit: TemporalUnit) -> String {
+    use TemporalUnit::*;
+    let trunc = |u: &str| format!("date_trunc('{u}', {inner})");
+    match unit {
+        Minute => trunc("minute"),
+        Hour => trunc("hour"),
+        Day => trunc("day"),
+        Week => trunc("week"),
+        Month => trunc("month"),
+        Quarter => trunc("quarter"),
+        Year => trunc("year"),
+        // extraction variants (hour-of-day, day-of-week, …) delegate to extract_expr
+        _ => extract_expr(engine, inner, unit),
+    }
+}
+
+/// Extraction units differ by engine; results are normalized so both engines return the
+/// same integers (ISO week, Monday=1 weekday), matching Trino and Metabase.
+fn extract_expr(engine: Engine, inner: &str, unit: TemporalUnit) -> String {
+    use Engine::*;
+    use TemporalUnit::*;
+    match (engine, unit) {
+        (_, MinuteOfHour) => format!("minute({inner})"),
+        (_, HourOfDay) => format!("hour({inner})"),
+        (_, MonthOfYear) => format!("month({inner})"),
+        (_, QuarterOfYear) => format!("quarter({inner})"),
+
+        (Trino, DayOfWeek) => format!("day_of_week({inner})"),
+        (StarRocks, DayOfWeek) => format!("(weekday({inner}) + 1)"),
+
+        (Trino, DayOfMonth) => format!("day_of_month({inner})"),
+        (StarRocks, DayOfMonth) => format!("dayofmonth({inner})"),
+
+        (Trino, DayOfYear) => format!("day_of_year({inner})"),
+        (StarRocks, DayOfYear) => format!("dayofyear({inner})"),
+
+        (Trino, WeekOfYear) => format!("week_of_year({inner})"),
+        (StarRocks, WeekOfYear) => format!("week({inner}, 3)"),
+
+        // Truncation variants are handled by temporal_expr and never dispatched here.
+        (_, Minute | Hour | Day | Week | Month | Quarter | Year) => {
+            unreachable!("truncation units must be handled by temporal_expr, not extract_expr")
+        }
+    }
+}
+
 fn find_column<'a>(columns: &'a [DatasetColumn], name: &str) -> Option<&'a DatasetColumn> {
     columns.iter().find(|c| c.column_name == name)
+}
+
+/// Resolve a dimension name to SQL, applying its temporal unit (from `spec.temporal_units`) if set.
+/// A unit on a non-temporal column, or an unknown unit token, is a BadRequest.
+fn dim_expr(
+    engine: Engine,
+    columns: &[DatasetColumn],
+    spec: &QuerySpec,
+    name: &str,
+) -> Result<String, BiError> {
+    let c = find_column(columns, name)
+        .ok_or_else(|| BiError::BadRequest(format!("unknown dimension: {name}")))?;
+    let base = column_sql(engine, c);
+    match spec.temporal_units.get(name) {
+        None => Ok(base),
+        Some(tok) => {
+            if !c.is_temporal {
+                return Err(BiError::BadRequest(format!(
+                    "temporal unit on non-temporal column: {name}"
+                )));
+            }
+            let unit = TemporalUnit::parse(tok)
+                .ok_or_else(|| BiError::BadRequest(format!("unknown temporal unit: {tok}")))?;
+            Ok(temporal_expr(engine, &base, unit))
+        }
+    }
 }
 fn find_metric<'a>(metrics: &'a [Metric], name: &str) -> Option<&'a Metric> {
     metrics.iter().find(|m| m.metric_name == name)
@@ -140,6 +278,8 @@ fn find_metric<'a>(metrics: &'a [Metric], name: &str) -> Option<&'a Metric> {
 fn render_filter(engine: Engine, columns: &[DatasetColumn], f: &Filter) -> Result<String, BiError> {
     let c = find_column(columns, &f.col)
         .ok_or_else(|| BiError::BadRequest(format!("unknown filter column: {}", f.col)))?;
+    // Filters compare the raw column, never the temporal bucket — a date range must match the
+    // real timestamp, not the truncated group key.
     let lhs = column_sql(engine, c);
     let tg = c.type_generic.as_str();
     let pred = match f.op {
@@ -184,15 +324,20 @@ fn render_filter(engine: Engine, columns: &[DatasetColumn], f: &Filter) -> Resul
     Ok(pred)
 }
 
-/// Resolve an ORDER BY field (a metric or a column name) to its SQL expression.
+/// Resolve an ORDER BY field to SQL: a metric expression, a grouped dimension (with its temporal
+/// unit), or a bare column. Order matters — a dimension with a unit must match its GROUP BY expr.
 fn orderby_sql(
     engine: Engine,
     columns: &[DatasetColumn],
     metrics: &[Metric],
+    spec: &QuerySpec,
     field: &str,
 ) -> Result<String, BiError> {
     if let Some(m) = find_metric(metrics, field) {
         return Ok(m.expression.clone());
+    }
+    if spec.dimensions.iter().any(|d| d == field) {
+        return dim_expr(engine, columns, spec, field);
     }
     if let Some(c) = find_column(columns, field) {
         return Ok(column_sql(engine, c));
@@ -215,6 +360,18 @@ pub fn build(
     let aggregate = !spec.metrics.is_empty();
     let mut select: Vec<String> = Vec::new();
 
+    // A temporal unit must target a column the query actually selects (a dimension in aggregate
+    // mode, or a listed column in raw-records mode); otherwise it would be silently ignored.
+    for key in spec.temporal_units.keys() {
+        let targeted =
+            spec.dimensions.iter().any(|d| d == key) || spec.columns.iter().any(|c| c == key);
+        if !targeted {
+            return Err(BiError::BadRequest(format!(
+                "temporal unit for a column that is not selected: {key}"
+            )));
+        }
+    }
+
     if aggregate {
         if !spec.rollup_groups.is_empty() && spec.dimensions.is_empty() {
             return Err(BiError::BadRequest(
@@ -226,9 +383,7 @@ pub fn build(
         let mut dim_index: std::collections::HashMap<&str, usize> =
             std::collections::HashMap::new();
         for (i, name) in spec.dimensions.iter().enumerate() {
-            let c = find_column(columns, name)
-                .ok_or_else(|| BiError::BadRequest(format!("unknown dimension: {name}")))?;
-            let e = column_sql(engine, c);
+            let e = dim_expr(engine, columns, spec, name)?;
             select.push(format!("{e} AS {}", quote_ident(engine, name)));
             dim_index.insert(name.as_str(), i);
             dim_exprs.push(e);
@@ -300,7 +455,7 @@ pub fn build(
         } else if !dim_exprs.is_empty() {
             sql.push_str(&format!("\nGROUP BY {}", dim_exprs.join(", ")));
         }
-        push_orderby(&mut sql, engine, columns, metrics, &spec.orderby)?;
+        push_orderby(&mut sql, engine, columns, metrics, spec)?;
         push_limit(&mut sql, spec.row_limit);
         Ok(sql)
     } else {
@@ -320,7 +475,7 @@ pub fn build(
         }
         let mut sql = format!("SELECT {}\nFROM {from}", select.join(", "));
         push_where(&mut sql, engine, columns, &spec.filters)?;
-        push_orderby(&mut sql, engine, columns, metrics, &spec.orderby)?;
+        push_orderby(&mut sql, engine, columns, metrics, spec)?;
         push_limit(&mut sql, spec.row_limit);
         Ok(sql)
     }
@@ -348,15 +503,16 @@ fn push_orderby(
     engine: Engine,
     columns: &[DatasetColumn],
     metrics: &[Metric],
-    orderby: &[OrderBy],
+    spec: &QuerySpec,
 ) -> Result<(), BiError> {
-    if orderby.is_empty() {
+    if spec.orderby.is_empty() {
         return Ok(());
     }
-    let parts = orderby
+    let parts = spec
+        .orderby
         .iter()
         .map(|o| {
-            let e = orderby_sql(engine, columns, metrics, &o.field)?;
+            let e = orderby_sql(engine, columns, metrics, spec, &o.field)?;
             Ok(format!("{e} {}", if o.desc { "DESC" } else { "ASC" }))
         })
         .collect::<Result<Vec<_>, BiError>>()?;
@@ -373,6 +529,19 @@ fn push_limit(sql: &mut String, row_limit: i64) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn temporal_unit_parse_and_classify() {
+        use TemporalUnit::*;
+        assert_eq!(TemporalUnit::parse("month"), Some(Month));
+        assert_eq!(TemporalUnit::parse("day_of_week"), Some(DayOfWeek));
+        assert_eq!(TemporalUnit::parse("week_of_year"), Some(WeekOfYear));
+        assert_eq!(TemporalUnit::parse("nonsense"), None);
+        assert!(!Month.is_extract());
+        assert!(Year.is_extract() == false);
+        assert!(DayOfWeek.is_extract());
+        assert!(HourOfDay.is_extract());
+    }
 
     #[test]
     fn sql_literal_encodes_by_type() {
@@ -444,6 +613,7 @@ mod tests {
             orderby: vec![],
             row_limit: 100,
             rollup_groups: vec![],
+            temporal_units: std::collections::HashMap::new(),
         };
         let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
         assert!(sql.contains("\"region\" AS \"region\""), "{sql}");
@@ -465,6 +635,7 @@ mod tests {
             orderby: vec![],
             row_limit: 100,
             rollup_groups: vec![vec!["region".into()], vec!["seg".into()]],
+            temporal_units: std::collections::HashMap::new(),
         };
         let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
         // ROLLUP(region) × ROLLUP(seg) expanded to portable GROUPING SETS
@@ -493,6 +664,7 @@ mod tests {
             }],
             row_limit: 50,
             rollup_groups: vec![],
+            temporal_units: std::collections::HashMap::new(),
         };
         let sql = build(Engine::Trino, &phys(), &cols, &[], &spec).unwrap();
         assert!(sql.contains("\"id\" AS \"id\""), "{sql}");
@@ -533,6 +705,7 @@ mod tests {
             orderby: vec![],
             row_limit: 100,
             rollup_groups: vec![],
+            temporal_units: std::collections::HashMap::new(),
         };
         let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
         assert!(sql.contains("\"region\" = 'EU'"), "{sql}");
@@ -557,6 +730,7 @@ mod tests {
             orderby: vec![],
             row_limit: 100,
             rollup_groups: vec![],
+            temporal_units: std::collections::HashMap::new(),
         };
         let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
         assert!(sql.contains("\"region\" NOT LIKE '%spam%'"), "{sql}");
@@ -573,6 +747,7 @@ mod tests {
             orderby: vec![],
             row_limit: 10,
             rollup_groups: vec![],
+            temporal_units: std::collections::HashMap::new(),
         };
         assert!(build(Engine::Trino, &phys(), &cols, &[], &spec).is_err());
     }
@@ -594,6 +769,7 @@ mod tests {
             orderby: vec![],
             row_limit: 100,
             rollup_groups: vec![],
+            temporal_units: std::collections::HashMap::new(),
         };
         let sql = build(Engine::StarRocks, &src, &cols, &metrics, &spec).unwrap();
         assert!(sql.contains("`region` AS `region`"), "{sql}");
@@ -617,6 +793,7 @@ mod tests {
             orderby: vec![],
             row_limit: 100,
             rollup_groups: vec![vec!["region".into(), "nation".into()], vec!["seg".into()]],
+            temporal_units: std::collections::HashMap::new(),
         };
         let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
         // ROLLUP(region, nation) × ROLLUP(seg) → portable GROUPING SETS.
@@ -643,6 +820,7 @@ mod tests {
             orderby: vec![],
             row_limit: 10,
             rollup_groups: vec![vec!["region".into()], vec!["seg".into()]],
+            temporal_units: std::collections::HashMap::new(),
         };
         assert!(build(Engine::Trino, &phys(), &cols, &metrics, &spec).is_err());
     }
@@ -659,7 +837,184 @@ mod tests {
             orderby: vec![],
             row_limit: 10,
             rollup_groups: vec![vec![], vec![]],
+            temporal_units: std::collections::HashMap::new(),
         };
         assert!(build(Engine::Trino, &phys(), &cols, &metrics, &spec).is_err());
+    }
+
+    #[test]
+    fn temporal_expr_truncation_both_engines() {
+        use TemporalUnit::*;
+        assert_eq!(
+            temporal_expr(Engine::Trino, "\"created_at\"", Month),
+            "date_trunc('month', \"created_at\")"
+        );
+        assert_eq!(
+            temporal_expr(Engine::StarRocks, "`created_at`", Quarter),
+            "date_trunc('quarter', `created_at`)"
+        );
+        assert_eq!(
+            temporal_expr(Engine::Trino, "x", Year),
+            "date_trunc('year', x)"
+        );
+    }
+
+    #[test]
+    fn temporal_expr_extraction_normalized() {
+        use TemporalUnit::*;
+        // identical function on both engines
+        assert_eq!(temporal_expr(Engine::Trino, "x", MonthOfYear), "month(x)");
+        assert_eq!(
+            temporal_expr(Engine::StarRocks, "x", MonthOfYear),
+            "month(x)"
+        );
+        assert_eq!(temporal_expr(Engine::Trino, "x", HourOfDay), "hour(x)");
+        // day_of_week: Trino native vs StarRocks normalized to Mon=1
+        assert_eq!(
+            temporal_expr(Engine::Trino, "x", DayOfWeek),
+            "day_of_week(x)"
+        );
+        assert_eq!(
+            temporal_expr(Engine::StarRocks, "x", DayOfWeek),
+            "(weekday(x) + 1)"
+        );
+        // week_of_year: Trino native vs StarRocks ISO mode 3
+        assert_eq!(
+            temporal_expr(Engine::Trino, "x", WeekOfYear),
+            "week_of_year(x)"
+        );
+        assert_eq!(
+            temporal_expr(Engine::StarRocks, "x", WeekOfYear),
+            "week(x, 3)"
+        );
+        // day_of_month / day_of_year naming differs
+        assert_eq!(
+            temporal_expr(Engine::Trino, "x", DayOfMonth),
+            "day_of_month(x)"
+        );
+        assert_eq!(
+            temporal_expr(Engine::StarRocks, "x", DayOfMonth),
+            "dayofmonth(x)"
+        );
+        assert_eq!(
+            temporal_expr(Engine::Trino, "x", DayOfYear),
+            "day_of_year(x)"
+        );
+        assert_eq!(
+            temporal_expr(Engine::StarRocks, "x", DayOfYear),
+            "dayofyear(x)"
+        );
+    }
+
+    #[test]
+    fn empty_temporal_units_leaves_sql_unchanged() {
+        let cols = vec![col("region", "string", None)];
+        let metrics = vec![metric("revenue", "SUM(price)")];
+        let spec = QuerySpec {
+            metrics: vec!["revenue".into()],
+            dimensions: vec!["region".into()],
+            columns: vec![],
+            filters: vec![],
+            orderby: vec![],
+            row_limit: 100,
+            rollup_groups: vec![],
+            temporal_units: std::collections::HashMap::new(),
+        };
+        let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
+        assert!(sql.contains("GROUP BY \"region\""), "{sql}");
+        assert!(!sql.contains("date_trunc"), "{sql}");
+    }
+
+    fn tcol(name: &str) -> DatasetColumn {
+        DatasetColumn {
+            column_name: name.into(),
+            data_type: "timestamp".into(),
+            type_generic: "temporal".into(),
+            is_temporal: true,
+            ordinal: 0,
+            expression: None,
+            verbose_name: String::new(),
+            description: String::new(),
+        }
+    }
+
+    fn spec_with_unit(dim: &str, unit: &str) -> QuerySpec {
+        let mut tu = std::collections::HashMap::new();
+        tu.insert(dim.to_string(), unit.to_string());
+        QuerySpec {
+            metrics: vec!["revenue".into()],
+            dimensions: vec![dim.into()],
+            columns: vec![],
+            filters: vec![],
+            orderby: vec![],
+            row_limit: 100,
+            rollup_groups: vec![],
+            temporal_units: tu,
+        }
+    }
+
+    #[test]
+    fn dimension_truncation_select_and_group_match() {
+        let cols = vec![tcol("created_at")];
+        let metrics = vec![metric("revenue", "SUM(price)")];
+        let spec = spec_with_unit("created_at", "month");
+        let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
+        assert!(
+            sql.contains("date_trunc('month', \"created_at\") AS \"created_at\""),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("GROUP BY date_trunc('month', \"created_at\")"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn dimension_unit_on_non_temporal_is_rejected() {
+        let cols = vec![col("region", "string", None)];
+        let metrics = vec![metric("revenue", "SUM(price)")];
+        let spec = spec_with_unit("region", "month");
+        let err = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap_err();
+        assert!(matches!(err, BiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn dimension_unknown_unit_is_rejected() {
+        let cols = vec![tcol("created_at")];
+        let metrics = vec![metric("revenue", "SUM(price)")];
+        let spec = spec_with_unit("created_at", "fortnight");
+        let err = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap_err();
+        assert!(matches!(err, BiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn temporal_unit_for_unknown_dimension_is_rejected() {
+        let cols = vec![tcol("created_at")];
+        let metrics = vec![metric("revenue", "SUM(price)")];
+        // unit keyed to a column that is NOT in dimensions (e.g. a typo)
+        let mut spec = spec_with_unit("created_at", "month");
+        spec.dimensions = vec![]; // created_at is no longer a dimension
+        let err = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap_err();
+        assert!(matches!(err, BiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn orderby_on_grouped_temporal_dim_wraps_identically() {
+        let cols = vec![tcol("created_at")];
+        let metrics = vec![metric("revenue", "SUM(price)")];
+        let mut spec = spec_with_unit("created_at", "month");
+        spec.orderby = vec![OrderBy {
+            field: "created_at".into(),
+            desc: false,
+        }];
+        let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
+        assert!(
+            sql.contains("GROUP BY date_trunc('month', \"created_at\")"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("ORDER BY date_trunc('month', \"created_at\") ASC"),
+            "{sql}"
+        );
     }
 }
