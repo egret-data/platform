@@ -14,7 +14,6 @@ Prereqs: the egret dev backend is up on BASE_URL and the datasets below already 
 
 Substitutions vs Metabase (viz types egret does not have yet):
   - "Revenue by state" map  -> row chart
-  - "Most recent subscription" object detail -> table (latest rows)
 """
 import json
 import sys
@@ -185,9 +184,9 @@ def charts():
          {"waterfall": {"xAxis": "acct_month", "metric": "seats_sum"},
           "spec": spec(["seats_sum"], ["acct_month"], orderby=[ob("acct_month")])},
          2, 0, 16, 14, 7),
-        ("Most recent subscription", "accounts", "table",
-         {"spec": spec([], [], columns=["id", "plan", "source", "seats", "created_at"],
-                       orderby=[ob("created_at", True)], limit=5)},
+        ("Most recent subscription", "accounts", "object",
+         {"spec": spec([], [], columns=["id", "plan", "source", "seats", "country", "created_at"],
+                       orderby=[ob("created_at", True)], limit=20)},
          2, 14, 16, 10, 6),
     ]
 
