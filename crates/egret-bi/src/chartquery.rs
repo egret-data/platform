@@ -210,8 +210,32 @@ fn temporal_expr(engine: Engine, inner: &str, unit: TemporalUnit) -> String {
     }
 }
 
-fn extract_expr(_engine: Engine, inner: &str, _unit: TemporalUnit) -> String {
-    inner.to_string()
+/// Extraction units differ by engine; results are normalized so both engines return the
+/// same integers (ISO week, Monday=1 weekday), matching Trino and Metabase.
+fn extract_expr(engine: Engine, inner: &str, unit: TemporalUnit) -> String {
+    use Engine::*;
+    use TemporalUnit::*;
+    match (engine, unit) {
+        (_, MinuteOfHour) => format!("minute({inner})"),
+        (_, HourOfDay) => format!("hour({inner})"),
+        (_, MonthOfYear) => format!("month({inner})"),
+        (_, QuarterOfYear) => format!("quarter({inner})"),
+
+        (Trino, DayOfWeek) => format!("day_of_week({inner})"),
+        (StarRocks, DayOfWeek) => format!("(weekday({inner}) + 1)"),
+
+        (Trino, DayOfMonth) => format!("day_of_month({inner})"),
+        (StarRocks, DayOfMonth) => format!("dayofmonth({inner})"),
+
+        (Trino, DayOfYear) => format!("day_of_year({inner})"),
+        (StarRocks, DayOfYear) => format!("dayofyear({inner})"),
+
+        (Trino, WeekOfYear) => format!("week_of_year({inner})"),
+        (StarRocks, WeekOfYear) => format!("week({inner}, 3)"),
+
+        // truncation variants never reach here (handled by temporal_expr); identity is safe.
+        (_, Minute | Hour | Day | Week | Month | Quarter | Year) => inner.to_string(),
+    }
 }
 
 fn find_column<'a>(columns: &'a [DatasetColumn], name: &str) -> Option<&'a DatasetColumn> {
@@ -786,6 +810,53 @@ mod tests {
         assert_eq!(
             temporal_expr(Engine::Trino, "x", Year),
             "date_trunc('year', x)"
+        );
+    }
+
+    #[test]
+    fn temporal_expr_extraction_normalized() {
+        use TemporalUnit::*;
+        // identical function on both engines
+        assert_eq!(temporal_expr(Engine::Trino, "x", MonthOfYear), "month(x)");
+        assert_eq!(
+            temporal_expr(Engine::StarRocks, "x", MonthOfYear),
+            "month(x)"
+        );
+        assert_eq!(temporal_expr(Engine::Trino, "x", HourOfDay), "hour(x)");
+        // day_of_week: Trino native vs StarRocks normalized to Mon=1
+        assert_eq!(
+            temporal_expr(Engine::Trino, "x", DayOfWeek),
+            "day_of_week(x)"
+        );
+        assert_eq!(
+            temporal_expr(Engine::StarRocks, "x", DayOfWeek),
+            "(weekday(x) + 1)"
+        );
+        // week_of_year: Trino native vs StarRocks ISO mode 3
+        assert_eq!(
+            temporal_expr(Engine::Trino, "x", WeekOfYear),
+            "week_of_year(x)"
+        );
+        assert_eq!(
+            temporal_expr(Engine::StarRocks, "x", WeekOfYear),
+            "week(x, 3)"
+        );
+        // day_of_month / day_of_year naming differs
+        assert_eq!(
+            temporal_expr(Engine::Trino, "x", DayOfMonth),
+            "day_of_month(x)"
+        );
+        assert_eq!(
+            temporal_expr(Engine::StarRocks, "x", DayOfMonth),
+            "dayofmonth(x)"
+        );
+        assert_eq!(
+            temporal_expr(Engine::Trino, "x", DayOfYear),
+            "day_of_year(x)"
+        );
+        assert_eq!(
+            temporal_expr(Engine::StarRocks, "x", DayOfYear),
+            "dayofyear(x)"
         );
     }
 
