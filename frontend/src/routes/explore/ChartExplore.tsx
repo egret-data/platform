@@ -295,7 +295,7 @@ export default function ChartExplore() {
     }
     try {
       if (id) {
-        await mutations.update.mutateAsync({ id, name: saveName.trim(), description: saveDesc, viz_type: viz, params: paramsForSave() });
+        await mutations.update.mutateAsync({ id, dataset_id: datasetId, name: saveName.trim(), description: saveDesc, viz_type: viz, params: paramsForSave() });
         setSaveOpen(false);
         toast.success("Saved");
       } else {

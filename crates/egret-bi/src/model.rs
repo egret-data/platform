@@ -262,6 +262,7 @@ pub struct CreateChart {
 
 #[derive(Debug, serde::Deserialize)]
 pub struct UpdateChart {
+    pub dataset_id: uuid::Uuid,
     pub name: String,
     #[serde(default)]
     pub description: String,
