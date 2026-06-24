@@ -6,6 +6,8 @@ export interface MapBuildConfig {
   region?: string;
   metric?: string;
   normalize: (v: unknown) => string;
+  /** Fixed text labels at geo coordinates [lon, lat] (e.g. archipelagos). */
+  annotations?: { name: string; coord: [number, number] }[];
 }
 
 /** Build a choropleth `map` option. The series data names are normalized region keys that match
@@ -23,6 +25,11 @@ export function buildMapOption(columns: ResultColumn[], rows: unknown[][], cfg: 
   const values = data.map((d) => d.value);
   const min = values.length ? Math.min(...values) : 0;
   const max = values.length ? Math.max(...values) : 1;
+  const annotations = cfg.annotations ?? [];
+  // Annotation labels are drawn by a scatter series on a hidden `geo` (which provides the lon/lat→
+  // pixel projection). The choropleth `map` series and the geo share an identical layout so the
+  // label points land in the right place.
+  const layout = { layoutCenter: ["50%", "50%"], layoutSize: "92%" };
   return {
     tooltip: {
       trigger: "item",
@@ -38,7 +45,11 @@ export function buildMapOption(columns: ResultColumn[], rows: unknown[][], cfg: 
       calculable: true,
       inRange: { color: ["#e6f4f1", "#0f9b8e"] },
       text: ["High", "Low"],
+      seriesIndex: 0, // colour the choropleth (map) series only, not the annotation scatter
     },
+    ...(annotations.length > 0
+      ? { geo: { map: cfg.echartsName, roam: false, show: false, ...layout } }
+      : {}),
     series: [
       {
         type: "map",
@@ -46,8 +57,23 @@ export function buildMapOption(columns: ResultColumn[], rows: unknown[][], cfg: 
         nameProperty: "key",
         roam: false,
         emphasis: { label: { show: false } },
+        ...(annotations.length > 0 ? layout : {}),
         data,
       },
+      ...(annotations.length > 0
+        ? [
+            {
+              type: "scatter",
+              coordinateSystem: "geo",
+              symbol: "circle",
+              symbolSize: 5,
+              itemStyle: { color: "#0f766e" },
+              silent: true,
+              label: { show: true, position: "right", formatter: "{b}", fontSize: 11, fontWeight: "bold", color: "#0f766e" },
+              data: annotations.map((a) => ({ name: a.name, value: a.coord })),
+            },
+          ]
+        : []),
     ],
   };
 }

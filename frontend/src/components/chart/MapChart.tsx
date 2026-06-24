@@ -47,6 +47,7 @@ export function MapChart({ columns, rows, params }: { columns: ResultColumn[]; r
           region: params.map?.region,
           metric: params.map?.metric,
           normalize: def.normalize,
+          annotations: def.annotations,
         })}
       />
     </div>
