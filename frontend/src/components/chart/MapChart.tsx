@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useReducer, useState } from "react";
 import { registerMap } from "echarts/core";
 import type { ChartParams } from "@/api/charts";
 import { EChartsRenderer } from "@/components/chart/echarts/EChartsRenderer";
@@ -11,24 +11,23 @@ const registered = new Set<string>();
 /** Choropleth map. Lazy-loads + registers the selected geojson, then renders via EChartsRenderer. */
 export function MapChart({ columns, rows, params }: { columns: ResultColumn[]; rows: unknown[][]; params: ChartParams }) {
   const def = MAPS[params.map?.mapKey ?? "us_states"] ?? MAPS.us_states;
-  const [ready, setReady] = useState(registered.has(def.echartsName));
+  const [, forceUpdate] = useReducer((n: number) => n + 1, 0);
   const [error, setError] = useState(false);
+  // Derive readiness from the registration set every render, so switching to a not-yet-registered
+  // map never renders its option before registerMap() has run.
+  const ready = registered.has(def.echartsName);
 
   useEffect(() => {
-    let alive = true;
-    if (registered.has(def.echartsName)) {
-      setReady(true);
-      return;
-    }
-    setReady(false);
     setError(false);
+    if (registered.has(def.echartsName)) return;
+    let alive = true;
     def
       .load()
       .then((geojson) => {
         if (!alive) return;
         registerMap(def.echartsName, geojson as never);
         registered.add(def.echartsName);
-        setReady(true);
+        forceUpdate();
       })
       .catch(() => alive && setError(true));
     return () => {
