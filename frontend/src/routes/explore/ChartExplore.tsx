@@ -162,6 +162,21 @@ export default function ChartExplore() {
         <TemporalUnitSelect value={temporalUnits[col]} onChange={(u) => setUnit(col, u)} />
       </div>
     ) : null;
+  const unitList = (dims: string[]) => {
+    const temporal = dims.filter((d) => columns.find((c) => c.column_name === d)?.is_temporal);
+    if (temporal.length === 0) return null;
+    return (
+      <div className="space-y-1">
+        <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Date grouping</Label>
+        {temporal.map((col) => (
+          <div key={col} className="flex items-center justify-between gap-2">
+            <span className="truncate text-xs">{col}</span>
+            <TemporalUnitSelect value={temporalUnits[col]} onChange={(u) => setUnit(col, u)} />
+          </div>
+        ))}
+      </div>
+    );
+  };
 
   function specForRun(): QuerySpec {
     if (isCartesianViz(viz)) {
@@ -447,6 +462,7 @@ export default function ChartExplore() {
                     ))}
                   </div>
                 </div>
+                {unitList(tableMetrics.length > 0 ? tableCols : [])}
               </>
             )}
 
@@ -456,6 +472,7 @@ export default function ChartExplore() {
                   options={columns.map((c) => c.column_name).filter((n) => !pCols.includes(n))} />
                 <FieldZone label="Columns" selected={pCols} onChange={setPCols}
                   options={columns.map((c) => c.column_name).filter((n) => !pRows.includes(n))} />
+                {unitList([...pRows, ...pCols])}
                 <FieldZone label="Values" selected={pVals} onChange={setPVals}
                   options={metrics.map((m) => m.metric_name)} />
               </>
