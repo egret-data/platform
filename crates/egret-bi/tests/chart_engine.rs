@@ -88,6 +88,7 @@ async fn table_chart_runs_on_trino() {
         orderby: vec![],
         row_limit: 100,
         rollup_groups: vec![],
+        temporal_units: std::collections::HashMap::new(),
     };
     let sql = build(spec.engine, &orders(), &cols, &metrics, &qs).unwrap();
     let r = run(&spec, &sql).await;
@@ -122,6 +123,7 @@ async fn pivot_rollup_x_rollup_runs_on_trino() {
         orderby: vec![],
         row_limit: 1000,
         rollup_groups: vec![vec!["orderpriority".into()], vec!["orderstatus".into()]],
+        temporal_units: std::collections::HashMap::new(),
     };
     let sql = build(spec.engine, &orders(), &cols, &metrics, &qs).unwrap();
     let r = run(&spec, &sql).await;

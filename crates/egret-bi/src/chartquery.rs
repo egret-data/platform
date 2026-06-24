@@ -28,6 +28,10 @@ pub struct QuerySpec {
     pub row_limit: i64,
     #[serde(default)]
     pub rollup_groups: Vec<Vec<String>>,
+    /// dimension column name -> temporal unit token (snake_case, e.g. "month", "day_of_week").
+    /// Empty (default) = no truncation = legacy behavior.
+    #[serde(default)]
+    pub temporal_units: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -444,6 +448,7 @@ mod tests {
             orderby: vec![],
             row_limit: 100,
             rollup_groups: vec![],
+            temporal_units: std::collections::HashMap::new(),
         };
         let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
         assert!(sql.contains("\"region\" AS \"region\""), "{sql}");
@@ -465,6 +470,7 @@ mod tests {
             orderby: vec![],
             row_limit: 100,
             rollup_groups: vec![vec!["region".into()], vec!["seg".into()]],
+            temporal_units: std::collections::HashMap::new(),
         };
         let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
         // ROLLUP(region) × ROLLUP(seg) expanded to portable GROUPING SETS
@@ -493,6 +499,7 @@ mod tests {
             }],
             row_limit: 50,
             rollup_groups: vec![],
+            temporal_units: std::collections::HashMap::new(),
         };
         let sql = build(Engine::Trino, &phys(), &cols, &[], &spec).unwrap();
         assert!(sql.contains("\"id\" AS \"id\""), "{sql}");
@@ -533,6 +540,7 @@ mod tests {
             orderby: vec![],
             row_limit: 100,
             rollup_groups: vec![],
+            temporal_units: std::collections::HashMap::new(),
         };
         let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
         assert!(sql.contains("\"region\" = 'EU'"), "{sql}");
@@ -557,6 +565,7 @@ mod tests {
             orderby: vec![],
             row_limit: 100,
             rollup_groups: vec![],
+            temporal_units: std::collections::HashMap::new(),
         };
         let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
         assert!(sql.contains("\"region\" NOT LIKE '%spam%'"), "{sql}");
@@ -573,6 +582,7 @@ mod tests {
             orderby: vec![],
             row_limit: 10,
             rollup_groups: vec![],
+            temporal_units: std::collections::HashMap::new(),
         };
         assert!(build(Engine::Trino, &phys(), &cols, &[], &spec).is_err());
     }
@@ -594,6 +604,7 @@ mod tests {
             orderby: vec![],
             row_limit: 100,
             rollup_groups: vec![],
+            temporal_units: std::collections::HashMap::new(),
         };
         let sql = build(Engine::StarRocks, &src, &cols, &metrics, &spec).unwrap();
         assert!(sql.contains("`region` AS `region`"), "{sql}");
@@ -617,6 +628,7 @@ mod tests {
             orderby: vec![],
             row_limit: 100,
             rollup_groups: vec![vec!["region".into(), "nation".into()], vec!["seg".into()]],
+            temporal_units: std::collections::HashMap::new(),
         };
         let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
         // ROLLUP(region, nation) × ROLLUP(seg) → portable GROUPING SETS.
@@ -643,6 +655,7 @@ mod tests {
             orderby: vec![],
             row_limit: 10,
             rollup_groups: vec![vec!["region".into()], vec!["seg".into()]],
+            temporal_units: std::collections::HashMap::new(),
         };
         assert!(build(Engine::Trino, &phys(), &cols, &metrics, &spec).is_err());
     }
@@ -659,7 +672,27 @@ mod tests {
             orderby: vec![],
             row_limit: 10,
             rollup_groups: vec![vec![], vec![]],
+            temporal_units: std::collections::HashMap::new(),
         };
         assert!(build(Engine::Trino, &phys(), &cols, &metrics, &spec).is_err());
+    }
+
+    #[test]
+    fn empty_temporal_units_leaves_sql_unchanged() {
+        let cols = vec![col("region", "string", None)];
+        let metrics = vec![metric("revenue", "SUM(price)")];
+        let spec = QuerySpec {
+            metrics: vec!["revenue".into()],
+            dimensions: vec!["region".into()],
+            columns: vec![],
+            filters: vec![],
+            orderby: vec![],
+            row_limit: 100,
+            rollup_groups: vec![],
+            temporal_units: std::collections::HashMap::new(),
+        };
+        let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
+        assert!(sql.contains("GROUP BY \"region\""), "{sql}");
+        assert!(!sql.contains("date_trunc"), "{sql}");
     }
 }
