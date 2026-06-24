@@ -69,6 +69,7 @@ export const CARD_SIZES_BY_VIZ: Record<string, CardSize> = {
   funnel:      { default: { w: 12, h: 6 }, min: { w: 4, h: 3 } },
   waterfall:   { default: { w: 14, h: 6 }, min: { w: 4, h: 3 } },
   sankey:      { default: { w: 16, h: 10 }, min: { w: 4, h: 3 } },
+  map:         { default: { w: 16, h: 10 }, min: { w: 6, h: 4 } },
   scalar:      { default: { w: 6, h: 3 }, min: { w: 2, h: 2 } },
   smartscalar: { default: { w: 6, h: 3 }, min: { w: 2, h: 2 } },
   text:        { default: { w: 12, h: 3 }, min: { w: 1, h: 1 } },
