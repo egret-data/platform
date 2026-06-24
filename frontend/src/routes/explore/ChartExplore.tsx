@@ -36,6 +36,7 @@ import {
 import { FieldZone } from "@/components/chart/config/FieldZone";
 import { SectionLabel } from "@/components/chart/settings/SectionLabel";
 import { pruneUnits } from "@/components/chart/temporal-units";
+import { TemporalUnitSelect } from "@/components/chart/TemporalUnitSelect";
 
 const UNDERLINE_LIST = "h-auto w-full justify-start gap-4 rounded-none border-b bg-transparent p-0";
 const UNDERLINE_TRIGGER = "rounded-none border-b-2 border-transparent px-0 pb-2 text-sm data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none";
@@ -154,8 +155,13 @@ export default function ChartExplore() {
       else next[col] = token;
       return next;
     });
-  // setUnit is wired up by Task 4/5 (temporal unit selectors); keep it reachable until then.
-  void setUnit;
+  const unitRow = (col: string | undefined) =>
+    col && columns.find((c) => c.column_name === col)?.is_temporal ? (
+      <div className="flex items-center gap-2 pl-2">
+        <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Unit</span>
+        <TemporalUnitSelect value={temporalUnits[col]} onChange={(u) => setUnit(col, u)} />
+      </div>
+    ) : null;
 
   function specForRun(): QuerySpec {
     if (isCartesianViz(viz)) {
@@ -466,6 +472,7 @@ export default function ChartExplore() {
                     </SelectContent>
                   </Select>
                 </div>
+                {unitRow(cartesian.xAxis)}
                 {viz === "scatter" && (
                   <div className="space-y-1">
                     <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">X metric (optional)</Label>
@@ -507,6 +514,7 @@ export default function ChartExplore() {
                     </SelectContent>
                   </Select>
                 </div>
+                {unitRow(pie.dimension)}
                 <div className="space-y-1">
                   <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
                   <Select value={pie.metric ?? ""} onValueChange={(v) => patchPie({ metric: v || undefined })}>
@@ -590,6 +598,7 @@ export default function ChartExplore() {
                     </SelectContent>
                   </Select>
                 </div>
+                {unitRow(funnel.dimension)}
                 <div className="space-y-1">
                   <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
                   <Select value={funnel.metric ?? ""} onValueChange={(v) => setFunnel((f) => ({ ...f, metric: v || undefined }))}>
@@ -613,6 +622,7 @@ export default function ChartExplore() {
                     </SelectContent>
                   </Select>
                 </div>
+                {unitRow(waterfall.xAxis)}
                 <div className="space-y-1">
                   <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric (delta)</Label>
                   <Select value={waterfall.metric ?? ""} onValueChange={(v) => setWaterfall((w) => ({ ...w, metric: v || undefined }))}>
@@ -640,6 +650,7 @@ export default function ChartExplore() {
                     </SelectContent>
                   </Select>
                 </div>
+                {unitRow(smart.dimension)}
                 <div className="space-y-1">
                   <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
                   <Select value={smart.metric ?? ""} onValueChange={(v) => setSmart((s) => ({ ...s, metric: v || undefined }))}>
