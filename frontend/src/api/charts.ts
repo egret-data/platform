@@ -29,6 +29,8 @@ export interface QuerySpec {
   orderby: ChartOrderBy[];
   row_limit: number;
   rollup_groups: string[][];
+  /** dimension column name -> temporal unit token (e.g. "month", "day_of_week"). */
+  temporal_units?: Record<string, string>;
 }
 
 export interface TableState {
