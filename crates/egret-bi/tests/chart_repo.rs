@@ -3,7 +3,7 @@ use egret_bi::{ChartRepo, DatasetRepo, SourceSpec};
 use egret_metastore::Db;
 use uuid::Uuid;
 
-async fn setup() -> Option<(ChartRepo, Uuid, Uuid, Uuid)> {
+async fn setup() -> Option<(ChartRepo, Uuid, Uuid, Uuid, Uuid)> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
@@ -47,13 +47,29 @@ async fn setup() -> Option<(ChartRepo, Uuid, Uuid, Uuid)> {
         )
         .await
         .unwrap();
+    let ds2 = datasets
+        .create(
+            wid,
+            db_id,
+            "customers",
+            "",
+            &SourceSpec::Physical {
+                catalog: Some("tpch".into()),
+                schema: "sf1".into(),
+                table: "customer".into(),
+            },
+            &[],
+            Some(egret_core::UserId(uid)),
+        )
+        .await
+        .unwrap();
 
-    Some((ChartRepo::new(db), wid, ds.id, uid))
+    Some((ChartRepo::new(db), wid, ds.id, ds2.id, uid))
 }
 
 #[tokio::test]
 async fn chart_repo_crud_and_unique_conflict() {
-    let Some((repo, ws, ds, user)) = setup().await else {
+    let Some((repo, ws, ds, ds2, user)) = setup().await else {
         eprintln!("skip");
         return;
     };
@@ -72,12 +88,14 @@ async fn chart_repo_crud_and_unique_conflict() {
     let listed = repo.list_by_workspace(ws).await.unwrap();
     assert_eq!(listed.len(), 1);
 
-    repo.update(c.id, "Sales v2", "desc", "pivot_table", &params)
+    // update can also re-point the chart at a different dataset
+    repo.update(c.id, ds2, "Sales v2", "desc", "pivot_table", &params)
         .await
         .unwrap();
     let after = repo.get(c.id).await.unwrap().unwrap();
     assert_eq!(after.name, "Sales v2");
     assert_eq!(after.viz_type, "pivot_table");
+    assert_eq!(after.dataset_id, ds2);
 
     assert_eq!(repo.chart_workspace(c.id).await.unwrap(), Some(ws));
     assert_eq!(repo.owner(c.id).await.unwrap(), Some(user));

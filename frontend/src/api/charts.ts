@@ -181,7 +181,7 @@ export function useChartMutations(ws: string) {
     onSuccess: invalidate,
   });
   const update = useMutation({
-    mutationFn: ({ id, ...b }: { id: string; name: string; description: string; viz_type: VizType; params: ChartParams }) =>
+    mutationFn: ({ id, ...b }: { id: string; dataset_id: string; name: string; description: string; viz_type: VizType; params: ChartParams }) =>
       apiJson<Chart>(`/ws/${ws}/charts/${id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(b) }),
     onSuccess: invalidate,
   });

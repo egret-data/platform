@@ -89,15 +89,17 @@ impl ChartRepo {
     pub async fn update(
         &self,
         id: Uuid,
+        dataset_id: Uuid,
         name: &str,
         description: &str,
         viz_type: &str,
         params: &serde_json::Value,
     ) -> Result<(), BiError> {
         sqlx::query(
-            "UPDATE charts SET name=$2, description=$3, viz_type=$4, params=$5, updated_at=now() WHERE id=$1",
+            "UPDATE charts SET dataset_id=$2, name=$3, description=$4, viz_type=$5, params=$6, updated_at=now() WHERE id=$1",
         )
         .bind(id)
+        .bind(dataset_id)
         .bind(name)
         .bind(description)
         .bind(viz_type)

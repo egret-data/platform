@@ -879,8 +879,25 @@ async fn ch_update(
         .map_err(BiApiError::from)?;
     require_chart_in_ws(&st, &ctx, id).await?;
     require_chart_owner(&st, &ctx, id).await?;
+    // The (possibly changed) dataset must exist in this workspace — same cross-tenant guard as create.
+    let ds = st
+        .datasets
+        .get(b.dataset_id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("dataset".into()))?;
+    if ds.workspace_id != ctx.workspace_id.0 {
+        return Err(Error::NotFound("dataset".into()).into());
+    }
     st.charts
-        .update(id, &b.name, &b.description, &b.viz_type, &b.params)
+        .update(
+            id,
+            b.dataset_id,
+            &b.name,
+            &b.description,
+            &b.viz_type,
+            &b.params,
+        )
         .await
         .map_err(BiApiError::from)?;
     let c = st
