@@ -241,6 +241,32 @@ fn extract_expr(engine: Engine, inner: &str, unit: TemporalUnit) -> String {
 fn find_column<'a>(columns: &'a [DatasetColumn], name: &str) -> Option<&'a DatasetColumn> {
     columns.iter().find(|c| c.column_name == name)
 }
+
+/// Resolve a dimension name to SQL, applying its temporal unit (from `spec.temporal_units`) if set.
+/// A unit on a non-temporal column, or an unknown unit token, is a BadRequest.
+fn dim_expr(
+    engine: Engine,
+    columns: &[DatasetColumn],
+    spec: &QuerySpec,
+    name: &str,
+) -> Result<String, BiError> {
+    let c = find_column(columns, name)
+        .ok_or_else(|| BiError::BadRequest(format!("unknown dimension: {name}")))?;
+    let base = column_sql(engine, c);
+    match spec.temporal_units.get(name) {
+        None => Ok(base),
+        Some(tok) => {
+            let unit = TemporalUnit::parse(tok)
+                .ok_or_else(|| BiError::BadRequest(format!("unknown temporal unit: {tok}")))?;
+            if !c.is_temporal {
+                return Err(BiError::BadRequest(format!(
+                    "temporal unit on non-temporal column: {name}"
+                )));
+            }
+            Ok(temporal_expr(engine, &base, unit))
+        }
+    }
+}
 fn find_metric<'a>(metrics: &'a [Metric], name: &str) -> Option<&'a Metric> {
     metrics.iter().find(|m| m.metric_name == name)
 }
@@ -336,9 +362,7 @@ pub fn build(
         let mut dim_index: std::collections::HashMap<&str, usize> =
             std::collections::HashMap::new();
         for (i, name) in spec.dimensions.iter().enumerate() {
-            let c = find_column(columns, name)
-                .ok_or_else(|| BiError::BadRequest(format!("unknown dimension: {name}")))?;
-            let e = column_sql(engine, c);
+            let e = dim_expr(engine, columns, spec, name)?;
             select.push(format!("{e} AS {}", quote_ident(engine, name)));
             dim_index.insert(name.as_str(), i);
             dim_exprs.push(e);
@@ -877,5 +901,67 @@ mod tests {
         let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
         assert!(sql.contains("GROUP BY \"region\""), "{sql}");
         assert!(!sql.contains("date_trunc"), "{sql}");
+    }
+
+    fn tcol(name: &str) -> DatasetColumn {
+        DatasetColumn {
+            column_name: name.into(),
+            data_type: "timestamp".into(),
+            type_generic: "temporal".into(),
+            is_temporal: true,
+            ordinal: 0,
+            expression: None,
+            verbose_name: String::new(),
+            description: String::new(),
+        }
+    }
+
+    fn spec_with_unit(dim: &str, unit: &str) -> QuerySpec {
+        let mut tu = std::collections::HashMap::new();
+        tu.insert(dim.to_string(), unit.to_string());
+        QuerySpec {
+            metrics: vec!["revenue".into()],
+            dimensions: vec![dim.into()],
+            columns: vec![],
+            filters: vec![],
+            orderby: vec![],
+            row_limit: 100,
+            rollup_groups: vec![],
+            temporal_units: tu,
+        }
+    }
+
+    #[test]
+    fn dimension_truncation_select_and_group_match() {
+        let cols = vec![tcol("created_at")];
+        let metrics = vec![metric("revenue", "SUM(price)")];
+        let spec = spec_with_unit("created_at", "month");
+        let sql = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap();
+        assert!(
+            sql.contains("date_trunc('month', \"created_at\") AS \"created_at\""),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("GROUP BY date_trunc('month', \"created_at\")"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn dimension_unit_on_non_temporal_is_rejected() {
+        let cols = vec![col("region", "string", None)];
+        let metrics = vec![metric("revenue", "SUM(price)")];
+        let spec = spec_with_unit("region", "month");
+        let err = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap_err();
+        assert!(matches!(err, BiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn dimension_unknown_unit_is_rejected() {
+        let cols = vec![tcol("created_at")];
+        let metrics = vec![metric("revenue", "SUM(price)")];
+        let spec = spec_with_unit("created_at", "fortnight");
+        let err = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap_err();
+        assert!(matches!(err, BiError::BadRequest(_)));
     }
 }
