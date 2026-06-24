@@ -101,6 +101,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
               yMin: cartesian.yMin, yMax: cartesian.yMax,
               showMarkers: cartesian.showMarkers, xScale: cartesian.xScale,
               columnSettings, metricTypes,
+              xAxisUnit: params.spec.temporal_units?.[cartesian.xAxis ?? ""],
             })}
             onPointClick={onValueClick && cartesian.xAxis ? (p) => {
               const dims: { col: string; value: unknown }[] = [{ col: cartesian.xAxis as string, value: p.name }];
@@ -124,6 +125,7 @@ export function ChartRenderer({ vizType, params, columns, rows, metricTypes = {}
               showTotal: pie.showTotal, percentVisibility: pie.percentVisibility,
               sliceColors: pie.sliceColors,
               columnSettings, metricTypes,
+              dimensionUnit: params.spec.temporal_units?.[pie.dimension ?? ""],
             })}
             onPointClick={onValueClick && pie.dimension ? (p) => onValueClick({ dims: [{ col: pie.dimension as string, value: p.name }] }, p.x, p.y) : undefined}
           />}

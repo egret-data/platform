@@ -4,6 +4,7 @@ import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
 import { formatValue } from "../../format";
 import { CHART_THEME, COLOR_FALLBACK, resolveColor, seriesColor, SUMMARIZE_COLOR } from "../palette";
+import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
 
 export interface ResultColumn { name: string; type: string }
 export interface CartesianBuildConfig {
@@ -37,6 +38,7 @@ export interface CartesianBuildConfig {
   xScale?: "ordinal" | "linear" | "timeseries";  // x-axis scale (default ordinal/category)
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
+  xAxisUnit?: string;            // temporal extraction unit for the x-axis dimension (e.g. "day_of_week")
 }
 
 // The series names a cartesian chart will render — its y-metrics, or the distinct
@@ -259,7 +261,8 @@ export function buildCartesianOption(
     if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
     if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
     if (usesXScale(cfg)) applyXScale(categories, series, cfg);
-    return baseOption(cfg, categories as (string | number)[], series);
+    const displayCats1 = isExtractUnit(cfg.xAxisUnit) ? categories.map((v) => temporalLabel(cfg.xAxisUnit, v)) : categories;
+    return baseOption(cfg, displayCats1 as (string | number)[], series);
   }
 
   const rowByCat = new Map(xrows.map((r) => [catKey(r[xi]), r]));
@@ -279,7 +282,8 @@ export function buildCartesianOption(
   if (cfg.trendLine) series.push(...(trendSeries(series as unknown as SeriesLike[]) as unknown as typeof series));
   if (cfg.stacked && cfg.showStackTotal && !isNormalized(cfg)) series.push(stackTotalSeries(series as unknown as SeriesLike[], cfg) as unknown as (typeof series)[number]);
   if (usesXScale(cfg)) applyXScale(categories, series, cfg);
-  return baseOption(cfg, categories as (string | number)[], series);
+  const displayCats = isExtractUnit(cfg.xAxisUnit) ? categories.map((v) => temporalLabel(cfg.xAxisUnit, v)) : categories;
+  return baseOption(cfg, displayCats as (string | number)[], series);
 }
 
 // Shared decoration: type, color, stack, areaStyle, labels, smooth, symbol.

@@ -2,6 +2,7 @@ import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
 import { SERIES_PALETTE, OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor } from "../palette";
+import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
 
 export interface ResultColumn { name: string; type: string }
 export interface PieBuildConfig {
@@ -22,6 +23,8 @@ export interface PieBuildConfig {
   sliceColors?: Record<string, string>;
   columnSettings?: Record<string, ColumnFormat>;
   metricTypes?: Record<string, string>;
+  /** Temporal extraction unit for the dimension (e.g. "day_of_week") — maps integers to friendly labels. */
+  dimensionUnit?: string;
 }
 
 const OTHER_NAME = "Other";
@@ -34,7 +37,7 @@ interface Slice { name: string; value: number; itemStyle?: { color: string } }
 // fold sub-threshold slices into a single muted "Other".
 function buildSlices(rows: unknown[][], di: number, mi: number, cfg: PieBuildConfig): Slice[] {
   let slices: Slice[] = rows
-    .map((r) => ({ name: String(r[di] ?? ""), value: Number(r[mi]) }))
+    .map((r) => ({ name: isExtractUnit(cfg.dimensionUnit) ? temporalLabel(cfg.dimensionUnit, r[di]) : String(r[di] ?? ""), value: Number(r[mi]) }))
     .filter((s) => Number.isFinite(s.value));
 
   const allNegative = slices.length > 0 && slices.every((s) => s.value < 0);
