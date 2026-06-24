@@ -60,7 +60,7 @@ export function FilterPill({ param, value, options, onChange }: Props) {
           <FilterControl param={param} value={value} options={options} onChange={onChange} />
         </PopoverContent>
       </Popover>
-      {set && (
+      {set && param.type !== "temporal_unit" && (
         <button type="button" aria-label={`clear ${param.name}`} className="pl-1.5 text-muted-foreground hover:text-foreground"
           onClick={() => onChange(clearedValue(param))}>
           <X className="h-3.5 w-3.5" />

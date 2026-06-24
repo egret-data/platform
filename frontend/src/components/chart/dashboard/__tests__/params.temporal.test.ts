@@ -36,6 +36,18 @@ describe("applyParamsToChart — temporal_unit", () => {
     const out = applyParamsToChart(c, [tuParam()], { date_grouping: "quarter" }, {});
     expect(out).toBe(c);
   });
+
+  it("applies a filter param and a temporal_unit param together", () => {
+    const filterParam: DashboardParameter = { id: "f1", name: "Region", slug: "region", type: "text", operator: "is" };
+    const out = applyParamsToChart(
+      chart({ created_at: "month" }),
+      [tuParam(), filterParam],
+      { date_grouping: "quarter", region: "EU" },
+      { p1: "created_at", f1: "region" },
+    );
+    expect(out.params.spec.temporal_units).toEqual({ created_at: "quarter" });
+    expect(out.params.spec.filters).toEqual([{ col: "region", op: "eq", value: "EU" }]);
+  });
 });
 
 describe("summarize — temporal_unit", () => {
