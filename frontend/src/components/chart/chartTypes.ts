@@ -1,5 +1,5 @@
 import {
-  Table2, LayoutGrid, BarChart3, BarChartHorizontal, LineChart, AreaChart, ScatterChart, Spline, PieChart, Hash, BarChartHorizontalBig, Gauge, Filter, BarChart4, TrendingUp, Box, Workflow,
+  Table2, LayoutGrid, BarChart3, BarChartHorizontal, LineChart, AreaChart, ScatterChart, Spline, PieChart, Hash, BarChartHorizontalBig, Gauge, Filter, BarChart4, TrendingUp, Box, Workflow, FileText,
   type LucideIcon,
 } from "lucide-react";
 import type { VizType } from "@/api/charts";
@@ -39,4 +39,5 @@ export const CHART_TYPES: ChartTypeMeta[] = [
   { key: "smartscalar", name: "Trend", description: "The latest value and its change versus the previous period.", icon: TrendingUp },
   { key: "boxplot", name: "Box plot", description: "The distribution of a value (min/quartiles/max) per category.", icon: Box },
   { key: "sankey", name: "Sankey", description: "Flows between source and target categories, weighted by a metric.", icon: Workflow },
+  { key: "object", name: "Object detail", description: "Inspect one record as field/value pairs, paging through results.", icon: FileText },
 ];
