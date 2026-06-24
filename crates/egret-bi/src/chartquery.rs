@@ -192,6 +192,28 @@ fn column_sql(engine: Engine, c: &DatasetColumn) -> String {
     }
 }
 
+/// Wrap an already-resolved column expression in its temporal grouping. `inner` is trusted
+/// (dataset-sourced); the unit string is a fixed literal, never user text.
+fn temporal_expr(engine: Engine, inner: &str, unit: TemporalUnit) -> String {
+    use TemporalUnit::*;
+    let trunc = |u: &str| format!("date_trunc('{u}', {inner})");
+    match unit {
+        Minute => trunc("minute"),
+        Hour => trunc("hour"),
+        Day => trunc("day"),
+        Week => trunc("week"),
+        Month => trunc("month"),
+        Quarter => trunc("quarter"),
+        Year => trunc("year"),
+        // extraction variants — implemented in Task 4
+        _ => extract_expr(engine, inner, unit),
+    }
+}
+
+fn extract_expr(_engine: Engine, inner: &str, _unit: TemporalUnit) -> String {
+    inner.to_string()
+}
+
 fn find_column<'a>(columns: &'a [DatasetColumn], name: &str) -> Option<&'a DatasetColumn> {
     columns.iter().find(|c| c.column_name == name)
 }
@@ -748,6 +770,23 @@ mod tests {
             temporal_units: std::collections::HashMap::new(),
         };
         assert!(build(Engine::Trino, &phys(), &cols, &metrics, &spec).is_err());
+    }
+
+    #[test]
+    fn temporal_expr_truncation_both_engines() {
+        use TemporalUnit::*;
+        assert_eq!(
+            temporal_expr(Engine::Trino, "\"created_at\"", Month),
+            "date_trunc('month', \"created_at\")"
+        );
+        assert_eq!(
+            temporal_expr(Engine::StarRocks, "`created_at`", Quarter),
+            "date_trunc('quarter', `created_at`)"
+        );
+        assert_eq!(
+            temporal_expr(Engine::Trino, "x", Year),
+            "date_trunc('year', x)"
+        );
     }
 
     #[test]
