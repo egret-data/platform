@@ -1,5 +1,5 @@
 import {
-  Table2, LayoutGrid, BarChart3, BarChartHorizontal, LineChart, AreaChart, ScatterChart, Spline, PieChart, Hash, BarChartHorizontalBig, Gauge, Filter, BarChart4, TrendingUp, Box, Workflow, FileText,
+  Table2, LayoutGrid, BarChart3, BarChartHorizontal, LineChart, AreaChart, ScatterChart, Spline, PieChart, Hash, BarChartHorizontalBig, Gauge, Filter, BarChart4, TrendingUp, Box, Workflow, FileText, Map,
   type LucideIcon,
 } from "lucide-react";
 import type { VizType } from "@/api/charts";
@@ -40,4 +40,5 @@ export const CHART_TYPES: ChartTypeMeta[] = [
   { key: "boxplot", name: "Box plot", description: "The distribution of a value (min/quartiles/max) per category.", icon: Box },
   { key: "sankey", name: "Sankey", description: "Flows between source and target categories, weighted by a metric.", icon: Workflow },
   { key: "object", name: "Object detail", description: "Inspect one record as field/value pairs, paging through results.", icon: FileText },
+  { key: "map", name: "Map", description: "Shade regions of a map by a metric (US states, world, Vietnam).", icon: Map },
 ];
