@@ -1,8 +1,8 @@
 import { use } from "echarts/core";
 import { SVGRenderer } from "echarts/renderers";
-import { BarChart, LineChart, ScatterChart, PieChart, GaugeChart, FunnelChart, BoxplotChart, SankeyChart } from "echarts/charts";
+import { BarChart, LineChart, ScatterChart, PieChart, GaugeChart, FunnelChart, BoxplotChart, SankeyChart, MapChart } from "echarts/charts";
 import {
-  GridComponent, TooltipComponent, LegendComponent, DatasetComponent, GraphicComponent, MarkLineComponent,
+  GridComponent, TooltipComponent, LegendComponent, DatasetComponent, GraphicComponent, MarkLineComponent, VisualMapComponent,
 } from "echarts/components";
 
 let registered = false;
@@ -12,8 +12,8 @@ export function registerEChartsModules() {
   if (registered) return;
   use([
     SVGRenderer,
-    BarChart, LineChart, ScatterChart, PieChart, GaugeChart, FunnelChart, BoxplotChart, SankeyChart,
-    GridComponent, TooltipComponent, LegendComponent, DatasetComponent, GraphicComponent, MarkLineComponent,
+    BarChart, LineChart, ScatterChart, PieChart, GaugeChart, FunnelChart, BoxplotChart, SankeyChart, MapChart,
+    GridComponent, TooltipComponent, LegendComponent, DatasetComponent, GraphicComponent, MarkLineComponent, VisualMapComponent,
   ]);
   registered = true;
 }
