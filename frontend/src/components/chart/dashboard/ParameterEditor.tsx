@@ -1,4 +1,5 @@
 import type { DashboardParameter, ParamType, ParamOperator } from "@/api/dashboards";
+import { TEMPORAL_UNITS } from "@/components/chart/temporal-units";
 
 export const OPERATORS: Record<ParamType, ParamOperator[]> = {
   text: ["is", "is-not", "contains", "does-not-contain", "starts-with", "ends-with"],
@@ -23,13 +24,19 @@ export function ParameterEditor({ param, onChange, onDelete }: {
       <input aria-label="parameter name" className={cls} value={param.name}
         onChange={(e) => onChange({ ...param, name: e.target.value })} />
       <select aria-label="parameter type" className={cls} value={param.type}
-        onChange={(e) => { const t = e.target.value as ParamType; onChange({ ...param, type: t, operator: OPERATORS[t][0] }); }}>
+        onChange={(e) => { const t = e.target.value as ParamType; onChange({ ...param, type: t, operator: OPERATORS[t][0], ...(t === "temporal_unit" ? { default: "month" } : {}) }); }}>
         {(Object.keys(OPERATORS) as ParamType[]).map((t) => <option key={t} value={t}>{t}</option>)}
       </select>
       {showOp && (
         <select aria-label="parameter operator" className={cls} value={param.operator}
           onChange={(e) => onChange({ ...param, operator: e.target.value as ParamOperator })}>
           {OPERATORS[param.type].map((o) => <option key={o} value={o}>{o}</option>)}
+        </select>
+      )}
+      {param.type === "temporal_unit" && (
+        <select aria-label="default unit" className={cls} value={String(param.default ?? "month")}
+          onChange={(e) => onChange({ ...param, default: e.target.value })}>
+          {TEMPORAL_UNITS.map((u) => <option key={u.token} value={u.token}>{u.label}</option>)}
         </select>
       )}
       <label className="flex items-center gap-1 text-xs">
