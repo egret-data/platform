@@ -23,7 +23,7 @@ export interface DashboardSummary {
   deleted_at?: string | null;
   bookmarked?: boolean;
 }
-export type ParamType = "text" | "number" | "date" | "id" | "category" | "boolean" | "location";
+export type ParamType = "text" | "number" | "date" | "id" | "category" | "boolean" | "location" | "temporal_unit";
 export type ParamOperator =
   | "is" | "is-not" | "contains" | "does-not-contain" | "starts-with" | "ends-with"        // text / category / location
   | "=" | "!=" | "between" | ">=" | "<="                              // number

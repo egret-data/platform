@@ -8,6 +8,7 @@ export const OPERATORS: Record<ParamType, ParamOperator[]> = {
   category: ["is"],
   boolean: ["is"],
   location: ["is", "is-not"],
+  temporal_unit: ["is"],
 };
 
 export function ParameterEditor({ param, onChange, onDelete }: {
