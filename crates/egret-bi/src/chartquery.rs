@@ -66,6 +66,66 @@ pub enum FilterOp {
     IsNotNull,
 }
 
+/// A Metabase-style temporal grouping unit. Truncation variants bucket to a date/timestamp;
+/// extraction variants (`*Of*`) return an integer field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemporalUnit {
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Quarter,
+    Year,
+    MinuteOfHour,
+    HourOfDay,
+    DayOfWeek,
+    DayOfMonth,
+    DayOfYear,
+    WeekOfYear,
+    MonthOfYear,
+    QuarterOfYear,
+}
+
+impl TemporalUnit {
+    pub fn parse(token: &str) -> Option<Self> {
+        use TemporalUnit::*;
+        Some(match token {
+            "minute" => Minute,
+            "hour" => Hour,
+            "day" => Day,
+            "week" => Week,
+            "month" => Month,
+            "quarter" => Quarter,
+            "year" => Year,
+            "minute_of_hour" => MinuteOfHour,
+            "hour_of_day" => HourOfDay,
+            "day_of_week" => DayOfWeek,
+            "day_of_month" => DayOfMonth,
+            "day_of_year" => DayOfYear,
+            "week_of_year" => WeekOfYear,
+            "month_of_year" => MonthOfYear,
+            "quarter_of_year" => QuarterOfYear,
+            _ => return None,
+        })
+    }
+
+    pub fn is_extract(self) -> bool {
+        use TemporalUnit::*;
+        matches!(
+            self,
+            MinuteOfHour
+                | HourOfDay
+                | DayOfWeek
+                | DayOfMonth
+                | DayOfYear
+                | WeekOfYear
+                | MonthOfYear
+                | QuarterOfYear
+        )
+    }
+}
+
 /// Encode a filter value as a SQL literal, validated by the target column's generic type.
 /// Numerics are validated and emitted unquoted; booleans normalized; everything else is
 /// single-quoted with `'` doubled. This is the security-critical primitive.
@@ -377,6 +437,19 @@ fn push_limit(sql: &mut String, row_limit: i64) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn temporal_unit_parse_and_classify() {
+        use TemporalUnit::*;
+        assert_eq!(TemporalUnit::parse("month"), Some(Month));
+        assert_eq!(TemporalUnit::parse("day_of_week"), Some(DayOfWeek));
+        assert_eq!(TemporalUnit::parse("week_of_year"), Some(WeekOfYear));
+        assert_eq!(TemporalUnit::parse("nonsense"), None);
+        assert!(!Month.is_extract());
+        assert!(Year.is_extract() == false);
+        assert!(DayOfWeek.is_extract());
+        assert!(HourOfDay.is_extract());
+    }
 
     #[test]
     fn sql_literal_encodes_by_type() {
