@@ -35,6 +35,8 @@ import {
 } from "@/components/ui/dialog";
 import { FieldZone } from "@/components/chart/config/FieldZone";
 import { SectionLabel } from "@/components/chart/settings/SectionLabel";
+import { pruneUnits } from "@/components/chart/temporal-units";
+import { TemporalUnitSelect } from "@/components/chart/TemporalUnitSelect";
 
 const UNDERLINE_LIST = "h-auto w-full justify-start gap-4 rounded-none border-b bg-transparent p-0";
 const UNDERLINE_TRIGGER = "rounded-none border-b-2 border-transparent px-0 pb-2 text-sm data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none";
@@ -58,6 +60,7 @@ export default function ChartExplore() {
   // table-mode controls
   const [tableMetrics, setTableMetrics] = useState<string[]>([]);
   const [tableCols, setTableCols] = useState<string[]>([]);
+  const [temporalUnits, setTemporalUnits] = useState<Record<string, string>>({});
   // pivot-mode controls (multi-dim ordered)
   const [pRows, setPRows] = useState<string[]>([]);
   const [pCols, setPCols] = useState<string[]>([]);
@@ -126,6 +129,7 @@ export default function ChartExplore() {
       setTableCols([...(p.spec?.dimensions ?? []), ...(p.spec?.columns ?? [])]);
     }
     setRowLimit(p.spec?.row_limit ?? 1000);
+    setTemporalUnits(p.spec?.temporal_units ?? {});
     setColumnSettings(p.columnSettings ?? {});
     setConditionalFormatting(p.conditionalFormatting ?? []);
     setCollapsed(new Set(p.collapsedRows ?? []));
@@ -144,15 +148,45 @@ export default function ChartExplore() {
   const columns = detail.data?.columns ?? [];
   const metrics = detail.data?.metrics ?? [];
 
+  const setUnit = (col: string, token: string | undefined) =>
+    setTemporalUnits((prev) => {
+      const next = { ...prev };
+      if (token == null) delete next[col];
+      else next[col] = token;
+      return next;
+    });
+  const unitRow = (col: string | undefined) =>
+    col && columns.find((c) => c.column_name === col)?.is_temporal ? (
+      <div className="flex items-center gap-2 pl-2">
+        <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Unit</span>
+        <TemporalUnitSelect value={temporalUnits[col]} onChange={(u) => setUnit(col, u)} />
+      </div>
+    ) : null;
+  const unitList = (dims: string[]) => {
+    const temporal = dims.filter((d) => columns.find((c) => c.column_name === d)?.is_temporal);
+    if (temporal.length === 0) return null;
+    return (
+      <div className="space-y-1">
+        <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Date grouping</Label>
+        {temporal.map((col) => (
+          <div key={col} className="flex items-center justify-between gap-2">
+            <span className="truncate text-xs">{col}</span>
+            <TemporalUnitSelect value={temporalUnits[col]} onChange={(u) => setUnit(col, u)} />
+          </div>
+        ))}
+      </div>
+    );
+  };
+
   function specForRun(): QuerySpec {
     if (isCartesianViz(viz)) {
       const dims = [cartesian.xAxis, cartesian.series].filter((d): d is string => !!d);
       const mets = viz === "scatter" && cartesian.xMetric ? [cartesian.xMetric, ...cartesian.yMetrics] : cartesian.yMetrics;
-      return { metrics: mets, dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
+      return { metrics: mets, dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [], temporal_units: pruneUnits(temporalUnits, dims) };
     }
     if (viz === "pie") {
       const dims = pie.dimension ? [pie.dimension] : [];
-      return { metrics: pie.metric ? [pie.metric] : [], dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
+      return { metrics: pie.metric ? [pie.metric] : [], dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [], temporal_units: pruneUnits(temporalUnits, dims) };
     }
     if (viz === "scalar") {
       return { metrics: scalar.metric ? [scalar.metric] : [], dimensions: [], columns: [], filters, orderby: [], row_limit: 1, rollup_groups: [] };
@@ -164,36 +198,58 @@ export default function ChartExplore() {
       return { metrics: gauge.metric ? [gauge.metric] : [], dimensions: [], columns: [], filters, orderby: [], row_limit: 1, rollup_groups: [] };
     }
     if (viz === "funnel") {
-      return { metrics: funnel.metric ? [funnel.metric] : [], dimensions: funnel.dimension ? [funnel.dimension] : [], columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
+      const dims = funnel.dimension ? [funnel.dimension] : [];
+      return { metrics: funnel.metric ? [funnel.metric] : [], dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [], temporal_units: pruneUnits(temporalUnits, dims) };
     }
     if (viz === "waterfall") {
-      return { metrics: waterfall.metric ? [waterfall.metric] : [], dimensions: waterfall.xAxis ? [waterfall.xAxis] : [], columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
+      const dims = waterfall.xAxis ? [waterfall.xAxis] : [];
+      return { metrics: waterfall.metric ? [waterfall.metric] : [], dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [], temporal_units: pruneUnits(temporalUnits, dims) };
     }
     if (viz === "smartscalar") {
       const dims = smart.dimension ? [smart.dimension] : [];
-      return { metrics: smart.metric ? [smart.metric] : [], dimensions: dims, columns: [], filters, orderby: smart.dimension ? [{ field: smart.dimension, desc: false }] : [], row_limit: rowLimit, rollup_groups: [] };
+      return { metrics: smart.metric ? [smart.metric] : [], dimensions: dims, columns: [], filters, orderby: smart.dimension ? [{ field: smart.dimension, desc: false }] : [], row_limit: rowLimit, rollup_groups: [], temporal_units: pruneUnits(temporalUnits, dims) };
     }
     if (viz === "boxplot") {
       // Raw rows (no aggregation) — quartiles are computed client-side.
       return { metrics: [], dimensions: [], columns: [box.category, box.value].filter((c): c is string => !!c), filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
     }
     if (viz === "sankey") {
-      return { metrics: sankey.metric ? [sankey.metric] : [], dimensions: [sankey.source, sankey.target].filter((d): d is string => !!d), columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [] };
+      const dims = [sankey.source, sankey.target].filter((d): d is string => !!d);
+      return { metrics: sankey.metric ? [sankey.metric] : [], dimensions: dims, columns: [], filters, orderby: [], row_limit: rowLimit, rollup_groups: [], temporal_units: pruneUnits(temporalUnits, dims) };
     }
     if (viz === "pivot_table") {
       const dims = [...pRows, ...pCols];
       const groups = [pRows, pCols].filter((g) => g.length > 0);
       return {
         metrics: pVals, dimensions: dims, columns: [], filters, orderby: [],
-        row_limit: rowLimit, rollup_groups: groups,
+        row_limit: rowLimit, rollup_groups: groups, temporal_units: pruneUnits(temporalUnits, dims),
       };
     }
     const agg = tableMetrics.length > 0;
+    const dims = agg ? tableCols : [];
     return {
-      metrics: tableMetrics, dimensions: agg ? tableCols : [], columns: agg ? [] : tableCols,
+      metrics: tableMetrics, dimensions: dims, columns: agg ? [] : tableCols,
       filters, orderby: [], row_limit: rowLimit, rollup_groups: [],
+      temporal_units: pruneUnits(temporalUnits, dims),
     };
   }
+
+  // A temporal dimension defaults to monthly grouping (Metabase-style) until the user changes it.
+  const activeDims = specForRun().dimensions;
+  useEffect(() => {
+    setTemporalUnits((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const name of activeDims) {
+        const temporal = columns.find((c) => c.column_name === name)?.is_temporal;
+        if (temporal && !(name in next)) {
+          next[name] = "month";
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [activeDims.join("|"), columns]);
 
   const build = useBuildChartData(ws);
   const submit = useSubmitQuery(ws);
@@ -324,6 +380,7 @@ export default function ChartExplore() {
     setTableMetrics([]); setTableCols([]); setPRows([]); setPCols([]); setPVals([]);
     setColumnSettings({}); setConditionalFormatting([]); setCollapsed(new Set()); setPivotSort({}); setTableState({}); setFilters([]); setQueryId(null);
     setCartesian({ yMetrics: [] }); setPie({}); setScalar({}); setProgress({}); setGauge({}); setFunnel({}); setWaterfall({}); setSmart({}); setBox({}); setSankey({});
+    setTemporalUnits({});
   }
 
   const isRunning = status.data?.status === "queued" || status.data?.status === "running";
@@ -406,6 +463,7 @@ export default function ChartExplore() {
                     ))}
                   </div>
                 </div>
+                {unitList(tableMetrics.length > 0 ? tableCols : [])}
               </>
             )}
 
@@ -415,6 +473,7 @@ export default function ChartExplore() {
                   options={columns.map((c) => c.column_name).filter((n) => !pCols.includes(n))} />
                 <FieldZone label="Columns" selected={pCols} onChange={setPCols}
                   options={columns.map((c) => c.column_name).filter((n) => !pRows.includes(n))} />
+                {unitList([...pRows, ...pCols])}
                 <FieldZone label="Values" selected={pVals} onChange={setPVals}
                   options={metrics.map((m) => m.metric_name)} />
               </>
@@ -431,6 +490,7 @@ export default function ChartExplore() {
                     </SelectContent>
                   </Select>
                 </div>
+                {unitRow(cartesian.xAxis)}
                 {viz === "scatter" && (
                   <div className="space-y-1">
                     <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">X metric (optional)</Label>
@@ -472,6 +532,7 @@ export default function ChartExplore() {
                     </SelectContent>
                   </Select>
                 </div>
+                {unitRow(pie.dimension)}
                 <div className="space-y-1">
                   <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
                   <Select value={pie.metric ?? ""} onValueChange={(v) => patchPie({ metric: v || undefined })}>
@@ -555,6 +616,7 @@ export default function ChartExplore() {
                     </SelectContent>
                   </Select>
                 </div>
+                {unitRow(funnel.dimension)}
                 <div className="space-y-1">
                   <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
                   <Select value={funnel.metric ?? ""} onValueChange={(v) => setFunnel((f) => ({ ...f, metric: v || undefined }))}>
@@ -578,6 +640,7 @@ export default function ChartExplore() {
                     </SelectContent>
                   </Select>
                 </div>
+                {unitRow(waterfall.xAxis)}
                 <div className="space-y-1">
                   <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric (delta)</Label>
                   <Select value={waterfall.metric ?? ""} onValueChange={(v) => setWaterfall((w) => ({ ...w, metric: v || undefined }))}>
@@ -605,6 +668,7 @@ export default function ChartExplore() {
                     </SelectContent>
                   </Select>
                 </div>
+                {unitRow(smart.dimension)}
                 <div className="space-y-1">
                   <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Metric</Label>
                   <Select value={smart.metric ?? ""} onValueChange={(v) => setSmart((s) => ({ ...s, metric: v || undefined }))}>
