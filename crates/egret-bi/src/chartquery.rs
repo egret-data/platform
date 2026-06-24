@@ -205,7 +205,7 @@ fn temporal_expr(engine: Engine, inner: &str, unit: TemporalUnit) -> String {
         Month => trunc("month"),
         Quarter => trunc("quarter"),
         Year => trunc("year"),
-        // extraction variants — implemented in Task 4
+        // extraction variants (hour-of-day, day-of-week, …) delegate to extract_expr
         _ => extract_expr(engine, inner, unit),
     }
 }
@@ -233,8 +233,10 @@ fn extract_expr(engine: Engine, inner: &str, unit: TemporalUnit) -> String {
         (Trino, WeekOfYear) => format!("week_of_year({inner})"),
         (StarRocks, WeekOfYear) => format!("week({inner}, 3)"),
 
-        // truncation variants never reach here (handled by temporal_expr); identity is safe.
-        (_, Minute | Hour | Day | Week | Month | Quarter | Year) => inner.to_string(),
+        // Truncation variants are handled by temporal_expr and never dispatched here.
+        (_, Minute | Hour | Day | Week | Month | Quarter | Year) => {
+            unreachable!("truncation units must be handled by temporal_expr, not extract_expr")
+        }
     }
 }
 
@@ -256,13 +258,13 @@ fn dim_expr(
     match spec.temporal_units.get(name) {
         None => Ok(base),
         Some(tok) => {
-            let unit = TemporalUnit::parse(tok)
-                .ok_or_else(|| BiError::BadRequest(format!("unknown temporal unit: {tok}")))?;
             if !c.is_temporal {
                 return Err(BiError::BadRequest(format!(
                     "temporal unit on non-temporal column: {name}"
                 )));
             }
+            let unit = TemporalUnit::parse(tok)
+                .ok_or_else(|| BiError::BadRequest(format!("unknown temporal unit: {tok}")))?;
             Ok(temporal_expr(engine, &base, unit))
         }
     }
@@ -276,6 +278,8 @@ fn find_metric<'a>(metrics: &'a [Metric], name: &str) -> Option<&'a Metric> {
 fn render_filter(engine: Engine, columns: &[DatasetColumn], f: &Filter) -> Result<String, BiError> {
     let c = find_column(columns, &f.col)
         .ok_or_else(|| BiError::BadRequest(format!("unknown filter column: {}", f.col)))?;
+    // Filters compare the raw column, never the temporal bucket — a date range must match the
+    // real timestamp, not the truncated group key.
     let lhs = column_sql(engine, c);
     let tg = c.type_generic.as_str();
     let pred = match f.op {
@@ -355,6 +359,18 @@ pub fn build(
     let from = source_ref_for(engine, source);
     let aggregate = !spec.metrics.is_empty();
     let mut select: Vec<String> = Vec::new();
+
+    // A temporal unit must target a column the query actually selects (a dimension in aggregate
+    // mode, or a listed column in raw-records mode); otherwise it would be silently ignored.
+    for key in spec.temporal_units.keys() {
+        let targeted =
+            spec.dimensions.iter().any(|d| d == key) || spec.columns.iter().any(|c| c == key);
+        if !targeted {
+            return Err(BiError::BadRequest(format!(
+                "temporal unit for a column that is not selected: {key}"
+            )));
+        }
+    }
 
     if aggregate {
         if !spec.rollup_groups.is_empty() && spec.dimensions.is_empty() {
@@ -967,6 +983,17 @@ mod tests {
         let cols = vec![tcol("created_at")];
         let metrics = vec![metric("revenue", "SUM(price)")];
         let spec = spec_with_unit("created_at", "fortnight");
+        let err = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap_err();
+        assert!(matches!(err, BiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn temporal_unit_for_unknown_dimension_is_rejected() {
+        let cols = vec![tcol("created_at")];
+        let metrics = vec![metric("revenue", "SUM(price)")];
+        // unit keyed to a column that is NOT in dimensions (e.g. a typo)
+        let mut spec = spec_with_unit("created_at", "month");
+        spec.dimensions = vec![]; // created_at is no longer a dimension
         let err = build(Engine::Trino, &phys(), &cols, &metrics, &spec).unwrap_err();
         assert!(matches!(err, BiError::BadRequest(_)));
     }
