@@ -116,6 +116,11 @@ export interface SankeyConfig {
   target?: string;
   metric?: string;
 }
+export interface MapConfig {
+  mapKey: string;      // registry key: "us_states" | "world" | "vietnam"
+  region?: string;     // dimension column holding the region code/name
+  metric?: string;
+}
 
 export interface ChartParams {
   spec: QuerySpec;
@@ -141,6 +146,7 @@ export interface ChartParams {
   smartscalar?: SmartScalarConfig; // trend viz only
   boxplot?: BoxplotConfig;       // boxplot viz only
   sankey?: SankeyConfig;         // sankey viz only
+  map?: MapConfig;               // map viz only
 }
 
 export interface Chart {
