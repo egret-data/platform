@@ -12,8 +12,7 @@ Prereqs: the egret dev backend is up on BASE_URL and the datasets below already 
 
     python3 scripts/seed_ecommerce_clone.py
 
-Substitutions vs Metabase (viz types egret does not have yet):
-  - "Revenue by state" map  -> row chart
+All Metabase viz types now have a native egret equivalent (US map, object detail, …).
 """
 import json
 import sys
@@ -143,9 +142,9 @@ def charts():
          {"cartesian": {"xAxis": "product", "yMetrics": ["orders"]},
           "spec": spec(["orders"], ["product"], orderby=[ob("orders", True)])},
          1, 0, 10, 12, 8),
-        ("Revenue by state", "ecom_orders", "row",
-         {"cartesian": {"xAxis": "state", "yMetrics": ["revenue"]},
-          "spec": spec(["revenue"], ["state"], orderby=[ob("revenue", True)])},
+        ("Revenue by state", "ecom_orders", "map",
+         {"map": {"mapKey": "us_states", "region": "state", "metric": "revenue"},
+          "spec": spec(["revenue"], ["state"])},
          1, 12, 10, 12, 8),
         ("Total order amount vs. discount given", "ecom_orders", "scatter",
          {"cartesian": {"xAxis": "product", "xMetric": "avg_discount", "yMetrics": ["avg_total"]},
