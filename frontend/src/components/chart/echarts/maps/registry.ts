@@ -7,6 +7,8 @@ export interface MapDef {
   echartsName: string;
   load: () => Promise<GeoJSON>;
   normalize: (v: unknown) => string;
+  /** Fixed text labels drawn at geo coordinates [lon, lat] (e.g. archipelagos). */
+  annotations?: { name: string; coord: [number, number] }[];
 }
 
 const upper = (v: unknown) => String(v ?? "").trim().toUpperCase();
@@ -33,5 +35,9 @@ export const MAPS: Record<string, MapDef> = {
     echartsName: "vietnam",
     load: () => import("./vietnam-provinces.geo.json").then((m) => m.default as unknown as GeoJSON),
     normalize: trim,
+    annotations: [
+      { name: "Hoàng Sa", coord: [112.4, 16.5] },
+      { name: "Trường Sa", coord: [114.2, 9.5] },
+    ],
   },
 };
