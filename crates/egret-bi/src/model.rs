@@ -117,6 +117,8 @@ pub struct DatasetSummaryDto {
     pub column_count: i64,
     pub folder_id: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub bookmarked: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -211,6 +213,26 @@ pub fn summary_dto(ds: Dataset, column_count: i64) -> DatasetSummaryDto {
         column_count,
         folder_id: ds.folder_id.map(|u| u.to_string()),
         updated_at: ds.updated_at,
+        deleted_at: ds.deleted_at,
+        bookmarked: false,
+    }
+}
+
+pub fn summary_dto_bm(ds: Dataset, column_count: i64, bookmarked: bool) -> DatasetSummaryDto {
+    DatasetSummaryDto {
+        kind: dataset_kind(&ds),
+        id: ds.id.to_string(),
+        name: ds.name,
+        description: ds.description,
+        database_id: ds.database_id.to_string(),
+        catalog: ds.catalog,
+        schema: ds.schema_name,
+        table: ds.table_name,
+        column_count,
+        folder_id: ds.folder_id.map(|u| u.to_string()),
+        updated_at: ds.updated_at,
+        deleted_at: ds.deleted_at,
+        bookmarked,
     }
 }
 

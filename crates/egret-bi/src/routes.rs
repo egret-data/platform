@@ -343,6 +343,12 @@ pub fn dataset_router() -> Router<BiState> {
             put(ds_update_column).delete(ds_delete_column),
         )
         .route("/ws/{workspace}/datasets/{id}/folder", patch(ds_set_folder))
+        .route("/ws/{workspace}/datasets/{id}/trash", post(ds_trash))
+        .route("/ws/{workspace}/datasets/{id}/restore", post(ds_restore))
+        .route(
+            "/ws/{workspace}/datasets/{id}/bookmark",
+            post(ds_bookmark_add).delete(ds_bookmark_remove),
+        )
 }
 
 /// Guard: dataset exists and lives in this workspace. Mirrors the inline
@@ -465,6 +471,7 @@ async fn ds_create(
 async fn ds_list(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
+    AxQuery(q): AxQuery<ListQuery>,
 ) -> Result<Json<Vec<DatasetSummaryDto>>, BiApiError> {
     st.authz
         .require_workspace(&ctx, DS_READ)
@@ -472,14 +479,82 @@ async fn ds_list(
         .map_err(BiApiError::from)?;
     let rows = st
         .datasets
-        .list(ctx.workspace_id.0)
+        .list_by_workspace_for(ctx.workspace_id.0, ctx.principal.user_id.0, q.trashed)
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(
         rows.into_iter()
-            .map(|(ds, n)| crate::model::summary_dto(ds, n))
+            .map(|(ds, n, bm)| crate::model::summary_dto_bm(ds, n, bm))
             .collect(),
     ))
+}
+
+async fn ds_trash(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DS_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_dataset_in_ws(&st, &ctx, id).await?;
+    st.datasets
+        .set_trashed(id, true)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn ds_restore(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DS_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_dataset_in_ws(&st, &ctx, id).await?;
+    st.datasets
+        .set_trashed(id, false)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn ds_bookmark_add(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DS_READ)
+        .await
+        .map_err(BiApiError::from)?;
+    require_dataset_in_ws(&st, &ctx, id).await?;
+    st.datasets
+        .add_bookmark(ctx.principal.user_id.0, id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn ds_bookmark_remove(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DS_READ)
+        .await
+        .map_err(BiApiError::from)?;
+    require_dataset_in_ws(&st, &ctx, id).await?;
+    st.datasets
+        .remove_bookmark(ctx.principal.user_id.0, id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn ds_get(

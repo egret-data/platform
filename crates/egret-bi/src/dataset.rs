@@ -47,6 +47,7 @@ pub struct Dataset {
     pub created_by: Option<Uuid>,
     pub folder_id: Option<Uuid>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -73,7 +74,7 @@ pub struct Metric {
     pub ordinal: i32,
 }
 
-const COLS: &str = "id, workspace_id, database_id, name, description, catalog, schema_name, table_name, sql, created_by, folder_id, updated_at";
+const COLS: &str = "id, workspace_id, database_id, name, description, catalog, schema_name, table_name, sql, created_by, folder_id, updated_at, deleted_at";
 
 /// Private struct for list() — sqlx tuple FromRow is version-sensitive; use flatten instead.
 #[derive(sqlx::FromRow)]
@@ -81,6 +82,15 @@ struct DatasetWithCount {
     #[sqlx(flatten)]
     ds: Dataset,
     column_count: i64,
+}
+
+/// Private struct for list_by_workspace_for — flatten the Dataset + the two extra scalar columns.
+#[derive(sqlx::FromRow)]
+struct DatasetWithBm {
+    #[sqlx(flatten)]
+    ds: Dataset,
+    column_count: i64,
+    bookmarked: bool,
 }
 
 impl DatasetRepo {
@@ -153,6 +163,71 @@ impl DatasetRepo {
         .fetch_all(&self.db.pool)
         .await?;
         Ok(rows.into_iter().map(|r| (r.ds, r.column_count)).collect())
+    }
+
+    /// Datasets in a workspace with the per-user `bookmarked` flag and the column count,
+    /// newest first. `trashed` selects the trash bin (soft-deleted) instead of the live list.
+    /// The column count uses the same correlated subquery as `list`, so behaviour is unchanged.
+    pub async fn list_by_workspace_for(
+        &self,
+        ws: Uuid,
+        user: Uuid,
+        trashed: bool,
+    ) -> Result<Vec<(Dataset, i64, bool)>, BiError> {
+        let pred = if trashed {
+            "deleted_at IS NOT NULL"
+        } else {
+            "deleted_at IS NULL"
+        };
+        let sql = format!(
+            "SELECT {COLS}, \
+             (SELECT count(*) FROM dataset_columns c WHERE c.dataset_id = datasets.id) AS column_count, \
+             EXISTS (SELECT 1 FROM bookmarks b WHERE b.user_id = $2 AND b.entity_type='dataset' AND b.entity_id = datasets.id) AS bookmarked \
+             FROM datasets WHERE workspace_id = $1 AND {pred} ORDER BY updated_at DESC"
+        );
+        let rows = sqlx::query_as::<_, DatasetWithBm>(&sql)
+            .bind(ws)
+            .bind(user)
+            .fetch_all(&self.db.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.ds, r.column_count, r.bookmarked))
+            .collect())
+    }
+
+    /// Soft-delete (trashed=true → deleted_at=now()) or restore (false → NULL).
+    pub async fn set_trashed(&self, id: Uuid, trashed: bool) -> Result<(), BiError> {
+        let sql = if trashed {
+            "UPDATE datasets SET deleted_at = now() WHERE id = $1"
+        } else {
+            "UPDATE datasets SET deleted_at = NULL WHERE id = $1"
+        };
+        sqlx::query(sql).bind(id).execute(&self.db.pool).await?;
+        Ok(())
+    }
+
+    pub async fn add_bookmark(&self, user: Uuid, entity_id: Uuid) -> Result<(), BiError> {
+        sqlx::query(
+            "INSERT INTO bookmarks (user_id, entity_type, entity_id) VALUES ($1,'dataset',$2) \
+             ON CONFLICT (user_id, entity_type, entity_id) DO NOTHING",
+        )
+        .bind(user)
+        .bind(entity_id)
+        .execute(&self.db.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn remove_bookmark(&self, user: Uuid, entity_id: Uuid) -> Result<(), BiError> {
+        sqlx::query(
+            "DELETE FROM bookmarks WHERE user_id=$1 AND entity_type='dataset' AND entity_id=$2",
+        )
+        .bind(user)
+        .bind(entity_id)
+        .execute(&self.db.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn get(&self, id: Uuid) -> Result<Option<Dataset>, BiError> {
