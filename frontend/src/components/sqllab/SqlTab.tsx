@@ -30,6 +30,7 @@ export function SqlTab({ ws, tab, patch, onOpenSaved }: {
   const [saveOpen, setSaveOpen] = useState(false);
   const [datasetOpen, setDatasetOpen] = useState(false);
   const [panelCollapsed, setPanelCollapsed] = useState(false);
+  const [selectedSql, setSelectedSql] = useState("");
 
   const submit = useSubmitQuery(ws);
   const cancel = useCancelQuery(ws);
@@ -39,10 +40,12 @@ export function SqlTab({ ws, tab, patch, onOpenSaved }: {
   const running = status.data?.status === "queued" || status.data?.status === "running";
   const results = useResults(ws, queryId, page, finished);
 
-  async function run() {
+  async function run(sqlOverride?: string) {
+    if (running) return;
     if (!tab.dbId) { toast.error("Pick a database"); return; }
+    const sql = sqlOverride ?? tab.sql;
     setQueryId(null); setPage(0);
-    try { const { id } = await submit.mutateAsync({ database_id: tab.dbId, sql: tab.sql, limit: tab.limit }); setQueryId(id); }
+    try { const { id } = await submit.mutateAsync({ database_id: tab.dbId, sql, limit: tab.limit }); setQueryId(id); }
     catch (e) { toast.error(String(e)); }
   }
   function doFormat() {
@@ -56,7 +59,9 @@ export function SqlTab({ ws, tab, patch, onOpenSaved }: {
       <Panel defaultSize={50} minSize={20}>
         <div className="flex h-full flex-col">
           <div className="flex items-center gap-2 border-b p-2">
-            <Button size="sm" onClick={run} disabled={running}>Run</Button>
+            <Button size="sm" title="⌘/Ctrl+↵" onClick={() => run(selectedSql.trim() ? selectedSql : undefined)} disabled={running}>
+              {selectedSql.trim() ? "Run selection" : "Run"}
+            </Button>
             <Button size="sm" variant="outline" disabled={!running} onClick={() => queryId && cancel.mutate(queryId)}>Cancel</Button>
             <Button size="sm" variant="outline" onClick={doFormat}>Format</Button>
             <Select value={String(tab.limit)} onValueChange={(v) => patch({ limit: Number(v) })}>
@@ -68,7 +73,8 @@ export function SqlTab({ ws, tab, patch, onOpenSaved }: {
             {running && <span className="text-sm text-muted-foreground">running…</span>}
             {status.data?.status === "failed" && <span className="text-sm text-red-600">{status.data.error}</span>}
           </div>
-          <div className="flex-1"><SqlEditor value={tab.sql} onChange={(v) => patch({ sql: v })} schemaWords={words} /></div>
+          <div className="flex-1"><SqlEditor value={tab.sql} onChange={(v) => patch({ sql: v })} schemaWords={words}
+            onRun={(sql) => run(sql)} onSelectionChange={setSelectedSql} /></div>
         </div>
       </Panel>
       <PanelResizeHandle className="h-1.5 bg-border transition-colors hover:bg-primary/60 data-[resize-handle-state=drag]:bg-primary" />
