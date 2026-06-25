@@ -5,6 +5,7 @@ import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const removeMock = vi.fn().mockResolvedValue(undefined);
+const duplicateMock = vi.fn().mockResolvedValue({});
 // c1 is newest → first row under the default "updated_at desc" sort.
 const charts = [
   { id: "c1", dataset_id: "d1", name: "Revenue bar", description: "", viz_type: "bar", params: {}, created_by: null, updated_at: "2026-06-21T00:00:00Z" },
@@ -12,7 +13,7 @@ const charts = [
 ];
 vi.mock("@/api/charts", () => ({
   useCharts: () => ({ data: charts, isLoading: false }),
-  useChartMutations: () => ({ remove: { mutateAsync: removeMock } }),
+  useChartMutations: () => ({ remove: { mutateAsync: removeMock }, duplicate: { mutateAsync: duplicateMock } }),
 }));
 
 import Charts from "../Charts";
@@ -50,5 +51,20 @@ describe("Charts list", () => {
     const dialog = await screen.findByRole("alertdialog");
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
     expect(removeMock).toHaveBeenCalledWith("c1");
+  });
+  it("Duplicate fires the duplicate mutation for the first row", async () => {
+    duplicateMock.mockClear();
+    const user = userEvent.setup();
+    renderAt();
+    await user.click(screen.getAllByRole("button", { name: "Actions" })[0]);
+    await user.click(await screen.findByText("Duplicate"));
+    expect(duplicateMock).toHaveBeenCalledWith("c1");
+  });
+  it("Bulk select toggle reveals a Select all checkbox", async () => {
+    const user = userEvent.setup();
+    renderAt();
+    expect(screen.queryByLabelText("Select all")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    expect(screen.getByLabelText("Select all")).toBeInTheDocument();
   });
 });
