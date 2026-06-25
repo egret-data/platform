@@ -1,17 +1,14 @@
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { Search } from "lucide-react";
+import { Search, Star } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import {
-  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
-  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
+import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { useDatabases } from "@/api/sqllab";
-import { useDatasets, useDataset, useDeleteDataset, type DatasetSummary } from "@/api/datasets";
+import { useDatasets, useDataset, useDatasetListMutations, useDeleteDataset, type DatasetSummary } from "@/api/datasets";
 import { CreateDatasetDialog } from "@/components/dataset/CreateDatasetDialog";
 import { DatasetActionsMenu } from "@/components/dataset/DatasetActionsMenu";
 import { RelativeTime } from "@/components/explore/RelativeTime";
@@ -31,8 +28,10 @@ function sourceOf(d: DatasetSummary): string {
 
 export default function Datasets() {
   const ws = useParams().workspace!;
-  const { data, isLoading } = useDatasets(ws);
+  const [showTrash, setShowTrash] = useState(false);
+  const { data, isLoading } = useDatasets(ws, { trashed: showTrash });
   const { data: databases } = useDatabases(ws);
+  const { trash, restore, addBookmark, removeBookmark } = useDatasetListMutations(ws);
   const del = useDeleteDataset(ws);
   const { data: folders = [] } = useFolders(ws, "datasets");
   const setFolder = useSetFolder(ws, "datasets");
@@ -40,12 +39,12 @@ export default function Datasets() {
   const collapse = useCollapsed(`folders:${ws}:datasets`);
 
   const [createOpen, setCreateOpen] = useState(false);
+  const [onlyBookmarked, setOnlyBookmarked] = useState(false);
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [dbFilter, setDbFilter] = useState("all");
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" }>({ key: "updated_at", dir: "desc" });
-  const [deleteTarget, setDeleteTarget] = useState<DatasetSummary | null>(null);
-  const [bulkOpen, setBulkOpen] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<DatasetSummary | null>(null);
   const [dupId, setDupId] = useState<string | null>(null);
   const dup = useDataset(ws, dupId);
 
@@ -57,6 +56,7 @@ export default function Datasets() {
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
     let r = (data ?? []).filter((d) => {
+      if (onlyBookmarked && !d.bookmarked) return false;
       if (typeFilter !== "all" && d.kind !== typeFilter) return false;
       if (dbFilter !== "all" && d.database_id !== dbFilter) return false;
       if (!q) return true;
@@ -72,30 +72,21 @@ export default function Datasets() {
       return sort.dir === "asc" ? cmp : -cmp;
     });
     return r;
-  }, [data, databases, query, typeFilter, dbFilter, sort]);
+  }, [data, databases, onlyBookmarked, query, typeFilter, dbFilter, sort]);
 
   const bulk = useBulkSelect(rows);
-  const filtering = query.trim() !== "" || typeFilter !== "all" || dbFilter !== "all";
+  const filtering = query.trim() !== "" || typeFilter !== "all" || dbFilter !== "all" || onlyBookmarked;
   const groups = useMemo(() => groupByFolder(rows, folders, filtering), [rows, folders, filtering]);
 
   const hasData = !!data && data.length > 0;
+  const guard = (p: Promise<unknown>) => p.catch((e) => toast.error(String(e)));
 
   function setSortKey(key: SortKey) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
   }
-  async function doDelete(id: string) {
-    await del.mutateAsync(id);
-    // The deleted row leaves the visible list, so it naturally drops out of
-    // bulk.selectedIds (filtered to visible rows); no explicit removal needed.
-  }
-  async function doBulkDelete() {
-    const ids = bulk.selectedIds;
-    try {
-      await Promise.all(ids.map((id) => del.mutateAsync(id)));
-      toast.success(`Deleted ${ids.length}`);
-      bulk.clear();
-    } catch (e) { toast.error(String(e)); }
-    setBulkOpen(false);
+  async function doBulkTrash() {
+    for (const id of bulk.selectedIds) { try { await trash.mutateAsync(id); } catch (e) { toast.error(String(e)); } }
+    toast.success("Moved to Trash"); bulk.clear();
   }
   async function doBulkMove() {
     const name = prompt("Move to folder (name; blank = Uncategorized)");
@@ -114,31 +105,49 @@ export default function Datasets() {
 
   const renderRow = (d: DatasetSummary) => (
     <tr key={d.id} className="border-t hover:bg-accent"
-      draggable onDragStart={(e) => e.dataTransfer.setData("text/plain", d.id)}>
-      {bulk.bulkMode && <td className="py-1"><Checkbox checked={bulk.selected.has(d.id)} onCheckedChange={() => bulk.toggle(d.id)} aria-label={`Select ${d.name}`} /></td>}
-      <td className="py-1"><Link className="font-medium hover:underline" to={d.id}>{d.name}</Link></td>
+      draggable={!showTrash} onDragStart={!showTrash ? (e) => e.dataTransfer.setData("text/plain", d.id) : undefined}>
+      {bulk.bulkMode && !showTrash && <td className="py-1"><Checkbox checked={bulk.selected.has(d.id)} onCheckedChange={() => bulk.toggle(d.id)} aria-label={`Select ${d.name}`} /></td>}
+      <td className="py-1">
+        <span className="inline-flex items-center gap-1">
+          {!showTrash && (
+            <Button size="sm" variant="ghost" className="h-7 w-7 p-0" aria-label={`${d.bookmarked ? "unbookmark" : "bookmark"} ${d.name}`}
+              onClick={() => guard((d.bookmarked ? removeBookmark : addBookmark).mutateAsync(d.id))}>
+              <Star className={`h-4 w-4 ${d.bookmarked ? "fill-amber-400 text-amber-400" : "text-muted-foreground"}`} />
+            </Button>
+          )}
+          <Link className="font-medium hover:underline" to={d.id}>{d.name}</Link>
+        </span>
+      </td>
       <td><span className="rounded bg-muted px-1.5 py-0.5 text-xs">{d.kind}</span></td>
       <td className="text-muted-foreground">{dbName(d.database_id)}</td>
       <td className="font-mono text-xs text-muted-foreground">{sourceOf(d)}</td>
       <td>{d.column_count}</td>
       <td className="text-muted-foreground"><RelativeTime iso={d.updated_at} /></td>
-      <td><DatasetActionsMenu ws={ws} ds={d} folders={folders}
+      <td><DatasetActionsMenu ws={ws} ds={d} trashed={showTrash} folders={folders}
         onDuplicate={(x) => setDupId(x.id)}
         onMove={(x, fid) => setFolder.mutateAsync({ id: x.id, folder_id: fid }).catch((e) => toast.error(String(e)))}
         onNewFolder={(x) => { const n = prompt("New folder name"); if (n) createFolder.mutateAsync(n).then((f) => setFolder.mutateAsync({ id: x.id, folder_id: f.id })).catch((e) => toast.error(String(e))); }}
-        onDelete={setDeleteTarget} /></td>
+        onTrash={(x) => trash.mutateAsync(x.id).then(() => toast.success("Moved to Trash")).catch((e) => toast.error(String(e)))}
+        onRestore={(x) => restore.mutateAsync(x.id).catch((e) => toast.error(String(e)))}
+        onDeletePermanent={(x) => setPendingDelete(x)} /></td>
     </tr>
   );
 
   return (
     <div className="p-4">
       <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Datasets</h1>
+        <h1 className="text-lg font-semibold">{showTrash ? "Trash" : "Datasets"}</h1>
         <div className="flex items-center gap-2">
-          {hasData && (
+          {!showTrash && (
+            <Button variant={onlyBookmarked ? "default" : "outline"} onClick={() => setOnlyBookmarked((v) => !v)}>★ Bookmarks</Button>
+          )}
+          <Button variant={showTrash ? "default" : "outline"} onClick={() => { const next = !showTrash; setShowTrash(next); if (next) { setOnlyBookmarked(false); bulk.setBulkMode(false); } }}>
+            {showTrash ? "← Datasets" : "Trash"}
+          </Button>
+          {!showTrash && hasData && (
             <BulkToggle active={bulk.bulkMode} onToggle={() => bulk.setBulkMode(!bulk.bulkMode)} />
           )}
-          <Button onClick={() => setCreateOpen(true)}>Create</Button>
+          {!showTrash && <Button onClick={() => setCreateOpen(true)}>Create</Button>}
         </div>
       </div>
 
@@ -151,28 +160,32 @@ export default function Datasets() {
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input className="pl-8" placeholder="Search name, schema, table…" value={query} onChange={(e) => setQuery(e.target.value)} />
             </div>
-            <Select value={typeFilter} onValueChange={setTypeFilter}>
-              <SelectTrigger className="h-9 w-36"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All types</SelectItem>
-                <SelectItem value="physical">Physical</SelectItem>
-                <SelectItem value="virtual">Virtual</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select value={dbFilter} onValueChange={setDbFilter}>
-              <SelectTrigger className="h-9 w-48"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All databases</SelectItem>
-                {(databases ?? []).map((d) => <SelectItem key={d.id} value={d.id}>{d.name} ({d.engine})</SelectItem>)}
-              </SelectContent>
-            </Select>
-            {bulk.bulkMode && bulk.someSelected && (
+            {!showTrash && (
+              <>
+                <Select value={typeFilter} onValueChange={setTypeFilter}>
+                  <SelectTrigger className="h-9 w-36"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All types</SelectItem>
+                    <SelectItem value="physical">Physical</SelectItem>
+                    <SelectItem value="virtual">Virtual</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Select value={dbFilter} onValueChange={setDbFilter}>
+                  <SelectTrigger className="h-9 w-48"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All databases</SelectItem>
+                    {(databases ?? []).map((d) => <SelectItem key={d.id} value={d.id}>{d.name} ({d.engine})</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </>
+            )}
+            {bulk.bulkMode && bulk.someSelected && !showTrash && (
               <>
                 <Button variant="outline" size="sm" onClick={doBulkMove}>
                   Move {bulk.selectedIds.length} to folder…
                 </Button>
-                <Button variant="destructive" size="sm" onClick={() => setBulkOpen(true)}>
-                  Delete {bulk.selectedIds.length}
+                <Button variant="destructive" size="sm" onClick={doBulkTrash}>
+                  Move {bulk.selectedIds.length} to Trash
                 </Button>
               </>
             )}
@@ -182,7 +195,7 @@ export default function Datasets() {
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
-                  {bulk.bulkMode && <th className="w-8 py-1"><Checkbox checked={bulk.allSelected} onCheckedChange={bulk.toggleAll} aria-label="Select all" /></th>}
+                  {bulk.bulkMode && !showTrash && <th className="w-8 py-1"><Checkbox checked={bulk.allSelected} onCheckedChange={bulk.toggleAll} aria-label="Select all" /></th>}
                   <SortableHeader sortKey="name" label="Name" current={sort} onSort={setSortKey} />
                   <th>Kind</th>
                   <th>Database</th>
@@ -192,33 +205,39 @@ export default function Datasets() {
                   <th className="w-8" />
                 </tr>
               </thead>
-              {groups.map((group) => {
-                const key = group.folder?.id ?? "__uncat__";
-                const isCollapsed = collapse.isCollapsed(key);
-                return (
-                  <tbody key={key}>
-                    <FolderHeaderRow
-                      name={group.folder?.name ?? "Uncategorized"}
-                      count={group.rows.length}
-                      colSpan={bulk.bulkMode ? 8 : 7}
-                      collapsed={isCollapsed}
-                      onToggle={() => collapse.toggle(key)}
-                      onRename={group.folder ? () => {
-                        const n = prompt("Rename folder", group.folder!.name);
-                        if (n) renameFolder.mutateAsync({ id: group.folder!.id, name: n }).catch((e) => toast.error(String(e)));
-                      } : undefined}
-                      onDelete={group.folder ? () => removeFolder.mutateAsync(group.folder!.id).then(() => toast.success("Folder deleted")).catch((e) => toast.error(String(e))) : undefined}
-                      onDropItem={(id) => setFolder.mutateAsync({ id, folder_id: group.folder?.id ?? null }).catch((e) => toast.error(String(e)))}
-                    />
-                    {!isCollapsed && group.rows.map(renderRow)}
-                  </tbody>
-                );
-              })}
+              {showTrash ? (
+                <tbody>{rows.map(renderRow)}</tbody>
+              ) : (
+                groups.map((group) => {
+                  const key = group.folder?.id ?? "__uncat__";
+                  const isCollapsed = collapse.isCollapsed(key);
+                  return (
+                    <tbody key={key}>
+                      <FolderHeaderRow
+                        name={group.folder?.name ?? "Uncategorized"}
+                        count={group.rows.length}
+                        colSpan={bulk.bulkMode ? 8 : 7}
+                        collapsed={isCollapsed}
+                        onToggle={() => collapse.toggle(key)}
+                        onRename={group.folder ? () => {
+                          const n = prompt("Rename folder", group.folder!.name);
+                          if (n) renameFolder.mutateAsync({ id: group.folder!.id, name: n }).catch((e) => toast.error(String(e)));
+                        } : undefined}
+                        onDelete={group.folder ? () => removeFolder.mutateAsync(group.folder!.id).then(() => toast.success("Folder deleted")).catch((e) => toast.error(String(e))) : undefined}
+                        onDropItem={(id) => setFolder.mutateAsync({ id, folder_id: group.folder?.id ?? null }).catch((e) => toast.error(String(e)))}
+                      />
+                      {!isCollapsed && group.rows.map(renderRow)}
+                    </tbody>
+                  );
+                })
+              )}
             </table>
           ) : (
-            <p className="text-muted-foreground">No datasets match the current filters.</p>
+            <p className="text-muted-foreground">{onlyBookmarked ? "No bookmarked datasets." : "No datasets match the current filters."}</p>
           )}
         </>
+      ) : showTrash ? (
+        <p className="text-muted-foreground">Trash is empty.</p>
       ) : (
         <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
           <p>No datasets yet. A dataset is a named, reusable source for charts.</p>
@@ -241,41 +260,13 @@ export default function Datasets() {
         />
       )}
 
-      <AlertDialog open={!!deleteTarget} onOpenChange={(o) => { if (!o) setDeleteTarget(null); }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete dataset “{deleteTarget?.name}”?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This removes the dataset and its column snapshot. The underlying table or query is not affected. This cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={() => { if (deleteTarget) doDelete(deleteTarget.id).then(() => toast.success("Deleted")).catch((e) => toast.error(String(e))); setDeleteTarget(null); }}>
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      <AlertDialog open={bulkOpen} onOpenChange={setBulkOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete {bulk.selectedIds.length} datasets?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This removes the selected datasets and their column snapshots. Underlying tables and queries are not affected. This cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={doBulkDelete}>
-              Delete {bulk.selectedIds.length}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ConfirmDeleteDialog
+        open={pendingDelete !== null}
+        onOpenChange={(o) => { if (!o) setPendingDelete(null); }}
+        title="Delete permanently"
+        description={`Permanently delete "${pendingDelete?.name ?? ""}"? This cannot be undone.`}
+        onConfirm={async () => { if (!pendingDelete) return; await guard(del.mutateAsync(pendingDelete.id)); setPendingDelete(null); }}
+      />
     </div>
   );
 }
