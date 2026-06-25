@@ -18,6 +18,9 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { ChartActionsMenu } from "@/components/chart/ChartActionsMenu";
 import { BulkToggle } from "@/components/explore/BulkBar";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
+import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
+import { groupByFolder, useCollapsed } from "@/components/explore/folders";
+import { FolderHeaderRow } from "@/components/explore/FolderHeaderRow";
 
 type SortKey = "name" | "viz_type" | "updated_at";
 const vizMeta = (v: string) => CHART_TYPES.find((t) => t.key === v);
@@ -27,6 +30,10 @@ export default function Charts() {
   const ws = useParams().workspace!;
   const { data: charts, isLoading } = useCharts(ws);
   const { remove, duplicate } = useChartMutations(ws);
+  const { data: folders = [] } = useFolders(ws, "charts");
+  const setFolder = useSetFolder(ws, "charts");
+  const { create: createFolder, rename: renameFolder, remove: removeFolder } = useFolderMutations(ws, "charts");
+  const collapse = useCollapsed(`folders:${ws}:charts`);
 
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
@@ -52,6 +59,8 @@ export default function Charts() {
   }, [charts, query, typeFilter, sort]);
 
   const bulk = useBulkSelect(rows);
+  const filtering = query.trim() !== "" || typeFilter !== "all";
+  const groups = useMemo(() => groupByFolder(rows, folders, filtering), [rows, folders, filtering]);
 
   function onSort(key: SortKey) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
@@ -63,6 +72,20 @@ export default function Charts() {
   async function doBulkDelete() {
     for (const id of bulk.selectedIds) { try { await remove.mutateAsync(id); } catch (e) { toast.error(String(e)); } }
     bulk.clear(); setBulkDeleteOpen(false);
+  }
+  async function doBulkMove() {
+    const name = prompt("Move to folder (name; blank = Uncategorized)");
+    if (name === null) return;
+    const trimmed = name.trim();
+    try {
+      let folderId: string | null = null;
+      if (trimmed !== "") {
+        const existing = folders.find((f) => f.name.toLowerCase() === trimmed.toLowerCase());
+        folderId = existing ? existing.id : (await createFolder.mutateAsync(trimmed)).id;
+      }
+      for (const id of bulk.selectedIds) await setFolder.mutateAsync({ id, folder_id: folderId });
+    } catch (e) { toast.error(String(e)); }
+    bulk.clear();
   }
 
   const hasData = !!charts && charts.length > 0;
@@ -97,9 +120,14 @@ export default function Charts() {
               </SelectContent>
             </Select>
             {bulk.bulkMode && bulk.someSelected && (
-              <Button variant="destructive" size="sm" onClick={() => setBulkDeleteOpen(true)}>
-                Delete {bulk.selectedIds.length}
-              </Button>
+              <>
+                <Button variant="outline" size="sm" onClick={doBulkMove}>
+                  Move {bulk.selectedIds.length} to folder…
+                </Button>
+                <Button variant="destructive" size="sm" onClick={() => setBulkDeleteOpen(true)}>
+                  Delete {bulk.selectedIds.length}
+                </Button>
+              </>
             )}
           </div>
 
@@ -114,27 +142,49 @@ export default function Charts() {
                   <th className="w-8" />
                 </tr>
               </thead>
-              <tbody>
-                {rows.map((c) => {
-                  const Icon = vizMeta(c.viz_type)?.icon;
-                  return (
-                    <tr key={c.id} className="border-t hover:bg-accent">
-                      {bulk.bulkMode && <td className="py-1"><Checkbox checked={bulk.selected.has(c.id)} onCheckedChange={() => bulk.toggle(c.id)} aria-label={`Select ${c.name}`} /></td>}
-                      <td className="py-1">
-                        <Link className="inline-flex items-center gap-2 font-medium hover:underline" to={`/explore/${ws}/charts/${c.id}`}>
-                          {Icon && <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />}
-                          {c.name}
-                        </Link>
-                      </td>
-                      <td className="text-muted-foreground">{vizLabel(c.viz_type)}</td>
-                      <td className="text-muted-foreground"><RelativeTime iso={c.updated_at} /></td>
-                      <td><ChartActionsMenu ws={ws} chart={c}
-                        onDuplicate={(x) => duplicate.mutateAsync(x.id).then(() => toast.success("Duplicated")).catch((e) => toast.error(String(e)))}
-                        onDelete={setDeleteTarget} /></td>
-                    </tr>
-                  );
-                })}
-              </tbody>
+              {groups.map((group) => {
+                const key = group.folder?.id ?? "__uncat__";
+                const isCollapsed = collapse.isCollapsed(key);
+                return (
+                  <tbody key={key}>
+                    <FolderHeaderRow
+                      name={group.folder?.name ?? "Uncategorized"}
+                      count={group.rows.length}
+                      colSpan={bulk.bulkMode ? 5 : 4}
+                      collapsed={isCollapsed}
+                      onToggle={() => collapse.toggle(key)}
+                      onRename={group.folder ? () => {
+                        const n = prompt("Rename folder", group.folder!.name);
+                        if (n) renameFolder.mutateAsync({ id: group.folder!.id, name: n }).catch((e) => toast.error(String(e)));
+                      } : undefined}
+                      onDelete={group.folder ? () => removeFolder.mutateAsync(group.folder!.id).then(() => toast.success("Folder deleted")).catch((e) => toast.error(String(e))) : undefined}
+                      onDropItem={(id) => setFolder.mutateAsync({ id, folder_id: group.folder?.id ?? null }).catch((e) => toast.error(String(e)))}
+                    />
+                    {!isCollapsed && group.rows.map((c) => {
+                      const Icon = vizMeta(c.viz_type)?.icon;
+                      return (
+                        <tr key={c.id} className="border-t hover:bg-accent"
+                          draggable onDragStart={(e) => e.dataTransfer.setData("text/plain", c.id)}>
+                          {bulk.bulkMode && <td className="py-1"><Checkbox checked={bulk.selected.has(c.id)} onCheckedChange={() => bulk.toggle(c.id)} aria-label={`Select ${c.name}`} /></td>}
+                          <td className="py-1">
+                            <Link className="inline-flex items-center gap-2 font-medium hover:underline" to={`/explore/${ws}/charts/${c.id}`}>
+                              {Icon && <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />}
+                              {c.name}
+                            </Link>
+                          </td>
+                          <td className="text-muted-foreground">{vizLabel(c.viz_type)}</td>
+                          <td className="text-muted-foreground"><RelativeTime iso={c.updated_at} /></td>
+                          <td><ChartActionsMenu ws={ws} chart={c} folders={folders}
+                            onDuplicate={(x) => duplicate.mutateAsync(x.id).then(() => toast.success("Duplicated")).catch((e) => toast.error(String(e)))}
+                            onMove={(x, fid) => setFolder.mutateAsync({ id: x.id, folder_id: fid }).catch((e) => toast.error(String(e)))}
+                            onNewFolder={(x) => { const n = prompt("New folder name"); if (n) createFolder.mutateAsync(n).then((f) => setFolder.mutateAsync({ id: x.id, folder_id: f.id })).catch((e) => toast.error(String(e))); }}
+                            onDelete={setDeleteTarget} /></td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                );
+              })}
             </table>
           ) : (
             <p className="text-muted-foreground">No charts match the current filters.</p>

@@ -15,6 +15,15 @@ vi.mock("@/api/charts", () => ({
   useCharts: () => ({ data: charts, isLoading: false }),
   useChartMutations: () => ({ remove: { mutateAsync: removeMock }, duplicate: { mutateAsync: duplicateMock } }),
 }));
+vi.mock("@/api/folders", () => ({
+  useFolders: () => ({ data: [] }),
+  useSetFolder: () => ({ mutateAsync: vi.fn().mockResolvedValue({}) }),
+  useFolderMutations: () => ({
+    create: { mutateAsync: vi.fn().mockResolvedValue({ id: "f1", name: "F1" }) },
+    rename: { mutateAsync: vi.fn().mockResolvedValue({}) },
+    remove: { mutateAsync: vi.fn().mockResolvedValue(undefined) },
+  }),
+}));
 
 import Charts from "../Charts";
 
