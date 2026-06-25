@@ -492,7 +492,7 @@ export default function DashboardView() {
                     rowHeight={rowHeight}
                     onAutoHeight={editing ? (rows) => applyAutoHeight(c.id, rows) : undefined}
                     onValueClick={editing ? undefined : (ctx, x, y) => onCardValueClick(c, ctx, x, y)}
-                    onEditText={editing && (c.card_type === "text" || c.card_type === "heading") ? (t) => updateCardOptions(c.id, { text: t }) : undefined}
+                    onEditText={editing && (c.card_type === "text" || c.card_type === "heading") ? (t) => { updateCardOptions(c.id, { text: t }); if (newCardId === c.id) setNewCardId(null); } : undefined}
                     autoFocusText={c.id === newCardId} />
                 )}
                 {activeParamId && c.card_type === "chart" && baseChart && (

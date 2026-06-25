@@ -117,13 +117,15 @@ describe("DashboardView (Phase B — card variety)", () => {
     fireEvent.change(editor, { target: { value: "## Notes" } });
     expect(editor.value).toBe("## Notes");
   });
-  it("adds a heading card", async () => {
+  it("adds a heading card and edits it inline", async () => {
     const user = userEvent.setup();
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
     await user.click(screen.getByRole("button", { name: "add text or heading" }));
     await user.click(await screen.findByRole("menuitem", { name: "Heading" }));
-    expect(screen.getByLabelText("heading text")).toBeInTheDocument();
+    const editor = screen.getByLabelText("heading text") as HTMLInputElement;
+    fireEvent.change(editor, { target: { value: "Sales" } });
+    expect(editor.value).toBe("Sales");
   });
   it("adds a link card with url + label settings", () => {
     renderAt();
