@@ -154,7 +154,7 @@ export default function Datasets() {
           <Tooltip><TooltipTrigger asChild>
             <Button size="icon" variant={showTrash ? "secondary" : "outline"} aria-label="Trash"
               onClick={() => { const next = !showTrash; setShowTrash(next); if (next) { setOnlyBookmarked(false); bulk.setBulkMode(false); } }}>
-              <Trash2 className="h-4 w-4" />
+              <Trash2 className={`h-4 w-4 ${showTrash ? "fill-current" : ""}`} />
             </Button>
           </TooltipTrigger><TooltipContent side="bottom">Trash</TooltipContent></Tooltip>
           {!showTrash && (
