@@ -1,6 +1,6 @@
 //! BI layer: SQL Lab (saved queries + schema introspection) and dataset persistence.
 
-mod chart;
+pub mod chart;
 pub mod chartquery;
 mod dashboard;
 mod dataset;

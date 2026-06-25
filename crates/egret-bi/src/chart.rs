@@ -148,4 +148,59 @@ impl ChartRepo {
                 .flatten(),
         )
     }
+
+    /// All chart names already used in a workspace (for collision-free copy naming).
+    pub async fn names_in_workspace(&self, workspace_id: Uuid) -> Result<Vec<String>, BiError> {
+        Ok(
+            sqlx::query_scalar::<_, String>("SELECT name FROM charts WHERE workspace_id=$1")
+                .bind(workspace_id)
+                .fetch_all(&self.db.pool)
+                .await?,
+        )
+    }
+
+    /// Duplicate a chart in place (same dataset/viz/params/folder), owned by `new_owner`.
+    pub async fn duplicate(
+        &self,
+        src_id: Uuid,
+        new_owner: Option<Uuid>,
+    ) -> Result<Option<Chart>, BiError> {
+        let Some(src) = self.get(src_id).await? else {
+            return Ok(None);
+        };
+        let existing = self.names_in_workspace(src.workspace_id).await?;
+        let name = next_copy_name(&existing, &src.name);
+        let sql = format!(
+            "INSERT INTO charts (workspace_id, dataset_id, name, description, viz_type, params, created_by, folder_id) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING {COLS}"
+        );
+        let c = sqlx::query_as::<_, Chart>(&sql)
+            .bind(src.workspace_id)
+            .bind(src.dataset_id)
+            .bind(&name)
+            .bind(&src.description)
+            .bind(&src.viz_type)
+            .bind(&src.params)
+            .bind(new_owner)
+            .bind(src.folder_id)
+            .fetch_one(&self.db.pool)
+            .await
+            .map_err(map_conflict_err)?;
+        Ok(Some(c))
+    }
+}
+
+/// First free "<base> (copy)" / "<base> (copy N)" not present in `existing`.
+pub fn next_copy_name(existing: &[String], base: &str) -> String {
+    let first = format!("{base} (copy)");
+    if !existing.iter().any(|n| n == &first) {
+        return first;
+    }
+    for n in 2.. {
+        let cand = format!("{base} (copy {n})");
+        if !existing.iter().any(|e| e == &cand) {
+            return cand;
+        }
+    }
+    unreachable!()
 }

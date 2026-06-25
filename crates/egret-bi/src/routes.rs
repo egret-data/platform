@@ -808,6 +808,7 @@ pub fn chart_router() -> Router<BiState> {
             get(ch_get).put(ch_update).delete(ch_remove),
         )
         .route("/ws/{workspace}/charts/{id}/folder", patch(ch_set_folder))
+        .route("/ws/{workspace}/charts/{id}/duplicate", post(ch_duplicate))
 }
 
 async fn ch_set_folder(
@@ -829,6 +830,25 @@ async fn ch_set_folder(
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn ch_duplicate(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<crate::model::ChartDto>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, CH_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_chart_in_ws(&st, &ctx, id).await?;
+    let copy = st
+        .charts
+        .duplicate(id, Some(ctx.principal.user_id.0))
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("chart".into()))?;
+    Ok(Json(crate::model::chart_dto(copy)))
 }
 
 async fn require_chart_in_ws(
