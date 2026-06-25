@@ -809,6 +809,12 @@ pub fn chart_router() -> Router<BiState> {
         )
         .route("/ws/{workspace}/charts/{id}/folder", patch(ch_set_folder))
         .route("/ws/{workspace}/charts/{id}/duplicate", post(ch_duplicate))
+        .route("/ws/{workspace}/charts/{id}/trash", post(ch_trash))
+        .route("/ws/{workspace}/charts/{id}/restore", post(ch_restore))
+        .route(
+            "/ws/{workspace}/charts/{id}/bookmark",
+            post(ch_bookmark_add).delete(ch_bookmark_remove),
+        )
 }
 
 async fn ch_set_folder(
@@ -883,6 +889,7 @@ async fn require_chart_owner(
 async fn ch_list(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
+    AxQuery(q): AxQuery<ListQuery>,
 ) -> Result<Json<Vec<crate::model::ChartDto>>, BiApiError> {
     st.authz
         .require_workspace(&ctx, CH_READ)
@@ -890,11 +897,13 @@ async fn ch_list(
         .map_err(BiApiError::from)?;
     let rows = st
         .charts
-        .list_by_workspace(ctx.workspace_id.0)
+        .list_by_workspace_for(ctx.workspace_id.0, ctx.principal.user_id.0, q.trashed)
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(
-        rows.into_iter().map(crate::model::chart_dto).collect(),
+        rows.into_iter()
+            .map(|(c, bm)| crate::model::chart_dto_bm(c, bm))
+            .collect(),
     ))
 }
 
@@ -1048,6 +1057,74 @@ async fn ch_data(
         sql,
         database_id: ds.database_id.to_string(),
     }))
+}
+
+async fn ch_trash(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, CH_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_chart_in_ws(&st, &ctx, id).await?;
+    st.charts
+        .set_trashed(id, true)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn ch_restore(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, CH_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_chart_in_ws(&st, &ctx, id).await?;
+    st.charts
+        .set_trashed(id, false)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn ch_bookmark_add(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, CH_READ)
+        .await
+        .map_err(BiApiError::from)?;
+    require_chart_in_ws(&st, &ctx, id).await?;
+    st.charts
+        .add_bookmark(ctx.principal.user_id.0, id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn ch_bookmark_remove(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, CH_READ)
+        .await
+        .map_err(BiApiError::from)?;
+    require_chart_in_ws(&st, &ctx, id).await?;
+    st.charts
+        .remove_bookmark(ctx.principal.user_id.0, id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 // ── Dashboard routes ─────────────────────────────────────────────────────────

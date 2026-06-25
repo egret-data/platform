@@ -262,6 +262,8 @@ pub struct ChartDto {
     pub created_by: Option<String>,
     pub folder_id: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub bookmarked: bool,
 }
 
 pub fn chart_dto(c: Chart) -> ChartDto {
@@ -275,6 +277,24 @@ pub fn chart_dto(c: Chart) -> ChartDto {
         created_by: c.created_by.map(|u| u.to_string()),
         folder_id: c.folder_id.map(|u| u.to_string()),
         updated_at: c.updated_at,
+        deleted_at: c.deleted_at,
+        bookmarked: false,
+    }
+}
+
+pub fn chart_dto_bm(c: Chart, bookmarked: bool) -> ChartDto {
+    ChartDto {
+        id: c.id.to_string(),
+        dataset_id: c.dataset_id.to_string(),
+        name: c.name,
+        description: c.description,
+        viz_type: c.viz_type,
+        params: c.params,
+        created_by: c.created_by.map(|u| u.to_string()),
+        folder_id: c.folder_id.map(|u| u.to_string()),
+        updated_at: c.updated_at,
+        deleted_at: c.deleted_at,
+        bookmarked,
     }
 }
 
