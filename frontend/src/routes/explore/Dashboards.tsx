@@ -1,14 +1,18 @@
-import { useState } from "react";
-import { Star } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Search, Star } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { useDashboards, useDashboardMutations, type DashboardSummary } from "@/api/dashboards";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import { RelativeTime } from "@/components/explore/RelativeTime";
+import { SortableHeader, type SortState } from "@/components/explore/SortableHeader";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { DashboardActionsMenu } from "@/components/chart/dashboard/DashboardActionsMenu";
+
+type SortKey = "name" | "card_count" | "updated_at";
 
 export default function Dashboards() {
   const ws = useParams().workspace!;
@@ -19,97 +23,127 @@ export default function Dashboards() {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [onlyBookmarked, setOnlyBookmarked] = useState(false);
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
   const [pendingDelete, setPendingDelete] = useState<DashboardSummary | null>(null);
-  const rows = (data ?? []).filter((d) => !onlyBookmarked || d.bookmarked);
 
+  const rows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    let r = (data ?? []).filter((d) => {
+      if (onlyBookmarked && !d.bookmarked) return false;
+      if (!q) return true;
+      return d.name.toLowerCase().includes(q);
+    });
+    r = [...r].sort((a, b) => {
+      let cmp = 0;
+      if (sort.key === "name") cmp = a.name.localeCompare(b.name);
+      else if (sort.key === "card_count") cmp = a.card_count - b.card_count;
+      else cmp = a.updated_at.localeCompare(b.updated_at);
+      return sort.dir === "asc" ? cmp : -cmp;
+    });
+    return r;
+  }, [data, onlyBookmarked, query, sort]);
+
+  function onSort(key: SortKey) {
+    setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
+  }
   async function onCreate() {
     if (!name.trim()) { toast.error("Name required"); return; }
-    try {
-      const d = await create.mutateAsync({ name: name.trim() });
-      setOpen(false); setName("");
-      nav(`/explore/${ws}/dashboards/${d.id}`);
-    } catch (e) { toast.error(String(e)); }
+    try { const d = await create.mutateAsync({ name: name.trim() }); setOpen(false); setName(""); nav(`/explore/${ws}/dashboards/${d.id}`); }
+    catch (e) { toast.error(String(e)); }
   }
+  const guard = (p: Promise<unknown>) => p.catch((e) => toast.error(String(e)));
+
+  const hasData = !!data && data.length > 0;
 
   return (
     <div className="p-4">
-      <div className="mb-3 flex items-center justify-between">
+      <div className="mb-4 flex items-center justify-between">
         <h1 className="text-lg font-semibold">{showTrash ? "Trash" : "Dashboards"}</h1>
         <div className="flex gap-2">
           {!showTrash && (
-            <Button size="sm" variant={onlyBookmarked ? "default" : "outline"} onClick={() => setOnlyBookmarked((v) => !v)}>★ Bookmarks</Button>
+            <Button variant={onlyBookmarked ? "default" : "outline"} onClick={() => setOnlyBookmarked((v) => !v)}>★ Bookmarks</Button>
           )}
-          <Button size="sm" variant={showTrash ? "default" : "outline"} onClick={() => { const next = !showTrash; setShowTrash(next); if (next) setOnlyBookmarked(false); }}>
+          <Button variant={showTrash ? "default" : "outline"} onClick={() => { const next = !showTrash; setShowTrash(next); if (next) setOnlyBookmarked(false); }}>
             {showTrash ? "← Dashboards" : "Trash"}
           </Button>
           <Dialog open={open} onOpenChange={setOpen}>
-            <DialogTrigger asChild><Button size="sm">+ Dashboard</Button></DialogTrigger>
+            <DialogTrigger asChild><Button>+ Dashboard</Button></DialogTrigger>
             <DialogContent>
               <DialogHeader><DialogTitle>New dashboard</DialogTitle></DialogHeader>
               <div className="flex gap-2 py-2">
-                <Input autoFocus placeholder="Name" value={name} onChange={(e) => setName(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") onCreate(); }} />
+                <Input autoFocus placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") onCreate(); }} />
                 <Button onClick={onCreate} disabled={create.isPending}>Create</Button>
               </div>
             </DialogContent>
           </Dialog>
         </div>
       </div>
+
       {isLoading ? (
-        <p className="text-muted-foreground">Loading…</p>
-      ) : !rows.length ? (
-        <p className="text-muted-foreground">{onlyBookmarked ? "No bookmarked dashboards." : showTrash ? "Trash is empty." : "No dashboards yet."}</p>
+        <ListSkeleton cols={4} />
+      ) : hasData ? (
+        <>
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <div className="relative max-w-xs flex-1">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input className="pl-8" placeholder="Search dashboards…" value={query} onChange={(e) => setQuery(e.target.value)} />
+            </div>
+          </div>
+
+          {rows.length > 0 ? (
+            <table className="w-full text-sm">
+              <thead className="text-left text-muted-foreground">
+                <tr>
+                  <SortableHeader sortKey="name" label="Name" current={sort} onSort={onSort} />
+                  <SortableHeader sortKey="card_count" label="Cards" current={sort} onSort={onSort} />
+                  <SortableHeader sortKey="updated_at" label="Updated" current={sort} onSort={onSort} />
+                  <th className="w-8" />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((d) => (
+                  <tr key={d.id} className="border-t hover:bg-accent">
+                    <td className="py-1">
+                      <span className="inline-flex items-center gap-1">
+                        {!showTrash && (
+                          <Button size="sm" variant="ghost" className="h-7 w-7 p-0" aria-label={`${d.bookmarked ? "unbookmark" : "bookmark"} ${d.name}`}
+                            onClick={() => guard((d.bookmarked ? removeBookmark : addBookmark).mutateAsync(d.id))}>
+                            <Star className={`h-4 w-4 ${d.bookmarked ? "fill-amber-400 text-amber-400" : "text-muted-foreground"}`} />
+                          </Button>
+                        )}
+                        <Link className="font-medium hover:underline" to={`/explore/${ws}/dashboards/${d.id}`}>{d.name}</Link>
+                      </span>
+                    </td>
+                    <td className="text-muted-foreground">{d.card_count}</td>
+                    <td className="text-muted-foreground"><RelativeTime iso={d.updated_at} /></td>
+                    <td>
+                      <DashboardActionsMenu
+                        ws={ws} dash={d} trashed={showTrash}
+                        onDuplicate={(x) => guard(duplicate.mutateAsync(x.id).then((c) => nav(`/explore/${ws}/dashboards/${c.id}`)))}
+                        onTrash={(x) => guard(trash.mutateAsync(x.id).then(() => toast.success("Moved to Trash")))}
+                        onRestore={(x) => guard(restore.mutateAsync(x.id))}
+                        onDeletePermanent={setPendingDelete}
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p className="text-muted-foreground">{onlyBookmarked ? "No bookmarked dashboards." : "No dashboards match the current filters."}</p>
+          )}
+        </>
       ) : (
-        <table className="w-full text-sm">
-          <thead className="text-left text-muted-foreground">
-            <tr><th className="py-1 pr-3">Name</th><th className="pr-3">Cards</th><th className="pr-3">Updated</th><th /></tr>
-          </thead>
-          <tbody>
-            {rows.map((d) => (
-              <tr key={d.id} className="border-t">
-                <td className="py-1 pr-3">
-                  <span className="inline-flex items-center gap-1">
-                    <Button size="sm" variant="ghost" aria-label={`${d.bookmarked ? "unbookmark" : "bookmark"} ${d.name}`}
-                      onClick={async () => { try { await (d.bookmarked ? removeBookmark : addBookmark).mutateAsync(d.id); } catch (e) { toast.error(String(e)); } }}>
-                      <Star className={`h-4 w-4 ${d.bookmarked ? "fill-amber-400 text-amber-400" : "text-muted-foreground"}`} />
-                    </Button>
-                    <Link className="hover:underline" to={`/explore/${ws}/dashboards/${d.id}`}>{d.name}</Link>
-                  </span>
-                </td>
-                <td className="pr-3 text-muted-foreground">{d.card_count}</td>
-                <td className="pr-3 text-muted-foreground">{new Date(d.updated_at).toLocaleString()}</td>
-                <td className="flex gap-1">
-                  {showTrash ? (
-                    <>
-                      <Button size="sm" variant="ghost" aria-label={`restore ${d.name}`}
-                        onClick={async () => { try { await restore.mutateAsync(d.id); } catch (e) { toast.error(String(e)); } }}>Restore</Button>
-                      <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" aria-label={`delete ${d.name} permanently`}
-                        onClick={() => setPendingDelete(d)}>Delete permanently</Button>
-                    </>
-                  ) : (
-                    <>
-                      <Button size="sm" variant="ghost" aria-label={`duplicate ${d.name}`}
-                        onClick={async () => { try { const c = await duplicate.mutateAsync(d.id); nav(`/explore/${ws}/dashboards/${c.id}`); } catch (e) { toast.error(String(e)); } }}>Duplicate</Button>
-                      <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" aria-label={`move ${d.name} to trash`}
-                        onClick={async () => { try { await trash.mutateAsync(d.id); } catch (e) { toast.error(String(e)); } }}>Delete</Button>
-                    </>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <p className="text-muted-foreground">{showTrash ? "Trash is empty." : "No dashboards yet."}</p>
       )}
+
       <ConfirmDeleteDialog
         open={pendingDelete !== null}
         onOpenChange={(o) => { if (!o) setPendingDelete(null); }}
         title="Delete permanently"
         description={`Permanently delete "${pendingDelete?.name ?? ""}"? This cannot be undone.`}
-        onConfirm={async () => {
-          if (!pendingDelete) return;
-          try { await remove.mutateAsync(pendingDelete.id); } catch (e) { toast.error(String(e)); }
-          setPendingDelete(null);
-        }}
+        onConfirm={async () => { if (!pendingDelete) return; await guard(remove.mutateAsync(pendingDelete.id)); setPendingDelete(null); }}
       />
     </div>
   );
