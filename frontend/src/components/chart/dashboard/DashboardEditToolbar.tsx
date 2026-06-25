@@ -61,7 +61,7 @@ export function DashboardEditToolbar({ onAddChart, onAddText, onAddHeading, onAd
             <ChevronDown className="h-3 w-3" />
           </button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
+        <DropdownMenuContent align="end" onCloseAutoFocus={(e) => e.preventDefault()}>
           <DropdownMenuItem onClick={onAddHeading}>Heading</DropdownMenuItem>
           <DropdownMenuItem onClick={onAddText}>Text</DropdownMenuItem>
         </DropdownMenuContent>
