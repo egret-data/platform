@@ -12,7 +12,7 @@ import type { Chart } from "@/api/charts";
 const chart: Chart = {
   id: "c1", dataset_id: "ds1", name: "S", description: "", viz_type: "table",
   params: { spec: { metrics: ["rev"], dimensions: [], columns: [], filters: [], orderby: [], row_limit: 1000, rollup_groups: [] } },
-  created_by: null, updated_at: "",
+  created_by: null, updated_at: "", folder_id: null,
 };
 
 function wrapper({ children }: { children: React.ReactNode }) {

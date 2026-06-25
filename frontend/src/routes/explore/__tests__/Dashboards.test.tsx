@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import Dashboards from "../Dashboards";
 
 vi.mock("@/api/dashboards", () => ({
@@ -16,14 +17,25 @@ vi.mock("@/api/dashboards", () => ({
     removeBookmark: { mutateAsync: vi.fn().mockResolvedValue(undefined) },
   }),
 }));
+vi.mock("@/api/folders", () => ({
+  useFolders: () => ({ data: [] }),
+  useSetFolder: () => ({ mutateAsync: vi.fn().mockResolvedValue({}) }),
+  useFolderMutations: () => ({
+    create: { mutateAsync: vi.fn().mockResolvedValue({ id: "f1", name: "F1" }) },
+    rename: { mutateAsync: vi.fn().mockResolvedValue({}) },
+    remove: { mutateAsync: vi.fn().mockResolvedValue(undefined) },
+  }),
+}));
 
 function renderAt() {
   const qc = new QueryClient();
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={["/explore/eng/dashboards"]}>
-        <Routes><Route path="/explore/:workspace/dashboards" element={<Dashboards />} /></Routes>
-      </MemoryRouter>
+      <TooltipProvider>
+        <MemoryRouter initialEntries={["/explore/eng/dashboards"]}>
+          <Routes><Route path="/explore/:workspace/dashboards" element={<Dashboards />} /></Routes>
+        </MemoryRouter>
+      </TooltipProvider>
     </QueryClientProvider>,
   );
 }

@@ -3,17 +3,27 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { createElement, type ReactNode } from "react";
 
 const apiJson = vi.fn();
 const apiFetch = vi.fn().mockResolvedValue({});
 vi.mock("@/api/client", () => ({ apiJson: (...a: unknown[]) => apiJson(...a), apiFetch: (...a: unknown[]) => apiFetch(...a) }));
 vi.mock("react-router-dom", async (orig) => ({ ...(await orig() as object), useParams: () => ({ workspace: "eng" }) }));
+vi.mock("@/api/folders", () => ({
+  useFolders: () => ({ data: [] }),
+  useSetFolder: () => ({ mutateAsync: vi.fn().mockResolvedValue({}) }),
+  useFolderMutations: () => ({
+    create: { mutateAsync: vi.fn().mockResolvedValue({ id: "f1", name: "F1" }) },
+    rename: { mutateAsync: vi.fn().mockResolvedValue({}) },
+    remove: { mutateAsync: vi.fn().mockResolvedValue(undefined) },
+  }),
+}));
 
 import Dashboards from "../Dashboards";
 
 const wrap = ({ children }: { children: ReactNode }) =>
-  createElement(QueryClientProvider, { client: new QueryClient() }, createElement(MemoryRouter, null, children));
+  createElement(QueryClientProvider, { client: new QueryClient() }, createElement(TooltipProvider, null, createElement(MemoryRouter, null, children)));
 
 describe("Dashboards trash", () => {
   beforeEach(() => { apiJson.mockReset(); apiFetch.mockReset(); apiFetch.mockResolvedValue({}); });

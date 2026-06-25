@@ -6,6 +6,9 @@ export interface DatasetSummary {
   id: string; name: string; description: string; database_id: string;
   kind: DatasetKind; catalog: string | null; schema: string | null; table: string | null;
   column_count: number; updated_at: string;
+  folder_id: string | null;
+  bookmarked?: boolean;
+  deleted_at?: string | null;
 }
 export interface DatasetColumn {
   column_name: string; data_type: string; type_generic: string; is_temporal: boolean; ordinal: number;
@@ -32,10 +35,11 @@ export const dsKeys = {
   detail: (ws: string, id: string) => ["datasets", ws, "detail", id] as const,
 };
 
-export function useDatasets(ws: string) {
+export function useDatasets(ws: string, opts?: { trashed?: boolean }) {
+  const trashed = !!opts?.trashed;
   return useQuery<DatasetSummary[]>({
-    queryKey: dsKeys.list(ws),
-    queryFn: () => apiJson<DatasetSummary[]>(`/ws/${ws}/datasets`),
+    queryKey: [...dsKeys.list(ws), { trashed }],
+    queryFn: () => apiJson<DatasetSummary[]>(`/ws/${ws}/datasets${trashed ? "?trashed=true" : ""}`),
   });
 }
 export function useDataset(ws: string, id: string | null) {
@@ -74,6 +78,28 @@ export function useDeleteDataset(ws: string) {
     mutationFn: (id: string) => apiFetch(`/ws/${ws}/datasets/${id}`, { method: "DELETE" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: dsKeys.list(ws) }),
   });
+}
+
+export function useDatasetListMutations(ws: string) {
+  const qc = useQueryClient();
+  const invalidate = () => qc.invalidateQueries({ queryKey: dsKeys.list(ws) });
+  const trash = useMutation({
+    mutationFn: (id: string) => apiJson(`/ws/${ws}/datasets/${id}/trash`, { method: "POST" }),
+    onSuccess: invalidate,
+  });
+  const restore = useMutation({
+    mutationFn: (id: string) => apiJson(`/ws/${ws}/datasets/${id}/restore`, { method: "POST" }),
+    onSuccess: invalidate,
+  });
+  const addBookmark = useMutation({
+    mutationFn: (id: string) => apiJson(`/ws/${ws}/datasets/${id}/bookmark`, { method: "POST" }),
+    onSuccess: invalidate,
+  });
+  const removeBookmark = useMutation({
+    mutationFn: (id: string) => apiJson(`/ws/${ws}/datasets/${id}/bookmark`, { method: "DELETE" }),
+    onSuccess: invalidate,
+  });
+  return { trash, restore, addBookmark, removeBookmark };
 }
 
 function mutateDetail(ws: string, id: string) {

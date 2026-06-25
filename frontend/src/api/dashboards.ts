@@ -22,6 +22,7 @@ export interface DashboardSummary {
   created_by: string | null; card_count: number; updated_at: string;
   deleted_at?: string | null;
   bookmarked?: boolean;
+  folder_id?: string | null;
 }
 export type ParamType = "text" | "number" | "date" | "id" | "category" | "boolean" | "location" | "temporal_unit";
 export type ParamOperator =

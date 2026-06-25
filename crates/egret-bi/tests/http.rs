@@ -25,7 +25,8 @@ fn build_state(db: Db) -> BiState {
         authz: egret_workspace::rbac::Authorizer::new(db.clone()),
         charts: ChartRepo::new(db.clone()),
         datasets: DatasetRepo::new(db.clone()),
-        dashboards: DashboardRepo::new(db),
+        dashboards: DashboardRepo::new(db.clone()),
+        folders: egret_bi::folder::FolderRepo::new(db),
     }
 }
 

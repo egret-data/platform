@@ -1,7 +1,7 @@
 //! SQL Lab routes: saved queries + schema browse. Dataset CRUD routes.
 
 use axum::extract::{FromRef, Path, Query as AxQuery, State};
-use axum::routing::{get, post, put};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use egret_auth::session::SessionService;
 use egret_core::Error;
@@ -39,6 +39,7 @@ pub struct BiState {
     pub datasets: crate::dataset::DatasetRepo,
     pub charts: crate::chart::ChartRepo,
     pub dashboards: crate::dashboard::DashboardRepo,
+    pub folders: crate::folder::FolderRepo,
 }
 impl FromRef<BiState> for SessionService {
     fn from_ref(s: &BiState) -> Self {
@@ -341,6 +342,53 @@ pub fn dataset_router() -> Router<BiState> {
             "/ws/{workspace}/datasets/{id}/columns/{column_name}",
             put(ds_update_column).delete(ds_delete_column),
         )
+        .route("/ws/{workspace}/datasets/{id}/folder", patch(ds_set_folder))
+        .route("/ws/{workspace}/datasets/{id}/trash", post(ds_trash))
+        .route("/ws/{workspace}/datasets/{id}/restore", post(ds_restore))
+        .route(
+            "/ws/{workspace}/datasets/{id}/bookmark",
+            post(ds_bookmark_add).delete(ds_bookmark_remove),
+        )
+}
+
+/// Guard: dataset exists and lives in this workspace. Mirrors the inline
+/// `get` + workspace check the other dataset handlers use.
+async fn require_dataset_in_ws(
+    st: &BiState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> Result<(), BiApiError> {
+    let ds = st
+        .datasets
+        .get(id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("dataset".into()))?;
+    if ds.workspace_id != ctx.workspace_id.0 {
+        return Err(Error::NotFound("dataset".into()).into());
+    }
+    Ok(())
+}
+
+async fn ds_set_folder(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+    Json(b): Json<crate::model::SetFolder>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DS_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_dataset_in_ws(&st, &ctx, id).await?;
+    if let Some(fid) = b.folder_id {
+        require_folder(&st, &ctx, fid, "dataset").await?;
+    }
+    st.datasets
+        .set_folder(id, b.folder_id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// Introspect a source's columns and classify them. Physical → schema service; virtual → describe().
@@ -423,6 +471,7 @@ async fn ds_create(
 async fn ds_list(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
+    AxQuery(q): AxQuery<ListQuery>,
 ) -> Result<Json<Vec<DatasetSummaryDto>>, BiApiError> {
     st.authz
         .require_workspace(&ctx, DS_READ)
@@ -430,14 +479,82 @@ async fn ds_list(
         .map_err(BiApiError::from)?;
     let rows = st
         .datasets
-        .list(ctx.workspace_id.0)
+        .list_by_workspace_for(ctx.workspace_id.0, ctx.principal.user_id.0, q.trashed)
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(
         rows.into_iter()
-            .map(|(ds, n)| crate::model::summary_dto(ds, n))
+            .map(|(ds, n, bm)| crate::model::summary_dto_bm(ds, n, bm))
             .collect(),
     ))
+}
+
+async fn ds_trash(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DS_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_dataset_in_ws(&st, &ctx, id).await?;
+    st.datasets
+        .set_trashed(id, true)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn ds_restore(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DS_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_dataset_in_ws(&st, &ctx, id).await?;
+    st.datasets
+        .set_trashed(id, false)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn ds_bookmark_add(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DS_READ)
+        .await
+        .map_err(BiApiError::from)?;
+    require_dataset_in_ws(&st, &ctx, id).await?;
+    st.datasets
+        .add_bookmark(ctx.principal.user_id.0, id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn ds_bookmark_remove(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DS_READ)
+        .await
+        .map_err(BiApiError::from)?;
+    require_dataset_in_ws(&st, &ctx, id).await?;
+    st.datasets
+        .remove_bookmark(ctx.principal.user_id.0, id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn ds_get(
@@ -765,6 +882,54 @@ pub fn chart_router() -> Router<BiState> {
             "/ws/{workspace}/charts/{id}",
             get(ch_get).put(ch_update).delete(ch_remove),
         )
+        .route("/ws/{workspace}/charts/{id}/folder", patch(ch_set_folder))
+        .route("/ws/{workspace}/charts/{id}/duplicate", post(ch_duplicate))
+        .route("/ws/{workspace}/charts/{id}/trash", post(ch_trash))
+        .route("/ws/{workspace}/charts/{id}/restore", post(ch_restore))
+        .route(
+            "/ws/{workspace}/charts/{id}/bookmark",
+            post(ch_bookmark_add).delete(ch_bookmark_remove),
+        )
+}
+
+async fn ch_set_folder(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+    Json(b): Json<crate::model::SetFolder>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, CH_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_chart_in_ws(&st, &ctx, id).await?;
+    if let Some(fid) = b.folder_id {
+        require_folder(&st, &ctx, fid, "chart").await?;
+    }
+    st.charts
+        .set_folder(id, b.folder_id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn ch_duplicate(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<crate::model::ChartDto>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, CH_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_chart_in_ws(&st, &ctx, id).await?;
+    let copy = st
+        .charts
+        .duplicate(id, Some(ctx.principal.user_id.0))
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("chart".into()))?;
+    Ok(Json(crate::model::chart_dto(copy)))
 }
 
 async fn require_chart_in_ws(
@@ -799,6 +964,7 @@ async fn require_chart_owner(
 async fn ch_list(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
+    AxQuery(q): AxQuery<ListQuery>,
 ) -> Result<Json<Vec<crate::model::ChartDto>>, BiApiError> {
     st.authz
         .require_workspace(&ctx, CH_READ)
@@ -806,11 +972,13 @@ async fn ch_list(
         .map_err(BiApiError::from)?;
     let rows = st
         .charts
-        .list_by_workspace(ctx.workspace_id.0)
+        .list_by_workspace_for(ctx.workspace_id.0, ctx.principal.user_id.0, q.trashed)
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(
-        rows.into_iter().map(crate::model::chart_dto).collect(),
+        rows.into_iter()
+            .map(|(c, bm)| crate::model::chart_dto_bm(c, bm))
+            .collect(),
     ))
 }
 
@@ -966,6 +1134,74 @@ async fn ch_data(
     }))
 }
 
+async fn ch_trash(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, CH_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_chart_in_ws(&st, &ctx, id).await?;
+    st.charts
+        .set_trashed(id, true)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn ch_restore(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, CH_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_chart_in_ws(&st, &ctx, id).await?;
+    st.charts
+        .set_trashed(id, false)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn ch_bookmark_add(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, CH_READ)
+        .await
+        .map_err(BiApiError::from)?;
+    require_chart_in_ws(&st, &ctx, id).await?;
+    st.charts
+        .add_bookmark(ctx.principal.user_id.0, id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn ch_bookmark_remove(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, CH_READ)
+        .await
+        .map_err(BiApiError::from)?;
+    require_chart_in_ws(&st, &ctx, id).await?;
+    st.charts
+        .remove_bookmark(ctx.principal.user_id.0, id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 // ── Dashboard routes ─────────────────────────────────────────────────────────
 
 pub fn dashboard_router() -> Router<BiState> {
@@ -985,6 +1221,31 @@ pub fn dashboard_router() -> Router<BiState> {
             "/ws/{workspace}/dashboards/{id}/bookmark",
             post(db_bookmark_add).delete(db_bookmark_remove),
         )
+        .route(
+            "/ws/{workspace}/dashboards/{id}/folder",
+            patch(db_set_folder),
+        )
+}
+
+async fn db_set_folder(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+    Json(b): Json<crate::model::SetFolder>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    st.authz
+        .require_workspace(&ctx, DB_MANAGE)
+        .await
+        .map_err(BiApiError::from)?;
+    require_dashboard_in_ws(&st, &ctx, id).await?;
+    if let Some(fid) = b.folder_id {
+        require_folder(&st, &ctx, fid, "dashboard").await?;
+    }
+    st.dashboards
+        .set_folder(id, b.folder_id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn require_dashboard_in_ws(
@@ -1266,4 +1527,121 @@ async fn load_dashboard(
     Ok(crate::model::dashboard_detail_dto(
         d, tabs, cards, bookmarked,
     ))
+}
+
+// ── Folder routes ────────────────────────────────────────────────────────────
+
+/// Map a URL {kind} segment to (entity_type, read_perm, manage_perm). None ⇒ 404.
+fn kind_perms(kind: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    match kind {
+        "charts" => Some(("chart", CH_READ, CH_MANAGE)),
+        "dashboards" => Some(("dashboard", DB_READ, DB_MANAGE)),
+        "datasets" => Some(("dataset", DS_READ, DS_MANAGE)),
+        _ => None,
+    }
+}
+
+pub fn folder_router() -> Router<BiState> {
+    Router::new()
+        .route(
+            "/ws/{workspace}/folders/{kind}",
+            get(folders_list).post(folders_create),
+        )
+        .route(
+            "/ws/{workspace}/folders/{kind}/{id}",
+            patch(folders_rename).delete(folders_delete),
+        )
+}
+
+async fn folders_list(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, kind)): Path<(String, String)>,
+) -> Result<Json<Vec<crate::model::FolderDto>>, BiApiError> {
+    let (etype, read, _manage) = kind_perms(&kind).ok_or(Error::NotFound("kind".into()))?;
+    st.authz
+        .require_workspace(&ctx, read)
+        .await
+        .map_err(BiApiError::from)?;
+    let rows = st
+        .folders
+        .list(ctx.workspace_id.0, etype)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(
+        rows.into_iter().map(crate::model::folder_dto).collect(),
+    ))
+}
+
+async fn folders_create(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, kind)): Path<(String, String)>,
+    Json(b): Json<crate::model::CreateFolder>,
+) -> Result<Json<crate::model::FolderDto>, BiApiError> {
+    let (etype, _read, manage) = kind_perms(&kind).ok_or(Error::NotFound("kind".into()))?;
+    st.authz
+        .require_workspace(&ctx, manage)
+        .await
+        .map_err(BiApiError::from)?;
+    let f = st
+        .folders
+        .create(
+            ctx.workspace_id.0,
+            etype,
+            &b.name,
+            Some(ctx.principal.user_id.0),
+        )
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(crate::model::folder_dto(f)))
+}
+
+async fn folders_rename(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, kind, id)): Path<(String, String, Uuid)>,
+    Json(b): Json<crate::model::RenameFolder>,
+) -> Result<Json<crate::model::FolderDto>, BiApiError> {
+    let (etype, _read, manage) = kind_perms(&kind).ok_or(Error::NotFound("kind".into()))?;
+    st.authz
+        .require_workspace(&ctx, manage)
+        .await
+        .map_err(BiApiError::from)?;
+    require_folder(&st, &ctx, id, etype).await?;
+    let f = st
+        .folders
+        .rename(id, &b.name)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("folder".into()))?;
+    Ok(Json(crate::model::folder_dto(f)))
+}
+
+async fn folders_delete(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, kind, id)): Path<(String, String, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    let (etype, _read, manage) = kind_perms(&kind).ok_or(Error::NotFound("kind".into()))?;
+    st.authz
+        .require_workspace(&ctx, manage)
+        .await
+        .map_err(BiApiError::from)?;
+    require_folder(&st, &ctx, id, etype).await?;
+    st.folders.delete(id).await.map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Guard: folder exists, in this workspace, and matches the URL kind's entity_type.
+async fn require_folder(
+    st: &BiState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    entity_type: &str,
+) -> Result<(), BiApiError> {
+    match st.folders.meta(id).await.map_err(BiApiError::from)? {
+        Some((w, t)) if w == ctx.workspace_id.0 && t == entity_type => Ok(()),
+        _ => Err(Error::NotFound("folder".into()).into()),
+    }
 }

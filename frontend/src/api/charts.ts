@@ -158,6 +158,9 @@ export interface Chart {
   params: ChartParams;
   created_by: string | null;
   updated_at: string;
+  folder_id: string | null;
+  bookmarked?: boolean;
+  deleted_at?: string | null;
 }
 
 export const chartKeys = {
@@ -165,10 +168,11 @@ export const chartKeys = {
   one: (ws: string, id: string) => ["charts", ws, id] as const,
 };
 
-export function useCharts(ws: string) {
+export function useCharts(ws: string, opts?: { trashed?: boolean }) {
+  const trashed = !!opts?.trashed;
   return useQuery<Chart[]>({
-    queryKey: chartKeys.list(ws),
-    queryFn: () => apiJson<Chart[]>(`/ws/${ws}/charts`),
+    queryKey: [...chartKeys.list(ws), { trashed }],
+    queryFn: () => apiJson<Chart[]>(`/ws/${ws}/charts${trashed ? "?trashed=true" : ""}`),
   });
 }
 
@@ -197,7 +201,28 @@ export function useChartMutations(ws: string) {
     mutationFn: (id: string) => apiFetch(`/ws/${ws}/charts/${id}`, { method: "DELETE" }),
     onSuccess: invalidate,
   });
-  return { create, update, remove };
+  const duplicate = useMutation({
+    mutationFn: (id: string) =>
+      apiJson<Chart>(`/ws/${ws}/charts/${id}/duplicate`, { method: "POST" }),
+    onSuccess: invalidate,
+  });
+  const trash = useMutation({
+    mutationFn: (id: string) => apiJson(`/ws/${ws}/charts/${id}/trash`, { method: "POST" }),
+    onSuccess: invalidate,
+  });
+  const restore = useMutation({
+    mutationFn: (id: string) => apiJson(`/ws/${ws}/charts/${id}/restore`, { method: "POST" }),
+    onSuccess: invalidate,
+  });
+  const addBookmark = useMutation({
+    mutationFn: (id: string) => apiJson(`/ws/${ws}/charts/${id}/bookmark`, { method: "POST" }),
+    onSuccess: invalidate,
+  });
+  const removeBookmark = useMutation({
+    mutationFn: (id: string) => apiJson(`/ws/${ws}/charts/${id}/bookmark`, { method: "DELETE" }),
+    onSuccess: invalidate,
+  });
+  return { create, update, remove, duplicate, trash, restore, addBookmark, removeBookmark };
 }
 
 /** Build-only: returns the SQL + database_id; the caller submits via useSubmitQuery and polls. */

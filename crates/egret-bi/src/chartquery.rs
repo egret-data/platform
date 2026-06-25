@@ -538,7 +538,7 @@ mod tests {
         assert_eq!(TemporalUnit::parse("week_of_year"), Some(WeekOfYear));
         assert_eq!(TemporalUnit::parse("nonsense"), None);
         assert!(!Month.is_extract());
-        assert!(Year.is_extract() == false);
+        assert!(!Year.is_extract());
         assert!(DayOfWeek.is_extract());
         assert!(HourOfDay.is_extract());
     }

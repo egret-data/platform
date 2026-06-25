@@ -22,6 +22,7 @@ pub struct Dashboard {
     pub description: String,
     pub parameters: serde_json::Value,
     pub created_by: Option<Uuid>,
+    pub folder_id: Option<Uuid>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub width: String,
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -87,7 +88,7 @@ pub struct NewCard {
 }
 
 const COLS: &str =
-    "id, workspace_id, name, description, parameters, created_by, updated_at, width, deleted_at";
+    "id, workspace_id, name, description, parameters, created_by, folder_id, updated_at, width, deleted_at";
 const CARD_COLS: &str =
     "id, dashboard_id, chart_id, card_type, grid_col, grid_row, size_x, size_y, options, ordinal, tab_id";
 
@@ -211,6 +212,15 @@ impl DashboardRepo {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn set_folder(&self, id: Uuid, folder_id: Option<Uuid>) -> Result<(), BiError> {
+        sqlx::query("UPDATE dashboards SET folder_id=$2 WHERE id=$1")
+            .bind(id)
+            .bind(folder_id)
+            .execute(&self.db.pool)
+            .await?;
         Ok(())
     }
 
