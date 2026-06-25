@@ -55,7 +55,7 @@ describe("paramToFilters", () => {
 const chart = (): Chart => ({
   id: "c1", dataset_id: "ds1", name: "Sales", viz_type: "table", description: "",
   params: { spec: { metrics: ["rev"], dimensions: ["region"], columns: [], filters: [{ col: "region", op: "is_not_null" }], orderby: [], row_limit: 1000, rollup_groups: [] } },
-  created_by: null, updated_at: "",
+  created_by: null, updated_at: "", folder_id: null,
 });
 
 describe("applyParamsToChart", () => {

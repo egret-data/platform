@@ -9,7 +9,7 @@ const tuParam = (over: Partial<DashboardParameter> = {}): DashboardParameter => 
 });
 
 const chart = (temporal_units: Record<string, string>): Chart => ({
-  id: "c", dataset_id: "d", name: "C", description: "", created_by: null, updated_at: "",
+  id: "c", dataset_id: "d", name: "C", description: "", created_by: null, updated_at: "", folder_id: null,
   viz_type: "bar",
   params: { spec: { metrics: ["rev"], dimensions: ["created_at"], columns: [], filters: [], orderby: [], row_limit: 100, rollup_groups: [], temporal_units } },
 });

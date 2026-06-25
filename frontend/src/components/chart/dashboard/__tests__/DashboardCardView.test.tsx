@@ -15,7 +15,7 @@ vi.mock("@/components/chart/ChartRenderer", () => ({
 const chart: Chart = {
   id: "c1", dataset_id: "ds1", name: "Sales", viz_type: "table", description: "",
   params: { spec: { metrics: [], dimensions: [], columns: [], filters: [], orderby: [], row_limit: 1000, rollup_groups: [] } },
-  created_by: null, updated_at: "",
+  created_by: null, updated_at: "", folder_id: null,
 };
 const card = (over: Partial<DashboardCard>): DashboardCard => ({
   id: "k", chart_id: null, card_type: "chart", grid_col: 0, grid_row: 0, size_x: 6, size_y: 4, options: {}, tab_id: null, ...over,

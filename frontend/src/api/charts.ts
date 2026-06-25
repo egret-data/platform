@@ -158,6 +158,7 @@ export interface Chart {
   params: ChartParams;
   created_by: string | null;
   updated_at: string;
+  folder_id: string | null;
 }
 
 export const chartKeys = {
@@ -197,7 +198,12 @@ export function useChartMutations(ws: string) {
     mutationFn: (id: string) => apiFetch(`/ws/${ws}/charts/${id}`, { method: "DELETE" }),
     onSuccess: invalidate,
   });
-  return { create, update, remove };
+  const duplicate = useMutation({
+    mutationFn: (id: string) =>
+      apiJson<Chart>(`/ws/${ws}/charts/${id}/duplicate`, { method: "POST" }),
+    onSuccess: invalidate,
+  });
+  return { create, update, remove, duplicate };
 }
 
 /** Build-only: returns the SQL + database_id; the caller submits via useSubmitQuery and polls. */
