@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, it, expect, vi } from "vitest";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { TextCard } from "../TextCard";
 import { HeadingCard } from "../HeadingCard";
 import { LinkCard } from "../LinkCard";
@@ -51,5 +51,38 @@ describe("LinkCard", () => {
     expect(screen.getByRole("link", { name: "X" })).toHaveAttribute("target", "_blank");
     rerender(<LinkCard url="https://x.com" label="X" editing />);
     expect(screen.getByRole("link", { name: "X" })).not.toHaveAttribute("target");
+  });
+});
+
+describe("inline text/heading editing", () => {
+  it("HeadingCard shows an editor bound to text when editing", () => {
+    const onChange = vi.fn();
+    render(<HeadingCard text="Hi" editing onChange={onChange} />);
+    const input = screen.getByLabelText("heading text") as HTMLInputElement;
+    expect(input.value).toBe("Hi");
+    fireEvent.change(input, { target: { value: "Hello" } });
+    expect(onChange).toHaveBeenCalledWith("Hello");
+  });
+
+  it("HeadingCard shows the display (no editor) when not editing", () => {
+    render(<HeadingCard text="Hi" />);
+    expect(screen.queryByLabelText("heading text")).toBeNull();
+    expect(screen.getByText("Hi")).toBeInTheDocument();
+  });
+
+  it("TextCard editor shows raw text (not rendered markdown) when editing", () => {
+    const onChange = vi.fn();
+    render(<TextCard text="## Notes" editing onChange={onChange} />);
+    const ta = screen.getByLabelText("text body") as HTMLTextAreaElement;
+    expect(ta.value).toBe("## Notes");
+    expect(screen.queryByRole("heading")).toBeNull();
+    fireEvent.change(ta, { target: { value: "# New" } });
+    expect(onChange).toHaveBeenCalledWith("# New");
+  });
+
+  it("TextCard renders markdown when not editing", () => {
+    render(<TextCard text="# Title" />);
+    expect(screen.queryByLabelText("text body")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Title" })).toBeInTheDocument();
   });
 });

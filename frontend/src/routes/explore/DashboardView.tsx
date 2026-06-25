@@ -72,6 +72,7 @@ export default function DashboardView() {
   const [editPanel, setEditPanel] = useState<EditPanel>(null);
   const [replacingId, setReplacingId] = useState<string | null>(null);
   const [fillingPlaceholderId, setFillingPlaceholderId] = useState<string | null>(null);
+  const [newCardId, setNewCardId] = useState<string | null>(null);
   const openPanel = useCallback((p: EditPanel) => { setEditPanel(p); }, []);
   const [deletingTabKey, setDeletingTabKey] = useState<string | null>(null);
   const [reassignTo, setReassignTo] = useState<string | null>(null);
@@ -92,6 +93,7 @@ export default function DashboardView() {
     setDraftParameters(null);
     setDraftTabs(null);
     setDraftName("");
+    setNewCardId(null);
   }, [id]);
 
   if (isLoading || !dash) return <div className="p-4 text-muted-foreground">Loading…</div>;
@@ -135,7 +137,7 @@ export default function DashboardView() {
     setEditing(true);
     setEditPanel(null);
   }
-  function cancelEdit() { setEditing(false); setDraftCards(null); setDraftParameters(null); setDraftTabs(null); setEditPanel(null); setDraftName(""); }
+  function cancelEdit() { setEditing(false); setDraftCards(null); setDraftParameters(null); setDraftTabs(null); setEditPanel(null); setDraftName(""); setNewCardId(null); }
 
   function addCard(chart: Chart) {
     const { w, h } = sizeForViz(chart.viz_type).default;
@@ -175,17 +177,19 @@ export default function DashboardView() {
   }
 
   function addVirtualCard(card_type: "text" | "heading" | "link", options: Record<string, unknown>) {
+    const id = `new-${card_type}-${cardSeqRef.current++}`;
     setDraftCards((prev) => {
       const base = prev ?? cardsAsDraft();
       const { w, h } = sizeForViz(card_type).default;
       const pos = getPositionForNewDashCard(base, w, h);
       const newCard: DraftCard = {
-        id: `new-${card_type}-${cardSeqRef.current++}`, chart_id: null, card_type,
+        id, chart_id: null, card_type,
         grid_col: pos.grid_col, grid_row: pos.grid_row, size_x: w, size_y: h, options, tab_id: null,
         tabKey: activeTab?.key ?? null,
       };
       return [...base, newCard];
     });
+    if (card_type === "text" || card_type === "heading") setNewCardId(id);
   }
   function addFilter() {
     const slug = slugify("filter", parameters.map((p) => p.slug));
@@ -275,7 +279,7 @@ export default function DashboardView() {
     const { tabs: tabPayload, cards: cardPayload } = serializeLayout(draftTabs ?? [], persistCards);
     try {
       await update.mutateAsync({ id: dashboard.id, name: draftName.trim() || dashboard.name, description: dashboard.description, parameters, tabs: tabPayload, width: dashboard.width, cards: cardPayload });
-      setEditing(false); setDraftCards(null); setDraftTabs(null); setEditPanel(null); setDraftName("");
+      setEditing(false); setDraftCards(null); setDraftTabs(null); setEditPanel(null); setDraftName(""); setNewCardId(null);
       toast.success("Saved");
     } catch (e) { toast.error(String(e)); }
   }
@@ -487,7 +491,9 @@ export default function DashboardView() {
                     autoHeight={!!c.options.autoHeight}
                     rowHeight={rowHeight}
                     onAutoHeight={editing ? (rows) => applyAutoHeight(c.id, rows) : undefined}
-                    onValueClick={editing ? undefined : (ctx, x, y) => onCardValueClick(c, ctx, x, y)} />
+                    onValueClick={editing ? undefined : (ctx, x, y) => onCardValueClick(c, ctx, x, y)}
+                    onEditText={editing && (c.card_type === "text" || c.card_type === "heading") ? (t) => { updateCardOptions(c.id, { text: t }); if (newCardId === c.id) setNewCardId(null); } : undefined}
+                    autoFocusText={c.id === newCardId} />
                 )}
                 {activeParamId && c.card_type === "chart" && baseChart && (
                   <CardFilterMapOverlay

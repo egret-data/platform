@@ -31,11 +31,16 @@ export function CardSettingsPanel({ card, chart, parameters, tabs, onUpdateOptio
     </label>
   ) : null;
   if (card.card_type === "text" || card.card_type === "heading") {
+    const slugs = parameters.map((p) => p.slug);
     return (
       <div className="flex flex-col gap-2 p-3">
         <div className="text-sm font-medium">{card.card_type === "heading" ? "Heading" : "Text"}</div>
-        <textarea aria-label={card.card_type === "heading" ? "heading text" : "text body"} className={`${inp} h-24 py-1`}
-          value={(card.options.text as string) ?? ""} onChange={(e) => onUpdateOptions({ text: e.target.value })} />
+        <p className="text-xs text-muted-foreground">
+          Edit the {card.card_type} on the card. Insert a filter value with <code className="rounded bg-muted px-1">{"{{slug}}"}</code>.
+          {slugs.length > 0 && (
+            <> Available: {slugs.map((s) => <code key={s} className="mr-1 rounded bg-muted px-1">{`{{${s}}}`}</code>)}</>
+          )}
+        </p>
         {autoHeightRow}
         {moveToTab}
       </div>
