@@ -56,15 +56,17 @@ function ChartCardTile({ ws, card, chart, refreshNonce, onValueClick, blocked, e
 }
 
 /** Render one dashboard card by its card_type. */
-export function DashboardCardView({ ws, card, chart, refreshNonce, parameters, paramValues, onValueClick, blocked, editing, autoHeight, onAutoHeight, rowHeight }: { ws: string; card: DashboardCard; chart: Chart | undefined; refreshNonce?: number; parameters?: DashboardParameter[]; paramValues?: Record<string, unknown>; onValueClick?: (ctx: DrillContext, x: number, y: number) => void; blocked?: boolean; editing?: boolean; autoHeight?: boolean; onAutoHeight?: (rows: number) => void; rowHeight?: number }) {
+export function DashboardCardView({ ws, card, chart, refreshNonce, parameters, paramValues, onValueClick, blocked, editing, autoHeight, onAutoHeight, rowHeight, onEditText, autoFocusText }: { ws: string; card: DashboardCard; chart: Chart | undefined; refreshNonce?: number; parameters?: DashboardParameter[]; paramValues?: Record<string, unknown>; onValueClick?: (ctx: DrillContext, x: number, y: number) => void; blocked?: boolean; editing?: boolean; autoHeight?: boolean; onAutoHeight?: (rows: number) => void; rowHeight?: number; onEditText?: (text: string) => void; autoFocusText?: boolean }) {
   const wrap = (body: React.ReactNode) => (autoHeight && onAutoHeight ? <AutoHeightMeasure rowHeight={rowHeight ?? 0} onRows={onAutoHeight}>{body}</AutoHeightMeasure> : body);
   if (card.card_type === "text") {
-    const text = interpolateParams(asString(card.options.text) ?? "", parameters ?? [], paramValues ?? {});
-    return wrap(<TextCard text={text} />);
+    const raw = asString(card.options.text) ?? "";
+    const display = editing ? raw : interpolateParams(raw, parameters ?? [], paramValues ?? {});
+    return wrap(<TextCard text={display} editing={editing} autoFocus={autoFocusText} onChange={onEditText} />);
   }
   if (card.card_type === "heading") {
-    const text = interpolateParams(asString(card.options.text) ?? "", parameters ?? [], paramValues ?? {});
-    return wrap(<HeadingCard text={text} />);
+    const raw = asString(card.options.text) ?? "";
+    const display = editing ? raw : interpolateParams(raw, parameters ?? [], paramValues ?? {});
+    return wrap(<HeadingCard text={display} editing={editing} autoFocus={autoFocusText} onChange={onEditText} />);
   }
   if (card.card_type === "link") return wrap(<LinkCard url={asString(card.options.url)} label={asString(card.options.label)} editing={editing} />);
   return <ChartCardTile ws={ws} card={card} chart={chart} refreshNonce={refreshNonce} onValueClick={onValueClick} blocked={blocked} editing={editing} autoHeight={autoHeight} onAutoHeight={onAutoHeight} rowHeight={rowHeight} />;

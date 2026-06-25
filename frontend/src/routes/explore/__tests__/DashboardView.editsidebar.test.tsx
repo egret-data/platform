@@ -37,6 +37,6 @@ describe("DashboardView edit sidebar", () => {
     renderView();
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     fireEvent.click(screen.getAllByTestId("dashcard-body")[0]);
-    expect(screen.getByLabelText(/heading text|text body/)).toBeTruthy();
+    expect(screen.getByText(/Insert a filter value/i)).toBeInTheDocument();
   });
 });

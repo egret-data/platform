@@ -35,11 +35,10 @@ describe("CardSettingsPanel (chart card)", () => {
 });
 
 describe("CardSettingsPanel (text card)", () => {
-  it("edits the text body", () => {
-    const onUpdateOptions = vi.fn();
+  it("shows the {{slug}} hint and lists available parameter slugs", () => {
     const c: DraftCard = { id: "t1", chart_id: null, card_type: "text", grid_col: 0, grid_row: 0, size_x: 6, size_y: 2, options: { text: "" }, tab_id: null, tabKey: null };
-    render(<CardSettingsPanel card={c} chart={undefined} parameters={[]} tabs={[]} onUpdateOptions={onUpdateOptions} onMoveToTab={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText("text body"), { target: { value: "hello" } });
-    expect(onUpdateOptions).toHaveBeenCalledWith({ text: "hello" });
+    render(<CardSettingsPanel card={c} chart={undefined} parameters={[param]} tabs={[]} onUpdateOptions={vi.fn()} onMoveToTab={vi.fn()} />);
+    expect(screen.getByText(/Insert a filter value/i)).toBeInTheDocument();
+    expect(screen.getByText("{{region}}")).toBeInTheDocument();
   });
 });

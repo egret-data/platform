@@ -107,22 +107,15 @@ describe("DashboardView (edit mode)", () => {
 });
 
 describe("DashboardView (Phase B — card variety)", () => {
-  // After adding a virtual card, its editor now lives in the CardSettingsPanel —
-  // click the last dashcard body to open it.
-  function openLastCardSettings() {
-    const bodies = screen.getAllByTestId("dashcard-body");
-    fireEvent.click(bodies[bodies.length - 1]);
-  }
-  it("adds a text card and edits its body", async () => {
+  it("adds a text card and edits its body inline", async () => {
     const user = userEvent.setup();
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
     await user.click(screen.getByRole("button", { name: "add text or heading" }));
     await user.click(await screen.findByRole("menuitem", { name: "Text" }));
-    openLastCardSettings();
-    const editor = screen.getByLabelText(/text body/i);
+    const editor = screen.getByLabelText("text body") as HTMLTextAreaElement;
     fireEvent.change(editor, { target: { value: "## Notes" } });
-    expect((editor as HTMLTextAreaElement).value).toBe("## Notes");
+    expect(editor.value).toBe("## Notes");
   });
   it("adds a heading card", async () => {
     const user = userEvent.setup();
@@ -130,8 +123,7 @@ describe("DashboardView (Phase B — card variety)", () => {
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
     await user.click(screen.getByRole("button", { name: "add text or heading" }));
     await user.click(await screen.findByRole("menuitem", { name: "Heading" }));
-    openLastCardSettings();
-    expect(screen.getByLabelText(/heading text/i)).toBeInTheDocument();
+    expect(screen.getByLabelText("heading text")).toBeInTheDocument();
   });
   it("adds a link card with url + label settings", () => {
     renderAt();
