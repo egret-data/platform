@@ -107,7 +107,7 @@ export default function Datasets() {
     <tr key={d.id} className="border-t hover:bg-accent"
       draggable={!showTrash} onDragStart={!showTrash ? (e) => e.dataTransfer.setData("text/plain", d.id) : undefined}>
       {bulk.bulkMode && !showTrash && <td className="py-1"><Checkbox checked={bulk.selected.has(d.id)} onCheckedChange={() => bulk.toggle(d.id)} aria-label={`Select ${d.name}`} /></td>}
-      <td className="py-1">
+      <td className="py-1 pl-6">
         <span className="inline-flex items-center gap-1">
           {!showTrash && (
             <Button size="sm" variant="ghost" className="h-7 w-7 p-0" aria-label={`${d.bookmarked ? "unbookmark" : "bookmark"} ${d.name}`}
@@ -146,6 +146,9 @@ export default function Datasets() {
           </Button>
           {!showTrash && hasData && (
             <BulkToggle active={bulk.bulkMode} onToggle={() => bulk.setBulkMode(!bulk.bulkMode)} />
+          )}
+          {!showTrash && (
+            <Button variant="outline" onClick={() => { const n = prompt("New folder name"); if (n && n.trim()) createFolder.mutateAsync(n.trim()).then(() => toast.success("Folder created")).catch((e) => toast.error(String(e))); }}>+ New folder</Button>
           )}
           {!showTrash && <Button onClick={() => setCreateOpen(true)}>Create</Button>}
         </div>

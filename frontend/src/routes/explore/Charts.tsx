@@ -94,7 +94,7 @@ export default function Charts() {
       <tr key={c.id} className="border-t hover:bg-accent"
         draggable={!showTrash} onDragStart={!showTrash ? (e) => e.dataTransfer.setData("text/plain", c.id) : undefined}>
         {bulk.bulkMode && !showTrash && <td className="py-1"><Checkbox checked={bulk.selected.has(c.id)} onCheckedChange={() => bulk.toggle(c.id)} aria-label={`Select ${c.name}`} /></td>}
-        <td className="py-1">
+        <td className="py-1 pl-6">
           <span className="inline-flex items-center gap-1">
             {!showTrash && (
               <Button size="sm" variant="ghost" className="h-7 w-7 p-0" aria-label={`${c.bookmarked ? "unbookmark" : "bookmark"} ${c.name}`}
@@ -136,6 +136,9 @@ export default function Charts() {
           </Button>
           {!showTrash && hasData && (
             <BulkToggle active={bulk.bulkMode} onToggle={() => bulk.setBulkMode(!bulk.bulkMode)} />
+          )}
+          {!showTrash && (
+            <Button variant="outline" onClick={() => { const n = prompt("New folder name"); if (n && n.trim()) createFolder.mutateAsync(n.trim()).then(() => toast.success("Folder created")).catch((e) => toast.error(String(e))); }}>+ New folder</Button>
           )}
           <Button asChild><Link to={`/explore/${ws}/charts/new`}>+ Chart</Link></Button>
         </div>
