@@ -17,6 +17,8 @@ import { DatasetActionsMenu } from "@/components/dataset/DatasetActionsMenu";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SortableHeader } from "@/components/explore/SortableHeader";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { BulkToggle } from "@/components/explore/BulkBar";
+import { useBulkSelect } from "@/hooks/useBulkSelect";
 
 type SortKey = "name" | "column_count" | "updated_at";
 
@@ -31,12 +33,10 @@ export default function Datasets() {
   const del = useDeleteDataset(ws);
 
   const [createOpen, setCreateOpen] = useState(false);
-  const [bulkMode, setBulkMode] = useState(false);
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [dbFilter, setDbFilter] = useState("all");
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" }>({ key: "updated_at", dir: "desc" });
-  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [deleteTarget, setDeleteTarget] = useState<DatasetSummary | null>(null);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [dupId, setDupId] = useState<string | null>(null);
@@ -67,32 +67,24 @@ export default function Datasets() {
     return r;
   }, [data, databases, query, typeFilter, dbFilter, sort]);
 
-  const hasData = !!data && data.length > 0;
-  const allSelected = rows.length > 0 && rows.every((d) => selected.has(d.id));
-  const someSelected = rows.some((d) => selected.has(d.id));
+  const bulk = useBulkSelect(rows);
 
-  function toggle(id: string) {
-    setSelected((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
-  }
-  function toggleAll() {
-    setSelected((s) => {
-      if (rows.every((d) => s.has(d.id))) { const n = new Set(s); rows.forEach((d) => n.delete(d.id)); return n; }
-      const n = new Set(s); rows.forEach((d) => n.add(d.id)); return n;
-    });
-  }
+  const hasData = !!data && data.length > 0;
+
   function setSortKey(key: SortKey) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
   }
   async function doDelete(id: string) {
     await del.mutateAsync(id);
-    setSelected((s) => { const n = new Set(s); n.delete(id); return n; });
+    // The deleted row leaves the visible list, so it naturally drops out of
+    // bulk.selectedIds (filtered to visible rows); no explicit removal needed.
   }
   async function doBulkDelete() {
-    const ids = [...selected];
+    const ids = bulk.selectedIds;
     try {
       await Promise.all(ids.map((id) => del.mutateAsync(id)));
       toast.success(`Deleted ${ids.length}`);
-      setSelected(new Set());
+      bulk.clear();
     } catch (e) { toast.error(String(e)); }
     setBulkOpen(false);
   }
@@ -103,10 +95,7 @@ export default function Datasets() {
         <h1 className="text-lg font-semibold">Datasets</h1>
         <div className="flex items-center gap-2">
           {hasData && (
-            <Button variant={bulkMode ? "secondary" : "outline"}
-              onClick={() => { setBulkMode((v) => !v); setSelected(new Set()); }}>
-              {bulkMode ? "Cancel" : "Bulk select"}
-            </Button>
+            <BulkToggle active={bulk.bulkMode} onToggle={() => bulk.setBulkMode(!bulk.bulkMode)} />
           )}
           <Button onClick={() => setCreateOpen(true)}>Create</Button>
         </div>
@@ -136,9 +125,9 @@ export default function Datasets() {
                 {(databases ?? []).map((d) => <SelectItem key={d.id} value={d.id}>{d.name} ({d.engine})</SelectItem>)}
               </SelectContent>
             </Select>
-            {bulkMode && someSelected && (
+            {bulk.bulkMode && bulk.someSelected && (
               <Button variant="destructive" size="sm" onClick={() => setBulkOpen(true)}>
-                Delete {[...selected].filter((id) => rows.some((r) => r.id === id)).length}
+                Delete {bulk.selectedIds.length}
               </Button>
             )}
           </div>
@@ -147,7 +136,7 @@ export default function Datasets() {
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
-                  {bulkMode && <th className="w-8 py-1"><Checkbox checked={allSelected} onCheckedChange={toggleAll} aria-label="Select all" /></th>}
+                  {bulk.bulkMode && <th className="w-8 py-1"><Checkbox checked={bulk.allSelected} onCheckedChange={bulk.toggleAll} aria-label="Select all" /></th>}
                   <SortableHeader sortKey="name" label="Name" current={sort} onSort={setSortKey} />
                   <th>Kind</th>
                   <th>Database</th>
@@ -160,7 +149,7 @@ export default function Datasets() {
               <tbody>
                 {rows.map((d) => (
                   <tr key={d.id} className="border-t hover:bg-accent">
-                    {bulkMode && <td className="py-1"><Checkbox checked={selected.has(d.id)} onCheckedChange={() => toggle(d.id)} aria-label={`Select ${d.name}`} /></td>}
+                    {bulk.bulkMode && <td className="py-1"><Checkbox checked={bulk.selected.has(d.id)} onCheckedChange={() => bulk.toggle(d.id)} aria-label={`Select ${d.name}`} /></td>}
                     <td className="py-1"><Link className="font-medium hover:underline" to={d.id}>{d.name}</Link></td>
                     <td><span className="rounded bg-muted px-1.5 py-0.5 text-xs">{d.kind}</span></td>
                     <td className="text-muted-foreground">{dbName(d.database_id)}</td>
@@ -220,7 +209,7 @@ export default function Datasets() {
       <AlertDialog open={bulkOpen} onOpenChange={setBulkOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete {selected.size} datasets?</AlertDialogTitle>
+            <AlertDialogTitle>Delete {bulk.selectedIds.length} datasets?</AlertDialogTitle>
             <AlertDialogDescription>
               This removes the selected datasets and their column snapshots. Underlying tables and queries are not affected. This cannot be undone.
             </AlertDialogDescription>
@@ -228,7 +217,7 @@ export default function Datasets() {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={doBulkDelete}>
-              Delete {selected.size}
+              Delete {bulk.selectedIds.length}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
