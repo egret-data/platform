@@ -5,12 +5,15 @@ import { toast } from "sonner";
 import { useDashboards, useDashboardMutations, type DashboardSummary } from "@/api/dashboards";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SortableHeader, type SortState } from "@/components/explore/SortableHeader";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { DashboardActionsMenu } from "@/components/chart/dashboard/DashboardActionsMenu";
+import { BulkToggle } from "@/components/explore/BulkBar";
+import { useBulkSelect } from "@/hooks/useBulkSelect";
 
 type SortKey = "name" | "card_count" | "updated_at";
 
@@ -44,6 +47,8 @@ export default function Dashboards() {
     return r;
   }, [data, onlyBookmarked, query, sort]);
 
+  const bulk = useBulkSelect(rows);
+
   function onSort(key: SortKey) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
   }
@@ -53,6 +58,11 @@ export default function Dashboards() {
     catch (e) { toast.error(String(e)); }
   }
   const guard = (p: Promise<unknown>) => p.catch((e) => toast.error(String(e)));
+
+  async function doBulkTrash() {
+    for (const id of bulk.selectedIds) { try { await trash.mutateAsync(id); } catch (e) { toast.error(String(e)); } }
+    toast.success("Moved to Trash"); bulk.clear();
+  }
 
   const hasData = !!data && data.length > 0;
 
@@ -64,7 +74,10 @@ export default function Dashboards() {
           {!showTrash && (
             <Button variant={onlyBookmarked ? "default" : "outline"} onClick={() => setOnlyBookmarked((v) => !v)}>★ Bookmarks</Button>
           )}
-          <Button variant={showTrash ? "default" : "outline"} onClick={() => { const next = !showTrash; setShowTrash(next); if (next) setOnlyBookmarked(false); }}>
+          {!showTrash && hasData && (
+            <BulkToggle active={bulk.bulkMode} onToggle={() => bulk.setBulkMode(!bulk.bulkMode)} />
+          )}
+          <Button variant={showTrash ? "default" : "outline"} onClick={() => { const next = !showTrash; setShowTrash(next); if (next) { setOnlyBookmarked(false); bulk.setBulkMode(false); } }}>
             {showTrash ? "← Dashboards" : "Trash"}
           </Button>
           <Dialog open={open} onOpenChange={setOpen}>
@@ -89,12 +102,18 @@ export default function Dashboards() {
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input className="pl-8" placeholder="Search dashboards…" value={query} onChange={(e) => setQuery(e.target.value)} />
             </div>
+            {bulk.bulkMode && bulk.someSelected && !showTrash && (
+              <Button variant="destructive" size="sm" onClick={doBulkTrash}>
+                Move {bulk.selectedIds.length} to Trash
+              </Button>
+            )}
           </div>
 
           {rows.length > 0 ? (
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
+                  {bulk.bulkMode && !showTrash && <th className="w-8 py-1"><Checkbox checked={bulk.allSelected} onCheckedChange={bulk.toggleAll} aria-label="Select all" /></th>}
                   <SortableHeader sortKey="name" label="Name" current={sort} onSort={onSort} />
                   <SortableHeader sortKey="card_count" label="Cards" current={sort} onSort={onSort} />
                   <SortableHeader sortKey="updated_at" label="Updated" current={sort} onSort={onSort} />
@@ -104,6 +123,7 @@ export default function Dashboards() {
               <tbody>
                 {rows.map((d) => (
                   <tr key={d.id} className="border-t hover:bg-accent">
+                    {bulk.bulkMode && !showTrash && <td className="py-1"><Checkbox checked={bulk.selected.has(d.id)} onCheckedChange={() => bulk.toggle(d.id)} aria-label={`Select ${d.name}`} /></td>}
                     <td className="py-1">
                       <span className="inline-flex items-center gap-1">
                         {!showTrash && (
