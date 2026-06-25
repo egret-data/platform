@@ -1,5 +1,6 @@
 //! Postgres access: a pooled connection wrapper and the embedded migrator.
 //!
+
 use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
