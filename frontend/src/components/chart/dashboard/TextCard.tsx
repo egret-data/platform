@@ -1,12 +1,20 @@
+import { useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 /** A dashboard text card: GFM markdown (XSS-safe; react-markdown does not render raw HTML).
  *  In edit mode it is an inline textarea bound to the raw markdown (so {{slug}} stays literal). */
 export function TextCard({ text, editing, autoFocus, onChange }: { text: string; editing?: boolean; autoFocus?: boolean; onChange?: (text: string) => void }) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    if (!autoFocus) return;
+    const id = window.setTimeout(() => ref.current?.focus(), 0);
+    return () => window.clearTimeout(id);
+  }, [autoFocus]);
   if (editing && onChange) {
     return (
       <textarea
+        ref={ref}
         aria-label="text body"
         className="dash-nodrag h-full w-full resize-none bg-transparent p-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
         placeholder="Write text…  ({{filter}} inserts a filter value)"
