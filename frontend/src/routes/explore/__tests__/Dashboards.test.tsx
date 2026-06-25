@@ -6,7 +6,15 @@ import Dashboards from "../Dashboards";
 
 vi.mock("@/api/dashboards", () => ({
   useDashboards: () => ({ data: [{ id: "d1", name: "Ops", description: "", created_by: null, card_count: 3, updated_at: "2026-06-21T00:00:00Z" }], isLoading: false }),
-  useDashboardMutations: () => ({ create: { mutateAsync: vi.fn(), isPending: false }, remove: { mutateAsync: vi.fn() } }),
+  useDashboardMutations: () => ({
+    create: { mutateAsync: vi.fn().mockResolvedValue({ id: "x" }), isPending: false },
+    remove: { mutateAsync: vi.fn().mockResolvedValue(undefined) },
+    duplicate: { mutateAsync: vi.fn().mockResolvedValue({ id: "x" }) },
+    trash: { mutateAsync: vi.fn().mockResolvedValue(undefined) },
+    restore: { mutateAsync: vi.fn().mockResolvedValue(undefined) },
+    addBookmark: { mutateAsync: vi.fn().mockResolvedValue(undefined) },
+    removeBookmark: { mutateAsync: vi.fn().mockResolvedValue(undefined) },
+  }),
 }));
 
 function renderAt() {
