@@ -1,5 +1,11 @@
 import { useState } from "react";
-import { Copy, X, Plus } from "lucide-react";
+import { ChevronDown, Plus } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "@/components/ui/dropdown-menu";
 import type { DraftTab } from "./tabs";
 
 interface Props {
@@ -46,11 +52,18 @@ export function DashboardTabBar({ tabs, activeTabPos, editing, onSelect, onAdd, 
               {t.name}
             </button>
             {editing && (
-              <>
-                <button type="button" aria-label={`duplicate tab ${t.name}`} title="Duplicate tab" className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100" onClick={() => onDuplicate(t.key)}><Copy className="h-3.5 w-3.5" /></button>
-                <button type="button" aria-label={`delete tab ${t.name}`} title="Delete tab" className="rounded p-0.5 text-destructive opacity-0 transition-opacity hover:bg-accent group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-30"
-                  disabled={ordered.length < 2} onClick={() => onDelete(t.key)}><X className="h-3.5 w-3.5" /></button>
-              </>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button type="button" aria-label={`tab menu ${t.name}`} title="Tab options" className="rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100"><ChevronDown className="h-3.5 w-3.5" /></button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start">
+                  <DropdownMenuItem onClick={() => setRenaming(t.key)}>Rename</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => onDuplicate(t.key)}>Duplicate</DropdownMenuItem>
+                  {ordered.length >= 2 && (
+                    <DropdownMenuItem className="text-destructive" onClick={() => onDelete(t.key)}>Delete</DropdownMenuItem>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
             )}
           </div>
         );

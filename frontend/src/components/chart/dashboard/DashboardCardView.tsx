@@ -66,6 +66,6 @@ export function DashboardCardView({ ws, card, chart, refreshNonce, parameters, p
     const text = interpolateParams(asString(card.options.text) ?? "", parameters ?? [], paramValues ?? {});
     return wrap(<HeadingCard text={text} />);
   }
-  if (card.card_type === "link") return wrap(<LinkCard url={asString(card.options.url)} label={asString(card.options.label)} />);
+  if (card.card_type === "link") return wrap(<LinkCard url={asString(card.options.url)} label={asString(card.options.label)} editing={editing} />);
   return <ChartCardTile ws={ws} card={card} chart={chart} refreshNonce={refreshNonce} onValueClick={onValueClick} blocked={blocked} editing={editing} autoHeight={autoHeight} onAutoHeight={onAutoHeight} rowHeight={rowHeight} />;
 }

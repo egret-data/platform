@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { DashboardTabBar } from "../DashboardTabBar";
 import type { DraftTab } from "../tabs";
 
@@ -31,10 +32,21 @@ describe("DashboardTabBar", () => {
     fireEvent.blur(input);
     expect(onRename).toHaveBeenCalledWith("ka", "Sales");
   });
-  it("delete is disabled with fewer than 2 tabs", () => {
+  it("hides Delete in the tab menu when there is only one tab", async () => {
+    const user = userEvent.setup();
     render(<DashboardTabBar tabs={[tabs[0]]} activeTabPos={0} editing={true}
       onSelect={vi.fn()} onAdd={vi.fn()} onRename={vi.fn()} onReorder={vi.fn()} onDelete={vi.fn()} onDuplicate={vi.fn()} />);
-    expect((screen.getByRole("button", { name: "delete tab A" }) as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole("button", { name: "tab menu A" }));
+    expect(await screen.findByRole("menuitem", { name: "Rename" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Delete" })).toBeNull();
+  });
+
+  it("shows Delete in the tab menu with two or more tabs", async () => {
+    const user = userEvent.setup();
+    render(<DashboardTabBar tabs={tabs} activeTabPos={0} editing={true}
+      onSelect={vi.fn()} onAdd={vi.fn()} onRename={vi.fn()} onReorder={vi.fn()} onDelete={vi.fn()} onDuplicate={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "tab menu A" }));
+    expect(await screen.findByRole("menuitem", { name: "Delete" })).toBeInTheDocument();
   });
   it("active tab uses the brand colour", () => {
     render(<DashboardTabBar tabs={tabs} activeTabPos={0} editing={false}

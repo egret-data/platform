@@ -5,7 +5,7 @@ import { AddPanel } from "./AddPanel";
 import { CardSettingsPanel } from "./CardSettingsPanel";
 import { FilterSettingsPanel } from "./FilterSettingsPanel";
 import { CardVizPanel } from "./CardVizPanel";
-import { PanelLeftClose } from "lucide-react";
+import { X } from "lucide-react";
 
 export type EditPanel =
   | { kind: "add" }
@@ -26,13 +26,12 @@ interface Props {
   vizForPanel?: { chart: Chart; override: Record<string, unknown> | undefined; columns: { name: string; type: string }[]; rows?: unknown[][] };
   onChangeVizOverride?: (next: Record<string, unknown> | undefined) => void;
   onAddChart: (c: Chart) => void;
-  onAddVirtual: (t: "text" | "heading" | "link") => void;
   onUpdateCardOptions: (patch: Record<string, unknown>) => void;
   onMoveCardToTab: (tabKey: string) => void;
   onChangeParam: (next: DashboardParameter) => void;
   onDeleteParam: () => void;
   onClose: () => void;
-  onCollapse: () => void;
+  onBack: () => void;
 }
 
 export function EditSidebar(props: Props) {
@@ -42,11 +41,11 @@ export function EditSidebar(props: Props) {
     <aside className="sticky top-4 max-h-[calc(100vh-7rem)] w-[340px] shrink-0 self-start overflow-auto rounded-lg border bg-card">
       <div className="flex items-center justify-between border-b px-2 py-1.5">
         {onPanel
-          ? <button type="button" aria-label="back to add" className="text-xs text-muted-foreground hover:text-foreground" onClick={props.onClose}>‹ Add cards</button>
+          ? <button type="button" aria-label="back to add" className="text-xs text-muted-foreground hover:text-foreground" onClick={props.onBack}>‹ Add cards</button>
           : <span className="px-1 text-xs font-medium text-muted-foreground">Add cards</span>}
-        <button type="button" aria-label="collapse sidebar" title="Hide panel" className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground" onClick={props.onCollapse}><PanelLeftClose className="h-4 w-4" /></button>
+        <button type="button" aria-label="close panel" title="Close" className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground" onClick={props.onClose}><X className="h-4 w-4" /></button>
       </div>
-      {panel?.kind === "add" && <AddPanel charts={props.charts} onAddChart={props.onAddChart} onAddVirtual={props.onAddVirtual} />}
+      {panel?.kind === "add" && <AddPanel charts={props.charts} onAddChart={props.onAddChart} />}
       {panel?.kind === "card" && props.cardForPanel && (
         <CardSettingsPanel card={props.cardForPanel} chart={props.chartForCard} parameters={props.parameters} tabs={props.tabs}
           onUpdateOptions={props.onUpdateCardOptions} onMoveToTab={props.onMoveCardToTab} />

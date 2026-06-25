@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import DashboardView from "../DashboardView";
@@ -67,7 +68,8 @@ describe("DashboardView (edit mode)", () => {
   it("adds a card from the saved-charts sidebar and removes it", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
-    // entering edit shows the Add panel; the chart's name button adds a card
+    // Sidebar is hidden on enter-edit; open the Add panel via the toolbar button
+    fireEvent.click(screen.getByRole("button", { name: "add chart" }));
     const addBtn = screen.getByRole("button", { name: "Sales" });
     fireEvent.click(addBtn);
     expect(screen.getAllByRole("button", { name: /remove card/i }).length).toBeGreaterThan(0);
@@ -79,6 +81,8 @@ describe("DashboardView (edit mode)", () => {
     updateSpy.mockClear();
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    // Open the Add panel via the toolbar button, then pick the chart
+    fireEvent.click(screen.getByRole("button", { name: "add chart" }));
     fireEvent.click(screen.getByRole("button", { name: "Sales" }));
     fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
     expect(updateSpy).toHaveBeenCalledTimes(1);
@@ -90,43 +94,61 @@ describe("DashboardView (edit mode)", () => {
       expect(c.size_y).toBeGreaterThanOrEqual(4);
     }
   });
+
+  it("saves the edited dashboard name", () => {
+    updateSpy.mockClear();
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    const nameInput = screen.getByLabelText("dashboard name");
+    fireEvent.change(nameInput, { target: { value: "Renamed Dash" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(updateSpy).toHaveBeenCalledWith(expect.objectContaining({ name: "Renamed Dash" }));
+  });
 });
 
 describe("DashboardView (Phase B — card variety)", () => {
   // After adding a virtual card, its editor now lives in the CardSettingsPanel —
-  // open the new card's "card settings" (the last toolbar) to reach it.
+  // click the last dashcard body to open it.
   function openLastCardSettings() {
-    const gear = screen.getAllByRole("button", { name: "card settings" });
-    fireEvent.click(gear[gear.length - 1]);
+    const bodies = screen.getAllByTestId("dashcard-body");
+    fireEvent.click(bodies[bodies.length - 1]);
   }
-  it("adds a text card and edits its body", () => {
+  it("adds a text card and edits its body", async () => {
+    const user = userEvent.setup();
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
-    fireEvent.click(screen.getByRole("button", { name: /add text/i }));
+    await user.click(screen.getByRole("button", { name: "add text or heading" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Text" }));
     openLastCardSettings();
     const editor = screen.getByLabelText(/text body/i);
     fireEvent.change(editor, { target: { value: "## Notes" } });
     expect((editor as HTMLTextAreaElement).value).toBe("## Notes");
   });
-  it("adds a heading card", () => {
+  it("adds a heading card", async () => {
+    const user = userEvent.setup();
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
-    fireEvent.click(screen.getByRole("button", { name: /add heading/i }));
+    await user.click(screen.getByRole("button", { name: "add text or heading" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Heading" }));
     openLastCardSettings();
     expect(screen.getByLabelText(/heading text/i)).toBeInTheDocument();
   });
-  it("adds a link card with url + label", () => {
+  it("adds a link card with url + label settings", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
-    fireEvent.click(screen.getByRole("button", { name: /add link/i }));
-    openLastCardSettings();
+    const before = screen.getAllByRole("button", { name: /remove card/i }).length;
+    fireEvent.click(screen.getByRole("button", { name: "add link" }));
+    const after = screen.getAllByRole("button", { name: /remove card/i }).length;
+    expect(after).toBe(before + 1);
+    const bodies = screen.getAllByTestId("dashcard-body");
+    fireEvent.click(bodies[bodies.length - 1]);
     expect(screen.getByLabelText(/link url/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/link label/i)).toBeInTheDocument();
   });
   it("offers a title input on a chart card in edit mode", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
-    fireEvent.click(screen.getByRole("button", { name: "card settings" }));
+    fireEvent.click(screen.getAllByTestId("dashcard-body")[0]);
     expect(screen.getByLabelText(/card title/i)).toBeInTheDocument();
   });
 });
@@ -161,7 +183,7 @@ describe("DashboardView (Phase C — parameters)", () => {
   it("adds a filter parameter in edit mode", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
-    fireEvent.click(screen.getByRole("button", { name: /\+ filter/i }));
+    fireEvent.click(screen.getByRole("button", { name: "add filter" }));
     expect(screen.getByLabelText(/parameter name/i)).toBeInTheDocument();
   });
   it("renders the filter bar in view mode when the dashboard has parameters", () => {
@@ -232,7 +254,7 @@ describe("DashboardView (Phase D1 — on-click config)", () => {
     };
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /edit/i }));
-    fireEvent.click(screen.getByRole("button", { name: "card settings" }));
+    fireEvent.click(screen.getAllByTestId("dashcard-body")[0]);
     fireEvent.change(screen.getByLabelText(/on click/i), { target: { value: "url" } });
     const tpl = screen.getByLabelText(/url template/i);
     fireEvent.change(tpl, { target: { value: "https://x.com/{{region}}" } });

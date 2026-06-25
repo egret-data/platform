@@ -41,12 +41,11 @@ describe("DashboardView width", () => {
     const { container } = renderView();
     expect(container.querySelector(".max-w-\\[1200px\\]")).toBeNull();
   });
-  it("edit mode: choosing Fixed and saving sends width in the payload", () => {
-    detail = { ...base, width: "full" };
+  it("edit mode: saving sends the stored dashboard width in the payload", () => {
+    detail = { ...base, width: "fixed" };
     update.mutateAsync.mockClear();
     renderView();
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    fireEvent.click(screen.getByRole("button", { name: "width fixed" }));
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(update.mutateAsync).toHaveBeenCalledWith(expect.objectContaining({ width: "fixed" }));
   });

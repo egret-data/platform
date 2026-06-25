@@ -15,24 +15,8 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { WorkspaceSwitcher } from "@/components/layout/WorkspaceSwitcher";
-
-// Polyfill browser APIs that jsdom lacks but Radix Select requires
-beforeEach(() => {
-  if (!HTMLElement.prototype.hasPointerCapture) {
-    HTMLElement.prototype.hasPointerCapture = () => false;
-  }
-  if (!HTMLElement.prototype.setPointerCapture) {
-    HTMLElement.prototype.setPointerCapture = () => undefined;
-  }
-  if (!HTMLElement.prototype.releasePointerCapture) {
-    HTMLElement.prototype.releasePointerCapture = () => undefined;
-  }
-  if (!HTMLElement.prototype.scrollIntoView) {
-    HTMLElement.prototype.scrollIntoView = () => undefined;
-  }
-});
 
 afterEach(() => vi.restoreAllMocks());
 

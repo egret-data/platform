@@ -93,6 +93,7 @@ export function deleteTab(
   key: string,
   opts: { mode: "reassign"; toKey: string } | { mode: "delete" },
 ): { draftTabs: DraftTab[]; draftCards: DraftCard[] } {
+  if (draftTabs.length < 2) return { draftTabs, draftCards };
   const remaining = draftTabs
     .filter((t) => t.key !== key)
     .sort((a, b) => a.position - b.position)

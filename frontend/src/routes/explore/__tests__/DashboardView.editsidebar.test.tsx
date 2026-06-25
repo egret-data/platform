@@ -13,17 +13,30 @@ vi.mock("@/api/dashboards", async (orig) => { const m = await (orig as () => Pro
 const renderView = () => render(<QueryClientProvider client={new QueryClient()}><MemoryRouter initialEntries={["/explore/eng/dashboards/d1"]}><Routes><Route path="/explore/:workspace/dashboards/:id" element={<DashboardView />} /></Routes></MemoryRouter></QueryClientProvider>);
 
 describe("DashboardView edit sidebar", () => {
-  it("entering edit shows the Add panel; +Filter opens a filter panel", () => {
+  it("sidebar is hidden on entering edit; add chart opens Add panel; +Filter opens filter panel", () => {
     renderView();
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    // Sidebar must NOT be visible yet — the Add panel only appears after clicking the toolbar button
+    expect(screen.queryByLabelText("search charts")).toBeNull();
+    // Click the "add chart" toolbar button to open the Add panel
+    fireEvent.click(screen.getByRole("button", { name: "add chart" }));
     expect(screen.getByLabelText("search charts")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "+ Filter" }));
+    // +Filter opens the filter panel directly (and replaces the Add panel)
+    fireEvent.click(screen.getByRole("button", { name: "add filter" }));
     expect(screen.getByLabelText("parameter name")).toBeTruthy();
   });
-  it("clicking a card's settings opens the card panel", () => {
+  it("close panel (X) hides the sidebar", () => {
     renderView();
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    fireEvent.click(screen.getByRole("button", { name: "card settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "add chart" }));
+    expect(screen.getByLabelText("search charts")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "close panel" }));
+    expect(screen.queryByLabelText("search charts")).toBeNull();
+  });
+  it("clicking a card opens the card panel", () => {
+    renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getAllByTestId("dashcard-body")[0]);
     expect(screen.getByLabelText(/heading text|text body/)).toBeTruthy();
   });
 });

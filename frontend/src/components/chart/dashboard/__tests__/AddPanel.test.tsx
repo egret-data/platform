@@ -7,22 +7,16 @@ const charts = [{ id: "1", name: "Revenue bar", viz_type: "bar" }, { id: "2", na
 
 describe("AddPanel", () => {
   it("renders a viz-type icon on each chart row", () => {
-    render(<AddPanel charts={charts} onAddChart={vi.fn()} onAddVirtual={vi.fn()} />);
+    render(<AddPanel charts={charts} onAddChart={vi.fn()} />);
     expect(screen.getByRole("button", { name: "Revenue bar" }).querySelector("svg")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Orders line" }).querySelector("svg")).toBeTruthy();
   });
   it("filters the chart list by search and adds on click", () => {
     const onAddChart = vi.fn();
-    render(<AddPanel charts={charts} onAddChart={onAddChart} onAddVirtual={vi.fn()} />);
+    render(<AddPanel charts={charts} onAddChart={onAddChart} />);
     fireEvent.change(screen.getByLabelText("search charts"), { target: { value: "order" } });
     expect(screen.queryByRole("button", { name: "Revenue bar" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Orders line" }));
     expect(onAddChart).toHaveBeenCalledWith(charts[1]);
-  });
-  it("adds virtual cards", () => {
-    const onAddVirtual = vi.fn();
-    render(<AddPanel charts={charts} onAddChart={vi.fn()} onAddVirtual={onAddVirtual} />);
-    fireEvent.click(screen.getByRole("button", { name: "Add Text" }));
-    expect(onAddVirtual).toHaveBeenCalledWith("text");
   });
 });

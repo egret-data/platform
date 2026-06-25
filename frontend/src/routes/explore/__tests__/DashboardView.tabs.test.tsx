@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import DashboardView from "../DashboardView";
@@ -59,10 +60,12 @@ describe("DashboardView tabs", () => {
 });
 
 describe("DashboardView tab edit affordances", () => {
-  it("deleting a tab with cards opens a reassign dialog and reassigns", () => {
+  it("deleting a tab with cards opens a reassign dialog and reassigns", async () => {
+    const user = userEvent.setup();
     renderView();
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    fireEvent.click(screen.getByRole("button", { name: "delete tab A" }));
+    await user.click(screen.getByRole("button", { name: "tab menu A" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
     const target = screen.getByLabelText("reassign target") as HTMLSelectElement;
     fireEvent.change(target, { target: { value: target.options[0].value } });
     fireEvent.click(screen.getByRole("button", { name: "reassign and delete" }));
@@ -71,8 +74,15 @@ describe("DashboardView tab edit affordances", () => {
   it("a card shows a move-to-tab control in edit mode with >=2 tabs", () => {
     renderView();
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
-    // the move-to-tab control now lives in the card settings panel
-    fireEvent.click(screen.getByRole("button", { name: "card settings" }));
+    fireEvent.click(screen.getAllByTestId("dashcard-body")[0]);
     expect(screen.getByLabelText("move card to tab")).toBeTruthy();
+  });
+  it("shows a tab options trigger per tab in edit mode only", () => {
+    renderView();
+    // view mode: no tab menu triggers
+    expect(screen.queryByRole("button", { name: /tab menu/i })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    // edit mode: one trigger per tab (fixture has 2 tabs)
+    expect(screen.getAllByRole("button", { name: /tab menu/i }).length).toBeGreaterThanOrEqual(2);
   });
 });

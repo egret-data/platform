@@ -46,4 +46,10 @@ describe("LinkCard", () => {
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
     expect(screen.getByText(/no url/i)).toBeInTheDocument();
   });
+  it("link card does not open a new tab in edit mode", () => {
+    const { rerender } = render(<LinkCard url="https://x.com" label="X" editing={false} />);
+    expect(screen.getByRole("link", { name: "X" })).toHaveAttribute("target", "_blank");
+    rerender(<LinkCard url="https://x.com" label="X" editing />);
+    expect(screen.getByRole("link", { name: "X" })).not.toHaveAttribute("target");
+  });
 });

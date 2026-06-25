@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Info, Pencil, Star, PanelLeftOpen } from "lucide-react";
+import { Info, Pencil, Star } from "lucide-react";
 import { useParams } from "react-router-dom";
 import { type Layout } from "react-grid-layout";
 import { useDashboard, useDashboardMutations, type DashboardCard as Card, type DashboardParameter } from "@/api/dashboards";
@@ -23,6 +23,10 @@ import { DashboardFilterBar } from "@/components/chart/dashboard/DashboardFilter
 import { EditSidebar, type EditPanel } from "@/components/chart/dashboard/EditSidebar";
 import { EditFilterChips } from "@/components/chart/dashboard/EditFilterChips";
 import { CardEditToolbar } from "@/components/chart/dashboard/CardEditToolbar";
+import { DashboardEditToolbar } from "@/components/chart/dashboard/DashboardEditToolbar";
+import type { SectionLayout } from "@/components/chart/dashboard/dashboard-sections";
+import { dropPlaceholders } from "@/components/chart/dashboard/dashboard-sections";
+import { PlaceholderCard } from "@/components/chart/dashboard/PlaceholderCard";
 import { slugify, applyParamsToChart, computeLinkedFilters, isBlank } from "@/components/chart/dashboard/params";
 import { useColumnValues } from "@/api/useColumnValues";
 import { useDashboardTabs } from "@/api/useDashboardTabs";
@@ -55,7 +59,7 @@ export default function DashboardView() {
   const [draftCards, setDraftCards] = useState<DraftCard[] | null>(null);
   const [draftParameters, setDraftParameters] = useState<DashboardParameter[] | null>(null);
   const [draftTabs, setDraftTabs] = useState<DraftTab[] | null>(null);
-  const [draftWidth, setDraftWidth] = useState<"fixed" | "full">("full");
+  const [draftName, setDraftName] = useState("");
   const serverTabCount = dash?.tabs?.length ?? 0;
   const { activeTabPos, setActiveTabPos } = useDashboardTabs(editing ? (draftTabs?.length ?? 0) : serverTabCount);
   const cardSeqRef = useRef(0);
@@ -67,9 +71,8 @@ export default function DashboardView() {
   const paramsState = useDashboardParams(paramSource);
   const [editPanel, setEditPanel] = useState<EditPanel>(null);
   const [replacingId, setReplacingId] = useState<string | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  // Opening any settings panel must reveal the sidebar even if the user collapsed it.
-  const openPanel = useCallback((p: EditPanel) => { setEditPanel(p); setSidebarCollapsed(false); }, []);
+  const [fillingPlaceholderId, setFillingPlaceholderId] = useState<string | null>(null);
+  const openPanel = useCallback((p: EditPanel) => { setEditPanel(p); }, []);
   const [deletingTabKey, setDeletingTabKey] = useState<string | null>(null);
   const [reassignTo, setReassignTo] = useState<string | null>(null);
   // category/id dropdown options, keyed by param slug; populated by <ParamOptions> children.
@@ -88,12 +91,13 @@ export default function DashboardView() {
     setDraftCards(null);
     setDraftParameters(null);
     setDraftTabs(null);
+    setDraftName("");
   }, [id]);
 
   if (isLoading || !dash) return <div className="p-4 text-muted-foreground">Loading…</div>;
 
   const dashboard = dash;
-  const effectiveWidth = editing ? draftWidth : dashboard.width;
+  const effectiveWidth = dashboard.width;
   const cards = editing && draftCards ? draftCards : dashboard.cards;
   // Fallback DraftCard[] for the draft setters (each runs only while editing, so draftCards is
   // non-null and this is effectively dead — but it keeps the setters typed as DraftCard[]).
@@ -127,11 +131,11 @@ export default function DashboardView() {
     setDraftCards(dc);
     setDraftParameters((dashboard.parameters ?? []).map((p) => ({ ...p })));
     setDraftTabs(dt);
-    setDraftWidth(dashboard.width);
+    setDraftName(dashboard.name);
     setEditing(true);
-    setEditPanel({ kind: "add" });
+    setEditPanel(null);
   }
-  function cancelEdit() { setEditing(false); setDraftCards(null); setDraftParameters(null); setDraftTabs(null); setEditPanel(null); }
+  function cancelEdit() { setEditing(false); setDraftCards(null); setDraftParameters(null); setDraftTabs(null); setEditPanel(null); setDraftName(""); }
 
   function addCard(chart: Chart) {
     const { w, h } = sizeForViz(chart.viz_type).default;
@@ -161,6 +165,15 @@ export default function DashboardView() {
     setReplacingId(null);
   }
 
+  function fillPlaceholder(cardId: string, chart: Chart) {
+    setDraftCards((prev) =>
+      (prev ?? cardsAsDraft()).map((c) =>
+        c.id === cardId ? { ...c, card_type: "chart", chart_id: chart.id, options: {} } : c,
+      ),
+    );
+    setFillingPlaceholderId(null);
+  }
+
   function addVirtualCard(card_type: "text" | "heading" | "link", options: Record<string, unknown>) {
     setDraftCards((prev) => {
       const base = prev ?? cardsAsDraft();
@@ -174,6 +187,34 @@ export default function DashboardView() {
       return [...base, newCard];
     });
   }
+  function addFilter() {
+    const slug = slugify("filter", parameters.map((p) => p.slug));
+    const id = `new-${slug}-${cardSeqRef.current++}`;
+    setDraftParameters([...parameters, { id, name: "Filter", slug, type: "text", operator: "is" }]);
+    openPanel({ kind: "filter", paramId: id });
+  }
+
+  function addSection(layout: SectionLayout) {
+    setDraftCards((prev) => {
+      const base = prev ?? cardsAsDraft();
+      const onTab = base.filter((c) => c.tabKey === (activeTab?.key ?? null));
+      const row = onTab.reduce((m, c) => Math.max(m, c.grid_row + c.size_y), 0);
+      const built: DraftCard[] = layout.build({ col: 0, row }).map((s) => ({
+        id: `new-section-${cardSeqRef.current++}`,
+        chart_id: null,
+        card_type: s.card_type,
+        grid_col: s.grid_col,
+        grid_row: s.grid_row,
+        size_x: s.size_x,
+        size_y: s.size_y,
+        options: s.card_type === "heading" ? { text: "" } : {},
+        tab_id: null,
+        tabKey: activeTab?.key ?? null,
+      }));
+      return [...base, ...built];
+    });
+  }
+
   function updateCardOptions(cardId: string, patch: Record<string, unknown>) {
     setDraftCards((prev) => {
       const base = prev ?? cardsAsDraft();
@@ -229,10 +270,12 @@ export default function DashboardView() {
   }
 
   async function onSave() {
-    const { tabs: tabPayload, cards: cardPayload } = serializeLayout(draftTabs ?? [], (cards as DraftCard[]));
+    if (!draftName.trim()) { toast.error("Dashboard name can't be empty"); return; }
+    const persistCards = dropPlaceholders(cards as DraftCard[]);
+    const { tabs: tabPayload, cards: cardPayload } = serializeLayout(draftTabs ?? [], persistCards);
     try {
-      await update.mutateAsync({ id: dashboard.id, name: dashboard.name, description: dashboard.description, parameters, tabs: tabPayload, width: draftWidth, cards: cardPayload });
-      setEditing(false); setDraftCards(null); setDraftTabs(null); setEditPanel(null);
+      await update.mutateAsync({ id: dashboard.id, name: draftName.trim() || dashboard.name, description: dashboard.description, parameters, tabs: tabPayload, width: dashboard.width, cards: cardPayload });
+      setEditing(false); setDraftCards(null); setDraftTabs(null); setEditPanel(null); setDraftName("");
       toast.success("Saved");
     } catch (e) { toast.error(String(e)); }
   }
@@ -276,11 +319,15 @@ export default function DashboardView() {
   return (
     <div className={view.isFullscreen ? "fixed inset-0 z-50 overflow-auto bg-dashboard p-4" : "min-h-full bg-dashboard p-4"}>
       {editing && (
-        <div className="-mx-4 -mt-4 mb-4 flex items-center gap-2 bg-primary/90 px-4 py-2 text-sm font-medium text-primary-foreground">
-          <Pencil className="h-4 w-4" /> You're editing this dashboard
+        <div className="-mx-4 -mt-4 mb-4 flex items-center justify-between gap-2 bg-primary/90 px-4 py-2 text-sm font-medium text-primary-foreground">
+          <span className="flex items-center gap-2"><Pencil className="h-4 w-4" /> You're editing this dashboard</span>
+          <span className="flex items-center gap-2">
+            <Button size="sm" variant="ghost" className="text-primary-foreground hover:bg-primary-foreground/15 hover:text-primary-foreground" onClick={cancelEdit}>Cancel</Button>
+            <Button size="sm" variant="secondary" onClick={onSave} disabled={update.isPending}>Save</Button>
+          </span>
         </div>
       )}
-      <div className={effectiveWidth === "fixed" ? "mx-auto w-full max-w-[1200px]" : ""}>
+<div className={effectiveWidth === "fixed" ? "mx-auto w-full max-w-[1200px]" : ""}>
       {dash.deleted_at && (
         <div className="mb-3 flex items-center justify-between rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
           <span>This dashboard is in the trash.</span>
@@ -288,8 +335,13 @@ export default function DashboardView() {
         </div>
       )}
       <div className="mb-3 flex items-center justify-between border-b pb-3">
-        <h1 className="text-xl font-bold">{dash.name}</h1>
-        <div className="flex gap-2">
+        {editing ? (
+          <input aria-label="dashboard name" value={draftName} onChange={(e) => setDraftName(e.target.value)}
+            className="min-w-0 flex-1 rounded border border-transparent bg-transparent text-xl font-bold focus:border-border focus:bg-background focus:px-2 focus:outline-none" />
+        ) : (
+          <h1 className="text-xl font-bold">{dash.name}</h1>
+        )}
+        <div className="flex items-center gap-2">
           {!editing && (
             <>
               <Button size="sm" variant="ghost" aria-label={dash.bookmarked ? "remove bookmark" : "add bookmark"}
@@ -324,21 +376,14 @@ export default function DashboardView() {
             </>
           )}
           {editing ? (
-            <>
-              <Button size="sm" variant="outline" onClick={() => openPanel({ kind: "add" })}>+ Chart</Button>
-              <Button size="sm" variant="outline" onClick={() => {
-                const slug = slugify("filter", parameters.map((p) => p.slug));
-                const id = `new-${slug}-${cardSeqRef.current++}`;
-                setDraftParameters([...parameters, { id, name: "Filter", slug, type: "text", operator: "is" }]);
-                openPanel({ kind: "filter", paramId: id });
-              }}>+ Filter</Button>
-              <div className="flex items-center gap-1 rounded border p-0.5">
-                <button type="button" aria-label="width full" className={`rounded px-2 py-0.5 text-xs ${draftWidth === "full" ? "bg-accent" : ""}`} onClick={() => setDraftWidth("full")}>Full</button>
-                <button type="button" aria-label="width fixed" className={`rounded px-2 py-0.5 text-xs ${draftWidth === "fixed" ? "bg-accent" : ""}`} onClick={() => setDraftWidth("fixed")}>Fixed</button>
-              </div>
-              <Button size="sm" variant="ghost" onClick={cancelEdit}>Cancel</Button>
-              <Button size="sm" onClick={onSave} disabled={update.isPending}>Save</Button>
-            </>
+            <DashboardEditToolbar
+              onAddChart={() => openPanel({ kind: "add" })}
+              onAddText={() => addVirtualCard("text", { text: "" })}
+              onAddHeading={() => addVirtualCard("heading", { text: "" })}
+              onAddLink={() => addVirtualCard("link", { url: "", label: "" })}
+              onAddSection={addSection}
+              onAddFilter={addFilter}
+            />
           ) : (
             <Button size="sm" variant="outline" onClick={startEdit}>Edit</Button>
           )}
@@ -386,7 +431,7 @@ export default function DashboardView() {
         ? <EditFilterChips parameters={parameters} activeId={editPanel?.kind === "filter" ? editPanel.paramId : null} onSelect={(id) => openPanel({ kind: "filter", paramId: id })} />
         : <DashboardFilterBar parameters={parameters} values={paramsState.values} onChange={paramsState.setValue} optionsBySlug={optionsBySlug} />}
       <div className={editing || showInfo ? "flex gap-4" : ""}>
-        <div className={editing || showInfo ? "min-w-0 flex-1" : ""}>
+        <div className={editing ? "min-w-0 flex-1 pb-24" : showInfo ? "min-w-0 flex-1" : ""}>
       {(cards.length === 0 || (tabs.length > 0 && visibleCards.length === 0)) && editing ? (
         <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed py-20 text-center">
           <Pencil className="h-8 w-8 text-muted-foreground/40" />
@@ -416,21 +461,34 @@ export default function DashboardView() {
               {editing && (
                 <div className="dash-nodrag absolute -top-3.5 left-1/2 z-30 -translate-x-1/2 opacity-0 transition-opacity group-hover:opacity-100">
                   <CardEditToolbar cardType={c.card_type}
-                    onSettings={() => openPanel({ kind: "card", cardId: c.id })}
                     onViz={() => openPanel({ kind: "viz", cardId: c.id })}
                     onDuplicate={() => duplicateCard(c.id)}
                     onReplace={() => setReplacingId(c.id)}
                     onRemove={() => removeCard(c.id)} />
                 </div>
               )}
-              <div className={`relative h-full overflow-hidden ${c.card_type === "heading" ? "" : "rounded-sm border bg-card"} ${editing && editPanel?.kind === "card" && editPanel.cardId === c.id ? "ring-2 ring-primary" : ""}`}>
+              <div
+                data-testid="dashcard-body"
+                role={editing && c.card_type !== "placeholder" ? "button" : undefined}
+                tabIndex={editing && c.card_type !== "placeholder" ? 0 : undefined}
+                onClick={editing && c.card_type !== "placeholder" ? () => openPanel({ kind: "card", cardId: c.id }) : undefined}
+                onKeyDown={editing && c.card_type !== "placeholder" ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openPanel({ kind: "card", cardId: c.id }); } } : undefined}
+                className={`relative h-full overflow-hidden ${editing && c.card_type !== "placeholder" ? "cursor-pointer" : ""} ${
+                c.card_type === "heading" ? "bg-dashboard"
+                : c.card_type === "placeholder" ? ""
+                : "rounded-sm border bg-card"
+              } ${editing && editPanel?.kind === "card" && editPanel.cardId === c.id ? "ring-2 ring-primary" : ""}`}>
                 {editing && <div className="dash-draghandle absolute inset-x-0 top-0 z-10 h-6 cursor-move" title="Drag to move" />}
-                <DashboardCardView ws={ws} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values}
-                  blocked={!editing && requiredUnset} editing={editing}
-                  autoHeight={!!c.options.autoHeight}
-                  rowHeight={rowHeight}
-                  onAutoHeight={editing ? (rows) => applyAutoHeight(c.id, rows) : undefined}
-                  onValueClick={editing ? undefined : (ctx, x, y) => onCardValueClick(c, ctx, x, y)} />
+                {c.card_type === "placeholder" ? (
+                  <PlaceholderCard onPick={() => setFillingPlaceholderId(c.id)} />
+                ) : (
+                  <DashboardCardView ws={ws} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values}
+                    blocked={!editing && requiredUnset} editing={editing}
+                    autoHeight={!!c.options.autoHeight}
+                    rowHeight={rowHeight}
+                    onAutoHeight={editing ? (rows) => applyAutoHeight(c.id, rows) : undefined}
+                    onValueClick={editing ? undefined : (ctx, x, y) => onCardValueClick(c, ctx, x, y)} />
+                )}
                 {activeParamId && c.card_type === "chart" && baseChart && (
                   <CardFilterMapOverlay
                     columns={
@@ -449,13 +507,7 @@ export default function DashboardView() {
         </DashboardGridLayout>
       )}
         </div>
-        {editing && (sidebarCollapsed ? (
-          <div className="sticky top-4 self-start">
-            <button type="button" aria-label="expand sidebar" title="Show panel" className="inline-flex size-9 items-center justify-center rounded-lg border bg-card text-muted-foreground hover:bg-accent hover:text-foreground" onClick={() => setSidebarCollapsed(false)}>
-              <PanelLeftOpen className="h-4 w-4" />
-            </button>
-          </div>
-        ) : (
+        {editing && editPanel && (
           <EditSidebar
             panel={editPanel}
             charts={charts ?? []}
@@ -468,15 +520,14 @@ export default function DashboardView() {
             chartForCard={editPanel?.kind === "card" ? chartById.get((cards as DraftCard[]).find((c) => c.id === editPanel.cardId)?.chart_id ?? "") : undefined}
             paramForPanel={editPanel?.kind === "filter" ? parameters.find((p) => p.id === editPanel.paramId) : undefined}
             onAddChart={(c) => addCard(c)}
-            onAddVirtual={(t) => addVirtualCard(t, t === "link" ? { url: "", label: "" } : { text: "" })}
             onUpdateCardOptions={(patch) => { if (editPanel?.kind === "card") updateCardOptions(editPanel.cardId, patch); }}
             onMoveCardToTab={(tabKey) => { if (editPanel?.kind === "card") setDraftCards(moveCardToTab((cards as DraftCard[]), editPanel.cardId, tabKey)); }}
             onChangeParam={(next) => setDraftParameters(parameters.map((x) => x.id === next.id ? { ...next, slug: x.slug } : x))}
             onDeleteParam={() => { if (editPanel?.kind === "filter") { const id = editPanel.paramId; setDraftParameters(parameters.filter((x) => x.id !== id)); setEditPanel({ kind: "add" }); } }}
-            onClose={() => setEditPanel({ kind: "add" })}
-            onCollapse={() => setSidebarCollapsed(true)}
+            onClose={() => setEditPanel(null)}
+            onBack={() => setEditPanel({ kind: "add" })}
           />
-        ))}
+        )}
         {!editing && showInfo && (
           <DashboardInfoSidebar
             name={dash.name}
@@ -527,6 +578,12 @@ export default function DashboardView() {
         <DialogContent>
           <DialogHeader><DialogTitle>Replace chart</DialogTitle></DialogHeader>
           <ChartPickerList charts={charts ?? []} onPick={(ch) => replaceCard(replacingId!, ch)} autoFocus />
+        </DialogContent>
+      </Dialog>
+      <Dialog open={fillingPlaceholderId !== null} onOpenChange={(o) => { if (!o) setFillingPlaceholderId(null); }}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Add a chart</DialogTitle></DialogHeader>
+          <ChartPickerList charts={charts ?? []} onPick={(ch) => fillPlaceholder(fillingPlaceholderId!, ch)} autoFocus />
         </DialogContent>
       </Dialog>
       {drillMenu && (
