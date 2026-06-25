@@ -1,19 +1,20 @@
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { Search, Star } from "lucide-react";
+import { Search, Star, Trash2, FolderPlus, ListChecks } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
 import { useCharts, useChartMutations, type Chart } from "@/api/charts";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SortableHeader, type SortState } from "@/components/explore/SortableHeader";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { ChartActionsMenu } from "@/components/chart/ChartActionsMenu";
-import { BulkToggle } from "@/components/explore/BulkBar";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
 import { groupByFolder, useCollapsed } from "@/components/explore/folders";
@@ -38,6 +39,7 @@ export default function Charts() {
   const [typeFilter, setTypeFilter] = useState("all");
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
   const [pendingDelete, setPendingDelete] = useState<Chart | null>(null);
+  const [folderDialog, setFolderDialog] = useState<{ mode: "new" | "rename" | "move" | "bulkmove"; chart?: Chart; folder?: { id: string; name: string } } | null>(null);
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -70,16 +72,11 @@ export default function Charts() {
     for (const id of bulk.selectedIds) { try { await trash.mutateAsync(id); } catch (e) { toast.error(String(e)); } }
     toast.success("Moved to Trash"); bulk.clear();
   }
-  async function doBulkMove() {
-    const name = prompt("Move to folder (name; blank = Uncategorized)");
-    if (name === null) return;
+  async function doBulkMove(name: string) {
     const trimmed = name.trim();
     try {
-      let folderId: string | null = null;
-      if (trimmed !== "") {
-        const existing = folders.find((f) => f.name.toLowerCase() === trimmed.toLowerCase());
-        folderId = existing ? existing.id : (await createFolder.mutateAsync(trimmed)).id;
-      }
+      const existing = folders.find((f) => f.name.toLowerCase() === trimmed.toLowerCase());
+      const folderId = existing ? existing.id : (await createFolder.mutateAsync(trimmed)).id;
       for (const id of bulk.selectedIds) await setFolder.mutateAsync({ id, folder_id: folderId });
     } catch (e) { toast.error(String(e)); }
     bulk.clear();
@@ -114,7 +111,7 @@ export default function Charts() {
           <ChartActionsMenu ws={ws} chart={c} trashed={showTrash} folders={folders}
             onDuplicate={(x) => duplicate.mutateAsync(x.id).then(() => toast.success("Duplicated")).catch((e) => toast.error(String(e)))}
             onMove={(x, fid) => setFolder.mutateAsync({ id: x.id, folder_id: fid }).catch((e) => toast.error(String(e)))}
-            onNewFolder={(x) => { const n = prompt("New folder name"); if (n) createFolder.mutateAsync(n).then((f) => setFolder.mutateAsync({ id: x.id, folder_id: f.id })).catch((e) => toast.error(String(e))); }}
+            onNewFolder={(c) => setFolderDialog({ mode: "move", chart: c })}
             onTrash={(x) => trash.mutateAsync(x.id).then(() => toast.success("Moved to Trash")).catch((e) => toast.error(String(e)))}
             onRestore={(x) => restore.mutateAsync(x.id).catch((e) => toast.error(String(e)))}
             onDeletePermanent={(x) => setPendingDelete(x)} />
@@ -129,16 +126,34 @@ export default function Charts() {
         <h1 className="text-lg font-semibold">{showTrash ? "Trash" : "Charts"}</h1>
         <div className="flex items-center gap-2">
           {!showTrash && (
-            <Button variant={onlyBookmarked ? "default" : "outline"} onClick={() => setOnlyBookmarked((v) => !v)}>★ Bookmarks</Button>
+            <Tooltip><TooltipTrigger asChild>
+              <Button size="icon" variant={onlyBookmarked ? "secondary" : "outline"} aria-label="Bookmarks"
+                onClick={() => setOnlyBookmarked((v) => !v)}>
+                <Star className={`h-4 w-4 ${onlyBookmarked ? "fill-current" : ""}`} />
+              </Button>
+            </TooltipTrigger><TooltipContent side="bottom">Bookmarks</TooltipContent></Tooltip>
           )}
-          <Button variant={showTrash ? "default" : "outline"} onClick={() => { const next = !showTrash; setShowTrash(next); if (next) { setOnlyBookmarked(false); bulk.setBulkMode(false); } }}>
-            {showTrash ? "← Charts" : "Trash"}
-          </Button>
           {!showTrash && hasData && (
-            <BulkToggle active={bulk.bulkMode} onToggle={() => bulk.setBulkMode(!bulk.bulkMode)} />
+            <Tooltip><TooltipTrigger asChild>
+              <Button size="icon" variant={bulk.bulkMode ? "secondary" : "outline"} aria-label="Bulk select"
+                onClick={() => bulk.setBulkMode(!bulk.bulkMode)}>
+                <ListChecks className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger><TooltipContent side="bottom">Bulk select</TooltipContent></Tooltip>
           )}
+          <Tooltip><TooltipTrigger asChild>
+            <Button size="icon" variant={showTrash ? "secondary" : "outline"} aria-label="Trash"
+              onClick={() => { const next = !showTrash; setShowTrash(next); if (next) { setOnlyBookmarked(false); bulk.setBulkMode(false); } }}>
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          </TooltipTrigger><TooltipContent side="bottom">Trash</TooltipContent></Tooltip>
           {!showTrash && (
-            <Button variant="outline" onClick={() => { const n = prompt("New folder name"); if (n && n.trim()) createFolder.mutateAsync(n.trim()).then(() => toast.success("Folder created")).catch((e) => toast.error(String(e))); }}>+ New folder</Button>
+            <Tooltip><TooltipTrigger asChild>
+              <Button size="icon" variant="outline" aria-label="New folder"
+                onClick={() => setFolderDialog({ mode: "new" })}>
+                <FolderPlus className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger><TooltipContent side="bottom">New folder</TooltipContent></Tooltip>
           )}
           <Button asChild><Link to={`/explore/${ws}/charts/new`}>+ Chart</Link></Button>
         </div>
@@ -164,7 +179,7 @@ export default function Charts() {
             )}
             {bulk.bulkMode && bulk.someSelected && !showTrash && (
               <>
-                <Button variant="outline" size="sm" onClick={doBulkMove}>
+                <Button variant="outline" size="sm" onClick={() => setFolderDialog({ mode: "bulkmove" })}>
                   Move {bulk.selectedIds.length} to folder…
                 </Button>
                 <Button variant="destructive" size="sm" onClick={doBulkTrash}>
@@ -199,10 +214,7 @@ export default function Charts() {
                         colSpan={bulk.bulkMode ? 5 : 4}
                         collapsed={isCollapsed}
                         onToggle={() => collapse.toggle(key)}
-                        onRename={group.folder ? () => {
-                          const n = prompt("Rename folder", group.folder!.name);
-                          if (n) renameFolder.mutateAsync({ id: group.folder!.id, name: n }).catch((e) => toast.error(String(e)));
-                        } : undefined}
+                        onRename={group.folder ? () => setFolderDialog({ mode: "rename", folder: group.folder! }) : undefined}
                         onDelete={group.folder ? () => removeFolder.mutateAsync(group.folder!.id).then(() => toast.success("Folder deleted")).catch((e) => toast.error(String(e))) : undefined}
                         onDropItem={(id) => setFolder.mutateAsync({ id, folder_id: group.folder?.id ?? null }).catch((e) => toast.error(String(e)))}
                       />
@@ -224,6 +236,21 @@ export default function Charts() {
           <Button asChild className="mt-3"><Link to={`/explore/${ws}/charts/new`}>Create your first chart</Link></Button>
         </div>
       )}
+
+      <FolderNameDialog
+        open={!!folderDialog}
+        title={folderDialog?.mode === "rename" ? "Rename folder" : folderDialog?.mode === "move" ? "Move to new folder" : folderDialog?.mode === "bulkmove" ? "Move to folder" : "New folder"}
+        submitLabel={folderDialog?.mode === "rename" ? "Rename" : folderDialog?.mode === "move" || folderDialog?.mode === "bulkmove" ? "Move" : "Create"}
+        initialValue={folderDialog?.mode === "rename" ? folderDialog.folder!.name : ""}
+        onOpenChange={(o) => { if (!o) setFolderDialog(null); }}
+        onSubmit={(name) => {
+          const d = folderDialog!;
+          if (d.mode === "rename") renameFolder.mutateAsync({ id: d.folder!.id, name }).catch((e) => toast.error(String(e)));
+          else if (d.mode === "move") createFolder.mutateAsync(name).then((f) => setFolder.mutateAsync({ id: d.chart!.id, folder_id: f.id })).then(() => toast.success("Moved")).catch((e) => toast.error(String(e)));
+          else if (d.mode === "bulkmove") doBulkMove(name);
+          else createFolder.mutateAsync(name).then(() => toast.success("Folder created")).catch((e) => toast.error(String(e)));
+        }}
+      />
 
       <ConfirmDeleteDialog
         open={pendingDelete !== null}
