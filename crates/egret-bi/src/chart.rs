@@ -20,11 +20,12 @@ pub struct Chart {
     pub viz_type: String,
     pub params: serde_json::Value,
     pub created_by: Option<Uuid>,
+    pub folder_id: Option<Uuid>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 const COLS: &str =
-    "id, workspace_id, dataset_id, name, description, viz_type, params, created_by, updated_at";
+    "id, workspace_id, dataset_id, name, description, viz_type, params, created_by, folder_id, updated_at";
 
 /// Map a unique-violation (on insert or update) to a Conflict; pass everything else through.
 fn map_conflict_err(e: sqlx::Error) -> BiError {
@@ -107,6 +108,15 @@ impl ChartRepo {
         .execute(&self.db.pool)
         .await
         .map_err(map_conflict_err)?;
+        Ok(())
+    }
+
+    pub async fn set_folder(&self, id: Uuid, folder_id: Option<Uuid>) -> Result<(), BiError> {
+        sqlx::query("UPDATE charts SET folder_id=$2 WHERE id=$1")
+            .bind(id)
+            .bind(folder_id)
+            .execute(&self.db.pool)
+            .await?;
         Ok(())
     }
 

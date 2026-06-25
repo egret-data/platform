@@ -45,6 +45,7 @@ pub struct Dataset {
     pub table_name: Option<String>,
     pub sql: Option<String>,
     pub created_by: Option<Uuid>,
+    pub folder_id: Option<Uuid>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -72,7 +73,7 @@ pub struct Metric {
     pub ordinal: i32,
 }
 
-const COLS: &str = "id, workspace_id, database_id, name, description, catalog, schema_name, table_name, sql, created_by, updated_at";
+const COLS: &str = "id, workspace_id, database_id, name, description, catalog, schema_name, table_name, sql, created_by, folder_id, updated_at";
 
 /// Private struct for list() — sqlx tuple FromRow is version-sensitive; use flatten instead.
 #[derive(sqlx::FromRow)]
@@ -272,6 +273,15 @@ impl DatasetRepo {
     pub async fn delete(&self, id: Uuid) -> Result<(), BiError> {
         sqlx::query("DELETE FROM datasets WHERE id = $1")
             .bind(id)
+            .execute(&self.db.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_folder(&self, id: Uuid, folder_id: Option<Uuid>) -> Result<(), BiError> {
+        sqlx::query("UPDATE datasets SET folder_id=$2 WHERE id=$1")
+            .bind(id)
+            .bind(folder_id)
             .execute(&self.db.pool)
             .await?;
         Ok(())

@@ -91,6 +91,7 @@ pub struct DatasetSummaryDto {
     pub schema: Option<String>,
     pub table: Option<String>,
     pub column_count: i64,
+    pub folder_id: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -184,6 +185,7 @@ pub fn summary_dto(ds: Dataset, column_count: i64) -> DatasetSummaryDto {
         schema: ds.schema_name,
         table: ds.table_name,
         column_count,
+        folder_id: ds.folder_id.map(|u| u.to_string()),
         updated_at: ds.updated_at,
     }
 }
@@ -234,6 +236,7 @@ pub struct ChartDto {
     pub viz_type: String,
     pub params: serde_json::Value,
     pub created_by: Option<String>,
+    pub folder_id: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -246,6 +249,7 @@ pub fn chart_dto(c: Chart) -> ChartDto {
         viz_type: c.viz_type,
         params: c.params,
         created_by: c.created_by.map(|u| u.to_string()),
+        folder_id: c.folder_id.map(|u| u.to_string()),
         updated_at: c.updated_at,
     }
 }
@@ -292,6 +296,7 @@ pub struct DashboardSummaryDto {
     pub name: String,
     pub description: String,
     pub created_by: Option<String>,
+    pub folder_id: Option<String>,
     pub card_count: i64,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub bookmarked: bool,
@@ -454,6 +459,7 @@ pub fn dashboard_summary_dto(
         name: d.name,
         description: d.description,
         created_by: d.created_by.map(|u| u.to_string()),
+        folder_id: d.folder_id.map(|u| u.to_string()),
         card_count,
         updated_at: d.updated_at,
         bookmarked,
