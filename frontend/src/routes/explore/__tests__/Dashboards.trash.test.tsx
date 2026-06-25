@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { createElement, type ReactNode } from "react";
 
 const apiJson = vi.fn();
@@ -22,7 +23,7 @@ vi.mock("@/api/folders", () => ({
 import Dashboards from "../Dashboards";
 
 const wrap = ({ children }: { children: ReactNode }) =>
-  createElement(QueryClientProvider, { client: new QueryClient() }, createElement(MemoryRouter, null, children));
+  createElement(QueryClientProvider, { client: new QueryClient() }, createElement(TooltipProvider, null, createElement(MemoryRouter, null, children)));
 
 describe("Dashboards trash", () => {
   beforeEach(() => { apiJson.mockReset(); apiFetch.mockReset(); apiFetch.mockResolvedValue({}); });

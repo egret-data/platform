@@ -3,6 +3,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 const trashMock = vi.fn().mockResolvedValue({});
 const delMock = vi.fn().mockResolvedValue(undefined);
@@ -41,9 +42,11 @@ function renderAt() {
   const qc = new QueryClient();
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={["/explore/eng/datasets"]}>
-        <Routes><Route path="/explore/:workspace/datasets" element={<Datasets />} /></Routes>
-      </MemoryRouter>
+      <TooltipProvider>
+        <MemoryRouter initialEntries={["/explore/eng/datasets"]}>
+          <Routes><Route path="/explore/:workspace/datasets" element={<Datasets />} /></Routes>
+        </MemoryRouter>
+      </TooltipProvider>
     </QueryClientProvider>,
   );
 }
