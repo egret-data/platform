@@ -80,6 +80,14 @@ export function useSaveQuery(ws: string) {
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.saved(ws) }),
   });
 }
+export function useUpdateSavedQuery(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...body }: { id: string; database_id: string | null; name: string; sql: string; description?: string }) =>
+      apiJson<SavedQuery>(`/ws/${ws}/sqllab/queries/${id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.saved(ws) }),
+  });
+}
 export function useDeleteSavedQuery(ws: string) {
   const qc = useQueryClient();
   return useMutation({
