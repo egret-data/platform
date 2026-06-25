@@ -19,6 +19,9 @@ import { SortableHeader } from "@/components/explore/SortableHeader";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { BulkToggle } from "@/components/explore/BulkBar";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
+import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
+import { groupByFolder, useCollapsed } from "@/components/explore/folders";
+import { FolderHeaderRow } from "@/components/explore/FolderHeaderRow";
 
 type SortKey = "name" | "column_count" | "updated_at";
 
@@ -31,6 +34,10 @@ export default function Datasets() {
   const { data, isLoading } = useDatasets(ws);
   const { data: databases } = useDatabases(ws);
   const del = useDeleteDataset(ws);
+  const { data: folders = [] } = useFolders(ws, "datasets");
+  const setFolder = useSetFolder(ws, "datasets");
+  const { create: createFolder, rename: renameFolder, remove: removeFolder } = useFolderMutations(ws, "datasets");
+  const collapse = useCollapsed(`folders:${ws}:datasets`);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -68,6 +75,8 @@ export default function Datasets() {
   }, [data, databases, query, typeFilter, dbFilter, sort]);
 
   const bulk = useBulkSelect(rows);
+  const filtering = query.trim() !== "" || typeFilter !== "all" || dbFilter !== "all";
+  const groups = useMemo(() => groupByFolder(rows, folders, filtering), [rows, folders, filtering]);
 
   const hasData = !!data && data.length > 0;
 
@@ -88,6 +97,38 @@ export default function Datasets() {
     } catch (e) { toast.error(String(e)); }
     setBulkOpen(false);
   }
+  async function doBulkMove() {
+    const name = prompt("Move to folder (name; blank = Uncategorized)");
+    if (name === null) return;
+    const trimmed = name.trim();
+    try {
+      let folderId: string | null = null;
+      if (trimmed !== "") {
+        const existing = folders.find((f) => f.name.toLowerCase() === trimmed.toLowerCase());
+        folderId = existing ? existing.id : (await createFolder.mutateAsync(trimmed)).id;
+      }
+      for (const id of bulk.selectedIds) await setFolder.mutateAsync({ id, folder_id: folderId });
+    } catch (e) { toast.error(String(e)); }
+    bulk.clear();
+  }
+
+  const renderRow = (d: DatasetSummary) => (
+    <tr key={d.id} className="border-t hover:bg-accent"
+      draggable onDragStart={(e) => e.dataTransfer.setData("text/plain", d.id)}>
+      {bulk.bulkMode && <td className="py-1"><Checkbox checked={bulk.selected.has(d.id)} onCheckedChange={() => bulk.toggle(d.id)} aria-label={`Select ${d.name}`} /></td>}
+      <td className="py-1"><Link className="font-medium hover:underline" to={d.id}>{d.name}</Link></td>
+      <td><span className="rounded bg-muted px-1.5 py-0.5 text-xs">{d.kind}</span></td>
+      <td className="text-muted-foreground">{dbName(d.database_id)}</td>
+      <td className="font-mono text-xs text-muted-foreground">{sourceOf(d)}</td>
+      <td>{d.column_count}</td>
+      <td className="text-muted-foreground"><RelativeTime iso={d.updated_at} /></td>
+      <td><DatasetActionsMenu ws={ws} ds={d} folders={folders}
+        onDuplicate={(x) => setDupId(x.id)}
+        onMove={(x, fid) => setFolder.mutateAsync({ id: x.id, folder_id: fid }).catch((e) => toast.error(String(e)))}
+        onNewFolder={(x) => { const n = prompt("New folder name"); if (n) createFolder.mutateAsync(n).then((f) => setFolder.mutateAsync({ id: x.id, folder_id: f.id })).catch((e) => toast.error(String(e))); }}
+        onDelete={setDeleteTarget} /></td>
+    </tr>
+  );
 
   return (
     <div className="p-4">
@@ -126,9 +167,14 @@ export default function Datasets() {
               </SelectContent>
             </Select>
             {bulk.bulkMode && bulk.someSelected && (
-              <Button variant="destructive" size="sm" onClick={() => setBulkOpen(true)}>
-                Delete {bulk.selectedIds.length}
-              </Button>
+              <>
+                <Button variant="outline" size="sm" onClick={doBulkMove}>
+                  Move {bulk.selectedIds.length} to folder…
+                </Button>
+                <Button variant="destructive" size="sm" onClick={() => setBulkOpen(true)}>
+                  Delete {bulk.selectedIds.length}
+                </Button>
+              </>
             )}
           </div>
 
@@ -146,20 +192,28 @@ export default function Datasets() {
                   <th className="w-8" />
                 </tr>
               </thead>
-              <tbody>
-                {rows.map((d) => (
-                  <tr key={d.id} className="border-t hover:bg-accent">
-                    {bulk.bulkMode && <td className="py-1"><Checkbox checked={bulk.selected.has(d.id)} onCheckedChange={() => bulk.toggle(d.id)} aria-label={`Select ${d.name}`} /></td>}
-                    <td className="py-1"><Link className="font-medium hover:underline" to={d.id}>{d.name}</Link></td>
-                    <td><span className="rounded bg-muted px-1.5 py-0.5 text-xs">{d.kind}</span></td>
-                    <td className="text-muted-foreground">{dbName(d.database_id)}</td>
-                    <td className="font-mono text-xs text-muted-foreground">{sourceOf(d)}</td>
-                    <td>{d.column_count}</td>
-                    <td className="text-muted-foreground"><RelativeTime iso={d.updated_at} /></td>
-                    <td><DatasetActionsMenu ws={ws} ds={d} onDuplicate={(x) => setDupId(x.id)} onDelete={setDeleteTarget} /></td>
-                  </tr>
-                ))}
-              </tbody>
+              {groups.map((group) => {
+                const key = group.folder?.id ?? "__uncat__";
+                const isCollapsed = collapse.isCollapsed(key);
+                return (
+                  <tbody key={key}>
+                    <FolderHeaderRow
+                      name={group.folder?.name ?? "Uncategorized"}
+                      count={group.rows.length}
+                      colSpan={bulk.bulkMode ? 8 : 7}
+                      collapsed={isCollapsed}
+                      onToggle={() => collapse.toggle(key)}
+                      onRename={group.folder ? () => {
+                        const n = prompt("Rename folder", group.folder!.name);
+                        if (n) renameFolder.mutateAsync({ id: group.folder!.id, name: n }).catch((e) => toast.error(String(e)));
+                      } : undefined}
+                      onDelete={group.folder ? () => removeFolder.mutateAsync(group.folder!.id).then(() => toast.success("Folder deleted")).catch((e) => toast.error(String(e))) : undefined}
+                      onDropItem={(id) => setFolder.mutateAsync({ id, folder_id: group.folder?.id ?? null }).catch((e) => toast.error(String(e)))}
+                    />
+                    {!isCollapsed && group.rows.map(renderRow)}
+                  </tbody>
+                );
+              })}
             </table>
           ) : (
             <p className="text-muted-foreground">No datasets match the current filters.</p>

@@ -14,6 +14,9 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { DashboardActionsMenu } from "@/components/chart/dashboard/DashboardActionsMenu";
 import { BulkToggle } from "@/components/explore/BulkBar";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
+import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
+import { groupByFolder, useCollapsed } from "@/components/explore/folders";
+import { FolderHeaderRow } from "@/components/explore/FolderHeaderRow";
 
 type SortKey = "name" | "card_count" | "updated_at";
 
@@ -23,6 +26,10 @@ export default function Dashboards() {
   const [showTrash, setShowTrash] = useState(false);
   const { data, isLoading } = useDashboards(ws, { trashed: showTrash });
   const { create, remove, duplicate, trash, restore, addBookmark, removeBookmark } = useDashboardMutations(ws);
+  const { data: folders = [] } = useFolders(ws, "dashboards");
+  const setFolder = useSetFolder(ws, "dashboards");
+  const { create: createFolder, rename: renameFolder, remove: removeFolder } = useFolderMutations(ws, "dashboards");
+  const collapse = useCollapsed(`folders:${ws}:dashboards`);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [onlyBookmarked, setOnlyBookmarked] = useState(false);
@@ -48,6 +55,8 @@ export default function Dashboards() {
   }, [data, onlyBookmarked, query, sort]);
 
   const bulk = useBulkSelect(rows);
+  const filtering = query.trim() !== "" || onlyBookmarked;
+  const groups = useMemo(() => groupByFolder(rows, folders, filtering), [rows, folders, filtering]);
 
   function onSort(key: SortKey) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
@@ -63,8 +72,53 @@ export default function Dashboards() {
     for (const id of bulk.selectedIds) { try { await trash.mutateAsync(id); } catch (e) { toast.error(String(e)); } }
     toast.success("Moved to Trash"); bulk.clear();
   }
+  async function doBulkMove() {
+    const name = prompt("Move to folder (name; blank = Uncategorized)");
+    if (name === null) return;
+    const trimmed = name.trim();
+    try {
+      let folderId: string | null = null;
+      if (trimmed !== "") {
+        const existing = folders.find((f) => f.name.toLowerCase() === trimmed.toLowerCase());
+        folderId = existing ? existing.id : (await createFolder.mutateAsync(trimmed)).id;
+      }
+      for (const id of bulk.selectedIds) await setFolder.mutateAsync({ id, folder_id: folderId });
+    } catch (e) { toast.error(String(e)); }
+    bulk.clear();
+  }
 
   const hasData = !!data && data.length > 0;
+
+  const renderRow = (d: DashboardSummary) => (
+    <tr key={d.id} className="border-t hover:bg-accent"
+      draggable={!showTrash} onDragStart={!showTrash ? (e) => e.dataTransfer.setData("text/plain", d.id) : undefined}>
+      {bulk.bulkMode && !showTrash && <td className="py-1"><Checkbox checked={bulk.selected.has(d.id)} onCheckedChange={() => bulk.toggle(d.id)} aria-label={`Select ${d.name}`} /></td>}
+      <td className="py-1">
+        <span className="inline-flex items-center gap-1">
+          {!showTrash && (
+            <Button size="sm" variant="ghost" className="h-7 w-7 p-0" aria-label={`${d.bookmarked ? "unbookmark" : "bookmark"} ${d.name}`}
+              onClick={() => guard((d.bookmarked ? removeBookmark : addBookmark).mutateAsync(d.id))}>
+              <Star className={`h-4 w-4 ${d.bookmarked ? "fill-amber-400 text-amber-400" : "text-muted-foreground"}`} />
+            </Button>
+          )}
+          <Link className="font-medium hover:underline" to={`/explore/${ws}/dashboards/${d.id}`}>{d.name}</Link>
+        </span>
+      </td>
+      <td className="text-muted-foreground">{d.card_count}</td>
+      <td className="text-muted-foreground"><RelativeTime iso={d.updated_at} /></td>
+      <td>
+        <DashboardActionsMenu
+          ws={ws} dash={d} trashed={showTrash} folders={folders}
+          onDuplicate={(x) => guard(duplicate.mutateAsync(x.id).then((c) => nav(`/explore/${ws}/dashboards/${c.id}`)))}
+          onMove={(x, fid) => setFolder.mutateAsync({ id: x.id, folder_id: fid }).catch((e) => toast.error(String(e)))}
+          onNewFolder={(x) => { const n = prompt("New folder name"); if (n) createFolder.mutateAsync(n).then((f) => setFolder.mutateAsync({ id: x.id, folder_id: f.id })).catch((e) => toast.error(String(e))); }}
+          onTrash={(x) => guard(trash.mutateAsync(x.id).then(() => toast.success("Moved to Trash")))}
+          onRestore={(x) => guard(restore.mutateAsync(x.id))}
+          onDeletePermanent={setPendingDelete}
+        />
+      </td>
+    </tr>
+  );
 
   return (
     <div className="p-4">
@@ -103,9 +157,14 @@ export default function Dashboards() {
               <Input className="pl-8" placeholder="Search dashboards…" value={query} onChange={(e) => setQuery(e.target.value)} />
             </div>
             {bulk.bulkMode && bulk.someSelected && !showTrash && (
-              <Button variant="destructive" size="sm" onClick={doBulkTrash}>
-                Move {bulk.selectedIds.length} to Trash
-              </Button>
+              <>
+                <Button variant="outline" size="sm" onClick={doBulkMove}>
+                  Move {bulk.selectedIds.length} to folder…
+                </Button>
+                <Button variant="destructive" size="sm" onClick={doBulkTrash}>
+                  Move {bulk.selectedIds.length} to Trash
+                </Button>
+              </>
             )}
           </div>
 
@@ -120,35 +179,32 @@ export default function Dashboards() {
                   <th className="w-8" />
                 </tr>
               </thead>
-              <tbody>
-                {rows.map((d) => (
-                  <tr key={d.id} className="border-t hover:bg-accent">
-                    {bulk.bulkMode && !showTrash && <td className="py-1"><Checkbox checked={bulk.selected.has(d.id)} onCheckedChange={() => bulk.toggle(d.id)} aria-label={`Select ${d.name}`} /></td>}
-                    <td className="py-1">
-                      <span className="inline-flex items-center gap-1">
-                        {!showTrash && (
-                          <Button size="sm" variant="ghost" className="h-7 w-7 p-0" aria-label={`${d.bookmarked ? "unbookmark" : "bookmark"} ${d.name}`}
-                            onClick={() => guard((d.bookmarked ? removeBookmark : addBookmark).mutateAsync(d.id))}>
-                            <Star className={`h-4 w-4 ${d.bookmarked ? "fill-amber-400 text-amber-400" : "text-muted-foreground"}`} />
-                          </Button>
-                        )}
-                        <Link className="font-medium hover:underline" to={`/explore/${ws}/dashboards/${d.id}`}>{d.name}</Link>
-                      </span>
-                    </td>
-                    <td className="text-muted-foreground">{d.card_count}</td>
-                    <td className="text-muted-foreground"><RelativeTime iso={d.updated_at} /></td>
-                    <td>
-                      <DashboardActionsMenu
-                        ws={ws} dash={d} trashed={showTrash}
-                        onDuplicate={(x) => guard(duplicate.mutateAsync(x.id).then((c) => nav(`/explore/${ws}/dashboards/${c.id}`)))}
-                        onTrash={(x) => guard(trash.mutateAsync(x.id).then(() => toast.success("Moved to Trash")))}
-                        onRestore={(x) => guard(restore.mutateAsync(x.id))}
-                        onDeletePermanent={setPendingDelete}
+              {showTrash ? (
+                <tbody>{rows.map(renderRow)}</tbody>
+              ) : (
+                groups.map((group) => {
+                  const key = group.folder?.id ?? "__uncat__";
+                  const isCollapsed = collapse.isCollapsed(key);
+                  return (
+                    <tbody key={key}>
+                      <FolderHeaderRow
+                        name={group.folder?.name ?? "Uncategorized"}
+                        count={group.rows.length}
+                        colSpan={bulk.bulkMode ? 5 : 4}
+                        collapsed={isCollapsed}
+                        onToggle={() => collapse.toggle(key)}
+                        onRename={group.folder ? () => {
+                          const n = prompt("Rename folder", group.folder!.name);
+                          if (n) renameFolder.mutateAsync({ id: group.folder!.id, name: n }).catch((e) => toast.error(String(e)));
+                        } : undefined}
+                        onDelete={group.folder ? () => removeFolder.mutateAsync(group.folder!.id).then(() => toast.success("Folder deleted")).catch((e) => toast.error(String(e))) : undefined}
+                        onDropItem={(id) => setFolder.mutateAsync({ id, folder_id: group.folder?.id ?? null }).catch((e) => toast.error(String(e)))}
                       />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
+                      {!isCollapsed && group.rows.map(renderRow)}
+                    </tbody>
+                  );
+                })
+              )}
             </table>
           ) : (
             <p className="text-muted-foreground">{onlyBookmarked ? "No bookmarked dashboards." : "No dashboards match the current filters."}</p>

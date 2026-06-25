@@ -7,6 +7,15 @@ import { createElement, type ReactNode } from "react";
 const apiJson = vi.fn();
 vi.mock("@/api/client", () => ({ apiJson: (...a: unknown[]) => apiJson(...a), apiFetch: vi.fn() }));
 vi.mock("react-router-dom", async (orig) => ({ ...(await orig() as object), useParams: () => ({ workspace: "eng" }) }));
+vi.mock("@/api/folders", () => ({
+  useFolders: () => ({ data: [] }),
+  useSetFolder: () => ({ mutateAsync: vi.fn().mockResolvedValue({}) }),
+  useFolderMutations: () => ({
+    create: { mutateAsync: vi.fn().mockResolvedValue({ id: "f1", name: "F1" }) },
+    rename: { mutateAsync: vi.fn().mockResolvedValue({}) },
+    remove: { mutateAsync: vi.fn().mockResolvedValue(undefined) },
+  }),
+}));
 
 import Dashboards from "../Dashboards";
 
