@@ -36,6 +36,30 @@ pub struct SchemaColumn {
     pub ty: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct FolderDto {
+    pub id: String,
+    pub name: String,
+}
+pub fn folder_dto(f: crate::folder::Folder) -> FolderDto {
+    FolderDto {
+        id: f.id.to_string(),
+        name: f.name,
+    }
+}
+#[derive(Debug, Deserialize)]
+pub struct CreateFolder {
+    pub name: String,
+}
+#[derive(Debug, Deserialize)]
+pub struct RenameFolder {
+    pub name: String,
+}
+#[derive(Debug, Deserialize)]
+pub struct SetFolder {
+    pub folder_id: Option<Uuid>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum CreateSource {
