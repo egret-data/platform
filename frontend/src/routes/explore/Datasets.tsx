@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowDown, ArrowUp, Search } from "lucide-react";
+import { Search } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,6 +14,9 @@ import { useDatabases } from "@/api/sqllab";
 import { useDatasets, useDataset, useDeleteDataset, type DatasetSummary } from "@/api/datasets";
 import { CreateDatasetDialog } from "@/components/dataset/CreateDatasetDialog";
 import { DatasetActionsMenu } from "@/components/dataset/DatasetActionsMenu";
+import { RelativeTime } from "@/components/explore/RelativeTime";
+import { SortableHeader } from "@/components/explore/SortableHeader";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
 
 type SortKey = "name" | "column_count" | "updated_at";
 
@@ -94,14 +97,6 @@ export default function Datasets() {
     setBulkOpen(false);
   }
 
-  const Th = ({ k, label }: { k: SortKey; label: string }) => (
-    <th className="cursor-pointer select-none py-1 hover:text-foreground" onClick={() => setSortKey(k)}>
-      <span className="inline-flex items-center gap-1">{label}
-        {sort.key === k && (sort.dir === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
-      </span>
-    </th>
-  );
-
   return (
     <div className="p-4">
       <div className="mb-4 flex items-center justify-between">
@@ -118,7 +113,7 @@ export default function Datasets() {
       </div>
 
       {isLoading ? (
-        <p className="text-muted-foreground">Loading…</p>
+        <ListSkeleton cols={6} />
       ) : hasData ? (
         <>
           <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -153,12 +148,12 @@ export default function Datasets() {
               <thead className="text-left text-muted-foreground">
                 <tr>
                   {bulkMode && <th className="w-8 py-1"><Checkbox checked={allSelected} onCheckedChange={toggleAll} aria-label="Select all" /></th>}
-                  <Th k="name" label="Name" />
+                  <SortableHeader sortKey="name" label="Name" current={sort} onSort={setSortKey} />
                   <th>Kind</th>
                   <th>Database</th>
                   <th>Source</th>
-                  <Th k="column_count" label="Columns" />
-                  <Th k="updated_at" label="Updated" />
+                  <SortableHeader sortKey="column_count" label="Columns" current={sort} onSort={setSortKey} />
+                  <SortableHeader sortKey="updated_at" label="Updated" current={sort} onSort={setSortKey} />
                   <th className="w-8" />
                 </tr>
               </thead>
@@ -171,7 +166,7 @@ export default function Datasets() {
                     <td className="text-muted-foreground">{dbName(d.database_id)}</td>
                     <td className="font-mono text-xs text-muted-foreground">{sourceOf(d)}</td>
                     <td>{d.column_count}</td>
-                    <td className="text-muted-foreground">{new Date(d.updated_at).toLocaleString()}</td>
+                    <td className="text-muted-foreground"><RelativeTime iso={d.updated_at} /></td>
                     <td><DatasetActionsMenu ws={ws} ds={d} onDuplicate={(x) => setDupId(x.id)} onDelete={setDeleteTarget} /></td>
                   </tr>
                 ))}
