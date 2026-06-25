@@ -5,14 +5,25 @@ import { MoveToFolderItems } from "@/components/explore/MoveToFolderSub";
 import type { Chart } from "@/api/charts";
 import type { Folder } from "@/api/folders";
 
-export function ChartActionsMenu({ ws, chart, folders, onDuplicate, onMove, onNewFolder, onDelete }: {
-  ws: string; chart: Chart; folders: Folder[];
+export function ChartActionsMenu({ ws, chart, trashed, folders, onDuplicate, onMove, onNewFolder, onTrash, onRestore, onDeletePermanent }: {
+  ws: string; chart: Chart; trashed: boolean; folders: Folder[];
   onDuplicate: (c: Chart) => void;
   onMove: (c: Chart, folderId: string | null) => void;
   onNewFolder: (c: Chart) => void;
-  onDelete: (c: Chart) => void;
+  onTrash: (c: Chart) => void;
+  onRestore: (c: Chart) => void;
+  onDeletePermanent: (c: Chart) => void;
 }) {
   const nav = useNavigate();
+  if (trashed) {
+    return (
+      <RowActionsMenu>
+        <DropdownMenuItem onClick={() => onRestore(chart)}>Restore</DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => onDeletePermanent(chart)}>Delete permanently</DropdownMenuItem>
+      </RowActionsMenu>
+    );
+  }
   return (
     <RowActionsMenu>
       <DropdownMenuItem onClick={() => nav(`/explore/${ws}/charts/${chart.id}`)}>Open</DropdownMenuItem>
@@ -24,7 +35,7 @@ export function ChartActionsMenu({ ws, chart, folders, onDuplicate, onMove, onNe
         onNewFolder={() => onNewFolder(chart)}
       />
       <DropdownMenuSeparator />
-      <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => onDelete(chart)}>Delete</DropdownMenuItem>
+      <DropdownMenuItem onClick={() => onTrash(chart)}>Move to Trash</DropdownMenuItem>
     </RowActionsMenu>
   );
 }
