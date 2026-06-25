@@ -6,6 +6,7 @@ mod dashboard;
 mod dataset;
 mod error;
 mod expr;
+pub mod folder;
 pub mod model;
 mod routes;
 mod saved;

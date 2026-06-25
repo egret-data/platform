@@ -39,6 +39,7 @@ pub struct BiState {
     pub datasets: crate::dataset::DatasetRepo,
     pub charts: crate::chart::ChartRepo,
     pub dashboards: crate::dashboard::DashboardRepo,
+    pub folders: crate::folder::FolderRepo,
 }
 impl FromRef<BiState> for SessionService {
     fn from_ref(s: &BiState) -> Self {
