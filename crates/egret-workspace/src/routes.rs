@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::context::WsContext;
 use crate::members::MemberRepo;
+use crate::provision::SharedWarehouseProvisioner;
 use crate::rbac::Authorizer;
 use crate::workspaces::WorkspaceRepo;
 
@@ -22,6 +23,11 @@ pub struct WorkspaceState {
     pub authz: Authorizer,
     pub users: UserRepo,
     pub sessions: SessionService,
+    /// Optional hook that provisions the workspace's lakekeeper warehouse after
+    /// the row is created (CE-2 T4). `None` when the embedded catalog engine is
+    /// disabled — workspace creation then succeeds without a warehouse. Supplied
+    /// by the composition root (`egret-bin`); see [`crate::provision`].
+    pub warehouse_provisioner: SharedWarehouseProvisioner,
 }
 
 impl FromRef<WorkspaceState> for WorkspaceRepo {
@@ -96,6 +102,35 @@ async fn create_ws(
         .create(&body.slug, &body.name, p.user_id)
         .await
         .map_err(AuthError)?;
+
+    // Provision the workspace's lakekeeper warehouse (CE-2 T4). The warehouse is
+    // what makes the workspace usable (queries/catalog browse target it), so a
+    // provisioning failure is surfaced as a 500.
+    //
+    // Failure-handling choice (best-effort, documented): the workspace row is
+    // already committed by the time we get here, so a provisioning failure leaves
+    // a workspace WITHOUT a warehouse. We deliberately do NOT roll the row back —
+    // `provision_workspace_warehouse` is idempotent, so the correct recovery is a
+    // retried create (or an admin re-provision), which will find the existing
+    // workspace's mapping absent and complete the warehouse. Rolling back here
+    // would risk orphaning a warehouse that lakekeeper DID create before the
+    // mapping write failed. We log loudly and return 500 so the caller knows the
+    // workspace is not yet ready.
+    if let Some(provisioner) = &st.warehouse_provisioner {
+        if let Err(e) = provisioner.provision(ws.id, &ws.slug).await {
+            tracing::error!(
+                workspace_id = %ws.id.0,
+                slug = %ws.slug,
+                error = %e,
+                "workspace created but warehouse provisioning failed; workspace is not yet usable \
+                 (re-create/re-provision is idempotent and will complete it)"
+            );
+            return Err(AuthError(Error::Internal(anyhow::anyhow!(
+                "workspace created but warehouse provisioning failed: {e}"
+            ))));
+        }
+    }
+
     Ok(Json(ws.into()))
 }
 

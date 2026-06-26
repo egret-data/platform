@@ -204,15 +204,19 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         rate_limiter,
     };
     let workspace = WorkspaceState {
-        // Provision per-workspace Iceberg catalogs under config.catalog.warehouse.
-        workspaces: WorkspaceRepo::with_warehouse_base(
-            db.clone(),
-            config.catalog.warehouse.clone(),
-        ),
+        workspaces: WorkspaceRepo::new(db.clone()),
         members: MemberRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
         users: users.clone(),
         sessions: sessions.clone(),
+        // Per-workspace warehouse provisioning hook (CE-2 T4). The provisioning
+        // *function* (`egret_catalog_engine::provision_workspace_warehouse`) and
+        // the `WarehouseProvisioner` seam are implemented; wiring a concrete impl
+        // here requires the embedded lakekeeper engine `ApiContext` (built via
+        // `build_state` + `run_lakekeeper_migrations` + `ensure_bootstrapped`),
+        // which is mounted in CE-2 T5. Until then this is `None`, so workspace
+        // creation succeeds without provisioning a warehouse.
+        warehouse_provisioner: None,
     };
 
     let oidc = if config.oidc.enabled {

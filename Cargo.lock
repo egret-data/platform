@@ -2489,9 +2489,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "egret-auth",
+ "egret-catalog",
  "egret-catalog-engine",
  "egret-config",
+ "egret-core",
  "egret-metastore",
+ "egret-storage",
+ "egret-workspace",
  "http 1.4.2",
  "http-body-util",
  "lakekeeper",
@@ -2691,6 +2696,7 @@ name = "egret-workspace"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "chrono",
  "egret-auth",

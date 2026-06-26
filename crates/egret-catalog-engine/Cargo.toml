@@ -37,6 +37,12 @@ lakekeeper-io = { git = "https://github.com/lakekeeper/lakekeeper", rev = "79165
 
 egret-config = { workspace = true }
 egret-metastore = { workspace = true }
+# Workspace→warehouse mapping store (the egret-side, sqlx-0.8 pool). We only
+# call its async methods; its sqlx-0.8 `Pool` type never crosses into this
+# crate's sqlx-0.9 surface, so the two majors coexist as transitive deps.
+egret-catalog = { workspace = true }
+# Runtime S3 config threaded into the warehouse storage profile.
+egret-storage = { workspace = true }
 
 anyhow.workspace = true
 # serde_json: the bootstrap principal's `limes::Authentication` carries a
@@ -78,3 +84,11 @@ tokio.workspace = true
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 serde_json.workspace = true
+# `provision_ws` integration test: needs egret's own migrations (workspaces +
+# workspace_warehouse tables) via `egret_metastore::Db`, and seeds a
+# workspace/user through the egret-side (sqlx-0.8) repos so the test never mixes
+# sqlx majors against the `Db` pool.
+egret-metastore = { workspace = true }
+egret-workspace = { workspace = true }
+egret-auth = { workspace = true }
+egret-core = { workspace = true }
