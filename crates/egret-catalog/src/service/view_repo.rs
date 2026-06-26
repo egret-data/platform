@@ -62,30 +62,42 @@ pub fn format_version_to_i16(v: ViewFormatVersion) -> i16 {
 ///
 /// Used by the future view-commit path; clear-then-repopulate.
 ///
-/// Migration 0023 FK chain: `catalog_view_versions` FKs into
-/// `catalog_view_schemas`, and `catalog_view_representations` FKs into
-/// `catalog_view_versions` (ON DELETE CASCADE). So deleting `catalog_view_schemas`
-/// cascades to versions and representations. But `catalog_view_version_log` FKs
-/// only `catalog_views(id)` — NOT `catalog_view_versions` — so it does NOT cascade
-/// from the schema delete and must be cleared explicitly. `catalog_view_properties`
-/// is also unrelated to the schema chain and is deleted explicitly.
+/// Migration 0023 FK chain (children → parents):
+///   `catalog_view_representations` FKs `catalog_view_versions` (no CASCADE) →
+///   `catalog_view_versions`       FKs `catalog_view_schemas`   (no CASCADE) →
+///   `catalog_view_schemas`        FKs `catalog_views`
+/// So we must delete leaves before parents: representations → version_log → versions
+/// → schemas → properties. There is no cascade from schemas to versions or
+/// representations, so every table must be deleted explicitly.
 #[allow(dead_code)]
 pub async fn clear_view_metadata(
     tx: &mut Transaction<'_, Postgres>,
     view_id: Uuid,
 ) -> Result<(), CatalogError> {
-    sqlx::query("DELETE FROM catalog_view_properties WHERE view_id = $1")
+    // representations reference versions — delete first.
+    sqlx::query("DELETE FROM catalog_view_representations WHERE view_id = $1")
         .bind(view_id)
         .execute(&mut **tx)
         .await
         .map_err(CatalogError::Db)?;
-    // version_log does not cascade from the schema delete (FKs catalog_views only).
+    // version_log FKs only catalog_views(id), but delete before versions for clarity.
     sqlx::query("DELETE FROM catalog_view_version_log WHERE view_id = $1")
         .bind(view_id)
         .execute(&mut **tx)
         .await
         .map_err(CatalogError::Db)?;
+    // versions reference schemas — delete before schemas.
+    sqlx::query("DELETE FROM catalog_view_versions WHERE view_id = $1")
+        .bind(view_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(CatalogError::Db)?;
     sqlx::query("DELETE FROM catalog_view_schemas WHERE view_id = $1")
+        .bind(view_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(CatalogError::Db)?;
+    sqlx::query("DELETE FROM catalog_view_properties WHERE view_id = $1")
         .bind(view_id)
         .execute(&mut **tx)
         .await
