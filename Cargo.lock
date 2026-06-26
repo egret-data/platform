@@ -2489,6 +2489,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "egret-catalog-engine",
  "egret-config",
  "egret-metastore",
  "http 1.4.2",
@@ -3810,6 +3811,7 @@ dependencies = [
 [[package]]
 name = "iceberg-ext"
 version = "0.12.3"
+source = "git+https://github.com/lakekeeper/lakekeeper?rev=791650571da769679a2037102a9737eb4fc84cfa#791650571da769679a2037102a9737eb4fc84cfa"
 dependencies = [
  "axum",
  "heck",
@@ -4220,6 +4222,7 @@ dependencies = [
 [[package]]
 name = "lakekeeper"
 version = "0.12.3"
+source = "git+https://github.com/lakekeeper/lakekeeper?rev=791650571da769679a2037102a9737eb4fc84cfa#791650571da769679a2037102a9737eb4fc84cfa"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4286,6 +4289,7 @@ dependencies = [
 [[package]]
 name = "lakekeeper-io"
 version = "0.12.3"
+source = "git+https://github.com/lakekeeper/lakekeeper?rev=791650571da769679a2037102a9737eb4fc84cfa#791650571da769679a2037102a9737eb4fc84cfa"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4336,6 +4340,7 @@ dependencies = [
 [[package]]
 name = "lakekeeper-storage-postgres"
 version = "0.12.3"
+source = "git+https://github.com/lakekeeper/lakekeeper?rev=791650571da769679a2037102a9737eb4fc84cfa#791650571da769679a2037102a9737eb4fc84cfa"
 dependencies = [
  "anyhow",
  "async-trait",

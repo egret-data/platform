@@ -3,10 +3,18 @@
 
 pub mod mount;
 pub mod pool;
+// The headless spike provisioner mints a bootstrap principal via
+// `RequestMetadata::test_user`, which only exists under lakekeeper's
+// `test-utils` feature. Gate the whole module (and its re-export) on the crate's
+// `test-utils` feature so the prod build never pulls in that API — only the
+// crate's own tests (which enable the feature via the self dev-dependency) see
+// it. egret proper will replace `test_user` with a real bootstrap principal.
+#[cfg(feature = "test-utils")]
 pub mod provision;
 
 pub use mount::{build_state, catalog_engine_router, EngineServer, EngineState};
 pub use pool::{build_isolated_pool, LAKEKEEPER_SCHEMA};
+#[cfg(feature = "test-utils")]
 pub use provision::{ensure_spike_warehouse, SPIKE_WAREHOUSE_NAME};
 
 /// Run lakekeeper's Postgres catalog migrations against an isolated

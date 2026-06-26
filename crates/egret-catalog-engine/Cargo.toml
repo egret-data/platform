@@ -5,24 +5,35 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+# `test-utils` pulls in lakekeeper's `test-utils`, which exposes
+# `RequestMetadata::test_user` — a principal-carrying actor with a real
+# `UserId`. The spike's headless `bootstrap` (`provision::ensure_spike_warehouse`)
+# needs one: `bootstrap` registers the calling user, and
+# `parse_create_user_request` requires a user id extractable from the actor. The
+# in-process `LakekeeperInternal` actor has NO user id (`user_id()` -> None) and
+# `BootstrapRequest` carries no `id` field, so bootstrap-via-internal-actor fails
+# with `MissingUserId`. (CE-2 finding — see provision.rs.) `test-utils` only adds
+# `lakekeeper-io/storage-in-memory`, so it's cheap to carry. The `provision`
+# module is gated on this feature so the non-test prod build never references
+# `test_user`. The crate's own integration tests turn it on via the self
+# dev-dependency below.
+test-utils = ["lakekeeper/test-utils"]
+
 [dependencies]
-# Spike: path deps to the sibling lakekeeper checkout. The lakekeeper workspace
-# pins `iceberg` to the same fork rev as egret (bb70173...), so a single
-# `iceberg` version must resolve across both workspaces.
-# `test-utils` exposes `RequestMetadata::test_user` — a principal-carrying
-# actor with a real `UserId`. The spike's headless `bootstrap` needs one:
-# `bootstrap` registers the calling user, and `parse_create_user_request`
-# requires a user id extractable from the actor. The in-process
-# `LakekeeperInternal` actor has NO user id (`user_id()` -> None) and
-# `BootstrapRequest` carries no `id` field, so bootstrap-via-internal-actor
-# fails with `MissingUserId`. (CE-2 finding — see provision.rs.) `test-utils`
-# only adds `lakekeeper-io/storage-in-memory`, so it's cheap to carry.
-lakekeeper = { path = "../../../lakekeeper/crates/lakekeeper", features = [
+# Git-pinned to the lakekeeper checkout the CE-1 spike was developed against
+# (rev 791650571..., a public ancestor of lakekeeper/lakekeeper@main). The
+# lakekeeper workspace at that rev pins `iceberg` to the same fork rev as egret
+# (bb70173...), so a single `iceberg` version must resolve across both. `optional`
+# so the `test-utils` feature's `dep:lakekeeper` toggles the `test-utils` feature
+# on the same crate without making lakekeeper itself optional in practice — it is
+# always pulled in (directly here without the feature, and via `test-utils` with
+# it).
+lakekeeper = { git = "https://github.com/lakekeeper/lakekeeper", rev = "791650571da769679a2037102a9737eb4fc84cfa", features = [
     "router",
-    "test-utils",
 ] }
-lakekeeper-storage-postgres = { path = "../../../lakekeeper/crates/lakekeeper-storage-postgres" }
-lakekeeper-io = { path = "../../../lakekeeper/crates/io" }
+lakekeeper-storage-postgres = { git = "https://github.com/lakekeeper/lakekeeper", rev = "791650571da769679a2037102a9737eb4fc84cfa" }
+lakekeeper-io = { git = "https://github.com/lakekeeper/lakekeeper", rev = "791650571da769679a2037102a9737eb4fc84cfa", package = "lakekeeper-io" }
 
 egret-config = { workspace = true }
 egret-metastore = { workspace = true }
@@ -48,6 +59,12 @@ sqlx = { version = "0.9", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+# Self dev-dependency so the crate's integration tests (`tests/*.rs`) link the
+# library built WITH `test-utils` — that's what compiles the `provision` module
+# (gated on `feature = "test-utils"`) whose `ensure_spike_warehouse` the
+# roundtrip test calls. The prod (non-test) `cargo build` leaves the feature off,
+# so `RequestMetadata::test_user` is never referenced outside test/dev builds.
+egret-catalog-engine = { path = ".", features = ["test-utils"] }
 tokio.workspace = true
 # oneshot harness: drive the mounted router with no socket (mirrors
 # egret-catalog/tests/http_roundtrip.rs's pattern). `tower::ServiceExt::oneshot`
