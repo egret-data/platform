@@ -25,6 +25,14 @@ pub struct AppState {
     pub oidc: Option<OidcRoutesState>,
     /// Present when `config.catalog.enabled`; `None` otherwise (or in unit tests).
     pub catalog: Option<egret_catalog::CatalogState>,
+    /// The LIVE embedded lakekeeper Iceberg REST engine router, fully assembled
+    /// in the composition root (`egret-bin`): the lakekeeper catalog router
+    /// fronted by egret's per-workspace token-ownership middleware (CE-2 T5).
+    /// Carried as a pre-built `axum::Router` so `egret-server` stays free of the
+    /// lakekeeper engine graph (the engine pulls in a second `sqlx` major). Nested
+    /// at `/catalog/v1`. `Some` once `config.catalog.enabled` wires the engine;
+    /// `None` otherwise (or in unit tests).
+    pub catalog_engine: Option<axum::Router>,
     /// Session-authenticated internal catalog browse API (for the UI).
     /// Present once a database is wired; `None` in pure health unit tests.
     pub catalog_browse: Option<egret_catalog::BrowseState>,
@@ -47,6 +55,7 @@ impl AppState {
             workspace: None,
             oidc: None,
             catalog: None,
+            catalog_engine: None,
             catalog_browse: None,
             ranger: None,
             database: None,
@@ -91,10 +100,17 @@ pub fn build_router(state: AppState) -> Router {
         );
     }
 
-    if let Some(catalog) = state.catalog.clone() {
+    // CE-2 T5 cutover: the built-in `egret_catalog::iceberg_router` is no longer
+    // mounted. The live catalog surface is the embedded lakekeeper Iceberg REST
+    // engine (`state.catalog_engine`), assembled in `egret-bin` with egret's
+    // per-workspace token-ownership middleware in front (A-3), nested at
+    // `/catalog/v1` so the front middleware sees lakekeeper-relative paths
+    // (`/{prefix}/...` and `/config`). `state.catalog` is retained for now (browse
+    // is rewired to read lakekeeper in T6; the old router code is deleted in T8).
+    if let Some(catalog_engine) = state.catalog_engine.clone() {
         router = router.merge(
             Router::new()
-                .nest("/catalog", egret_catalog::iceberg_router(catalog))
+                .nest("/catalog/v1", catalog_engine)
                 .with_state(()),
         );
     }

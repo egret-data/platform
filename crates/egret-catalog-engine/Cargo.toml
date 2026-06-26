@@ -43,8 +43,15 @@ egret-metastore = { workspace = true }
 egret-catalog = { workspace = true }
 # Runtime S3 config threaded into the warehouse storage profile.
 egret-storage = { workspace = true }
+# The `WarehouseProvisioner` trait egret-catalog-engine implements (the
+# composition-root seam) and the `WorkspaceId` newtype it takes. egret-workspace
+# stays free of the engine; the engine depends on it (downstream direction).
+egret-workspace = { workspace = true }
+egret-core = { workspace = true }
 
 anyhow.workspace = true
+# `#[async_trait]` impl of `WarehouseProvisioner` (see provisioner.rs).
+async-trait.workspace = true
 # serde_json: the bootstrap principal's `limes::Authentication` carries a
 # `claims: serde_json::Value` (we pass an empty object). Must be a regular dep —
 # the prod bootstrap path needs it, not just tests.
@@ -89,6 +96,4 @@ serde_json.workspace = true
 # workspace/user through the egret-side (sqlx-0.8) repos so the test never mixes
 # sqlx majors against the `Db` pool.
 egret-metastore = { workspace = true }
-egret-workspace = { workspace = true }
 egret-auth = { workspace = true }
-egret-core = { workspace = true }

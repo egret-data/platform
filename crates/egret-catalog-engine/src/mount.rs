@@ -146,3 +146,29 @@ pub async fn build_state(dsn: &str) -> anyhow::Result<ApiContext<EngineState>> {
 pub fn catalog_engine_router(state: ApiContext<EngineState>) -> axum::Router {
     new_v1_full_router::<EngineServer, EngineState>().with_state(state)
 }
+
+/// Assemble the LIVE catalog engine router: the lakekeeper Iceberg REST router
+/// (built by [`catalog_engine_router`]) fronted by egret's per-workspace token
+/// ownership middleware ([`crate::front_auth::front_auth`], CE-2 T5 / A-3).
+///
+/// The returned router is lakekeeper-relative — its routes are `/{prefix}/...`
+/// (catalog ops) and `/config` (warehouse discovery). The composition root nests
+/// it under `/catalog/v1` so the middleware sees those relative paths when it
+/// extracts the `{prefix}` warehouse UUID. This is the single wiring point shared
+/// by `egret-bin` (prod startup) and the CE-2 integration test, so both exercise
+/// identical authn/ownership behaviour.
+///
+/// * `engine_state` — the lakekeeper [`ApiContext`] from [`build_state`]
+///   (migrated + bootstrapped).
+/// * `store` — egret-side [`egret_catalog::service::CatalogStore`] resolving
+///   `token → workspace → warehouse`.
+pub fn mount_catalog_engine(
+    engine_state: ApiContext<EngineState>,
+    store: egret_catalog::service::CatalogStore,
+) -> axum::Router {
+    let front = crate::front_auth::FrontAuthState::new(store);
+    catalog_engine_router(engine_state).layer(axum::middleware::from_fn_with_state(
+        front,
+        crate::front_auth::front_auth,
+    ))
+}
