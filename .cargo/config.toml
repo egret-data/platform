@@ -1,0 +1,7 @@
+# Required to embed lakekeeper's crates as the catalog engine: lakekeeper builds
+# `tracing` / `tokio` with their unstable feature surface (`tracing::field::valuable`,
+# tokio-metrics task instrumentation), which is gated behind these cfgs. Cargo
+# resolves `.cargo/config.toml` relative to the invocation directory, so egret must
+# declare its own — lakekeeper's sibling config is not inherited across workspaces.
+[build]
+rustflags = ["--cfg", "tracing_unstable", "--cfg", "tokio_unstable"]

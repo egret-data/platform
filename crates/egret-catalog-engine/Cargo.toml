@@ -1,0 +1,17 @@
+[package]
+name = "egret-catalog-engine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Spike: path deps to the sibling lakekeeper checkout. The lakekeeper workspace
+# pins `iceberg` to the same fork rev as egret (bb70173...), so a single
+# `iceberg` version must resolve across both workspaces.
+lakekeeper = { path = "../../../lakekeeper/crates/lakekeeper", features = ["router"] }
+lakekeeper-storage-postgres = { path = "../../../lakekeeper/crates/lakekeeper-storage-postgres" }
+lakekeeper-io = { path = "../../../lakekeeper/crates/io" }
+
+egret-config = { workspace = true }
+egret-metastore = { workspace = true }
