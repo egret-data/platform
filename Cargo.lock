@@ -2488,13 +2488,17 @@ name = "egret-catalog-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "egret-config",
  "egret-metastore",
+ "http 1.4.2",
  "lakekeeper",
  "lakekeeper-io",
  "lakekeeper-storage-postgres",
  "sqlx 0.9.0",
  "tokio",
+ "url",
+ "uuid",
 ]
 
 [[package]]

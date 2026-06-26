@@ -1,9 +1,13 @@
 //! egret-catalog-engine — spike crate proving lakekeeper's core crates can be
 //! embedded as the catalog engine with a single shared `iceberg` version.
 
+pub mod mount;
 pub mod pool;
+pub mod provision;
 
+pub use mount::{build_state, catalog_engine_router, EngineServer, EngineState};
 pub use pool::{build_isolated_pool, LAKEKEEPER_SCHEMA};
+pub use provision::{ensure_spike_warehouse, SPIKE_WAREHOUSE_NAME};
 
 /// Run lakekeeper's Postgres catalog migrations against an isolated
 /// `lakekeeper` schema in the database addressed by `dsn`.

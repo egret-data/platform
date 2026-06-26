@@ -17,6 +17,15 @@ egret-config = { workspace = true }
 egret-metastore = { workspace = true }
 
 anyhow.workspace = true
+# axum 0.8 — must be the SAME axum major lakekeeper's router uses, so the
+# `Router` types unify. lakekeeper re-exports its axum as `lakekeeper::axum`;
+# we depend on it directly here for `axum::Router` in our public signatures.
+axum = { version = "0.8" }
+http.workspace = true
+# uuid with v7: `RequestMetadata::new_lakekeeper_internal` and project ids use
+# v7/nil. Feature-unified with lakekeeper's uuid anyway, but declared explicitly.
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+url = { workspace = true }
 # NB: sqlx 0.9 (NOT egret's workspace 0.8) so the `PgPool` we build is the same
 # type lakekeeper's migrator accepts — the two sqlx majors have incompatible
 # `Pool<Postgres>` types and won't unify across the crate boundary.
