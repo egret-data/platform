@@ -1,32 +1,8 @@
 //! DB-gated table-store tests. Self-skip without DATABASE_URL.
-use egret_catalog::service::CatalogStore;
+mod common;
+use common::{seed_catalog, store};
 use egret_catalog::CatalogError;
-use egret_metastore::Db;
 use std::collections::HashMap;
-
-async fn store() -> Option<CatalogStore> {
-    let url = std::env::var("DATABASE_URL").ok()?;
-    let db = Db::connect(&url, 5).await.expect("connect");
-    db.migrate().await.expect("migrate");
-    Some(CatalogStore::new(db))
-}
-
-/// Seed a workspace + its default catalog and return the catalog id.
-async fn seed_catalog(s: &CatalogStore) -> uuid::Uuid {
-    let ws = uuid::Uuid::new_v4();
-    let slug = format!("ws_{}", ws.simple());
-    sqlx::query("INSERT INTO workspaces (id, slug, name, status) VALUES ($1, $2, $3, 'active')")
-        .bind(ws)
-        .bind(&slug)
-        .bind(&slug)
-        .execute(s.pool())
-        .await
-        .expect("seed workspace");
-    s.create_catalog(ws, "default", "s3://wh")
-        .await
-        .expect("seed catalog")
-        .id
-}
 
 fn minimal_metadata(location: &str, id: uuid::Uuid) -> iceberg::spec::TableMetadata {
     egret_catalog::service::test_support::minimal_table_metadata(location, id)

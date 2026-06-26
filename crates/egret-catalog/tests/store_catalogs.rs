@@ -1,26 +1,6 @@
 //! DB-gated catalogs-store tests. Self-skip without DATABASE_URL.
-use egret_catalog::service::CatalogStore;
-use egret_metastore::Db;
-
-async fn store() -> Option<CatalogStore> {
-    let url = std::env::var("DATABASE_URL").ok()?;
-    let db = Db::connect(&url, 5).await.expect("connect");
-    db.migrate().await.expect("migrate");
-    Some(CatalogStore::new(db))
-}
-
-/// Insert a workspace row directly (FK target) and return its id.
-async fn seed_workspace(s: &CatalogStore) -> uuid::Uuid {
-    let id = uuid::Uuid::new_v4();
-    sqlx::query("INSERT INTO workspaces (id, slug, name, status) VALUES ($1,$2,$3,'active')")
-        .bind(id)
-        .bind(format!("ws_{}", id.simple()))
-        .bind("Test WS")
-        .execute(s.pool())
-        .await
-        .unwrap();
-    id
-}
+mod common;
+use common::{seed_workspace, store};
 
 #[tokio::test]
 async fn create_and_get_catalog() {
