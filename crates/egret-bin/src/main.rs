@@ -121,7 +121,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         rate_limiter,
     };
     let workspace = WorkspaceState {
-        workspaces: WorkspaceRepo::new(db.clone()),
+        // Provision per-workspace Iceberg catalogs under config.catalog.warehouse.
+        workspaces: WorkspaceRepo::with_warehouse_base(
+            db.clone(),
+            config.catalog.warehouse.clone(),
+        ),
         members: MemberRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
         users: users.clone(),

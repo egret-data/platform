@@ -22,3 +22,4 @@ tokio.workspace = true
 tower.workspace = true
 http-body-util = "0.1"
 egret-config.workspace = true
+egret-catalog.workspace = true
