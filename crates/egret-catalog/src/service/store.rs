@@ -23,6 +23,10 @@ impl CatalogStore {
         Self { db }
     }
 
+    pub fn pool(&self) -> &sqlx::PgPool {
+        &self.db.pool
+    }
+
     pub async fn create_namespace(
         &self,
         levels: &[String],
