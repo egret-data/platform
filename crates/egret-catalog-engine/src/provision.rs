@@ -97,16 +97,39 @@ const MINIO_SECRET_KEY: &str = "egretsecret";
 /// already-bootstrapped, or if warehouse creation fails (including the live
 /// MinIO storage-access validation lakekeeper performs at create time).
 pub async fn ensure_spike_warehouse(state: ApiContext<EngineState>) -> anyhow::Result<String> {
-    // In-process actor that bypasses control-plane authz.
+    // In-process actor that bypasses control-plane authz. Used for
+    // `create_warehouse` (a pure control-plane mutation).
     let request_metadata = RequestMetadata::new_lakekeeper_internal(Uuid::now_v7());
 
     // 1. Bootstrap. Seeds the default project (nil UUID) when
     //    enable_default_project is on (the OSS default). Tolerate the
     //    already-bootstrapped case for idempotency.
-    let bootstrap_req = BootstrapRequest::builder().accept_terms_of_use().build();
+    //
+    // KEY FINDING (CE-2): bootstrap CANNOT use the `LakekeeperInternal` actor.
+    // When the actor `is_authenticated()` (true for `LakekeeperInternal`),
+    // bootstrap registers the calling user via `parse_create_user_request`,
+    // which needs a user id extractable from the actor. The internal actor's
+    // `user_id()` is `None` and `BootstrapRequest` carries no `id` field, so it
+    // fails with `MissingUserId`. Bootstrap is meant to be driven by a real
+    // authenticated principal (the first human → global admin). For the
+    // headless spike we mint a synthetic principal via test-utils'
+    // `RequestMetadata::test_user`, which carries a real `UserId`
+    // (`Actor::Principal`). Under `AllowAllAuthorizer` `can_bootstrap` passes,
+    // and the user row is created cleanly. For egret proper, this is where the
+    // real bootstrap admin principal will be threaded.
+    let bootstrap_actor = {
+        let user_id = lakekeeper::service::UserId::try_from("oidc~egret-spike-bootstrap")
+            .context("constructing synthetic bootstrap user id")?;
+        RequestMetadata::test_user(user_id)
+    };
+    let bootstrap_req = BootstrapRequest::builder()
+        .accept_terms_of_use()
+        .user_name("Egret Spike Bootstrap".to_string())
+        .user_type(lakekeeper::api::management::v1::user::UserType::Application)
+        .build();
     match <EngineApiServer as ServerService<_, _, _>>::bootstrap(
         state.clone(),
-        request_metadata.clone(),
+        bootstrap_actor,
         bootstrap_req,
     )
     .await
@@ -173,10 +196,20 @@ fn is_already_bootstrapped(e: &lakekeeper::api::IcebergErrorResponse) -> bool {
     t == "CatalogAlreadyBootstrapped" || t == "ConcurrentBootstrap"
 }
 
-/// Whether an error from `create_warehouse` indicates a name conflict (the
-/// warehouse already exists — treated as idempotent success).
+/// Whether an error from `create_warehouse` indicates the `spike` warehouse
+/// already exists (treated as idempotent success).
+///
+/// KEY FINDING (CE-2 idempotency): re-creating the warehouse does NOT
+/// necessarily surface a name conflict. lakekeeper validates the storage
+/// profile for **overlap** against existing warehouses BEFORE the name-unique
+/// check, so a second `create_warehouse` with the same name AND the same S3
+/// bucket+prefix returns `CreateWarehouseStorageProfileOverlap` (HTTP 400), not
+/// a 409 name conflict. We treat both as "already provisioned". egret proper
+/// should look the warehouse up by name first and short-circuit, rather than
+/// relying on create-time error sniffing.
 fn is_warehouse_conflict(e: &lakekeeper::api::IcebergErrorResponse) -> bool {
     e.error.code == http::StatusCode::CONFLICT.as_u16()
         || e.error.r#type.contains("WarehouseName")
         || e.error.r#type.contains("AlreadyExists")
+        || e.error.r#type.contains("StorageProfileOverlap")
 }

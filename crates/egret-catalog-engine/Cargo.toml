@@ -9,7 +9,18 @@ rust-version.workspace = true
 # Spike: path deps to the sibling lakekeeper checkout. The lakekeeper workspace
 # pins `iceberg` to the same fork rev as egret (bb70173...), so a single
 # `iceberg` version must resolve across both workspaces.
-lakekeeper = { path = "../../../lakekeeper/crates/lakekeeper", features = ["router"] }
+# `test-utils` exposes `RequestMetadata::test_user` — a principal-carrying
+# actor with a real `UserId`. The spike's headless `bootstrap` needs one:
+# `bootstrap` registers the calling user, and `parse_create_user_request`
+# requires a user id extractable from the actor. The in-process
+# `LakekeeperInternal` actor has NO user id (`user_id()` -> None) and
+# `BootstrapRequest` carries no `id` field, so bootstrap-via-internal-actor
+# fails with `MissingUserId`. (CE-2 finding — see provision.rs.) `test-utils`
+# only adds `lakekeeper-io/storage-in-memory`, so it's cheap to carry.
+lakekeeper = { path = "../../../lakekeeper/crates/lakekeeper", features = [
+    "router",
+    "test-utils",
+] }
 lakekeeper-storage-postgres = { path = "../../../lakekeeper/crates/lakekeeper-storage-postgres" }
 lakekeeper-io = { path = "../../../lakekeeper/crates/io" }
 
@@ -38,3 +49,9 @@ sqlx = { version = "0.9", default-features = false, features = [
 
 [dev-dependencies]
 tokio.workspace = true
+# oneshot harness: drive the mounted router with no socket (mirrors
+# egret-catalog/tests/http_roundtrip.rs's pattern). `tower::ServiceExt::oneshot`
+# + `http_body_util::BodyExt` to collect response bodies.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+serde_json.workspace = true
