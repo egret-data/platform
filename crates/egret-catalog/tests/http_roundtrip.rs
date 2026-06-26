@@ -49,7 +49,13 @@ fn storage_cfg() -> egret_storage::StorageConfig {
     }
 }
 
-async fn state() -> Option<CatalogState> {
+/// The warehouse location seeded for the test catalog. Per-workspace table
+/// locations derive from this.
+const WAREHOUSE: &str = "s3://warehouse";
+
+/// Build the catalog state and seed a workspace + its default catalog.
+/// Returns the state and the workspace **slug** (the `{prefix}` every request uses).
+async fn state() -> Option<(CatalogState, String)> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
@@ -65,7 +71,7 @@ async fn state() -> Option<CatalogState> {
         .await
         .expect("seed workspace");
     store
-        .create_catalog(ws, "default", "s3://warehouse")
+        .create_catalog(ws, "default", WAREHOUSE)
         .await
         .expect("seed catalog");
     let service = CatalogService {
@@ -74,12 +80,13 @@ async fn state() -> Option<CatalogState> {
             std::collections::HashMap::new(),
         ))),
     };
-    Some(CatalogState {
+    let st = CatalogState {
         service,
         auth_token: Arc::from(TOKEN),
         storage_cfg: Arc::new(storage_cfg()),
         base_url: Arc::from("http://localhost:8080/catalog"),
-    })
+    };
+    Some((st, slug))
 }
 
 /// Build a minimal CreateTableRequest with a single `id: long` field.
@@ -109,7 +116,7 @@ fn create_table_request(name: &str) -> CreateTableRequest {
 
 #[tokio::test]
 async fn config_requires_bearer() {
-    let Some(st) = state().await else {
+    let Some((st, _slug)) = state().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -127,12 +134,44 @@ async fn config_requires_bearer() {
 }
 
 #[tokio::test]
-async fn config_with_bearer_returns_warehouse_and_signer_keys() {
-    let Some(st) = state().await else {
+async fn config_with_warehouse_returns_prefix_and_warehouse() {
+    let Some((st, slug)) = state().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
     let app = iceberg_router(st);
+    // With `?warehouse=<slug>` the config advertises the resolved prefix + warehouse.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/config?warehouse={slug}"))
+                .header("Authorization", format!("Bearer {TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["overrides"]["prefix"], slug);
+    assert_eq!(json["overrides"]["warehouse"], WAREHOUSE);
+    assert_eq!(json["overrides"]["s3.remote-signing-enabled"], "true");
+    assert_eq!(json["overrides"]["s3.signer"], "S3V4RestSigner");
+    assert!(json["overrides"]["s3.signer.uri"].is_string());
+    assert!(json["overrides"]["signer.uri"].is_string());
+    assert_eq!(json["overrides"]["s3.region"], "us-east-1");
+    assert_eq!(json["overrides"]["s3.path-style-access"], "true");
+}
+
+#[tokio::test]
+async fn config_without_warehouse_returns_signer_keys_only() {
+    let Some((st, _slug)) = state().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let app = iceberg_router(st);
+    // Without `?warehouse` the config returns signer discovery keys and NO prefix/warehouse.
     let resp = app
         .oneshot(
             Request::builder()
@@ -146,7 +185,14 @@ async fn config_with_bearer_returns_warehouse_and_signer_keys() {
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(json["overrides"]["warehouse"], "s3://warehouse");
+    assert!(
+        json["overrides"]["prefix"].is_null(),
+        "no prefix without warehouse"
+    );
+    assert!(
+        json["overrides"]["warehouse"].is_null(),
+        "no warehouse without warehouse query"
+    );
     assert_eq!(json["overrides"]["s3.remote-signing-enabled"], "true");
     assert_eq!(json["overrides"]["s3.signer"], "S3V4RestSigner");
     assert!(json["overrides"]["s3.signer.uri"].is_string());
@@ -155,9 +201,30 @@ async fn config_with_bearer_returns_warehouse_and_signer_keys() {
     assert_eq!(json["overrides"]["s3.path-style-access"], "true");
 }
 
+/// An unknown `{prefix}` (no such workspace catalog) resolves to 404.
+#[tokio::test]
+async fn unknown_prefix_returns_404() {
+    let Some((st, _slug)) = state().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let app = iceberg_router(st);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/does-not-exist/namespaces")
+                .header("Authorization", format!("Bearer {TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn create_namespace_then_table_then_load() {
-    let Some(st) = state().await else {
+    let Some((st, slug)) = state().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -171,7 +238,7 @@ async fn create_namespace_then_table_then_load() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v1/namespaces")
+                .uri(format!("/v1/{slug}/namespaces"))
                 .header("Authorization", format!("Bearer {TOKEN}"))
                 .header("Content-Type", "application/json")
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -188,7 +255,7 @@ async fn create_namespace_then_table_then_load() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/v1/namespaces/{ns}/tables"))
+                .uri(format!("/v1/{slug}/namespaces/{ns}/tables"))
                 .header("Authorization", format!("Bearer {TOKEN}"))
                 .header("Content-Type", "application/json")
                 .body(Body::from(serde_json::to_vec(&req).unwrap()))
@@ -211,7 +278,7 @@ async fn create_namespace_then_table_then_load() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/namespaces/{ns}/tables/orders"))
+                .uri(format!("/v1/{slug}/namespaces/{ns}/tables/orders"))
                 .header("Authorization", format!("Bearer {TOKEN}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -235,7 +302,7 @@ async fn create_namespace_then_table_then_load() {
 /// (proves the `s3://placeholder` literal is gone).
 #[tokio::test]
 async fn create_table_without_location_uses_warehouse() {
-    let Some(st) = state().await else {
+    let Some((st, slug)) = state().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -248,7 +315,7 @@ async fn create_table_without_location_uses_warehouse() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v1/namespaces")
+                .uri(format!("/v1/{slug}/namespaces"))
                 .header("Authorization", format!("Bearer {TOKEN}"))
                 .header("Content-Type", "application/json")
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -266,7 +333,7 @@ async fn create_table_without_location_uses_warehouse() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/v1/namespaces/{ns}/tables"))
+                .uri(format!("/v1/{slug}/namespaces/{ns}/tables"))
                 .header("Authorization", format!("Bearer {TOKEN}"))
                 .header("Content-Type", "application/json")
                 .body(Body::from(serde_json::to_vec(&req).unwrap()))
@@ -283,14 +350,15 @@ async fn create_table_without_location_uses_warehouse() {
         String::from_utf8_lossy(&bytes)
     );
     let created: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    // Location derives from the per-workspace CATALOG warehouse_location seeded by `state()`.
     let location = created["metadata"]["location"].as_str().unwrap();
     assert!(
-        location.starts_with("s3://warehouse"),
-        "table location should derive from the configured warehouse, got {location}"
+        location.starts_with(WAREHOUSE),
+        "table location should derive from the catalog warehouse {WAREHOUSE}, got {location}"
     );
     let mloc = created["metadata-location"].as_str().unwrap();
     assert!(
-        mloc.starts_with("s3://warehouse"),
-        "metadata-location should derive from the configured warehouse, got {mloc}"
+        mloc.starts_with(WAREHOUSE),
+        "metadata-location should derive from the catalog warehouse {WAREHOUSE}, got {mloc}"
     );
 }

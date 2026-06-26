@@ -76,20 +76,28 @@ BIN=$(pwd)/../target/debug/egret
 (cd /tmp/egret-itest && "$BIN" migrate && nohup "$BIN" serve > /tmp/egret-itest/server.log 2>&1 &)
 sleep 3
 curl -s -o /dev/null -w "egret healthz: %{http_code}\n" http://$HOST_IP:8080/healthz
-curl -s -H "Authorization: Bearer devtoken" http://$HOST_IP:8080/catalog/v1/config | head -c 200; echo
+curl -s -H "Authorization: Bearer devtoken" "http://$HOST_IP:8080/catalog/v1/config?warehouse=<WS_SLUG>" | head -c 200; echo
 curl -s -o /dev/null -w "anon /service: %{http_code}\n" http://$HOST_IP:8080/service/plugins/definitions
 ```
-Kỳ vọng: `healthz 200`, JSON `/v1/config` có `warehouse` + `s3.signer.uri`, `anon /service: 200`.
+Kỳ vọng: `healthz 200`, JSON `/v1/config` có `overrides` chứa `prefix=<WS_SLUG>` + `warehouse` + `s3.signer.uri` (bỏ `?warehouse` thì chỉ trả về khóa signer, không có prefix), `anon /service: 200`.
 
 ## 3. Cấu hình + khởi động Trino
 
 ### 3a. Iceberg catalog → Egret (`deploy/trino/catalog/iceberg.properties`)
+
+Catalog giờ là **per-workspace**: mọi route Iceberg REST đều có tiền tố slug của
+workspace (`/v1/{prefix}/...`). Đặt `iceberg.rest-catalog.warehouse` bằng slug của
+workspace — Trino gọi `GET /v1/config?warehouse=<slug>`, đọc lại
+`overrides.prefix=<slug>` + `overrides.warehouse`, rồi tự động nhắm tới các route
+có tiền tố. Thay `<WS_SLUG>` bên dưới bằng slug workspace thật (ví dụ từ cột
+`workspaces.slug`, hoặc slug được cấp khi tạo workspace).
 
 ```bash
 cat > trino/catalog/iceberg.properties <<EOF
 connector.name=iceberg
 iceberg.catalog.type=rest
 iceberg.rest-catalog.uri=http://$HOST_IP:8080/catalog
+iceberg.rest-catalog.warehouse=<WS_SLUG>
 iceberg.rest-catalog.security=OAUTH2
 iceberg.rest-catalog.oauth2.token=devtoken
 fs.native-s3.enabled=true
