@@ -35,13 +35,15 @@ impl CatalogService {
     /// Create a new table: build initial metadata (v0), write `metadata.json`, insert DB row.
     pub async fn create_table(
         &self,
+        catalog_id: Uuid,
+        warehouse: &str,
         ns_levels: &[String],
         req: CreateTableRequest,
     ) -> Result<LoadTableResult, CatalogError> {
-        let ns = self.store.get_namespace(self.catalog_id, ns_levels).await?;
+        let ns = self.store.get_namespace(catalog_id, ns_levels).await?;
         let table_uuid = Uuid::new_v4();
         let location = req.location.clone().unwrap_or_else(|| {
-            egret_storage::table_base_location(&self.warehouse, ns_levels, &req.name, &table_uuid)
+            egret_storage::table_base_location(warehouse, ns_levels, &req.name, &table_uuid)
         });
         let md = create_table_metadata(&req, table_uuid, location.clone())?;
         // Do NOT write metadata.json into the table location on create. Engines like Trino
@@ -63,10 +65,11 @@ impl CatalogService {
     /// Load the current state of a table from the DB.
     pub async fn load_table(
         &self,
+        catalog_id: Uuid,
         ns_levels: &[String],
         name: &str,
     ) -> Result<LoadTableResult, CatalogError> {
-        let ns = self.store.get_namespace(self.catalog_id, ns_levels).await?;
+        let ns = self.store.get_namespace(catalog_id, ns_levels).await?;
         let row = self.store.load_table(ns.id, name).await?;
         Ok(LoadTableResult {
             metadata_location: Some(row.metadata_location),
@@ -79,11 +82,12 @@ impl CatalogService {
     /// write new `metadata.json`, then CAS-update the DB row.
     pub async fn commit_table(
         &self,
+        catalog_id: Uuid,
         ns_levels: &[String],
         name: &str,
         req: CommitTableRequest,
     ) -> Result<LoadTableResult, CatalogError> {
-        let ns = self.store.get_namespace(self.catalog_id, ns_levels).await?;
+        let ns = self.store.get_namespace(catalog_id, ns_levels).await?;
         let row = self.store.load_table(ns.id, name).await?;
         let new_md = apply_commit(
             row.metadata.clone(),

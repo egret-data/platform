@@ -4,6 +4,7 @@
 //! typed [`iceberg::spec::ViewMetadata`] from the Iceberg REST `CreateViewRequest`
 //! and shreds it; load assembles it back and serializes the typed metadata.
 
+use crate::api::resolve::resolve_catalog;
 use crate::api::tables::parse_namespace;
 use crate::routes::CatalogState;
 use crate::CatalogError;
@@ -20,13 +21,14 @@ use uuid::Uuid;
 
 pub async fn list(
     State(s): State<CatalogState>,
-    Path(ns): Path<String>,
+    Path((prefix, ns)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     let levels = parse_namespace(&ns);
     let nsrow = s
         .service
         .store
-        .get_namespace(s.service.catalog_id, &levels)
+        .get_namespace(cat.catalog_id, &levels)
         .await?;
     let names = s.service.store.list_views(nsrow.id).await?;
     let ns_ident =
@@ -40,14 +42,15 @@ pub async fn list(
 
 pub async fn create(
     State(s): State<CatalogState>,
-    Path(ns): Path<String>,
+    Path((prefix, ns)): Path<(String, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     let levels = parse_namespace(&ns);
     let nsrow = s
         .service
         .store
-        .get_namespace(s.service.catalog_id, &levels)
+        .get_namespace(cat.catalog_id, &levels)
         .await?;
     let name = body
         .get("name")
@@ -60,7 +63,7 @@ pub async fn create(
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .unwrap_or_else(|| {
-            egret_storage::table_base_location(&s.warehouse, &levels, &name, &view_uuid)
+            egret_storage::table_base_location(&cat.warehouse, &levels, &name, &view_uuid)
         });
 
     // Build a typed ViewMetadata (format v1) from the CreateView request.
@@ -191,12 +194,13 @@ fn build_view_metadata(
 
 pub async fn load(
     State(s): State<CatalogState>,
-    Path((ns, view)): Path<(String, String)>,
+    Path((prefix, ns, view)): Path<(String, String, String)>,
 ) -> Result<Json<serde_json::Value>, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     let nsrow = s
         .service
         .store
-        .get_namespace(s.service.catalog_id, &parse_namespace(&ns))
+        .get_namespace(cat.catalog_id, &parse_namespace(&ns))
         .await?;
     let row = s.service.store.load_view(nsrow.id, &view).await?;
     let metadata_json =
@@ -209,12 +213,13 @@ pub async fn load(
 
 pub async fn head(
     State(s): State<CatalogState>,
-    Path((ns, view)): Path<(String, String)>,
+    Path((prefix, ns, view)): Path<(String, String, String)>,
 ) -> Result<axum::http::StatusCode, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     let nsrow = s
         .service
         .store
-        .get_namespace(s.service.catalog_id, &parse_namespace(&ns))
+        .get_namespace(cat.catalog_id, &parse_namespace(&ns))
         .await?;
     s.service.store.load_view(nsrow.id, &view).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
@@ -222,12 +227,13 @@ pub async fn head(
 
 pub async fn drop(
     State(s): State<CatalogState>,
-    Path((ns, view)): Path<(String, String)>,
+    Path((prefix, ns, view)): Path<(String, String, String)>,
 ) -> Result<axum::http::StatusCode, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     let nsrow = s
         .service
         .store
-        .get_namespace(s.service.catalog_id, &parse_namespace(&ns))
+        .get_namespace(cat.catalog_id, &parse_namespace(&ns))
         .await?;
     s.service.store.drop_view(nsrow.id, &view).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)

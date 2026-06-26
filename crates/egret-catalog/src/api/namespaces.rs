@@ -1,5 +1,6 @@
 //! Namespace handlers: create/load/head/drop/list/update_properties.
 
+use crate::api::resolve::resolve_catalog;
 use crate::api::tables::parse_namespace;
 use crate::routes::CatalogState;
 use crate::CatalogError;
@@ -20,13 +21,15 @@ pub struct ListQuery {
 
 pub async fn list(
     State(s): State<CatalogState>,
+    Path(prefix): Path<String>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<ListNamespacesResponse>, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     let parent = q.parent.as_deref().map(parse_namespace);
     let rows = s
         .service
         .store
-        .list_namespaces(s.service.catalog_id, parent.as_deref())
+        .list_namespaces(cat.catalog_id, parent.as_deref())
         .await?;
     let mut namespaces = Vec::with_capacity(rows.len());
     for levels in rows {
@@ -43,14 +46,16 @@ pub async fn list(
 
 pub async fn create(
     State(s): State<CatalogState>,
+    Path(prefix): Path<String>,
     Json(req): Json<CreateNamespaceRequest>,
 ) -> Result<Json<CreateNamespaceResponse>, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     let levels: Vec<String> = req.namespace.as_ref().clone();
     let props = req.properties.clone().unwrap_or_default();
     let row = s
         .service
         .store
-        .create_namespace(s.service.catalog_id, &levels, &props)
+        .create_namespace(cat.catalog_id, &levels, &props)
         .await?;
     let properties: HashMap<String, String> =
         serde_json::from_value(row.properties).unwrap_or_default();
@@ -62,13 +67,14 @@ pub async fn create(
 
 pub async fn load(
     State(s): State<CatalogState>,
-    Path(ns): Path<String>,
+    Path((prefix, ns)): Path<(String, String)>,
 ) -> Result<Json<GetNamespaceResponse>, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     let levels = parse_namespace(&ns);
     let row = s
         .service
         .store
-        .get_namespace(s.service.catalog_id, &levels)
+        .get_namespace(cat.catalog_id, &levels)
         .await?;
     let properties: HashMap<String, String> =
         serde_json::from_value(row.properties).unwrap_or_default();
@@ -82,38 +88,41 @@ pub async fn load(
 
 pub async fn head(
     State(s): State<CatalogState>,
-    Path(ns): Path<String>,
+    Path((prefix, ns)): Path<(String, String)>,
 ) -> Result<axum::http::StatusCode, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     s.service
         .store
-        .get_namespace(s.service.catalog_id, &parse_namespace(&ns))
+        .get_namespace(cat.catalog_id, &parse_namespace(&ns))
         .await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 pub async fn drop(
     State(s): State<CatalogState>,
-    Path(ns): Path<String>,
+    Path((prefix, ns)): Path<(String, String)>,
 ) -> Result<axum::http::StatusCode, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     s.service
         .store
-        .drop_namespace(s.service.catalog_id, &parse_namespace(&ns))
+        .drop_namespace(cat.catalog_id, &parse_namespace(&ns))
         .await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 pub async fn update_properties(
     State(s): State<CatalogState>,
-    Path(ns): Path<String>,
+    Path((prefix, ns)): Path<(String, String)>,
     Json(req): Json<UpdateNamespacePropertiesRequest>,
 ) -> Result<Json<UpdateNamespacePropertiesResponse>, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     let levels = parse_namespace(&ns);
     let removals = req.removals.unwrap_or_default();
     let updates = req.updates.unwrap_or_default();
     let (updated, removed) = s
         .service
         .store
-        .update_namespace_properties(s.service.catalog_id, &levels, &removals, &updates)
+        .update_namespace_properties(cat.catalog_id, &levels, &removals, &updates)
         .await?;
     // Report removals requested but not present as `missing`.
     let missing: Vec<String> = removals

@@ -1,5 +1,6 @@
 //! Table handlers: create/load/head/commit/drop/list/metrics/rename/register.
 
+use crate::api::resolve::resolve_catalog;
 use crate::routes::CatalogState;
 use crate::CatalogError;
 use axum::extract::{Path, State};
@@ -22,43 +23,53 @@ pub fn parse_namespace(ns: &str) -> Vec<String> {
 
 pub async fn create(
     State(s): State<CatalogState>,
-    Path(ns): Path<String>,
+    Path((prefix, ns)): Path<(String, String)>,
     Json(req): Json<CreateTableRequest>,
 ) -> Result<Json<LoadTableResult>, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     let levels = parse_namespace(&ns);
-    Ok(Json(s.service.create_table(&levels, req).await?))
+    Ok(Json(
+        s.service
+            .create_table(cat.catalog_id, &cat.warehouse, &levels, req)
+            .await?,
+    ))
 }
 
 pub async fn load(
     State(s): State<CatalogState>,
-    Path((ns, table)): Path<(String, String)>,
+    Path((prefix, ns, table)): Path<(String, String, String)>,
 ) -> Result<Json<LoadTableResult>, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     Ok(Json(
-        s.service.load_table(&parse_namespace(&ns), &table).await?,
+        s.service
+            .load_table(cat.catalog_id, &parse_namespace(&ns), &table)
+            .await?,
     ))
 }
 
 pub async fn commit(
     State(s): State<CatalogState>,
-    Path((ns, table)): Path<(String, String)>,
+    Path((prefix, ns, table)): Path<(String, String, String)>,
     Json(req): Json<CommitTableRequest>,
 ) -> Result<Json<LoadTableResult>, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     Ok(Json(
         s.service
-            .commit_table(&parse_namespace(&ns), &table, req)
+            .commit_table(cat.catalog_id, &parse_namespace(&ns), &table, req)
             .await?,
     ))
 }
 
 pub async fn list(
     State(s): State<CatalogState>,
-    Path(ns): Path<String>,
+    Path((prefix, ns)): Path<(String, String)>,
 ) -> Result<Json<ListTablesResponse>, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     let levels = parse_namespace(&ns);
     let nsrow = s
         .service
         .store
-        .get_namespace(s.service.catalog_id, &levels)
+        .get_namespace(cat.catalog_id, &levels)
         .await?;
     let names = s.service.store.list_tables(nsrow.id).await?;
     let ns_ident =
@@ -75,12 +86,13 @@ pub async fn list(
 
 pub async fn head(
     State(s): State<CatalogState>,
-    Path((ns, table)): Path<(String, String)>,
+    Path((prefix, ns, table)): Path<(String, String, String)>,
 ) -> Result<axum::http::StatusCode, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     let nsrow = s
         .service
         .store
-        .get_namespace(s.service.catalog_id, &parse_namespace(&ns))
+        .get_namespace(cat.catalog_id, &parse_namespace(&ns))
         .await?;
     s.service.store.load_table(nsrow.id, &table).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
@@ -88,12 +100,13 @@ pub async fn head(
 
 pub async fn drop(
     State(s): State<CatalogState>,
-    Path((ns, table)): Path<(String, String)>,
+    Path((prefix, ns, table)): Path<(String, String, String)>,
 ) -> Result<axum::http::StatusCode, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     let nsrow = s
         .service
         .store
-        .get_namespace(s.service.catalog_id, &parse_namespace(&ns))
+        .get_namespace(cat.catalog_id, &parse_namespace(&ns))
         .await?;
     s.service.store.drop_table(nsrow.id, &table).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
@@ -105,17 +118,19 @@ pub async fn metrics(Json(_v): Json<serde_json::Value>) -> axum::http::StatusCod
 
 pub async fn rename(
     State(s): State<CatalogState>,
+    Path(prefix): Path<String>,
     Json(req): Json<RenameTableRequest>,
 ) -> Result<axum::http::StatusCode, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     let src_ns = s
         .service
         .store
-        .get_namespace(s.service.catalog_id, req.source.namespace.as_ref())
+        .get_namespace(cat.catalog_id, req.source.namespace.as_ref())
         .await?;
     let dst_ns = s
         .service
         .store
-        .get_namespace(s.service.catalog_id, req.destination.namespace.as_ref())
+        .get_namespace(cat.catalog_id, req.destination.namespace.as_ref())
         .await?;
     s.service
         .store
@@ -131,15 +146,16 @@ pub async fn rename(
 
 pub async fn register(
     State(s): State<CatalogState>,
-    Path(ns): Path<String>,
+    Path((prefix, ns)): Path<(String, String)>,
     Json(req): Json<RegisterTableRequest>,
 ) -> Result<Json<LoadTableResult>, CatalogError> {
+    let cat = resolve_catalog(&s, &prefix).await?;
     // Read the existing metadata.json from storage, then insert a row pointing at it.
     let levels = parse_namespace(&ns);
     let nsrow = s
         .service
         .store
-        .get_namespace(s.service.catalog_id, &levels)
+        .get_namespace(cat.catalog_id, &levels)
         .await?;
     let bytes = s.service.storage.get(&req.metadata_location).await?;
     let md: iceberg::spec::TableMetadata =
