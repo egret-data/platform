@@ -23,7 +23,11 @@ pub async fn list(
     Query(q): Query<ListQuery>,
 ) -> Result<Json<ListNamespacesResponse>, CatalogError> {
     let parent = q.parent.as_deref().map(parse_namespace);
-    let rows = s.service.store.list_namespaces(parent.as_deref()).await?;
+    let rows = s
+        .service
+        .store
+        .list_namespaces(s.service.catalog_id, parent.as_deref())
+        .await?;
     let mut namespaces = Vec::with_capacity(rows.len());
     for levels in rows {
         namespaces.push(
@@ -43,7 +47,11 @@ pub async fn create(
 ) -> Result<Json<CreateNamespaceResponse>, CatalogError> {
     let levels: Vec<String> = req.namespace.as_ref().clone();
     let props = req.properties.clone().unwrap_or_default();
-    let row = s.service.store.create_namespace(&levels, &props).await?;
+    let row = s
+        .service
+        .store
+        .create_namespace(s.service.catalog_id, &levels, &props)
+        .await?;
     let properties: HashMap<String, String> =
         serde_json::from_value(row.properties).unwrap_or_default();
     Ok(Json(CreateNamespaceResponse {
@@ -57,7 +65,11 @@ pub async fn load(
     Path(ns): Path<String>,
 ) -> Result<Json<GetNamespaceResponse>, CatalogError> {
     let levels = parse_namespace(&ns);
-    let row = s.service.store.get_namespace(&levels).await?;
+    let row = s
+        .service
+        .store
+        .get_namespace(s.service.catalog_id, &levels)
+        .await?;
     let properties: HashMap<String, String> =
         serde_json::from_value(row.properties).unwrap_or_default();
     let namespace = NamespaceIdent::from_vec(row.levels)
@@ -72,7 +84,10 @@ pub async fn head(
     State(s): State<CatalogState>,
     Path(ns): Path<String>,
 ) -> Result<axum::http::StatusCode, CatalogError> {
-    s.service.store.get_namespace(&parse_namespace(&ns)).await?;
+    s.service
+        .store
+        .get_namespace(s.service.catalog_id, &parse_namespace(&ns))
+        .await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -82,7 +97,7 @@ pub async fn drop(
 ) -> Result<axum::http::StatusCode, CatalogError> {
     s.service
         .store
-        .drop_namespace(&parse_namespace(&ns))
+        .drop_namespace(s.service.catalog_id, &parse_namespace(&ns))
         .await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -98,7 +113,7 @@ pub async fn update_properties(
     let (updated, removed) = s
         .service
         .store
-        .update_namespace_properties(&levels, &removals, &updates)
+        .update_namespace_properties(s.service.catalog_id, &levels, &removals, &updates)
         .await?;
     // Report removals requested but not present as `missing`.
     let missing: Vec<String> = removals

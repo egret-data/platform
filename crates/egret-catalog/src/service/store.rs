@@ -1,8 +1,9 @@
 //! Postgres-backed CatalogStore: namespace CRUD + table CRUD + CAS commit.
 
+use crate::service::{table_repo, view_repo};
 use crate::CatalogError;
 use egret_metastore::Db;
-use iceberg::spec::TableMetadata;
+use iceberg::spec::{TableMetadata, ViewMetadata};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -23,16 +24,22 @@ impl CatalogStore {
         Self { db }
     }
 
+    pub fn pool(&self) -> &sqlx::PgPool {
+        &self.db.pool
+    }
+
     pub async fn create_namespace(
         &self,
+        catalog_id: Uuid,
         levels: &[String],
         props: &HashMap<String, String>,
     ) -> Result<NamespaceRow, CatalogError> {
         let props_json = serde_json::to_value(props).unwrap_or_default();
         sqlx::query_as::<_, NamespaceRow>(
-            "INSERT INTO catalog_namespaces (levels, properties) VALUES ($1, $2) \
+            "INSERT INTO catalog_namespaces (catalog_id, levels, properties) VALUES ($1, $2, $3) \
              RETURNING id, levels, properties",
         )
+        .bind(catalog_id)
         .bind(levels)
         .bind(props_json)
         .fetch_one(&self.db.pool)
@@ -45,10 +52,16 @@ impl CatalogStore {
         })
     }
 
-    pub async fn get_namespace(&self, levels: &[String]) -> Result<NamespaceRow, CatalogError> {
+    pub async fn get_namespace(
+        &self,
+        catalog_id: Uuid,
+        levels: &[String],
+    ) -> Result<NamespaceRow, CatalogError> {
         sqlx::query_as::<_, NamespaceRow>(
-            "SELECT id, levels, properties FROM catalog_namespaces WHERE levels = $1",
+            "SELECT id, levels, properties FROM catalog_namespaces \
+             WHERE catalog_id = $1 AND levels = $2",
         )
+        .bind(catalog_id)
         .bind(levels)
         .fetch_optional(&self.db.pool)
         .await
@@ -58,21 +71,25 @@ impl CatalogStore {
 
     pub async fn list_namespaces(
         &self,
+        catalog_id: Uuid,
         parent: Option<&[String]>,
     ) -> Result<Vec<Vec<String>>, CatalogError> {
         match parent {
             None => sqlx::query_scalar::<_, Vec<String>>(
-                "SELECT levels FROM catalog_namespaces ORDER BY levels",
+                "SELECT levels FROM catalog_namespaces WHERE catalog_id = $1 ORDER BY levels",
             )
+            .bind(catalog_id)
             .fetch_all(&self.db.pool)
             .await
             .map_err(CatalogError::Db),
             Some(p) => sqlx::query_scalar::<_, Vec<String>>(
                 "SELECT levels FROM catalog_namespaces \
-                     WHERE levels[1:cardinality($1::text[])] = $1 \
-                       AND cardinality(levels) = cardinality($1::text[]) + 1 \
+                     WHERE catalog_id = $1 \
+                       AND levels[1:cardinality($2::text[])] = $2 \
+                       AND cardinality(levels) = cardinality($2::text[]) + 1 \
                      ORDER BY levels",
             )
+            .bind(catalog_id)
             .bind(p)
             .fetch_all(&self.db.pool)
             .await
@@ -80,8 +97,12 @@ impl CatalogStore {
         }
     }
 
-    pub async fn drop_namespace(&self, levels: &[String]) -> Result<(), CatalogError> {
-        let ns = self.get_namespace(levels).await?;
+    pub async fn drop_namespace(
+        &self,
+        catalog_id: Uuid,
+        levels: &[String],
+    ) -> Result<(), CatalogError> {
+        let ns = self.get_namespace(catalog_id, levels).await?;
         let count: i64 = sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM catalog_tables WHERE namespace_id = $1",
         )
@@ -102,11 +123,12 @@ impl CatalogStore {
 
     pub async fn update_namespace_properties(
         &self,
+        catalog_id: Uuid,
         levels: &[String],
         removals: &[String],
         updates: &HashMap<String, String>,
     ) -> Result<(Vec<String>, Vec<String>), CatalogError> {
-        let ns = self.get_namespace(levels).await?;
+        let ns = self.get_namespace(catalog_id, levels).await?;
         let mut props: HashMap<String, String> =
             serde_json::from_value(ns.properties).unwrap_or_default();
         let mut removed = vec![];
@@ -135,19 +157,7 @@ impl CatalogStore {
 // Table rows
 // ---------------------------------------------------------------------------
 
-/// Internal FromRow struct for raw DB fetch (metadata column stays as JSON value).
-#[derive(sqlx::FromRow)]
-struct TableRowRaw {
-    id: Uuid,
-    name: String,
-    table_uuid: Uuid,
-    metadata: serde_json::Value,
-    metadata_location: String,
-    location: String,
-    current_version: i32,
-}
-
-/// A fully-deserialized table row returned from the store.
+/// A fully-assembled table row returned from the store.
 pub struct TableRow {
     pub id: Uuid,
     pub name: String,
@@ -158,28 +168,15 @@ pub struct TableRow {
     pub current_version: i32,
 }
 
-impl TableRowRaw {
-    fn into_table_row(self) -> Result<TableRow, CatalogError> {
-        let metadata: TableMetadata = serde_json::from_value(self.metadata)
-            .map_err(|e| CatalogError::BadRequest(e.to_string()))?;
-        Ok(TableRow {
-            id: self.id,
-            name: self.name,
-            table_uuid: self.table_uuid,
-            metadata,
-            metadata_location: self.metadata_location,
-            location: self.location,
-            current_version: self.current_version,
-        })
-    }
-}
-
 // ---------------------------------------------------------------------------
 // CatalogStore — table methods
 // ---------------------------------------------------------------------------
 
 impl CatalogStore {
     /// Insert a freshly-created table (version 0). `metadata` already has its uuid/location.
+    ///
+    /// Shreds the [`TableMetadata`] into the root `catalog_tables` row plus its
+    /// normalized child tables in a single transaction.
     pub async fn insert_table(
         &self,
         ns_id: Uuid,
@@ -189,37 +186,61 @@ impl CatalogStore {
         metadata_location: &str,
         location: &str,
     ) -> Result<(), CatalogError> {
-        let md =
-            serde_json::to_value(metadata).map_err(|e| CatalogError::BadRequest(e.to_string()))?;
         let snap: Option<i64> = metadata.current_snapshot_id();
-        sqlx::query(
+        let mut tx = self.db.pool.begin().await.map_err(CatalogError::Db)?;
+
+        let id: Uuid = match sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO catalog_tables \
-               (namespace_id, name, table_uuid, metadata, metadata_location, location, \
-                current_snapshot_id, current_version) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 0)",
+               (namespace_id, name, table_uuid, location, format_version, last_column_id, \
+                last_sequence_number, last_updated_ms, last_partition_id, current_schema_id, \
+                default_spec_id, default_sort_order_id, current_snapshot_id, metadata_location, \
+                previous_metadata_location, current_version) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULL, 0) \
+             RETURNING id",
         )
         .bind(ns_id)
         .bind(name)
         .bind(table_uuid)
-        .bind(md)
-        .bind(metadata_location)
         .bind(location)
+        .bind(table_repo::format_version_to_i16(metadata.format_version()))
+        .bind(metadata.last_column_id())
+        .bind(metadata.last_sequence_number())
+        .bind(metadata.last_updated_ms())
+        .bind(metadata.last_partition_id())
+        .bind(metadata.current_schema().schema_id())
+        .bind(metadata.default_partition_spec().spec_id())
+        .bind(
+            i32::try_from(metadata.default_sort_order_id()).map_err(|e| {
+                CatalogError::BadRequest(format!("default_sort_order_id out of range: {e}"))
+            })?,
+        )
         .bind(snap)
-        .execute(&self.db.pool)
+        .bind(metadata_location)
+        .fetch_one(&mut *tx)
         .await
-        .map_err(|e| match &e {
-            sqlx::Error::Database(d) if d.is_unique_violation() => {
-                CatalogError::AlreadyExists(name.into())
+        {
+            Ok(id) => id,
+            Err(sqlx::Error::Database(d)) if d.is_unique_violation() => {
+                return Err(CatalogError::AlreadyExists(name.into()));
             }
-            _ => CatalogError::Db(e),
-        })?;
+            Err(e) => return Err(CatalogError::Db(e)),
+        };
+
+        table_repo::shred_children(&mut tx, id, metadata).await?;
+        table_repo::append_logs(&mut tx, id, metadata, metadata_location).await?;
+
+        tx.commit().await.map_err(CatalogError::Db)?;
         Ok(())
     }
 
-    /// Load a table by namespace + name.
+    /// Load a table by namespace + name, assembling its metadata from the
+    /// normalized child tables.
     pub async fn load_table(&self, ns_id: Uuid, name: &str) -> Result<TableRow, CatalogError> {
-        sqlx::query_as::<_, TableRowRaw>(
-            "SELECT id, name, table_uuid, metadata, metadata_location, location, current_version \
+        let root = sqlx::query_as::<_, table_repo::TableRootRow>(
+            "SELECT id, name, table_uuid, location, format_version, last_column_id, \
+                    last_sequence_number, last_updated_ms, last_partition_id, current_schema_id, \
+                    default_spec_id, default_sort_order_id, current_snapshot_id, \
+                    metadata_location, current_version \
              FROM catalog_tables WHERE namespace_id = $1 AND name = $2",
         )
         .bind(ns_id)
@@ -227,8 +248,18 @@ impl CatalogStore {
         .fetch_optional(&self.db.pool)
         .await
         .map_err(CatalogError::Db)?
-        .ok_or_else(|| CatalogError::NotFound(name.into()))?
-        .into_table_row()
+        .ok_or_else(|| CatalogError::NotFound(name.into()))?;
+
+        let metadata = table_repo::assemble_table_metadata(&self.db.pool, &root).await?;
+        Ok(TableRow {
+            id: root.id,
+            name: root.name,
+            table_uuid: root.table_uuid,
+            metadata,
+            metadata_location: root.metadata_location,
+            location: root.location,
+            current_version: root.current_version,
+        })
     }
 
     /// List table names in a namespace, ordered alphabetically.
@@ -289,25 +320,40 @@ impl CatalogStore {
         metadata: &TableMetadata,
         new_metadata_location: &str,
     ) -> Result<(), CatalogError> {
-        let md =
-            serde_json::to_value(metadata).map_err(|e| CatalogError::BadRequest(e.to_string()))?;
         let snap: Option<i64> = metadata.current_snapshot_id();
         let mut tx = self.db.pool.begin().await.map_err(CatalogError::Db)?;
+
         let affected = sqlx::query(
             "UPDATE catalog_tables \
-               SET metadata = $3, \
-                   previous_metadata_location = metadata_location, \
-                   metadata_location = $4, \
-                   current_snapshot_id = $5, \
+               SET previous_metadata_location = metadata_location, \
+                   metadata_location = $3, \
+                   current_snapshot_id = $4, \
+                   last_sequence_number = $5, \
+                   last_updated_ms = $6, \
+                   last_column_id = $7, \
+                   last_partition_id = $8, \
+                   current_schema_id = $9, \
+                   default_spec_id = $10, \
+                   default_sort_order_id = $11, \
                    current_version = current_version + 1, \
                    updated_at = now() \
              WHERE id = $1 AND current_version = $2",
         )
         .bind(table_id)
         .bind(expected_version)
-        .bind(md)
         .bind(new_metadata_location)
         .bind(snap)
+        .bind(metadata.last_sequence_number())
+        .bind(metadata.last_updated_ms())
+        .bind(metadata.last_column_id())
+        .bind(metadata.last_partition_id())
+        .bind(metadata.current_schema().schema_id())
+        .bind(metadata.default_partition_spec().spec_id())
+        .bind(
+            i32::try_from(metadata.default_sort_order_id()).map_err(|e| {
+                CatalogError::BadRequest(format!("default_sort_order_id out of range: {e}"))
+            })?,
+        )
         .execute(&mut *tx)
         .await
         .map_err(CatalogError::Db)?
@@ -318,15 +364,8 @@ impl CatalogStore {
             return Err(CatalogError::Conflict("stale table version".into()));
         }
 
-        sqlx::query(
-            "INSERT INTO catalog_table_metadata_log (table_id, metadata_location) \
-             VALUES ($1, $2)",
-        )
-        .bind(table_id)
-        .bind(new_metadata_location)
-        .execute(&mut *tx)
-        .await
-        .map_err(CatalogError::Db)?;
+        table_repo::shred_children(&mut tx, table_id, metadata).await?;
+        table_repo::append_logs(&mut tx, table_id, metadata, new_metadata_location).await?;
 
         tx.commit().await.map_err(CatalogError::Db)?;
         Ok(())
@@ -337,22 +376,12 @@ impl CatalogStore {
 // View rows
 // ---------------------------------------------------------------------------
 
-/// Internal FromRow struct for raw DB fetch (metadata column stays as JSON value).
-#[derive(sqlx::FromRow)]
-struct ViewRowRaw {
-    id: Uuid,
-    name: String,
-    metadata: serde_json::Value,
-    metadata_location: String,
-    location: String,
-    current_version: i32,
-}
-
-/// A view row with metadata stored as an opaque JSON blob.
+/// A fully-assembled view row returned from the store.
 pub struct ViewRow {
     pub id: Uuid,
     pub name: String,
-    pub metadata: serde_json::Value,
+    pub view_uuid: Uuid,
+    pub metadata: ViewMetadata,
     pub metadata_location: String,
     pub location: String,
     pub current_version: i32,
@@ -363,40 +392,56 @@ pub struct ViewRow {
 // ---------------------------------------------------------------------------
 
 impl CatalogStore {
-    /// Insert a new view. Returns `AlreadyExists` on unique-constraint violation.
+    /// Insert a freshly-created view (version 0). `metadata` already has its
+    /// uuid/location. Shreds the [`ViewMetadata`] into the root `catalog_views`
+    /// row plus its normalized child tables in a single transaction. Returns
+    /// `AlreadyExists` on unique-constraint violation.
     pub async fn insert_view(
         &self,
         ns_id: Uuid,
         name: &str,
-        metadata: &serde_json::Value,
+        metadata: &ViewMetadata,
         metadata_location: &str,
         location: &str,
     ) -> Result<(), CatalogError> {
-        sqlx::query(
+        let mut tx = self.db.pool.begin().await.map_err(CatalogError::Db)?;
+
+        let id: Uuid = match sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO catalog_views \
-               (namespace_id, name, metadata, metadata_location, location, current_version) \
-             VALUES ($1, $2, $3, $4, $5, 0)",
+               (namespace_id, name, view_uuid, location, format_version, current_version_id, \
+                metadata_location, current_version) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 0) \
+             RETURNING id",
         )
         .bind(ns_id)
         .bind(name)
-        .bind(metadata)
-        .bind(metadata_location)
+        .bind(metadata.uuid())
         .bind(location)
-        .execute(&self.db.pool)
+        .bind(view_repo::format_version_to_i16(metadata.format_version()))
+        .bind(metadata.current_version_id())
+        .bind(metadata_location)
+        .fetch_one(&mut *tx)
         .await
-        .map_err(|e| match &e {
-            sqlx::Error::Database(d) if d.is_unique_violation() => {
-                CatalogError::AlreadyExists(name.into())
+        {
+            Ok(id) => id,
+            Err(sqlx::Error::Database(d)) if d.is_unique_violation() => {
+                return Err(CatalogError::AlreadyExists(name.into()));
             }
-            _ => CatalogError::Db(e),
-        })?;
+            Err(e) => return Err(CatalogError::Db(e)),
+        };
+
+        view_repo::shred_view(&mut tx, id, metadata).await?;
+
+        tx.commit().await.map_err(CatalogError::Db)?;
         Ok(())
     }
 
-    /// Load a view by namespace + name. Returns `NotFound` if absent.
+    /// Load a view by namespace + name, assembling its metadata from the
+    /// normalized child tables. Returns `NotFound` if absent.
     pub async fn load_view(&self, ns_id: Uuid, name: &str) -> Result<ViewRow, CatalogError> {
-        let raw = sqlx::query_as::<_, ViewRowRaw>(
-            "SELECT id, name, metadata, metadata_location, location, current_version \
+        let root = sqlx::query_as::<_, view_repo::ViewRootRow>(
+            "SELECT id, name, view_uuid, location, format_version, current_version_id, \
+                    metadata_location, current_version \
              FROM catalog_views WHERE namespace_id = $1 AND name = $2",
         )
         .bind(ns_id)
@@ -405,13 +450,16 @@ impl CatalogStore {
         .await
         .map_err(CatalogError::Db)?
         .ok_or_else(|| CatalogError::NotFound(name.into()))?;
+
+        let metadata = view_repo::assemble_view_metadata(&self.db.pool, &root).await?;
         Ok(ViewRow {
-            id: raw.id,
-            name: raw.name,
-            metadata: raw.metadata,
-            metadata_location: raw.metadata_location,
-            location: raw.location,
-            current_version: raw.current_version,
+            id: root.id,
+            name: root.name,
+            view_uuid: root.view_uuid,
+            metadata,
+            metadata_location: root.metadata_location,
+            location: root.location,
+            current_version: root.current_version,
         })
     }
 

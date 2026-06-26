@@ -14,6 +14,7 @@ pub struct CatalogService {
     pub store: CatalogStore,
     pub storage: Arc<dyn ObjectStore>,
     pub warehouse: std::sync::Arc<str>,
+    pub catalog_id: Uuid,
 }
 
 impl CatalogService {
@@ -37,7 +38,7 @@ impl CatalogService {
         ns_levels: &[String],
         req: CreateTableRequest,
     ) -> Result<LoadTableResult, CatalogError> {
-        let ns = self.store.get_namespace(ns_levels).await?;
+        let ns = self.store.get_namespace(self.catalog_id, ns_levels).await?;
         let table_uuid = Uuid::new_v4();
         let location = req.location.clone().unwrap_or_else(|| {
             egret_storage::table_base_location(&self.warehouse, ns_levels, &req.name, &table_uuid)
@@ -65,7 +66,7 @@ impl CatalogService {
         ns_levels: &[String],
         name: &str,
     ) -> Result<LoadTableResult, CatalogError> {
-        let ns = self.store.get_namespace(ns_levels).await?;
+        let ns = self.store.get_namespace(self.catalog_id, ns_levels).await?;
         let row = self.store.load_table(ns.id, name).await?;
         Ok(LoadTableResult {
             metadata_location: Some(row.metadata_location),
@@ -82,7 +83,7 @@ impl CatalogService {
         name: &str,
         req: CommitTableRequest,
     ) -> Result<LoadTableResult, CatalogError> {
-        let ns = self.store.get_namespace(ns_levels).await?;
+        let ns = self.store.get_namespace(self.catalog_id, ns_levels).await?;
         let row = self.store.load_table(ns.id, name).await?;
         let new_md = apply_commit(
             row.metadata.clone(),

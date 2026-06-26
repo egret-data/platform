@@ -178,10 +178,16 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         let store = egret_catalog::service::CatalogStore::new(db.clone());
         let storage: std::sync::Arc<dyn egret_storage::ObjectStore> =
             std::sync::Arc::new(egret_storage::S3Store::new(&storage_cfg).await?);
+        // TEMP (Plan A-1): single default catalog; replaced by per-request {prefix}
+        // resolution in Plan A-2.
+        let catalog_id = store
+            .ensure_default_catalog(&config.catalog.warehouse)
+            .await?;
         let service = egret_catalog::service::CatalogService {
             store,
             storage,
             warehouse: config.catalog.warehouse.clone().into(),
+            catalog_id,
         };
         // Advertise an externally-reachable origin in `s3.signer.uri`, not the bind
         // host (which defaults to 0.0.0.0 and is unreachable for engines).
