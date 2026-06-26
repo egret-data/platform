@@ -42,3 +42,35 @@ async fn duplicate_namespace_is_already_exists() {
     assert!(matches!(err, egret_catalog::CatalogError::AlreadyExists(_)));
     s.drop_namespace(cat, &levels).await.unwrap();
 }
+
+#[tokio::test]
+async fn drop_namespace_with_only_a_view_is_not_empty() {
+    let Some(s) = store().await else {
+        eprintln!("skip");
+        return;
+    };
+    let cat = seed_catalog(&s).await;
+    let levels = ns();
+    let ns = s
+        .create_namespace(cat, &levels, &HashMap::new())
+        .await
+        .unwrap();
+
+    let view_uuid = uuid::Uuid::new_v4();
+    let loc = "s3://wh/ns/v";
+    let mloc = "s3://wh/ns/v/metadata/0.json";
+    let view_md = egret_catalog::service::test_support::minimal_view_metadata(loc, view_uuid);
+    s.insert_view(ns.id, "v", &view_md, mloc, loc)
+        .await
+        .unwrap();
+
+    let err = s.drop_namespace(cat, &levels).await.unwrap_err();
+    assert!(
+        matches!(err, egret_catalog::CatalogError::NamespaceNotEmpty(_)),
+        "expected NamespaceNotEmpty, got: {err:?}"
+    );
+
+    // Cleanup
+    s.drop_view(ns.id, "v").await.unwrap();
+    s.drop_namespace(cat, &levels).await.unwrap();
+}

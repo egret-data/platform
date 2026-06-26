@@ -104,7 +104,8 @@ impl CatalogStore {
     ) -> Result<(), CatalogError> {
         let ns = self.get_namespace(catalog_id, levels).await?;
         let count: i64 = sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM catalog_tables WHERE namespace_id = $1",
+            "SELECT (SELECT count(*) FROM catalog_tables WHERE namespace_id = $1) \
+                  + (SELECT count(*) FROM catalog_views  WHERE namespace_id = $1)",
         )
         .bind(ns.id)
         .fetch_one(&self.db.pool)
