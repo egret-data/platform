@@ -6,5 +6,6 @@ pub mod http_error;
 pub mod routes;
 pub mod service;
 
+pub use api::resolve::AuthnPrincipal;
 pub use error::CatalogError;
 pub use routes::{iceberg_router, CatalogState};

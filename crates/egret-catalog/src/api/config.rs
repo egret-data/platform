@@ -5,7 +5,7 @@
 //! When `warehouse` names a workspace slug we resolve its managed catalog and advertise
 //! the `prefix`/`warehouse` overrides; without it we return signer-only discovery config.
 
-use crate::api::resolve::resolve_catalog;
+use crate::api::resolve::{resolve_catalog, AuthnPrincipal};
 use crate::routes::CatalogState;
 use crate::CatalogError;
 use axum::extract::{Query, State};
@@ -36,7 +36,12 @@ pub async fn get_config(
         ),
     ]);
     if let Some(slug) = q.warehouse {
-        let cat = resolve_catalog(&s, &slug).await?;
+        // `/v1/config` is unprefixed: it only requires a valid token (any
+        // workspace or admin, enforced by `require_bearer`). The optional
+        // `?warehouse=<slug>` lookup just advertises discovery config, so we
+        // resolve it with `Admin` (no ownership check) — config exposes no data,
+        // only the prefix/warehouse a client should target.
+        let cat = resolve_catalog(&s, &AuthnPrincipal::Admin, &slug).await?;
         overrides.insert("prefix".to_string(), slug);
         overrides.insert("warehouse".to_string(), cat.warehouse);
     }
