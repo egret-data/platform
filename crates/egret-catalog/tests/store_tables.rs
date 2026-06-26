@@ -297,6 +297,97 @@ async fn cas_commit_rejects_stale_version() {
 }
 
 #[tokio::test]
+async fn commit_with_new_snapshot_roundtrips() {
+    use iceberg::spec::{Operation, Snapshot, Summary, TableMetadataBuilder};
+    let Some(s) = store().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let cat = seed_catalog(&s).await;
+    let levels = vec![format!("t_{}", uuid::Uuid::new_v4().simple())];
+    let ns = s
+        .create_namespace(cat, &levels, &HashMap::new())
+        .await
+        .unwrap();
+    let tid = uuid::Uuid::new_v4();
+    let loc = format!("s3://wh/{}/cas-snap-{tid}", levels[0]);
+
+    // Insert with minimal metadata (no snapshot) at version 0.
+    let base_md = minimal_metadata(&loc, tid);
+    let mloc0 = format!(
+        "{loc}/metadata/00000-{}.metadata.json",
+        uuid::Uuid::new_v4()
+    );
+    s.insert_table(ns.id, "cas_snap", tid, &base_md, &mloc0, &loc)
+        .await
+        .unwrap();
+    let row = s.load_table(ns.id, "cas_snap").await.unwrap();
+    assert_eq!(row.current_version, 0);
+    assert_eq!(row.metadata.current_snapshot_id(), None);
+
+    // Build new metadata that adds a snapshot on main branch.
+    let snapshot_id = 4_001i64;
+    let ts = chrono::Utc::now().timestamp_millis();
+    let snap = Snapshot::builder()
+        .with_snapshot_id(snapshot_id)
+        .with_sequence_number(1)
+        .with_schema_id(0)
+        .with_manifest_list(format!("{loc}/metadata/snap-{snapshot_id}.avro"))
+        .with_summary(Summary {
+            operation: Operation::Append,
+            additional_properties: HashMap::from([("added-records".to_string(), "1".to_string())]),
+        })
+        .with_timestamp_ms(ts)
+        .build();
+    let new_md = TableMetadataBuilder::new_from_metadata(row.metadata, None)
+        .set_branch_snapshot(snap, "main")
+        .unwrap()
+        .build()
+        .unwrap()
+        .metadata;
+
+    let mloc1 = format!(
+        "{loc}/metadata/00001-{}.metadata.json",
+        uuid::Uuid::new_v4()
+    );
+
+    // CAS commit at expected_version=0 must succeed.
+    s.cas_commit(row.id, 0, &new_md, &mloc1).await.unwrap();
+
+    // Reload and verify the committed state.
+    let reloaded = s.load_table(ns.id, "cas_snap").await.unwrap();
+    assert_eq!(reloaded.current_version, 1);
+    assert_eq!(reloaded.metadata.current_snapshot_id(), Some(snapshot_id));
+
+    // The snapshot must be present and retrievable.
+    let loaded_snap = reloaded
+        .metadata
+        .snapshot_by_id(snapshot_id)
+        .expect("snapshot present after cas_commit");
+    assert_eq!(loaded_snap.snapshot_id(), snapshot_id);
+    assert_eq!(loaded_snap.sequence_number(), 1);
+
+    // The main ref must point to our snapshot.
+    let main_ref = reloaded
+        .metadata
+        .refs()
+        .get("main")
+        .expect("main ref present after cas_commit");
+    assert_eq!(main_ref.snapshot_id, snapshot_id);
+    assert!(
+        matches!(
+            main_ref.retention,
+            iceberg::spec::SnapshotRetention::Branch { .. }
+        ),
+        "main must be a branch, got: {:?}",
+        main_ref.retention
+    );
+
+    s.drop_table(ns.id, "cas_snap").await.unwrap();
+    s.drop_namespace(cat, &levels).await.unwrap();
+}
+
+#[tokio::test]
 async fn duplicate_table_is_already_exists() {
     let Some(s) = store().await else {
         eprintln!("skip: DATABASE_URL not set");

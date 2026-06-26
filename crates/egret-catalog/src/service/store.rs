@@ -320,25 +320,40 @@ impl CatalogStore {
         metadata: &TableMetadata,
         new_metadata_location: &str,
     ) -> Result<(), CatalogError> {
-        let md =
-            serde_json::to_value(metadata).map_err(|e| CatalogError::BadRequest(e.to_string()))?;
         let snap: Option<i64> = metadata.current_snapshot_id();
         let mut tx = self.db.pool.begin().await.map_err(CatalogError::Db)?;
+
         let affected = sqlx::query(
             "UPDATE catalog_tables \
-               SET metadata = $3, \
-                   previous_metadata_location = metadata_location, \
-                   metadata_location = $4, \
-                   current_snapshot_id = $5, \
+               SET previous_metadata_location = metadata_location, \
+                   metadata_location = $3, \
+                   current_snapshot_id = $4, \
+                   last_sequence_number = $5, \
+                   last_updated_ms = $6, \
+                   last_column_id = $7, \
+                   last_partition_id = $8, \
+                   current_schema_id = $9, \
+                   default_spec_id = $10, \
+                   default_sort_order_id = $11, \
                    current_version = current_version + 1, \
                    updated_at = now() \
              WHERE id = $1 AND current_version = $2",
         )
         .bind(table_id)
         .bind(expected_version)
-        .bind(md)
         .bind(new_metadata_location)
         .bind(snap)
+        .bind(metadata.last_sequence_number())
+        .bind(metadata.last_updated_ms())
+        .bind(metadata.last_column_id())
+        .bind(metadata.last_partition_id())
+        .bind(metadata.current_schema().schema_id())
+        .bind(metadata.default_partition_spec().spec_id())
+        .bind(
+            i32::try_from(metadata.default_sort_order_id()).map_err(|e| {
+                CatalogError::BadRequest(format!("default_sort_order_id out of range: {e}"))
+            })?,
+        )
         .execute(&mut *tx)
         .await
         .map_err(CatalogError::Db)?
@@ -349,15 +364,8 @@ impl CatalogStore {
             return Err(CatalogError::Conflict("stale table version".into()));
         }
 
-        sqlx::query(
-            "INSERT INTO catalog_table_metadata_log (table_id, metadata_location) \
-             VALUES ($1, $2)",
-        )
-        .bind(table_id)
-        .bind(new_metadata_location)
-        .execute(&mut *tx)
-        .await
-        .map_err(CatalogError::Db)?;
+        table_repo::shred_children(&mut tx, table_id, metadata).await?;
+        table_repo::append_logs(&mut tx, table_id, metadata, new_metadata_location).await?;
 
         tx.commit().await.map_err(CatalogError::Db)?;
         Ok(())
