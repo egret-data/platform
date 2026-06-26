@@ -33,9 +33,14 @@ pub struct AppState {
     /// at `/catalog/v1`. `Some` once `config.catalog.enabled` wires the engine;
     /// `None` otherwise (or in unit tests).
     pub catalog_engine: Option<axum::Router>,
-    /// Session-authenticated internal catalog browse API (for the UI).
-    /// Present once a database is wired; `None` in pure health unit tests.
-    pub catalog_browse: Option<egret_catalog::BrowseState>,
+    /// Session-authenticated internal catalog browse API (for the UI), reading
+    /// the embedded lakekeeper catalog (CE-2 T6). Like `catalog_engine`, it is
+    /// assembled in the composition root (`egret-bin`) and carried as a pre-built
+    /// `axum::Router` so `egret-server` stays free of the lakekeeper engine graph
+    /// (the engine pulls in a second `sqlx` major). Nested at `/api`, fronted by
+    /// the CSRF layer. `Some` once a database + the engine are wired; `None`
+    /// otherwise (or in unit tests).
+    pub catalog_browse: Option<axum::Router>,
     /// Present when `config.ranger.enabled`; `None` otherwise (or in unit tests).
     pub ranger: Option<egret_ranger::RangerState>,
     /// Present once a database is wired (in `egret-bin`); `None` in pure health unit tests.
@@ -115,11 +120,16 @@ pub fn build_router(state: AppState) -> Router {
         );
     }
 
+    // CE-2 T6: the browse API now reads the embedded lakekeeper catalog (not
+    // egret's stale `catalog_*` tables). It is assembled in `egret-bin`
+    // (`egret_catalog_engine::browse_router` with its `BrowseState`) and carried
+    // here as a pre-built `axum::Router` so this crate stays off the engine graph.
+    // Mounted at `/api`, fronted by the CSRF layer (same as before).
     if let Some(browse) = state.catalog_browse.clone() {
         let group = Router::new()
-            .nest("/api", egret_catalog::browse_router())
+            .nest("/api", browse)
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
-            .with_state(browse);
+            .with_state(());
         router = router.merge(group);
     }
 

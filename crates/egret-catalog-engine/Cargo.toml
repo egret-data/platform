@@ -48,8 +48,13 @@ egret-storage = { workspace = true }
 # stays free of the engine; the engine depends on it (downstream direction).
 egret-workspace = { workspace = true }
 egret-core = { workspace = true }
+# Session-authenticated browse API (CE-2 T6): the `WsContext` extractor needs
+# `SessionService` for session auth; the browse router is `WsContext`-gated.
+egret-auth = { workspace = true }
 
 anyhow.workspace = true
+# `#[derive(Serialize)]` on the browse DTOs.
+serde = { workspace = true, features = ["derive"] }
 # `#[async_trait]` impl of `WarehouseProvisioner` (see provisioner.rs).
 async-trait.workspace = true
 # serde_json: the bootstrap principal's `limes::Authentication` carries a
@@ -96,4 +101,7 @@ serde_json.workspace = true
 # workspace/user through the egret-side (sqlx-0.8) repos so the test never mixes
 # sqlx majors against the `Db` pool.
 egret-metastore = { workspace = true }
-egret-auth = { workspace = true }
+# (`egret-auth` is now a regular dependency for the browse API; the browse_api
+# integration test reuses it for session minting.)
+# `SessionService::new` takes `chrono::Duration` TTLs in the browse_api test.
+chrono = { workspace = true }

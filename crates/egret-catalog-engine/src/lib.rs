@@ -5,6 +5,10 @@
 /// stable admin principal derived from `catalog.system_user`. Replaces the
 /// CE-1 spike's `test_user`-based path for production startup.
 pub mod bootstrap;
+/// Session-authenticated internal catalog browse API (for the UI) reading the
+/// embedded lakekeeper catalog (CE-2 T6). Replaces `egret_catalog::browse`,
+/// which read egret's now-stale `catalog_*` tables.
+pub mod browse;
 /// Front-of-router auth + per-workspace token-ownership middleware (CE-2 T5 /
 /// A-3) for the embedded lakekeeper Iceberg REST engine.
 pub mod front_auth;
@@ -27,6 +31,7 @@ pub mod provisioner;
 pub mod provision;
 
 pub use bootstrap::ensure_bootstrapped;
+pub use browse::{browse_router, BrowseState};
 pub use front_auth::{front_auth, FrontAuthState};
 pub use mount::{
     build_state, catalog_engine_router, mount_catalog_engine, EngineServer, EngineState,
