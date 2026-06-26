@@ -8,6 +8,7 @@ pub mod table_repo;
 pub mod test_support;
 pub mod tokens;
 pub mod view_repo;
+pub mod warehouse;
 pub use catalogs::Catalog;
 pub use service::CatalogService;
 pub use store::CatalogStore;

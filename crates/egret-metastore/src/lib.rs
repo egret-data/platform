@@ -7,6 +7,7 @@ use sqlx::PgPool;
 
 // migration 0023: per-workspace normalized catalog
 // migration 0024: catalog perms
+// migration 0025: workspace_warehouse mapping
 /// All SQL migrations, embedded at compile time from the workspace `migrations/` dir.
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
