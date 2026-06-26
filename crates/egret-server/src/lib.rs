@@ -25,6 +25,9 @@ pub struct AppState {
     pub oidc: Option<OidcRoutesState>,
     /// Present when `config.catalog.enabled`; `None` otherwise (or in unit tests).
     pub catalog: Option<egret_catalog::CatalogState>,
+    /// Session-authenticated internal catalog browse API (for the UI).
+    /// Present once a database is wired; `None` in pure health unit tests.
+    pub catalog_browse: Option<egret_catalog::BrowseState>,
     /// Present when `config.ranger.enabled`; `None` otherwise (or in unit tests).
     pub ranger: Option<egret_ranger::RangerState>,
     /// Present once a database is wired (in `egret-bin`); `None` in pure health unit tests.
@@ -44,6 +47,7 @@ impl AppState {
             workspace: None,
             oidc: None,
             catalog: None,
+            catalog_browse: None,
             ranger: None,
             database: None,
             engine: None,
@@ -93,6 +97,14 @@ pub fn build_router(state: AppState) -> Router {
                 .nest("/catalog", egret_catalog::iceberg_router(catalog))
                 .with_state(()),
         );
+    }
+
+    if let Some(browse) = state.catalog_browse.clone() {
+        let group = Router::new()
+            .nest("/api", egret_catalog::browse_router())
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(browse);
+        router = router.merge(group);
     }
 
     if let Some(ranger) = state.ranger.clone() {

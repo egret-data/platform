@@ -284,6 +284,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         None
     };
 
+    // Session-authenticated internal catalog browse API (for the UI). Always wired
+    // (independent of `config.catalog.enabled`, which gates the Iceberg REST surface).
+    let catalog_browse = Some(egret_catalog::BrowseState {
+        store: egret_catalog::service::CatalogStore::new(db.clone()),
+        sessions: sessions.clone(),
+        workspaces: WorkspaceRepo::new(db.clone()),
+        authz: Authorizer::new(db.clone()),
+    });
+
     // Hoist crypto/SecretStore/DatabaseRepo so both the database and engine blocks can share them.
     let databases = {
         use base64::Engine as _;
@@ -366,6 +375,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         workspace: Some(workspace),
         oidc,
         catalog,
+        catalog_browse,
         ranger,
         database,
         engine,
