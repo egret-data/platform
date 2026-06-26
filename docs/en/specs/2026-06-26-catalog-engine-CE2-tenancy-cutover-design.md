@@ -13,7 +13,7 @@ Turn the CE-1 spike into a real, served, per-workspace lakekeeper catalog: clean
 ## 1. Decisions (locked)
 - **Dependency:** git-pin lakekeeper to an **upstream rev** (`github.com/lakekeeper/lakekeeper`), replacing the CE-1 sibling path-deps. Reproducible; no sibling checkout needed.
 - **Tenancy mapping:** a **new `workspace_warehouse` table** (not the A-1 `catalogs` table, which CE-8 retires).
-- **Cutover:** **replace** the built-in `iceberg_router` mount immediately — only lakekeeper serves Iceberg REST. (egret's `catalog_*` schema/store stays dormant until CE-8.)
+- **Cutover + delete superseded A-1/A-2:** replace the built-in `iceberg_router` mount AND **delete the now-superseded egret catalog code+schema** (CE-8 folded forward — no dormant code). Deleted: catalog **metadata** tables (`catalogs`, `catalog_namespaces`, `catalog_tables`+children, `catalog_views`+children), the `egret-catalog` table/view/namespace store (`store.rs` table/view/ns methods, `table_repo.rs`, `view_repo.rs`, `catalogs.rs`), the Iceberg REST handlers (`api/*`, `resolve.rs`), and the `iceberg_router`. **Kept** (the reusable A-3 identity layer): `catalog_tokens` (`tokens.rs` — engine auth, used in CE-3), `role_permissions` `catalog:read|write`, `require_bearer`, the browse API (rewired to lakekeeper), and the Catalog UI. Deletion happens AFTER lakekeeper serves + browse is rewired (within CE-2), so it is provably unused at delete time.
 - **UI continuity:** CE-2 **pulls the read half of CE-7 forward** — the internal browse API reads lakekeeper, so the Catalog UI doesn't break.
 - Tenancy model: one lakekeeper **default project**; **one warehouse per workspace**; REST `{prefix}` = warehouse **UUID**.
 
@@ -36,10 +36,16 @@ At egret-server startup (when `catalog.engine = lakekeeper`): run lakekeeper mig
 ### 2.4 Mount + cutover
 - New `egret-catalog-engine::mount_into(router, state, dsn)` (built on CE-1's `catalog_engine_router`): assemble lakekeeper `State` (real warehouse-backed; AllowAll authorizer for now) and nest `new_v1_full_router` under `/catalog/v1` in egret-server.
 - **Front middleware (preserve A-3 security):** egret `require_bearer` runs first — validate the bearer against `catalog_tokens` → workspace; resolve that workspace's `warehouse_id`; enforce `{prefix} == warehouse_id` (the A-3 per-workspace ownership invariant, now keyed on warehouse UUID; 403 on mismatch, 401 on bad token). Then a `from_fn` layer injects a lakekeeper `RequestMetadata` (the CE-1 seam). Inside lakekeeper: AllowAll for CE-2 (real per-token scope = CE-3/CE-4).
-- **Remove** the built-in `iceberg_router` mount from egret-server (the A-1/A-2 Iceberg REST surface). Leave egret's `catalog_*` schema + `egret-catalog` store dormant (unused) — CE-8 deletes them. Guard the engine choice behind `catalog.engine` config; default `lakekeeper` on this branch.
+- **Remove** the built-in `iceberg_router` mount from egret-server (the A-1/A-2 Iceberg REST surface). Then **delete** the superseded egret catalog code+schema (see §2.6) once the engine serves + browse is rewired. No `catalog.engine` flag needed (lakekeeper is the only engine after deletion).
 
 ### 2.5 Browse API rewire (read half of CE-7)
 - Re-point the internal `/api/ws/{ws}/catalog/...` endpoints (namespaces / tables / views / table-detail / summary) to read **lakekeeper** data instead of egret `catalog_*`: resolve the workspace's `warehouse_id`, then read via lakekeeper's catalog read API (or query the `lakekeeper` schema for namespaces/tables under that warehouse). Keep the `require_workspace(ctx, "catalog:read")` RBAC gate + workspace scoping (a member of X can't read Y). The Catalog UI is unchanged (same internal API shape).
+
+### 2.6 Delete superseded A-1/A-2 (CE-8 folded in)
+After the engine serves + browse reads lakekeeper, delete the now-unused egret catalog:
+- **Migration** (new): `DROP TABLE` the catalog metadata tables — `catalogs`, `catalog_namespaces`, `catalog_tables` + all `catalog_table_*`, `catalog_views` + all `catalog_view_*`. **Do NOT drop** `catalog_tokens` (engine auth) or `role_permissions` rows.
+- **Code (egret-catalog crate):** remove `service/{table_repo.rs, view_repo.rs, catalogs.rs}`, the table/view/namespace methods in `service/store.rs`, `api/*` Iceberg REST handlers, `resolve.rs`, and `iceberg_router` + `CatalogState` from `routes.rs`. **Keep** `service/tokens.rs` (catalog_tokens), `require_bearer` (moved/kept for the engine front layer), and `browse.rs` (rewired in §2.5). Remove `state.catalog`/the iceberg mount from egret-server.
+- **Order:** do this LAST in CE-2 (after Tasks proving the engine + browse work), so the deleted code is provably unused. `cargo build`/clippy must stay green.
 
 ## 3. Testing
 - **Provisioning:** create a workspace → `workspace_warehouse` row exists + the lakekeeper warehouse is resolvable; idempotent on repeat.
@@ -54,4 +60,4 @@ At egret-server startup (when `catalog.engine = lakekeeper`): run lakekeeper mig
 - **egret `catalog_*` dormant** — ensure nothing still writes/reads it post-cutover except the browse API (which §2.5 rewires away). Grep to confirm before merge.
 
 ## 5. Out of scope (later CE)
-CE-3 (token→principal injection + per-token scope), CE-4 (real `Authorizer` = RBAC + scope, deny-before-sign), CE-5 (storage profiles/secrets bridge, GCS/Azure), CE-6 (GC/task workers), CE-8 (delete egret `catalog_*` schema + `egret-catalog` store/handlers).
+CE-3 (token→principal injection + per-token scope), CE-4 (real `Authorizer` = RBAC + scope, deny-before-sign), CE-5 (storage profiles/secrets bridge, GCS/Azure), CE-6 (GC/task workers). **CE-8 is folded into this spec (§2.6)** — there is no separate CE-8; the superseded egret catalog is deleted here, not left dormant.
