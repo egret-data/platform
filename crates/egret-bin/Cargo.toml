@@ -32,4 +32,5 @@ tracing-subscriber.workspace = true
 chrono.workspace = true
 sqlx.workspace = true
 base64.workspace = true
+uuid.workspace = true
 axum-extra = { version = "0.10", features = ["cookie", "cookie-private"] }
