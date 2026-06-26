@@ -10,6 +10,8 @@ pub enum CatalogError {
     NamespaceNotEmpty(String),
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]

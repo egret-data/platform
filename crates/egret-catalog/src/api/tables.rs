@@ -1,10 +1,10 @@
 //! Table handlers: create/load/head/commit/drop/list/metrics/rename/register.
 
-use crate::api::resolve::resolve_catalog;
+use crate::api::resolve::{resolve_catalog, AuthnPrincipal};
 use crate::routes::CatalogState;
 use crate::CatalogError;
 use axum::extract::{Path, State};
-use axum::Json;
+use axum::{Extension, Json};
 use egret_iceberg_ext::catalog::{
     CommitTableRequest, CreateTableRequest, ListTablesResponse, LoadTableResult,
     RegisterTableRequest, RenameTableRequest,
@@ -23,10 +23,11 @@ pub fn parse_namespace(ns: &str) -> Vec<String> {
 
 pub async fn create(
     State(s): State<CatalogState>,
+    Extension(principal): Extension<AuthnPrincipal>,
     Path((prefix, ns)): Path<(String, String)>,
     Json(req): Json<CreateTableRequest>,
 ) -> Result<Json<LoadTableResult>, CatalogError> {
-    let cat = resolve_catalog(&s, &prefix).await?;
+    let cat = resolve_catalog(&s, &principal, &prefix).await?;
     let levels = parse_namespace(&ns);
     Ok(Json(
         s.service
@@ -37,9 +38,10 @@ pub async fn create(
 
 pub async fn load(
     State(s): State<CatalogState>,
+    Extension(principal): Extension<AuthnPrincipal>,
     Path((prefix, ns, table)): Path<(String, String, String)>,
 ) -> Result<Json<LoadTableResult>, CatalogError> {
-    let cat = resolve_catalog(&s, &prefix).await?;
+    let cat = resolve_catalog(&s, &principal, &prefix).await?;
     Ok(Json(
         s.service
             .load_table(cat.catalog_id, &parse_namespace(&ns), &table)
@@ -49,10 +51,11 @@ pub async fn load(
 
 pub async fn commit(
     State(s): State<CatalogState>,
+    Extension(principal): Extension<AuthnPrincipal>,
     Path((prefix, ns, table)): Path<(String, String, String)>,
     Json(req): Json<CommitTableRequest>,
 ) -> Result<Json<LoadTableResult>, CatalogError> {
-    let cat = resolve_catalog(&s, &prefix).await?;
+    let cat = resolve_catalog(&s, &principal, &prefix).await?;
     Ok(Json(
         s.service
             .commit_table(cat.catalog_id, &parse_namespace(&ns), &table, req)
@@ -62,9 +65,10 @@ pub async fn commit(
 
 pub async fn list(
     State(s): State<CatalogState>,
+    Extension(principal): Extension<AuthnPrincipal>,
     Path((prefix, ns)): Path<(String, String)>,
 ) -> Result<Json<ListTablesResponse>, CatalogError> {
-    let cat = resolve_catalog(&s, &prefix).await?;
+    let cat = resolve_catalog(&s, &principal, &prefix).await?;
     let levels = parse_namespace(&ns);
     let nsrow = s
         .service
@@ -86,9 +90,10 @@ pub async fn list(
 
 pub async fn head(
     State(s): State<CatalogState>,
+    Extension(principal): Extension<AuthnPrincipal>,
     Path((prefix, ns, table)): Path<(String, String, String)>,
 ) -> Result<axum::http::StatusCode, CatalogError> {
-    let cat = resolve_catalog(&s, &prefix).await?;
+    let cat = resolve_catalog(&s, &principal, &prefix).await?;
     let nsrow = s
         .service
         .store
@@ -100,9 +105,10 @@ pub async fn head(
 
 pub async fn drop(
     State(s): State<CatalogState>,
+    Extension(principal): Extension<AuthnPrincipal>,
     Path((prefix, ns, table)): Path<(String, String, String)>,
 ) -> Result<axum::http::StatusCode, CatalogError> {
-    let cat = resolve_catalog(&s, &prefix).await?;
+    let cat = resolve_catalog(&s, &principal, &prefix).await?;
     let nsrow = s
         .service
         .store
@@ -112,16 +118,25 @@ pub async fn drop(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-pub async fn metrics(Json(_v): Json<serde_json::Value>) -> axum::http::StatusCode {
-    axum::http::StatusCode::NO_CONTENT
+pub async fn metrics(
+    State(s): State<CatalogState>,
+    Extension(principal): Extension<AuthnPrincipal>,
+    Path((prefix, _ns, _table)): Path<(String, String, String)>,
+    Json(_v): Json<serde_json::Value>,
+) -> Result<axum::http::StatusCode, CatalogError> {
+    // Resolve + ownership-check the prefix so an unauthorized engine can't post
+    // metrics against a foreign workspace (403) or an unknown prefix (404).
+    resolve_catalog(&s, &principal, &prefix).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 pub async fn rename(
     State(s): State<CatalogState>,
+    Extension(principal): Extension<AuthnPrincipal>,
     Path(prefix): Path<String>,
     Json(req): Json<RenameTableRequest>,
 ) -> Result<axum::http::StatusCode, CatalogError> {
-    let cat = resolve_catalog(&s, &prefix).await?;
+    let cat = resolve_catalog(&s, &principal, &prefix).await?;
     let src_ns = s
         .service
         .store
@@ -146,10 +161,11 @@ pub async fn rename(
 
 pub async fn register(
     State(s): State<CatalogState>,
+    Extension(principal): Extension<AuthnPrincipal>,
     Path((prefix, ns)): Path<(String, String)>,
     Json(req): Json<RegisterTableRequest>,
 ) -> Result<Json<LoadTableResult>, CatalogError> {
-    let cat = resolve_catalog(&s, &prefix).await?;
+    let cat = resolve_catalog(&s, &principal, &prefix).await?;
     // Read the existing metadata.json from storage, then insert a row pointing at it.
     let levels = parse_namespace(&ns);
     let nsrow = s

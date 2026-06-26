@@ -16,6 +16,7 @@ impl IntoResponse for CatalogError {
                 (StatusCode::CONFLICT, "NamespaceNotEmptyException")
             }
             CatalogError::BadRequest(_) => (StatusCode::BAD_REQUEST, "BadRequestException"),
+            CatalogError::Forbidden(_) => (StatusCode::FORBIDDEN, "NotAuthorizedException"),
             CatalogError::Db(_) | CatalogError::Storage(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "InternalServerError")
             }

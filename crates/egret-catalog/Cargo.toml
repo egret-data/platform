@@ -10,6 +10,8 @@ egret-config.workspace = true
 egret-metastore.workspace = true
 egret-storage.workspace = true
 egret-iceberg-ext.workspace = true
+egret-auth.workspace = true
+egret-workspace.workspace = true
 iceberg.workspace = true
 axum.workspace = true
 sqlx.workspace = true
@@ -23,6 +25,9 @@ tracing.workspace = true
 url.workspace = true
 http.workspace = true
 async-trait.workspace = true
+rand.workspace = true
+sha2.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

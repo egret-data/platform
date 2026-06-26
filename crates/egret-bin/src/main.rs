@@ -5,13 +5,14 @@ mod cli;
 use anyhow::Context;
 use chrono::Duration;
 use clap::Parser;
-use cli::{Cli, Command};
+use cli::{CatalogAction, Cli, Command};
 use egret_auth::groups::GroupRepo;
 use egret_auth::password::hash_password;
 use egret_auth::ratelimit::RateLimiter;
 use egret_auth::routes::AuthState;
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
+use egret_catalog::service::CatalogStore;
 use egret_config::Config;
 use egret_metastore::Db;
 use egret_server::{build_router, AppState};
@@ -32,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve => serve(config).await,
         Command::Migrate => migrate(config).await,
         Command::Init { force } => init(config, force).await,
+        Command::Catalog { action } => catalog_cmd(config, action).await,
     }
 }
 
@@ -94,6 +96,87 @@ async fn init(config: Config, force: bool) -> anyhow::Result<()> {
     tracing::info!(%email, "bootstrap admin created");
     println!("Bootstrap admin: {email}");
     println!("Password: {password}");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Catalog token management
+// ---------------------------------------------------------------------------
+
+/// Helper: connect to the DB (runs migrations so tokens table is present).
+async fn connect_db(config: &Config) -> anyhow::Result<Db> {
+    let db = Db::connect(&config.database.url, config.database.max_connections)
+        .await
+        .context("connecting to database")?;
+    db.migrate().await.context("running migrations")?;
+    Ok(db)
+}
+
+async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()> {
+    let db = connect_db(&config).await?;
+    let store = CatalogStore::new(db.clone());
+    let workspaces = WorkspaceRepo::new(db.clone());
+
+    match action {
+        CatalogAction::MintToken { workspace, label } => {
+            // Resolve workspace slug → workspace_id.
+            let ws = workspaces
+                .get_by_slug(&workspace)
+                .await
+                .context("looking up workspace")?
+                .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace}"))?;
+
+            let (token_row, raw) = store
+                .create_token(ws.id.0, &label)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            println!("Token id   : {}", token_row.id);
+            println!("Workspace  : {} ({})", workspace, ws.id.0);
+            println!("Label      : {}", token_row.label);
+            println!("Created at : {}", token_row.created_at.to_rfc3339());
+            println!();
+            println!("Raw token (store this now — it will NOT be shown again):");
+            println!("{raw}");
+        }
+
+        CatalogAction::RevokeToken { id } => {
+            store
+                .revoke_token(id)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("Token {id} revoked.");
+        }
+
+        CatalogAction::ListTokens { workspace } => {
+            let ws = workspaces
+                .get_by_slug(&workspace)
+                .await
+                .context("looking up workspace")?
+                .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace}"))?;
+
+            let tokens = store
+                .list_tokens(ws.id.0)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            if tokens.is_empty() {
+                println!("No active tokens for workspace '{workspace}'.");
+            } else {
+                println!("{:<38}  {:<20}  CREATED AT", "TOKEN ID", "LABEL");
+                println!("{}", "-".repeat(80));
+                for t in tokens {
+                    println!(
+                        "{:<38}  {:<20}  {}",
+                        t.id,
+                        t.label,
+                        t.created_at.to_rfc3339()
+                    );
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -201,6 +284,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         None
     };
 
+    // Session-authenticated internal catalog browse API (for the UI). Always wired
+    // (independent of `config.catalog.enabled`, which gates the Iceberg REST surface).
+    let catalog_browse = Some(egret_catalog::BrowseState {
+        store: egret_catalog::service::CatalogStore::new(db.clone()),
+        sessions: sessions.clone(),
+        workspaces: WorkspaceRepo::new(db.clone()),
+        authz: Authorizer::new(db.clone()),
+    });
+
     // Hoist crypto/SecretStore/DatabaseRepo so both the database and engine blocks can share them.
     let databases = {
         use base64::Engine as _;
@@ -283,6 +375,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         workspace: Some(workspace),
         oidc,
         catalog,
+        catalog_browse,
         ranger,
         database,
         engine,

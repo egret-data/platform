@@ -6,6 +6,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
 // migration 0023: per-workspace normalized catalog
+// migration 0024: catalog perms
 /// All SQL migrations, embedded at compile time from the workspace `migrations/` dir.
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
