@@ -29,14 +29,16 @@ impl CatalogStore {
 
     pub async fn create_namespace(
         &self,
+        catalog_id: Uuid,
         levels: &[String],
         props: &HashMap<String, String>,
     ) -> Result<NamespaceRow, CatalogError> {
         let props_json = serde_json::to_value(props).unwrap_or_default();
         sqlx::query_as::<_, NamespaceRow>(
-            "INSERT INTO catalog_namespaces (levels, properties) VALUES ($1, $2) \
+            "INSERT INTO catalog_namespaces (catalog_id, levels, properties) VALUES ($1, $2, $3) \
              RETURNING id, levels, properties",
         )
+        .bind(catalog_id)
         .bind(levels)
         .bind(props_json)
         .fetch_one(&self.db.pool)
@@ -49,10 +51,16 @@ impl CatalogStore {
         })
     }
 
-    pub async fn get_namespace(&self, levels: &[String]) -> Result<NamespaceRow, CatalogError> {
+    pub async fn get_namespace(
+        &self,
+        catalog_id: Uuid,
+        levels: &[String],
+    ) -> Result<NamespaceRow, CatalogError> {
         sqlx::query_as::<_, NamespaceRow>(
-            "SELECT id, levels, properties FROM catalog_namespaces WHERE levels = $1",
+            "SELECT id, levels, properties FROM catalog_namespaces \
+             WHERE catalog_id = $1 AND levels = $2",
         )
+        .bind(catalog_id)
         .bind(levels)
         .fetch_optional(&self.db.pool)
         .await
@@ -62,21 +70,25 @@ impl CatalogStore {
 
     pub async fn list_namespaces(
         &self,
+        catalog_id: Uuid,
         parent: Option<&[String]>,
     ) -> Result<Vec<Vec<String>>, CatalogError> {
         match parent {
             None => sqlx::query_scalar::<_, Vec<String>>(
-                "SELECT levels FROM catalog_namespaces ORDER BY levels",
+                "SELECT levels FROM catalog_namespaces WHERE catalog_id = $1 ORDER BY levels",
             )
+            .bind(catalog_id)
             .fetch_all(&self.db.pool)
             .await
             .map_err(CatalogError::Db),
             Some(p) => sqlx::query_scalar::<_, Vec<String>>(
                 "SELECT levels FROM catalog_namespaces \
-                     WHERE levels[1:cardinality($1::text[])] = $1 \
-                       AND cardinality(levels) = cardinality($1::text[]) + 1 \
+                     WHERE catalog_id = $1 \
+                       AND levels[1:cardinality($2::text[])] = $2 \
+                       AND cardinality(levels) = cardinality($2::text[]) + 1 \
                      ORDER BY levels",
             )
+            .bind(catalog_id)
             .bind(p)
             .fetch_all(&self.db.pool)
             .await
@@ -84,8 +96,12 @@ impl CatalogStore {
         }
     }
 
-    pub async fn drop_namespace(&self, levels: &[String]) -> Result<(), CatalogError> {
-        let ns = self.get_namespace(levels).await?;
+    pub async fn drop_namespace(
+        &self,
+        catalog_id: Uuid,
+        levels: &[String],
+    ) -> Result<(), CatalogError> {
+        let ns = self.get_namespace(catalog_id, levels).await?;
         let count: i64 = sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM catalog_tables WHERE namespace_id = $1",
         )
@@ -106,11 +122,12 @@ impl CatalogStore {
 
     pub async fn update_namespace_properties(
         &self,
+        catalog_id: Uuid,
         levels: &[String],
         removals: &[String],
         updates: &HashMap<String, String>,
     ) -> Result<(Vec<String>, Vec<String>), CatalogError> {
-        let ns = self.get_namespace(levels).await?;
+        let ns = self.get_namespace(catalog_id, levels).await?;
         let mut props: HashMap<String, String> =
             serde_json::from_value(ns.properties).unwrap_or_default();
         let mut removed = vec![];

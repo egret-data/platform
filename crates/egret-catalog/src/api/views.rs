@@ -17,7 +17,11 @@ pub async fn list(
     Path(ns): Path<String>,
 ) -> Result<Json<serde_json::Value>, CatalogError> {
     let levels = parse_namespace(&ns);
-    let nsrow = s.service.store.get_namespace(&levels).await?;
+    let nsrow = s
+        .service
+        .store
+        .get_namespace(s.service.catalog_id, &levels)
+        .await?;
     let names = s.service.store.list_views(nsrow.id).await?;
     let ns_ident =
         NamespaceIdent::from_vec(levels).map_err(|e| CatalogError::BadRequest(e.to_string()))?;
@@ -34,7 +38,11 @@ pub async fn create(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, CatalogError> {
     let levels = parse_namespace(&ns);
-    let nsrow = s.service.store.get_namespace(&levels).await?;
+    let nsrow = s
+        .service
+        .store
+        .get_namespace(s.service.catalog_id, &levels)
+        .await?;
     let name = body
         .get("name")
         .and_then(|v| v.as_str())
@@ -65,7 +73,11 @@ pub async fn load(
     State(s): State<CatalogState>,
     Path((ns, view)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, CatalogError> {
-    let nsrow = s.service.store.get_namespace(&parse_namespace(&ns)).await?;
+    let nsrow = s
+        .service
+        .store
+        .get_namespace(s.service.catalog_id, &parse_namespace(&ns))
+        .await?;
     let row = s.service.store.load_view(nsrow.id, &view).await?;
     Ok(Json(json!({
         "metadata-location": row.metadata_location,
@@ -77,7 +89,11 @@ pub async fn head(
     State(s): State<CatalogState>,
     Path((ns, view)): Path<(String, String)>,
 ) -> Result<axum::http::StatusCode, CatalogError> {
-    let nsrow = s.service.store.get_namespace(&parse_namespace(&ns)).await?;
+    let nsrow = s
+        .service
+        .store
+        .get_namespace(s.service.catalog_id, &parse_namespace(&ns))
+        .await?;
     s.service.store.load_view(nsrow.id, &view).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -86,7 +102,11 @@ pub async fn drop(
     State(s): State<CatalogState>,
     Path((ns, view)): Path<(String, String)>,
 ) -> Result<axum::http::StatusCode, CatalogError> {
-    let nsrow = s.service.store.get_namespace(&parse_namespace(&ns)).await?;
+    let nsrow = s
+        .service
+        .store
+        .get_namespace(s.service.catalog_id, &parse_namespace(&ns))
+        .await?;
     s.service.store.drop_view(nsrow.id, &view).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

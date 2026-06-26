@@ -11,6 +11,23 @@ async fn store() -> Option<CatalogStore> {
     Some(CatalogStore::new(db))
 }
 
+/// Seed a workspace + its default catalog and return the catalog id.
+async fn seed_catalog(s: &CatalogStore) -> uuid::Uuid {
+    let ws = uuid::Uuid::new_v4();
+    let slug = format!("ws_{}", ws.simple());
+    sqlx::query("INSERT INTO workspaces (id, slug, name, status) VALUES ($1, $2, $3, 'active')")
+        .bind(ws)
+        .bind(&slug)
+        .bind(&slug)
+        .execute(s.pool())
+        .await
+        .expect("seed workspace");
+    s.create_catalog(ws, "default", "s3://wh")
+        .await
+        .expect("seed catalog")
+        .id
+}
+
 fn minimal_metadata(location: &str, id: uuid::Uuid) -> iceberg::spec::TableMetadata {
     egret_catalog::service::test_support::minimal_table_metadata(location, id)
 }
@@ -21,8 +38,12 @@ async fn insert_load_drop_table() {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
+    let cat = seed_catalog(&s).await;
     let levels = vec![format!("t_{}", uuid::Uuid::new_v4().simple())];
-    let ns = s.create_namespace(&levels, &HashMap::new()).await.unwrap();
+    let ns = s
+        .create_namespace(cat, &levels, &HashMap::new())
+        .await
+        .unwrap();
     let tid = uuid::Uuid::new_v4();
     let loc = format!("s3://wh/{}/orders-{tid}", levels[0]);
     let md = minimal_metadata(&loc, tid);
@@ -43,7 +64,7 @@ async fn insert_load_drop_table() {
     );
     s.drop_table(ns.id, "orders").await.unwrap();
     assert!(s.load_table(ns.id, "orders").await.is_err());
-    s.drop_namespace(&levels).await.unwrap();
+    s.drop_namespace(cat, &levels).await.unwrap();
 }
 
 #[tokio::test]
@@ -52,8 +73,12 @@ async fn list_tables_multiple() {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
+    let cat = seed_catalog(&s).await;
     let levels = vec![format!("t_{}", uuid::Uuid::new_v4().simple())];
-    let ns = s.create_namespace(&levels, &HashMap::new()).await.unwrap();
+    let ns = s
+        .create_namespace(cat, &levels, &HashMap::new())
+        .await
+        .unwrap();
 
     for name in ["alpha", "beta", "gamma"] {
         let tid = uuid::Uuid::new_v4();
@@ -72,7 +97,7 @@ async fn list_tables_multiple() {
     for name in ["alpha", "beta", "gamma"] {
         s.drop_table(ns.id, name).await.unwrap();
     }
-    s.drop_namespace(&levels).await.unwrap();
+    s.drop_namespace(cat, &levels).await.unwrap();
 }
 
 #[tokio::test]
@@ -81,8 +106,12 @@ async fn cas_commit_rejects_stale_version() {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
+    let cat = seed_catalog(&s).await;
     let levels = vec![format!("t_{}", uuid::Uuid::new_v4().simple())];
-    let ns = s.create_namespace(&levels, &HashMap::new()).await.unwrap();
+    let ns = s
+        .create_namespace(cat, &levels, &HashMap::new())
+        .await
+        .unwrap();
     let tid = uuid::Uuid::new_v4();
     let loc = format!("s3://wh/{}/t-{tid}", levels[0]);
     let md = minimal_metadata(&loc, tid);
@@ -115,7 +144,7 @@ async fn cas_commit_rejects_stale_version() {
         "expected Conflict, got: {err:?}"
     );
     s.drop_table(ns.id, "t").await.unwrap();
-    s.drop_namespace(&levels).await.unwrap();
+    s.drop_namespace(cat, &levels).await.unwrap();
 }
 
 #[tokio::test]
@@ -124,8 +153,12 @@ async fn duplicate_table_is_already_exists() {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
+    let cat = seed_catalog(&s).await;
     let levels = vec![format!("t_{}", uuid::Uuid::new_v4().simple())];
-    let ns = s.create_namespace(&levels, &HashMap::new()).await.unwrap();
+    let ns = s
+        .create_namespace(cat, &levels, &HashMap::new())
+        .await
+        .unwrap();
     let tid = uuid::Uuid::new_v4();
     let loc = format!("s3://wh/{}/dup-{tid}", levels[0]);
     let md = minimal_metadata(&loc, tid);
@@ -143,5 +176,5 @@ async fn duplicate_table_is_already_exists() {
         "expected AlreadyExists, got: {err:?}"
     );
     s.drop_table(ns.id, "dup").await.unwrap();
-    s.drop_namespace(&levels).await.unwrap();
+    s.drop_namespace(cat, &levels).await.unwrap();
 }

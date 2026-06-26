@@ -53,12 +53,29 @@ async fn state() -> Option<CatalogState> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
+    let store = CatalogStore::new(db);
+    // Seed a workspace + its default catalog so namespace ops are scoped to a real catalog.
+    let ws = uuid::Uuid::new_v4();
+    let slug = format!("ws_{}", ws.simple());
+    sqlx::query("INSERT INTO workspaces (id, slug, name, status) VALUES ($1, $2, $3, 'active')")
+        .bind(ws)
+        .bind(&slug)
+        .bind(&slug)
+        .execute(store.pool())
+        .await
+        .expect("seed workspace");
+    let catalog_id = store
+        .create_catalog(ws, "default", "s3://warehouse")
+        .await
+        .expect("seed catalog")
+        .id;
     let service = CatalogService {
-        store: CatalogStore::new(db),
+        store,
         storage: Arc::new(MemStore(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         ))),
         warehouse: Arc::from("s3://warehouse"),
+        catalog_id,
     };
     Some(CatalogState {
         service,

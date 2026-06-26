@@ -55,7 +55,11 @@ pub async fn list(
     Path(ns): Path<String>,
 ) -> Result<Json<ListTablesResponse>, CatalogError> {
     let levels = parse_namespace(&ns);
-    let nsrow = s.service.store.get_namespace(&levels).await?;
+    let nsrow = s
+        .service
+        .store
+        .get_namespace(s.service.catalog_id, &levels)
+        .await?;
     let names = s.service.store.list_tables(nsrow.id).await?;
     let ns_ident =
         NamespaceIdent::from_vec(levels).map_err(|e| CatalogError::BadRequest(e.to_string()))?;
@@ -73,7 +77,11 @@ pub async fn head(
     State(s): State<CatalogState>,
     Path((ns, table)): Path<(String, String)>,
 ) -> Result<axum::http::StatusCode, CatalogError> {
-    let nsrow = s.service.store.get_namespace(&parse_namespace(&ns)).await?;
+    let nsrow = s
+        .service
+        .store
+        .get_namespace(s.service.catalog_id, &parse_namespace(&ns))
+        .await?;
     s.service.store.load_table(nsrow.id, &table).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -82,7 +90,11 @@ pub async fn drop(
     State(s): State<CatalogState>,
     Path((ns, table)): Path<(String, String)>,
 ) -> Result<axum::http::StatusCode, CatalogError> {
-    let nsrow = s.service.store.get_namespace(&parse_namespace(&ns)).await?;
+    let nsrow = s
+        .service
+        .store
+        .get_namespace(s.service.catalog_id, &parse_namespace(&ns))
+        .await?;
     s.service.store.drop_table(nsrow.id, &table).await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -98,12 +110,12 @@ pub async fn rename(
     let src_ns = s
         .service
         .store
-        .get_namespace(req.source.namespace.as_ref())
+        .get_namespace(s.service.catalog_id, req.source.namespace.as_ref())
         .await?;
     let dst_ns = s
         .service
         .store
-        .get_namespace(req.destination.namespace.as_ref())
+        .get_namespace(s.service.catalog_id, req.destination.namespace.as_ref())
         .await?;
     s.service
         .store
@@ -124,7 +136,11 @@ pub async fn register(
 ) -> Result<Json<LoadTableResult>, CatalogError> {
     // Read the existing metadata.json from storage, then insert a row pointing at it.
     let levels = parse_namespace(&ns);
-    let nsrow = s.service.store.get_namespace(&levels).await?;
+    let nsrow = s
+        .service
+        .store
+        .get_namespace(s.service.catalog_id, &levels)
+        .await?;
     let bytes = s.service.storage.get(&req.metadata_location).await?;
     let md: iceberg::spec::TableMetadata =
         serde_json::from_slice(&bytes).map_err(|e| CatalogError::BadRequest(e.to_string()))?;
