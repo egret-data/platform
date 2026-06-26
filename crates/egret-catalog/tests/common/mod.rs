@@ -18,6 +18,11 @@ pub async fn store() -> Option<CatalogStore> {
 
 /// Seed a fresh workspace row and return its id.
 pub async fn seed_workspace(s: &CatalogStore) -> Uuid {
+    seed_workspace_with_slug(s).await.0
+}
+
+/// Seed a fresh workspace row and return `(id, slug)`.
+pub async fn seed_workspace_with_slug(s: &CatalogStore) -> (Uuid, String) {
     let id = Uuid::new_v4();
     let slug = format!("ws_{}", id.simple());
     sqlx::query("INSERT INTO workspaces (id, slug, name, status) VALUES ($1, $2, $3, 'active')")
@@ -27,7 +32,7 @@ pub async fn seed_workspace(s: &CatalogStore) -> Uuid {
         .execute(s.pool())
         .await
         .expect("seed workspace");
-    id
+    (id, slug)
 }
 
 /// Seed a workspace + its default catalog and return the catalog id.

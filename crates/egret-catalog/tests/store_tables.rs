@@ -364,6 +364,47 @@ async fn commit_with_new_snapshot_roundtrips() {
 }
 
 #[tokio::test]
+async fn cas_commit_persists_format_version() {
+    // real trigger: register V1 + UpgradeFormatVersion; here we exercise V2 round-trip.
+    let Some(s) = store().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let cat = seed_catalog(&s).await;
+    let levels = vec![format!("t_{}", uuid::Uuid::new_v4().simple())];
+    let ns = s
+        .create_namespace(cat, &levels, &HashMap::new())
+        .await
+        .unwrap();
+    let tid = uuid::Uuid::new_v4();
+    let loc = format!("s3://wh/{}/fv-{tid}", levels[0]);
+    let md = minimal_metadata(&loc, tid);
+    assert_eq!(
+        md.format_version(),
+        iceberg::spec::FormatVersion::V2,
+        "precondition: minimal_metadata builds V2"
+    );
+    let mloc0 = format!("{loc}/metadata/00000-x.metadata.json");
+    s.insert_table(ns.id, "fv", tid, &md, &mloc0, &loc)
+        .await
+        .unwrap();
+    let row = s.load_table(ns.id, "fv").await.unwrap();
+
+    let mloc1 = format!("{loc}/metadata/00001-y.metadata.json");
+    s.cas_commit(row.id, 0, &md, &mloc1).await.unwrap();
+
+    let reloaded = s.load_table(ns.id, "fv").await.unwrap();
+    assert_eq!(
+        reloaded.metadata.format_version(),
+        md.format_version(),
+        "format_version must survive cas_commit"
+    );
+
+    s.drop_table(ns.id, "fv").await.unwrap();
+    s.drop_namespace(cat, &levels).await.unwrap();
+}
+
+#[tokio::test]
 async fn duplicate_table_is_already_exists() {
     let Some(s) = store().await else {
         eprintln!("skip: DATABASE_URL not set");

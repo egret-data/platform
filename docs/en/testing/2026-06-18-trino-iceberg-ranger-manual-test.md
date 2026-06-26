@@ -77,20 +77,28 @@ BIN=$(pwd)/../target/debug/egret
 (cd /tmp/egret-itest && "$BIN" migrate && nohup "$BIN" serve > /tmp/egret-itest/server.log 2>&1 &)
 sleep 3
 curl -s -o /dev/null -w "egret healthz: %{http_code}\n" http://$HOST_IP:8080/healthz
-curl -s -H "Authorization: Bearer devtoken" http://$HOST_IP:8080/catalog/v1/config | head -c 200; echo
+curl -s -H "Authorization: Bearer devtoken" "http://$HOST_IP:8080/catalog/v1/config?warehouse=<WS_SLUG>" | head -c 200; echo
 curl -s -o /dev/null -w "anon /service: %{http_code}\n" http://$HOST_IP:8080/service/plugins/definitions
 ```
-Expect: `healthz 200`, a `/v1/config` JSON with `warehouse` + `s3.signer.uri`, `anon /service: 200`.
+Expect: `healthz 200`, a `/v1/config` JSON whose `overrides` include `prefix=<WS_SLUG>` + `warehouse` + `s3.signer.uri` (omitting `?warehouse` returns signer keys only, no prefix), `anon /service: 200`.
 
 ## 3. Configure + start Trino
 
 ### 3a. Iceberg catalog → Egret (`deploy/trino/catalog/iceberg.properties`)
+
+The catalog is now **per-workspace**: every Iceberg REST route is prefixed with
+the workspace **slug** (`/v1/{prefix}/...`). Set `iceberg.rest-catalog.warehouse`
+to the workspace slug — Trino calls `GET /v1/config?warehouse=<slug>`, reads back
+`overrides.prefix=<slug>` + `overrides.warehouse`, and targets the prefixed routes
+automatically. Replace `<WS_SLUG>` below with a real workspace slug (e.g. from the
+`workspaces.slug` column, or one provisioned at workspace creation).
 
 ```bash
 cat > trino/catalog/iceberg.properties <<EOF
 connector.name=iceberg
 iceberg.catalog.type=rest
 iceberg.rest-catalog.uri=http://$HOST_IP:8080/catalog
+iceberg.rest-catalog.warehouse=<WS_SLUG>
 iceberg.rest-catalog.security=OAUTH2
 iceberg.rest-catalog.oauth2.token=devtoken
 fs.native-s3.enabled=true

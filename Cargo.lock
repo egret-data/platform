@@ -2272,6 +2272,7 @@ dependencies = [
  "axum",
  "chrono",
  "egret-auth",
+ "egret-catalog",
  "egret-config",
  "egret-core",
  "egret-metastore",

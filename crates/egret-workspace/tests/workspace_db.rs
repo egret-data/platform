@@ -61,6 +61,30 @@ async fn create_get_and_unique_slug() {
 }
 
 #[tokio::test]
+async fn create_provisions_catalog_resolvable_by_slug() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let owner = seed_user(&db).await;
+    let base = "s3://test-warehouse/";
+    let repo = WorkspaceRepo::with_warehouse_base(db.clone(), base);
+    let slug = uniq("ws");
+
+    let ws = repo.create(&slug, "Sales", owner).await.unwrap();
+
+    // The managed catalog must be resolvable by the workspace slug (REST {prefix}).
+    let store = egret_catalog::service::CatalogStore::new(db.clone());
+    let catalog = store.get_catalog_by_slug(&slug).await.unwrap();
+    assert_eq!(catalog.workspace_id, ws.id.0);
+    assert_eq!(
+        catalog.warehouse_location,
+        format!("s3://test-warehouse/workspaces/{slug}/warehouse"),
+        "warehouse_location is <base>/workspaces/<slug>/warehouse with a trimmed trailing slash"
+    );
+}
+
+#[tokio::test]
 async fn invalid_slug_rejected() {
     let Some(db) = connect().await else {
         eprintln!("skip");

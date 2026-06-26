@@ -104,7 +104,8 @@ impl CatalogStore {
     ) -> Result<(), CatalogError> {
         let ns = self.get_namespace(catalog_id, levels).await?;
         let count: i64 = sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM catalog_tables WHERE namespace_id = $1",
+            "SELECT (SELECT count(*) FROM catalog_tables WHERE namespace_id = $1) \
+                  + (SELECT count(*) FROM catalog_views  WHERE namespace_id = $1)",
         )
         .bind(ns.id)
         .fetch_one(&self.db.pool)
@@ -335,6 +336,7 @@ impl CatalogStore {
                    current_schema_id = $9, \
                    default_spec_id = $10, \
                    default_sort_order_id = $11, \
+                   format_version = $12, \
                    current_version = current_version + 1, \
                    updated_at = now() \
              WHERE id = $1 AND current_version = $2",
@@ -354,6 +356,7 @@ impl CatalogStore {
                 CatalogError::BadRequest(format!("default_sort_order_id out of range: {e}"))
             })?,
         )
+        .bind(table_repo::format_version_to_i16(metadata.format_version()))
         .execute(&mut *tx)
         .await
         .map_err(CatalogError::Db)?

@@ -121,7 +121,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         rate_limiter,
     };
     let workspace = WorkspaceState {
-        workspaces: WorkspaceRepo::new(db.clone()),
+        // Provision per-workspace Iceberg catalogs under config.catalog.warehouse.
+        workspaces: WorkspaceRepo::with_warehouse_base(
+            db.clone(),
+            config.catalog.warehouse.clone(),
+        ),
         members: MemberRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
         users: users.clone(),
@@ -178,17 +182,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         let store = egret_catalog::service::CatalogStore::new(db.clone());
         let storage: std::sync::Arc<dyn egret_storage::ObjectStore> =
             std::sync::Arc::new(egret_storage::S3Store::new(&storage_cfg).await?);
-        // TEMP (Plan A-1): single default catalog; replaced by per-request {prefix}
-        // resolution in Plan A-2.
-        let catalog_id = store
-            .ensure_default_catalog(&config.catalog.warehouse)
-            .await?;
-        let service = egret_catalog::service::CatalogService {
-            store,
-            storage,
-            warehouse: config.catalog.warehouse.clone().into(),
-            catalog_id,
-        };
+        let service = egret_catalog::service::CatalogService { store, storage };
         // Advertise an externally-reachable origin in `s3.signer.uri`, not the bind
         // host (which defaults to 0.0.0.0 and is unreachable for engines).
         let public = config
@@ -200,7 +194,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         Some(egret_catalog::CatalogState {
             service,
             auth_token: config.catalog.auth_token.clone().into(),
-            warehouse: config.catalog.warehouse.clone().into(),
             storage_cfg: std::sync::Arc::new(storage_cfg),
             base_url: base_url.into(),
         })

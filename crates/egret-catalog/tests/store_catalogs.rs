@@ -1,6 +1,6 @@
 //! DB-gated catalogs-store tests. Self-skip without DATABASE_URL.
 mod common;
-use common::{seed_workspace, store};
+use common::{seed_workspace, seed_workspace_with_slug, store};
 
 #[tokio::test]
 async fn create_and_get_catalog() {
@@ -36,5 +36,33 @@ async fn duplicate_catalog_per_workspace_is_already_exists() {
     assert!(
         matches!(err, egret_catalog::CatalogError::AlreadyExists(_)),
         "got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn get_catalog_by_slug_resolves() {
+    let Some(s) = store().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let (ws, slug) = seed_workspace_with_slug(&s).await;
+    let c = s
+        .create_catalog(ws, "main", "s3://wh/slug-test")
+        .await
+        .unwrap();
+
+    // Happy path: slug resolves to the correct catalog.
+    let got = s.get_catalog_by_slug(&slug).await.unwrap();
+    assert_eq!(got.id, c.id, "resolved catalog id must match");
+    assert_eq!(got.workspace_id, ws);
+
+    // Unknown slug returns NotFound.
+    let err = s
+        .get_catalog_by_slug("nonexistent-slug-xyz")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, egret_catalog::CatalogError::NotFound(_)),
+        "expected NotFound, got: {err:?}"
     );
 }

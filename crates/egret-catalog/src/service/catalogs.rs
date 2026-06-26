@@ -58,29 +58,17 @@ impl CatalogStore {
         .ok_or_else(|| CatalogError::NotFound(format!("catalog for workspace {workspace_id}")))
     }
 
-    /// Ensure a single default catalog exists and return its id (idempotent).
-    ///
-    /// TEMP (Plan A-1): picks the first workspace and lazily creates a `default`
-    /// catalog for it. Replaced by per-request `{prefix}` resolution in Plan A-2.
-    pub async fn ensure_default_catalog(&self, warehouse: &str) -> Result<Uuid, CatalogError> {
-        let workspace_id: Uuid =
-            sqlx::query_scalar::<_, Uuid>("SELECT id FROM workspaces ORDER BY created_at LIMIT 1")
-                .fetch_optional(self.pool())
-                .await
-                .map_err(CatalogError::Db)?
-                .ok_or_else(|| {
-                    CatalogError::NotFound(
-                        "no workspace exists to bootstrap a default catalog".into(),
-                    )
-                })?;
-        match self.get_catalog_by_workspace(workspace_id).await {
-            Ok(catalog) => Ok(catalog.id),
-            Err(CatalogError::NotFound(_)) => Ok(self
-                .create_catalog(workspace_id, "default", warehouse)
-                .await?
-                .id),
-            Err(e) => Err(e),
-        }
+    /// Resolve a workspace's catalog by the workspace slug (REST {prefix}).
+    pub async fn get_catalog_by_slug(&self, slug: &str) -> Result<Catalog, CatalogError> {
+        sqlx::query_as::<_, Catalog>(
+            "SELECT c.id, c.workspace_id, c.name, c.warehouse_location \
+             FROM catalogs c JOIN workspaces w ON w.id = c.workspace_id WHERE w.slug = $1",
+        )
+        .bind(slug)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(CatalogError::Db)?
+        .ok_or_else(|| CatalogError::NotFound(format!("catalog for workspace slug {slug}")))
     }
 
     /// Load a catalog by its id, or NotFound.
