@@ -1,6 +1,10 @@
 //! egret-catalog-engine — spike crate proving lakekeeper's core crates can be
 //! embedded as the catalog engine with a single shared `iceberg` version.
 
+/// Prod (non-`test-utils`) bootstrap of lakekeeper's default project using a
+/// stable admin principal derived from `catalog.system_user`. Replaces the
+/// CE-1 spike's `test_user`-based path for production startup.
+pub mod bootstrap;
 pub mod mount;
 pub mod pool;
 // The headless spike provisioner mints a bootstrap principal via
@@ -12,6 +16,7 @@ pub mod pool;
 #[cfg(feature = "test-utils")]
 pub mod provision;
 
+pub use bootstrap::ensure_bootstrapped;
 pub use mount::{build_state, catalog_engine_router, EngineServer, EngineState};
 pub use pool::{build_isolated_pool, LAKEKEEPER_SCHEMA};
 #[cfg(feature = "test-utils")]

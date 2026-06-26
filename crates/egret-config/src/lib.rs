@@ -64,6 +64,21 @@ pub struct CatalogSettings {
     /// suffix), advertised in `/v1/config`'s `s3.signer.uri`. Defaults to
     /// `http://localhost:8080`; set this to a client-reachable URL in production.
     pub public_url: Option<String>,
+    /// Stable identity of the in-process "system" principal that egret uses to
+    /// bootstrap lakekeeper's default project at startup. lakekeeper's
+    /// `bootstrap` registers the calling user as the catalog's first
+    /// (global-admin) user, so it must be a real, authenticated principal with a
+    /// stable `UserId` — the in-process `LakekeeperInternal` actor has no
+    /// `UserId` and is rejected with `MissingUserId`. This value is hashed into
+    /// a deterministic lakekeeper `UserId` (`oidc~<system_user>`), so the same
+    /// configured name yields the same admin principal on every boot. Keep it
+    /// stable across deploys; changing it mints a *different* system admin.
+    #[serde(default = "default_system_user")]
+    pub system_user: String,
+}
+
+fn default_system_user() -> String {
+    "egret-system".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +195,7 @@ impl Default for Config {
                 warehouse: "s3://warehouse".into(),
                 auth_token: String::new(),
                 public_url: Some("http://localhost:8080".into()),
+                system_user: default_system_user(),
             },
             storage: StorageSettings {
                 endpoint: Some("http://localhost:9000".into()),
