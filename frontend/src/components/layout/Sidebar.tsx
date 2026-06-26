@@ -29,6 +29,7 @@ const EXPLORE: NavItem[] = [
   { label: "Charts", icon: BarChart3 },
   { label: "Dashboards", icon: LayoutDashboard },
   { label: "Notebooks", icon: NotebookText },
+  { label: "Catalog", icon: Boxes },
 ];
 
 const ADMIN: NavItem[] = [
