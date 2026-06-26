@@ -11,7 +11,6 @@ use std::sync::Arc;
 pub struct CatalogState {
     pub service: CatalogService,
     pub auth_token: Arc<str>,
-    pub warehouse: Arc<str>,
     pub storage_cfg: Arc<StorageConfig>,
     /// Base public URL of the catalog, e.g. `http://localhost:8080/catalog`, for signer.uri.
     pub base_url: Arc<str>,

@@ -13,8 +13,6 @@ use uuid::Uuid;
 pub struct CatalogService {
     pub store: CatalogStore,
     pub storage: Arc<dyn ObjectStore>,
-    pub warehouse: std::sync::Arc<str>,
-    pub catalog_id: Uuid,
 }
 
 impl CatalogService {

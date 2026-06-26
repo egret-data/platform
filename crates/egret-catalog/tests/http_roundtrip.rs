@@ -64,23 +64,19 @@ async fn state() -> Option<CatalogState> {
         .execute(store.pool())
         .await
         .expect("seed workspace");
-    let catalog_id = store
+    store
         .create_catalog(ws, "default", "s3://warehouse")
         .await
-        .expect("seed catalog")
-        .id;
+        .expect("seed catalog");
     let service = CatalogService {
         store,
         storage: Arc::new(MemStore(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         ))),
-        warehouse: Arc::from("s3://warehouse"),
-        catalog_id,
     };
     Some(CatalogState {
         service,
         auth_token: Arc::from(TOKEN),
-        warehouse: Arc::from("s3://warehouse"),
         storage_cfg: Arc::new(storage_cfg()),
         base_url: Arc::from("http://localhost:8080/catalog"),
     })
