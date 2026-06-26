@@ -2487,11 +2487,14 @@ dependencies = [
 name = "egret-catalog-engine"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "egret-config",
  "egret-metastore",
  "lakekeeper",
  "lakekeeper-io",
  "lakekeeper-storage-postgres",
+ "sqlx 0.9.0",
+ "tokio",
 ]
 
 [[package]]

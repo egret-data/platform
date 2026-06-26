@@ -15,3 +15,17 @@ lakekeeper-io = { path = "../../../lakekeeper/crates/io" }
 
 egret-config = { workspace = true }
 egret-metastore = { workspace = true }
+
+anyhow.workspace = true
+# NB: sqlx 0.9 (NOT egret's workspace 0.8) so the `PgPool` we build is the same
+# type lakekeeper's migrator accepts — the two sqlx majors have incompatible
+# `Pool<Postgres>` types and won't unify across the crate boundary.
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "migrate",
+] }
+
+[dev-dependencies]
+tokio.workspace = true

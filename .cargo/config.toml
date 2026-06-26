@@ -5,3 +5,13 @@
 # declare its own — lakekeeper's sibling config is not inherited across workspaces.
 [build]
 rustflags = ["--cfg", "tracing_unstable", "--cfg", "tokio_unstable"]
+
+# lakekeeper's crates use compile-time-checked `sqlx::query!` macros. When built
+# from egret's workspace, sqlx can't find lakekeeper's `.sqlx` query cache (it
+# lives at the lakekeeper workspace root, not egret's) and would otherwise open a
+# live DB connection per query against DATABASE_URL — failing on a fresh DB.
+# Force offline mode and point sqlx at lakekeeper's cache. egret's own crates use
+# only runtime sqlx queries (no checked macros), so global offline is harmless.
+[env]
+SQLX_OFFLINE = "true"
+SQLX_OFFLINE_DIR = { value = "../lakekeeper/.sqlx", relative = true }
