@@ -83,6 +83,19 @@ impl CatalogStore {
         }
     }
 
+    /// Resolve a workspace's catalog by the workspace slug (REST {prefix}).
+    pub async fn get_catalog_by_slug(&self, slug: &str) -> Result<Catalog, CatalogError> {
+        sqlx::query_as::<_, Catalog>(
+            "SELECT c.id, c.workspace_id, c.name, c.warehouse_location \
+             FROM catalogs c JOIN workspaces w ON w.id = c.workspace_id WHERE w.slug = $1",
+        )
+        .bind(slug)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(CatalogError::Db)?
+        .ok_or_else(|| CatalogError::NotFound(format!("catalog for workspace slug {slug}")))
+    }
+
     /// Load a catalog by its id, or NotFound.
     pub async fn get_catalog_by_id(&self, id: Uuid) -> Result<Catalog, CatalogError> {
         sqlx::query_as::<_, Catalog>(
