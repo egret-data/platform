@@ -1,5 +1,6 @@
 //! Postgres-backed CatalogStore: namespace CRUD + table CRUD + CAS commit.
 
+use crate::service::table_repo;
 use crate::CatalogError;
 use egret_metastore::Db;
 use iceberg::spec::TableMetadata;
@@ -156,19 +157,7 @@ impl CatalogStore {
 // Table rows
 // ---------------------------------------------------------------------------
 
-/// Internal FromRow struct for raw DB fetch (metadata column stays as JSON value).
-#[derive(sqlx::FromRow)]
-struct TableRowRaw {
-    id: Uuid,
-    name: String,
-    table_uuid: Uuid,
-    metadata: serde_json::Value,
-    metadata_location: String,
-    location: String,
-    current_version: i32,
-}
-
-/// A fully-deserialized table row returned from the store.
+/// A fully-assembled table row returned from the store.
 pub struct TableRow {
     pub id: Uuid,
     pub name: String,
@@ -179,28 +168,15 @@ pub struct TableRow {
     pub current_version: i32,
 }
 
-impl TableRowRaw {
-    fn into_table_row(self) -> Result<TableRow, CatalogError> {
-        let metadata: TableMetadata = serde_json::from_value(self.metadata)
-            .map_err(|e| CatalogError::BadRequest(e.to_string()))?;
-        Ok(TableRow {
-            id: self.id,
-            name: self.name,
-            table_uuid: self.table_uuid,
-            metadata,
-            metadata_location: self.metadata_location,
-            location: self.location,
-            current_version: self.current_version,
-        })
-    }
-}
-
 // ---------------------------------------------------------------------------
 // CatalogStore — table methods
 // ---------------------------------------------------------------------------
 
 impl CatalogStore {
     /// Insert a freshly-created table (version 0). `metadata` already has its uuid/location.
+    ///
+    /// Shreds the [`TableMetadata`] into the root `catalog_tables` row plus its
+    /// normalized child tables in a single transaction.
     pub async fn insert_table(
         &self,
         ns_id: Uuid,
@@ -210,37 +186,61 @@ impl CatalogStore {
         metadata_location: &str,
         location: &str,
     ) -> Result<(), CatalogError> {
-        let md =
-            serde_json::to_value(metadata).map_err(|e| CatalogError::BadRequest(e.to_string()))?;
         let snap: Option<i64> = metadata.current_snapshot_id();
-        sqlx::query(
+        let mut tx = self.db.pool.begin().await.map_err(CatalogError::Db)?;
+
+        let id: Uuid = match sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO catalog_tables \
-               (namespace_id, name, table_uuid, metadata, metadata_location, location, \
-                current_snapshot_id, current_version) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 0)",
+               (namespace_id, name, table_uuid, location, format_version, last_column_id, \
+                last_sequence_number, last_updated_ms, last_partition_id, current_schema_id, \
+                default_spec_id, default_sort_order_id, current_snapshot_id, metadata_location, \
+                previous_metadata_location, current_version) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULL, 0) \
+             RETURNING id",
         )
         .bind(ns_id)
         .bind(name)
         .bind(table_uuid)
-        .bind(md)
-        .bind(metadata_location)
         .bind(location)
+        .bind(table_repo::format_version_to_i16(metadata.format_version()))
+        .bind(metadata.last_column_id())
+        .bind(metadata.last_sequence_number())
+        .bind(metadata.last_updated_ms())
+        .bind(metadata.last_partition_id())
+        .bind(metadata.current_schema().schema_id())
+        .bind(metadata.default_partition_spec().spec_id())
+        .bind(
+            i32::try_from(metadata.default_sort_order_id()).map_err(|e| {
+                CatalogError::BadRequest(format!("default_sort_order_id out of range: {e}"))
+            })?,
+        )
         .bind(snap)
-        .execute(&self.db.pool)
+        .bind(metadata_location)
+        .fetch_one(&mut *tx)
         .await
-        .map_err(|e| match &e {
-            sqlx::Error::Database(d) if d.is_unique_violation() => {
-                CatalogError::AlreadyExists(name.into())
+        {
+            Ok(id) => id,
+            Err(sqlx::Error::Database(d)) if d.is_unique_violation() => {
+                return Err(CatalogError::AlreadyExists(name.into()));
             }
-            _ => CatalogError::Db(e),
-        })?;
+            Err(e) => return Err(CatalogError::Db(e)),
+        };
+
+        table_repo::shred_children(&mut tx, id, metadata).await?;
+        table_repo::append_logs(&mut tx, id, metadata, metadata_location).await?;
+
+        tx.commit().await.map_err(CatalogError::Db)?;
         Ok(())
     }
 
-    /// Load a table by namespace + name.
+    /// Load a table by namespace + name, assembling its metadata from the
+    /// normalized child tables.
     pub async fn load_table(&self, ns_id: Uuid, name: &str) -> Result<TableRow, CatalogError> {
-        sqlx::query_as::<_, TableRowRaw>(
-            "SELECT id, name, table_uuid, metadata, metadata_location, location, current_version \
+        let root = sqlx::query_as::<_, table_repo::TableRootRow>(
+            "SELECT id, name, table_uuid, location, format_version, last_column_id, \
+                    last_sequence_number, last_updated_ms, last_partition_id, current_schema_id, \
+                    default_spec_id, default_sort_order_id, current_snapshot_id, \
+                    metadata_location, current_version \
              FROM catalog_tables WHERE namespace_id = $1 AND name = $2",
         )
         .bind(ns_id)
@@ -248,8 +248,18 @@ impl CatalogStore {
         .fetch_optional(&self.db.pool)
         .await
         .map_err(CatalogError::Db)?
-        .ok_or_else(|| CatalogError::NotFound(name.into()))?
-        .into_table_row()
+        .ok_or_else(|| CatalogError::NotFound(name.into()))?;
+
+        let metadata = table_repo::assemble_table_metadata(&self.db.pool, &root).await?;
+        Ok(TableRow {
+            id: root.id,
+            name: root.name,
+            table_uuid: root.table_uuid,
+            metadata,
+            metadata_location: root.metadata_location,
+            location: root.location,
+            current_version: root.current_version,
+        })
     }
 
     /// List table names in a namespace, ordered alphabetically.
