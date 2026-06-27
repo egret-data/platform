@@ -34,15 +34,18 @@ use std::sync::Arc;
 use axum::extract::{FromRef, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{delete, get};
 use axum::{Json, Router};
+use chrono::{DateTime, Utc};
 use egret_auth::session::SessionService;
+use egret_catalog::service::tokens::CatalogToken;
 use egret_catalog::service::CatalogStore;
+use egret_catalog::CatalogError;
 use egret_core::WorkspaceContext;
 use egret_workspace::context::WsContext;
 use egret_workspace::rbac::Authorizer;
 use egret_workspace::workspaces::WorkspaceRepo;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use lakekeeper::api::iceberg::types::{PageToken, Prefix};
@@ -53,7 +56,9 @@ use lakekeeper::api::iceberg::v1::tables::TablesService;
 use lakekeeper::api::iceberg::v1::tables::{ListTablesQuery, LoadTableRequest, TableParameters};
 use lakekeeper::api::iceberg::v1::views::ViewService;
 use lakekeeper::api::iceberg::v1::ListTablesResponse;
-use lakekeeper::api::management::v1::warehouse::Service as WarehouseService;
+use lakekeeper::api::management::v1::warehouse::{
+    Service as WarehouseService, UpdateWarehouseStorageRequest,
+};
 use lakekeeper::api::management::v1::ApiServer;
 use lakekeeper::api::{ApiContext, RequestMetadata};
 use lakekeeper::iceberg::{NamespaceIdent, TableIdent};
@@ -80,6 +85,18 @@ type EngineApiServer = ApiServer<PostgresBackend, EgretAuthorizer, SecretsState>
 pub struct BrowseState {
     pub engine: ApiContext<EngineState>,
     pub store: CatalogStore,
+    /// Vault used to seal/unseal per-workspace S3 secret keys (CE-5). Carried so
+    /// the storage-update handler can persist a new secret and read the existing
+    /// one when a re-point omits `secret_key`.
+    pub secret_store: egret_secrets::SecretStore,
+    /// The GLOBAL default S3 storage config (the same one threaded into the
+    /// `EngineWarehouseProvisioner`). Used to (a) lazily provision a warehouse for
+    /// a workspace that predates catalog-enablement and has no custom storage row,
+    /// and (b) report the EFFECTIVE storage config from `GET .../catalog/storage`
+    /// when no per-workspace `workspace_storage` row exists. Never serialized
+    /// directly — only its non-secret fields surface, and `secret_key` is reported
+    /// solely as the `has_secret` boolean.
+    pub default_storage: egret_storage::StorageConfig,
     pub system_user: Arc<str>,
     pub sessions: SessionService,
     pub workspaces: WorkspaceRepo,
@@ -118,6 +135,19 @@ pub fn browse_router() -> Router<BrowseState> {
             "/ws/{workspace}/catalog/namespaces/{ns}/tables/{table}",
             get(table_detail),
         )
+        // Workspace-admin catalog token management (gated `workspace:manage_members`).
+        .route(
+            "/ws/{workspace}/catalog/tokens",
+            get(list_tokens).post(mint_token),
+        )
+        .route("/ws/{workspace}/catalog/tokens/{id}", delete(revoke_token))
+        // Workspace-admin storage read (effective config) + re-point (gated
+        // `workspace:manage_members`). The GET lazily provisions a warehouse so the
+        // Storage page is usable on a workspace that predates catalog enablement.
+        .route(
+            "/ws/{workspace}/catalog/storage",
+            get(get_storage).put(update_storage),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -132,8 +162,22 @@ enum BrowseApiError {
     NoWarehouse,
     /// A lakekeeper `Service` call failed (preserves its iceberg HTTP code).
     Engine(lakekeeper::api::IcebergErrorResponse),
+    /// Client-supplied input was invalid → 400.
+    BadRequest(String),
+    /// The targeted resource does not exist (or belongs to another tenant) → 404.
+    NotFound,
     /// An internal failure building the system principal etc.
     Internal,
+}
+
+impl From<CatalogError> for BrowseApiError {
+    fn from(e: CatalogError) -> Self {
+        match e {
+            CatalogError::BadRequest(m) => BrowseApiError::BadRequest(m),
+            CatalogError::NotFound(_) => BrowseApiError::NotFound,
+            _ => BrowseApiError::Internal,
+        }
+    }
 }
 
 impl From<egret_core::Error> for BrowseApiError {
@@ -170,6 +214,8 @@ impl IntoResponse for BrowseApiError {
             BrowseApiError::NoWarehouse => {
                 (StatusCode::NOT_FOUND, "catalog not provisioned".to_string())
             }
+            BrowseApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
+            BrowseApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             BrowseApiError::Engine(e) => {
                 let code =
                     StatusCode::from_u16(e.error.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -283,6 +329,98 @@ async fn authorized_warehouse(
     })
 }
 
+/// Lazily ensure the workspace has a provisioned lakekeeper warehouse, returning
+/// its UUID.
+///
+/// Warehouse provisioning used to be create-time only, so a workspace created
+/// before the catalog was enabled (e.g. `eng`) has NO warehouse and its Catalog /
+/// Storage pages are unusable. This makes provisioning lazy: the first
+/// catalog/storage access provisions the warehouse on demand.
+///
+/// * If `warehouse_for_workspace(ws)` already returns `Some`, that id is returned
+///   without touching lakekeeper.
+/// * Otherwise the effective [`StorageConfig`] is resolved — the workspace's
+///   custom `workspace_storage` row (with its secret unsealed from the vault) if
+///   present, else the global [`BrowseState::default_storage`] — and
+///   [`provision_workspace_warehouse`](crate::provision_ws::provision_workspace_warehouse)
+///   (itself idempotent) creates the warehouse + persists the mapping.
+///
+/// Callers MUST authorize the workspace first; this resolves the slug from the
+/// workspace repo for the warehouse name + key prefix.
+async fn ensure_warehouse(
+    st: &BrowseState,
+    ctx: &WorkspaceContext,
+) -> Result<Uuid, BrowseApiError> {
+    let ws_id = ctx.workspace_id.0;
+
+    // Fast path: already provisioned.
+    if let Some(existing) = st
+        .store
+        .warehouse_for_workspace(ws_id)
+        .await
+        .map_err(|_| BrowseApiError::Internal)?
+    {
+        return Ok(existing);
+    }
+
+    // Resolve the workspace slug (warehouse name + `workspaces/<slug>/warehouse`
+    // key prefix). `WsContext` already bound `ctx.workspace_id` to the path slug.
+    let slug = st
+        .workspaces
+        .get_by_id(ctx.workspace_id)
+        .await
+        .map_err(|_| BrowseApiError::Internal)?
+        .ok_or(BrowseApiError::NotFound)?
+        .slug;
+
+    // Resolve the EFFECTIVE storage config: the workspace's custom row (with its
+    // sealed secret unsealed), else the global default.
+    let cfg = match st
+        .store
+        .workspace_storage_for(ws_id)
+        .await
+        .map_err(|_| BrowseApiError::Internal)?
+    {
+        Some(row) => {
+            let secret_key = match row.secret_ref {
+                Some(secret_ref) => st
+                    .secret_store
+                    .get(secret_ref)
+                    .await
+                    .map_err(|_| BrowseApiError::Internal)?,
+                // A custom row without a sealed secret falls back to the default's
+                // secret (the access key still comes from the row).
+                None => st.default_storage.secret_key.clone(),
+            };
+            egret_storage::StorageConfig {
+                endpoint: row.endpoint.clone(),
+                region: row.region.clone(),
+                bucket: row.bucket.clone(),
+                access_key: row.access_key.clone(),
+                secret_key,
+                path_style: row.path_style,
+            }
+        }
+        None => st.default_storage.clone(),
+    };
+
+    let warehouse_id = crate::provision_ws::provision_workspace_warehouse(
+        st.engine.clone(),
+        &st.store,
+        ws_id,
+        &slug,
+        &cfg,
+        &st.system_user,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = ?e, workspace_id = %ws_id, "lazy warehouse provisioning failed");
+        BrowseApiError::Internal
+    })?;
+
+    Ok(warehouse_id)
+}
+
 /// Empty/default list-namespaces query starting at top level.
 fn ns_query(parent: Option<NamespaceIdent>) -> ListNamespacesQuery {
     ListNamespacesQuery {
@@ -303,7 +441,21 @@ async fn summary(
     State(st): State<BrowseState>,
     WsContext(ctx): WsContext,
 ) -> Result<Json<CatalogSummary>, BrowseApiError> {
-    let r = authorized_warehouse(&st, &ctx).await?;
+    // RBAC FIRST: the session must hold `catalog:read` on the path workspace.
+    st.authz.require_workspace(&ctx, PERM).await?;
+
+    // Lazily provision the warehouse if this workspace predates catalog enablement
+    // (e.g. `eng`), so the Catalog page returns the empty catalog instead of a
+    // "not provisioned" state on first view. Provisioning failure → 5xx.
+    let warehouse_id = ensure_warehouse(&st, &ctx).await?;
+    let request_metadata =
+        system_request_metadata(&st.system_user).map_err(|_| BrowseApiError::Internal)?;
+
+    let r = Resolved {
+        prefix: Prefix::from(warehouse_id.to_string()),
+        warehouse_id,
+        request_metadata,
+    };
 
     let wh = <EngineApiServer as WarehouseService<_, _, _>>::get_warehouse(
         WarehouseId::from(r.warehouse_id),
@@ -540,5 +692,390 @@ async fn table_detail(
         current_snapshot_id: md.current_snapshot_id(),
         snapshot_count: md.snapshots().count(),
         properties,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Workspace-admin catalog token management (list / mint / revoke).
+//
+// Gated `workspace:manage_members` (the workspace-admin permission, same gate as
+// `egret-workspace`'s storage/members routes), and IDOR-safe: every operation is
+// scoped to `ctx.workspace_id`, which `WsContext` bound to the path slug +
+// membership, so a workspace admin can only see/mint/revoke their OWN tokens.
+//
+// The persisted SHA-256 hash and the raw secret are NEVER serialized into the
+// list/mint responses — [`CatalogTokenDto`] has no hash field and the raw token
+// is returned exactly once, only from mint.
+// ---------------------------------------------------------------------------
+
+/// A catalog token as exposed to the workspace-admin UI. Deliberately omits the
+/// stored hash (and never carries the raw secret).
+#[derive(Serialize)]
+struct CatalogTokenDto {
+    id: Uuid,
+    label: String,
+    permissions: Vec<String>,
+    namespace_scope: Vec<String>,
+    created_at: DateTime<Utc>,
+}
+
+impl From<CatalogToken> for CatalogTokenDto {
+    fn from(t: CatalogToken) -> Self {
+        CatalogTokenDto {
+            id: t.id,
+            label: t.label,
+            permissions: t.permissions,
+            namespace_scope: t.namespace_scope,
+            created_at: t.created_at,
+        }
+    }
+}
+
+/// Request body for minting a token. `permissions` are the short UI forms
+/// (`"read"` / `"write"`) which we map to the catalog permission strings.
+#[derive(Deserialize)]
+struct MintTokenRequest {
+    label: String,
+    permissions: Vec<String>,
+    #[serde(default)]
+    namespace_scope: Vec<String>,
+}
+
+/// Mint response: the persisted token plus the raw secret (shown once).
+#[derive(Serialize)]
+struct MintTokenResponse {
+    token: CatalogTokenDto,
+    raw: String,
+}
+
+/// Authorize `workspace:manage_members` on the active (path) workspace.
+async fn require_workspace_admin(
+    st: &BrowseState,
+    ctx: &WorkspaceContext,
+) -> Result<(), BrowseApiError> {
+    st.authz
+        .require_workspace(ctx, "workspace:manage_members")
+        .await?;
+    Ok(())
+}
+
+/// Map a short UI permission (`read`/`write`) to its catalog permission string.
+fn map_permission(p: &str) -> Result<String, BrowseApiError> {
+    match p {
+        "read" => Ok("catalog:read".to_string()),
+        "write" => Ok("catalog:write".to_string()),
+        other => Err(BrowseApiError::BadRequest(format!(
+            "unknown permission '{other}'; valid values are: read, write"
+        ))),
+    }
+}
+
+/// GET `/api/ws/{workspace}/catalog/tokens` — list this workspace's tokens.
+async fn list_tokens(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<Vec<CatalogTokenDto>>, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+    let tokens = st.store.list_tokens(ctx.workspace_id.0).await?;
+    Ok(Json(
+        tokens.into_iter().map(CatalogTokenDto::from).collect(),
+    ))
+}
+
+/// POST `/api/ws/{workspace}/catalog/tokens` — mint a new token.
+async fn mint_token(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Json(req): Json<MintTokenRequest>,
+) -> Result<Json<MintTokenResponse>, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+
+    if req.permissions.is_empty() {
+        return Err(BrowseApiError::BadRequest(
+            "permissions must not be empty".to_string(),
+        ));
+    }
+    let mut perms = req
+        .permissions
+        .iter()
+        .map(|p| map_permission(p))
+        .collect::<Result<Vec<_>, _>>()?;
+    // Dedup so e.g. `["read","read"]` persists a single `catalog:read`.
+    perms.sort();
+    perms.dedup();
+
+    let (token, raw) = st
+        .store
+        .create_token(ctx.workspace_id.0, &req.label, &perms, &req.namespace_scope)
+        .await?;
+
+    Ok(Json(MintTokenResponse {
+        token: token.into(),
+        raw,
+    }))
+}
+
+/// DELETE `/api/ws/{workspace}/catalog/tokens/{id}` — revoke a token.
+///
+/// 404 (not 403) when the id does not belong to this workspace, so the response
+/// does not confirm the existence of another tenant's token (IDOR closed).
+async fn revoke_token(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> Result<StatusCode, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+    let revoked = st
+        .store
+        .revoke_token_for_workspace(id, ctx.workspace_id.0)
+        .await?;
+    if revoked {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(BrowseApiError::NotFound)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Workspace-admin storage re-point: `PUT /api/ws/{workspace}/catalog/storage`.
+//
+// Gated `workspace:manage_members` (same admin gate as token management), and
+// IDOR-safe (scoped to `ctx.workspace_id`, bound by `WsContext`). Re-points the
+// workspace's lakekeeper warehouse storage AND persists the new
+// `workspace_storage` row, sealing any new secret through the vault.
+//
+// Ordering is load-bearing: lakekeeper is updated FIRST so its `validate_access`
+// (a live S3 round-trip) rejects bad credentials before egret mutates its own
+// row — a failed update leaves the egret `workspace_storage` row UNCHANGED.
+//
+// lakekeeper requires the re-pointed profile to keep the SAME location (bucket +
+// key prefix); the warehouse was created at `workspaces/<slug>/warehouse`, so the
+// handler reuses [`crate::provision_ws::build_storage_profile`] with the path
+// slug to derive an identically-located profile.
+// ---------------------------------------------------------------------------
+
+/// Request body for re-pointing a workspace's S3/MinIO storage. `secret_key` is
+/// optional: when `None`, the existing sealed secret is reused (keep-current).
+/// `key_prefix` is accepted for shape-parity with the storage DTO but is NOT
+/// applied — the warehouse layout uses the fixed `workspaces/<slug>/warehouse`
+/// prefix (changing it would move the location, which lakekeeper rejects).
+#[derive(Deserialize)]
+struct UpdateStorageRequest {
+    provider: String,
+    endpoint: Option<String>,
+    region: String,
+    bucket: String,
+    #[allow(dead_code)]
+    key_prefix: Option<String>,
+    access_key: String,
+    secret_key: Option<String>,
+    path_style: bool,
+}
+
+/// GET `/api/ws/{workspace}/catalog/storage` — the EFFECTIVE storage config.
+///
+/// Gated `workspace:manage_members` (same admin gate as the re-point), and
+/// IDOR-safe (scoped to `ctx.workspace_id`, bound by `WsContext`). Lazily
+/// provisions the warehouse first (so a never-visited workspace becomes usable),
+/// then returns the secret-free [`WorkspaceStorageInfo`]:
+///   * if a custom `workspace_storage` row exists → from that row,
+///   * else → derived from the global [`BrowseState::default_storage`] (the
+///     effective config the warehouse was provisioned with), with the canonical
+///     `workspaces/<slug>/warehouse` key prefix.
+///
+/// The secret VALUE is never returned — only `has_secret` reflects whether a
+/// sealed secret exists (a row's `secret_ref`, or the default's non-empty
+/// `secret_key`).
+async fn get_storage(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Path(slug): Path<String>,
+) -> Result<Json<egret_workspace::provision::WorkspaceStorageInfo>, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+
+    // Lazily provision the warehouse so a workspace that predates catalog
+    // enablement gets one on first Storage view (GET has this side effect by
+    // design — the Storage page must be usable without an explicit provision step).
+    ensure_warehouse(&st, &ctx).await?;
+
+    let info = match st
+        .store
+        .workspace_storage_for(ctx.workspace_id.0)
+        .await
+        .map_err(|_| BrowseApiError::Internal)?
+    {
+        Some(row) => egret_workspace::provision::WorkspaceStorageInfo {
+            provider: row.provider,
+            endpoint: row.endpoint,
+            region: row.region,
+            bucket: row.bucket,
+            key_prefix: row.key_prefix,
+            access_key: row.access_key,
+            has_secret: row.secret_ref.is_some(),
+        },
+        None => {
+            let d = &st.default_storage;
+            egret_workspace::provision::WorkspaceStorageInfo {
+                provider: "s3".to_string(),
+                endpoint: d.endpoint.clone(),
+                region: d.region.clone(),
+                bucket: d.bucket.clone(),
+                key_prefix: Some(format!("workspaces/{slug}/warehouse")),
+                access_key: d.access_key.clone(),
+                has_secret: !d.secret_key.is_empty(),
+            }
+        }
+    };
+
+    Ok(Json(info))
+}
+
+/// PUT `/api/ws/{workspace}/catalog/storage` — re-point the warehouse storage.
+async fn update_storage(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Path(slug): Path<String>,
+    Json(req): Json<UpdateStorageRequest>,
+) -> Result<Json<egret_workspace::provision::WorkspaceStorageInfo>, BrowseApiError> {
+    update_storage_inner(st, ctx, slug, req).await
+}
+
+async fn update_storage_inner(
+    st: BrowseState,
+    ctx: WorkspaceContext,
+    slug: String,
+    req: UpdateStorageRequest,
+) -> Result<Json<egret_workspace::provision::WorkspaceStorageInfo>, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+
+    // 0. Only S3/MinIO is supported — reject any other provider BEFORE building a
+    //    profile, so the egret row can never record a provider that diverges from
+    //    what lakekeeper actually stores (always S3).
+    if req.provider != "s3" {
+        return Err(BrowseApiError::BadRequest(
+            "only s3 storage is supported".to_string(),
+        ));
+    }
+
+    // 1. Lazily provision the warehouse if missing, so a re-point works even on a
+    //    never-visited workspace (one that predates catalog enablement) instead of
+    //    409-ing. Idempotent: a no-op when the warehouse already exists.
+    let warehouse_id = ensure_warehouse(&st, &ctx).await?;
+
+    // 2. Resolve the effective secret: the request's `secret_key` if present,
+    //    else the existing sealed secret (keep-current). Without either we cannot
+    //    build S3 credentials.
+    let existing = st
+        .store
+        .workspace_storage_for(ctx.workspace_id.0)
+        .await
+        .map_err(|_| BrowseApiError::Internal)?;
+    let secret_key = match &req.secret_key {
+        Some(s) => s.clone(),
+        None => {
+            let secret_ref = existing
+                .as_ref()
+                .and_then(|row| row.secret_ref)
+                .ok_or_else(|| {
+                    BrowseApiError::BadRequest(
+                        "secret_key is required (no existing secret to keep)".to_string(),
+                    )
+                })?;
+            st.secret_store
+                .get(secret_ref)
+                .await
+                .map_err(|_| BrowseApiError::Internal)?
+        }
+    };
+
+    // 3. Build the egret StorageConfig + the lakekeeper profile/credential. The
+    //    profile reuses the `workspaces/<slug>/warehouse` prefix so the location
+    //    is unchanged (lakekeeper rejects a location change on re-point).
+    let cfg = egret_storage::StorageConfig {
+        endpoint: req.endpoint.clone(),
+        region: req.region.clone(),
+        bucket: req.bucket.clone(),
+        access_key: req.access_key.clone(),
+        secret_key,
+        path_style: req.path_style,
+    };
+    let storage_profile = crate::provision_ws::build_storage_profile(&cfg, &slug)
+        .map_err(|e| BrowseApiError::BadRequest(format!("invalid storage profile: {e}")))?;
+    let storage_credential = crate::provision_ws::build_storage_credential(&cfg);
+
+    // 4. lakekeeper FIRST — `update_storage` runs `validate_access` (a live S3
+    //    round-trip), so bad credentials fail HERE, before egret mutates its row.
+    let rm = system_request_metadata(&st.system_user).map_err(|_| BrowseApiError::Internal)?;
+    <EngineApiServer as WarehouseService<_, _, _>>::update_storage(
+        WarehouseId::from(warehouse_id),
+        UpdateWarehouseStorageRequest {
+            storage_profile,
+            storage_credential: Some(storage_credential),
+        },
+        st.engine.clone(),
+        rm,
+    )
+    .await
+    // A rejected re-point (bad creds / invalid profile / location change) surfaces
+    // as 400; the egret row is left UNCHANGED because we return before step 5. The
+    // admin configured these credentials, so lakekeeper's message
+    // (`InvalidAccessKeyId` / `NoSuchBucket` / …) is actionable — forward a TRIMMED
+    // copy (cap length so a large upstream dump can't be echoed verbatim) and log
+    // the full error at WARN for operators.
+    .map_err(|e| {
+        tracing::warn!(error = ?e, "lakekeeper storage update rejected");
+        let mut msg = e.error.message.clone();
+        msg.truncate(200);
+        BrowseApiError::BadRequest(format!("storage update rejected: {msg}"))
+    })?;
+
+    // ----- Partial-failure / divergence window -------------------------------
+    // lakekeeper's warehouse is now re-pointed (Step 4 committed). Step 5 below
+    // (sealing a new secret + upserting the egret `workspace_storage` row) could
+    // still fail — if it does, the warehouse points at the NEW storage while
+    // egret's row still describes the OLD one (a transient divergence). We do NOT
+    // run a cross-system 2-phase commit here; the window is recoverable by simply
+    // re-issuing this PUT (idempotent: lakekeeper accepts the same re-point and the
+    // egret upsert overwrites the row), which we accept for this pass.
+    // -------------------------------------------------------------------------
+
+    // 5. ONLY on lakekeeper success: persist the egret row. Seal a new secret if
+    //    one was supplied; otherwise keep the existing `secret_ref`.
+    let secret_ref = match &req.secret_key {
+        Some(s) => Some(
+            st.secret_store
+                .put("workspace_s3_secret", s)
+                .await
+                .map_err(|_| BrowseApiError::Internal)?,
+        ),
+        None => existing.as_ref().and_then(|row| row.secret_ref),
+    };
+
+    let row = egret_catalog::WorkspaceStorageRow {
+        workspace_id: ctx.workspace_id.0,
+        provider: req.provider.clone(),
+        endpoint: req.endpoint.clone(),
+        region: req.region.clone(),
+        bucket: req.bucket.clone(),
+        // Record the CANONICAL warehouse prefix (the same derivation
+        // `build_storage_profile` feeds lakekeeper), NOT the request's `key_prefix`
+        // (which is not applied) nor the possibly-stale existing-row value — so the
+        // persisted row and the returned `WorkspaceStorageInfo` always match the
+        // real warehouse layout.
+        key_prefix: Some(format!("workspaces/{slug}/warehouse")),
+        access_key: req.access_key.clone(),
+        secret_ref,
+        path_style: req.path_style,
+    };
+    st.store.upsert_workspace_storage(&row).await?;
+
+    Ok(Json(egret_workspace::provision::WorkspaceStorageInfo {
+        provider: row.provider,
+        endpoint: row.endpoint,
+        region: row.region,
+        bucket: row.bucket,
+        key_prefix: row.key_prefix,
+        access_key: row.access_key,
+        has_secret: row.secret_ref.is_some(),
     }))
 }

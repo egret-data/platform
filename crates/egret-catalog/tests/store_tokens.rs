@@ -162,6 +162,62 @@ async fn create_token_rejects_empty_permissions() {
 }
 
 // ---------------------------------------------------------------------------
+// Workspace-scoped revoke (IDOR guard)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn revoke_token_for_workspace_guards_by_workspace() {
+    let Some(s) = store().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let ws_a = seed_workspace(&s).await;
+    let ws_b = seed_workspace(&s).await;
+    let (token, _raw) = s
+        .create_token(ws_a, "guard", &rw_perms(), &[])
+        .await
+        .unwrap();
+
+    // Wrong workspace cannot revoke it (IDOR closed).
+    assert!(
+        !s.revoke_token_for_workspace(token.id, ws_b).await.unwrap(),
+        "a different workspace must not be able to revoke"
+    );
+    // Still present in workspace A's list.
+    let ids: Vec<_> = s
+        .list_tokens(ws_a)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
+    assert!(
+        ids.contains(&token.id),
+        "token still active after foreign revoke"
+    );
+
+    // Owning workspace revokes it.
+    assert!(
+        s.revoke_token_for_workspace(token.id, ws_a).await.unwrap(),
+        "owning workspace revokes successfully"
+    );
+    let ids: Vec<_> = s
+        .list_tokens(ws_a)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
+    assert!(!ids.contains(&token.id), "token absent after revoke");
+
+    // A second revoke is a no-op (already revoked).
+    assert!(
+        !s.revoke_token_for_workspace(token.id, ws_a).await.unwrap(),
+        "double-revoke returns false"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // CE-4: namespace_scope tests
 // ---------------------------------------------------------------------------
 

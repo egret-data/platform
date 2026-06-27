@@ -93,6 +93,7 @@ frontend that inherits the sparklabx design system.
 
 > Each ADR gets a detailed file under `docs/en/adr/` (and `docs/vi/adr/`) once implementation begins.
 > **Note (ADR-19 supersession):** ADR-12's "global register → grant" applies to Ranger policy scope, not database connections — those are now per-workspace self-service (ADR-19 layer 2).
+> **Refinement (ADR-19a, 2026-06-27):** the workspace sidebar is split into **zones** — **EXPLORE** (SQL Lab, Datasets, Charts, Dashboards, Notebooks, Catalog) and **MANAGE** (Storage, …later Members/Connections). Catalog management does NOT live under a generic "Settings" page — instead the **Catalog is a rich multi-tab AREA** (mirroring lakekeeper's web console `data-portal/console`: namespaces · details · tasks · statistics · permissions; table-detail: schema/snapshots/files…) and **catalog access (tokens) is a tab INSIDE that Catalog area**. **Storage is its own MANAGE page**, an editable per-workspace MinIO/S3 config (uses lakekeeper `update_storage_profile`/`update_storage_credential` to re-point the warehouse). Full lakekeeper-console catalog parity is a phased epic.
 
 ---
 
