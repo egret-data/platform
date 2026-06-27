@@ -23,8 +23,6 @@ pub struct AppState {
     pub workspace: Option<WorkspaceState>,
     /// Present when `config.oidc.enabled`; `None` otherwise (or in unit tests).
     pub oidc: Option<OidcRoutesState>,
-    /// Present when `config.catalog.enabled`; `None` otherwise (or in unit tests).
-    pub catalog: Option<egret_catalog::CatalogState>,
     /// The LIVE embedded lakekeeper Iceberg REST engine router, fully assembled
     /// in the composition root (`egret-bin`): the lakekeeper catalog router
     /// fronted by egret's per-workspace token-ownership middleware (CE-2 T5).
@@ -59,7 +57,6 @@ impl AppState {
             auth: None,
             workspace: None,
             oidc: None,
-            catalog: None,
             catalog_engine: None,
             catalog_browse: None,
             ranger: None,
@@ -105,13 +102,11 @@ pub fn build_router(state: AppState) -> Router {
         );
     }
 
-    // CE-2 T5 cutover: the built-in `egret_catalog::iceberg_router` is no longer
-    // mounted. The live catalog surface is the embedded lakekeeper Iceberg REST
-    // engine (`state.catalog_engine`), assembled in `egret-bin` with egret's
+    // CE-2 cutover: the live catalog surface is the embedded lakekeeper Iceberg
+    // REST engine (`state.catalog_engine`), assembled in `egret-bin` with egret's
     // per-workspace token-ownership middleware in front (A-3), nested at
     // `/catalog/v1` so the front middleware sees lakekeeper-relative paths
-    // (`/{prefix}/...` and `/config`). `state.catalog` is retained for now (browse
-    // is rewired to read lakekeeper in T6; the old router code is deleted in T8).
+    // (`/{prefix}/...` and `/config`).
     if let Some(catalog_engine) = state.catalog_engine.clone() {
         router = router.merge(
             Router::new()
