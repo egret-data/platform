@@ -13,7 +13,7 @@
 //!   - a BOGUS credential is rejected by lakekeeper FIRST (validate_access on
 //!     update) → 400 and the `workspace_storage` row is left UNCHANGED,
 //!   - a non-admin (`ws_viewer`) → 403,
-//!   - a workspace with NO warehouse → 409.
+//!   - a workspace with NO warehouse → lazily provisions, then re-points → 200.
 //!
 //! lakekeeper requires the re-pointed profile to keep the SAME location (bucket +
 //! key prefix), so the test re-points within the same `warehouse` bucket and the
