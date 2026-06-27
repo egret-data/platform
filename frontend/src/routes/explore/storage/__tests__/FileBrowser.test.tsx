@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 // ── Mock factories ────────────────────────────────────────────────────────────
 const objectsMock = vi.fn();
+const refetch = vi.fn();
 const uploadMutation = vi.fn();
 const uploadMutate = vi.fn();
 const deleteMutation = vi.fn();
@@ -46,15 +48,25 @@ const listing = {
   folders: ["sub/"],
   objects: [
     { key: "readme.txt", size: 1234, last_modified: "2025-01-01T00:00:00Z" },
+    { key: "data.csv", size: 5678, last_modified: "2025-01-02T00:00:00Z" },
+    { key: "events.parquet", size: 9012, last_modified: "2025-01-03T00:00:00Z" },
   ],
 };
 
 function ok(data: typeof listing) {
-  return { data, isLoading: false, isError: false, error: null };
+  return { data, isLoading: false, isError: false, error: null, refetch };
+}
+
+/** Open the ⋮ menu for the row identified by its action button aria-label. */
+async function openMenu(name: RegExp) {
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name }));
+  return user;
 }
 
 beforeEach(() => {
   objectsMock.mockReset();
+  refetch.mockReset();
   uploadMutation.mockReset();
   uploadMutate.mockReset();
   deleteMutation.mockReset();
@@ -77,12 +89,41 @@ beforeEach(() => {
 });
 
 describe("FileBrowser", () => {
+  it("renders the connection info header with name and meta", () => {
+    render(<FileBrowser ws="eng" conn={conn} />);
+    expect(screen.getByText("prod-lakehouse")).toBeInTheDocument();
+    // meta line: purpose · provider · bucket
+    expect(
+      screen.getByText("catalog · S3 / MinIO · my-data-lake"),
+    ).toBeInTheDocument();
+  });
+
   it("renders folders and files from the listing", () => {
     render(<FileBrowser ws="eng" conn={conn} />);
     expect(screen.getByText("sub")).toBeInTheDocument();
     expect(screen.getByText("readme.txt")).toBeInTheDocument();
     // human-readable size
     expect(screen.getByText("1.2 KB")).toBeInTheDocument();
+  });
+
+  it("renders file-type icons: csv→Table2, parquet→Database, folder→amber Folder", () => {
+    const { container } = render(<FileBrowser ws="eng" conn={conn} />);
+    // folder icon is the amber lucide-folder
+    const folderIcon = container.querySelector(".lucide-folder");
+    expect(folderIcon).toBeInTheDocument();
+    expect(folderIcon).toHaveClass("text-amber-500");
+    // csv → Table2
+    expect(container.querySelector(".lucide-table-2")).toBeInTheDocument();
+    // parquet → Database (within the table; the header tile is also a Database
+    // but we just assert at least one exists)
+    expect(container.querySelector(".lucide-database")).toBeInTheDocument();
+  });
+
+  it("calls refetch when Refresh is clicked", async () => {
+    const user = userEvent.setup();
+    render(<FileBrowser ws="eng" conn={conn} />);
+    await user.click(screen.getByRole("button", { name: /refresh/i }));
+    expect(refetch).toHaveBeenCalled();
   });
 
   it("navigates into a folder — re-queries with the new prefix", () => {
@@ -95,18 +136,38 @@ describe("FileBrowser", () => {
     // after navigation the hook is queried with the folder's prefix
     expect(objectsMock).toHaveBeenCalledWith("sub/");
     // breadcrumb reflects the new level
-    expect(screen.getByRole("button", { name: /up one level/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /up one level/i }),
+    ).toBeInTheDocument();
   });
 
-  it("calls downloadObject when Download is clicked", () => {
+  it("file ⋮ menu exposes Download / Move / Rename / Delete", async () => {
     render(<FileBrowser ws="eng" conn={conn} />);
-    fireEvent.click(screen.getByRole("button", { name: /download readme\.txt/i }));
+    await openMenu(/actions for readme\.txt/i);
+    expect(await screen.findByText("Download")).toBeInTheDocument();
+    expect(screen.getByText("Move / Rename")).toBeInTheDocument();
+    expect(screen.getByText("Delete")).toBeInTheDocument();
+  });
+
+  it("folder ⋮ menu exposes Open / Move / Rename / Delete", async () => {
+    render(<FileBrowser ws="eng" conn={conn} />);
+    await openMenu(/actions for sub/i);
+    expect(await screen.findByText("Open")).toBeInTheDocument();
+    expect(screen.getByText("Move / Rename")).toBeInTheDocument();
+    expect(screen.getByText("Delete")).toBeInTheDocument();
+  });
+
+  it("calls downloadObject from the file ⋮ menu", async () => {
+    render(<FileBrowser ws="eng" conn={conn} />);
+    const user = await openMenu(/actions for readme\.txt/i);
+    await user.click(await screen.findByText("Download"));
     expect(downloadObject).toHaveBeenCalledWith("eng", "conn-1", "readme.txt");
   });
 
-  it("deletes an object after confirmation", async () => {
+  it("deletes an object after confirmation via the ⋮ menu", async () => {
     render(<FileBrowser ws="eng" conn={conn} />);
-    fireEvent.click(screen.getByRole("button", { name: /delete readme\.txt/i }));
+    const user = await openMenu(/actions for readme\.txt/i);
+    await user.click(await screen.findByText("Delete"));
 
     await waitFor(() =>
       expect(screen.getByText(/Delete «readme\.txt»/)).toBeInTheDocument(),
@@ -149,6 +210,7 @@ describe("FileBrowser", () => {
       isLoading: false,
       isError: true,
       error: { status: 403 },
+      refetch,
     });
     render(<FileBrowser ws="eng" conn={conn} />);
     expect(
@@ -159,7 +221,7 @@ describe("FileBrowser", () => {
   it("shows empty state when there are no folders or objects", () => {
     objectsMock.mockReturnValue(ok({ prefix: "", folders: [], objects: [] }));
     render(<FileBrowser ws="eng" conn={conn} />);
-    expect(screen.getByText("Empty")).toBeInTheDocument();
+    expect(screen.getByText("This folder is empty")).toBeInTheDocument();
   });
 
   it("creates a folder at the current prefix via the new-folder dialog", async () => {
@@ -208,11 +270,10 @@ describe("FileBrowser", () => {
     expect(await screen.findByText(/cannot contain/i)).toBeInTheDocument();
   });
 
-  it("deletes a folder recursively after confirmation", async () => {
+  it("deletes a folder recursively after confirmation via the ⋮ menu", async () => {
     render(<FileBrowser ws="eng" conn={conn} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /delete folder sub/i }),
-    );
+    const user = await openMenu(/actions for sub/i);
+    await user.click(await screen.findByText("Delete"));
 
     await waitFor(() =>
       expect(screen.getByText(/and ALL its contents/i)).toBeInTheDocument(),
@@ -233,9 +294,8 @@ describe("FileBrowser", () => {
 
   it("renames a file — destination has no trailing slash", async () => {
     render(<FileBrowser ws="eng" conn={conn} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /move or rename readme\.txt/i }),
-    );
+    const user = await openMenu(/actions for readme\.txt/i);
+    await user.click(await screen.findByText("Move / Rename"));
 
     const input = await screen.findByLabelText(/new path/i);
     expect((input as HTMLInputElement).value).toBe("readme.txt");
@@ -252,9 +312,8 @@ describe("FileBrowser", () => {
 
   it("renames a folder — both from and to end with a slash", async () => {
     render(<FileBrowser ws="eng" conn={conn} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /move or rename sub/i }),
-    );
+    const user = await openMenu(/actions for sub/i);
+    await user.click(await screen.findByText("Move / Rename"));
 
     const input = await screen.findByLabelText(/new path/i);
     expect((input as HTMLInputElement).value).toBe("sub/");
