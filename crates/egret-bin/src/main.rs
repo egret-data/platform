@@ -258,6 +258,22 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     //      provisions a per-workspace warehouse (flips the T4 `None` to `Some`).
     // This is the single composition point that makes the engine live; the
     // lakekeeper graph (and its second `sqlx` major) stays contained here.
+    // Hoisted so BOTH the engine block (per-workspace storage secrets, CE-5) and
+    // the database block (database-connection secrets) share one secret store
+    // built from the same `db` + master key. `SecretStore` is cheap + `Clone`.
+    let secrets = {
+        use base64::Engine as _;
+        let crypto = if config.secrets.master_key.is_empty() {
+            None
+        } else {
+            let key = base64::engine::general_purpose::STANDARD
+                .decode(config.secrets.master_key.as_bytes())
+                .map_err(|e| anyhow::anyhow!("secrets.master_key base64: {e}"))?;
+            Some(egret_secrets::Crypto::new(&key).map_err(|e| anyhow::anyhow!(e.to_string()))?)
+        };
+        egret_secrets::SecretStore::new(db.clone(), crypto)
+    };
+
     let (catalog_engine, warehouse_provisioner, catalog_browse): (
         Option<axum::Router>,
         egret_workspace::provision::SharedWarehouseProvisioner,
@@ -310,6 +326,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 engine_store,
                 storage_cfg,
                 config.catalog.system_user.clone(),
+                secrets.clone(),
             ));
 
         (Some(router), Some(provisioner), Some(browse_router))
@@ -372,20 +389,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // `ApiContext` and is therefore gated on `config.catalog.enabled` (when the
     // catalog surface is off there is no warehouse to browse).
 
-    // Hoist crypto/SecretStore/DatabaseRepo so both the database and engine blocks can share them.
-    let databases = {
-        use base64::Engine as _;
-        let crypto = if config.secrets.master_key.is_empty() {
-            None
-        } else {
-            let key = base64::engine::general_purpose::STANDARD
-                .decode(config.secrets.master_key.as_bytes())
-                .map_err(|e| anyhow::anyhow!("secrets.master_key base64: {e}"))?;
-            Some(egret_secrets::Crypto::new(&key).map_err(|e| anyhow::anyhow!(e.to_string()))?)
-        };
-        let secrets = egret_secrets::SecretStore::new(db.clone(), crypto);
-        egret_database::DatabaseRepo::new(db.clone(), secrets)
-    };
+    // `secrets` (the SecretStore) was hoisted above the engine block so the
+    // per-workspace storage provisioner shares it; the database block reuses the
+    // same instance for database-connection secrets.
+    let databases = egret_database::DatabaseRepo::new(db.clone(), secrets.clone());
 
     let database = Some(egret_database::DatabaseState {
         repo: databases.clone(),

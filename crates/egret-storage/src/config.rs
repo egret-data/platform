@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct StorageConfig {
     /// Custom S3 endpoint (MinIO). Empty/None means real AWS.
     pub endpoint: Option<String>,

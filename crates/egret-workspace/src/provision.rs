@@ -28,7 +28,7 @@ use std::sync::Arc;
 /// warehouse to use this storage backend instead of the system-wide default.
 /// All fields map 1-to-1 to the `workspace_storage` row written by the
 /// CE-5 Task 1 store.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct StorageSpec {
     pub provider: String,
     pub endpoint: Option<String>,
@@ -38,6 +38,23 @@ pub struct StorageSpec {
     pub access_key: String,
     pub secret_key: String,
     pub path_style: bool,
+}
+
+impl std::fmt::Debug for StorageSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redact credentials (mirrors `egret_storage::StorageConfig`'s Debug):
+        // this hits HTTP/tracing paths during workspace provisioning.
+        f.debug_struct("StorageSpec")
+            .field("provider", &self.provider)
+            .field("endpoint", &self.endpoint)
+            .field("region", &self.region)
+            .field("bucket", &self.bucket)
+            .field("key_prefix", &self.key_prefix)
+            .field("access_key", &"<redacted>")
+            .field("secret_key", &"<redacted>")
+            .field("path_style", &self.path_style)
+            .finish()
+    }
 }
 
 /// Provisions (idempotently) the lakekeeper warehouse backing a freshly-created

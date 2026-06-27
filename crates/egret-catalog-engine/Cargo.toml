@@ -43,6 +43,11 @@ egret-metastore = { workspace = true }
 egret-catalog = { workspace = true }
 # Runtime S3 config threaded into the warehouse storage profile.
 egret-storage = { workspace = true }
+# Per-workspace storage secret_key is sealed/unsealed via the secret store
+# (CE-5 Task 3). Like `egret-catalog`, this is the egret-side sqlx-0.8 surface:
+# `SecretStore::{put,get}` return `Uuid`/`String` (never a `Pool`), so its
+# sqlx-0.8 pool type never crosses into this crate's sqlx-0.9 surface.
+egret-secrets = { workspace = true }
 # The `WarehouseProvisioner` trait egret-catalog-engine implements (the
 # composition-root seam) and the `WorkspaceId` newtype it takes. egret-workspace
 # stays free of the engine; the engine depends on it (downstream direction).
