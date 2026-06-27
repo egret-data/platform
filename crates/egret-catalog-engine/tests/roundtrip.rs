@@ -18,17 +18,20 @@
 //! see also `api/router.rs`'s `auth_middleware_fn`). Without it, every handler
 //! 500s on a missing extension.
 //!
-//! We mirror that layer with a single `axum::middleware::from_fn` that inserts
-//! `RequestMetadata::new_lakekeeper_internal(Uuid::now_v7())` — the in-process
-//! actor whose `bypasses_control_plane_authz()` is `true`, so under
-//! `AllowAllAuthorizer` (and even a real authorizer) every action is approved.
-//! Its `project_id` is `None`, which `require_project_id(None)` resolves to the
-//! OSS `DEFAULT_PROJECT_ID` (nil project) that `bootstrap` seeded — so
-//! `GET /config?warehouse=spike` resolves the warehouse in the default project.
+//! We mirror that layer with a single `axum::middleware::from_fn` that inserts a
+//! `RequestMetadata` carrying a full-scope `egret` claim (CE-4): a token-shaped
+//! `Actor::Principal` with `{ perms: [read, write], ns: [] }`. The control-plane
+//! actor (`new_lakekeeper_internal`) bypasses control-plane authz, but CE-4's
+//! [`egret_catalog_engine::EgretAuthorizer`] now gates DATA actions (namespace /
+//! table) off the `egret` claim — an unscoped internal actor fails closed there.
+//! An empty `ns` scope means "all namespaces", so this full-scope claim lets the
+//! round-trip proceed while still exercising the real authorizer's claim path
+//! (not its system bypass). Its `project_id` is `None`, which
+//! `require_project_id(None)` resolves to the OSS `DEFAULT_PROJECT_ID` (nil
+//! project) that `bootstrap` seeded — so `GET /config?warehouse=spike` resolves
+//! the warehouse in the default project.
 //!
-//! For egret proper, THIS layer is exactly where the egret token → principal
-//! bridge will live (CE-3): replace the constant internal actor with one built
-//! from egret's authenticated principal.
+//! This mirrors the prod token→principal bridge in `front_auth::front_auth`.
 //!
 //! ## KEY FINDING — the route shape lakekeeper uses (CE-2: provisioning)
 //!
@@ -55,16 +58,41 @@ use egret_catalog_engine::{
 };
 use http_body_util::BodyExt;
 use lakekeeper::api::RequestMetadata;
+use lakekeeper::limes::Authentication;
+use lakekeeper::service::authn::{Actor, UserId};
 use tower::ServiceExt; // for `oneshot`
 use uuid::Uuid;
 
-/// Mirror lakekeeper's authn layer for the headless router: insert an
-/// in-process `RequestMetadata` so the catalog handlers' `Extension<_>`
-/// extractor succeeds. This is the CE-3 seam (token → principal).
+/// Mirror lakekeeper's authn layer for the headless router: insert a
+/// `RequestMetadata` so the catalog handlers' `Extension<_>` extractor succeeds.
+///
+/// CE-4: the engine now runs `EgretAuthorizer`, which gates DATA actions off the
+/// `egret` authentication claim (fail-closed without it). So we inject a
+/// token-shaped principal carrying a FULL-scope claim (`perms: [read, write]`,
+/// empty `ns` = all namespaces) — the same shape the prod front-auth bridge
+/// builds — so the round-trip proceeds through the real authorizer's claim path.
 async fn inject_request_metadata(mut request: Request, next: Next) -> Response {
-    request
-        .extensions_mut()
-        .insert(RequestMetadata::new_lakekeeper_internal(Uuid::now_v7()));
+    let uid = UserId::try_from(
+        format!(
+            "oidc~{}",
+            Uuid::new_v5(&Uuid::NAMESPACE_OID, b"roundtrip-token")
+        )
+        .as_str(),
+    )
+    .expect("valid principal id");
+    let authentication = Authentication::builder()
+        .token_header(None)
+        .claims(serde_json::json!({
+            "egret": { "perms": ["catalog:read", "catalog:write"], "ns": [] }
+        }))
+        .subject(uid.clone().into())
+        .name(Some("Roundtrip Token".to_string()))
+        .email(None)
+        .principal_type(None)
+        .build();
+    let mut md = RequestMetadata::new_lakekeeper_internal(Uuid::now_v7());
+    md.set_authentication(Actor::Principal(uid), authentication);
+    request.extensions_mut().insert(md);
     next.run(request).await
 }
 
@@ -94,7 +122,10 @@ async fn iceberg_roundtrip_through_lakekeeper() {
     run_lakekeeper_migrations(&dsn)
         .await
         .expect("run lakekeeper migrations");
-    let state = build_state(&dsn)
+    // `system_user` only matters for the authorizer's system-principal bypass,
+    // which this test does NOT use (it drives the engine via a full-scope egret
+    // claim, see `inject_request_metadata`). Any value is fine.
+    let state = build_state(&dsn, "egret-system")
         .await
         .expect("build lakekeeper router state");
     ensure_spike_warehouse(state.clone())

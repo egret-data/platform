@@ -377,7 +377,7 @@ impl Authorizer for EgretAuthorizer {
         A: Into<Self::GenericTableAction> + Send + Clone + Sync,
     >(
         &self,
-        _metadata: &RequestMetadata,
+        metadata: &RequestMetadata,
         _warehouse: &ResolvedWarehouse,
         _parent_namespaces: &HashMap<NamespaceId, NamespaceWithParent>,
         actions: &[(
@@ -385,8 +385,13 @@ impl Authorizer for EgretAuthorizer {
             ActionOnGenericTable<'_, '_, impl AuthZGenericTableInfo, A>,
         )],
     ) -> Result<Vec<bool>, IsAllowedActionError> {
-        // TODO(CE-4): generic-table actions gated as AllowAll (egret doesn't expose them yet)
-        Ok(vec![true; actions.len()])
+        // TODO(CE-4): egret doesn't expose generic tables yet; gate conservatively
+        // as write (the system principal still bypasses via gate(); token
+        // principals fail-closed — never the old unconditional AllowAll).
+        Ok(actions
+            .iter()
+            .map(|(ns, _)| self.gate(metadata, ns.namespace_ident().as_ref(), true))
+            .collect())
     }
 
     async fn delete_user(&self, _metadata: &RequestMetadata, _user_id: UserId) -> Result<()> {
@@ -625,5 +630,89 @@ mod tests {
             &target(&["marts", "x"]),
             false
         ));
+    }
+
+    // --- gate: the in-engine enforcer (defense in depth) -------------------
+    //
+    // These exercise `EgretAuthorizer::gate` directly — the method ALL data
+    // actions funnel through, independent of egret's front-auth middleware. If
+    // the authorizer ever stops enforcing (system bypass widens, claim path
+    // fails open, ns boundary drops), these fail. This is the CE-4 guarantee
+    // that the engine itself — not just the front layer — denies out-of-scope
+    // requests.
+
+    use lakekeeper::api::RequestMetadata;
+    use lakekeeper::limes::Authentication;
+    use lakekeeper::service::authn::Actor;
+    use uuid::Uuid;
+
+    /// Build a fixed, valid `UserId` for tests (distinct per `seed`).
+    fn user_id(seed: &str) -> UserId {
+        let subject = Uuid::new_v5(&Uuid::NAMESPACE_OID, seed.as_bytes());
+        UserId::try_from(format!("oidc~{subject}").as_str()).expect("valid user id")
+    }
+
+    /// `RequestMetadata` for `principal` carrying an optional `egret` claim.
+    fn metadata_with(principal: &UserId, claim: serde_json::Value) -> RequestMetadata {
+        let authentication = Authentication::builder()
+            .token_header(None)
+            .claims(claim)
+            .subject(principal.clone().into())
+            .name(Some("test".to_string()))
+            .email(None)
+            .principal_type(None)
+            .build();
+        let mut md = RequestMetadata::new_lakekeeper_internal(Uuid::now_v7());
+        md.set_authentication(Actor::Principal(principal.clone()), authentication);
+        md
+    }
+
+    /// An `EgretAuthorizer` whose system principal is `sys`.
+    fn authorizer(sys: UserId) -> EgretAuthorizer {
+        EgretAuthorizer {
+            server_id: ServerId::new(Uuid::nil()),
+            system_principal: sys,
+        }
+    }
+
+    #[test]
+    fn gate_allows_system_principal_unconditionally() {
+        let sys = user_id("egret-system");
+        let az = authorizer(sys.clone());
+        // System principal, NO egret claim: still allowed for read AND write,
+        // any namespace. This is the bootstrap/browse bypass.
+        let md = metadata_with(&sys, serde_json::json!({}));
+        assert!(az.gate(&md, &target(&["marketing"]), false));
+        assert!(az.gate(&md, &target(&["anything", "deep"]), true));
+    }
+
+    #[test]
+    fn gate_denies_token_principal_out_of_namespace_scope() {
+        let sys = user_id("egret-system");
+        let az = authorizer(sys);
+        // A token principal (NOT the system one) scoped to `marts`, read-only.
+        let token = user_id("egret-catalog-token");
+        let md = metadata_with(
+            &token,
+            serde_json::json!({ "egret": { "perms": ["catalog:read"], "ns": ["marts"] } }),
+        );
+        // Allowed: read inside the `marts` subtree.
+        assert!(az.gate(&md, &target(&["marts"]), false));
+        assert!(az.gate(&md, &target(&["marts", "sales"]), false));
+        // Denied: a different namespace (the namespace_scope boundary).
+        assert!(!az.gate(&md, &target(&["marketing"]), false));
+        // Denied: a write, even within scope (read-only perm).
+        assert!(!az.gate(&md, &target(&["marts"]), true));
+    }
+
+    #[test]
+    fn gate_fails_closed_without_egret_claim() {
+        let sys = user_id("egret-system");
+        let az = authorizer(sys);
+        // A non-system principal with NO egret claim is denied everything.
+        let stranger = user_id("stranger");
+        let md = metadata_with(&stranger, serde_json::json!({}));
+        assert!(!az.gate(&md, &target(&["marts"]), false));
+        assert!(!az.gate(&md, &target(&["marts"]), true));
     }
 }

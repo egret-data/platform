@@ -57,10 +57,10 @@ use lakekeeper::api::management::v1::warehouse::Service as WarehouseService;
 use lakekeeper::api::management::v1::ApiServer;
 use lakekeeper::api::{ApiContext, RequestMetadata};
 use lakekeeper::iceberg::{NamespaceIdent, TableIdent};
-use lakekeeper::service::authz::AllowAllAuthorizer;
 use lakekeeper::service::WarehouseId;
 use lakekeeper_storage_postgres::{PostgresBackend, SecretsState};
 
+use crate::authorizer::EgretAuthorizer;
 use crate::bootstrap::system_request_metadata;
 use crate::mount::{EngineServer, EngineState};
 
@@ -69,7 +69,7 @@ const PERM: &str = "catalog:read";
 
 /// `ApiServer` specialized to egret's concrete backends — the type whose
 /// management `Service` impl carries `get_warehouse`.
-type EngineApiServer = ApiServer<PostgresBackend, AllowAllAuthorizer, SecretsState>;
+type EngineApiServer = ApiServer<PostgresBackend, EgretAuthorizer, SecretsState>;
 
 /// State for the lakekeeper-reading browse API. Carries the embedded engine
 /// [`ApiContext`] (lakekeeper reads), the egret-side [`CatalogStore`]

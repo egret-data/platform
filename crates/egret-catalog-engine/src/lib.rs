@@ -4,7 +4,7 @@
 /// Minimal scope-based [`Authorizer`](lakekeeper::service::authz::Authorizer)
 /// for the embedded engine (CE-4): control-plane actions stay permissive; data
 /// actions (namespace/table/view) are gated by the per-token `egret` scope
-/// claim. Replaces lakekeeper's inert `AllowAllAuthorizer` for data actions.
+/// claim. Replaces lakekeeper's inert `AllowAll` authorizer for data actions.
 pub mod authorizer;
 /// Prod (non-`test-utils`) bootstrap of lakekeeper's default project using a
 /// stable admin principal derived from `catalog.system_user`. Replaces the

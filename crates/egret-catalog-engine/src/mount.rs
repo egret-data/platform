@@ -17,7 +17,7 @@
 //! * `S: lakekeeper::api::ThreadSafe` — the *state* type. The concrete state
 //!   lakekeeper uses (see `api/router.rs::new_full_router`) is
 //!   `lakekeeper::service::State<A, C, S>` where `A: Authorizer + Clone` (we use
-//!   [`AllowAllAuthorizer`]), `C: CatalogStore` (we use `PostgresBackend`), and
+//!   [`EgretAuthorizer`]), `C: CatalogStore` (we use `PostgresBackend`), and
 //!   `S: SecretStore` (we use postgres `SecretsState`). `State<A, C, S>` itself
 //!   `impl ThreadSafe` (it is `Clone + Send + Sync + 'static`).
 //! * `T` — the *service implementation* that satisfies the catalog endpoint
@@ -34,7 +34,7 @@
 //! `State { authz, catalog, secrets, contract_verifiers, events,
 //! registered_task_queues, license_status, build_info }`:
 //!
-//! * `authz` → `AllowAllAuthorizer { server_id }`
+//! * `authz` → `EgretAuthorizer { server_id, system_principal }`
 //! * `catalog` → `CatalogState::from_pools(read, write)` over our isolated
 //!   `lakekeeper`-schema pools.
 //! * `secrets` → postgres `SecretsState::from_pools(read, write)`.
@@ -56,26 +56,27 @@ use lakekeeper::api::iceberg::v1::new_v1_full_router;
 use lakekeeper::api::management::v1::server::{APACHE_LICENSE_STATUS, DEFAULT_BUILD_INFO};
 use lakekeeper::api::ApiContext;
 use lakekeeper::server::CatalogServer;
-use lakekeeper::service::authz::AllowAllAuthorizer;
 use lakekeeper::service::contract_verification::ContractVerifiers;
 use lakekeeper::service::events::EventDispatcher;
 use lakekeeper::service::tasks::TaskQueueRegistry;
 use lakekeeper::service::{CatalogStore, State};
 use lakekeeper_storage_postgres::{CatalogState, PostgresBackend, SecretsState};
 
+use crate::authorizer::EgretAuthorizer;
 use crate::pool::build_isolated_pool;
 
 /// The concrete state type lakekeeper's router is generic over.
 ///
-/// `A = AllowAllAuthorizer`, `C = PostgresBackend`, `S = SecretsState`.
+/// `A = EgretAuthorizer` (CE-4: enforces the per-token egret scope claim on data
+/// actions), `C = PostgresBackend`, `S = SecretsState`.
 /// `ApiContext<EngineState>` is what `new_v1_full_router` returns a
 /// `Router<_>` for, and the value Task 4 will `.with_state(...)`.
-pub type EngineState = State<AllowAllAuthorizer, PostgresBackend, SecretsState>;
+pub type EngineState = State<EgretAuthorizer, PostgresBackend, SecretsState>;
 
 /// The concrete service implementation that satisfies the iceberg endpoint
 /// traits the router requires (`config`/`namespace`/`tables`/`metrics`/
 /// `s3_signer`/`views` `Service`s). Upstream blanket-implements all of them.
-pub type EngineServer = CatalogServer<PostgresBackend, AllowAllAuthorizer, SecretsState>;
+pub type EngineServer = CatalogServer<PostgresBackend, EgretAuthorizer, SecretsState>;
 
 /// Build the lakekeeper [`ApiContext`] over isolated `lakekeeper`-schema pools.
 ///
@@ -89,10 +90,16 @@ pub type EngineServer = CatalogServer<PostgresBackend, AllowAllAuthorizer, Secre
 /// `from_pools` constructors expect (we point both at the same DSN — the spike
 /// has no read replica).
 ///
+/// `system_user` is the configured `catalog.system_user`; it derives the stable
+/// [`crate::bootstrap::system_user_id`] principal that [`EgretAuthorizer`]
+/// bypasses (so bootstrap, provisioning, and the in-process browse API are never
+/// blocked by per-token scope claims).
+///
 /// # Errors
-/// Returns an error if the pools cannot be built or the server info (server id)
-/// cannot be read back from the catalog.
-pub async fn build_state(dsn: &str) -> anyhow::Result<ApiContext<EngineState>> {
+/// Returns an error if the pools cannot be built, the server info (server id)
+/// cannot be read back from the catalog, or the system principal id cannot be
+/// derived.
+pub async fn build_state(dsn: &str, system_user: &str) -> anyhow::Result<ApiContext<EngineState>> {
     // Two isolated pools (read + write). Both pin search_path = lakekeeper,public.
     let read_pool = build_isolated_pool(dsn)
         .await
@@ -104,13 +111,18 @@ pub async fn build_state(dsn: &str) -> anyhow::Result<ApiContext<EngineState>> {
     let catalog: CatalogState = CatalogState::from_pools(read_pool.clone(), write_pool.clone());
     let secrets: SecretsState = SecretsState::from_pools(read_pool, write_pool);
 
-    // server_id is required to construct the AllowAllAuthorizer. Read it back
-    // from the (already-migrated) catalog, exactly like serve.rs does.
+    // server_id is required to construct the authorizer. Read it back from the
+    // (already-migrated) catalog, exactly like serve.rs does.
     let server_id = <PostgresBackend as CatalogStore>::get_server_info(catalog.clone())
         .await
         .context("reading lakekeeper server info (catalog must be migrated first)")?
         .server_id();
-    let authz = AllowAllAuthorizer { server_id };
+    // CE-4: the EgretAuthorizer gates data actions by the per-token egret scope
+    // claim, bypassing only the stable system principal (bootstrap/browse).
+    let authz = EgretAuthorizer {
+        server_id,
+        system_principal: crate::bootstrap::system_user_id(system_user)?,
+    };
 
     // Empty task-queue registry: the router only reads `api_config()` off this
     // handle; we spawn no workers (that is serve_inner's job, which we skip).

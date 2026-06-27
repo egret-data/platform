@@ -267,7 +267,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         egret_catalog_engine::run_lakekeeper_migrations(dsn)
             .await
             .context("running lakekeeper catalog migrations on boot")?;
-        let engine_state = egret_catalog_engine::build_state(dsn)
+        let engine_state = egret_catalog_engine::build_state(dsn, &config.catalog.system_user)
             .await
             .context("building lakekeeper engine state")?;
         egret_catalog_engine::ensure_bootstrapped(

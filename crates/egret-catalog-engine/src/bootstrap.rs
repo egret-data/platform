@@ -11,8 +11,9 @@
 //! `server::Service::bootstrap` (the static method on
 //! `ApiServer<C, A, S>`) does three things relevant here:
 //!
-//! 1. **Authz**: `authorizer.can_bootstrap(&request_metadata)`. Under
-//!    [`AllowAllAuthorizer`] this always passes.
+//! 1. **Authz**: `authorizer.can_bootstrap(&request_metadata)`. Under egret's
+//!    [`EgretAuthorizer`] (which keeps control-plane actions permissive) this
+//!    always passes.
 //! 2. **Seeds the default project**: when `DEFAULT_PROJECT_ID` is set (the OSS
 //!    default → nil UUID), `bootstrap` creates the "Default Project" if absent.
 //!    This is the outcome egret needs.
@@ -74,24 +75,29 @@ use lakekeeper::api::management::v1::ApiServer;
 use lakekeeper::api::ApiContext;
 use lakekeeper::api::RequestMetadata;
 use lakekeeper::limes::Authentication;
-use lakekeeper::service::authz::AllowAllAuthorizer;
 use lakekeeper::service::{Actor, UserId};
 use lakekeeper_storage_postgres::{PostgresBackend, SecretsState};
 use uuid::Uuid;
 
+use crate::authorizer::EgretAuthorizer;
 use crate::mount::EngineState;
 
 /// `ApiServer` specialized to egret's concrete backends — the type whose
 /// `Service` trait impls carry `bootstrap`.
-type EngineApiServer = ApiServer<PostgresBackend, AllowAllAuthorizer, SecretsState>;
+type EngineApiServer = ApiServer<PostgresBackend, EgretAuthorizer, SecretsState>;
 
 /// IdP id used for the synthetic egret-system principal. lakekeeper `UserId`s
 /// are `<idp_id>~<subject_in_idp>`; `oidc` is lakekeeper's canonical OIDC IdP id.
 const SYSTEM_USER_IDP: &str = "oidc";
 
 /// Fixed namespace UUID for deriving the system principal's subject from
-/// `catalog.system_user` (UUIDv5). Random-but-constant: changing it would change
-/// every derived id, so it must never change. (Generated once for egret.)
+/// `catalog.system_user` (UUIDv5).
+///
+/// Generated ONCE for egret (RFC-4122 random v4), verified distinct from
+/// `EGRET_TOKEN_USER_NAMESPACE` (in [`crate::front_auth`]). It MUST NEVER change
+/// after first deployment: changing it re-derives every system `UserId`, so
+/// `bootstrap` would no longer find the admin user it previously registered —
+/// breaking bootstrap idempotency.
 const EGRET_SYSTEM_USER_NAMESPACE: Uuid =
     Uuid::from_u128(0x6b3f_2a17_8c54_4d9e_b1a0_7e5c_2f48_9d61);
 
@@ -103,7 +109,7 @@ const EGRET_SYSTEM_USER_NAMESPACE: Uuid =
 /// # Errors
 /// Only fails if lakekeeper rejects the (always-valid) derived id — effectively
 /// infallible, but surfaced as a `Result` to avoid an `unwrap` on external API.
-fn system_user_id(system_user: &str) -> anyhow::Result<UserId> {
+pub(crate) fn system_user_id(system_user: &str) -> anyhow::Result<UserId> {
     let subject = Uuid::new_v5(&EGRET_SYSTEM_USER_NAMESPACE, system_user.as_bytes());
     let id = format!("{SYSTEM_USER_IDP}~{subject}");
     UserId::try_from(id.as_str())
