@@ -9,15 +9,15 @@ vi.mock("@/api/catalog", () => ({
   useWorkspaceStorage: () => storageMock(),
 }));
 
-import StorageSettings from "../StorageSettings";
+import StoragePage from "@/routes/explore/StoragePage";
 
 function renderAt() {
   const qc = new QueryClient();
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={["/explore/eng/settings/storage"]}>
+      <MemoryRouter initialEntries={["/explore/eng/storage"]}>
         <Routes>
-          <Route path="/explore/:workspace/settings/storage" element={<StorageSettings />} />
+          <Route path="/explore/:workspace/storage" element={<StoragePage />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -44,7 +44,7 @@ beforeEach(() => {
   });
 });
 
-describe("StorageSettings", () => {
+describe("StoragePage", () => {
   it("renders storage info fields and shows 'Configured' badge when has_secret is true", () => {
     renderAt();
 

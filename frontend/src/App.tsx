@@ -26,6 +26,7 @@ import Notebooks from "@/routes/explore/Notebooks";
 import CatalogArea from "@/routes/explore/catalog/CatalogArea";
 import CatalogBrowse from "@/routes/explore/catalog/CatalogBrowse";
 import CatalogAccess from "@/routes/explore/catalog/CatalogAccess";
+import StoragePage from "@/routes/explore/StoragePage";
 import Databases from "@/routes/admin/Databases";
 import Catalog from "@/routes/admin/Catalog";
 import Policies from "@/routes/admin/Policies";
@@ -62,6 +63,7 @@ function ExploreRoutes() {
             <Route index element={<CatalogBrowse />} />
             <Route path="access" element={<CatalogAccess />} />
           </Route>
+          <Route path="storage" element={<StoragePage />} />
           <Route path="*" element={<Navigate to="sql-lab" replace />} />
         </Routes>
       </AppShell>

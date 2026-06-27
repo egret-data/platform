@@ -8,13 +8,14 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 
-export default function StorageSettings() {
+export default function StoragePage() {
   const ws = useParams().workspace!;
   const storage = useWorkspaceStorage(ws);
 
   if (storage.isLoading) {
     return (
       <section>
+        <h1 className="text-xl font-semibold">Storage</h1>
         <SectionHeader />
         <div className="mt-4 space-y-2">
           <Skeleton className="h-5 w-1/3" />
@@ -32,6 +33,7 @@ export default function StorageSettings() {
     if (status === 404) {
       return (
         <section>
+          <h1 className="text-xl font-semibold">Storage</h1>
           <SectionHeader />
           <div className="mt-4 rounded-lg border border-border bg-muted/40 p-5 text-sm text-muted-foreground">
             This workspace uses the platform default storage.
@@ -43,6 +45,7 @@ export default function StorageSettings() {
     if (status === 403) {
       return (
         <section>
+          <h1 className="text-xl font-semibold">Storage</h1>
           <SectionHeader />
           <Alert className="mt-4">
             <HardDrive className="h-4 w-4" />
@@ -57,6 +60,7 @@ export default function StorageSettings() {
 
     return (
       <section>
+        <h1 className="text-xl font-semibold">Storage</h1>
         <SectionHeader />
         <Alert variant="destructive" className="mt-4">
           <AlertTitle>Failed to load storage configuration</AlertTitle>
@@ -70,6 +74,7 @@ export default function StorageSettings() {
 
   return (
     <section>
+      <h1 className="text-xl font-semibold">Storage</h1>
       <SectionHeader />
       <Card className="mt-4">
         <CardContent className="pt-6">
@@ -85,12 +90,9 @@ export default function StorageSettings() {
 
 function SectionHeader() {
   return (
-    <div>
-      <h2 className="text-base font-semibold">Storage</h2>
-      <p className="text-sm text-muted-foreground">
-        Read-only view of this workspace&apos;s catalog storage configuration.
-      </p>
-    </div>
+    <p className="mt-1 text-sm text-muted-foreground">
+      Read-only view of this workspace&apos;s catalog storage configuration.
+    </p>
   );
 }
 
