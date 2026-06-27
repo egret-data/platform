@@ -3,17 +3,25 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-const storageMock = vi.fn();
-const mutateMock = vi.fn();
-const updateStorageMock = vi.fn();
+// ── Mock factories ────────────────────────────────────────────────────────────
+const storageConnsMock = vi.fn();
+const createMutateAsync = vi.fn();
+const createMutation = vi.fn();
+const updateMutateAsync = vi.fn();
+const updateMutation = vi.fn();
+const deleteMutateAsync = vi.fn();
+const deleteMutation = vi.fn();
 
-vi.mock("@/api/catalog", () => ({
-  useWorkspaceStorage: () => storageMock(),
-  useUpdateStorage: () => updateStorageMock(),
+vi.mock("@/api/storage", () => ({
+  useStorageConns: () => storageConnsMock(),
+  useCreateStorageConn: () => createMutation(),
+  useUpdateStorageConn: () => updateMutation(),
+  useDeleteStorageConn: () => deleteMutation(),
 }));
 
 import StoragePage from "@/routes/explore/StoragePage";
 
+// ── Render helper ─────────────────────────────────────────────────────────────
 function renderAt() {
   const qc = new QueryClient();
   return render(
@@ -27,235 +35,134 @@ function renderAt() {
   );
 }
 
-const mockStorageInfo = {
+// ── Fixtures ──────────────────────────────────────────────────────────────────
+const mockConn1 = {
+  id: "conn-1",
+  name: "prod-lakehouse",
+  purpose: "catalog",
   provider: "s3",
-  endpoint: "https://s3.example.com",
+  endpoint: "https://minio.corp.local",
   region: "us-east-1",
-  bucket: "my-data-bucket",
+  bucket: "my-data-lake",
   key_prefix: "warehouse/eng",
   access_key: "AKIAIOSFODNN7EXAMPLE",
+  path_style: true,
+  created_at: "2025-01-01T00:00:00Z",
   has_secret: true,
 };
 
-beforeEach(() => {
-  storageMock.mockReset();
-  updateStorageMock.mockReset();
-  mutateMock.mockReset();
+const mockConn2 = {
+  id: "conn-2",
+  name: "backup-store",
+  purpose: null,
+  provider: "s3",
+  endpoint: null,
+  region: "eu-west-1",
+  bucket: "backup-bucket",
+  key_prefix: null,
+  access_key: "AKIAIOSFODNN7BACKUP",
+  path_style: false,
+  created_at: "2025-02-01T00:00:00Z",
+  has_secret: false,
+};
 
-  // Default: successful load of custom storage
-  storageMock.mockReturnValue({
-    data: mockStorageInfo,
+// ── Setup ─────────────────────────────────────────────────────────────────────
+beforeEach(() => {
+  storageConnsMock.mockReset();
+  createMutation.mockReset();
+  updateMutation.mockReset();
+  deleteMutation.mockReset();
+  createMutateAsync.mockReset();
+  updateMutateAsync.mockReset();
+  deleteMutateAsync.mockReset();
+
+  // Default: successful load of two connections
+  storageConnsMock.mockReturnValue({
+    data: [mockConn1, mockConn2],
     isLoading: false,
     isError: false,
     error: null,
   });
 
-  // Default: idle mutation
-  updateStorageMock.mockReturnValue({
-    mutateAsync: mutateMock,
+  createMutation.mockReturnValue({
+    mutateAsync: createMutateAsync,
     isPending: false,
     reset: vi.fn(),
   });
 
-  mutateMock.mockResolvedValue(mockStorageInfo);
+  updateMutation.mockReturnValue({
+    mutateAsync: updateMutateAsync,
+    isPending: false,
+    reset: vi.fn(),
+  });
+
+  deleteMutation.mockReturnValue({
+    mutate: deleteMutateAsync,
+    isPending: false,
+  });
+
+  createMutateAsync.mockResolvedValue(mockConn1);
+  updateMutateAsync.mockResolvedValue(mockConn1);
+  deleteMutateAsync.mockResolvedValue(undefined);
 });
 
 describe("StoragePage", () => {
-  // ── 200 (custom storage row) ──────────────────────────────────────────────
+  // ── List rendering ────────────────────────────────────────────────────────
 
-  it("renders editable form prefilled from server data", () => {
+  it("renders the connections list with name, bucket, provider, and secret badge", () => {
     renderAt();
 
-    // Editable fields should be prefilled
-    expect(screen.getByDisplayValue("https://s3.example.com")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("us-east-1")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("AKIAIOSFODNN7EXAMPLE")).toBeInTheDocument();
+    // conn1
+    expect(screen.getByText("prod-lakehouse")).toBeInTheDocument();
+    expect(screen.getByText("my-data-lake")).toBeInTheDocument();
+    // provider badge (may be multiple "s3" badges)
+    expect(screen.getAllByText("s3").length).toBeGreaterThanOrEqual(1);
+    // has_secret=true → "Configured"
+    expect(screen.getByText("Configured")).toBeInTheDocument();
 
-    // Secret never prefilled — password input should be empty
-    const secretInput = screen.getByPlaceholderText("Leave blank to keep current");
-    expect(secretInput).toBeInTheDocument();
-    expect((secretInput as HTMLInputElement).value).toBe("");
+    // conn2
+    expect(screen.getByText("backup-store")).toBeInTheDocument();
+    expect(screen.getByText("backup-bucket")).toBeInTheDocument();
+    // has_secret=false → "Not set"
+    expect(screen.getByText("Not set")).toBeInTheDocument();
 
-    // Secret value must never appear in the DOM
-    expect(screen.queryByText("SUPER_SECRET_VALUE")).not.toBeInTheDocument();
+    // Secret strings must never appear
+    expect(screen.queryByText(/SUPER_SECRET/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/secret_key/i)).not.toBeInTheDocument();
-
-    // Fixed fields: bucket and key_prefix rendered as disabled inputs
-    const bucketInput = screen.getByDisplayValue("my-data-bucket");
-    expect(bucketInput).toBeDisabled();
-    const keyPrefixInput = screen.getByDisplayValue("warehouse/eng");
-    expect(keyPrefixInput).toBeDisabled();
-
-    // The provider input should also be present and disabled
-    const providerInput = screen.getByDisplayValue("s3");
-    expect(providerInput).toBeDisabled();
-
-    // Save button exists
-    expect(screen.getByRole("button", { name: /save/i })).toBeInTheDocument();
-
-    // Re-point warning must be visible
-    expect(
-      screen.getByText(/re-points this workspace.s catalog warehouse/i),
-    ).toBeInTheDocument();
   });
 
-  it("calls useUpdateStorage mutate with correct body when saved (secret left blank → null)", async () => {
+  it("shows 'AWS default' for connections with no endpoint", () => {
     renderAt();
-
-    // Change the endpoint
-    const endpointInput = screen.getByDisplayValue("https://s3.example.com");
-    fireEvent.change(endpointInput, { target: { value: "https://minio.corp.local" } });
-
-    // Leave secret blank → secret_key should be null
-    fireEvent.click(screen.getByRole("button", { name: /save/i }));
-
-    await waitFor(() => {
-      expect(mutateMock).toHaveBeenCalledWith({
-        provider: "s3",
-        bucket: "my-data-bucket",
-        key_prefix: "warehouse/eng",
-        endpoint: "https://minio.corp.local",
-        region: "us-east-1",
-        access_key: "AKIAIOSFODNN7EXAMPLE",
-        secret_key: null,
-        path_style: false,
-      });
-    });
+    expect(screen.getByText("AWS default")).toBeInTheDocument();
   });
 
-  it("passes secret_key when the user types a new secret", async () => {
-    renderAt();
-
-    const secretInput = screen.getByPlaceholderText("Leave blank to keep current");
-    fireEvent.change(secretInput, { target: { value: "newS3cr3t!" } });
-
-    fireEvent.click(screen.getByRole("button", { name: /save/i }));
-
-    await waitFor(() => {
-      expect(mutateMock).toHaveBeenCalledWith(
-        expect.objectContaining({ secret_key: "newS3cr3t!" }),
-      );
-    });
-  });
-
-  it("shows success message and clears secret field after successful save", async () => {
-    renderAt();
-
-    const secretInput = screen.getByPlaceholderText(
-      "Leave blank to keep current",
-    ) as HTMLInputElement;
-    fireEvent.change(secretInput, { target: { value: "tempSecret" } });
-
-    fireEvent.click(screen.getByRole("button", { name: /save/i }));
-
-    await waitFor(() => {
-      expect(screen.getByText("Storage updated.")).toBeInTheDocument();
-    });
-
-    // Secret field must be cleared after save
-    expect(secretInput.value).toBe("");
-  });
-
-  it("shows error message from the API on mutation failure", async () => {
-    mutateMock.mockRejectedValue({
-      message: "Invalid credentials: access denied by S3",
-    });
-
-    renderAt();
-
-    fireEvent.click(screen.getByRole("button", { name: /save/i }));
-
-    await waitFor(() => {
-      expect(
-        screen.getByText("Invalid credentials: access denied by S3"),
-      ).toBeInTheDocument();
-    });
-  });
-
-  it("shows 'A secret is currently configured' hint when has_secret is true", () => {
-    renderAt();
-    expect(screen.getByText("A secret is currently configured.")).toBeInTheDocument();
-  });
-
-  it("omits the secret hint when has_secret is false", () => {
-    storageMock.mockReturnValue({
-      data: { ...mockStorageInfo, has_secret: false },
+  it("shows empty state when no connections exist", () => {
+    storageConnsMock.mockReturnValue({
+      data: [],
       isLoading: false,
       isError: false,
       error: null,
     });
     renderAt();
-    expect(
-      screen.queryByText("A secret is currently configured."),
-    ).not.toBeInTheDocument();
+    expect(screen.getByText("No storage connections yet.")).toBeInTheDocument();
   });
 
-  it("sends endpoint as null when the endpoint field is cleared", async () => {
-    renderAt();
-
-    const endpointInput = screen.getByDisplayValue("https://s3.example.com");
-    fireEvent.change(endpointInput, { target: { value: "" } });
-
-    fireEvent.click(screen.getByRole("button", { name: /save/i }));
-
-    await waitFor(() => {
-      expect(mutateMock).toHaveBeenCalledWith(
-        expect.objectContaining({ endpoint: null }),
-      );
-    });
-  });
-
-  it("falls back to default key-prefix display when key_prefix is null", () => {
-    storageMock.mockReturnValue({
-      data: { ...mockStorageInfo, key_prefix: null },
-      isLoading: false,
-      isError: false,
-      error: null,
-    });
-    renderAt();
-
-    // Disabled key-prefix input should show the computed default
-    const kpInput = screen.getByDisplayValue("workspaces/eng/warehouse");
-    expect(kpInput).toBeDisabled();
-  });
-
-  // ── 404 (platform default) ────────────────────────────────────────────────
-
-  it("shows platform-default message + no-support note on 404 (no edit form)", () => {
-    storageMock.mockReturnValue({
+  it("shows skeleton while loading", () => {
+    storageConnsMock.mockReturnValue({
       data: undefined,
-      isLoading: false,
-      isError: true,
-      error: { status: 404 },
+      isLoading: true,
+      isError: false,
+      error: null,
     });
     renderAt();
-
-    expect(
-      screen.getByText("This workspace uses the platform default storage."),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        /Customizing storage for a default-backed workspace isn.t supported here yet/i,
-      ),
-    ).toBeInTheDocument();
-
-    // No edit form / inputs should be present
-    expect(screen.queryByRole("button", { name: /save/i })).not.toBeInTheDocument();
-    expect(
-      screen.queryByPlaceholderText("Leave blank to keep current"),
-    ).not.toBeInTheDocument();
-
-    // Not a scary error — these alerts must not appear
-    expect(
-      screen.queryByText("Failed to load storage configuration"),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByText(/requires workspace-admin/i)).not.toBeInTheDocument();
+    // Skeleton renders — no table rows
+    expect(screen.queryByText("prod-lakehouse")).not.toBeInTheDocument();
   });
 
   // ── 403 ───────────────────────────────────────────────────────────────────
 
   it("shows workspace-admin notice on 403", () => {
-    storageMock.mockReturnValue({
+    storageConnsMock.mockReturnValue({
       data: undefined,
       isLoading: false,
       isError: true,
@@ -264,18 +171,15 @@ describe("StoragePage", () => {
     renderAt();
 
     expect(
-      screen.getByText("Requires workspace-admin to view storage configuration."),
+      screen.getByText("Requires workspace-admin to manage storage."),
     ).toBeInTheDocument();
-    expect(
-      screen.queryByText("This workspace uses the platform default storage."),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /save/i })).not.toBeInTheDocument();
+    expect(screen.queryByText("Add connection")).not.toBeInTheDocument();
   });
 
   // ── Generic error ─────────────────────────────────────────────────────────
 
   it("shows generic error alert on unexpected error status", () => {
-    storageMock.mockReturnValue({
+    storageConnsMock.mockReturnValue({
       data: undefined,
       isLoading: false,
       isError: true,
@@ -283,6 +187,187 @@ describe("StoragePage", () => {
     });
     renderAt();
 
-    expect(screen.getByText("Failed to load storage configuration")).toBeInTheDocument();
+    expect(screen.getByText("Failed to load storage connections")).toBeInTheDocument();
+  });
+
+  // ── Add connection dialog ─────────────────────────────────────────────────
+
+  it("opens the Add dialog when 'Add connection' is clicked", async () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Add storage connection")).toBeInTheDocument();
+    });
+  });
+
+  it("calls createMutation with correct body when Add form is submitted", async () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
+
+    await waitFor(() => screen.getByText("Add storage connection"));
+
+    fireEvent.change(screen.getByLabelText(/^name$/i), {
+      target: { value: "new-conn" },
+    });
+    fireEvent.change(screen.getByLabelText(/^region/i), {
+      target: { value: "ap-southeast-1" },
+    });
+    fireEvent.change(screen.getByLabelText(/^bucket/i), {
+      target: { value: "new-bucket" },
+    });
+    fireEvent.change(screen.getByLabelText(/^access key/i), {
+      target: { value: "AKIANEWKEY" },
+    });
+    fireEvent.change(screen.getByLabelText(/^secret key/i), {
+      target: { value: "newSecret123" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i, hidden: false }));
+
+    await waitFor(() => {
+      expect(createMutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "new-conn",
+          region: "ap-southeast-1",
+          bucket: "new-bucket",
+          access_key: "AKIANEWKEY",
+          secret_key: "newSecret123",
+          provider: "s3",
+        }),
+      );
+    });
+  });
+
+  it("shows the server error message in the dialog on create failure", async () => {
+    createMutateAsync.mockRejectedValue({
+      message: "Bucket unreachable: connection refused",
+    });
+
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
+
+    await waitFor(() => screen.getByText("Add storage connection"));
+
+    // Fill required fields
+    fireEvent.change(screen.getByLabelText(/^name$/i), {
+      target: { value: "bad-conn" },
+    });
+    fireEvent.change(screen.getByLabelText(/^region/i), {
+      target: { value: "us-east-1" },
+    });
+    fireEvent.change(screen.getByLabelText(/^bucket/i), {
+      target: { value: "bad-bucket" },
+    });
+    fireEvent.change(screen.getByLabelText(/^access key/i), {
+      target: { value: "AKIAKEY" },
+    });
+    fireEvent.change(screen.getByLabelText(/^secret key/i), {
+      target: { value: "secret" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i, hidden: false }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Bucket unreachable: connection refused"),
+      ).toBeInTheDocument();
+    });
+  });
+
+  // ── Edit dialog ───────────────────────────────────────────────────────────
+
+  it("opens the Edit dialog with the connection's name prefilled", async () => {
+    renderAt();
+
+    // Click the first Edit button (for conn1)
+    const editButtons = screen.getAllByRole("button", { name: /edit/i });
+    fireEvent.click(editButtons[0]);
+
+    await waitFor(() => {
+      expect(screen.getByText("Edit storage connection")).toBeInTheDocument();
+    });
+
+    // Name is prefilled
+    const nameInput = screen.getByDisplayValue("prod-lakehouse");
+    expect(nameInput).toBeInTheDocument();
+  });
+
+  it("calls updateMutation with correct body when Edit form is submitted", async () => {
+    renderAt();
+
+    const editButtons = screen.getAllByRole("button", { name: /edit/i });
+    fireEvent.click(editButtons[0]);
+
+    await waitFor(() => screen.getByText("Edit storage connection"));
+
+    // Change bucket
+    const bucketInput = screen.getByDisplayValue("my-data-lake");
+    fireEvent.change(bucketInput, { target: { value: "updated-bucket" } });
+
+    // Leave secret blank → should not send it (null)
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(updateMutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: "conn-1",
+          input: expect.objectContaining({
+            bucket: "updated-bucket",
+            secret_key: null,
+          }),
+        }),
+      );
+    });
+  });
+
+  it("sends secret_key when user types a new secret in the Edit dialog", async () => {
+    renderAt();
+
+    const editButtons = screen.getAllByRole("button", { name: /edit/i });
+    fireEvent.click(editButtons[0]);
+
+    await waitFor(() => screen.getByText("Edit storage connection"));
+
+    const secretInput = screen.getByLabelText(/^secret key/i);
+    fireEvent.change(secretInput, { target: { value: "newSecret!" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(updateMutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({
+          input: expect.objectContaining({ secret_key: "newSecret!" }),
+        }),
+      );
+    });
+  });
+
+  // ── Delete ────────────────────────────────────────────────────────────────
+
+  it("calls deleteMutation when delete is confirmed", async () => {
+    renderAt();
+
+    // Click the first "Delete" action button in the table (aria-label "Delete prod-lakehouse")
+    const deleteButton = screen.getByRole("button", {
+      name: /delete prod-lakehouse/i,
+    });
+    fireEvent.click(deleteButton);
+
+    // ConfirmDeleteDialog opens
+    await waitFor(() => {
+      expect(screen.getByText(/Delete «prod-lakehouse»/)).toBeInTheDocument();
+    });
+
+    // Type "delete" into the placeholder="delete" input
+    const confirmInput = screen.getByPlaceholderText("delete");
+    fireEvent.change(confirmInput, { target: { value: "delete" } });
+
+    // The destructive "Delete" button inside the dialog becomes enabled
+    const confirmBtn = screen.getByRole("button", { name: /^delete$/i });
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(deleteMutateAsync).toHaveBeenCalledWith("conn-1");
+    });
   });
 });
