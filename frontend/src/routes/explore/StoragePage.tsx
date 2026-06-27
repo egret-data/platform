@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import { FolderOpen, HardDrive, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 
 import {
@@ -43,14 +43,22 @@ export default function StoragePage() {
   const [addOpen, setAddOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<StorageConn | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<StorageConn | null>(null);
-  const [browseTarget, setBrowseTarget] = useState<StorageConn | null>(null);
 
-  // Master/detail: when a connection is selected for browsing, show its
-  // FileBrowser instead of the connections list.
-  if (browseTarget) {
-    return (
-      <FileBrowser ws={ws} conn={browseTarget} onClose={() => setBrowseTarget(null)} />
-    );
+  // Browse state lives in the URL so it's deep-linkable and the back button
+  // walks folder history: `?conn=<id>&path=<prefix>`.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const browseConnId = searchParams.get("conn");
+  const browsePath = searchParams.get("path") ?? "";
+
+  function openBrowse(conn: StorageConn) {
+    setSearchParams({ conn: conn.id });
+  }
+  function closeBrowse() {
+    setSearchParams({});
+  }
+  function changeBrowsePath(path: string) {
+    if (!browseConnId) return;
+    setSearchParams(path ? { conn: browseConnId, path } : { conn: browseConnId });
   }
 
   if (conns.isLoading) {
@@ -86,6 +94,24 @@ export default function StoragePage() {
   }
 
   const rows = conns.data ?? [];
+
+  // Master/detail: a `?conn=<id>` in the URL selects a connection to browse.
+  // Resolved against the loaded list so deep links / refresh work; an unknown
+  // id (e.g. a deleted connection) falls back to the registry list.
+  const browseTarget = browseConnId
+    ? (rows.find((c) => c.id === browseConnId) ?? null)
+    : null;
+  if (browseTarget) {
+    return (
+      <FileBrowser
+        ws={ws}
+        conn={browseTarget}
+        prefix={browsePath}
+        onPrefixChange={changeBrowsePath}
+        onClose={closeBrowse}
+      />
+    );
+  }
 
   return (
     <section>
@@ -134,7 +160,7 @@ export default function StoragePage() {
                         variant="ghost"
                         size="sm"
                         className="text-muted-foreground"
-                        onClick={() => setBrowseTarget(conn)}
+                        onClick={() => openBrowse(conn)}
                         aria-label={`Browse files for ${conn.name}`}
                       >
                         <FolderOpen className="h-4 w-4" />

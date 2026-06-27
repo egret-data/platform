@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -57,6 +58,27 @@ function ok(data: typeof listing) {
   return { data, isLoading: false, isError: false, error: null, refetch };
 }
 
+/**
+ * Render FileBrowser with a controlled prefix held in a tiny harness, so
+ * navigation (which now calls `onPrefixChange`) re-renders with the new prefix
+ * exactly as the StoragePage URL wiring does.
+ */
+function renderBrowser() {
+  function Harness() {
+    const [prefix, setPrefix] = useState("");
+    return (
+      <FileBrowser
+        ws="eng"
+        conn={conn}
+        prefix={prefix}
+        onPrefixChange={setPrefix}
+        onClose={() => {}}
+      />
+    );
+  }
+  return render(<Harness />);
+}
+
 /** Open the ⋮ menu for the row identified by its action button aria-label. */
 async function openMenu(name: RegExp) {
   const user = userEvent.setup();
@@ -90,7 +112,7 @@ beforeEach(() => {
 
 describe("FileBrowser", () => {
   it("renders the connection info header with name and meta", () => {
-    render(<FileBrowser ws="eng" conn={conn} />);
+    renderBrowser();
     expect(screen.getByText("prod-lakehouse")).toBeInTheDocument();
     // meta line: purpose · provider · bucket
     expect(
@@ -99,7 +121,7 @@ describe("FileBrowser", () => {
   });
 
   it("renders folders and files from the listing", () => {
-    render(<FileBrowser ws="eng" conn={conn} />);
+    renderBrowser();
     expect(screen.getByText("sub")).toBeInTheDocument();
     expect(screen.getByText("readme.txt")).toBeInTheDocument();
     // human-readable size
@@ -107,7 +129,7 @@ describe("FileBrowser", () => {
   });
 
   it("renders file-type icons: csv→Table2, parquet→Database, folder→amber Folder", () => {
-    const { container } = render(<FileBrowser ws="eng" conn={conn} />);
+    const { container } = renderBrowser();
     // folder icon is the amber lucide-folder
     const folderIcon = container.querySelector(".lucide-folder");
     expect(folderIcon).toBeInTheDocument();
@@ -121,13 +143,13 @@ describe("FileBrowser", () => {
 
   it("calls refetch when Refresh is clicked", async () => {
     const user = userEvent.setup();
-    render(<FileBrowser ws="eng" conn={conn} />);
+    renderBrowser();
     await user.click(screen.getByRole("button", { name: /refresh/i }));
     expect(refetch).toHaveBeenCalled();
   });
 
   it("navigates into a folder — re-queries with the new prefix", () => {
-    render(<FileBrowser ws="eng" conn={conn} />);
+    renderBrowser();
     // initial query at root
     expect(objectsMock).toHaveBeenCalledWith("");
 
@@ -141,8 +163,23 @@ describe("FileBrowser", () => {
     ).toBeInTheDocument();
   });
 
+  it("reports folder navigation through onPrefixChange (URL-controlled prefix)", () => {
+    const onPrefixChange = vi.fn();
+    render(
+      <FileBrowser
+        ws="eng"
+        conn={conn}
+        prefix=""
+        onPrefixChange={onPrefixChange}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByText("sub"));
+    expect(onPrefixChange).toHaveBeenCalledWith("sub/");
+  });
+
   it("file ⋮ menu exposes Download / Move / Rename / Delete", async () => {
-    render(<FileBrowser ws="eng" conn={conn} />);
+    renderBrowser();
     await openMenu(/actions for readme\.txt/i);
     expect(await screen.findByText("Download")).toBeInTheDocument();
     expect(screen.getByText("Move / Rename")).toBeInTheDocument();
@@ -150,7 +187,7 @@ describe("FileBrowser", () => {
   });
 
   it("folder ⋮ menu exposes Open / Move / Rename / Delete", async () => {
-    render(<FileBrowser ws="eng" conn={conn} />);
+    renderBrowser();
     await openMenu(/actions for sub/i);
     expect(await screen.findByText("Open")).toBeInTheDocument();
     expect(screen.getByText("Move / Rename")).toBeInTheDocument();
@@ -158,14 +195,14 @@ describe("FileBrowser", () => {
   });
 
   it("calls downloadObject from the file ⋮ menu", async () => {
-    render(<FileBrowser ws="eng" conn={conn} />);
+    renderBrowser();
     const user = await openMenu(/actions for readme\.txt/i);
     await user.click(await screen.findByText("Download"));
     expect(downloadObject).toHaveBeenCalledWith("eng", "conn-1", "readme.txt");
   });
 
   it("deletes an object after confirmation via the ⋮ menu", async () => {
-    render(<FileBrowser ws="eng" conn={conn} />);
+    renderBrowser();
     const user = await openMenu(/actions for readme\.txt/i);
     await user.click(await screen.findByText("Delete"));
 
@@ -184,7 +221,7 @@ describe("FileBrowser", () => {
   });
 
   it("uploads a chosen file with the current prefix in the key", async () => {
-    render(<FileBrowser ws="eng" conn={conn} />);
+    renderBrowser();
 
     const input = screen.getByLabelText(/upload file/i) as HTMLInputElement;
     const file = new File(["hello"], "notes.md", { type: "text/plain" });
@@ -212,7 +249,7 @@ describe("FileBrowser", () => {
       error: { status: 403 },
       refetch,
     });
-    render(<FileBrowser ws="eng" conn={conn} />);
+    renderBrowser();
     expect(
       screen.getByText("Requires workspace-admin to browse storage."),
     ).toBeInTheDocument();
@@ -220,12 +257,12 @@ describe("FileBrowser", () => {
 
   it("shows empty state when there are no folders or objects", () => {
     objectsMock.mockReturnValue(ok({ prefix: "", folders: [], objects: [] }));
-    render(<FileBrowser ws="eng" conn={conn} />);
+    renderBrowser();
     expect(screen.getByText("This folder is empty")).toBeInTheDocument();
   });
 
   it("creates a folder at the current prefix via the new-folder dialog", async () => {
-    render(<FileBrowser ws="eng" conn={conn} />);
+    renderBrowser();
 
     fireEvent.click(screen.getByRole("button", { name: /new folder/i }));
 
@@ -242,7 +279,7 @@ describe("FileBrowser", () => {
   });
 
   it("creates a folder under a nested prefix", async () => {
-    render(<FileBrowser ws="eng" conn={conn} />);
+    renderBrowser();
     // navigate into "sub/"
     fireEvent.click(screen.getByText("sub"));
 
@@ -260,7 +297,7 @@ describe("FileBrowser", () => {
   });
 
   it("rejects a folder name containing a slash", async () => {
-    render(<FileBrowser ws="eng" conn={conn} />);
+    renderBrowser();
     fireEvent.click(screen.getByRole("button", { name: /new folder/i }));
     const input = await screen.findByLabelText(/folder name/i);
     fireEvent.change(input, { target: { value: "a/b" } });
@@ -271,7 +308,7 @@ describe("FileBrowser", () => {
   });
 
   it("deletes a folder recursively after confirmation via the ⋮ menu", async () => {
-    render(<FileBrowser ws="eng" conn={conn} />);
+    renderBrowser();
     const user = await openMenu(/actions for sub/i);
     await user.click(await screen.findByText("Delete"));
 
@@ -293,7 +330,7 @@ describe("FileBrowser", () => {
   });
 
   it("renames a file — destination has no trailing slash", async () => {
-    render(<FileBrowser ws="eng" conn={conn} />);
+    renderBrowser();
     const user = await openMenu(/actions for readme\.txt/i);
     await user.click(await screen.findByText("Move / Rename"));
 
@@ -311,7 +348,7 @@ describe("FileBrowser", () => {
   });
 
   it("renames a folder — both from and to end with a slash", async () => {
-    render(<FileBrowser ws="eng" conn={conn} />);
+    renderBrowser();
     const user = await openMenu(/actions for sub/i);
     await user.click(await screen.findByText("Move / Rename"));
 

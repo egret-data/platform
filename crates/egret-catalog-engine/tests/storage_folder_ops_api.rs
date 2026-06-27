@@ -327,6 +327,15 @@ async fn admin_can_create_delete_and_move_folders() {
         "docs/ folder listed; got {folders:?}"
     );
 
+    // Listing INSIDE the freshly-created empty folder must return no objects:
+    // the folder's own marker (`docs/`) backs the folder in the parent listing
+    // but must not leak as a phantom 0-byte file when browsing into it.
+    let inside_empty = list_prefix_objects(&f, &base, &token, "docs/").await;
+    assert!(
+        inside_empty.is_empty(),
+        "empty folder shows no phantom marker object; got {inside_empty:?}"
+    );
+
     // --- RECURSIVE DELETE ------------------------------------------------
     upload(&f, &base, &token, "docs/x.txt", b"inside docs").await;
     let resp = f
