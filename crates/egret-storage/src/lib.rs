@@ -12,10 +12,35 @@ pub use s3::S3Store;
 
 use async_trait::async_trait;
 
+/// A folder-style listing result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Listing {
+    /// Key prefixes that share the delimiter (i.e. "virtual folders").
+    pub folders: Vec<String>,
+    /// Objects at this level.
+    pub objects: Vec<ObjectMeta>,
+}
+
+/// Metadata for a single object returned by `list`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjectMeta {
+    pub key: String,
+    pub size: i64,
+    /// ISO-8601 / RFC-3339 representation of the last-modified timestamp.
+    pub last_modified: Option<String>,
+}
+
 /// Minimal object-store surface the catalog needs (write/read/delete metadata files).
 #[async_trait]
 pub trait ObjectStore: Send + Sync {
     async fn put(&self, uri: &str, bytes: Vec<u8>) -> Result<(), StorageError>;
     async fn get(&self, uri: &str) -> Result<Vec<u8>, StorageError>;
     async fn delete(&self, uri: &str) -> Result<(), StorageError>;
+    /// List objects under `prefix` within the store's configured bucket.
+    ///
+    /// `prefix` is a plain key prefix (NOT an `s3://` URI).
+    /// When `delimiter` is `Some("/")` the result is folder-style: objects at this
+    /// level appear in `objects`, common prefixes (virtual folders) in `folders`.
+    /// When `delimiter` is `None` the listing is flat: all objects recursively.
+    async fn list(&self, prefix: &str, delimiter: Option<&str>) -> Result<Listing, StorageError>;
 }

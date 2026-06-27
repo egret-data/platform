@@ -1,9 +1,11 @@
-use crate::{ObjectStore, StorageConfig, StorageError};
+use crate::{Listing, ObjectMeta, ObjectStore, StorageConfig, StorageError};
 use async_trait::async_trait;
 
 #[derive(Clone)]
 pub struct S3Store {
     client: aws_sdk_s3::Client,
+    /// The bucket this store is scoped to (from `StorageConfig::bucket`).
+    bucket: String,
 }
 
 impl S3Store {
@@ -28,6 +30,7 @@ impl S3Store {
         }
         Ok(Self {
             client: aws_sdk_s3::Client::from_conf(b.build()),
+            bucket: cfg.bucket.clone(),
         })
     }
 
@@ -93,5 +96,53 @@ impl ObjectStore for S3Store {
             .await
             .map_err(|e| StorageError::S3(e.to_string()))?;
         Ok(())
+    }
+
+    async fn list(&self, prefix: &str, delimiter: Option<&str>) -> Result<Listing, StorageError> {
+        let mut folders: Vec<String> = Vec::new();
+        let mut objects: Vec<ObjectMeta> = Vec::new();
+        let mut continuation: Option<String> = None;
+
+        loop {
+            let mut req = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(prefix);
+
+            if let Some(d) = delimiter {
+                req = req.delimiter(d);
+            }
+            if let Some(ref token) = continuation {
+                req = req.continuation_token(token);
+            }
+
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| StorageError::S3(e.to_string()))?;
+
+            for cp in resp.common_prefixes() {
+                if let Some(p) = cp.prefix() {
+                    folders.push(p.to_string());
+                }
+            }
+
+            for obj in resp.contents() {
+                objects.push(ObjectMeta {
+                    key: obj.key().unwrap_or_default().to_string(),
+                    size: obj.size().unwrap_or(0),
+                    last_modified: obj.last_modified().map(|t| t.to_string()),
+                });
+            }
+
+            if resp.is_truncated().unwrap_or(false) {
+                continuation = resp.next_continuation_token().map(str::to_string);
+            } else {
+                break;
+            }
+        }
+
+        Ok(Listing { folders, objects })
     }
 }
