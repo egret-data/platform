@@ -1,5 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
-import { ApiError, apiJson } from "./client";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ApiError, apiFetch, apiJson } from "./client";
 
 export interface CatalogSummary {
   id: string;
@@ -36,7 +36,40 @@ export const catalogKeys = {
   namespaces: (ws: string) => ["catalog", ws, "namespaces"] as const,
   tables: (ws: string, ns: string) => ["catalog", ws, "tables", ns] as const,
   table: (ws: string, ns: string, table: string) => ["catalog", ws, "table", ns, table] as const,
+  tokens: (ws: string) => ["catalog", ws, "tokens"] as const,
+  storage: (ws: string) => ["catalog", ws, "storage"] as const,
 };
+
+// ── Workspace admin types ──────────────────────────────────────────────────
+
+export interface CatalogTokenDto {
+  id: string;
+  label: string;
+  permissions: string[];
+  namespace_scope: string[];
+  created_at: string;
+}
+
+export interface MintTokenRequest {
+  label: string;
+  permissions: string[];
+  namespace_scope: string[];
+}
+
+export interface MintTokenResponse {
+  token: CatalogTokenDto;
+  raw: string;
+}
+
+export interface WorkspaceStorageInfo {
+  provider: string;
+  endpoint: string | null;
+  region: string;
+  bucket: string;
+  key_prefix: string | null;
+  access_key: string;
+  has_secret: boolean;
+}
 
 /**
  * Catalog summary. A 404 means the workspace has no catalog provisioned yet —
@@ -81,5 +114,49 @@ export function useTableDetail(ws: string, ns: string | null, table: string | nu
         `/ws/${ws}/catalog/namespaces/${encodeURIComponent(ns!)}/tables/${encodeURIComponent(table!)}`,
       ),
     enabled: !!ns && !!table,
+  });
+}
+
+// ── Workspace admin hooks ──────────────────────────────────────────────────
+
+export function useCatalogTokens(ws: string) {
+  return useQuery<CatalogTokenDto[]>({
+    queryKey: catalogKeys.tokens(ws),
+    queryFn: () => apiJson<CatalogTokenDto[]>(`/ws/${ws}/catalog/tokens`),
+  });
+}
+
+export function useMintToken(ws: string) {
+  const queryClient = useQueryClient();
+  return useMutation<MintTokenResponse, ApiError, MintTokenRequest>({
+    mutationFn: (req) =>
+      apiJson<MintTokenResponse>(`/ws/${ws}/catalog/tokens`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: catalogKeys.tokens(ws) });
+    },
+  });
+}
+
+export function useRevokeToken(ws: string) {
+  const queryClient = useQueryClient();
+  return useMutation<void, ApiError, string>({
+    mutationFn: async (id) => {
+      await apiFetch(`/ws/${ws}/catalog/tokens/${id}`, { method: "DELETE" });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: catalogKeys.tokens(ws) });
+    },
+  });
+}
+
+export function useWorkspaceStorage(ws: string) {
+  return useQuery<WorkspaceStorageInfo>({
+    queryKey: catalogKeys.storage(ws),
+    queryFn: () => apiJson<WorkspaceStorageInfo>(`/ws/${ws}/storage`),
+    retry: false,
   });
 }

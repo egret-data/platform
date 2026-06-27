@@ -10,6 +10,7 @@ import {
   NotebookText,
   PanelLeftClose,
   PanelLeftOpen,
+  Settings,
   ShieldCheck,
   SquareTerminal,
   Table2,
@@ -30,6 +31,7 @@ const EXPLORE: NavItem[] = [
   { label: "Dashboards", icon: LayoutDashboard },
   { label: "Notebooks", icon: NotebookText },
   { label: "Catalog", icon: Boxes },
+  { label: "Settings", icon: Settings },
 ];
 
 const ADMIN: NavItem[] = [
