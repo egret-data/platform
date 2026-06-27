@@ -117,7 +117,7 @@ async fn create_ws(
     // mapping write failed. We log loudly and return 500 so the caller knows the
     // workspace is not yet ready.
     if let Some(provisioner) = &st.warehouse_provisioner {
-        if let Err(e) = provisioner.provision(ws.id, &ws.slug).await {
+        if let Err(e) = provisioner.provision(ws.id, &ws.slug, None).await {
             tracing::error!(
                 workspace_id = %ws.id.0,
                 slug = %ws.slug,

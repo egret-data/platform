@@ -22,6 +22,24 @@ use async_trait::async_trait;
 use egret_core::WorkspaceId;
 use std::sync::Arc;
 
+/// Per-workspace storage override supplied at workspace-creation time (CE-5).
+///
+/// When `Some`, the provisioner will (in a later task) configure the lakekeeper
+/// warehouse to use this storage backend instead of the system-wide default.
+/// All fields map 1-to-1 to the `workspace_storage` row written by the
+/// CE-5 Task 1 store.
+#[derive(Clone, Debug)]
+pub struct StorageSpec {
+    pub provider: String,
+    pub endpoint: Option<String>,
+    pub region: String,
+    pub bucket: String,
+    pub key_prefix: Option<String>,
+    pub access_key: String,
+    pub secret_key: String,
+    pub path_style: bool,
+}
+
 /// Provisions (idempotently) the lakekeeper warehouse backing a freshly-created
 /// workspace and records the workspace→warehouse mapping.
 ///
@@ -34,7 +52,15 @@ pub trait WarehouseProvisioner: Send + Sync {
     /// stored. Idempotent: safe to call again for an already-provisioned
     /// workspace. Returns an error string on failure (a workspace without a
     /// warehouse is unusable, so the handler surfaces this).
-    async fn provision(&self, workspace_id: WorkspaceId, slug: &str) -> Result<(), String>;
+    ///
+    /// `storage` is `None` until CE-5 Task 3 wires per-workspace storage; the
+    /// engine impl ignores it for now and falls back to the system-wide config.
+    async fn provision(
+        &self,
+        workspace_id: WorkspaceId,
+        slug: &str,
+        storage: Option<StorageSpec>,
+    ) -> Result<(), String>;
 }
 
 /// Shared, optional provisioner handle carried on `WorkspaceState`.

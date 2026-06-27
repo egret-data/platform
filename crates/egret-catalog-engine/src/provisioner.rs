@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use egret_catalog::service::CatalogStore;
 use egret_core::WorkspaceId;
 use egret_storage::StorageConfig;
-use egret_workspace::provision::WarehouseProvisioner;
+use egret_workspace::provision::{StorageSpec, WarehouseProvisioner};
 use lakekeeper::api::ApiContext;
 
 use crate::mount::EngineState;
@@ -53,7 +53,13 @@ impl EngineWarehouseProvisioner {
 
 #[async_trait]
 impl WarehouseProvisioner for EngineWarehouseProvisioner {
-    async fn provision(&self, workspace_id: WorkspaceId, slug: &str) -> Result<(), String> {
+    async fn provision(
+        &self,
+        workspace_id: WorkspaceId,
+        slug: &str,
+        storage: Option<StorageSpec>,
+    ) -> Result<(), String> {
+        let _ = storage; // TODO(CE-5 Task 3): persist + resolve per-workspace storage
         provision_workspace_warehouse(
             self.engine_state.clone(),
             &self.store,
