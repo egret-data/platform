@@ -3,6 +3,11 @@ mod common;
 use common::{seed_workspace, store};
 use egret_catalog::service::tokens::hash_token;
 
+/// Full read+write permissions, used by most existing tests.
+fn rw_perms() -> Vec<String> {
+    vec!["catalog:read".to_string(), "catalog:write".to_string()]
+}
+
 #[tokio::test]
 async fn create_token_and_workspace_for_token_returns_workspace_id() {
     let Some(s) = store().await else {
@@ -10,12 +15,15 @@ async fn create_token_and_workspace_for_token_returns_workspace_id() {
         return;
     };
     let ws = seed_workspace(&s).await;
-    let (token_row, raw) = s.create_token(ws, "test-engine").await.unwrap();
+    let (token_row, raw) = s
+        .create_token(ws, "test-engine", &rw_perms())
+        .await
+        .unwrap();
     assert_eq!(token_row.workspace_id, ws);
     assert_eq!(token_row.label, "test-engine");
 
-    let found_ws = s.workspace_for_token(&raw).await.unwrap();
-    assert_eq!(found_ws, ws);
+    let auth = s.authenticate_token(&raw).await.unwrap();
+    assert_eq!(auth.workspace_id, ws);
 }
 
 #[tokio::test]
@@ -26,7 +34,7 @@ async fn wrong_token_returns_not_found() {
     };
     let _ws = seed_workspace(&s).await;
     let err = s
-        .workspace_for_token("garbage-token-that-does-not-exist")
+        .authenticate_token("garbage-token-that-does-not-exist")
         .await
         .unwrap_err();
     assert!(
@@ -42,14 +50,14 @@ async fn revoked_token_returns_not_found() {
         return;
     };
     let ws = seed_workspace(&s).await;
-    let (token_row, raw) = s.create_token(ws, "revoke-me").await.unwrap();
+    let (token_row, raw) = s.create_token(ws, "revoke-me", &rw_perms()).await.unwrap();
 
     // Before revocation it works.
-    s.workspace_for_token(&raw).await.unwrap();
+    s.authenticate_token(&raw).await.unwrap();
 
     s.revoke_token(token_row.id).await.unwrap();
 
-    let err = s.workspace_for_token(&raw).await.unwrap_err();
+    let err = s.authenticate_token(&raw).await.unwrap_err();
     assert!(
         matches!(err, egret_catalog::CatalogError::NotFound(_)),
         "expected NotFound after revoke, got: {err:?}"
@@ -63,7 +71,7 @@ async fn stored_value_is_hash_not_raw_token() {
         return;
     };
     let ws = seed_workspace(&s).await;
-    let (token_row, raw) = s.create_token(ws, "hash-check").await.unwrap();
+    let (token_row, raw) = s.create_token(ws, "hash-check", &rw_perms()).await.unwrap();
 
     let stored_hash: String =
         sqlx::query_scalar("SELECT token_hash FROM catalog_tokens WHERE id = $1")
@@ -87,11 +95,62 @@ async fn list_tokens_for_workspace() {
         return;
     };
     let ws = seed_workspace(&s).await;
-    let (r1, _) = s.create_token(ws, "alpha").await.unwrap();
-    let (r2, _) = s.create_token(ws, "beta").await.unwrap();
+    let (r1, _) = s.create_token(ws, "alpha", &rw_perms()).await.unwrap();
+    let (r2, _) = s.create_token(ws, "beta", &rw_perms()).await.unwrap();
 
     let tokens = s.list_tokens(ws).await.unwrap();
     let ids: Vec<_> = tokens.iter().map(|t| t.id).collect();
     assert!(ids.contains(&r1.id));
     assert!(ids.contains(&r2.id));
+}
+
+// ---------------------------------------------------------------------------
+// New CE-3 tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn create_token_with_read_only_perms() {
+    let Some(s) = store().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let ws = seed_workspace(&s).await;
+    let ro_perms = vec!["catalog:read".to_string()];
+    let (token_row, raw) = s.create_token(ws, "ro", &ro_perms).await.unwrap();
+    assert_eq!(token_row.permissions, ro_perms);
+
+    let auth = s.authenticate_token(&raw).await.unwrap();
+    assert_eq!(auth.workspace_id, ws);
+    assert_eq!(auth.permissions, ro_perms);
+}
+
+#[tokio::test]
+async fn create_token_rejects_unknown_permission() {
+    let Some(s) = store().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let ws = seed_workspace(&s).await;
+    let err = s
+        .create_token(ws, "x", &["catalog:admin".to_string()])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, egret_catalog::CatalogError::BadRequest(_)),
+        "expected BadRequest for unknown permission, got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn create_token_rejects_empty_permissions() {
+    let Some(s) = store().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let ws = seed_workspace(&s).await;
+    let err = s.create_token(ws, "x", &[]).await.unwrap_err();
+    assert!(
+        matches!(err, egret_catalog::CatalogError::BadRequest(_)),
+        "expected BadRequest for empty permissions, got: {err:?}"
+    );
 }

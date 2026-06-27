@@ -9,6 +9,7 @@ use sqlx::PgPool;
 // migration 0024: catalog perms
 // migration 0025: workspace_warehouse mapping
 // migration 0026: drop legacy catalog metadata tables (lakekeeper is the engine)
+// migration 0027: per-token permissions on catalog_tokens
 /// All SQL migrations, embedded at compile time from the workspace `migrations/` dir.
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 

@@ -4,6 +4,8 @@ pub enum CatalogError {
     NotFound(String),
     #[error("already exists: {0}")]
     AlreadyExists(String),
+    #[error("bad request: {0}")]
+    BadRequest(String),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }

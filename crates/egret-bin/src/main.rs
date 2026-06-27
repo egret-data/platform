@@ -126,8 +126,10 @@ async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()
                 .context("looking up workspace")?
                 .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace}"))?;
 
+            // TODO(CE-3 Task 2): expose --perms CLI flag; defaults to full access for now.
+            let default_perms = vec!["catalog:read".to_string(), "catalog:write".to_string()];
             let (token_row, raw) = store
-                .create_token(ws.id.0, &label)
+                .create_token(ws.id.0, &label, &default_perms)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 

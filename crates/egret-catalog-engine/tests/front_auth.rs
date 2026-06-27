@@ -134,7 +134,11 @@ async fn front_auth_enforces_per_workspace_ownership() {
 
     // --- Mint an egret catalog token for workspace A ------------------------
     let (_token_row, token_a) = store
-        .create_token(ws_a, "t5-token-a")
+        .create_token(
+            ws_a,
+            "t5-token-a",
+            &["catalog:read".to_string(), "catalog:write".to_string()],
+        )
         .await
         .expect("mint catalog token for workspace A");
 
