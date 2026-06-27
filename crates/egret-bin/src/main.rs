@@ -149,7 +149,7 @@ async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()
                 .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace}"))?;
 
             let (token_row, raw) = store
-                .create_token(ws.id.0, &label, &permissions)
+                .create_token(ws.id.0, &label, &permissions, &[])
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
