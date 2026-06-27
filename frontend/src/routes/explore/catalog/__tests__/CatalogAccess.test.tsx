@@ -25,9 +25,9 @@ function renderAt() {
   const qc = new QueryClient();
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={["/explore/eng/settings/catalog"]}>
+      <MemoryRouter initialEntries={["/explore/eng/catalog/access"]}>
         <Routes>
-          <Route path="/explore/:workspace/settings/catalog" element={<CatalogAccess />} />
+          <Route path="/explore/:workspace/catalog/access" element={<CatalogAccess />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,

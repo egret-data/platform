@@ -23,10 +23,9 @@ import ChartExplore from "@/routes/explore/ChartExplore";
 import Dashboards from "@/routes/explore/Dashboards";
 import DashboardView from "@/routes/explore/DashboardView";
 import Notebooks from "@/routes/explore/Notebooks";
-import ExploreCatalog from "@/routes/explore/Catalog";
-import WorkspaceSettings from "@/routes/explore/settings/WorkspaceSettings";
-import CatalogAccess from "@/routes/explore/settings/CatalogAccess";
-import StorageSettings from "@/routes/explore/settings/StorageSettings";
+import CatalogArea from "@/routes/explore/catalog/CatalogArea";
+import CatalogBrowse from "@/routes/explore/catalog/CatalogBrowse";
+import CatalogAccess from "@/routes/explore/catalog/CatalogAccess";
 import Databases from "@/routes/admin/Databases";
 import Catalog from "@/routes/admin/Catalog";
 import Policies from "@/routes/admin/Policies";
@@ -59,11 +58,9 @@ function ExploreRoutes() {
           <Route path="dashboards" element={<Dashboards />} />
           <Route path="dashboards/:id" element={<DashboardView />} />
           <Route path="notebooks" element={<Notebooks />} />
-          <Route path="catalog" element={<ExploreCatalog />} />
-          <Route path="settings" element={<WorkspaceSettings />}>
-            <Route index element={<Navigate to="catalog" replace />} />
-            <Route path="catalog" element={<CatalogAccess />} />
-            <Route path="storage" element={<StorageSettings />} />
+          <Route path="catalog" element={<CatalogArea />}>
+            <Route index element={<CatalogBrowse />} />
+            <Route path="access" element={<CatalogAccess />} />
           </Route>
           <Route path="*" element={<Navigate to="sql-lab" replace />} />
         </Routes>

@@ -17,7 +17,7 @@ vi.mock("@/api/catalog", () => ({
   useTableDetail: (_ws: string, ns: string | null, table: string | null) => tableDetailMock(ns, table),
 }));
 
-import Catalog from "../Catalog";
+import CatalogBrowse from "../CatalogBrowse";
 
 function renderAt() {
   const qc = new QueryClient();
@@ -25,7 +25,7 @@ function renderAt() {
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={["/explore/eng/catalog"]}>
         <Routes>
-          <Route path="/explore/:workspace/catalog" element={<Catalog />} />
+          <Route path="/explore/:workspace/catalog" element={<CatalogBrowse />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,

@@ -10,7 +10,7 @@ import {
 } from "@/api/catalog";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 
-export default function Catalog() {
+export default function CatalogBrowse() {
   const ws = useParams().workspace!;
   const summary = useCatalogSummary(ws);
 
@@ -39,7 +39,6 @@ export default function Catalog() {
   if (summary.isError) {
     return (
       <div className="p-4">
-        <h1 className="mb-4 text-lg font-semibold">Catalog</h1>
         <p className="text-destructive">Failed to load catalog.</p>
       </div>
     );
@@ -48,7 +47,6 @@ export default function Catalog() {
   if (!summary.data) {
     return (
       <div className="p-4">
-        <h1 className="mb-4 text-lg font-semibold">Catalog</h1>
         <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
           <Boxes className="mx-auto mb-3 h-8 w-8 opacity-60" />
           <p>No catalog provisioned for this workspace yet.</p>
@@ -60,7 +58,7 @@ export default function Catalog() {
   return (
     <div className="p-4">
       <div className="mb-4 flex items-baseline justify-between">
-        <h1 className="text-lg font-semibold">{summary.data.name}</h1>
+        <h2 className="text-base font-semibold">{summary.data.name}</h2>
         <span className="font-mono text-xs text-muted-foreground">{summary.data.warehouse_location}</span>
       </div>
 

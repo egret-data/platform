@@ -7,17 +7,17 @@ const subNavLinkClass = ({ isActive }: { isActive: boolean }) =>
       : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
   }`;
 
-export default function WorkspaceSettings() {
+export default function CatalogArea() {
   return (
     <div className="flex flex-col gap-6 p-6">
-      <h1 className="text-xl font-semibold">Workspace settings</h1>
+      <h1 className="text-xl font-semibold">Catalog</h1>
 
       <nav className="flex gap-1 border-b border-border pb-0">
-        <NavLink to="catalog" className={subNavLinkClass}>
-          Catalog access
+        <NavLink to="." end className={subNavLinkClass}>
+          Browse
         </NavLink>
-        <NavLink to="storage" className={subNavLinkClass}>
-          Storage
+        <NavLink to="access" className={subNavLinkClass}>
+          Access
         </NavLink>
       </nav>
 
