@@ -163,3 +163,29 @@ export function useWorkspaceStorage(ws: string) {
     retry: false,
   });
 }
+
+export interface UpdateStorageRequest {
+  provider: string;
+  endpoint: string | null;
+  region: string;
+  bucket: string;
+  key_prefix: string | null;
+  access_key: string;
+  secret_key: string | null;
+  path_style: boolean;
+}
+
+export function useUpdateStorage(ws: string) {
+  const queryClient = useQueryClient();
+  return useMutation<WorkspaceStorageInfo, ApiError, UpdateStorageRequest>({
+    mutationFn: (req) =>
+      apiJson<WorkspaceStorageInfo>(`/ws/${ws}/catalog/storage`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: catalogKeys.storage(ws) });
+    },
+  });
+}
