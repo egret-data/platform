@@ -2456,31 +2456,14 @@ dependencies = [
 name = "egret-catalog"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "async-trait",
- "axum",
  "chrono",
- "egret-auth",
- "egret-config",
- "egret-core",
- "egret-iceberg-ext",
  "egret-metastore",
- "egret-storage",
- "egret-workspace",
  "hex",
- "http 1.4.2",
- "http-body-util",
- "iceberg",
  "rand 0.8.6",
- "serde",
- "serde_json",
  "sha2 0.10.9",
  "sqlx 0.8.6",
  "thiserror 2.0.18",
  "tokio",
- "tower",
- "tracing",
- "url",
  "uuid",
 ]
 

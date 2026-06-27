@@ -77,13 +77,17 @@ async fn create_does_not_provision_legacy_catalogs_row() {
     let ws = repo.create(&slug, "Sales", owner).await.unwrap();
     assert_eq!(ws.slug, slug);
 
-    // No legacy `catalogs` row was written for this workspace.
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM catalogs WHERE workspace_id = $1")
-        .bind(ws.id.0)
+    // The legacy `catalogs` metadata table was dropped in migration 0026 once
+    // lakekeeper became the engine, so `create` provably cannot write such a row:
+    // the relation no longer exists.
+    let legacy_table: Option<String> = sqlx::query_scalar("SELECT to_regclass('catalogs')::text")
         .fetch_one(&db.pool)
         .await
         .unwrap();
-    assert_eq!(count, 0, "create must not write a legacy catalogs row");
+    assert!(
+        legacy_table.is_none(),
+        "legacy `catalogs` table must no longer exist (dropped in 0026)"
+    );
 }
 
 #[tokio::test]

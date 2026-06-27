@@ -324,37 +324,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         None
     };
 
-    let catalog = if config.catalog.enabled {
-        let storage_cfg = egret_storage::StorageConfig {
-            endpoint: config.storage.endpoint.clone(),
-            region: config.storage.region.clone(),
-            bucket: config.storage.bucket.clone(),
-            access_key: config.storage.access_key.clone(),
-            secret_key: config.storage.secret_key.clone(),
-            path_style: config.storage.path_style,
-        };
-        let store = egret_catalog::service::CatalogStore::new(db.clone());
-        let storage: std::sync::Arc<dyn egret_storage::ObjectStore> =
-            std::sync::Arc::new(egret_storage::S3Store::new(&storage_cfg).await?);
-        let service = egret_catalog::service::CatalogService { store, storage };
-        // Advertise an externally-reachable origin in `s3.signer.uri`, not the bind
-        // host (which defaults to 0.0.0.0 and is unreachable for engines).
-        let public = config
-            .catalog
-            .public_url
-            .clone()
-            .unwrap_or_else(|| format!("http://localhost:{}", config.server.port));
-        let base_url = format!("{}/catalog", public.trim_end_matches('/'));
-        Some(egret_catalog::CatalogState {
-            service,
-            auth_token: config.catalog.auth_token.clone().into(),
-            storage_cfg: std::sync::Arc::new(storage_cfg),
-            base_url: base_url.into(),
-        })
-    } else {
-        None
-    };
-
     // CE-2 T6: the browse API (`catalog_browse`) is built above alongside the
     // embedded lakekeeper engine — it reads lakekeeper, so it requires the engine
     // `ApiContext` and is therefore gated on `config.catalog.enabled` (when the
@@ -441,7 +410,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         auth: Some(auth),
         workspace: Some(workspace),
         oidc,
-        catalog,
         catalog_engine,
         catalog_browse,
         ranger,
