@@ -580,7 +580,7 @@ implementation belongs to a per-phase spec.
 - **Identity layer (`egret-catalog`):** per-workspace `catalog_tokens` (hashed; `permissions[]`, `namespace_scope[]`), the warehouse mapping, and the Catalog browse API/UI.
 - **Security (`front_auth` + ADR-16):** the lakekeeper router is mounted at `/catalog/v1` behind an egret middleware enforcing (1) per-workspace token ownership (`{prefix}` must equal the workspace's warehouse → 403), (2) per-token read/write permission, (3) per-token `namespace_scope`. It injects a lakekeeper principal carrying the token's scope as an `egret` claim; the embedded **`EgretAuthorizer`** authorizes data actions (namespace/table/view) against that claim as defense-in-depth, while a system principal (bootstrap + in-process browse) bypasses.
 - **egret-server does NOT link lakekeeper** — `egret-bin` builds the engine + browse routers and passes them in as prebuilt `axum::Router`s, keeping the lakekeeper dependency graph out of `egret-server`.
-- **Status:** CE-1 (spike) → CE-2 (embedded live per-workspace + cutover; v0.1 catalog deleted) → CE-3 (per-token read/write scope) → CE-4 (`EgretAuthorizer` + `namespace_scope`) — all merged. Next: CE-5 (storage profiles/secrets bridge, GCS/Azure), CE-6 (GC/task-queue workers).
+- **Status:** CE-1 (spike) → CE-2 (embedded live per-workspace + cutover; v0.1 catalog deleted) → CE-3 (per-token read/write scope) → CE-4 (`EgretAuthorizer` + `namespace_scope`) → CE-5 (per-workspace storage config) — all merged. Next: CE-6 (GC/task-queue workers); CE-5 follow-ons (GCS/Azure, full secrets bridge).
 
 ### 10.4 Apache Ranger API (`egret-ranger`) — see §8.3.
 
@@ -813,14 +813,14 @@ egret/
 > **Reframe (v0.2):** the build targets **each workspace as a full self-contained data platform** across **4 pillars** (ADR-17). Each item below is its own brainstorm → spec → plan → subagent-build cycle.
 
 ### 16.1 Delivered
-- **Foundation:** Cargo workspace + crates; Postgres metastore + sqlx migrations (0001–0028); typed config; dev docker-compose (Postgres + MinIO + Trino/StarRocks).
+- **Foundation:** Cargo workspace + crates; Postgres metastore + sqlx migrations (0001–0029); typed config; dev docker-compose (Postgres + MinIO + Trino/StarRocks).
 - **Admin / control plane:** local auth + session, workspaces + members + RBAC; database/engine registration (Trino REST + StarRocks MySQL); Ranger REST-compatible policy surface.
 - **Analytics (BI):** Dataset / Chart / Dashboard with deep **Metabase parity** (table & pivot, per-series chart options, axis range, series rename, table view-as + mini-bar, PNG export, Vietnam-map geo).
-- **Catalog (lakehouse core):** per-workspace Iceberg catalog via **embedded lakekeeper** — CE-1 spike → CE-2 tenancy + cutover → CE-3 per-token read/write scope → CE-4 minimal `EgretAuthorizer` + `namespace_scope` (all merged; see §10.3).
+- **Catalog (lakehouse core):** per-workspace Iceberg catalog via **embedded lakekeeper** — CE-1 spike → CE-2 tenancy + cutover → CE-3 per-token read/write scope → CE-4 minimal `EgretAuthorizer` + `namespace_scope` → CE-5 per-workspace storage config (each workspace sets its own S3 at create-time; secret via `egret-secrets`; global default when unset) (all merged; see §10.3).
 
 ### 16.2 Next — Catalog pillar (CE chain)
-- **CE-5** — storage profiles / secrets bridge: per-workspace storage config, GCS/Azure beyond S3/MinIO, wire lakekeeper's secret store to `egret-secrets`.
 - **CE-6** — GC / task-queue workers: run lakekeeper's snapshot-expiry + orphan-file cleanup (the embedded registry currently serves REST but spawns no workers).
+- **CE-5 follow-ons** — GCS / Azure storage (the `workspace_storage.provider` column is reserved; lakekeeper supports them natively); a full lakekeeper `SecretStore` bridge to `egret-secrets`; per-workspace `key_prefix` override; orphaned-secret cleanup on re-provision.
 - Later: external catalog connections (register REST/Glue/Nessie per workspace), lakekeeper-parity polish (soft-delete, statistics, generic tables), lineage.
 
 ### 16.3 Next pillars
