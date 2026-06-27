@@ -12,17 +12,25 @@
 
 ## 2. File browser redesign (`FileBrowser.tsx` + a `fileIcon` helper)
 
-### Layout (MinIO-console-like)
-- **Header row:** `‹ Back` + the connection name; a **breadcrumb** with a bucket icon then the path segments (root = the bucket; each segment clickable); on the right a **toolbar**: `⟳ Refresh` (refetch), `+ New folder`, `⬆ Upload`.
-- **Table** (shadcn-less plain `<table>` styled, matching the app): columns **[type icon] · Name · Last modified · Size · [⋮]**.
-  - **Folders first** (sorted), folder icon, click row (name) → navigate in; **Files** after, with a **type icon** (see helper); size human-readable ("1.2 MB"), last-modified formatted.
-  - Row **hover** highlight; the whole name cell for a folder is the navigate target; an **`⋮` dropdown** (shadcn `DropdownMenu`) at the row end with actions:
+> **Reference — the REAL MinIO Console object browser, studied live at `http://localhost:9001` (2026-06-27).** The redesign mirrors its three stacked regions inside one bordered card: (a) a **connection info header**, (b) a **breadcrumb bar**, (c) a **columned object table**. Replicate the *structure & feel*, adapted to our shadcn/Tailwind tokens (NOT MinIO's navy chrome).
+
+### Layout (matches the live MinIO console)
+- **One bordered card** (`rounded-lg border bg-card`, subtle shadow) wrapping the whole browser, on the page's normal background.
+- **(a) Connection info header** (top of the card, padded, bottom border):
+  - Left: a **bucket icon** in a dark rounded-square tile (`Database`/`HardDrive` lucide in a `bg-foreground/90 text-background` rounded tile) + the **connection name** as an `<h2>` (bold) + a muted meta line beneath it: `purpose · provider(S3/MinIO) · bucket` (e.g. "Warehouse storage · S3 / MinIO · warehouse"). (MinIO shows "Created on / Access / size-objects"; we show what we have.)
+  - Right: action buttons in a row — **`⟳ Refresh`** (outline, refetch), **`+ New folder`** (outline), **`⬆ Upload`** (primary, solid). (MinIO order: Rewind/Refresh/Upload — we drop Rewind, add New folder.)
+  - Far left of the whole card header (or as a small back affordance): a `‹ Back` to the connections list (keep the existing back-to-registry behaviour).
+- **(b) Breadcrumb bar** (its own row, `bg-muted/40` rounded, padded, between header and table): a **back-chevron** button (up one level — disabled at root) + the **breadcrumb** (`bucket / seg / seg`, each segment clickable to jump) on the left. (MinIO's "Create new path" lives here at the right — we already put New folder in the header, so the bar's right side can stay empty or mirror New folder; keep New folder in the header to avoid duplication.)
+- **(c) Object table** (plain `<table>` styled with our tokens): columns **[type icon] · Name · Last modified · Size · [⋮]**.
+  - Column header row (muted, small, `Name` left; `Last Modified`; `Size` right-aligned). Folders need no size → show **`—`** (em dash) and a blank Last-modified, exactly like MinIO.
+  - **Folders first** (sorted A→Z), **yellow folder icon** (`Folder` lucide, `text-amber-500` to echo MinIO's yellow), name is the click target → navigate in. **Files after**, each with its **type icon** (see helper); size human-readable ("1.8 KiB", "3.6 MiB" — MinIO uses KiB/MiB; match that), last-modified formatted (e.g. "Jun 18 2026 07:59").
+  - Row **hover** highlight (`hover:bg-muted/50`); the folder name cell is the navigate target. An **`⋮` dropdown** (shadcn `DropdownMenu`) in the last column:
     - File: **Download**, **Move / Rename**, **Delete**.
     - Folder: **Open**, **Move / Rename**, **Delete** (recursive).
-  - (No inline action buttons — they move into the `⋮` menu for a clean MinIO look.)
+  - (MinIO itself uses row-click→detail-drawer + checkbox→bulk-bar; those are out of scope — the `⋮` menu is our cleaner stand-in. No always-visible inline buttons.)
 - **Empty state:** a centered muted folder icon + "This folder is empty" + a short hint ("Upload files or create a folder").
 - **Loading:** a table-row skeleton. **403** → admin notice (unchanged). **Error** → alert.
-- Keep the New-folder dialog + the Move/Rename dialog + the ConfirmDeleteDialog from the current implementation (just trigger them from the `⋮` menu / toolbar).
+- Keep the New-folder dialog + the Move/Rename dialog + the ConfirmDeleteDialog from the current implementation (just trigger them from the `⋮` menu / header).
 
 ### `fileIcon(name): LucideIcon` helper (file-type icons — folds in the requested feature)
 Map by extension (lowercase, after the last `.`):
