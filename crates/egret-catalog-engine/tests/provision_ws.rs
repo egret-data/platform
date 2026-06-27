@@ -62,7 +62,7 @@ async fn provision_workspace_warehouse_maps_and_is_idempotent() {
     run_lakekeeper_migrations(&dsn)
         .await
         .expect("lakekeeper migrations apply");
-    let engine_state = egret_catalog_engine::build_state(&dsn)
+    let engine_state = egret_catalog_engine::build_state(&dsn, SYSTEM_USER)
         .await
         .expect("build engine state");
     ensure_bootstrapped(engine_state.clone(), SYSTEM_USER)

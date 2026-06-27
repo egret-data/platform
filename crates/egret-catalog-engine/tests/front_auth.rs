@@ -117,7 +117,9 @@ async fn front_auth_enforces_per_workspace_ownership() {
     run_lakekeeper_migrations(&dsn)
         .await
         .expect("lakekeeper migrations apply");
-    let engine_state = build_state(&dsn).await.expect("build engine state");
+    let engine_state = build_state(&dsn, SYSTEM_USER)
+        .await
+        .expect("build engine state");
     ensure_bootstrapped(engine_state.clone(), SYSTEM_USER)
         .await
         .expect("bootstrap default project");
@@ -138,6 +140,7 @@ async fn front_auth_enforces_per_workspace_ownership() {
             ws_a,
             "t5-token-a",
             &["catalog:read".to_string(), "catalog:write".to_string()],
+            &[],
         )
         .await
         .expect("mint catalog token for workspace A");
@@ -313,7 +316,9 @@ async fn front_auth_enforces_per_token_permissions() {
     run_lakekeeper_migrations(&dsn)
         .await
         .expect("lakekeeper migrations apply");
-    let engine_state = build_state(&dsn).await.expect("build engine state");
+    let engine_state = build_state(&dsn, SYSTEM_USER)
+        .await
+        .expect("build engine state");
     ensure_bootstrapped(engine_state.clone(), SYSTEM_USER)
         .await
         .expect("bootstrap default project");
@@ -329,7 +334,7 @@ async fn front_auth_enforces_per_token_permissions() {
 
     // --- Mint read-only and read-write tokens for workspace A ---------------
     let (_row, token_ro) = store
-        .create_token(ws_a, "t6-ro", &["catalog:read".to_string()])
+        .create_token(ws_a, "t6-ro", &["catalog:read".to_string()], &[])
         .await
         .expect("mint read-only token");
 
@@ -338,6 +343,7 @@ async fn front_auth_enforces_per_token_permissions() {
             ws_a,
             "t6-rw",
             &["catalog:read".to_string(), "catalog:write".to_string()],
+            &[],
         )
         .await
         .expect("mint read-write token");
@@ -515,5 +521,308 @@ async fn front_auth_enforces_per_token_permissions() {
         cfg["defaults"]["prefix"].as_str(),
         Some(prefix_a.as_str()),
         "/config with read-only token returns the warehouse prefix; body={cfg}"
+    );
+}
+
+// ===========================================================================
+// CE-4: EgretAuthorizer enforces the per-token egret scope (perms +
+// namespace_scope) INSIDE the engine. The front layer (above) is workspace-
+// ownership + coarse read/write; these tests prove the authorizer additionally
+// enforces the per-namespace `namespace_scope` boundary (out-of-scope access is
+// denied — lakekeeper surfaces it as 404, hiding existence; see the scoped test
+// for why), and — critically — that a FULL-scope token still round-trips
+// normally (the regression guard that swapping AllowAll → EgretAuthorizer did
+// not break the happy path).
+// ===========================================================================
+
+/// JSON body to create a namespace `name`.
+fn create_ns_body(name: &str) -> serde_json::Value {
+    serde_json::json!({ "namespace": [name], "properties": {} })
+}
+
+/// JSON body to create a minimal single-column table `name`.
+fn create_table_body(name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "schema": {
+            "type": "struct",
+            "schema-id": 0,
+            "fields": [ { "id": 1, "name": "id", "required": true, "type": "long" } ]
+        }
+    })
+}
+
+/// Fire a POST `{path}` with a JSON `body` under `Bearer token`; return status.
+async fn post(app: &axum::Router, token: &str, path: &str, body: &serde_json::Value) -> StatusCode {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+/// Fire a GET `{path}` under `Bearer token`; return status.
+async fn get(app: &axum::Router, token: &str, path: &str) -> StatusCode {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(path)
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+/// REGRESSION GUARD: a FULL-scope (no `namespace_scope`) read-write token must
+/// behave exactly as before the EgretAuthorizer swap — create/read/commit
+/// across ANY namespace, no per-namespace restriction. If the authorizer ever
+/// over-denies the normal flow, this fails.
+#[tokio::test]
+async fn front_auth_full_scope_token_is_unrestricted() {
+    let Ok(dsn) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL not set — skipping front_auth full-scope test");
+        return;
+    };
+
+    let db = Db::connect(&dsn, 5).await.expect("connect egret db");
+    db.migrate().await.expect("egret migrations apply");
+    run_lakekeeper_migrations(&dsn)
+        .await
+        .expect("lakekeeper migrations apply");
+    let engine_state = build_state(&dsn, SYSTEM_USER)
+        .await
+        .expect("build engine state");
+    ensure_bootstrapped(engine_state.clone(), SYSTEM_USER)
+        .await
+        .expect("bootstrap default project");
+
+    let store = CatalogStore::new(db.clone());
+    let storage_cfg = dev_storage_config();
+    let (ws_a, _slug_a, wh_a) =
+        seed_workspace_with_warehouse(&db, &store, &engine_state, &storage_cfg, "ce4full").await;
+    let prefix = wh_a.to_string();
+
+    // Full-scope rw token: read + write, EMPTY namespace_scope (= all namespaces).
+    let (_row, token) = store
+        .create_token(
+            ws_a,
+            "ce4-full",
+            &["catalog:read".to_string(), "catalog:write".to_string()],
+            &[],
+        )
+        .await
+        .expect("mint full-scope rw token");
+
+    let app = mount_catalog_engine(engine_state.clone(), store.clone());
+
+    // marts: create ns, create + load table.
+    assert_eq!(
+        post(
+            &app,
+            &token,
+            &format!("/{prefix}/namespaces"),
+            &create_ns_body("marts")
+        )
+        .await,
+        StatusCode::OK,
+        "full-scope token creates namespace `marts`"
+    );
+    assert_eq!(
+        post(
+            &app,
+            &token,
+            &format!("/{prefix}/namespaces/marts/tables"),
+            &create_table_body("orders"),
+        )
+        .await,
+        StatusCode::OK,
+        "full-scope token creates table `marts.orders`"
+    );
+    assert_eq!(
+        get(
+            &app,
+            &token,
+            &format!("/{prefix}/namespaces/marts/tables/orders"),
+        )
+        .await,
+        StatusCode::OK,
+        "full-scope token loads table `marts.orders`"
+    );
+
+    // A DIFFERENT namespace (marketing): also fully allowed (no ns restriction).
+    assert_eq!(
+        post(
+            &app,
+            &token,
+            &format!("/{prefix}/namespaces"),
+            &create_ns_body("marketing"),
+        )
+        .await,
+        StatusCode::OK,
+        "full-scope token creates namespace `marketing`"
+    );
+    assert_eq!(
+        post(
+            &app,
+            &token,
+            &format!("/{prefix}/namespaces/marketing/tables"),
+            &create_table_body("campaigns"),
+        )
+        .await,
+        StatusCode::OK,
+        "full-scope token creates table `marketing.campaigns`"
+    );
+}
+
+/// CORE CE-4 BOUNDARY: a token scoped to `namespace_scope = ["marts"]` may
+/// operate inside `marts` but is DENIED on `marketing` — even though it owns the
+/// workspace and holds `catalog:write`. The denial comes from the
+/// EgretAuthorizer (the front layer is namespace-agnostic).
+///
+/// lakekeeper surfaces the denial as **404 NOT_FOUND**, not 403: before checking
+/// the requested action it runs a "can you SEE this namespace" predicate (a
+/// read-class check our scoped token also fails for `marketing`), and a
+/// principal that cannot see a namespace is told it does not exist — deliberate
+/// existence-hiding (no leak of out-of-scope namespaces). Either way the data
+/// action does NOT execute: the boundary holds. We assert the exact 404 so the
+/// test fails loudly if that behavior ever changes (e.g. silently starts
+/// leaking 403-with-existence, or — worse — starts succeeding).
+#[tokio::test]
+async fn front_auth_namespace_scope_is_enforced() {
+    let Ok(dsn) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL not set — skipping front_auth namespace-scope test");
+        return;
+    };
+
+    let db = Db::connect(&dsn, 5).await.expect("connect egret db");
+    db.migrate().await.expect("egret migrations apply");
+    run_lakekeeper_migrations(&dsn)
+        .await
+        .expect("lakekeeper migrations apply");
+    let engine_state = build_state(&dsn, SYSTEM_USER)
+        .await
+        .expect("build engine state");
+    ensure_bootstrapped(engine_state.clone(), SYSTEM_USER)
+        .await
+        .expect("bootstrap default project");
+
+    let store = CatalogStore::new(db.clone());
+    let storage_cfg = dev_storage_config();
+    let (ws_a, _slug_a, wh_a) =
+        seed_workspace_with_warehouse(&db, &store, &engine_state, &storage_cfg, "ce4ns").await;
+    let prefix = wh_a.to_string();
+
+    let app = mount_catalog_engine(engine_state.clone(), store.clone());
+
+    // A full-scope token pre-creates BOTH namespaces (so the marts-scoped token's
+    // marketing denial is the authorizer refusing, not lakekeeper 404ing).
+    let (_row, full) = store
+        .create_token(
+            ws_a,
+            "ce4ns-full",
+            &["catalog:read".to_string(), "catalog:write".to_string()],
+            &[],
+        )
+        .await
+        .expect("mint full-scope token");
+    assert_eq!(
+        post(
+            &app,
+            &full,
+            &format!("/{prefix}/namespaces"),
+            &create_ns_body("marts")
+        )
+        .await,
+        StatusCode::OK,
+        "setup: create namespace `marts`"
+    );
+    assert_eq!(
+        post(
+            &app,
+            &full,
+            &format!("/{prefix}/namespaces"),
+            &create_ns_body("marketing"),
+        )
+        .await,
+        StatusCode::OK,
+        "setup: create namespace `marketing`"
+    );
+
+    // The marts-scoped rw token: write perm + workspace ownership, BUT ns scope
+    // = ["marts"].
+    let (_row, scoped) = store
+        .create_token(
+            ws_a,
+            "ce4ns-marts",
+            &["catalog:read".to_string(), "catalog:write".to_string()],
+            &["marts".to_string()],
+        )
+        .await
+        .expect("mint marts-scoped token");
+
+    // IN scope: create a table under `marts` → allowed.
+    assert_eq!(
+        post(
+            &app,
+            &scoped,
+            &format!("/{prefix}/namespaces/marts/tables"),
+            &create_table_body("scoped_ok"),
+        )
+        .await,
+        StatusCode::OK,
+        "marts-scoped token creates a table under `marts`"
+    );
+    // IN scope: read `marts` (list tables) → allowed.
+    assert_eq!(
+        get(&app, &scoped, &format!("/{prefix}/namespaces/marts/tables")).await,
+        StatusCode::OK,
+        "marts-scoped token lists tables under `marts`"
+    );
+
+    // OUT of scope: create a table under `marketing` → DENIED by the authorizer
+    // (404: lakekeeper hides the out-of-scope namespace's existence; see doc).
+    let blocked_write = post(
+        &app,
+        &scoped,
+        &format!("/{prefix}/namespaces/marketing/tables"),
+        &create_table_body("blocked"),
+    )
+    .await;
+    assert_eq!(
+        blocked_write,
+        StatusCode::NOT_FOUND,
+        "marts-scoped token MUST be denied writing under `marketing` (namespace_scope); got {blocked_write}"
+    );
+    assert!(
+        blocked_write.is_client_error(),
+        "out-of-scope write is a client-error denial, never a success; got {blocked_write}"
+    );
+    // OUT of scope: list tables under `marketing` → DENIED (likewise 404).
+    let blocked_read = get(
+        &app,
+        &scoped,
+        &format!("/{prefix}/namespaces/marketing/tables"),
+    )
+    .await;
+    assert_eq!(
+        blocked_read,
+        StatusCode::NOT_FOUND,
+        "marts-scoped token MUST be denied listing under `marketing` (namespace_scope); got {blocked_read}"
+    );
+    assert!(
+        blocked_read.is_client_error(),
+        "out-of-scope read is a client-error denial, never a success; got {blocked_read}"
     );
 }

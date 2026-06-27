@@ -1,6 +1,11 @@
 //! egret-catalog-engine — spike crate proving lakekeeper's core crates can be
 //! embedded as the catalog engine with a single shared `iceberg` version.
 
+/// Minimal scope-based [`Authorizer`](lakekeeper::service::authz::Authorizer)
+/// for the embedded engine (CE-4): control-plane actions stay permissive; data
+/// actions (namespace/table/view) are gated by the per-token `egret` scope
+/// claim. Replaces lakekeeper's inert `AllowAll` authorizer for data actions.
+pub mod authorizer;
 /// Prod (non-`test-utils`) bootstrap of lakekeeper's default project using a
 /// stable admin principal derived from `catalog.system_user`. Replaces the
 /// CE-1 spike's `test_user`-based path for production startup.
@@ -30,6 +35,7 @@ pub mod provisioner;
 #[cfg(feature = "test-utils")]
 pub mod provision;
 
+pub use authorizer::EgretAuthorizer;
 pub use bootstrap::ensure_bootstrapped;
 pub use browse::{browse_router, BrowseState};
 pub use front_auth::{front_auth, FrontAuthState};

@@ -43,7 +43,6 @@ use lakekeeper::api::management::v1::warehouse::{
 };
 use lakekeeper::api::management::v1::ApiServer;
 use lakekeeper::api::ApiContext;
-use lakekeeper::service::authz::AllowAllAuthorizer;
 use lakekeeper::service::storage::s3::S3AccessKeyCredential;
 use lakekeeper::service::storage::{
     S3Credential, S3Flavor, S3Profile, StorageCredential, StorageProfile,
@@ -52,12 +51,13 @@ use lakekeeper::ProjectId;
 use lakekeeper_storage_postgres::{PostgresBackend, SecretsState};
 use uuid::Uuid;
 
+use crate::authorizer::EgretAuthorizer;
 use crate::bootstrap::system_request_metadata;
 use crate::mount::EngineState;
 
 /// `ApiServer` specialized to egret's concrete backends — the type whose
 /// `Service` trait impls carry `create_warehouse` / `list_warehouses`.
-type EngineApiServer = ApiServer<PostgresBackend, AllowAllAuthorizer, SecretsState>;
+type EngineApiServer = ApiServer<PostgresBackend, EgretAuthorizer, SecretsState>;
 
 /// Provision (idempotently) the lakekeeper warehouse backing `workspace_id` and
 /// record the workspace → warehouse-UUID mapping in egret's [`CatalogStore`].

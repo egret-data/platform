@@ -3,12 +3,14 @@
 //! per-token read/write permissions (CE-3 T3).
 //!
 //! The bare lakekeeper router (`mount::catalog_engine_router`) carries NO authn
-//! middleware and runs an `AllowAllAuthorizer` inside — every handler simply
-//! reads `Extension<RequestMetadata>` and trusts it. So egret's tenant boundary
-//! is enforced HERE, in front, before the request reaches lakekeeper:
+//! middleware and runs egret's [`EgretAuthorizer`] inside — every handler reads
+//! `Extension<RequestMetadata>` and the authorizer gates data actions off its
+//! `"egret"` claim. So egret's tenant boundary is enforced in two layers: HERE
+//! in front (workspace ownership + coarse read/write permission), and AGAIN
+//! inside the engine (the authorizer, which also enforces `namespace_scope`):
 //!
 //! 1. **AUTHN** — extract the `Bearer` token and resolve it to an egret
-//!    `TokenAuth { workspace_id, permissions }` via
+//!    `TokenAuth { workspace_id, permissions, namespace_scope }` via
 //!    [`CatalogStore::authenticate_token`]. A missing / unknown / revoked token
 //!    is `401 UNAUTHORIZED`.
 //! 2. **AUTHZ (A-3 ownership)** — the warehouse UUID lives in the request path
@@ -20,12 +22,17 @@
 //!    by `(method, path)` and checks that the resolved token's `permissions`
 //!    slice contains the required `"catalog:read"` or `"catalog:write"` value.
 //!    A token that lacks the needed permission is `403 FORBIDDEN`.
-//! 4. **Principal injection** — on success we mirror lakekeeper's own authn
-//!    layer by inserting a `RequestMetadata` into the request extensions (the
-//!    handlers' `Extension<_>` extractor 500s without it). For CE-2/CE-3 we use
-//!    the in-process `new_lakekeeper_internal` actor (AllowAll inside approves
-//!    it); mapping the egret token to a real per-token lakekeeper principal is a
-//!    future refinement.
+//! 4. **Principal injection (CE-4)** — on success we insert a `RequestMetadata`
+//!    carrying a real per-token lakekeeper principal (`Actor::Principal`, a fixed
+//!    synthetic [`token_principal_id`] distinct from the system principal) whose
+//!    `"egret"` authentication claim carries this token's `perms` +
+//!    `namespace_scope`. [`EgretAuthorizer`] reads that claim to re-enforce the
+//!    permission scope AND the per-namespace `namespace_scope` boundary inside
+//!    the engine — the latter is enforced ONLY here-plus-authorizer, since the
+//!    front layer is namespace-agnostic. (The handlers' `Extension<_>` extractor
+//!    500s without the metadata, so injection is also load-bearing for routing.)
+//!
+//! [`EgretAuthorizer`]: crate::authorizer::EgretAuthorizer
 //!
 //! ## `{prefix}` extraction
 //!
@@ -59,8 +66,10 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
-use egret_catalog::service::CatalogStore;
+use egret_catalog::service::{CatalogStore, TokenAuth};
 use lakekeeper::api::RequestMetadata;
+use lakekeeper::limes::Authentication;
+use lakekeeper::service::authn::{Actor, UserId};
 use uuid::Uuid;
 
 /// State carried by the front-auth middleware: the egret-side store used to
@@ -77,6 +86,65 @@ impl FrontAuthState {
             store: Arc::new(store),
         }
     }
+}
+
+/// IdP id for the synthetic per-token lakekeeper principal. Mirrors the system
+/// principal's `oidc` IdP (see [`crate::bootstrap`]).
+const TOKEN_USER_IDP: &str = "oidc";
+
+/// Fixed namespace UUID for deriving the **token** principal's subject. It is
+/// DISTINCT from `EGRET_SYSTEM_USER_NAMESPACE` (in [`crate::bootstrap`]) and the
+/// subject is a fixed string, so the derived token-principal `UserId` can NEVER
+/// collide with the system principal — guaranteeing per-token requests never hit
+/// [`EgretAuthorizer`]'s system-principal bypass.
+///
+/// Generated ONCE for egret (RFC-4122 random v4), verified distinct from
+/// `EGRET_SYSTEM_USER_NAMESPACE`. It MUST NEVER change after first deployment:
+/// changing it re-derives the token principal's id (harmless for the token path,
+/// which keys off the claim not the id, but it would silently void the
+/// distinct-from-system invariant if edited to collide).
+const EGRET_TOKEN_USER_NAMESPACE: Uuid = Uuid::from_u128(0xb54e_1e3e_2ab4_4686_9bff_b2ee_f0e3_d7ab);
+
+/// The stable lakekeeper [`UserId`] for the synthetic token principal, computed
+/// once (the v5 derivation + `UserId` validation are on the per-request hot path
+/// otherwise).
+///
+/// A single, fixed subject (NOT per-workspace): the egret scope claim — not the
+/// principal identity — carries the per-token permissions + namespace scope that
+/// [`EgretAuthorizer`] enforces. This principal exists only so lakekeeper's
+/// handlers have an `Actor::Principal` to read, and so the authorizer's claim
+/// path (not its system bypass) is exercised.
+static TOKEN_PRINCIPAL_ID: std::sync::LazyLock<UserId> = std::sync::LazyLock::new(|| {
+    let subject = Uuid::new_v5(&EGRET_TOKEN_USER_NAMESPACE, b"egret-catalog-token");
+    UserId::try_from(format!("{TOKEN_USER_IDP}~{subject}").as_str())
+        .expect("static token principal id is valid")
+});
+
+/// Build the per-request [`RequestMetadata`] for a successfully authenticated
+/// egret catalog token.
+///
+/// It installs the synthetic [`token_principal_id`] as `Actor::Principal` and
+/// carries the token's `permissions` + `namespace_scope` in the `"egret"`
+/// authentication claim — exactly the shape [`EgretAuthorizer`] reads to gate
+/// data actions (`{ "egret": { "perms": [...], "ns": [...] } }`). The front-auth
+/// ownership + permission checks above are belt-and-braces; the authorizer is
+/// the in-engine, defense-in-depth enforcer of the same scope.
+fn token_request_metadata(auth: &TokenAuth) -> RequestMetadata {
+    let uid = TOKEN_PRINCIPAL_ID.clone();
+    let authentication = Authentication::builder()
+        .token_header(None)
+        .claims(serde_json::json!({
+            "egret": { "perms": auth.permissions, "ns": auth.namespace_scope }
+        }))
+        .subject(uid.clone().into())
+        .name(Some("Egret Catalog Token".to_string()))
+        .email(None)
+        .principal_type(None)
+        .build();
+
+    let mut md = RequestMetadata::new_lakekeeper_internal(Uuid::now_v7());
+    md.set_authentication(Actor::Principal(uid), authentication);
+    md
 }
 
 /// The permission a request requires, by (method, lakekeeper-relative path).
@@ -167,9 +235,12 @@ pub async fn front_auth(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // --- Principal injection: mirror lakekeeper's authn layer ------------------
-    req.extensions_mut()
-        .insert(RequestMetadata::new_lakekeeper_internal(Uuid::now_v7()));
+    // --- Principal injection: a real token principal carrying the egret scope --
+    // Inject a per-token lakekeeper principal whose `"egret"` authentication
+    // claim carries this token's perms + namespace_scope, so `EgretAuthorizer`
+    // re-enforces the same scope INSIDE the engine (defense in depth, and the
+    // sole enforcer of the per-namespace `namespace_scope` boundary).
+    req.extensions_mut().insert(token_request_metadata(&auth));
 
     Ok(next.run(req).await)
 }

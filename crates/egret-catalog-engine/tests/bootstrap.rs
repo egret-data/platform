@@ -28,7 +28,9 @@ async fn ensure_bootstrapped_is_idempotent_and_seeds_default_project() {
         .await
         .expect("lakekeeper migrations apply");
 
-    let state = build_state(&dsn).await.expect("build engine state");
+    let state = build_state(&dsn, SYSTEM_USER)
+        .await
+        .expect("build engine state");
 
     // First call bootstraps (or no-ops if a previous run already did — both Ok).
     ensure_bootstrapped(state.clone(), SYSTEM_USER)

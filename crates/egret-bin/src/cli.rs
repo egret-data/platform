@@ -46,6 +46,11 @@ pub enum CatalogAction {
         /// Defaults to `read,write` (full access). Example: `--perms read`.
         #[arg(long, default_value = "read,write")]
         perms: String,
+        /// Comma-separated namespace names this token is scoped to.
+        /// Omit (or pass empty) to grant access to all namespaces.
+        /// Example: `--namespaces marts,staging`.
+        #[arg(long, default_value = "")]
+        namespaces: String,
     },
     /// Revoke a catalog token by its id (sets revoked_at = now()).
     RevokeToken {
@@ -59,6 +64,18 @@ pub enum CatalogAction {
         #[arg(long)]
         workspace: String,
     },
+}
+
+/// Parse the `--namespaces` flag value into a `Vec<String>`.
+///
+/// Splits on `,`, trims whitespace from each token, and drops empty entries.
+/// An empty or absent value (default `""`) returns `vec![]` meaning all namespaces.
+pub fn parse_namespaces(input: &str) -> Vec<String> {
+    input
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 #[cfg(test)]
@@ -97,6 +114,7 @@ mod tests {
                     workspace: "eng".into(),
                     label: "default".into(),
                     perms: "read,write".into(),
+                    namespaces: "".into(),
                 }
             }
         );
@@ -120,6 +138,7 @@ mod tests {
                     workspace: "eng".into(),
                     label: "trino-prod".into(),
                     perms: "read,write".into(),
+                    namespaces: "".into(),
                 }
             }
         );
@@ -144,6 +163,7 @@ mod tests {
                     workspace: "eng".into(),
                     label: "default".into(),
                     perms: "read".into(),
+                    namespaces: "".into(),
                 }
             }
         );
@@ -165,6 +185,7 @@ mod tests {
                     workspace: "eng".into(),
                     label: "default".into(),
                     perms: "write".into(),
+                    namespaces: "".into(),
                 }
             }
         );
@@ -176,6 +197,52 @@ mod tests {
         } = cli.command
         {
             assert_eq!(perms, "read,write");
+        } else {
+            panic!("unexpected command variant");
+        }
+    }
+
+    #[test]
+    fn parse_namespaces_trims_and_splits() {
+        use super::parse_namespaces;
+
+        // Normal comma-separated with spaces
+        assert_eq!(
+            parse_namespaces("marts, staging"),
+            vec!["marts".to_string(), "staging".to_string()]
+        );
+
+        // Absent / empty → all namespaces
+        assert_eq!(parse_namespaces(""), Vec::<String>::new());
+
+        // Double comma drops empty segment
+        assert_eq!(
+            parse_namespaces("a,,b"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+
+        // Single namespace
+        assert_eq!(parse_namespaces("marts"), vec!["marts".to_string()]);
+    }
+
+    #[test]
+    fn mint_token_parses_namespaces_flag() {
+        let cli = Cli::parse_from([
+            "egret",
+            "catalog",
+            "mint-token",
+            "--workspace",
+            "eng",
+            "--namespaces",
+            "marts,staging",
+        ]);
+        if let Command::Catalog {
+            action: CatalogAction::MintToken { namespaces, .. },
+        } = cli.command
+        {
+            // Exercise the flag end-to-end: clap captures the raw string,
+            // then the parser splits it the way the handler will.
+            assert_eq!(parse_namespaces(&namespaces), vec!["marts", "staging"]);
         } else {
             panic!("unexpected command variant");
         }

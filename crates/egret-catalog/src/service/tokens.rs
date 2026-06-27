@@ -23,6 +23,7 @@ pub struct CatalogToken {
     pub workspace_id: Uuid,
     pub label: String,
     pub permissions: Vec<String>,
+    pub namespace_scope: Vec<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -31,6 +32,7 @@ pub struct CatalogToken {
 pub struct TokenAuth {
     pub workspace_id: Uuid,
     pub permissions: Vec<String>,
+    pub namespace_scope: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -69,6 +71,25 @@ fn validate_permissions(permissions: &[String]) -> Result<(), CatalogError> {
     Ok(())
 }
 
+/// Validate a single namespace segment string.
+///
+/// Rules: must be non-empty; when split by `.`, every segment must be
+/// non-empty (i.e. no leading/trailing dot and no `..`).
+fn validate_namespace(ns: &str) -> bool {
+    !ns.is_empty() && ns.split('.').all(|s| !s.is_empty())
+}
+
+fn validate_namespace_scope(scope: &[String]) -> Result<(), CatalogError> {
+    for ns in scope {
+        if !validate_namespace(ns) {
+            return Err(CatalogError::BadRequest(format!(
+                "invalid namespace '{ns}': must be non-empty with no leading, trailing, or consecutive dots"
+            )));
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // CatalogStore — token methods
 // ---------------------------------------------------------------------------
@@ -80,6 +101,7 @@ struct TokenRow {
     workspace_id: Uuid,
     label: String,
     permissions: Vec<String>,
+    namespace_scope: Vec<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -90,6 +112,7 @@ impl From<TokenRow> for CatalogToken {
             workspace_id: r.workspace_id,
             label: r.label,
             permissions: r.permissions,
+            namespace_scope: r.namespace_scope,
             created_at: r.created_at,
         }
     }
@@ -100,13 +123,20 @@ impl From<TokenRow> for CatalogToken {
 struct AuthRow {
     workspace_id: Uuid,
     permissions: Vec<String>,
+    namespace_scope: Vec<String>,
 }
 
 impl CatalogStore {
-    /// Create a new catalog token for `workspace_id` with the given `permissions`.
+    /// Create a new catalog token for `workspace_id` with the given `permissions`
+    /// and optional `namespace_scope`.
     ///
     /// `permissions` must be a non-empty subset of `{"catalog:read","catalog:write"}`;
     /// any unknown value returns `CatalogError::BadRequest`.
+    ///
+    /// `namespace_scope` is a list of dot-separated namespace identifiers
+    /// (e.g. `"marts"`, `"staging.raw"`). An empty slice means the token is
+    /// scoped to all namespaces. Each entry must be non-empty with no
+    /// leading, trailing, or consecutive dots.
     ///
     /// Returns the persisted `CatalogToken` row plus the **raw token** (shown
     /// once; the caller must relay it to the user immediately).
@@ -115,21 +145,24 @@ impl CatalogStore {
         workspace_id: Uuid,
         label: &str,
         permissions: &[String],
+        namespace_scope: &[String],
     ) -> Result<(CatalogToken, String), CatalogError> {
         validate_permissions(permissions)?;
+        validate_namespace_scope(namespace_scope)?;
 
         let raw = generate_raw_token();
         let hash = hash_token(&raw);
 
         let row: TokenRow = sqlx::query_as::<_, TokenRow>(
-            "INSERT INTO catalog_tokens (workspace_id, token_hash, label, permissions) \
-             VALUES ($1, $2, $3, $4) \
-             RETURNING id, workspace_id, label, permissions, created_at",
+            "INSERT INTO catalog_tokens (workspace_id, token_hash, label, permissions, namespace_scope) \
+             VALUES ($1, $2, $3, $4, $5) \
+             RETURNING id, workspace_id, label, permissions, namespace_scope, created_at",
         )
         .bind(workspace_id)
         .bind(&hash)
         .bind(label)
         .bind(permissions)
+        .bind(namespace_scope)
         .fetch_one(self.pool())
         .await
         .map_err(|e| match &e {
@@ -142,13 +175,14 @@ impl CatalogStore {
         Ok((row.into(), raw))
     }
 
-    /// Authenticate `raw` and return the workspace + permissions (only if not revoked).
+    /// Authenticate `raw` and return the workspace + permissions + namespace_scope
+    /// (only if not revoked).
     ///
     /// Maps a miss to `CatalogError::NotFound` so the caller can return 401.
     pub async fn authenticate_token(&self, raw: &str) -> Result<TokenAuth, CatalogError> {
         let hash = hash_token(raw);
         let row: AuthRow = sqlx::query_as::<_, AuthRow>(
-            "SELECT workspace_id, permissions FROM catalog_tokens \
+            "SELECT workspace_id, permissions, namespace_scope FROM catalog_tokens \
              WHERE token_hash = $1 AND revoked_at IS NULL",
         )
         .bind(&hash)
@@ -160,6 +194,7 @@ impl CatalogStore {
         Ok(TokenAuth {
             workspace_id: row.workspace_id,
             permissions: row.permissions,
+            namespace_scope: row.namespace_scope,
         })
     }
 
@@ -188,7 +223,7 @@ impl CatalogStore {
     /// List all non-revoked tokens for a workspace (hashes excluded).
     pub async fn list_tokens(&self, workspace_id: Uuid) -> Result<Vec<CatalogToken>, CatalogError> {
         let rows: Vec<TokenRow> = sqlx::query_as::<_, TokenRow>(
-            "SELECT id, workspace_id, label, permissions, created_at \
+            "SELECT id, workspace_id, label, permissions, namespace_scope, created_at \
              FROM catalog_tokens \
              WHERE workspace_id = $1 \
              ORDER BY created_at ASC",

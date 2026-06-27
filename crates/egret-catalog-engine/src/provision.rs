@@ -21,8 +21,8 @@
 //! The trick for headless calls is `RequestMetadata::new_lakekeeper_internal`
 //! — a **public, non-test** constructor producing the in-process
 //! `LakekeeperInternal` actor. `bypasses_control_plane_authz` returns `true`
-//! for it, so with [`AllowAllAuthorizer`] (and even with a real authorizer)
-//! every control-plane action (`bootstrap` / `create_project` /
+//! for it, so with the engine authorizer (which leaves control-plane actions
+//! permissive) every control-plane action (`bootstrap` / `create_project` /
 //! `create_warehouse`) is authorized. This is the same mechanism lakekeeper
 //! uses internally for system-initiated mutations.
 //!
@@ -66,12 +66,12 @@ use lakekeeper::ProjectId;
 use lakekeeper_storage_postgres::{PostgresBackend, SecretsState};
 use uuid::Uuid;
 
+use crate::authorizer::EgretAuthorizer;
 use crate::mount::EngineState;
 
 /// `ApiServer` specialized to the spike's concrete backends — the type whose
 /// `Service` trait impls carry `bootstrap` / `create_warehouse`.
-type EngineApiServer =
-    ApiServer<PostgresBackend, lakekeeper::service::authz::AllowAllAuthorizer, SecretsState>;
+type EngineApiServer = ApiServer<PostgresBackend, EgretAuthorizer, SecretsState>;
 
 /// Name of the single warehouse the spike provisions.
 pub const SPIKE_WAREHOUSE_NAME: &str = "spike";
@@ -114,7 +114,7 @@ pub async fn ensure_spike_warehouse(state: ApiContext<EngineState>) -> anyhow::R
     // authenticated principal (the first human → global admin). For the
     // headless spike we mint a synthetic principal via test-utils'
     // `RequestMetadata::test_user`, which carries a real `UserId`
-    // (`Actor::Principal`). Under `AllowAllAuthorizer` `can_bootstrap` passes,
+    // (`Actor::Principal`). The engine authorizer's `can_bootstrap` passes,
     // and the user row is created cleanly. For egret proper, this is where the
     // real bootstrap admin principal will be threaded.
     let bootstrap_actor = {
