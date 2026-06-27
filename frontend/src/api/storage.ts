@@ -145,16 +145,63 @@ export function useUploadObject(ws: string, connId: string) {
   });
 }
 
+export interface DeleteObjectArgs {
+  key: string;
+  recursive?: boolean;
+}
+
 export function useDeleteObject(ws: string, connId: string) {
   const queryClient = useQueryClient();
-  return useMutation<void, ApiError, string>({
-    mutationFn: async (key) => {
+  return useMutation<void, ApiError, DeleteObjectArgs>({
+    mutationFn: async ({ key, recursive }) => {
       await apiFetch(
-        `/ws/${ws}/storages/${connId}/objects?key=${encodeURIComponent(key)}`,
+        `/ws/${ws}/storages/${connId}/objects?key=${encodeURIComponent(
+          key,
+        )}&recursive=${!!recursive}`,
         { method: "DELETE" },
       );
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["storage", ws, "conns", connId, "objects"],
+      });
+    },
+  });
+}
+
+export function useCreateFolder(ws: string, connId: string) {
+  const queryClient = useQueryClient();
+  return useMutation<void, ApiError, string>({
+    mutationFn: async (path) => {
+      await apiFetch(
+        `/ws/${ws}/storages/${connId}/objects/folder?path=${encodeURIComponent(path)}`,
+        { method: "POST" },
+      );
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["storage", ws, "conns", connId, "objects"],
+      });
+    },
+  });
+}
+
+export interface MoveObjectArgs {
+  from: string;
+  to: string;
+}
+
+export function useMoveObject(ws: string, connId: string) {
+  const queryClient = useQueryClient();
+  return useMutation<void, ApiError, MoveObjectArgs>({
+    mutationFn: (args) =>
+      apiJson<void>(`/ws/${ws}/storages/${connId}/objects/move`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(args),
+      }),
+    onSuccess: () => {
+      // Broad invalidation so both the source and destination prefixes refetch.
       queryClient.invalidateQueries({
         queryKey: ["storage", ws, "conns", connId, "objects"],
       });

@@ -26,6 +26,8 @@ vi.mock("@/api/storage", () => ({
   }),
   useUploadObject: () => ({ mutate: vi.fn(), isPending: false }),
   useDeleteObject: () => ({ mutate: vi.fn(), isPending: false }),
+  useCreateFolder: () => ({ mutate: vi.fn(), isPending: false }),
+  useMoveObject: () => ({ mutate: vi.fn(), isPending: false }),
   downloadObject: vi.fn(),
 }));
 
