@@ -42,6 +42,10 @@ pub enum CatalogAction {
         /// Human-readable label, e.g. "trino-prod".
         #[arg(long, default_value = "default")]
         label: String,
+        /// Comma-separated permissions to grant: `read`, `write`, or both.
+        /// Defaults to `read,write` (full access). Example: `--perms read`.
+        #[arg(long, default_value = "read,write")]
+        perms: String,
     },
     /// Revoke a catalog token by its id (sets revoked_at = now()).
     RevokeToken {
@@ -92,6 +96,7 @@ mod tests {
                 action: CatalogAction::MintToken {
                     workspace: "eng".into(),
                     label: "default".into(),
+                    perms: "read,write".into(),
                 }
             }
         );
@@ -114,9 +119,66 @@ mod tests {
                 action: CatalogAction::MintToken {
                     workspace: "eng".into(),
                     label: "trino-prod".into(),
+                    perms: "read,write".into(),
                 }
             }
         );
+    }
+
+    #[test]
+    fn mint_token_parses_perms() {
+        // Explicit --perms read
+        let cli = Cli::parse_from([
+            "egret",
+            "catalog",
+            "mint-token",
+            "--workspace",
+            "eng",
+            "--perms",
+            "read",
+        ]);
+        assert_eq!(
+            cli.command,
+            Command::Catalog {
+                action: CatalogAction::MintToken {
+                    workspace: "eng".into(),
+                    label: "default".into(),
+                    perms: "read".into(),
+                }
+            }
+        );
+
+        // Explicit --perms write
+        let cli = Cli::parse_from([
+            "egret",
+            "catalog",
+            "mint-token",
+            "--workspace",
+            "eng",
+            "--perms",
+            "write",
+        ]);
+        assert_eq!(
+            cli.command,
+            Command::Catalog {
+                action: CatalogAction::MintToken {
+                    workspace: "eng".into(),
+                    label: "default".into(),
+                    perms: "write".into(),
+                }
+            }
+        );
+
+        // Default (omitted) is read,write
+        let cli = Cli::parse_from(["egret", "catalog", "mint-token", "--workspace", "eng"]);
+        if let Command::Catalog {
+            action: CatalogAction::MintToken { perms, .. },
+        } = cli.command
+        {
+            assert_eq!(perms, "read,write");
+        } else {
+            panic!("unexpected command variant");
+        }
     }
 
     #[test]

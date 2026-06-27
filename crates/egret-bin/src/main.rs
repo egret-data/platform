@@ -118,7 +118,29 @@ async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()
     let workspaces = WorkspaceRepo::new(db.clone());
 
     match action {
-        CatalogAction::MintToken { workspace, label } => {
+        CatalogAction::MintToken {
+            workspace,
+            label,
+            perms,
+        } => {
+            // Parse --perms: comma-separated "read" and/or "write" tokens.
+            let permissions: Vec<String> = perms
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .map(|s| match s.as_str() {
+                    "read" => Ok("catalog:read".to_string()),
+                    "write" => Ok("catalog:write".to_string()),
+                    other => Err(anyhow::anyhow!(
+                        "invalid permission '{other}': must be 'read' or 'write'"
+                    )),
+                })
+                .collect::<anyhow::Result<Vec<String>>>()?;
+
+            if permissions.is_empty() {
+                anyhow::bail!("--perms must not be empty; use 'read', 'write', or 'read,write'");
+            }
+
             // Resolve workspace slug → workspace_id.
             let ws = workspaces
                 .get_by_slug(&workspace)
@@ -126,16 +148,15 @@ async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()
                 .context("looking up workspace")?
                 .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace}"))?;
 
-            // TODO(CE-3 Task 2): expose --perms CLI flag; defaults to full access for now.
-            let default_perms = vec!["catalog:read".to_string(), "catalog:write".to_string()];
             let (token_row, raw) = store
-                .create_token(ws.id.0, &label, &default_perms)
+                .create_token(ws.id.0, &label, &permissions)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
             println!("Token id   : {}", token_row.id);
             println!("Workspace  : {} ({})", workspace, ws.id.0);
             println!("Label      : {}", token_row.label);
+            println!("Permissions: {}", token_row.permissions.join(","));
             println!("Created at : {}", token_row.created_at.to_rfc3339());
             println!();
             println!("Raw token (store this now — it will NOT be shown again):");
@@ -165,13 +186,17 @@ async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()
             if tokens.is_empty() {
                 println!("No active tokens for workspace '{workspace}'.");
             } else {
-                println!("{:<38}  {:<20}  CREATED AT", "TOKEN ID", "LABEL");
-                println!("{}", "-".repeat(80));
+                println!(
+                    "{:<38}  {:<20}  {:<20}  CREATED AT",
+                    "TOKEN ID", "LABEL", "PERMISSIONS"
+                );
+                println!("{}", "-".repeat(100));
                 for t in tokens {
                     println!(
-                        "{:<38}  {:<20}  {}",
+                        "{:<38}  {:<20}  {:<20}  {}",
                         t.id,
                         t.label,
+                        t.permissions.join(","),
                         t.created_at.to_rfc3339()
                     );
                 }
