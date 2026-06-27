@@ -5,7 +5,7 @@ mod cli;
 use anyhow::Context;
 use chrono::Duration;
 use clap::Parser;
-use cli::{CatalogAction, Cli, Command};
+use cli::{parse_namespaces, CatalogAction, Cli, Command};
 use egret_auth::groups::GroupRepo;
 use egret_auth::password::hash_password;
 use egret_auth::ratelimit::RateLimiter;
@@ -122,6 +122,7 @@ async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()
             workspace,
             label,
             perms,
+            namespaces,
         } => {
             // Parse --perms: comma-separated "read" and/or "write" tokens.
             let permissions: Vec<String> = perms
@@ -141,6 +142,9 @@ async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()
                 anyhow::bail!("--perms must not be empty; use 'read', 'write', or 'read,write'");
             }
 
+            // Parse --namespaces: comma-separated namespace names; empty = all.
+            let namespace_scope = parse_namespaces(&namespaces);
+
             // Resolve workspace slug → workspace_id.
             let ws = workspaces
                 .get_by_slug(&workspace)
@@ -149,15 +153,21 @@ async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()
                 .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace}"))?;
 
             let (token_row, raw) = store
-                .create_token(ws.id.0, &label, &permissions, &[])
+                .create_token(ws.id.0, &label, &permissions, &namespace_scope)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            println!("Token id   : {}", token_row.id);
-            println!("Workspace  : {} ({})", workspace, ws.id.0);
-            println!("Label      : {}", token_row.label);
-            println!("Permissions: {}", token_row.permissions.join(","));
-            println!("Created at : {}", token_row.created_at.to_rfc3339());
+            println!("Token id      : {}", token_row.id);
+            println!("Workspace     : {} ({})", workspace, ws.id.0);
+            println!("Label         : {}", token_row.label);
+            println!("Permissions   : {}", token_row.permissions.join(","));
+            let scope_display = if token_row.namespace_scope.is_empty() {
+                "*".to_string()
+            } else {
+                token_row.namespace_scope.join(",")
+            };
+            println!("Namespaces    : {scope_display}");
+            println!("Created at    : {}", token_row.created_at.to_rfc3339());
             println!();
             println!("Raw token (store this now — it will NOT be shown again):");
             println!("{raw}");
@@ -187,16 +197,22 @@ async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()
                 println!("No active tokens for workspace '{workspace}'.");
             } else {
                 println!(
-                    "{:<38}  {:<20}  {:<20}  CREATED AT",
-                    "TOKEN ID", "LABEL", "PERMISSIONS"
+                    "{:<38}  {:<20}  {:<20}  {:<20}  CREATED AT",
+                    "TOKEN ID", "LABEL", "PERMISSIONS", "NAMESPACE SCOPE"
                 );
-                println!("{}", "-".repeat(100));
+                println!("{}", "-".repeat(120));
                 for t in tokens {
+                    let scope = if t.namespace_scope.is_empty() {
+                        "*".to_string()
+                    } else {
+                        t.namespace_scope.join(",")
+                    };
                     println!(
-                        "{:<38}  {:<20}  {:<20}  {}",
+                        "{:<38}  {:<20}  {:<20}  {:<20}  {}",
                         t.id,
                         t.label,
                         t.permissions.join(","),
+                        scope,
                         t.created_at.to_rfc3339()
                     );
                 }
