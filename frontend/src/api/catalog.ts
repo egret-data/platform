@@ -159,7 +159,7 @@ export function useRevokeToken(ws: string) {
 export function useWorkspaceStorage(ws: string) {
   return useQuery<WorkspaceStorageInfo>({
     queryKey: catalogKeys.storage(ws),
-    queryFn: () => apiJson<WorkspaceStorageInfo>(`/ws/${ws}/storage`),
+    queryFn: () => apiJson<WorkspaceStorageInfo>(`/ws/${ws}/catalog/storage`),
     retry: false,
   });
 }

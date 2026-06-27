@@ -34,12 +34,14 @@ const EXPLORE_GROUPS: NavGroup[] = [
       { label: "Charts", icon: BarChart3 },
       { label: "Dashboards", icon: LayoutDashboard },
       { label: "Notebooks", icon: NotebookText },
-      { label: "Catalog", icon: Boxes },
     ],
   },
   {
     heading: "Manage",
-    items: [{ label: "Storage", icon: HardDrive }],
+    items: [
+      { label: "Catalog", icon: Boxes },
+      { label: "Storage", icon: HardDrive },
+    ],
   },
 ];
 
