@@ -120,9 +120,12 @@ export function useTableDetail(ws: string, ns: string | null, table: string | nu
 // ── Workspace admin hooks ──────────────────────────────────────────────────
 
 export function useCatalogTokens(ws: string) {
-  return useQuery<CatalogTokenDto[]>({
+  return useQuery<CatalogTokenDto[], ApiError>({
     queryKey: catalogKeys.tokens(ws),
     queryFn: () => apiJson<CatalogTokenDto[]>(`/ws/${ws}/catalog/tokens`),
+    // 403 (non-admin) is an expected outcome — surface it immediately instead
+    // of retrying 3× before the workspace-admin notice can render.
+    retry: false,
   });
 }
 
