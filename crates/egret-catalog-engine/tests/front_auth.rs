@@ -117,7 +117,7 @@ async fn front_auth_enforces_per_workspace_ownership() {
     run_lakekeeper_migrations(&dsn)
         .await
         .expect("lakekeeper migrations apply");
-    let engine_state = build_state(&dsn, SYSTEM_USER)
+    let (engine_state, _registry) = build_state(&dsn, SYSTEM_USER)
         .await
         .expect("build engine state");
     ensure_bootstrapped(engine_state.clone(), SYSTEM_USER)
@@ -316,7 +316,7 @@ async fn front_auth_enforces_per_token_permissions() {
     run_lakekeeper_migrations(&dsn)
         .await
         .expect("lakekeeper migrations apply");
-    let engine_state = build_state(&dsn, SYSTEM_USER)
+    let (engine_state, _registry) = build_state(&dsn, SYSTEM_USER)
         .await
         .expect("build engine state");
     ensure_bootstrapped(engine_state.clone(), SYSTEM_USER)
@@ -601,7 +601,7 @@ async fn front_auth_full_scope_token_is_unrestricted() {
     run_lakekeeper_migrations(&dsn)
         .await
         .expect("lakekeeper migrations apply");
-    let engine_state = build_state(&dsn, SYSTEM_USER)
+    let (engine_state, _registry) = build_state(&dsn, SYSTEM_USER)
         .await
         .expect("build engine state");
     ensure_bootstrapped(engine_state.clone(), SYSTEM_USER)
@@ -711,7 +711,7 @@ async fn front_auth_namespace_scope_is_enforced() {
     run_lakekeeper_migrations(&dsn)
         .await
         .expect("lakekeeper migrations apply");
-    let engine_state = build_state(&dsn, SYSTEM_USER)
+    let (engine_state, _registry) = build_state(&dsn, SYSTEM_USER)
         .await
         .expect("build engine state");
     ensure_bootstrapped(engine_state.clone(), SYSTEM_USER)

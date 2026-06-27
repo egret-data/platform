@@ -40,11 +40,10 @@
 //! * `secrets` → postgres `SecretsState::from_pools(read, write)`.
 //! * `contract_verifiers` → `ContractVerifiers::default()` (no verifiers).
 //! * `events` → `EventDispatcher::new(vec![])` (no listeners).
-//! * `registered_task_queues` → `TaskQueueRegistry::new().registered_task_queues()`,
-//!   an EMPTY registry. The router only needs this handle to answer
-//!   `api_config()` when building task-queue management routes; with no queues
-//!   registered those routes are simply empty. No worker tasks are spawned
-//!   (that is the bin's job in `serve_inner`, which we deliberately skip).
+//! * `registered_task_queues` → populated by `register_built_in_queues` on the
+//!   returned `TaskQueueRegistry` (tabular-expiry + purge + task-log cleanup).
+//!   The router reads this handle via `api_config()`. Workers are NOT spawned
+//!   here — the binary calls [`spawn_gc_workers`] after `build_state` (CE-6).
 //! * `license_status` → `&APACHE_LICENSE_STATUS` (the OSS default).
 //! * `build_info` → `&DEFAULT_BUILD_INFO` (empty build info).
 //!
@@ -78,7 +77,8 @@ pub type EngineState = State<EgretAuthorizer, PostgresBackend, SecretsState>;
 /// `s3_signer`/`views` `Service`s). Upstream blanket-implements all of them.
 pub type EngineServer = CatalogServer<PostgresBackend, EgretAuthorizer, SecretsState>;
 
-/// Build the lakekeeper [`ApiContext`] over isolated `lakekeeper`-schema pools.
+/// Build the lakekeeper [`ApiContext`] over isolated `lakekeeper`-schema pools,
+/// and return the populated [`TaskQueueRegistry`] for the caller to spawn workers.
 ///
 /// Ports `lakekeeper-bin/src/serve.rs::get_default_catalog_from_config` +
 /// `serve_inner`'s state assembly, but: it uses our [`build_isolated_pool`]
@@ -95,11 +95,53 @@ pub type EngineServer = CatalogServer<PostgresBackend, EgretAuthorizer, SecretsS
 /// bypasses (so bootstrap, provisioning, and the in-process browse API are never
 /// blocked by per-token scope claims).
 ///
+/// The returned [`TaskQueueRegistry`] has the 3 built-in GC queues registered
+/// (tabular expiry + purge + task-log cleanup). The binary passes it to
+/// [`spawn_gc_workers`] to start the workers (CE-6).
+///
 /// # Errors
 /// Returns an error if the pools cannot be built, the server info (server id)
 /// cannot be read back from the catalog, or the system principal id cannot be
 /// derived.
-pub async fn build_state(dsn: &str, system_user: &str) -> anyhow::Result<ApiContext<EngineState>> {
+pub async fn build_state(
+    dsn: &str,
+    system_user: &str,
+) -> anyhow::Result<(ApiContext<EngineState>, TaskQueueRegistry)> {
+    // Prod poll interval: 10s between task-queue polls (the same cadence
+    // lakekeeper-bin's serve.rs uses). Tests that need a faster pickup use
+    // `build_state_with_gc_poll` (test-utils-gated).
+    build_state_with_gc_poll_inner(dsn, system_user, std::time::Duration::from_secs(10)).await
+}
+
+/// A test-only variant of [`build_state`] that takes the task-queue **poll
+/// interval** explicitly, so an integration test can register the built-in GC
+/// queues with a short (e.g. 1s) cadence and not wait the prod 10s per tick.
+///
+/// Identical to [`build_state`] in every other respect — same isolated pools,
+/// same authorizer, same `State` assembly, and it registers the SAME 3 built-in
+/// queues into the returned [`TaskQueueRegistry`]. The only difference is the
+/// `poll` passed to `register_built_in_queues`. Gated behind the crate's
+/// `test-utils` feature so the prod build never exposes a tunable poll knob and
+/// [`build_state`]'s public signature is unchanged.
+///
+/// # Errors
+/// Same as [`build_state`].
+#[cfg(feature = "test-utils")]
+pub async fn build_state_with_gc_poll(
+    dsn: &str,
+    system_user: &str,
+    poll: std::time::Duration,
+) -> anyhow::Result<(ApiContext<EngineState>, TaskQueueRegistry)> {
+    build_state_with_gc_poll_inner(dsn, system_user, poll).await
+}
+
+/// Shared body of [`build_state`] / [`build_state_with_gc_poll`]. Private so the
+/// prod path keeps its no-argument `poll` baked in.
+async fn build_state_with_gc_poll_inner(
+    dsn: &str,
+    system_user: &str,
+    poll: std::time::Duration,
+) -> anyhow::Result<(ApiContext<EngineState>, TaskQueueRegistry)> {
     // Two isolated pools (read + write). Both pin search_path = lakekeeper,public.
     let read_pool = build_isolated_pool(dsn)
         .await
@@ -124,9 +166,20 @@ pub async fn build_state(dsn: &str, system_user: &str) -> anyhow::Result<ApiCont
         system_principal: crate::bootstrap::system_user_id(system_user)?,
     };
 
-    // Empty task-queue registry: the router only reads `api_config()` off this
-    // handle; we spawn no workers (that is serve_inner's job, which we skip).
-    let registered_task_queues = TaskQueueRegistry::new().registered_task_queues();
+    // Register the 3 built-in GC queues (tabular expiry + purge + task-log
+    // cleanup). We clone catalog/secrets/authz here so the originals still move
+    // into State below. Workers are NOT spawned here — the binary calls
+    // spawn_gc_workers with the returned registry (CE-6).
+    let registry = TaskQueueRegistry::new();
+    registry
+        .register_built_in_queues::<PostgresBackend, SecretsState, EgretAuthorizer>(
+            catalog.clone(),
+            secrets.clone(),
+            authz.clone(),
+            poll,
+        )
+        .await;
+    let registered_task_queues = registry.registered_task_queues();
 
     let state = State {
         authz,
@@ -139,7 +192,17 @@ pub async fn build_state(dsn: &str, system_user: &str) -> anyhow::Result<ApiCont
         build_info: &DEFAULT_BUILD_INFO,
     };
 
-    Ok(ApiContext { v1_state: state })
+    Ok((ApiContext { v1_state: state }, registry))
+}
+
+/// Spawn lakekeeper's built-in GC task-queue workers (tabular expiration +
+/// purge + task-log cleanup). Runs until `cancel` fires; restarts any worker
+/// that exits. Call once, after [`build_state`], from the binary.
+pub fn spawn_gc_workers(registry: TaskQueueRegistry, cancel: lakekeeper::CancellationToken) {
+    tokio::spawn(async move {
+        let runner = registry.task_queues_runner(cancel).await;
+        runner.run_queue_workers(true).await;
+    });
 }
 
 /// Build the lakekeeper Iceberg REST v1 router, with the engine state applied.
