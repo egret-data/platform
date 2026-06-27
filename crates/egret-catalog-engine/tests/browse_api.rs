@@ -100,7 +100,7 @@ async fn setup() -> Option<Fixture> {
     run_lakekeeper_migrations(&dsn)
         .await
         .expect("lakekeeper migrations");
-    let engine_state = build_state(&dsn, SYSTEM_USER)
+    let (engine_state, _registry) = build_state(&dsn, SYSTEM_USER)
         .await
         .expect("build engine state");
     ensure_bootstrapped(engine_state.clone(), SYSTEM_USER)

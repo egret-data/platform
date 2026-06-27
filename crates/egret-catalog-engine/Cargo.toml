@@ -58,6 +58,10 @@ egret-core = { workspace = true }
 egret-auth = { workspace = true }
 
 anyhow.workspace = true
+# Direct dep so `spawn_gc_workers` calls `tokio::spawn` against our own tokio,
+# not lakekeeper's re-export (a prod build shouldn't depend on tokio implicitly
+# via a re-export). Workspace declares tokio with the `full` feature set.
+tokio = { workspace = true }
 # `#[derive(Serialize)]` on the browse DTOs.
 serde = { workspace = true, features = ["derive"] }
 # `#[async_trait]` impl of `WarehouseProvisioner` (see provisioner.rs).

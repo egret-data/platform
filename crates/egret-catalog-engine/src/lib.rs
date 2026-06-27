@@ -39,8 +39,10 @@ pub use authorizer::EgretAuthorizer;
 pub use bootstrap::ensure_bootstrapped;
 pub use browse::{browse_router, BrowseState};
 pub use front_auth::{front_auth, FrontAuthState};
+pub use lakekeeper::CancellationToken;
 pub use mount::{
-    build_state, catalog_engine_router, mount_catalog_engine, EngineServer, EngineState,
+    build_state, catalog_engine_router, mount_catalog_engine, spawn_gc_workers, EngineServer,
+    EngineState,
 };
 pub use pool::{build_isolated_pool, LAKEKEEPER_SCHEMA};
 #[cfg(feature = "test-utils")]

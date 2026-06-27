@@ -125,7 +125,7 @@ async fn iceberg_roundtrip_through_lakekeeper() {
     // `system_user` only matters for the authorizer's system-principal bypass,
     // which this test does NOT use (it drives the engine via a full-scope egret
     // claim, see `inject_request_metadata`). Any value is fine.
-    let state = build_state(&dsn, "egret-system")
+    let (state, _registry) = build_state(&dsn, "egret-system")
         .await
         .expect("build lakekeeper router state");
     ensure_spike_warehouse(state.clone())
