@@ -211,6 +211,12 @@ impl CatalogStore {
     }
 
     /// Revoke a token by id (sets `revoked_at = now()`).
+    ///
+    /// **Admin-CLI only — intentionally has NO workspace guard.** It revokes any
+    /// token by id regardless of owning workspace. HTTP / multi-tenant callers
+    /// MUST use [`CatalogStore::revoke_token_for_workspace`] instead, which
+    /// scopes the revoke to the caller's workspace and so closes the cross-tenant
+    /// IDOR. Do not wire this method to a network endpoint.
     pub async fn revoke_token(&self, id: Uuid) -> Result<(), CatalogError> {
         sqlx::query("UPDATE catalog_tokens SET revoked_at = now() WHERE id = $1")
             .bind(id)
@@ -220,12 +226,36 @@ impl CatalogStore {
         Ok(())
     }
 
+    /// Revoke a token by id, but only if it belongs to `workspace_id` and is not
+    /// already revoked.
+    ///
+    /// Returns `true` when exactly one row was revoked, `false` otherwise (the
+    /// token does not exist, belongs to another workspace, or was already
+    /// revoked). The `workspace_id` guard closes the cross-tenant IDOR so a
+    /// workspace admin can only revoke their own workspace's tokens.
+    pub async fn revoke_token_for_workspace(
+        &self,
+        id: Uuid,
+        workspace_id: Uuid,
+    ) -> Result<bool, CatalogError> {
+        let r = sqlx::query(
+            "UPDATE catalog_tokens SET revoked_at = now() \
+             WHERE id = $1 AND workspace_id = $2 AND revoked_at IS NULL",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .execute(self.pool())
+        .await
+        .map_err(CatalogError::from)?;
+        Ok(r.rows_affected() == 1)
+    }
+
     /// List all non-revoked tokens for a workspace (hashes excluded).
     pub async fn list_tokens(&self, workspace_id: Uuid) -> Result<Vec<CatalogToken>, CatalogError> {
         let rows: Vec<TokenRow> = sqlx::query_as::<_, TokenRow>(
             "SELECT id, workspace_id, label, permissions, namespace_scope, created_at \
              FROM catalog_tokens \
-             WHERE workspace_id = $1 \
+             WHERE workspace_id = $1 AND revoked_at IS NULL \
              ORDER BY created_at ASC",
         )
         .bind(workspace_id)

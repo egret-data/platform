@@ -34,15 +34,18 @@ use std::sync::Arc;
 use axum::extract::{FromRef, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{delete, get};
 use axum::{Json, Router};
+use chrono::{DateTime, Utc};
 use egret_auth::session::SessionService;
+use egret_catalog::service::tokens::CatalogToken;
 use egret_catalog::service::CatalogStore;
+use egret_catalog::CatalogError;
 use egret_core::WorkspaceContext;
 use egret_workspace::context::WsContext;
 use egret_workspace::rbac::Authorizer;
 use egret_workspace::workspaces::WorkspaceRepo;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use lakekeeper::api::iceberg::types::{PageToken, Prefix};
@@ -118,6 +121,12 @@ pub fn browse_router() -> Router<BrowseState> {
             "/ws/{workspace}/catalog/namespaces/{ns}/tables/{table}",
             get(table_detail),
         )
+        // Workspace-admin catalog token management (gated `workspace:manage_members`).
+        .route(
+            "/ws/{workspace}/catalog/tokens",
+            get(list_tokens).post(mint_token),
+        )
+        .route("/ws/{workspace}/catalog/tokens/{id}", delete(revoke_token))
 }
 
 // ---------------------------------------------------------------------------
@@ -132,8 +141,22 @@ enum BrowseApiError {
     NoWarehouse,
     /// A lakekeeper `Service` call failed (preserves its iceberg HTTP code).
     Engine(lakekeeper::api::IcebergErrorResponse),
+    /// Client-supplied input was invalid → 400.
+    BadRequest(String),
+    /// The targeted resource does not exist (or belongs to another tenant) → 404.
+    NotFound,
     /// An internal failure building the system principal etc.
     Internal,
+}
+
+impl From<CatalogError> for BrowseApiError {
+    fn from(e: CatalogError) -> Self {
+        match e {
+            CatalogError::BadRequest(m) => BrowseApiError::BadRequest(m),
+            CatalogError::NotFound(_) => BrowseApiError::NotFound,
+            _ => BrowseApiError::Internal,
+        }
+    }
 }
 
 impl From<egret_core::Error> for BrowseApiError {
@@ -170,6 +193,8 @@ impl IntoResponse for BrowseApiError {
             BrowseApiError::NoWarehouse => {
                 (StatusCode::NOT_FOUND, "catalog not provisioned".to_string())
             }
+            BrowseApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
+            BrowseApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             BrowseApiError::Engine(e) => {
                 let code =
                     StatusCode::from_u16(e.error.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -541,4 +566,145 @@ async fn table_detail(
         snapshot_count: md.snapshots().count(),
         properties,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Workspace-admin catalog token management (list / mint / revoke).
+//
+// Gated `workspace:manage_members` (the workspace-admin permission, same gate as
+// `egret-workspace`'s storage/members routes), and IDOR-safe: every operation is
+// scoped to `ctx.workspace_id`, which `WsContext` bound to the path slug +
+// membership, so a workspace admin can only see/mint/revoke their OWN tokens.
+//
+// The persisted SHA-256 hash and the raw secret are NEVER serialized into the
+// list/mint responses — [`CatalogTokenDto`] has no hash field and the raw token
+// is returned exactly once, only from mint.
+// ---------------------------------------------------------------------------
+
+/// A catalog token as exposed to the workspace-admin UI. Deliberately omits the
+/// stored hash (and never carries the raw secret).
+#[derive(Serialize)]
+struct CatalogTokenDto {
+    id: Uuid,
+    label: String,
+    permissions: Vec<String>,
+    namespace_scope: Vec<String>,
+    created_at: DateTime<Utc>,
+}
+
+impl From<CatalogToken> for CatalogTokenDto {
+    fn from(t: CatalogToken) -> Self {
+        CatalogTokenDto {
+            id: t.id,
+            label: t.label,
+            permissions: t.permissions,
+            namespace_scope: t.namespace_scope,
+            created_at: t.created_at,
+        }
+    }
+}
+
+/// Request body for minting a token. `permissions` are the short UI forms
+/// (`"read"` / `"write"`) which we map to the catalog permission strings.
+#[derive(Deserialize)]
+struct MintTokenRequest {
+    label: String,
+    permissions: Vec<String>,
+    #[serde(default)]
+    namespace_scope: Vec<String>,
+}
+
+/// Mint response: the persisted token plus the raw secret (shown once).
+#[derive(Serialize)]
+struct MintTokenResponse {
+    token: CatalogTokenDto,
+    raw: String,
+}
+
+/// Authorize `workspace:manage_members` on the active (path) workspace.
+async fn require_workspace_admin(
+    st: &BrowseState,
+    ctx: &WorkspaceContext,
+) -> Result<(), BrowseApiError> {
+    st.authz
+        .require_workspace(ctx, "workspace:manage_members")
+        .await?;
+    Ok(())
+}
+
+/// Map a short UI permission (`read`/`write`) to its catalog permission string.
+fn map_permission(p: &str) -> Result<String, BrowseApiError> {
+    match p {
+        "read" => Ok("catalog:read".to_string()),
+        "write" => Ok("catalog:write".to_string()),
+        other => Err(BrowseApiError::BadRequest(format!(
+            "unknown permission '{other}'; valid values are: read, write"
+        ))),
+    }
+}
+
+/// GET `/api/ws/{workspace}/catalog/tokens` — list this workspace's tokens.
+async fn list_tokens(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<Vec<CatalogTokenDto>>, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+    let tokens = st.store.list_tokens(ctx.workspace_id.0).await?;
+    Ok(Json(
+        tokens.into_iter().map(CatalogTokenDto::from).collect(),
+    ))
+}
+
+/// POST `/api/ws/{workspace}/catalog/tokens` — mint a new token.
+async fn mint_token(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Json(req): Json<MintTokenRequest>,
+) -> Result<Json<MintTokenResponse>, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+
+    if req.permissions.is_empty() {
+        return Err(BrowseApiError::BadRequest(
+            "permissions must not be empty".to_string(),
+        ));
+    }
+    let mut perms = req
+        .permissions
+        .iter()
+        .map(|p| map_permission(p))
+        .collect::<Result<Vec<_>, _>>()?;
+    // Dedup so e.g. `["read","read"]` persists a single `catalog:read`.
+    perms.sort();
+    perms.dedup();
+
+    let (token, raw) = st
+        .store
+        .create_token(ctx.workspace_id.0, &req.label, &perms, &req.namespace_scope)
+        .await?;
+
+    Ok(Json(MintTokenResponse {
+        token: token.into(),
+        raw,
+    }))
+}
+
+/// DELETE `/api/ws/{workspace}/catalog/tokens/{id}` — revoke a token.
+///
+/// 404 (not 403) when the id does not belong to this workspace, so the response
+/// does not confirm the existence of another tenant's token (IDOR closed).
+async fn revoke_token(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> Result<StatusCode, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+    let revoked = st
+        .store
+        .revoke_token_for_workspace(id, ctx.workspace_id.0)
+        .await?;
+    if revoked {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(BrowseApiError::NotFound)
+    }
 }

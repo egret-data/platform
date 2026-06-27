@@ -64,6 +64,9 @@ anyhow.workspace = true
 tokio = { workspace = true }
 # `#[derive(Serialize)]` on the browse DTOs.
 serde = { workspace = true, features = ["derive"] }
+# `DateTime<Utc>` on the catalog-token browse DTO (re-exposes egret-catalog's
+# `CatalogToken::created_at`). Also used by the browse tests' `SessionService`.
+chrono = { workspace = true }
 # `#[async_trait]` impl of `WarehouseProvisioner` (see provisioner.rs).
 async-trait.workspace = true
 # serde_json: the bootstrap principal's `limes::Authentication` carries a
@@ -112,5 +115,5 @@ serde_json.workspace = true
 egret-metastore = { workspace = true }
 # (`egret-auth` is now a regular dependency for the browse API; the browse_api
 # integration test reuses it for session minting.)
-# `SessionService::new` takes `chrono::Duration` TTLs in the browse_api test.
-chrono = { workspace = true }
+# (`chrono` — used by the browse tests' `SessionService::new` TTLs — is now a
+# regular dependency for the catalog-token DTO, so it's available to tests too.)
