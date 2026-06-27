@@ -2481,6 +2481,7 @@ dependencies = [
  "egret-config",
  "egret-core",
  "egret-metastore",
+ "egret-secrets",
  "egret-storage",
  "egret-workspace",
  "http 1.4.2",
