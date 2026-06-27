@@ -315,6 +315,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             egret_catalog_engine::browse_router().with_state(egret_catalog_engine::BrowseState {
                 engine: engine_state.clone(),
                 store: egret_catalog::service::CatalogStore::new(db.clone()),
+                // CE-5 storage re-point: the browse router's `PUT .../catalog/storage`
+                // seals/unseals per-workspace S3 secrets through the same vault the
+                // provisioner uses.
+                secret_store: secrets.clone(),
                 system_user: config.catalog.system_user.clone().into(),
                 sessions: sessions.clone(),
                 workspaces: WorkspaceRepo::new(db.clone()),

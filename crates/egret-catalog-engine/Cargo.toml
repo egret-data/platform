@@ -62,6 +62,9 @@ anyhow.workspace = true
 # not lakekeeper's re-export (a prod build shouldn't depend on tokio implicitly
 # via a re-export). Workspace declares tokio with the `full` feature set.
 tokio = { workspace = true }
+# WARN-log the full lakekeeper error on a rejected storage re-point (the HTTP
+# response forwards only a trimmed message).
+tracing = { workspace = true }
 # `#[derive(Serialize)]` on the browse DTOs.
 serde = { workspace = true, features = ["derive"] }
 # `DateTime<Utc>` on the catalog-token browse DTO (re-exposes egret-catalog's

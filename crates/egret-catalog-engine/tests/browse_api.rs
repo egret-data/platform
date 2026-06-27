@@ -192,9 +192,12 @@ async fn setup() -> Option<Fixture> {
     assert_eq!(status, StatusCode::OK, "seed table; body={created}");
 
     // The browse router under test.
+    let crypto =
+        egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
     let app = browse_router().with_state(BrowseState {
         engine: engine_state,
         store: store.clone(),
+        secret_store: egret_secrets::SecretStore::new(db.clone(), Some(crypto)),
         system_user: SYSTEM_USER.into(),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),

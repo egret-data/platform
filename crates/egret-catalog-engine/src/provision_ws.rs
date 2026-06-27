@@ -159,7 +159,15 @@ pub async fn provision_workspace_warehouse(
 /// Build the S3 [`StorageProfile`] for a workspace warehouse from egret's
 /// runtime [`StorageConfig`]. Bucket comes from the config; the key prefix
 /// namespaces the workspace as `workspaces/<slug>/warehouse`.
-fn build_storage_profile(cfg: &StorageConfig, slug: &str) -> anyhow::Result<StorageProfile> {
+///
+/// Crate-internal so the storage-update handler ([`crate::browse`]) can build an
+/// identically-shaped profile when RE-pointing an existing warehouse — lakekeeper
+/// requires the new profile to keep the same location (bucket + key prefix), so
+/// the re-point reuses this same `workspaces/<slug>/warehouse` derivation.
+pub(crate) fn build_storage_profile(
+    cfg: &StorageConfig,
+    slug: &str,
+) -> anyhow::Result<StorageProfile> {
     let key_prefix = format!("workspaces/{slug}/warehouse");
 
     // A custom endpoint marks an S3-compatible store (MinIO); when absent we are
@@ -195,7 +203,9 @@ fn build_storage_profile(cfg: &StorageConfig, slug: &str) -> anyhow::Result<Stor
 }
 
 /// Build the S3 access-key [`StorageCredential`] from egret's [`StorageConfig`].
-fn build_storage_credential(cfg: &StorageConfig) -> StorageCredential {
+/// Crate-internal so the storage-update handler can reuse it (see
+/// [`build_storage_profile`]).
+pub(crate) fn build_storage_credential(cfg: &StorageConfig) -> StorageCredential {
     StorageCredential::S3(S3Credential::AccessKey(S3AccessKeyCredential {
         access_key_id: cfg.access_key.clone(),
         secret_access_key: cfg.secret_key.clone(),
