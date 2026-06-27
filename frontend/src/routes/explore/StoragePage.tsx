@@ -26,6 +26,13 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import FileBrowser from "@/routes/explore/storage/FileBrowser";
 
 export default function StoragePage() {
@@ -232,6 +239,7 @@ function StorageConnDialog({
 
   const [name, setName] = useState(editConn?.name ?? "");
   const [purpose, setPurpose] = useState(editConn?.purpose ?? "");
+  const [provider, setProvider] = useState(editConn?.provider ?? "s3");
   const [endpoint, setEndpoint] = useState(editConn?.endpoint ?? "");
   const [region, setRegion] = useState(editConn?.region ?? "");
   const [bucket, setBucket] = useState(editConn?.bucket ?? "");
@@ -245,6 +253,7 @@ function StorageConnDialog({
   function resetToConn(conn: StorageConn | null) {
     setName(conn?.name ?? "");
     setPurpose(conn?.purpose ?? "");
+    setProvider(conn?.provider ?? "s3");
     setEndpoint(conn?.endpoint ?? "");
     setRegion(conn?.region ?? "");
     setBucket(conn?.bucket ?? "");
@@ -271,7 +280,7 @@ function StorageConnDialog({
     const input: StorageConnInput = {
       name: name.trim(),
       purpose: purpose.trim().length > 0 ? purpose.trim() : null,
-      provider: "s3",
+      provider,
       endpoint: endpoint.trim().length > 0 ? endpoint.trim() : null,
       region: region.trim(),
       bucket: bucket.trim(),
@@ -330,6 +339,24 @@ function StorageConnDialog({
                 onChange={(e) => setPurpose(e.target.value)}
                 placeholder="Optional (e.g. catalog, notebooks)"
               />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="sc-provider">Provider</Label>
+              <Select value={provider} onValueChange={setProvider}>
+                <SelectTrigger id="sc-provider" className="w-full">
+                  <SelectValue placeholder="Select a provider" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="s3">S3 / MinIO</SelectItem>
+                  <SelectItem value="gcs" disabled>
+                    Google Cloud Storage — coming soon
+                  </SelectItem>
+                  <SelectItem value="azure" disabled>
+                    Azure Blob — coming soon
+                  </SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="space-y-1.5">

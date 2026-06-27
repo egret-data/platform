@@ -202,6 +202,59 @@ describe("StoragePage", () => {
     expect(screen.getByText("Failed to load storage connections")).toBeInTheDocument();
   });
 
+  // ── Add connection dialog — Provider select ───────────────────────────────
+
+  it("Add dialog renders a Provider select showing 'S3 / MinIO' as the selected option", async () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
+
+    await waitFor(() => screen.getByText("Add storage connection"));
+
+    // Radix renders the selected value in a <span data-slot="select-value">
+    // and also in a hidden <option>; getAllByText handles both occurrences.
+    const instances = screen.getAllByText("S3 / MinIO");
+    expect(instances.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("GCS and Azure provider options carry the disabled attribute", async () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
+
+    await waitFor(() => screen.getByText("Add storage connection"));
+
+    // Radix renders a native <select> (aria-hidden) alongside its custom UI.
+    // Check the native <option> elements for the disabled attribute — reliable in jsdom.
+    const nativeOptions = document.querySelectorAll<HTMLOptionElement>("option");
+    const gcsNative = Array.from(nativeOptions).find((o) => o.value === "gcs");
+    const azureNative = Array.from(nativeOptions).find((o) => o.value === "azure");
+
+    expect(gcsNative).toBeTruthy();
+    expect(azureNative).toBeTruthy();
+    expect(gcsNative?.disabled).toBe(true);
+    expect(azureNative?.disabled).toBe(true);
+  });
+
+  it("submitting the create form includes provider: 's3' in the payload", async () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
+
+    await waitFor(() => screen.getByText("Add storage connection"));
+
+    fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "provider-test" } });
+    fireEvent.change(screen.getByLabelText(/^region/i), { target: { value: "us-east-1" } });
+    fireEvent.change(screen.getByLabelText(/^bucket/i), { target: { value: "test-bucket" } });
+    fireEvent.change(screen.getByLabelText(/^access key/i), { target: { value: "AKIATEST" } });
+    fireEvent.change(screen.getByLabelText(/^secret key/i), { target: { value: "secretTest" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i, hidden: false }));
+
+    await waitFor(() => {
+      expect(createMutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({ provider: "s3" }),
+      );
+    });
+  });
+
   // ── Add connection dialog ─────────────────────────────────────────────────
 
   it("opens the Add dialog when 'Add connection' is clicked", async () => {
