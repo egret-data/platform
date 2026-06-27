@@ -27,3 +27,27 @@ async fn put_get_delete_round_trip() {
     store.delete(&uri).await.unwrap();
     assert!(store.get(&uri).await.is_err());
 }
+
+#[tokio::test]
+async fn copy_object_round_trip() {
+    let Some(c) = cfg() else {
+        eprintln!("EGRET_TEST_S3_ENDPOINT unset — skipping");
+        return;
+    };
+    let bucket = c.bucket.clone();
+    let store = S3Store::new(&c).await.unwrap();
+    let dir = format!("egret-test/c-{}", uuid::Uuid::new_v4());
+    let src = format!("s3://{bucket}/{dir}/a.txt");
+    let dst = format!("s3://{bucket}/{dir}/b.txt");
+
+    store.put(&src, b"copy me".to_vec()).await.unwrap();
+    store.copy(&src, &dst).await.unwrap();
+
+    // Both objects exist with identical bytes.
+    assert_eq!(store.get(&src).await.unwrap(), b"copy me");
+    assert_eq!(store.get(&dst).await.unwrap(), b"copy me");
+
+    // Cleanup.
+    store.delete(&src).await.unwrap();
+    store.delete(&dst).await.unwrap();
+}

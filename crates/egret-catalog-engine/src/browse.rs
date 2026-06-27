@@ -174,6 +174,18 @@ pub fn browse_router() -> Router<BrowseState> {
             "/ws/{workspace}/storages/{id}/objects/content",
             get(download_object),
         )
+        // Folder management (gated `workspace:manage_members`, path-confined under
+        // the connection root via `safe_key`): create a folder marker, and
+        // move/rename a file or a whole folder. Recursive folder delete is folded
+        // into `delete_object` via `?recursive=true`.
+        .route(
+            "/ws/{workspace}/storages/{id}/objects/folder",
+            axum::routing::post(create_folder),
+        )
+        .route(
+            "/ws/{workspace}/storages/{id}/objects/move",
+            axum::routing::post(move_object),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -1445,10 +1457,28 @@ async fn delete_storage_conn(
 // ---------------------------------------------------------------------------
 
 /// Query string carrying a `key` (single object) for upload/download/delete.
+/// `recursive` (delete only) deletes a folder and everything under it.
 #[derive(Deserialize)]
 struct KeyQuery {
     #[serde(default)]
     key: String,
+    #[serde(default)]
+    recursive: bool,
+}
+
+/// Query string carrying a `path` (folder) for the new-folder route.
+#[derive(Deserialize)]
+struct PathQuery {
+    #[serde(default)]
+    path: String,
+}
+
+/// Request body for a move/rename: both root-relative paths. A trailing `/` on
+/// `from` means "move a whole folder" (and `to` should then also end `/`).
+#[derive(Deserialize)]
+struct MoveRequest {
+    from: String,
+    to: String,
 }
 
 /// Query string carrying a `prefix` (folder) for listing. Empty = the root.
@@ -1703,7 +1733,15 @@ async fn upload_object(
     Ok(StatusCode::CREATED)
 }
 
-/// DELETE `/api/ws/{workspace}/storages/{id}/objects?key=<k>` — delete one object.
+/// DELETE `/api/ws/{workspace}/storages/{id}/objects?key=<k>[&recursive=<bool>]`
+/// — delete one object, or (folder + `recursive=true`) a folder and everything
+/// under it.
+///
+/// A `key` ending in `/` OR `recursive=true` is treated as a folder: we `list`
+/// the folder flat (NO delimiter → `Listing.objects` are FULL, root-prefixed
+/// keys, since `list` does not strip the root) and `delete` every returned
+/// object, then the folder marker itself. Best-effort: if any delete errors we
+/// stop and return 500 reporting how many were removed.
 async fn delete_object(
     State(st): State<BrowseState>,
     WsContext(ctx): WsContext,
@@ -1715,11 +1753,172 @@ async fn delete_object(
         return Err(BrowseApiError::BadRequest("invalid path".to_string()));
     }
     let (conn, store) = conn_s3(&st, ctx.workspace_id.0, id).await?;
-    let key = safe_key(conn.key_prefix.as_deref(), &q.key)?;
+    let root = conn.key_prefix.as_deref();
+    let key = safe_key(root, &q.key)?;
+
+    let is_folder = q.recursive || q.key.ends_with('/');
+    if is_folder {
+        // The effective folder prefix MUST end in `/` so the flat list returns
+        // only objects under this folder (not sibling keys sharing the string).
+        let folder_prefix = if key.ends_with('/') {
+            key.clone()
+        } else {
+            format!("{key}/")
+        };
+        // Flat list (delimiter=None): `objects` are full root-prefixed keys.
+        let listing = store
+            .list(&folder_prefix, None)
+            .await
+            .map_err(|_| BrowseApiError::Internal)?;
+
+        // Best-effort: on the first delete error we stop and report 500. Some
+        // objects may already be removed (a partial delete the caller can retry —
+        // re-issuing the recursive delete is idempotent).
+        let mut removed = 0usize;
+        for obj in &listing.objects {
+            store
+                .delete(&s3_uri(&conn.bucket, &obj.key))
+                .await
+                .map_err(|e| {
+                    tracing::warn!(error = ?e, removed, "recursive delete failed mid-way");
+                    BrowseApiError::Internal
+                })?;
+            removed += 1;
+        }
+        let _ = removed;
+        // Delete the folder marker too (idempotent if it doesn't exist).
+        store
+            .delete(&s3_uri(&conn.bucket, &folder_prefix))
+            .await
+            .map_err(|_| BrowseApiError::Internal)?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
 
     store
         .delete(&s3_uri(&conn.bucket, &key))
         .await
         .map_err(|_| BrowseApiError::Internal)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST `/api/ws/{workspace}/storages/{id}/objects/folder?path=<p>` — create an
+/// empty folder by writing a zero-byte `<root>/<p>/` marker object.
+///
+/// Path-confined under the connection root via [`safe_key`]; an empty `path` is
+/// rejected (400). The effective key is normalized to exactly one trailing `/`.
+async fn create_folder(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    Query(q): Query<PathQuery>,
+) -> Result<StatusCode, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+    if q.path.trim().is_empty() {
+        return Err(BrowseApiError::BadRequest("invalid path".to_string()));
+    }
+    let (conn, store) = conn_s3(&st, ctx.workspace_id.0, id).await?;
+    let key = safe_key(conn.key_prefix.as_deref(), q.path.trim_end_matches('/'))?;
+    let marker = format!("{key}/");
+
+    store
+        .put(&s3_uri(&conn.bucket, &marker), Vec::new())
+        .await
+        .map_err(|_| BrowseApiError::Internal)?;
+    Ok(StatusCode::CREATED)
+}
+
+/// POST `/api/ws/{workspace}/storages/{id}/objects/move` — move/rename a file or
+/// folder via copy-then-delete.
+///
+/// Both `from` and `to` are path-confined under the connection root via
+/// [`safe_key`]. Rejects (400): `from == to`, and a folder-into-itself move
+/// (`from` ends `/` and `to` starts with `from`). A file (`from` not ending `/`)
+/// is a single copy+delete; a folder (`from` ends `/`) flat-lists under the
+/// prefix (full root-prefixed keys) and copies+deletes each, re-rooting each key
+/// under `to`, then moves the folder marker. Best-effort on partial failure.
+async fn move_object(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    Json(req): Json<MoveRequest>,
+) -> Result<StatusCode, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+    if req.from.trim().is_empty() || req.to.trim().is_empty() {
+        return Err(BrowseApiError::BadRequest("invalid path".to_string()));
+    }
+    // `from == to` is a no-op move — reject (compare the RAW user paths).
+    if req.from == req.to {
+        return Err(BrowseApiError::BadRequest(
+            "source and destination are the same".to_string(),
+        ));
+    }
+    // Folder-into-itself: moving `f/` into `f/h/` would recurse — reject.
+    if req.from.ends_with('/') && req.to.starts_with(&req.from) {
+        return Err(BrowseApiError::BadRequest(
+            "cannot move a folder into itself".to_string(),
+        ));
+    }
+
+    let (conn, store) = conn_s3(&st, ctx.workspace_id.0, id).await?;
+    let root = conn.key_prefix.as_deref();
+    let from_key = safe_key(root, &req.from)?;
+    let to_key = safe_key(root, &req.to)?;
+    let bucket = &conn.bucket;
+
+    let is_folder = req.from.ends_with('/');
+    if !is_folder {
+        // Single file: copy then delete.
+        store
+            .copy(&s3_uri(bucket, &from_key), &s3_uri(bucket, &to_key))
+            .await
+            .map_err(|e| match e {
+                egret_storage::StorageError::NotFound(_) => BrowseApiError::NotFound,
+                _ => BrowseApiError::Internal,
+            })?;
+        store
+            .delete(&s3_uri(bucket, &from_key))
+            .await
+            .map_err(|_| BrowseApiError::Internal)?;
+        return Ok(StatusCode::OK);
+    }
+
+    // Folder move. Normalize both effective keys to a single trailing `/`.
+    let from_prefix = if from_key.ends_with('/') {
+        from_key.clone()
+    } else {
+        format!("{from_key}/")
+    };
+    let to_prefix = if to_key.ends_with('/') {
+        to_key.clone()
+    } else {
+        format!("{to_key}/")
+    };
+
+    // Flat list (delimiter=None): full root-prefixed keys under the folder.
+    let listing = store
+        .list(&from_prefix, None)
+        .await
+        .map_err(|_| BrowseApiError::Internal)?;
+
+    for obj in &listing.objects {
+        // Re-root each key from `from_prefix` to `to_prefix`. `list` returns keys
+        // under `from_prefix`, so the strip always succeeds; fall back defensively.
+        let rel = obj.key.strip_prefix(&from_prefix).unwrap_or(&obj.key);
+        let dst = format!("{to_prefix}{rel}");
+        store
+            .copy(&s3_uri(bucket, &obj.key), &s3_uri(bucket, &dst))
+            .await
+            .map_err(|_| BrowseApiError::Internal)?;
+        store
+            .delete(&s3_uri(bucket, &obj.key))
+            .await
+            .map_err(|_| BrowseApiError::Internal)?;
+    }
+    // Move the folder marker (best-effort: the source marker may not exist).
+    let _ = store
+        .copy(&s3_uri(bucket, &from_prefix), &s3_uri(bucket, &to_prefix))
+        .await;
+    let _ = store.delete(&s3_uri(bucket, &from_prefix)).await;
+
+    Ok(StatusCode::OK)
 }

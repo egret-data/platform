@@ -55,6 +55,15 @@ impl ObjectStore for MemStore {
         self.0.lock().unwrap().remove(u);
         Ok(())
     }
+    async fn copy(&self, src: &str, dst: &str) -> Result<(), StorageError> {
+        let mut m = self.0.lock().unwrap();
+        let bytes = m
+            .get(src)
+            .cloned()
+            .ok_or_else(|| StorageError::NotFound(src.into()))?;
+        m.insert(dst.into(), bytes);
+        Ok(())
+    }
     async fn list(
         &self,
         _prefix: &str,

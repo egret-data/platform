@@ -36,6 +36,13 @@ pub trait ObjectStore: Send + Sync {
     async fn put(&self, uri: &str, bytes: Vec<u8>) -> Result<(), StorageError>;
     async fn get(&self, uri: &str) -> Result<Vec<u8>, StorageError>;
     async fn delete(&self, uri: &str) -> Result<(), StorageError>;
+    /// Server-side copy `src` → `dst` (both `s3://bucket/key` URIs).
+    ///
+    /// Used by the file manager's move/rename (copy-then-delete). Keys are
+    /// expected to be simple (the file-browser confines them under a connection
+    /// root via `safe_key`); special characters in a key would need URL-encoding
+    /// of the S3 copy-source and are not handled here.
+    async fn copy(&self, src: &str, dst: &str) -> Result<(), StorageError>;
     /// List objects under `prefix` within the store's configured bucket.
     ///
     /// `prefix` is a plain key prefix (NOT an `s3://` URI).

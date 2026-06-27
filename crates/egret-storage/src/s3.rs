@@ -98,6 +98,23 @@ impl ObjectStore for S3Store {
         Ok(())
     }
 
+    async fn copy(&self, src: &str, dst: &str) -> Result<(), StorageError> {
+        let (_src_bucket, src_key) = Self::split(src)?;
+        let (_dst_bucket, dst_key) = Self::split(dst)?;
+        // `copy_source` is `bucket/key`; we always copy within this store's
+        // configured bucket. Keys are kept simple (no URL-encoding) — see the
+        // trait doc.
+        self.client
+            .copy_object()
+            .bucket(&self.bucket)
+            .copy_source(format!("{}/{}", self.bucket, src_key))
+            .key(dst_key)
+            .send()
+            .await
+            .map_err(|e| StorageError::S3(e.to_string()))?;
+        Ok(())
+    }
+
     async fn list(&self, prefix: &str, delimiter: Option<&str>) -> Result<Listing, StorageError> {
         let mut folders: Vec<String> = Vec::new();
         let mut objects: Vec<ObjectMeta> = Vec::new();
