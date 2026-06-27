@@ -1,9 +1,10 @@
 # Egret — Master Architecture Design
 
-> **Status:** Foundational · **Date:** 2026-06-17 · **Version:** 0.1
+> **Status:** Living · **Date:** 2026-06-27 · **Version:** 0.2
 > This is the **canonical (source-of-truth) document** for the Egret project. All later tasks/specs reference it.
 > A Vietnamese reference translation lives at [`docs/vi/architecture/2026-06-17-egret-architecture-design.md`](../../vi/architecture/2026-06-17-egret-architecture-design.md).
 > Major decisions are recorded in [§2 Architecture Decisions](#2-architecture-decisions-adr-summary).
+> **v0.2 evolution:** since v0.1 the catalog was re-built on an embedded lakekeeper, the product reframed into 4 workspace pillars, and per-token catalog authz landed — see [§2 ADRs](#2-architecture-decisions-adr-summary), [§10.3](#103-iceberg-rest-catalog-egret-catalog), and the [§16 roadmap](#16-roadmap--status).
 
 ---
 
@@ -24,7 +25,7 @@
 13. [API surface & OpenAPI](#13-api-surface--openapi)
 14. [Security](#14-security)
 15. [Repository layout](#15-repository-layout)
-16. [Phased roadmap](#16-phased-roadmap)
+16. [Roadmap & status](#16-roadmap--status)
 17. [Open questions / future](#17-open-questions--future)
 18. [Appendix: references](#18-appendix-references)
 
@@ -43,6 +44,8 @@ frontend that inherits the sparklabx design system.
 |---|---|---|
 | **Admin / Data Governance** | Admin, data steward | Manage databases, Iceberg catalog, Ranger policies, users/roles/workspaces, org-level Data APIs and workflows, monitoring/audit |
 | **Explorer** | User / analyst | SQL Lab, dataset, chart, dashboard, notebook, workspace Data APIs, automation workflows — **isolated per workspace** |
+
+**4-pillar product framing (ADR-17):** each workspace is a full self-contained data platform, organized into four pillars: **Catalog** (lakehouse core: per-workspace Iceberg catalog + external connections + lineage), **Analytics** (BI dataset/chart/dashboard + Notebook + alerts), **Engineering** (workflow + data API + pipeline IDE + CDC→Iceberg), and **Admin** (control plane: members, RBAC, catalog perms, database/engine connections, Ranger, secrets, storage). The two-portal view still holds: the Admin portal maps onto the Admin pillar; the Explorer portal spans Catalog + Analytics + Engineering, all scoped per workspace.
 
 ### 1.2 Capabilities
 
@@ -81,6 +84,11 @@ frontend that inherits the sparklabx design system.
 | ADR-11 | Email | **SMTP + Microsoft Graph** (pluggable) | Leverages Microsoft-Graph-SMTP-Relay |
 | ADR-12 | Workspace isolation | **Global register → grant**; **logical isolation** (row-level `workspace_id` + Ranger policy) | Centralized governance, shared engine, flexible |
 | ADR-13 | Secrets | **Envelope encryption** in Postgres, KMS-pluggable | Protect credentials at rest |
+| ADR-14 | Catalog implementation | **Embed lakekeeper core as a Rust library** (`egret-catalog-engine`) instead of reimplementing the Iceberg REST catalog | Same iceberg-rust fork → a single `iceberg` version; production-grade store/REST/GC/storage reused; egret keeps identity/RBAC/UI/token + an `Authorizer` bridge. Supersedes the from-scratch `egret-catalog` of v0.1 (its tables/handlers were deleted in migration 0026) |
+| ADR-15 | Catalog tenancy | **1 lakekeeper default project + 1 warehouse per workspace** (`{prefix}` = warehouse UUID), mapped in `workspace_warehouse`, provisioned on workspace-create | Deep per-workspace isolation — each workspace gets its own catalog/warehouse |
+| ADR-16 | Catalog authz | **egret `front_auth`** (per-workspace token ownership + read/write + `namespace_scope`) **+ a minimal `EgretAuthorizer`** (lakekeeper `Authorizer` impl gating data actions by per-token scope claim); lakekeeper's own RBAC/OpenFGA is NOT used | egret owns identity; lakekeeper's full authz model is heavier than needed; defense-in-depth in two layers |
+| ADR-17 | Product framing | **Each workspace = a full self-contained data platform**, organized into **4 pillars**: Catalog / Analytics / Engineering / Admin | Workspace is the isolation unit for catalog + engine + config; replaces the flat two-portal framing (Admin/Explorer still roughly map onto Admin + the other three pillars) |
+| ADR-18 | Notebook engine | **Daft** (Rust-native Python dataframe) kernel per workspace, bound to the workspace's Iceberg catalog; **absorbs SQL Lab** into one notebook surface | Modern dataframe engine; avoids hosting Jupyter/Spark; one ad-hoc surface. Supersedes the Jupyter/Spark-kernel note in §10.6 |
 
 > Each ADR gets a detailed file under `docs/en/adr/` (and `docs/vi/adr/`) once implementation begins.
 
@@ -211,6 +219,8 @@ Cargo workspace under `crates/`. Convention: each crate has **one clear purpose*
 **traits/interfaces in `egret-core`**, and is independently testable. The `*-server` crate composes
 the router.
 
+> Product crates `egret-notebook` **(planned)**, `egret-dataapi` **(planned)**, `egret-workflow` **(planned)**, `egret-notify` **(planned)**, `egret-monitor` **(planned)**, `egret-events` **(planned)** are not yet built; the rows below describe the target design.
+
 ### 5.1 Foundation
 
 | Crate | Responsibility | Key deps | Public interface |
@@ -238,43 +248,52 @@ the router.
 |---|---|---|
 | `egret-database` | Connection lifecycle (Trino/StarRocks): register/test/health/monitor, pool registry, creds via `egret-secrets`, capability metadata | `DatabaseRegistry`, `Connection` |
 | `egret-engine` | Query execution: **Trino (REST protocol)** + **StarRocks (MySQL protocol)** connectors, async **JobManager**, result streaming, **result cache/store** (Postgres + object store), cancellation, cost/limit guards | `QueryEngine::submit()`, `Job`, `ResultStore` |
-| `egret-catalog` | **Iceberg REST Catalog** (spec-compliant): namespaces/tables/views/commits/loadTable, config endpoint, optional S3 signer. Backed by Postgres metadata + `egret-storage` data. Layered `api/iceberg` + `service` following Lakekeeper | `iceberg_router()` (mounted at `/catalog`), `CatalogStore` |
+| `egret-catalog` | The **egret-side identity layer** of the catalog — per-workspace `catalog_tokens` (hashed; `permissions[]`, `namespace_scope[]`), the `workspace_warehouse` mapping, and the Catalog browse API/UI. The v0.1 from-scratch Iceberg store/handlers/`iceberg_router` were deleted at the CE-2 cutover (migration 0026). | `CatalogTokenStore`, browse router |
+| `egret-catalog-engine` | Embeds **lakekeeper** core as a library (sqlx 0.9, isolated Postgres pool with `search_path = lakekeeper`); builds the Iceberg REST router + state, the `front_auth` security middleware, the `EgretAuthorizer`, warehouse provisioning, and typed in-process browse reads. | `mount_catalog_engine`, `build_state`, `EgretAuthorizer`, `front_auth` |
+| `egret-workspace` | Workspace provisioning + `WorkspaceProvisioner`/`WarehouseProvisioner` trait seam (avoids circular crate dependency between workspace and catalog-engine) | `WorkspaceProvisioner`, `WarehouseProvisioner` |
+| `egret-iceberg-ext` | Iceberg format extensions (egret-specific Iceberg metadata helpers) | format extension types |
 
 ### 5.4 Application / Product
 
 | Crate | Responsibility | Public interface |
 |---|---|---|
 | `egret-bi` | Semantic layer: **dataset** (logical table, column, metric, computed), **SQL Lab** saved query, **chart** (viz config → ECharts spec), **dashboard** (multi-tab grid layout, parameters/filters, click behaviour: cross-filter/URL/drill-through), querying via `egret-engine`, caching | `DatasetService`, `ChartService`, `DashboardService`, `SqlLabService` |
-| `egret-notebook` | Notebook model (cells), **kernel session** Jupyter/Spark (protocol), execution, attaches `sparklabx/kernel` | `NotebookService`, `KernelGateway` |
-| `egret-dataapi` | **Data API Builder**: API definitions, **dynamic-SQL template engine** (MyBatis-style: if/foreach/where), param binding, multi-statement + transaction, publish/version/**hot-reload**, **gateway runtime** (token/api-key, IP allow/deny, rate-limit, cache, call-log) | `ApiDefService`, `ApiGateway`, `SqlTemplate` |
-| `egret-workflow` | **Automation engine**: DAG model, **triggers** (cron via `tokio-cron-scheduler`, webhook, on-event), **executors** (run-query, send-email, http-request, transform, branch, call-dataapi, export), run engine + history, retry/alert | `WorkflowService`, `WorkflowRunner`, `NodeExecutor` trait |
-| `egret-notify` | **SMTP + Microsoft Graph** providers (pluggable), template rendering | `Notifier` trait |
-| `egret-monitor` | Query monitoring, **audit log**, usage metrics, Prometheus exporter, admin health rollups | `AuditLog`, `Metrics` |
+| `egret-notebook` **(planned)** | Notebook model (cells), **Daft** kernel per workspace (ADR-18), bound to the workspace Iceberg catalog, execution, absorbs SQL Lab | `NotebookService`, `KernelGateway` |
+| `egret-dataapi` **(planned)** | **Data API Builder**: API definitions, **dynamic-SQL template engine** (MyBatis-style: if/foreach/where), param binding, multi-statement + transaction, publish/version/**hot-reload**, **gateway runtime** (token/api-key, IP allow/deny, rate-limit, cache, call-log) | `ApiDefService`, `ApiGateway`, `SqlTemplate` |
+| `egret-workflow` **(planned)** | **Automation engine**: DAG model, **triggers** (cron via `tokio-cron-scheduler`, webhook, on-event), **executors** (run-query, send-email, http-request, transform, branch, call-dataapi, export), run engine + history, retry/alert | `WorkflowService`, `WorkflowRunner`, `NodeExecutor` trait |
+| `egret-notify` **(planned)** | **SMTP + Microsoft Graph** providers (pluggable), template rendering | `Notifier` trait |
+| `egret-monitor` **(planned)** | Query monitoring, **audit log**, usage metrics, Prometheus exporter, admin health rollups | `AuditLog`, `Metrics` |
 
 ### 5.5 Crate dependency diagram (simplified)
+
+> Note: `egret-notebook`, `egret-dataapi`, `egret-workflow`, `egret-notify`, `egret-monitor`, `egret-events` are **(planned)** and not yet built.
 
 ```mermaid
 graph TD
   bin --> server
-  server --> auth & authz & ranger & database & engine & catalog & bi & notebook & dataapi & workflow & monitor
+  bin --> catalog-engine
+  server --> auth & authz & ranger & database & engine & catalog & bi & workspace
+  server -.->|planned| notebook & dataapi & workflow & monitor
   ranger --> authz
   bi --> engine
-  dataapi --> engine
-  notebook --> engine
-  workflow --> engine & notify & dataapi
+  dataapi -.->|planned| engine
+  notebook -.->|planned| engine
+  workflow -.->|planned| engine & notify & dataapi
   engine --> database & storage
-  catalog --> storage & metastore
+  catalog --> metastore
+  catalog-engine --> metastore & storage
+  workspace --> catalog-engine
   database --> secrets
-  authz --> metastore & events
+  authz --> metastore
   auth --> metastore
-  monitor --> events & metastore
+  monitor -.->|planned| metastore
   subgraph foundation
     core
     config
     metastore
     secrets
     storage
-    events
+    events["events (planned)"]
   end
 ```
 
@@ -468,13 +487,19 @@ policy_audit(id, policy_id, action, actor, at)
 ### 9.4 Catalog (Iceberg)
 
 ```text
-catalog_namespaces(id, name, properties_jsonb)
-catalog_tables(id, namespace_id, name, metadata_location, current_snapshot_id,
-               format_version, properties_jsonb)
-catalog_table_metadata_log(table_id, metadata_location, created_at)
-catalog_views(id, namespace_id, name, metadata_location)
-workspace_catalog_grant(workspace_id, namespace_id, granted_by)
-catalog_commits(table_id, snapshot_id, parent_id, summary_jsonb, created_at)
+-- The from-scratch catalog tables of v0.1 (catalog_namespaces / catalog_tables /
+-- catalog_views / catalog_commits) were REMOVED in migration 0026. egret now embeds
+-- lakekeeper; Iceberg metadata lives in lakekeeper's own (~63) tables under the
+-- Postgres schema `lakekeeper` (search_path-isolated). egret keeps only the
+-- identity + tenancy tables:
+
+catalog_tokens(id, workspace_id, token_hash, label,
+               permissions text[],      -- {catalog:read, catalog:write}
+               namespace_scope text[],  -- {} = all namespaces; else subtree-scoped (e.g. {marts})
+               created_at, revoked_at)  -- per-workspace catalog access tokens (engine auth)
+workspace_warehouse(workspace_id PK→workspaces, warehouse_id uuid, created_at)  -- {prefix} = warehouse UUID
+role_permissions(role_id, 'catalog:read' | 'catalog:write')                      -- workspace RBAC for catalog
+-- schema `lakekeeper`: projects, warehouses, namespaces, tabulars, … (owned by the embedded engine)
 ```
 
 ### 9.5 Engine / query
@@ -549,10 +574,13 @@ implementation belongs to a per-phase spec.
 - **ResultStore:** cache by hash(sql+db); large results written to object store, metadata in `queries`.
 - **Clients:** SQL Lab, dataset preview, chart queries, Data API, the workflow run-query node.
 
-### 10.3 Iceberg REST Catalog (`egret-catalog`)
-- **Spec:** Iceberg REST Catalog API — `GET /v1/config`, namespace CRUD, tables (`create/load/commit/drop/rename`), views, `report-metrics`, optional S3 remote signing.
-- **Layout (following Lakekeeper):** `api/iceberg` (HTTP handlers) + `service::CatalogStore` (Postgres) + `egret-storage` (data files). Mounted at `/catalog`.
-- **Integration:** Trino/StarRocks/Spark configure the REST catalog to point at Egret; namespaces granted per workspace; metadata pointer in `catalog_tables.metadata_location`.
+### 10.3 Iceberg REST Catalog (`egret-catalog` + `egret-catalog-engine`)
+- **Approach (ADR-14):** embed **lakekeeper** core as a library (`egret-catalog-engine`, sqlx 0.9) on the same iceberg-rust fork as egret → a single `iceberg` version. lakekeeper provides the spec-compliant Iceberg REST router, the Postgres catalog store, storage IO, and (future) GC/task workers. lakekeeper migrations run in an isolated `lakekeeper` Postgres schema (`search_path = lakekeeper,public`).
+- **Tenancy (ADR-15):** one default lakekeeper project; **one warehouse per workspace** (`{prefix}` = warehouse UUID), mapped in `workspace_warehouse`, provisioned when a workspace is created via a `WarehouseProvisioner` trait seam (no circular crate dep).
+- **Identity layer (`egret-catalog`):** per-workspace `catalog_tokens` (hashed; `permissions[]`, `namespace_scope[]`), the warehouse mapping, and the Catalog browse API/UI.
+- **Security (`front_auth` + ADR-16):** the lakekeeper router is mounted at `/catalog/v1` behind an egret middleware enforcing (1) per-workspace token ownership (`{prefix}` must equal the workspace's warehouse → 403), (2) per-token read/write permission, (3) per-token `namespace_scope`. It injects a lakekeeper principal carrying the token's scope as an `egret` claim; the embedded **`EgretAuthorizer`** authorizes data actions (namespace/table/view) against that claim as defense-in-depth, while a system principal (bootstrap + in-process browse) bypasses.
+- **egret-server does NOT link lakekeeper** — `egret-bin` builds the engine + browse routers and passes them in as prebuilt `axum::Router`s, keeping the lakekeeper dependency graph out of `egret-server`.
+- **Status:** CE-1 (spike) → CE-2 (embedded live per-workspace + cutover; v0.1 catalog deleted) → CE-3 (per-token read/write scope) → CE-4 (`EgretAuthorizer` + `namespace_scope`) — all merged. Next: CE-5 (storage profiles/secrets bridge, GCS/Azure), CE-6 (GC/task-queue workers).
 
 ### 10.4 Apache Ranger API (`egret-ranger`) — see §8.3.
 
@@ -563,8 +591,8 @@ implementation belongs to a per-phase spec.
 - **Dashboard:** grid layout (`layout_jsonb`), cross-filtering, dashboard-level filters; child charts via `dashboard_charts`.
 - **References:** Superset (chart/dashboard/dataset model), Metabase.
 
-### 10.6 Notebook (`egret-notebook`)
-- Notebook cells (sql/markdown/python), kernel sessions over **Jupyter/Spark** (reusing `sparklabx/kernel` + `@jupyterlab/services` on the FE), output streamed over WS, parquet preview (hyparquet).
+### 10.6 Notebook (`egret-notebook`) **(planned)**
+- **(ADR-18)** Per-workspace notebook on a **Daft** (Rust-native Python dataframe) kernel, bound to the workspace's Iceberg catalog. SQL cells **absorb SQL Lab** into one ad-hoc surface. Output streamed over WS, parquet preview (hyparquet). *(was: Jupyter/Spark kernel in v0.1)*
 
 ### 10.7 Data API Builder (`egret-dataapi`)
 - **Definition:** path/method + `sql_template` (MyBatis-style dynamic SQL: `<if>`, `<foreach>`, `<where>`) + params schema + target database.
@@ -760,12 +788,15 @@ egret/
 │   ├── egret-database/
 │   ├── egret-engine/
 │   ├── egret-catalog/
+│   ├── egret-catalog-engine/
+│   ├── egret-workspace/
+│   ├── egret-iceberg-ext/
 │   ├── egret-bi/
-│   ├── egret-notebook/
-│   ├── egret-dataapi/
-│   ├── egret-workflow/
-│   ├── egret-notify/
-│   └── egret-monitor/
+│   ├── egret-notebook/             # planned
+│   ├── egret-dataapi/              # planned
+│   ├── egret-workflow/             # planned
+│   ├── egret-notify/               # planned
+│   └── egret-monitor/              # planned
 ├── migrations/                     # sqlx migrations
 ├── frontend/                       # pnpm monorepo (apps/web + packages/*)
 ├── deploy/                         # Dockerfile, docker-compose, helm/
@@ -777,47 +808,28 @@ egret/
 
 ---
 
-## 16. Phased roadmap
+## 16. Roadmap & status
 
-> Principle: **foundation first → BI later** (per the roadmap ADR). Each phase is one or more
-> dedicated specs (brainstorm → plan → implement).
+> **Reframe (v0.2):** the build targets **each workspace as a full self-contained data platform** across **4 pillars** (ADR-17). Each item below is its own brainstorm → spec → plan → subagent-build cycle.
 
-### Phase 0 — Bootstrap (foundation)
-- Cargo workspace + crate skeletons; `egret-core`, `egret-config`, `egret-metastore`, `egret-server`.
-- CI, migration runner, dev Docker/compose (Postgres + MinIO + Trino + StarRocks).
-- FE skeleton: extract `packages/ui` from sparklabx, app shell + workspace switcher.
+### 16.1 Delivered
+- **Foundation:** Cargo workspace + crates; Postgres metastore + sqlx migrations (0001–0028); typed config; dev docker-compose (Postgres + MinIO + Trino/StarRocks).
+- **Admin / control plane:** local auth + session, workspaces + members + RBAC; database/engine registration (Trino REST + StarRocks MySQL); Ranger REST-compatible policy surface.
+- **Analytics (BI):** Dataset / Chart / Dashboard with deep **Metabase parity** (table & pivot, per-series chart options, axis range, series rename, table view-as + mini-bar, PNG export, Vietnam-map geo).
+- **Catalog (lakehouse core):** per-workspace Iceberg catalog via **embedded lakekeeper** — CE-1 spike → CE-2 tenancy + cutover → CE-3 per-token read/write scope → CE-4 minimal `EgretAuthorizer` + `namespace_scope` (all merged; see §10.3).
 
-### Phase 1 — Foundation (auth, workspace, database)
-- `egret-auth`: OIDC/SSO, session, RBAC, workspace membership.
-- `egret-database`: register/test/health for Trino & StarRocks; `egret-secrets`.
-- Admin portal: users, workspaces, databases. Explorer shell.
-- **Milestone:** SSO login, create a workspace, register + grant a database.
+### 16.2 Next — Catalog pillar (CE chain)
+- **CE-5** — storage profiles / secrets bridge: per-workspace storage config, GCS/Azure beyond S3/MinIO, wire lakekeeper's secret store to `egret-secrets`.
+- **CE-6** — GC / task-queue workers: run lakekeeper's snapshot-expiry + orphan-file cleanup (the embedded registry currently serves REST but spawns no workers).
+- Later: external catalog connections (register REST/Glue/Nessie per workspace), lakekeeper-parity polish (soft-delete, statistics, generic tables), lineage.
 
-### Phase 2 — Catalog & Ranger (governance core)
-- `egret-storage`, `egret-catalog` (Iceberg REST), `egret-authz` + `egret-ranger`.
-- Admin: catalog browser, policy authoring.
-- **Milestone:** Trino/StarRocks use Egret as the Iceberg catalog + download Ranger policies to enforce.
+### 16.3 Next pillars
+- **Analytics — Notebook (Daft):** per-workspace notebook (ADR-18) on a **Daft** kernel bound to the workspace Iceberg catalog, with fast ad-hoc SQL cells that **absorb SQL Lab**; chart/dashboard alerts.
+- **Engineering:** mature Workflow + Data API (dbapi); Pipeline IDE (Airflow/Astronomer-style); CDC → Iceberg ingestion.
+- **Admin:** self-service per-workspace database/engine connections; Secrets + per-workspace Storage config UI; Ranger data policies.
 
-### Phase 3 — Query & SQL Lab & Dataset
-- `egret-engine` (Trino REST + StarRocks MySQL, async, result store), `egret-bi` (sqllab + dataset).
-- Explorer: SQL Lab, datasets.
-- **Milestone:** async queries with caching, saved queries, dataset creation.
-
-### Phase 4 — Chart & Dashboard & Notebook
-- `egret-bi` (ECharts charts + dashboards), `egret-notebook`.
-- Explorer: charts, dashboards, notebooks.
-- **Milestone:** build a dashboard from a dataset; notebook runs a kernel.
-
-### Phase 5 — Data API Builder
-- `egret-dataapi`: template engine, gateway, client mgmt, call-log.
-- **Milestone:** publish SQL→API, call via api-key with rate-limit & cache.
-
-### Phase 6 — Workflow Automation
-- `egret-workflow` + `egret-notify`, FE workflow canvas (React Flow).
-- **Milestone:** cron → run-query → send-email works, with run history.
-
-### Phase 7 — Monitoring, hardening, scale
-- Full `egret-monitor`, audit, Prometheus, Helm, leader-election scheduler, distributed event bus.
+### 16.4 Hardening
+- Monitoring/audit, Prometheus, Helm, leader-election scheduler, distributed event bus.
 
 ---
 
@@ -846,4 +858,4 @@ egret/
 
 ---
 
-*End of foundational document v0.1. Update via PR; record major changes as new ADRs under `docs/en/adr/`.*
+*Living document v0.2 (2026-06-27). Update via PR; record major changes as new ADRs under `docs/en/adr/`.*

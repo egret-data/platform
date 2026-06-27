@@ -36,7 +36,9 @@ inherits the sparklabx design system.
 
 ## Status
 
-🚧 Design phase. See the [Roadmap](docs/en/architecture/2026-06-17-egret-architecture-design.md#16-phased-roadmap).
+**Foundation + Admin** (auth/workspace/RBAC, database registration, Ranger) and **Analytics BI** (dataset/chart/dashboard, deep Metabase parity) are built and in use. **Catalog** (per-workspace Iceberg REST via embedded lakekeeper) is live through CE-4 (embedded engine, per-workspace tenancy, per-token read/write scope, `EgretAuthorizer` + `namespace_scope`). Next: Catalog CE-5/CE-6 (storage profiles, GC workers), then **Notebook** (Daft kernel), **Engineering** (Workflow, Data API), and Admin hardening.
+
+See the [Roadmap & status](docs/en/architecture/2026-06-17-egret-architecture-design.md#16-roadmap--status).
 
 ## Repository layout (planned)
 

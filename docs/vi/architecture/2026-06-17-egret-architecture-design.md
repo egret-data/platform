@@ -1,9 +1,10 @@
 # Egret — Tài liệu Kiến trúc Tổng thể (Master Architecture Design)
 
-> **Trạng thái:** Bản tham khảo tiếng Việt · **Ngày:** 2026-06-17 · **Phiên bản:** 0.1
+> **Trạng thái:** Tài liệu sống · **Ngày:** 2026-06-27 · **Phiên bản:** 0.2
 > ⚠️ **Bản gốc (source-of-truth) là tiếng Anh:** [`docs/en/architecture/2026-06-17-egret-architecture-design.md`](../../en/architecture/2026-06-17-egret-architecture-design.md).
 > Đây là **bản dịch tham khảo**. Khi có khác biệt, ưu tiên bản tiếng Anh.
 > Các quyết định lớn được ghi lại ở mục [§2 Quyết định kiến trúc](#2-quyết-định-kiến-trúc-adr-tóm-tắt).
+> **v0.2 evolution:** từ v0.1, catalog đã được xây dựng lại trên embedded lakekeeper, sản phẩm được tái định hình thành 4 trụ cột workspace, và per-token catalog authz đã được triển khai — xem [§2 ADRs](#2-quyết-định-kiến-trúc-adr-tóm-tắt), [§10.3](#103-iceberg-rest-catalog-egret-catalog--egret-catalog-engine), và [§16 roadmap](#16-roadmap--trạng-thái).
 
 ---
 
@@ -24,7 +25,7 @@
 13. [API surface & OpenAPI](#13-api-surface--openapi)
 14. [Bảo mật](#14-bảo-mật)
 15. [Bố cục repository](#15-bố-cục-repository)
-16. [Roadmap theo phase](#16-roadmap-theo-phase)
+16. [Roadmap & trạng thái](#16-roadmap--trạng-thái)
 17. [Câu hỏi mở / tương lai](#17-câu-hỏi-mở--tương-lai)
 18. [Phụ lục: nguồn tham khảo](#18-phụ-lục-nguồn-tham-khảo)
 
@@ -43,6 +44,8 @@ design system của sparklabx.
 |---|---|---|
 | **Admin / Data Governance** | Admin, data steward | Quản lý database, Iceberg catalog, Ranger policies, users/roles/workspaces, Data API, workflow ở mức tổ chức, monitoring/audit |
 | **Explorer** | User / analyst | SQL Lab, dataset, chart, dashboard, notebook, Data API của workspace, workflow tự động hoá — **cô lập theo workspace** |
+
+**Mô hình 4 trụ cột (ADR-17):** mỗi workspace là một nền tảng dữ liệu độc lập hoàn chỉnh, gồm bốn trụ cột: **Catalog** (lõi lakehouse: Iceberg catalog per-workspace + kết nối ngoài + lineage), **Analytics** (BI dataset/chart/dashboard + Notebook + cảnh báo), **Engineering** (workflow + data API + pipeline IDE + CDC→Iceberg), và **Admin** (control plane: thành viên, RBAC, quyền catalog, kết nối database/engine, Ranger, secrets, storage). Mô hình hai portal vẫn còn hiệu lực: Admin portal tương ứng trụ cột Admin; Explorer portal bao gồm Catalog + Analytics + Engineering, đều scoped theo workspace.
 
 ### 1.2 Năng lực (capabilities)
 
@@ -81,6 +84,11 @@ design system của sparklabx.
 | ADR-11 | Email | **SMTP + Microsoft Graph** (pluggable) | Tận dụng Microsoft-Graph-SMTP-Relay |
 | ADR-12 | Workspace isolation | **Global register → grant**; **cách ly logic** (row-level `workspace_id` + ranger policy) | Governance tập trung, engine dùng chung, linh hoạt |
 | ADR-13 | Secrets | **Envelope encryption** trong Postgres, KMS-pluggable | Bảo vệ credential at-rest |
+| ADR-14 | Triển khai Catalog | **Nhúng lakekeeper core như một thư viện Rust** (`egret-catalog-engine`) thay vì tự xây Iceberg REST catalog | Cùng iceberg-rust fork → 1 version `iceberg`; tái dùng store/REST/GC/storage production-grade; egret giữ identity/RBAC/UI/token + bridge `Authorizer`. Thay thế `egret-catalog` từ đầu của v0.1 (bảng/handler bị xóa trong migration 0026) |
+| ADR-15 | Tenancy catalog | **1 lakekeeper default project + 1 warehouse per workspace** (`{prefix}` = warehouse UUID), ánh xạ trong `workspace_warehouse`, provisioned khi tạo workspace | Cách ly sâu per-workspace — mỗi workspace có catalog/warehouse riêng |
+| ADR-16 | Catalog authz | **`front_auth` của egret** (xác thực quyền sở hữu token per-workspace + read/write + `namespace_scope`) **+ `EgretAuthorizer` tối giản** (impl lakekeeper `Authorizer` kiểm soát data action theo scope claim của token); RBAC/OpenFGA của lakekeeper KHÔNG được dùng | egret sở hữu identity; authz đầy đủ của lakekeeper nặng hơn cần thiết; bảo vệ chiều sâu 2 lớp |
+| ADR-17 | Định hình sản phẩm | **Mỗi workspace = nền tảng dữ liệu độc lập hoàn chỉnh**, tổ chức thành **4 trụ cột**: Catalog / Analytics / Engineering / Admin | Workspace là đơn vị cô lập cho catalog + engine + config; thay thế định hình hai-portal phẳng trước đây |
+| ADR-18 | Notebook engine | Kernel **Daft** (Python dataframe native Rust) per workspace, gắn với Iceberg catalog của workspace; **hấp thu SQL Lab** vào một bề mặt notebook | Engine dataframe hiện đại; tránh host Jupyter/Spark; một bề mặt ad-hoc. Thay thế mô tả Jupyter/Spark-kernel trong §10.6 |
 
 > Mỗi ADR sẽ có file chi tiết trong `docs/adr/` khi đi vào implement.
 
@@ -209,6 +217,8 @@ graph LR
 Workspace Cargo `crates/`. Quy ước: mỗi crate có **một mục đích rõ**, giao tiếp qua **trait/interface
 trong `egret-core`**, có thể test độc lập. Crate `*-server` tổng hợp router.
 
+> Các product crate `egret-notebook` **(planned)**, `egret-dataapi` **(planned)**, `egret-workflow` **(planned)**, `egret-notify` **(planned)**, `egret-monitor` **(planned)**, `egret-events` **(planned)** chưa được xây dựng; các dòng dưới đây mô tả thiết kế mục tiêu.
+
 ### 5.1 Foundation
 
 | Crate | Trách nhiệm | Phụ thuộc chính | Public interface |
@@ -236,43 +246,52 @@ trong `egret-core`**, có thể test độc lập. Crate `*-server` tổng hợp
 |---|---|---|
 | `egret-database` | Đăng ký & vòng đời connection (Trino/StarRocks): register/test/health/monitor, pool registry, creds qua `egret-secrets`, capability metadata | `DatabaseRegistry`, `Connection` |
 | `egret-engine` | Thực thi query: connector **Trino (REST protocol)** + **StarRocks (MySQL protocol)**, async **JobManager**, streaming kết quả, **result cache/store** (Postgres + object store), cancel, cost/limit guard | `QueryEngine::submit()`, `Job`, `ResultStore` |
-| `egret-catalog` | **Iceberg REST Catalog** spec-compliant: namespaces/tables/views/commits/loadTable, config endpoint, (tùy chọn) S3 signer. Backend Postgres metadata + `egret-storage` data. Lớp `api/iceberg` + `service` theo Lakekeeper | `iceberg_router()` (mount `/catalog`), `CatalogStore` |
+| `egret-catalog` | **Lớp identity phía egret** của catalog — `catalog_tokens` per-workspace (hashed; `permissions[]`, `namespace_scope[]`), ánh xạ `workspace_warehouse`, và Catalog browse API/UI. Store/handler Iceberg từ đầu của v0.1 đã bị xóa ở CE-2 cutover (migration 0026). | `CatalogTokenStore`, browse router |
+| `egret-catalog-engine` | Nhúng core **lakekeeper** như thư viện (sqlx 0.9, pool Postgres cách ly với `search_path = lakekeeper`); xây Iceberg REST router + state, middleware `front_auth`, `EgretAuthorizer`, warehouse provisioning, và in-process browse reads có kiểu. | `mount_catalog_engine`, `build_state`, `EgretAuthorizer`, `front_auth` |
+| `egret-workspace` | Provisioning workspace + trait seam `WorkspaceProvisioner`/`WarehouseProvisioner` (tránh vòng phụ thuộc crate giữa workspace và catalog-engine) | `WorkspaceProvisioner`, `WarehouseProvisioner` |
+| `egret-iceberg-ext` | Mở rộng định dạng Iceberg (Iceberg metadata helper riêng của egret) | các kiểu mở rộng định dạng |
 
 ### 5.4 Application / Product
 
 | Crate | Trách nhiệm | Public interface |
 |---|---|---|
 | `egret-bi` | Semantic layer: **dataset** (logical table, column, metric, computed), **SQL Lab** saved query, **chart** (viz config → ECharts spec), **dashboard** (layout lưới nhiều tab, parameter/filter, click behaviour: cross-filter/URL/drill-through), query qua `egret-engine`, caching | `DatasetService`, `ChartService`, `DashboardService`, `SqlLabService` |
-| `egret-notebook` | Notebook model (cells), **kernel session** Jupyter/Spark (giao thức), thực thi, gắn `sparklabx/kernel` | `NotebookService`, `KernelGateway` |
-| `egret-dataapi` | **Data API Builder**: API definition, **dynamic-SQL template engine** (MyBatis-style: if/foreach/where), param binding, multi-statement + transaction, publish/version/**hot-reload**, **gateway runtime** (token/api-key, IP allow/deny, rate-limit, cache, call-log) | `ApiDefService`, `ApiGateway`, `SqlTemplate` |
-| `egret-workflow` | **Automation engine**: DAG model, **triggers** (cron via `tokio-cron-scheduler`, webhook, on-event), **executors** (run-query, send-email, http-request, transform, branch, call-dataapi, export), run engine + history, retry/alert | `WorkflowService`, `WorkflowRunner`, `NodeExecutor` trait |
-| `egret-notify` | Providers **SMTP + Microsoft Graph** (pluggable), template render | `Notifier` trait |
-| `egret-monitor` | Query monitoring, **audit log**, usage metrics, Prometheus exporter, admin health rollup | `AuditLog`, `Metrics` |
+| `egret-notebook` **(planned)** | Notebook model (cells), kernel **Daft** per workspace (ADR-18), gắn với Iceberg catalog của workspace, thực thi, hấp thu SQL Lab | `NotebookService`, `KernelGateway` |
+| `egret-dataapi` **(planned)** | **Data API Builder**: API definition, **dynamic-SQL template engine** (MyBatis-style: if/foreach/where), param binding, multi-statement + transaction, publish/version/**hot-reload**, **gateway runtime** (token/api-key, IP allow/deny, rate-limit, cache, call-log) | `ApiDefService`, `ApiGateway`, `SqlTemplate` |
+| `egret-workflow` **(planned)** | **Automation engine**: DAG model, **triggers** (cron via `tokio-cron-scheduler`, webhook, on-event), **executors** (run-query, send-email, http-request, transform, branch, call-dataapi, export), run engine + history, retry/alert | `WorkflowService`, `WorkflowRunner`, `NodeExecutor` trait |
+| `egret-notify` **(planned)** | Providers **SMTP + Microsoft Graph** (pluggable), template render | `Notifier` trait |
+| `egret-monitor` **(planned)** | Query monitoring, **audit log**, usage metrics, Prometheus exporter, admin health rollup | `AuditLog`, `Metrics` |
 
 ### 5.5 Sơ đồ phụ thuộc crate (rút gọn)
+
+> Lưu ý: `egret-notebook`, `egret-dataapi`, `egret-workflow`, `egret-notify`, `egret-monitor`, `egret-events` là **(planned)** và chưa được xây dựng.
 
 ```mermaid
 graph TD
   bin --> server
-  server --> auth & authz & ranger & database & engine & catalog & bi & notebook & dataapi & workflow & monitor
+  bin --> catalog-engine
+  server --> auth & authz & ranger & database & engine & catalog & bi & workspace
+  server -.->|planned| notebook & dataapi & workflow & monitor
   ranger --> authz
   bi --> engine
-  dataapi --> engine
-  notebook --> engine
-  workflow --> engine & notify & dataapi
+  dataapi -.->|planned| engine
+  notebook -.->|planned| engine
+  workflow -.->|planned| engine & notify & dataapi
   engine --> database & storage
-  catalog --> storage & metastore
+  catalog --> metastore
+  catalog-engine --> metastore & storage
+  workspace --> catalog-engine
   database --> secrets
-  authz --> metastore & events
+  authz --> metastore
   auth --> metastore
-  monitor --> events & metastore
+  monitor -.->|planned| metastore
   subgraph foundation
     core
     config
     metastore
     secrets
     storage
-    events
+    events["events (planned)"]
   end
 ```
 
@@ -465,13 +484,19 @@ policy_audit(id, policy_id, action, actor, at)
 ### 9.4 Catalog (Iceberg)
 
 ```text
-catalog_namespaces(id, name, properties_jsonb)
-catalog_tables(id, namespace_id, name, metadata_location, current_snapshot_id,
-               format_version, properties_jsonb)
-catalog_table_metadata_log(table_id, metadata_location, created_at)
-catalog_views(id, namespace_id, name, metadata_location)
-workspace_catalog_grant(workspace_id, namespace_id, granted_by)
-catalog_commits(table_id, snapshot_id, parent_id, summary_jsonb, created_at)
+-- Các bảng catalog tự xây của v0.1 (catalog_namespaces / catalog_tables /
+-- catalog_views / catalog_commits) đã bị XÓA trong migration 0026. egret nay nhúng
+-- lakekeeper; metadata Iceberg nằm trong ~63 bảng riêng của lakekeeper dưới
+-- Postgres schema `lakekeeper` (search_path-isolated). egret chỉ giữ các bảng
+-- identity + tenancy:
+
+catalog_tokens(id, workspace_id, token_hash, label,
+               permissions text[],      -- {catalog:read, catalog:write}
+               namespace_scope text[],  -- {} = mọi namespace; ngược lại giới hạn theo cây con (vd {marts})
+               created_at, revoked_at)  -- token truy cập catalog per-workspace (xác thực engine)
+workspace_warehouse(workspace_id PK→workspaces, warehouse_id uuid, created_at)  -- {prefix} = warehouse UUID
+role_permissions(role_id, 'catalog:read' | 'catalog:write')                      -- RBAC workspace cho catalog
+-- schema `lakekeeper`: projects, warehouses, namespaces, tabulars, … (do embedded engine sở hữu)
 ```
 
 ### 9.5 Engine / query
@@ -546,10 +571,13 @@ cho spec riêng từng phase.
 - **ResultStore:** cache theo hash(sql+db); kết quả lớn ghi object store, metadata ở `queries`.
 - **Khách hàng:** SQL Lab, dataset preview, chart query, Data API, workflow run-query node.
 
-### 10.3 Iceberg REST Catalog (`egret-catalog`)
-- **Spec:** Iceberg REST Catalog API — `GET /v1/config`, namespaces CRUD, tables (`create/load/commit/drop/rename`), views, `report-metrics`, optional S3 remote signing.
-- **Layout (theo Lakekeeper):** `api/iceberg` (HTTP handlers) + `service::CatalogStore` (Postgres) + `egret-storage` (data files). Mount dưới `/catalog`.
-- **Tích hợp:** Trino/StarRocks/Spark cấu hình REST catalog trỏ về Egret; grant namespace theo workspace; metadata pointer ở `catalog_tables.metadata_location`.
+### 10.3 Iceberg REST Catalog (`egret-catalog` + `egret-catalog-engine`)
+- **Cách tiếp cận (ADR-14):** nhúng core **lakekeeper** như thư viện (`egret-catalog-engine`, sqlx 0.9) trên cùng iceberg-rust fork với egret → 1 version `iceberg`. lakekeeper cung cấp Iceberg REST router spec-compliant, Postgres catalog store, storage IO, và (tương lai) GC/task workers. Migration lakekeeper chạy trong Postgres schema `lakekeeper` cách ly (`search_path = lakekeeper,public`).
+- **Tenancy (ADR-15):** 1 lakekeeper default project; **1 warehouse per workspace** (`{prefix}` = warehouse UUID), ánh xạ trong `workspace_warehouse`, được provisioned khi tạo workspace qua trait seam `WarehouseProvisioner` (không circular dep).
+- **Lớp identity (`egret-catalog`):** `catalog_tokens` per-workspace (hashed; `permissions[]`, `namespace_scope[]`), ánh xạ warehouse, và Catalog browse API/UI.
+- **Bảo mật (`front_auth` + ADR-16):** lakekeeper router được mount tại `/catalog/v1` sau middleware egret bảo vệ (1) quyền sở hữu token per-workspace (`{prefix}` phải bằng warehouse của workspace → 403), (2) quyền read/write per-token, (3) `namespace_scope` per-token. Middleware tiêm principal lakekeeper mang scope token làm claim `egret`; **`EgretAuthorizer`** nhúng sẵn cấp quyền data action (namespace/table/view) theo claim đó làm defense-in-depth; system principal (bootstrap + in-process browse) được bypass.
+- **egret-server KHÔNG link lakekeeper** — `egret-bin` xây engine + browse router rồi truyền vào dạng `axum::Router` dựng sẵn, giữ lakekeeper ra khỏi dependency graph của `egret-server`.
+- **Trạng thái:** CE-1 (spike) → CE-2 (embedded sống per-workspace + cutover; catalog v0.1 bị xóa) → CE-3 (per-token read/write scope) → CE-4 (`EgretAuthorizer` + `namespace_scope`) — tất cả đã merge. Tiếp theo: CE-5 (storage profiles/secrets bridge, GCS/Azure), CE-6 (GC/task-queue workers).
 
 ### 10.4 Apache Ranger API (`egret-ranger`) — xem §8.3.
 
@@ -560,8 +588,8 @@ cho spec riêng từng phase.
 - **Dashboard:** layout grid (`layout_jsonb`), cross-filter, dashboard-level filters; chart con qua `dashboard_charts`.
 - **Tham khảo:** Superset (chart/dashboard/dataset model), Metabase.
 
-### 10.6 Notebook (`egret-notebook`)
-- Notebook cells (sql/markdown/python), kernel session qua **Jupyter/Spark** (tái dùng `sparklabx/kernel` + `@jupyterlab/services` ở FE), output stream qua WS, parquet preview (hyparquet).
+### 10.6 Notebook (`egret-notebook`) **(planned)**
+- **(ADR-18)** Notebook per-workspace trên kernel **Daft** (Python dataframe native Rust), gắn với Iceberg catalog của workspace. SQL cell **hấp thu SQL Lab** thành một bề mặt ad-hoc. Output stream qua WS, parquet preview (hyparquet). *(v0.1: Jupyter/Spark kernel)*
 
 ### 10.7 Data API Builder (`egret-dataapi`)
 - **Định nghĩa:** path/method + `sql_template` (dynamic SQL kiểu MyBatis: `<if>`, `<foreach>`, `<where>`) + params schema + database target.
@@ -757,12 +785,15 @@ egret/
 │   ├── egret-database/
 │   ├── egret-engine/
 │   ├── egret-catalog/
+│   ├── egret-catalog-engine/
+│   ├── egret-workspace/
+│   ├── egret-iceberg-ext/
 │   ├── egret-bi/
-│   ├── egret-notebook/
-│   ├── egret-dataapi/
-│   ├── egret-workflow/
-│   ├── egret-notify/
-│   └── egret-monitor/
+│   ├── egret-notebook/             # planned
+│   ├── egret-dataapi/              # planned
+│   ├── egret-workflow/             # planned
+│   ├── egret-notify/               # planned
+│   └── egret-monitor/              # planned
 ├── migrations/                     # sqlx migrations
 ├── frontend/                       # pnpm monorepo (apps/web + packages/*)
 ├── deploy/                         # Dockerfile, docker-compose, helm/
@@ -774,47 +805,28 @@ egret/
 
 ---
 
-## 16. Roadmap theo phase
+## 16. Roadmap & trạng thái
 
-> Nguyên tắc: **nền tảng trước → BI sau** (ADR roadmap). Mỗi phase là một hoặc nhiều spec riêng
-> (brainstorm → plan → implement).
+> **Tái định hình (v0.2):** mục tiêu xây **mỗi workspace thành một nền tảng dữ liệu độc lập hoàn chỉnh** theo **4 trụ cột** (ADR-17). Mỗi mục dưới đây là một chu kỳ brainstorm → spec → plan → subagent-build riêng.
 
-### Phase 0 — Bootstrap (móng)
-- Cargo workspace + crate skeleton; `egret-core`, `egret-config`, `egret-metastore`, `egret-server`.
-- CI, migration runner, Docker/compose dev (Postgres + MinIO + Trino + StarRocks).
-- FE skeleton: tách `packages/ui` từ sparklabx, app shell + workspace switcher.
+### 16.1 Đã hoàn thành
+- **Foundation:** Cargo workspace + crates; Postgres metastore + sqlx migrations (0001–0028); typed config; dev docker-compose (Postgres + MinIO + Trino/StarRocks).
+- **Admin / control plane:** local auth + session, workspaces + members + RBAC; đăng ký database/engine (Trino REST + StarRocks MySQL); Ranger REST-compatible policy surface.
+- **Analytics (BI):** Dataset / Chart / Dashboard với **Metabase parity** sâu (table & pivot, per-series chart options, axis range, series rename, table view-as + mini-bar, PNG export, Vietnam-map geo).
+- **Catalog (lakehouse core):** Iceberg catalog per-workspace qua **embedded lakekeeper** — CE-1 spike → CE-2 tenancy + cutover → CE-3 per-token read/write scope → CE-4 `EgretAuthorizer` tối giản + `namespace_scope` (đã merge toàn bộ; xem §10.3).
 
-### Phase 1 — Nền tảng (auth, workspace, database)
-- `egret-auth`: OIDC/SSO, session, RBAC, workspace membership.
-- `egret-database`: đăng ký/test/health Trino & StarRocks; `egret-secrets`.
-- Admin portal: users, workspaces, databases. Explorer shell.
-- **Mốc:** đăng nhập SSO, tạo workspace, đăng ký + grant database.
+### 16.2 Tiếp theo — Trụ cột Catalog (CE chain)
+- **CE-5** — storage profiles / secrets bridge: cấu hình storage per-workspace, GCS/Azure ngoài S3/MinIO, kết nối secret store của lakekeeper với `egret-secrets`.
+- **CE-6** — GC / task-queue workers: chạy snapshot-expiry + orphan-file cleanup của lakekeeper (registry nhúng hiện chỉ phục vụ REST, chưa spawn worker).
+- Sau: kết nối catalog ngoài (đăng ký REST/Glue/Nessie per workspace), hoàn thiện parity lakekeeper (soft-delete, statistics, generic tables), lineage.
 
-### Phase 2 — Catalog & Ranger (governance core)
-- `egret-storage`, `egret-catalog` (Iceberg REST), `egret-authz` + `egret-ranger`.
-- Admin: catalog browser, policy authoring.
-- **Mốc:** Trino/StarRocks dùng Egret làm Iceberg catalog + tải Ranger policy về enforce.
+### 16.3 Các trụ cột tiếp theo
+- **Analytics — Notebook (Daft):** notebook per-workspace (ADR-18) trên kernel **Daft** gắn với Iceberg catalog workspace, với SQL cell nhanh **hấp thu SQL Lab**; cảnh báo chart/dashboard.
+- **Engineering:** hoàn thiện Workflow + Data API (dbapi); Pipeline IDE (kiểu Airflow/Astronomer); CDC → Iceberg ingestion.
+- **Admin:** tự phục vụ kết nối database/engine per-workspace; UI Secrets + Storage config per-workspace; Ranger data policies.
 
-### Phase 3 — Query & SQL Lab & Dataset
-- `egret-engine` (Trino REST + StarRocks MySQL, async, result store), `egret-bi` (sqllab + dataset).
-- Explorer: SQL Lab, dataset.
-- **Mốc:** chạy query async có cache, lưu saved query, tạo dataset.
-
-### Phase 4 — Chart & Dashboard & Notebook
-- `egret-bi` (chart ECharts + dashboard), `egret-notebook`.
-- Explorer: charts, dashboards, notebooks.
-- **Mốc:** dựng dashboard từ dataset; notebook chạy kernel.
-
-### Phase 5 — Data API Builder
-- `egret-dataapi`: template engine, gateway, client mgmt, call-log.
-- **Mốc:** publish SQL→API, gọi qua api-key có rate-limit & cache.
-
-### Phase 6 — Workflow Automation
-- `egret-workflow` + `egret-notify`, FE workflow canvas (React Flow).
-- **Mốc:** cron → run-query → send-email chạy được, có run history.
-
-### Phase 7 — Monitoring, hardening, scale
-- `egret-monitor` đầy đủ, audit, Prometheus, Helm, leader-election scheduler, event bus phân tán.
+### 16.4 Hardening
+- Monitoring/audit, Prometheus, Helm, leader-election scheduler, event bus phân tán.
 
 ---
 
@@ -843,4 +855,4 @@ egret/
 
 ---
 
-*Hết tài liệu gốc v0.1. Cập nhật qua PR; thay đổi lớn ghi ADR mới trong `docs/adr/`.*
+*Tài liệu sống v0.2 (2026-06-27). Cập nhật qua PR; thay đổi lớn ghi ADR mới trong `docs/vi/adr/`.*
