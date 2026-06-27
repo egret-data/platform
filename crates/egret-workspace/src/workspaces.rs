@@ -1,62 +1,38 @@
 //! Postgres-backed workspace CRUD.
 
-use std::sync::Arc;
-
 use egret_core::{Error, Pagination, Result, UserId, WorkspaceId};
 use egret_metastore::Db;
 use uuid::Uuid;
 
 use crate::model::{is_valid_slug, Workspace};
 
-/// Default warehouse base, matching `config.catalog.warehouse`'s default. Used
-/// when a `WorkspaceRepo` is built without an explicit base (tests, callers that
-/// never create workspaces).
-const DEFAULT_WAREHOUSE_BASE: &str = "s3://warehouse";
-
 #[derive(Clone)]
 pub struct WorkspaceRepo {
     db: Db,
-    /// Base location new workspace catalogs are provisioned under, e.g.
-    /// `s3://warehouse`. Threaded from `config.catalog.warehouse`.
-    warehouse_base: Arc<str>,
 }
 
 impl WorkspaceRepo {
     pub fn new(db: Db) -> Self {
-        Self {
-            db,
-            warehouse_base: Arc::from(DEFAULT_WAREHOUSE_BASE),
-        }
+        Self { db }
     }
 
-    /// Build a repo whose `create` provisions catalogs under `warehouse_base`
-    /// (from `config.catalog.warehouse`).
-    pub fn with_warehouse_base(db: Db, warehouse_base: impl Into<Arc<str>>) -> Self {
-        Self {
-            db,
-            warehouse_base: warehouse_base.into(),
-        }
-    }
-
-    /// Per-workspace warehouse location: `<base>/workspaces/<slug>/warehouse`.
-    fn warehouse_location_for(&self, slug: &str) -> String {
-        format!(
-            "{}/workspaces/{}/warehouse",
-            self.warehouse_base.trim_end_matches('/'),
-            slug
-        )
-    }
-
-    /// Create a workspace and, atomically in the same transaction, provision its
-    /// managed Iceberg catalog (`catalogs` row) so per-`{prefix}` REST routing can
-    /// resolve it. Idempotent on the catalog row via `ON CONFLICT DO NOTHING`.
+    /// Insert a workspace row.
+    ///
+    /// Warehouse provisioning is **no longer done here** (CE-2 T4). The legacy
+    /// A-2 path inserted a `catalogs` row in the same transaction; under the
+    /// embedded-lakekeeper architecture the workspace's catalog is a lakekeeper
+    /// *warehouse*, provisioned out-of-band by
+    /// `egret_catalog_engine::provision_workspace_warehouse` from the
+    /// server/handler layer (which holds the engine state + storage cfg +
+    /// catalog store). Keeping that out of `WorkspaceRepo` avoids a circular
+    /// crate dependency (egret-workspace must not depend on egret-catalog-engine)
+    /// and keeps the warehouse round-trip (a live S3 `validate_access`) out of
+    /// this DB transaction.
     pub async fn create(&self, slug: &str, name: &str, created_by: UserId) -> Result<Workspace> {
         if !is_valid_slug(slug) {
             return Err(Error::InvalidInput(format!("invalid slug: {slug}")));
         }
-        let warehouse_location = self.warehouse_location_for(slug);
 
-        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
         let row = sqlx::query_as::<_, WorkspaceRow>(
             "INSERT INTO workspaces (slug, name, created_by) VALUES ($1, $2, $3) \
              RETURNING id, slug, name, status",
@@ -64,7 +40,7 @@ impl WorkspaceRepo {
         .bind(slug)
         .bind(name)
         .bind(created_by.0)
-        .fetch_one(&mut *tx)
+        .fetch_one(&self.db.pool)
         .await
         .map_err(|e| match e {
             sqlx::Error::Database(db) if db.is_unique_violation() => {
@@ -73,21 +49,6 @@ impl WorkspaceRepo {
             other => db_err(other),
         })?;
 
-        // Provision the workspace's managed Iceberg catalog. The catalog name
-        // mirrors the slug; `ON CONFLICT (workspace_id) DO NOTHING` makes this
-        // idempotent if a catalog already exists for the workspace.
-        sqlx::query(
-            "INSERT INTO catalogs (workspace_id, name, warehouse_location) \
-             VALUES ($1, $2, $3) ON CONFLICT (workspace_id) DO NOTHING",
-        )
-        .bind(row.id)
-        .bind(slug)
-        .bind(&warehouse_location)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
-
-        tx.commit().await.map_err(db_err)?;
         Ok(row.into())
     }
 

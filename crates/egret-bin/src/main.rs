@@ -203,16 +203,87 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         config: config.clone(),
         rate_limiter,
     };
+
+    // --- Embedded lakekeeper catalog engine (CE-2 T5) ------------------------
+    // When the catalog surface is enabled, build the LIVE engine at startup:
+    //   1. migrate lakekeeper's catalog into its isolated `lakekeeper` schema,
+    //   2. bootstrap the default project under the stable system principal,
+    //   3. build the engine `ApiContext` (`build_state`),
+    //   4. assemble the engine router fronted by egret's per-workspace
+    //      token-ownership middleware (`mount_catalog_engine`, A-3), and
+    //   5. construct the concrete `WarehouseProvisioner` so workspace creation
+    //      provisions a per-workspace warehouse (flips the T4 `None` to `Some`).
+    // This is the single composition point that makes the engine live; the
+    // lakekeeper graph (and its second `sqlx` major) stays contained here.
+    let (catalog_engine, warehouse_provisioner, catalog_browse): (
+        Option<axum::Router>,
+        egret_workspace::provision::SharedWarehouseProvisioner,
+        Option<axum::Router>,
+    ) = if config.catalog.enabled {
+        let dsn = &config.database.url;
+        egret_catalog_engine::run_lakekeeper_migrations(dsn)
+            .await
+            .context("running lakekeeper catalog migrations on boot")?;
+        let engine_state = egret_catalog_engine::build_state(dsn)
+            .await
+            .context("building lakekeeper engine state")?;
+        egret_catalog_engine::ensure_bootstrapped(
+            engine_state.clone(),
+            &config.catalog.system_user,
+        )
+        .await
+        .context("bootstrapping lakekeeper default project")?;
+
+        let engine_store = egret_catalog::service::CatalogStore::new(db.clone());
+        let storage_cfg = egret_storage::StorageConfig {
+            endpoint: config.storage.endpoint.clone(),
+            region: config.storage.region.clone(),
+            bucket: config.storage.bucket.clone(),
+            access_key: config.storage.access_key.clone(),
+            secret_key: config.storage.secret_key.clone(),
+            path_style: config.storage.path_style,
+        };
+
+        let router =
+            egret_catalog_engine::mount_catalog_engine(engine_state.clone(), engine_store.clone());
+
+        // CE-2 T6: the session-authed browse API (for the UI) reads the embedded
+        // lakekeeper catalog via the engine `ApiContext`. Built here (in the
+        // composition root) so the lakekeeper graph stays contained, then carried
+        // into `AppState` as a pre-built router (like `catalog_engine`).
+        let browse_router =
+            egret_catalog_engine::browse_router().with_state(egret_catalog_engine::BrowseState {
+                engine: engine_state.clone(),
+                store: egret_catalog::service::CatalogStore::new(db.clone()),
+                system_user: config.catalog.system_user.clone().into(),
+                sessions: sessions.clone(),
+                workspaces: WorkspaceRepo::new(db.clone()),
+                authz: Authorizer::new(db.clone()),
+            });
+
+        let provisioner: std::sync::Arc<dyn egret_workspace::provision::WarehouseProvisioner> =
+            std::sync::Arc::new(egret_catalog_engine::EngineWarehouseProvisioner::new(
+                engine_state,
+                engine_store,
+                storage_cfg,
+                config.catalog.system_user.clone(),
+            ));
+
+        (Some(router), Some(provisioner), Some(browse_router))
+    } else {
+        (None, None, None)
+    };
+
     let workspace = WorkspaceState {
-        // Provision per-workspace Iceberg catalogs under config.catalog.warehouse.
-        workspaces: WorkspaceRepo::with_warehouse_base(
-            db.clone(),
-            config.catalog.warehouse.clone(),
-        ),
+        workspaces: WorkspaceRepo::new(db.clone()),
         members: MemberRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
         users: users.clone(),
         sessions: sessions.clone(),
+        // Per-workspace warehouse provisioning hook (CE-2 T4/T5). `Some` once the
+        // embedded lakekeeper engine is built above (catalog enabled); workspace
+        // creation then provisions a per-workspace warehouse via the engine.
+        warehouse_provisioner,
     };
 
     let oidc = if config.oidc.enabled {
@@ -253,45 +324,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         None
     };
 
-    let catalog = if config.catalog.enabled {
-        let storage_cfg = egret_storage::StorageConfig {
-            endpoint: config.storage.endpoint.clone(),
-            region: config.storage.region.clone(),
-            bucket: config.storage.bucket.clone(),
-            access_key: config.storage.access_key.clone(),
-            secret_key: config.storage.secret_key.clone(),
-            path_style: config.storage.path_style,
-        };
-        let store = egret_catalog::service::CatalogStore::new(db.clone());
-        let storage: std::sync::Arc<dyn egret_storage::ObjectStore> =
-            std::sync::Arc::new(egret_storage::S3Store::new(&storage_cfg).await?);
-        let service = egret_catalog::service::CatalogService { store, storage };
-        // Advertise an externally-reachable origin in `s3.signer.uri`, not the bind
-        // host (which defaults to 0.0.0.0 and is unreachable for engines).
-        let public = config
-            .catalog
-            .public_url
-            .clone()
-            .unwrap_or_else(|| format!("http://localhost:{}", config.server.port));
-        let base_url = format!("{}/catalog", public.trim_end_matches('/'));
-        Some(egret_catalog::CatalogState {
-            service,
-            auth_token: config.catalog.auth_token.clone().into(),
-            storage_cfg: std::sync::Arc::new(storage_cfg),
-            base_url: base_url.into(),
-        })
-    } else {
-        None
-    };
-
-    // Session-authenticated internal catalog browse API (for the UI). Always wired
-    // (independent of `config.catalog.enabled`, which gates the Iceberg REST surface).
-    let catalog_browse = Some(egret_catalog::BrowseState {
-        store: egret_catalog::service::CatalogStore::new(db.clone()),
-        sessions: sessions.clone(),
-        workspaces: WorkspaceRepo::new(db.clone()),
-        authz: Authorizer::new(db.clone()),
-    });
+    // CE-2 T6: the browse API (`catalog_browse`) is built above alongside the
+    // embedded lakekeeper engine — it reads lakekeeper, so it requires the engine
+    // `ApiContext` and is therefore gated on `config.catalog.enabled` (when the
+    // catalog surface is off there is no warehouse to browse).
 
     // Hoist crypto/SecretStore/DatabaseRepo so both the database and engine blocks can share them.
     let databases = {
@@ -374,7 +410,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         auth: Some(auth),
         workspace: Some(workspace),
         oidc,
-        catalog,
+        catalog_engine,
         catalog_browse,
         ranger,
         database,

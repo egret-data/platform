@@ -34,12 +34,3 @@ pub async fn seed_workspace_with_slug(s: &CatalogStore) -> (Uuid, String) {
         .expect("seed workspace");
     (id, slug)
 }
-
-/// Seed a workspace + its default catalog and return the catalog id.
-pub async fn seed_catalog(s: &CatalogStore) -> Uuid {
-    let ws = seed_workspace(s).await;
-    s.create_catalog(ws, "default", "s3://wh")
-        .await
-        .expect("seed catalog")
-        .id
-}

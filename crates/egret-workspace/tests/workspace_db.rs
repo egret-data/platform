@@ -61,26 +61,32 @@ async fn create_get_and_unique_slug() {
 }
 
 #[tokio::test]
-async fn create_provisions_catalog_resolvable_by_slug() {
+async fn create_does_not_provision_legacy_catalogs_row() {
+    // CE-2 T4: warehouse provisioning moved out of `WorkspaceRepo::create` (it no
+    // longer writes the legacy `catalogs` table). The workspace's catalog is now a
+    // lakekeeper warehouse, provisioned from the server/handler layer via the
+    // `WarehouseProvisioner` hook. `create` is a plain workspace-row insert.
     let Some(db) = connect().await else {
         eprintln!("skip");
         return;
     };
     let owner = seed_user(&db).await;
-    let base = "s3://test-warehouse/";
-    let repo = WorkspaceRepo::with_warehouse_base(db.clone(), base);
+    let repo = WorkspaceRepo::new(db.clone());
     let slug = uniq("ws");
 
     let ws = repo.create(&slug, "Sales", owner).await.unwrap();
+    assert_eq!(ws.slug, slug);
 
-    // The managed catalog must be resolvable by the workspace slug (REST {prefix}).
-    let store = egret_catalog::service::CatalogStore::new(db.clone());
-    let catalog = store.get_catalog_by_slug(&slug).await.unwrap();
-    assert_eq!(catalog.workspace_id, ws.id.0);
-    assert_eq!(
-        catalog.warehouse_location,
-        format!("s3://test-warehouse/workspaces/{slug}/warehouse"),
-        "warehouse_location is <base>/workspaces/<slug>/warehouse with a trimmed trailing slash"
+    // The legacy `catalogs` metadata table was dropped in migration 0026 once
+    // lakekeeper became the engine, so `create` provably cannot write such a row:
+    // the relation no longer exists.
+    let legacy_table: Option<String> = sqlx::query_scalar("SELECT to_regclass('catalogs')::text")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert!(
+        legacy_table.is_none(),
+        "legacy `catalogs` table must no longer exist (dropped in 0026)"
     );
 }
 
@@ -239,6 +245,7 @@ async fn ws_state(db: &Db) -> WorkspaceState {
             chrono::Duration::hours(24),
             chrono::Duration::minutes(60),
         ),
+        warehouse_provisioner: None,
     }
 }
 

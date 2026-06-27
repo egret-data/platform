@@ -1,0 +1,93 @@
+//! DB-gated test proving egret's migrator and lakekeeper's migrator coexist in
+//! one Postgres database without colliding, by isolating lakekeeper into its own
+//! `lakekeeper` schema (tables AND its `_sqlx_migrations` tracker), while egret's
+//! migrations stay in `public`.
+//!
+//! Self-skips when `DATABASE_URL` is unset. Run with:
+//!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
+//!   cargo test -p egret-catalog-engine --test migrate
+
+use egret_catalog_engine::run_lakekeeper_migrations;
+use egret_metastore::Db;
+use sqlx::Row;
+
+#[tokio::test]
+async fn migrate_isolates_schemas() {
+    let Ok(dsn) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL not set — skipping migrate_isolates_schemas");
+        return;
+    };
+
+    // Run BOTH migrators against the same database.
+    // egret -> public.*, lakekeeper -> lakekeeper.*
+    let db = Db::connect(&dsn, 5).await.expect("egret pool connects");
+    db.migrate().await.expect("egret migrations apply");
+
+    run_lakekeeper_migrations(&dsn)
+        .await
+        .expect("lakekeeper migrations apply into isolated schema");
+
+    // Plain verification pool (default search_path).
+    let pool = sqlx::PgPool::connect(&dsn)
+        .await
+        .expect("verification pool connects");
+
+    // 1. lakekeeper's `table` lives in the lakekeeper schema.
+    let lk_table: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('lakekeeper.\"table\"')::text")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        lk_table.is_some(),
+        "lakekeeper.\"table\" should exist in the lakekeeper schema"
+    );
+
+    // 2. egret's catalog tables stay in public. (The legacy `catalog_tables`
+    //    metadata table was dropped in migration 0026 once lakekeeper became the
+    //    engine; assert against `catalog_tokens`, an egret-owned table that
+    //    survives in public.)
+    let egret_table: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('public.catalog_tokens')::text")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        egret_table.is_some(),
+        "public.catalog_tokens should exist (egret's migrations untouched)"
+    );
+
+    // 2b. lakekeeper's `table` must NOT leak into public.
+    let lk_in_public: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('public.\"table\"')::text")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        lk_in_public.is_none(),
+        "lakekeeper.\"table\" must not leak into public"
+    );
+
+    // 3. Two DISTINCT migration trackers, both populated.
+    let lk_migrations: i64 = sqlx::query("SELECT count(*) AS c FROM lakekeeper._sqlx_migrations")
+        .fetch_one(&pool)
+        .await
+        .expect("lakekeeper._sqlx_migrations exists")
+        .get("c");
+    let public_migrations: i64 = sqlx::query("SELECT count(*) AS c FROM public._sqlx_migrations")
+        .fetch_one(&pool)
+        .await
+        .expect("public._sqlx_migrations exists")
+        .get("c");
+
+    assert!(
+        lk_migrations > 0,
+        "lakekeeper._sqlx_migrations should record applied migrations"
+    );
+    assert!(
+        public_migrations > 0,
+        "public._sqlx_migrations should record egret's applied migrations"
+    );
+
+    pool.close().await;
+}
