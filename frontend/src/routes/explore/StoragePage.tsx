@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import FileBrowser from "@/routes/explore/storage/FileBrowser";
 
 export default function StoragePage() {
   const ws = useParams().workspace!;
@@ -35,6 +36,15 @@ export default function StoragePage() {
   const [addOpen, setAddOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<StorageConn | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<StorageConn | null>(null);
+  const [browseTarget, setBrowseTarget] = useState<StorageConn | null>(null);
+
+  // Master/detail: when a connection is selected for browsing, show its
+  // FileBrowser instead of the connections list.
+  if (browseTarget) {
+    return (
+      <FileBrowser ws={ws} conn={browseTarget} onClose={() => setBrowseTarget(null)} />
+    );
+  }
 
   if (conns.isLoading) {
     return (
@@ -117,7 +127,7 @@ export default function StoragePage() {
                         variant="ghost"
                         size="sm"
                         className="text-muted-foreground"
-                        disabled
+                        onClick={() => setBrowseTarget(conn)}
                         aria-label={`Browse files for ${conn.name}`}
                       >
                         <FolderOpen className="h-4 w-4" />

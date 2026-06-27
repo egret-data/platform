@@ -17,6 +17,16 @@ vi.mock("@/api/storage", () => ({
   useCreateStorageConn: () => createMutation(),
   useUpdateStorageConn: () => updateMutation(),
   useDeleteStorageConn: () => deleteMutation(),
+  // FileBrowser (rendered on Browse) consumes these.
+  useStorageObjects: () => ({
+    data: { prefix: "", folders: [], objects: [] },
+    isLoading: false,
+    isError: false,
+    error: null,
+  }),
+  useUploadObject: () => ({ mutate: vi.fn(), isPending: false }),
+  useDeleteObject: () => ({ mutate: vi.fn(), isPending: false }),
+  downloadObject: vi.fn(),
 }));
 
 import StoragePage from "@/routes/explore/StoragePage";
@@ -340,6 +350,28 @@ describe("StoragePage", () => {
         }),
       );
     });
+  });
+
+  // ── Browse ────────────────────────────────────────────────────────────────
+
+  it("Browse button is enabled and opens the file browser", async () => {
+    renderAt();
+
+    const browseBtn = screen.getByRole("button", {
+      name: /browse files for prod-lakehouse/i,
+    });
+    expect(browseBtn).not.toBeDisabled();
+
+    fireEvent.click(browseBtn);
+
+    // FileBrowser detail view shows the connection name + a Back action.
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /back to connections/i }),
+      ).toBeInTheDocument();
+    });
+    // The connections list table is no longer shown.
+    expect(screen.queryByText("backup-store")).not.toBeInTheDocument();
   });
 
   // ── Delete ────────────────────────────────────────────────────────────────

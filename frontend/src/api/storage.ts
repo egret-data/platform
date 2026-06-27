@@ -29,8 +29,22 @@ export interface StorageConnInput {
   path_style: boolean;
 }
 
+export interface StorageObject {
+  key: string;
+  size: number;
+  last_modified: string | null;
+}
+
+export interface ObjectListing {
+  prefix: string;
+  folders: string[];
+  objects: StorageObject[];
+}
+
 export const storageKeys = {
   conns: (ws: string) => ["storage", ws, "conns"] as const,
+  objects: (ws: string, connId: string, prefix: string) =>
+    ["storage", ws, "conns", connId, "objects", prefix] as const,
 };
 
 export function useStorageConns(ws: string) {
@@ -88,4 +102,82 @@ export function useDeleteStorageConn(ws: string) {
       queryClient.invalidateQueries({ queryKey: storageKeys.conns(ws) });
     },
   });
+}
+
+// ── Object browser ───────────────────────────────────────────────────────────
+
+export function useStorageObjects(ws: string, connId: string, prefix: string) {
+  return useQuery<ObjectListing, ApiError>({
+    queryKey: storageKeys.objects(ws, connId, prefix),
+    queryFn: () =>
+      apiJson<ObjectListing>(
+        `/ws/${ws}/storages/${connId}/objects?prefix=${encodeURIComponent(prefix)}`,
+      ),
+    enabled: !!connId,
+    // 403 (non-admin) is an expected outcome — surface it immediately.
+    retry: false,
+  });
+}
+
+export interface UploadObjectArgs {
+  key: string;
+  bytes: ArrayBuffer | Uint8Array;
+}
+
+export function useUploadObject(ws: string, connId: string) {
+  const queryClient = useQueryClient();
+  return useMutation<void, ApiError, UploadObjectArgs>({
+    mutationFn: async ({ key, bytes }) => {
+      await apiFetch(
+        `/ws/${ws}/storages/${connId}/objects?key=${encodeURIComponent(key)}`,
+        {
+          method: "POST",
+          body: bytes as BodyInit,
+          headers: { "Content-Type": "application/octet-stream" },
+        },
+      );
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["storage", ws, "conns", connId, "objects"],
+      });
+    },
+  });
+}
+
+export function useDeleteObject(ws: string, connId: string) {
+  const queryClient = useQueryClient();
+  return useMutation<void, ApiError, string>({
+    mutationFn: async (key) => {
+      await apiFetch(
+        `/ws/${ws}/storages/${connId}/objects?key=${encodeURIComponent(key)}`,
+        { method: "DELETE" },
+      );
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["storage", ws, "conns", connId, "objects"],
+      });
+    },
+  });
+}
+
+/** Fetch an object's bytes and trigger a browser download. */
+export async function downloadObject(
+  ws: string,
+  connId: string,
+  key: string,
+): Promise<void> {
+  const res = await apiFetch(
+    `/ws/${ws}/storages/${connId}/objects/content?key=${encodeURIComponent(key)}`,
+  );
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = key.split("/").pop() ?? key;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
