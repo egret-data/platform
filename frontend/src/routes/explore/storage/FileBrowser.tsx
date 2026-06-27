@@ -150,13 +150,19 @@ interface MoveTarget {
 export default function FileBrowser({
   ws,
   conn,
+  prefix,
+  onPrefixChange,
   onClose,
 }: {
   ws: string;
   conn: StorageConn;
+  /** Current folder prefix (controlled — lives in the page URL). */
+  prefix: string;
+  /** Navigate to a new folder prefix (updates the URL). */
+  onPrefixChange: (prefix: string) => void;
   onClose?: () => void;
 }) {
-  const [prefix, setPrefix] = useState("");
+  const setPrefix = onPrefixChange;
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
 
   const [newFolderOpen, setNewFolderOpen] = useState(false);

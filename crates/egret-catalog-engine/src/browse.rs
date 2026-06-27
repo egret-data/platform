@@ -1642,6 +1642,11 @@ async fn list_objects(
     let objects = listing
         .objects
         .iter()
+        // Drop the current folder's own marker object (an empty key equal to the
+        // listing prefix, e.g. `<root>/test/`). It backs the folder so it shows
+        // up in the PARENT listing, but inside the folder it must not appear as a
+        // phantom 0-byte file named after the folder.
+        .filter(|o| o.key != list_prefix)
         .map(|o| ObjectEntry {
             key: strip_root(root, &o.key),
             size: o.size,
