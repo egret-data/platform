@@ -40,6 +40,11 @@ pub use bootstrap::ensure_bootstrapped;
 pub use browse::{browse_router, BrowseState};
 pub use front_auth::{front_auth, FrontAuthState};
 pub use lakekeeper::CancellationToken;
+/// Test-only [`build_state`] variant that takes the task-queue poll interval, so
+/// integration tests can register the built-in GC queues with a short cadence.
+/// Gated behind `test-utils`; `build_state`'s public signature is unchanged.
+#[cfg(feature = "test-utils")]
+pub use mount::build_state_with_gc_poll;
 pub use mount::{
     build_state, catalog_engine_router, mount_catalog_engine, spawn_gc_workers, EngineServer,
     EngineState,

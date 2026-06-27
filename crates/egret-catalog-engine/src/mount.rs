@@ -107,6 +107,41 @@ pub async fn build_state(
     dsn: &str,
     system_user: &str,
 ) -> anyhow::Result<(ApiContext<EngineState>, TaskQueueRegistry)> {
+    // Prod poll interval: 10s between task-queue polls (the same cadence
+    // lakekeeper-bin's serve.rs uses). Tests that need a faster pickup use
+    // `build_state_with_gc_poll` (test-utils-gated).
+    build_state_with_gc_poll_inner(dsn, system_user, std::time::Duration::from_secs(10)).await
+}
+
+/// A test-only variant of [`build_state`] that takes the task-queue **poll
+/// interval** explicitly, so an integration test can register the built-in GC
+/// queues with a short (e.g. 1s) cadence and not wait the prod 10s per tick.
+///
+/// Identical to [`build_state`] in every other respect — same isolated pools,
+/// same authorizer, same `State` assembly, and it registers the SAME 3 built-in
+/// queues into the returned [`TaskQueueRegistry`]. The only difference is the
+/// `poll` passed to `register_built_in_queues`. Gated behind the crate's
+/// `test-utils` feature so the prod build never exposes a tunable poll knob and
+/// [`build_state`]'s public signature is unchanged.
+///
+/// # Errors
+/// Same as [`build_state`].
+#[cfg(feature = "test-utils")]
+pub async fn build_state_with_gc_poll(
+    dsn: &str,
+    system_user: &str,
+    poll: std::time::Duration,
+) -> anyhow::Result<(ApiContext<EngineState>, TaskQueueRegistry)> {
+    build_state_with_gc_poll_inner(dsn, system_user, poll).await
+}
+
+/// Shared body of [`build_state`] / [`build_state_with_gc_poll`]. Private so the
+/// prod path keeps its no-argument `poll` baked in.
+async fn build_state_with_gc_poll_inner(
+    dsn: &str,
+    system_user: &str,
+    poll: std::time::Duration,
+) -> anyhow::Result<(ApiContext<EngineState>, TaskQueueRegistry)> {
     // Two isolated pools (read + write). Both pin search_path = lakekeeper,public.
     let read_pool = build_isolated_pool(dsn)
         .await
@@ -141,7 +176,7 @@ pub async fn build_state(
             catalog.clone(),
             secrets.clone(),
             authz.clone(),
-            std::time::Duration::from_secs(10),
+            poll,
         )
         .await;
     let registered_task_queues = registry.registered_task_queues();
