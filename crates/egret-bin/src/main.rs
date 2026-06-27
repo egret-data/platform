@@ -283,7 +283,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         egret_catalog_engine::run_lakekeeper_migrations(dsn)
             .await
             .context("running lakekeeper catalog migrations on boot")?;
-        let (engine_state, _gc_registry) =
+        let (engine_state, gc_registry) =
             egret_catalog_engine::build_state(dsn, &config.catalog.system_user)
                 .await
                 .context("building lakekeeper engine state")?;
@@ -329,6 +329,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 config.catalog.system_user.clone(),
                 secrets.clone(),
             ));
+
+        let gc_cancel = egret_catalog_engine::CancellationToken::new();
+        egret_catalog_engine::spawn_gc_workers(gc_registry, gc_cancel.clone());
+        tracing::info!("catalog GC workers started");
+        {
+            let gc_cancel = gc_cancel.clone();
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                tracing::info!("SIGINT received, stopping catalog GC workers");
+                gc_cancel.cancel();
+            });
+        }
 
         (Some(router), Some(provisioner), Some(browse_router))
     } else {
