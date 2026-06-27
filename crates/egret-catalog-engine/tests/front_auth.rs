@@ -298,3 +298,222 @@ async fn front_auth_enforces_per_workspace_ownership() {
         "/config resolves the caller's warehouse UUID as the prefix; body={config}"
     );
 }
+
+#[tokio::test]
+async fn front_auth_enforces_per_token_permissions() {
+    let Ok(dsn) = std::env::var("DATABASE_URL") else {
+        eprintln!("DATABASE_URL not set — skipping front_auth permission scope test");
+        return;
+    };
+
+    // --- Engine + egret schema setup ----------------------------------------
+    let db = Db::connect(&dsn, 5).await.expect("connect egret db");
+    db.migrate().await.expect("egret migrations apply");
+
+    run_lakekeeper_migrations(&dsn)
+        .await
+        .expect("lakekeeper migrations apply");
+    let engine_state = build_state(&dsn).await.expect("build engine state");
+    ensure_bootstrapped(engine_state.clone(), SYSTEM_USER)
+        .await
+        .expect("bootstrap default project");
+
+    let store = CatalogStore::new(db.clone());
+    let storage_cfg = dev_storage_config();
+
+    // --- One workspace with a real warehouse --------------------------------
+    let (ws_a, slug_a, wh_a) =
+        seed_workspace_with_warehouse(&db, &store, &engine_state, &storage_cfg, "t6a").await;
+
+    let prefix_a = wh_a.to_string();
+
+    // --- Mint read-only and read-write tokens for workspace A ---------------
+    let (_row, token_ro) = store
+        .create_token(ws_a, "t6-ro", &["catalog:read".to_string()])
+        .await
+        .expect("mint read-only token");
+
+    let (_row, token_rw) = store
+        .create_token(
+            ws_a,
+            "t6-rw",
+            &["catalog:read".to_string(), "catalog:write".to_string()],
+        )
+        .await
+        .expect("mint read-write token");
+
+    let app = mount_catalog_engine(engine_state.clone(), store.clone());
+
+    // === A. Read-only token on A's prefix — GET namespaces → 200 ===========
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/{prefix_a}/namespaces"))
+                .header("Authorization", format!("Bearer {token_ro}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "read-only token may list namespaces (GET → catalog:read); body={body}"
+    );
+
+    // === B. Read-only token — POST create namespace → 403 ===================
+    let ro_ns = format!("ro_demo_{}", Uuid::now_v7().simple());
+    let create_ns_body = serde_json::json!({ "namespace": [ro_ns], "properties": {} });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/{prefix_a}/namespaces"))
+                .header("Authorization", format!("Bearer {token_ro}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&create_ns_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "read-only token MUST NOT create a namespace (POST → catalog:write)"
+    );
+
+    // === C. Read-only token — POST create table → 403 =======================
+    // First need a namespace to attempt table creation under. Use token_rw.
+    let rw_ns = format!("rw_base_{}", Uuid::now_v7().simple());
+    let ns_body = serde_json::json!({ "namespace": [rw_ns], "properties": {} });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/{prefix_a}/namespaces"))
+                .header("Authorization", format!("Bearer {token_rw}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&ns_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (setup_status, setup_body) = into_json(resp).await;
+    assert_eq!(
+        setup_status,
+        StatusCode::OK,
+        "rw token creates namespace for subsequent tests; body={setup_body}"
+    );
+
+    // Now try to create a table with the read-only token → must 403.
+    let create_table = serde_json::json!({
+        "name": "ro_table",
+        "schema": {
+            "type": "struct",
+            "schema-id": 0,
+            "fields": [ { "id": 1, "name": "id", "required": true, "type": "long" } ]
+        }
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/{prefix_a}/namespaces/{rw_ns}/tables"))
+                .header("Authorization", format!("Bearer {token_ro}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&create_table).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "read-only token MUST NOT create a table (POST → catalog:write)"
+    );
+
+    // === D. Read-write token — create namespace + table → 200 each ==========
+    let rw_ns2 = format!("rw_demo_{}", Uuid::now_v7().simple());
+    let ns_body2 = serde_json::json!({ "namespace": [rw_ns2], "properties": {} });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/{prefix_a}/namespaces"))
+                .header("Authorization", format!("Bearer {token_rw}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&ns_body2).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, ns_resp) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "rw token creates namespace; body={ns_resp}"
+    );
+
+    let rw_table = serde_json::json!({
+        "name": "rw_t",
+        "schema": {
+            "type": "struct",
+            "schema-id": 0,
+            "fields": [ { "id": 1, "name": "id", "required": true, "type": "long" } ]
+        }
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/{prefix_a}/namespaces/{rw_ns2}/tables"))
+                .header("Authorization", format!("Bearer {token_rw}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&rw_table).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, tbl_resp) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "rw token creates table; body={tbl_resp}"
+    );
+    assert!(
+        tbl_resp["metadata-location"].is_string(),
+        "created table has a metadata-location; body={tbl_resp}"
+    );
+
+    // === E. Regression: /config with read-only token → 200 (classified:read) =
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/config?warehouse={slug_a}"))
+                .header("Authorization", format!("Bearer {token_ro}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let (status, cfg) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/config is classified catalog:read so a read-only token may call it; body={cfg}"
+    );
+    assert_eq!(
+        cfg["defaults"]["prefix"].as_str(),
+        Some(prefix_a.as_str()),
+        "/config with read-only token returns the warehouse prefix; body={cfg}"
+    );
+}
