@@ -38,10 +38,12 @@ use axum::routing::{delete, get};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use egret_auth::session::SessionService;
+use egret_catalog::service::storage_conn::{StorageConnInput, WorkspaceStorageConn};
 use egret_catalog::service::tokens::CatalogToken;
 use egret_catalog::service::CatalogStore;
 use egret_catalog::CatalogError;
 use egret_core::WorkspaceContext;
+use egret_storage::{ObjectStore, S3Store, StorageConfig};
 use egret_workspace::context::WsContext;
 use egret_workspace::rbac::Authorizer;
 use egret_workspace::workspaces::WorkspaceRepo;
@@ -147,6 +149,17 @@ pub fn browse_router() -> Router<BrowseState> {
         .route(
             "/ws/{workspace}/catalog/storage",
             get(get_storage).put(update_storage),
+        )
+        // Workspace-admin per-workspace storage-connection registry (gated
+        // `workspace:manage_members`). CRUD with a live reachability probe on
+        // register/edit.
+        .route(
+            "/ws/{workspace}/storages",
+            get(list_storage_conns).post(create_storage_conn),
+        )
+        .route(
+            "/ws/{workspace}/storages/{id}",
+            axum::routing::put(update_storage_conn).delete(delete_storage_conn),
         )
 }
 
@@ -1078,4 +1091,326 @@ async fn update_storage_inner(
         access_key: row.access_key,
         has_secret: row.secret_ref.is_some(),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Workspace-admin storage-connection registry (CRUD + reachability validate).
+//
+// A per-workspace registry of N named storage connections (`workspace_storages`,
+// distinct from the single warehouse-backing `workspace_storage` above). Gated
+// `workspace:manage_members` (the workspace-admin gate), and IDOR-safe: every
+// operation is scoped to `ctx.workspace_id` (bound by `WsContext`), and the
+// store queries every row by BOTH id AND workspace_id, so a workspace admin can
+// only see/edit/delete their OWN connections.
+//
+// Register/edit run a LIVE reachability probe (`S3Store::list`) so bad
+// credentials / unreachable endpoints are rejected with 400 BEFORE anything is
+// persisted. The S3 secret is WRITE-ONLY: it is sealed through the vault and
+// referenced by `secret_ref`; it is never serialized into ANY response, and is
+// OPTIONAL on edit (omitting it keeps the existing sealed secret).
+// ---------------------------------------------------------------------------
+
+/// A registered storage connection as exposed to the workspace-admin UI.
+/// Deliberately omits the secret value AND its `secret_ref`; `has_secret`
+/// reflects whether a sealed secret exists.
+#[derive(Serialize)]
+struct WorkspaceStorageConnDto {
+    id: Uuid,
+    name: String,
+    purpose: Option<String>,
+    provider: String,
+    endpoint: Option<String>,
+    region: String,
+    bucket: String,
+    key_prefix: Option<String>,
+    access_key: String,
+    path_style: bool,
+    has_secret: bool,
+    created_at: DateTime<Utc>,
+}
+
+impl From<WorkspaceStorageConn> for WorkspaceStorageConnDto {
+    fn from(c: WorkspaceStorageConn) -> Self {
+        WorkspaceStorageConnDto {
+            id: c.id,
+            name: c.name,
+            purpose: c.purpose,
+            provider: c.provider,
+            endpoint: c.endpoint,
+            region: c.region,
+            bucket: c.bucket,
+            key_prefix: c.key_prefix,
+            access_key: c.access_key,
+            path_style: c.path_style,
+            has_secret: c.secret_ref.is_some(),
+            created_at: c.created_at,
+        }
+    }
+}
+
+/// Request body to register a storage connection. `secret_key` is REQUIRED on
+/// create (we need credentials to seal + probe).
+#[derive(Deserialize)]
+struct CreateStorageConnRequest {
+    name: String,
+    #[serde(default)]
+    purpose: Option<String>,
+    provider: String,
+    #[serde(default)]
+    endpoint: Option<String>,
+    region: String,
+    bucket: String,
+    #[serde(default)]
+    key_prefix: Option<String>,
+    access_key: String,
+    secret_key: String,
+    path_style: bool,
+}
+
+/// Request body to edit a storage connection. `secret_key` is OPTIONAL: when
+/// `None`, the existing sealed secret is reused (keep-current).
+#[derive(Deserialize)]
+struct UpdateStorageConnRequest {
+    name: String,
+    #[serde(default)]
+    purpose: Option<String>,
+    provider: String,
+    #[serde(default)]
+    endpoint: Option<String>,
+    region: String,
+    bucket: String,
+    #[serde(default)]
+    key_prefix: Option<String>,
+    access_key: String,
+    #[serde(default)]
+    secret_key: Option<String>,
+    path_style: bool,
+}
+
+/// Probe that the storage described by `cfg` is reachable with the given
+/// credentials by attempting a folder-style `list` under `key_prefix`. Any
+/// failure (auth, missing bucket, unreachable endpoint) → 400 with a trimmed,
+/// actionable message; the full error is logged at WARN for operators.
+async fn validate_reachable(
+    cfg: &StorageConfig,
+    key_prefix: Option<&str>,
+) -> Result<(), BrowseApiError> {
+    let store = S3Store::new(cfg).await.map_err(|e| {
+        tracing::warn!(error = ?e, "storage reachability probe: client build failed");
+        let mut msg = e.to_string();
+        msg.truncate(200);
+        BrowseApiError::BadRequest(format!("storage not reachable: {msg}"))
+    })?;
+    store
+        .list(key_prefix.unwrap_or(""), Some("/"))
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = ?e, "storage reachability probe failed");
+            let mut msg = e.to_string();
+            msg.truncate(200);
+            BrowseApiError::BadRequest(format!("storage not reachable: {msg}"))
+        })?;
+    Ok(())
+}
+
+/// Translate a `create_storage_conn` error into the right HTTP code. A unique
+/// constraint violation (duplicate connection name in the workspace) becomes a
+/// 409-style conflict with an actionable message rather than a generic 500.
+fn map_create_conn_error(e: CatalogError) -> BrowseApiError {
+    match &e {
+        CatalogError::AlreadyExists(m) => BrowseApiError::BadRequest(m.clone()),
+        // A unique-name violation surfaces as a transparent `Db(sqlx::Error)`. We
+        // can't cheaply pattern-match the DB error across the two sqlx versions in
+        // the graph, so detect the unique constraint by its Postgres error text and
+        // return an actionable 400 instead of a generic 500.
+        CatalogError::Db(db_err) => {
+            let msg = db_err.to_string();
+            if msg.contains("duplicate key") || msg.contains("unique constraint") {
+                BrowseApiError::BadRequest(
+                    "a storage connection with that name already exists".to_string(),
+                )
+            } else {
+                BrowseApiError::Internal
+            }
+        }
+        _ => e.into(),
+    }
+}
+
+/// GET `/api/ws/{workspace}/storages` — list this workspace's storage conns.
+async fn list_storage_conns(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<Vec<WorkspaceStorageConnDto>>, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+    let conns = st.store.list_storage_conns(ctx.workspace_id.0).await?;
+    Ok(Json(
+        conns
+            .into_iter()
+            .map(WorkspaceStorageConnDto::from)
+            .collect(),
+    ))
+}
+
+/// POST `/api/ws/{workspace}/storages` — register a storage conn after a live
+/// reachability probe; on success the secret is sealed and the row persisted.
+async fn create_storage_conn(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Json(req): Json<CreateStorageConnRequest>,
+) -> Result<Response, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+
+    if req.provider != "s3" {
+        return Err(BrowseApiError::BadRequest(
+            "only s3 storage is supported".to_string(),
+        ));
+    }
+
+    let cfg = StorageConfig {
+        endpoint: req.endpoint.clone(),
+        region: req.region.clone(),
+        bucket: req.bucket.clone(),
+        access_key: req.access_key.clone(),
+        secret_key: req.secret_key.clone(),
+        path_style: req.path_style,
+    };
+    validate_reachable(&cfg, req.key_prefix.as_deref()).await?;
+
+    let secret_ref = st
+        .secret_store
+        .put("workspace_storage_conn", &req.secret_key)
+        .await
+        .map_err(|_| BrowseApiError::Internal)?;
+
+    let input = StorageConnInput {
+        name: req.name,
+        purpose: req.purpose,
+        provider: req.provider,
+        endpoint: req.endpoint,
+        region: req.region,
+        bucket: req.bucket,
+        key_prefix: req.key_prefix,
+        access_key: req.access_key,
+        secret_ref: Some(secret_ref),
+        path_style: req.path_style,
+    };
+    let conn = st
+        .store
+        .create_storage_conn(ctx.workspace_id.0, &input)
+        .await
+        .map_err(map_create_conn_error)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(WorkspaceStorageConnDto::from(conn)),
+    )
+        .into_response())
+}
+
+/// PUT `/api/ws/{workspace}/storages/{id}` — edit a storage conn. Resolves the
+/// effective secret (request's `secret_key`, else the existing sealed one),
+/// re-probes reachability, and on success persists the update; a new secret is
+/// sealed only when one was supplied.
+async fn update_storage_conn(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    Json(req): Json<UpdateStorageConnRequest>,
+) -> Result<StatusCode, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+
+    if req.provider != "s3" {
+        return Err(BrowseApiError::BadRequest(
+            "only s3 storage is supported".to_string(),
+        ));
+    }
+
+    let existing = st
+        .store
+        .get_storage_conn(ctx.workspace_id.0, id)
+        .await?
+        .ok_or(BrowseApiError::NotFound)?;
+
+    // Resolve the effective secret: the request's `secret_key` if present, else
+    // the existing sealed secret (keep-current).
+    let secret_key = match &req.secret_key {
+        Some(s) => s.clone(),
+        None => {
+            let secret_ref = existing.secret_ref.ok_or_else(|| {
+                BrowseApiError::BadRequest(
+                    "secret_key is required (no existing secret to keep)".to_string(),
+                )
+            })?;
+            st.secret_store
+                .get(secret_ref)
+                .await
+                .map_err(|_| BrowseApiError::Internal)?
+        }
+    };
+
+    let cfg = StorageConfig {
+        endpoint: req.endpoint.clone(),
+        region: req.region.clone(),
+        bucket: req.bucket.clone(),
+        access_key: req.access_key.clone(),
+        secret_key,
+        path_style: req.path_style,
+    };
+    validate_reachable(&cfg, req.key_prefix.as_deref()).await?;
+
+    // Seal a new secret only when one was supplied; otherwise keep the existing
+    // `secret_ref`.
+    // TODO: new secret_ref orphans in the vault if the subsequent
+    // update_storage_conn fails; clean up old/new refs holistically later.
+    let secret_ref = match &req.secret_key {
+        Some(s) => Some(
+            st.secret_store
+                .put("workspace_storage_conn", s)
+                .await
+                .map_err(|_| BrowseApiError::Internal)?,
+        ),
+        None => existing.secret_ref,
+    };
+
+    let input = StorageConnInput {
+        name: req.name,
+        purpose: req.purpose,
+        provider: req.provider,
+        endpoint: req.endpoint,
+        region: req.region,
+        bucket: req.bucket,
+        key_prefix: req.key_prefix,
+        access_key: req.access_key,
+        secret_ref,
+        path_style: req.path_style,
+    };
+    let updated = st
+        .store
+        .update_storage_conn(ctx.workspace_id.0, id, &input)
+        .await
+        .map_err(map_create_conn_error)?;
+    if updated {
+        Ok(StatusCode::OK)
+    } else {
+        Err(BrowseApiError::NotFound)
+    }
+}
+
+/// DELETE `/api/ws/{workspace}/storages/{id}` — delete a storage conn.
+///
+/// 404 (not 403) when the id does not belong to this workspace, so the response
+/// does not confirm the existence of another tenant's connection (IDOR closed).
+async fn delete_storage_conn(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> Result<StatusCode, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+    let deleted = st.store.delete_storage_conn(ctx.workspace_id.0, id).await?;
+    if deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(BrowseApiError::NotFound)
+    }
 }

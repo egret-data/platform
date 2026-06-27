@@ -31,6 +31,16 @@ impl ObjectStore for MemStore {
         self.0.lock().unwrap().remove(uri);
         Ok(())
     }
+    async fn list(
+        &self,
+        _prefix: &str,
+        _delimiter: Option<&str>,
+    ) -> Result<egret_storage::Listing, StorageError> {
+        Ok(egret_storage::Listing {
+            folders: Vec::new(),
+            objects: Vec::new(),
+        })
+    }
 }
 
 fn build_state(db: egret_metastore::Db) -> EngineState {
