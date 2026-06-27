@@ -1,4 +1,9 @@
 //! DB-gated DatabaseRepo tests. Self-skip without DATABASE_URL.
+//!
+//! Covers the workspace-scoped repo methods' secret lifecycle (ADR-19): create
+//! seals, update rotates / preserves, delete removes the backing secret row,
+//! and a secret without a configured master key errors. Cross-workspace
+//! ownership isolation lives in `repo_workspace_scope.rs`.
 use egret_database::{DatabaseRepo, Engine};
 use egret_metastore::Db;
 use egret_secrets::{Crypto, SecretStore};
@@ -18,19 +23,42 @@ fn input(name: &str, secret: Option<&str>) -> egret_database::model::DatabaseInp
     }
 }
 
-async fn repo_with_db(with_key: bool) -> Option<(DatabaseRepo, Db)> {
+/// Returns the repo, the raw Db handle, and a freshly-seeded workspace id to own
+/// every database created in the test.
+async fn repo_with_db(with_key: bool) -> Option<(DatabaseRepo, Db, uuid::Uuid)> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let crypto = with_key.then(|| Crypto::new(&[3u8; 32]).unwrap());
+    let wid = seed_workspace(&db).await;
     Some((
         DatabaseRepo::new(db.clone(), SecretStore::new(db.clone(), crypto)),
         db,
+        wid,
     ))
 }
 
-async fn repo(with_key: bool) -> Option<DatabaseRepo> {
-    repo_with_db(with_key).await.map(|(r, _db)| r)
+async fn repo(with_key: bool) -> Option<(DatabaseRepo, uuid::Uuid)> {
+    repo_with_db(with_key).await.map(|(r, _db, wid)| (r, wid))
+}
+
+async fn seed_workspace(db: &Db) -> uuid::Uuid {
+    let uid: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO users (email, name, provider, status, password_hash) \
+         VALUES ($1,'t','local','active','x') RETURNING id",
+    )
+    .bind(format!("u_{}@t.local", uuid::Uuid::new_v4().simple()))
+    .fetch_one(&db.pool)
+    .await
+    .expect("user");
+    sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by) VALUES ($1,'t',$2) RETURNING id",
+    )
+    .bind(format!("w-{}", uuid::Uuid::new_v4().simple()))
+    .bind(uid)
+    .fetch_one(&db.pool)
+    .await
+    .expect("ws")
 }
 
 fn uniq(prefix: &str) -> String {
@@ -39,65 +67,82 @@ fn uniq(prefix: &str) -> String {
 
 #[tokio::test]
 async fn register_list_get_delete() {
-    let Some(r) = repo(true).await else {
+    let Some((r, wid)) = repo(true).await else {
         eprintln!("skip");
         return;
     };
     let name = uniq("db");
-    let db = r.create(&input(&name, Some("pw")), None).await.unwrap();
+    let db = r
+        .create_in_workspace(wid, &input(&name, Some("pw")), None)
+        .await
+        .unwrap();
     assert!(db.has_secret);
-    let got = r.get(db.id).await.unwrap();
+    let got = r.get_in_workspace(wid, db.id).await.unwrap();
     assert_eq!(got.name, name);
     assert!(got.has_secret);
-    assert!(r.list().await.unwrap().iter().any(|d| d.id == db.id));
-    r.delete(db.id).await.unwrap();
+    assert!(r
+        .list_for_workspace(wid)
+        .await
+        .unwrap()
+        .iter()
+        .any(|d| d.id == db.id));
+    r.delete_in_workspace(wid, db.id).await.unwrap();
     assert!(matches!(
-        r.get(db.id).await.unwrap_err(),
+        r.get_in_workspace(wid, db.id).await.unwrap_err(),
         egret_database::DatabaseError::NotFound(_)
     ));
 }
 
 #[tokio::test]
 async fn duplicate_name_conflicts() {
-    let Some(r) = repo(true).await else {
+    let Some((r, wid)) = repo(true).await else {
         eprintln!("skip");
         return;
     };
     let name = uniq("db");
-    let a = r.create(&input(&name, None), None).await.unwrap();
-    let err = r.create(&input(&name, None), None).await.unwrap_err();
+    let a = r
+        .create_in_workspace(wid, &input(&name, None), None)
+        .await
+        .unwrap();
+    let err = r
+        .create_in_workspace(wid, &input(&name, None), None)
+        .await
+        .unwrap_err();
     assert!(matches!(
         err,
         egret_database::DatabaseError::AlreadyExists(_)
     ));
-    r.delete(a.id).await.unwrap();
+    r.delete_in_workspace(wid, a.id).await.unwrap();
 }
 
 #[tokio::test]
 async fn update_rotates_secret() {
-    let Some(r) = repo(true).await else {
+    let Some((r, wid)) = repo(true).await else {
         eprintln!("skip");
         return;
     };
     let name = uniq("db");
-    let db = r.create(&input(&name, Some("old")), None).await.unwrap();
+    let db = r
+        .create_in_workspace(wid, &input(&name, Some("old")), None)
+        .await
+        .unwrap();
     let updated = r
-        .update(db.id, &input(&name, Some("new")), None)
+        .update_in_workspace(wid, db.id, &input(&name, Some("new")), None)
         .await
         .unwrap();
     assert!(updated.has_secret);
     assert_eq!(r.open_secret(db.id).await.unwrap(), Some("new".to_string()));
-    r.delete(db.id).await.unwrap();
+    r.delete_in_workspace(wid, db.id).await.unwrap();
 }
 
 #[tokio::test]
 async fn register_with_secret_without_key_errors() {
-    let Some(r) = repo(false).await else {
+    let Some((r, wid)) = repo(false).await else {
         eprintln!("skip");
         return;
     };
     let err = r
-        .create(&input(&uniq("db"), Some("pw")), None)
+        .create_in_workspace(wid, &input(&uniq("db"), Some("pw")), None)
         .await
         .unwrap_err();
     assert!(matches!(
@@ -108,15 +153,18 @@ async fn register_with_secret_without_key_errors() {
 
 #[tokio::test]
 async fn update_without_secret_preserves_old() {
-    let Some(r) = repo(true).await else {
+    let Some((r, wid)) = repo(true).await else {
         eprintln!("skip");
         return;
     };
     let name = uniq("db");
-    let db = r.create(&input(&name, Some("keepme")), None).await.unwrap();
+    let db = r
+        .create_in_workspace(wid, &input(&name, Some("keepme")), None)
+        .await
+        .unwrap();
     let mut inp = input(&name, None); // no secret supplied
     inp.host = "newhost".into();
-    let updated = r.update(db.id, &inp, None).await.unwrap();
+    let updated = r.update_in_workspace(wid, db.id, &inp, None).await.unwrap();
     assert_eq!(updated.host, "newhost");
     assert!(
         updated.has_secret,
@@ -126,17 +174,17 @@ async fn update_without_secret_preserves_old() {
         r.open_secret(db.id).await.unwrap(),
         Some("keepme".to_string())
     );
-    r.delete(db.id).await.unwrap();
+    r.delete_in_workspace(wid, db.id).await.unwrap();
 }
 
 #[tokio::test]
 async fn delete_removes_secret_row() {
-    let Some((r, db)) = repo_with_db(true).await else {
+    let Some((r, db, wid)) = repo_with_db(true).await else {
         eprintln!("skip");
         return;
     };
     let database = r
-        .create(&input(&uniq("db"), Some("pw")), None)
+        .create_in_workspace(wid, &input(&uniq("db"), Some("pw")), None)
         .await
         .unwrap();
     let secret_id: Option<uuid::Uuid> =
@@ -146,63 +194,11 @@ async fn delete_removes_secret_row() {
             .await
             .unwrap();
     let secret_id = secret_id.expect("secret_id should be set");
-    r.delete(database.id).await.unwrap();
+    r.delete_in_workspace(wid, database.id).await.unwrap();
     let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM secrets WHERE id = $1")
         .bind(secret_id)
         .fetch_one(&db.pool)
         .await
         .unwrap();
     assert_eq!(remaining, 0, "delete must remove the backing secret row");
-}
-
-async fn ws_and_user() -> Option<(Db, uuid::Uuid, uuid::Uuid)> {
-    let url = std::env::var("DATABASE_URL").ok()?;
-    let db = Db::connect(&url, 5).await.expect("connect");
-    db.migrate().await.expect("migrate");
-    let uid: uuid::Uuid = sqlx::query_scalar(
-        "INSERT INTO users (email, name, provider, status, password_hash) \
-         VALUES ($1,'t','local','active','x') RETURNING id",
-    )
-    .bind(format!("u_{}@t.local", uuid::Uuid::new_v4().simple()))
-    .fetch_one(&db.pool)
-    .await
-    .expect("user");
-    let wid: uuid::Uuid = sqlx::query_scalar(
-        "INSERT INTO workspaces (slug, name, created_by) VALUES ($1,'t',$2) RETURNING id",
-    )
-    .bind(format!("w-{}", uuid::Uuid::new_v4().simple()))
-    .bind(uid)
-    .fetch_one(&db.pool)
-    .await
-    .expect("ws");
-    Some((db, wid, uid))
-}
-
-#[tokio::test]
-async fn grant_revoke_and_list_for_workspace() {
-    let Some(r) = repo(true).await else {
-        eprintln!("skip");
-        return;
-    };
-    let Some((_db, wid, uid)) = ws_and_user().await else {
-        return;
-    };
-    let database = r.create(&input(&uniq("db"), None), None).await.unwrap();
-
-    r.grant(wid, database.id, Some(egret_core::UserId(uid)))
-        .await
-        .unwrap();
-    let listed = r.list_for_workspace(wid).await.unwrap();
-    assert!(listed.iter().any(|d| d.id == database.id));
-
-    // grant is idempotent
-    r.grant(wid, database.id, Some(egret_core::UserId(uid)))
-        .await
-        .unwrap();
-
-    r.revoke(wid, database.id).await.unwrap();
-    let after = r.list_for_workspace(wid).await.unwrap();
-    assert!(!after.iter().any(|d| d.id == database.id));
-
-    r.delete(database.id).await.unwrap();
 }

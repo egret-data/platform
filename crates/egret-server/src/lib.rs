@@ -138,8 +138,7 @@ pub fn build_router(state: AppState) -> Router {
 
     if let Some(database) = state.database.clone() {
         let group = Router::new()
-            .nest("/api/admin", egret_database::admin_database_router())
-            .nest("/api/me", egret_database::me_database_router())
+            .nest("/api", egret_database::workspace_database_router())
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
             .with_state(database);
         router = router.merge(group);
