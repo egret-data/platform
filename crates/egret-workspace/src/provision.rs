@@ -34,6 +34,11 @@ pub struct StorageSpec {
     pub endpoint: Option<String>,
     pub region: String,
     pub bucket: String,
+    /// Reserved: persisted to `workspace_storage` but NOT yet applied. The
+    /// provisioner currently lays the warehouse out at the fixed
+    /// `workspaces/<slug>/warehouse` prefix regardless of this value, so a stored
+    /// `key_prefix` is recorded metadata, not an active override (wiring it
+    /// through is future work).
     pub key_prefix: Option<String>,
     pub access_key: String,
     pub secret_key: String,
@@ -57,6 +62,27 @@ impl std::fmt::Debug for StorageSpec {
     }
 }
 
+/// Read-only view of a workspace's effective storage configuration (CE-5),
+/// returned by the `GET /workspaces/{workspace}/storage` endpoint.
+///
+/// **Never carries the secret value.** `access_key` is the (non-secret) S3 key
+/// id; the secret key is represented only by the `has_secret` boolean (whether a
+/// sealed `secret_ref` exists in the vault). This type is `Serialize`-only so the
+/// secret can never leak into a response body.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct WorkspaceStorageInfo {
+    pub provider: String,
+    pub endpoint: Option<String>,
+    pub region: String,
+    pub bucket: String,
+    /// Reserved: the stored value, surfaced for visibility. NOT currently applied
+    /// to the warehouse layout (see [`StorageSpec::key_prefix`]) — the warehouse
+    /// uses the fixed `workspaces/<slug>/warehouse` prefix.
+    pub key_prefix: Option<String>,
+    pub access_key: String,
+    pub has_secret: bool,
+}
+
 /// Provisions (idempotently) the lakekeeper warehouse backing a freshly-created
 /// workspace and records the workspace→warehouse mapping.
 ///
@@ -78,6 +104,16 @@ pub trait WarehouseProvisioner: Send + Sync {
         slug: &str,
         storage: Option<StorageSpec>,
     ) -> Result<(), String>;
+
+    /// Return the workspace's per-workspace storage config (CE-5), WITHOUT the
+    /// secret value. `Ok(Some(info))` when the workspace has a stored
+    /// `workspace_storage` row; `Ok(None)` when it has none (it provisions
+    /// against the global default and exposes no per-workspace storage). Powers
+    /// the read-only `GET /workspaces/{workspace}/storage` endpoint.
+    async fn storage_info(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<WorkspaceStorageInfo>, String>;
 }
 
 /// Shared, optional provisioner handle carried on `WorkspaceState`.

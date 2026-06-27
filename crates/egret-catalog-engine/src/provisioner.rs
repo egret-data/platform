@@ -22,7 +22,7 @@ use egret_catalog::WorkspaceStorageRow;
 use egret_core::WorkspaceId;
 use egret_secrets::SecretStore;
 use egret_storage::StorageConfig;
-use egret_workspace::provision::{StorageSpec, WarehouseProvisioner};
+use egret_workspace::provision::{StorageSpec, WarehouseProvisioner, WorkspaceStorageInfo};
 use lakekeeper::api::ApiContext;
 use uuid::Uuid;
 
@@ -166,6 +166,29 @@ impl WarehouseProvisioner for EngineWarehouseProvisioner {
         .await
         .map(|_warehouse_id| ())
         .map_err(|e| e.to_string())
+    }
+
+    async fn storage_info(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<WorkspaceStorageInfo>, String> {
+        // Read the stored row directly; map it to the secret-free info view. The
+        // secret value is NEVER read here — `has_secret` reflects only whether a
+        // sealed `secret_ref` exists.
+        let row = self
+            .store
+            .workspace_storage_for(workspace_id.0)
+            .await
+            .map_err(|e| format!("reading workspace_storage for {}: {e}", workspace_id.0))?;
+        Ok(row.map(|row| WorkspaceStorageInfo {
+            provider: row.provider,
+            endpoint: row.endpoint,
+            region: row.region,
+            bucket: row.bucket,
+            key_prefix: row.key_prefix,
+            access_key: row.access_key,
+            has_secret: row.secret_ref.is_some(),
+        }))
     }
 }
 

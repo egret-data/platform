@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::context::WsContext;
 use crate::members::MemberRepo;
-use crate::provision::SharedWarehouseProvisioner;
+use crate::provision::{SharedWarehouseProvisioner, StorageSpec};
 use crate::rbac::Authorizer;
 use crate::workspaces::WorkspaceRepo;
 
@@ -64,10 +64,56 @@ impl From<crate::model::Workspace> for WorkspaceDto {
     }
 }
 
+/// Per-workspace storage override accepted at workspace-create time (CE-5).
+///
+/// Deserialize-only input: `secret_key` is a write-only credential and this type
+/// is intentionally NOT `Serialize`, so the secret can never be echoed back. The
+/// handler maps it field-for-field to a [`StorageSpec`], which the provisioner
+/// seals through the secret vault.
+#[derive(Deserialize)]
+pub struct StorageSpecDto {
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    pub endpoint: Option<String>,
+    pub region: String,
+    pub bucket: String,
+    pub key_prefix: Option<String>,
+    pub access_key: String,
+    pub secret_key: String,
+    #[serde(default = "default_path_style")]
+    pub path_style: bool,
+}
+
+fn default_provider() -> String {
+    "s3".to_string()
+}
+fn default_path_style() -> bool {
+    true
+}
+
+impl From<StorageSpecDto> for StorageSpec {
+    fn from(d: StorageSpecDto) -> Self {
+        StorageSpec {
+            provider: d.provider,
+            endpoint: d.endpoint,
+            region: d.region,
+            bucket: d.bucket,
+            key_prefix: d.key_prefix,
+            access_key: d.access_key,
+            secret_key: d.secret_key,
+            path_style: d.path_style,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct CreateWorkspace {
     pub slug: String,
     pub name: String,
+    /// Optional per-workspace storage backend (CE-5). When omitted, the
+    /// workspace provisions against the system-wide default storage config.
+    #[serde(default)]
+    pub storage: Option<StorageSpecDto>,
 }
 #[derive(Deserialize)]
 pub struct UpdateWorkspace {
@@ -116,8 +162,9 @@ async fn create_ws(
     // would risk orphaning a warehouse that lakekeeper DID create before the
     // mapping write failed. We log loudly and return 500 so the caller knows the
     // workspace is not yet ready.
+    let storage: Option<StorageSpec> = body.storage.map(Into::into);
     if let Some(provisioner) = &st.warehouse_provisioner {
-        if let Err(e) = provisioner.provision(ws.id, &ws.slug, None).await {
+        if let Err(e) = provisioner.provision(ws.id, &ws.slug, storage).await {
             tracing::error!(
                 workspace_id = %ws.id.0,
                 slug = %ws.slug,
@@ -337,6 +384,49 @@ pub fn ws_member_router() -> Router<WorkspaceState> {
     Router::new()
         .route("/{workspace}/members", get(list_members).post(add_member))
         .route("/{workspace}/members/{ptype}/{pid}", delete(remove_member))
+        .route("/{workspace}/storage", get(get_storage))
+}
+
+/// `GET /{workspace}/storage` — return the workspace's per-workspace storage
+/// config WITHOUT the secret (CE-5). The response body is a
+/// [`WorkspaceStorageInfo`], which carries only `has_secret`, never the secret
+/// value. `WsContext` resolves the `{workspace}` slug and enforces membership.
+///
+/// **Admin-only**: storage config is administrative metadata (which bucket /
+/// endpoint / access-key id backs the workspace), not something a viewer needs —
+/// viewers query the catalog via tokens, never the raw S3 config. So this is
+/// gated by `workspace:manage_members` (granted to `ws_admin` by migration 0003,
+/// the same admin-level perm the member endpoints use), NOT the broad
+/// `catalog:read`. Platform admins bypass via `is_platform_admin()`.
+///
+/// Status codes:
+/// - `404` when the workspace has no stored per-workspace storage row (it uses
+///   the global default — there is no per-workspace config to expose);
+/// - `500` (Internal) when no provisioner is configured (catalog engine
+///   disabled) — a server-config condition, deliberately NOT conflated with the
+///   genuine "no custom storage" 404 above.
+///
+/// The read goes through the `WarehouseProvisioner` trait already on
+/// `WorkspaceState`, so this route stays free of any catalog/engine dependency.
+async fn get_storage(
+    State(st): State<WorkspaceState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<crate::provision::WorkspaceStorageInfo>, AuthError> {
+    st.authz
+        .require_workspace(&ctx, "workspace:manage_members")
+        .await
+        .map_err(AuthError)?;
+    let provisioner = st.warehouse_provisioner.as_ref().ok_or_else(|| {
+        AuthError(Error::Internal(anyhow::Error::msg(
+            "catalog engine not configured",
+        )))
+    })?;
+    let info = provisioner
+        .storage_info(ctx.workspace_id)
+        .await
+        .map_err(|e| AuthError(Error::Internal(anyhow::anyhow!(e))))?
+        .ok_or(AuthError(Error::NotFound("workspace storage".into())))?;
+    Ok(Json(info))
 }
 
 async fn list_members(
