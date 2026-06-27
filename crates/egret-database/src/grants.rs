@@ -39,16 +39,17 @@ impl DatabaseRepo {
         Ok(())
     }
 
-    /// Databases granted to a workspace (ordered by name).
+    /// Databases owned by a workspace (ordered by name).
+    ///
+    /// Ownership query (ADR-19 per-workspace model): rows are filtered by their
+    /// own `workspace_id` column rather than via the old grant-join table.
     pub async fn list_for_workspace(
         &self,
         workspace_id: Uuid,
     ) -> Result<Vec<Database>, DatabaseError> {
         let rows = sqlx::query_as::<_, crate::repo::Row>(
-            "SELECT d.id, d.name, d.engine, d.host, d.port, d.options, d.secret_id, d.status \
-             FROM databases d \
-             JOIN workspace_database_grant g ON g.database_id = d.id \
-             WHERE g.workspace_id = $1 ORDER BY d.name",
+            "SELECT id, name, engine, host, port, options, secret_id, status \
+             FROM databases WHERE workspace_id = $1 ORDER BY name",
         )
         .bind(workspace_id)
         .fetch_all(self.pool())
