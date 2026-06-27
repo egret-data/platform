@@ -144,6 +144,7 @@ async fn setup() -> Option<Fixture> {
         engine: engine_state,
         store: store.clone(),
         secret_store: secret_store.clone(),
+        default_storage: dev_storage_config(),
         system_user: SYSTEM_USER.into(),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
@@ -397,13 +398,14 @@ async fn non_s3_provider_is_400() {
 }
 
 #[tokio::test]
-async fn workspace_without_warehouse_is_409() {
+async fn put_on_workspace_without_warehouse_provisions_then_repoints() {
     let Some(f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
 
-    // A SECOND workspace with NO provisioned warehouse.
+    // A SECOND workspace with NO provisioned warehouse (predates catalog
+    // enablement). PUT must now lazily provision + re-point → 200, not 409.
     let suffix = Uuid::now_v7().simple().to_string();
     let owner = f
         .users
@@ -415,6 +417,14 @@ async fn workspace_without_warehouse_is_409() {
         .create(&slug, "No Warehouse", owner)
         .await
         .expect("seed workspace");
+    assert!(
+        f.store
+            .warehouse_for_workspace(ws.id.0)
+            .await
+            .expect("read mapping")
+            .is_none(),
+        "precondition: the workspace starts with NO warehouse"
+    );
     // Make the caller an admin of this warehouse-less workspace.
     let admin = f
         .users
@@ -447,9 +457,19 @@ async fn workspace_without_warehouse_is_409() {
         .oneshot(put(&format!("/ws/{slug}/catalog/storage"), &token, body))
         .await
         .unwrap();
+    let (status, json) = into_json(resp).await;
     assert_eq!(
-        resp.status(),
-        StatusCode::CONFLICT,
-        "updating storage for a workspace with no warehouse → 409"
+        status,
+        StatusCode::OK,
+        "PUT on a never-visited workspace lazily provisions + re-points → 200; body={json}"
+    );
+    // The warehouse is now provisioned.
+    assert!(
+        f.store
+            .warehouse_for_workspace(ws.id.0)
+            .await
+            .expect("read mapping")
+            .is_some(),
+        "PUT lazily provisioned the warehouse"
     );
 }

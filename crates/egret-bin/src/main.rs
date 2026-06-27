@@ -319,6 +319,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 // seals/unseals per-workspace S3 secrets through the same vault the
                 // provisioner uses.
                 secret_store: secrets.clone(),
+                // The same global storage config threaded into the provisioner
+                // below; carried so the browse router can lazily provision a
+                // warehouse and report the effective default storage for a
+                // workspace that predates catalog enablement (e.g. `eng`).
+                default_storage: storage_cfg.clone(),
                 system_user: config.catalog.system_user.clone().into(),
                 sessions: sessions.clone(),
                 workspaces: WorkspaceRepo::new(db.clone()),

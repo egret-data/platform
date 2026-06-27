@@ -34,7 +34,7 @@ use std::sync::Arc;
 use axum::extract::{FromRef, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, put};
+use axum::routing::{delete, get};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use egret_auth::session::SessionService;
@@ -89,6 +89,14 @@ pub struct BrowseState {
     /// the storage-update handler can persist a new secret and read the existing
     /// one when a re-point omits `secret_key`.
     pub secret_store: egret_secrets::SecretStore,
+    /// The GLOBAL default S3 storage config (the same one threaded into the
+    /// `EngineWarehouseProvisioner`). Used to (a) lazily provision a warehouse for
+    /// a workspace that predates catalog-enablement and has no custom storage row,
+    /// and (b) report the EFFECTIVE storage config from `GET .../catalog/storage`
+    /// when no per-workspace `workspace_storage` row exists. Never serialized
+    /// directly — only its non-secret fields surface, and `secret_key` is reported
+    /// solely as the `has_secret` boolean.
+    pub default_storage: egret_storage::StorageConfig,
     pub system_user: Arc<str>,
     pub sessions: SessionService,
     pub workspaces: WorkspaceRepo,
@@ -133,8 +141,13 @@ pub fn browse_router() -> Router<BrowseState> {
             get(list_tokens).post(mint_token),
         )
         .route("/ws/{workspace}/catalog/tokens/{id}", delete(revoke_token))
-        // Workspace-admin storage re-point (gated `workspace:manage_members`).
-        .route("/ws/{workspace}/catalog/storage", put(update_storage))
+        // Workspace-admin storage read (effective config) + re-point (gated
+        // `workspace:manage_members`). The GET lazily provisions a warehouse so the
+        // Storage page is usable on a workspace that predates catalog enablement.
+        .route(
+            "/ws/{workspace}/catalog/storage",
+            get(get_storage).put(update_storage),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -151,8 +164,6 @@ enum BrowseApiError {
     Engine(lakekeeper::api::IcebergErrorResponse),
     /// Client-supplied input was invalid → 400.
     BadRequest(String),
-    /// The request conflicts with current state (e.g. no warehouse to re-point) → 409.
-    Conflict(String),
     /// The targeted resource does not exist (or belongs to another tenant) → 404.
     NotFound,
     /// An internal failure building the system principal etc.
@@ -204,7 +215,6 @@ impl IntoResponse for BrowseApiError {
                 (StatusCode::NOT_FOUND, "catalog not provisioned".to_string())
             }
             BrowseApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
-            BrowseApiError::Conflict(m) => (StatusCode::CONFLICT, m),
             BrowseApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             BrowseApiError::Engine(e) => {
                 let code =
@@ -319,6 +329,98 @@ async fn authorized_warehouse(
     })
 }
 
+/// Lazily ensure the workspace has a provisioned lakekeeper warehouse, returning
+/// its UUID.
+///
+/// Warehouse provisioning used to be create-time only, so a workspace created
+/// before the catalog was enabled (e.g. `eng`) has NO warehouse and its Catalog /
+/// Storage pages are unusable. This makes provisioning lazy: the first
+/// catalog/storage access provisions the warehouse on demand.
+///
+/// * If `warehouse_for_workspace(ws)` already returns `Some`, that id is returned
+///   without touching lakekeeper.
+/// * Otherwise the effective [`StorageConfig`] is resolved — the workspace's
+///   custom `workspace_storage` row (with its secret unsealed from the vault) if
+///   present, else the global [`BrowseState::default_storage`] — and
+///   [`provision_workspace_warehouse`](crate::provision_ws::provision_workspace_warehouse)
+///   (itself idempotent) creates the warehouse + persists the mapping.
+///
+/// Callers MUST authorize the workspace first; this resolves the slug from the
+/// workspace repo for the warehouse name + key prefix.
+async fn ensure_warehouse(
+    st: &BrowseState,
+    ctx: &WorkspaceContext,
+) -> Result<Uuid, BrowseApiError> {
+    let ws_id = ctx.workspace_id.0;
+
+    // Fast path: already provisioned.
+    if let Some(existing) = st
+        .store
+        .warehouse_for_workspace(ws_id)
+        .await
+        .map_err(|_| BrowseApiError::Internal)?
+    {
+        return Ok(existing);
+    }
+
+    // Resolve the workspace slug (warehouse name + `workspaces/<slug>/warehouse`
+    // key prefix). `WsContext` already bound `ctx.workspace_id` to the path slug.
+    let slug = st
+        .workspaces
+        .get_by_id(ctx.workspace_id)
+        .await
+        .map_err(|_| BrowseApiError::Internal)?
+        .ok_or(BrowseApiError::NotFound)?
+        .slug;
+
+    // Resolve the EFFECTIVE storage config: the workspace's custom row (with its
+    // sealed secret unsealed), else the global default.
+    let cfg = match st
+        .store
+        .workspace_storage_for(ws_id)
+        .await
+        .map_err(|_| BrowseApiError::Internal)?
+    {
+        Some(row) => {
+            let secret_key = match row.secret_ref {
+                Some(secret_ref) => st
+                    .secret_store
+                    .get(secret_ref)
+                    .await
+                    .map_err(|_| BrowseApiError::Internal)?,
+                // A custom row without a sealed secret falls back to the default's
+                // secret (the access key still comes from the row).
+                None => st.default_storage.secret_key.clone(),
+            };
+            egret_storage::StorageConfig {
+                endpoint: row.endpoint.clone(),
+                region: row.region.clone(),
+                bucket: row.bucket.clone(),
+                access_key: row.access_key.clone(),
+                secret_key,
+                path_style: row.path_style,
+            }
+        }
+        None => st.default_storage.clone(),
+    };
+
+    let warehouse_id = crate::provision_ws::provision_workspace_warehouse(
+        st.engine.clone(),
+        &st.store,
+        ws_id,
+        &slug,
+        &cfg,
+        &st.system_user,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = ?e, workspace_id = %ws_id, "lazy warehouse provisioning failed");
+        BrowseApiError::Internal
+    })?;
+
+    Ok(warehouse_id)
+}
+
 /// Empty/default list-namespaces query starting at top level.
 fn ns_query(parent: Option<NamespaceIdent>) -> ListNamespacesQuery {
     ListNamespacesQuery {
@@ -339,7 +441,21 @@ async fn summary(
     State(st): State<BrowseState>,
     WsContext(ctx): WsContext,
 ) -> Result<Json<CatalogSummary>, BrowseApiError> {
-    let r = authorized_warehouse(&st, &ctx).await?;
+    // RBAC FIRST: the session must hold `catalog:read` on the path workspace.
+    st.authz.require_workspace(&ctx, PERM).await?;
+
+    // Lazily provision the warehouse if this workspace predates catalog enablement
+    // (e.g. `eng`), so the Catalog page returns the empty catalog instead of a
+    // "not provisioned" state on first view. Provisioning failure → 5xx.
+    let warehouse_id = ensure_warehouse(&st, &ctx).await?;
+    let request_metadata =
+        system_request_metadata(&st.system_user).map_err(|_| BrowseApiError::Internal)?;
+
+    let r = Resolved {
+        prefix: Prefix::from(warehouse_id.to_string()),
+        warehouse_id,
+        request_metadata,
+    };
 
     let wh = <EngineApiServer as WarehouseService<_, _, _>>::get_warehouse(
         WarehouseId::from(r.warehouse_id),
@@ -756,6 +872,64 @@ struct UpdateStorageRequest {
     path_style: bool,
 }
 
+/// GET `/api/ws/{workspace}/catalog/storage` — the EFFECTIVE storage config.
+///
+/// Gated `workspace:manage_members` (same admin gate as the re-point), and
+/// IDOR-safe (scoped to `ctx.workspace_id`, bound by `WsContext`). Lazily
+/// provisions the warehouse first (so a never-visited workspace becomes usable),
+/// then returns the secret-free [`WorkspaceStorageInfo`]:
+///   * if a custom `workspace_storage` row exists → from that row,
+///   * else → derived from the global [`BrowseState::default_storage`] (the
+///     effective config the warehouse was provisioned with), with the canonical
+///     `workspaces/<slug>/warehouse` key prefix.
+///
+/// The secret VALUE is never returned — only `has_secret` reflects whether a
+/// sealed secret exists (a row's `secret_ref`, or the default's non-empty
+/// `secret_key`).
+async fn get_storage(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Path(slug): Path<String>,
+) -> Result<Json<egret_workspace::provision::WorkspaceStorageInfo>, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+
+    // Lazily provision the warehouse so a workspace that predates catalog
+    // enablement gets one on first Storage view (GET has this side effect by
+    // design — the Storage page must be usable without an explicit provision step).
+    ensure_warehouse(&st, &ctx).await?;
+
+    let info = match st
+        .store
+        .workspace_storage_for(ctx.workspace_id.0)
+        .await
+        .map_err(|_| BrowseApiError::Internal)?
+    {
+        Some(row) => egret_workspace::provision::WorkspaceStorageInfo {
+            provider: row.provider,
+            endpoint: row.endpoint,
+            region: row.region,
+            bucket: row.bucket,
+            key_prefix: row.key_prefix,
+            access_key: row.access_key,
+            has_secret: row.secret_ref.is_some(),
+        },
+        None => {
+            let d = &st.default_storage;
+            egret_workspace::provision::WorkspaceStorageInfo {
+                provider: "s3".to_string(),
+                endpoint: d.endpoint.clone(),
+                region: d.region.clone(),
+                bucket: d.bucket.clone(),
+                key_prefix: Some(format!("workspaces/{slug}/warehouse")),
+                access_key: d.access_key.clone(),
+                has_secret: !d.secret_key.is_empty(),
+            }
+        }
+    };
+
+    Ok(Json(info))
+}
+
 /// PUT `/api/ws/{workspace}/catalog/storage` — re-point the warehouse storage.
 async fn update_storage(
     State(st): State<BrowseState>,
@@ -783,15 +957,10 @@ async fn update_storage_inner(
         ));
     }
 
-    // 1. The workspace must already have a warehouse to re-point → else 409.
-    let warehouse_id = st
-        .store
-        .warehouse_for_workspace(ctx.workspace_id.0)
-        .await
-        .map_err(|_| BrowseApiError::Internal)?
-        .ok_or_else(|| {
-            BrowseApiError::Conflict("workspace has no warehouse to re-point".to_string())
-        })?;
+    // 1. Lazily provision the warehouse if missing, so a re-point works even on a
+    //    never-visited workspace (one that predates catalog enablement) instead of
+    //    409-ing. Idempotent: a no-op when the warehouse already exists.
+    let warehouse_id = ensure_warehouse(&st, &ctx).await?;
 
     // 2. Resolve the effective secret: the request's `secret_key` if present,
     //    else the existing sealed secret (keep-current). Without either we cannot
