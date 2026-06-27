@@ -76,6 +76,16 @@ impl ObjectStore for MemStore {
         self.0.lock().unwrap().remove(uri);
         Ok(())
     }
+    async fn list(
+        &self,
+        _prefix: &str,
+        _delimiter: Option<&str>,
+    ) -> Result<egret_storage::Listing, StorageError> {
+        Ok(egret_storage::Listing {
+            folders: Vec::new(),
+            objects: Vec::new(),
+        })
+    }
 }
 
 async fn setup(sleep_ms: u64) -> Option<(JobManager, QueryStore, Uuid, Uuid)> {

@@ -1,239 +1,385 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
-import { HardDrive, Loader2, TriangleAlert } from "lucide-react";
+import { FolderOpen, HardDrive, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 
 import {
-  type UpdateStorageRequest,
-  type WorkspaceStorageInfo,
-  useUpdateStorage,
-  useWorkspaceStorage,
-} from "@/api/catalog";
+  type StorageConn,
+  type StorageConnInput,
+  useCreateStorageConn,
+  useDeleteStorageConn,
+  useStorageConns,
+  useUpdateStorageConn,
+} from "@/api/storage";
 import { ApiError } from "@/api/client";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Skeleton } from "@/components/ui/skeleton";
+import FileBrowser from "@/routes/explore/storage/FileBrowser";
 
 export default function StoragePage() {
   const ws = useParams().workspace!;
-  const storage = useWorkspaceStorage(ws);
+  const conns = useStorageConns(ws);
+  const deleteMutation = useDeleteStorageConn(ws);
 
-  if (storage.isLoading) {
+  const [addOpen, setAddOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState<StorageConn | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<StorageConn | null>(null);
+  const [browseTarget, setBrowseTarget] = useState<StorageConn | null>(null);
+
+  // Master/detail: when a connection is selected for browsing, show its
+  // FileBrowser instead of the connections list.
+  if (browseTarget) {
+    return (
+      <FileBrowser ws={ws} conn={browseTarget} onClose={() => setBrowseTarget(null)} />
+    );
+  }
+
+  if (conns.isLoading) {
     return (
       <section>
-        <h1 className="text-xl font-semibold">Storage</h1>
-        <SectionHeader />
-        <div className="mt-4 space-y-2">
-          <Skeleton className="h-5 w-1/3" />
-          <Skeleton className="h-5 w-1/2" />
-          <Skeleton className="h-5 w-2/5" />
-          <Skeleton className="h-5 w-1/4" />
+        <SectionHeader onAdd={() => setAddOpen(true)} />
+        <div className="mt-4">
+          <ListSkeleton rows={3} cols={5} />
         </div>
       </section>
     );
   }
 
-  if (storage.isError) {
-    const status = (storage.error as ApiError | null)?.status;
-
-    if (status === 404) {
-      return (
-        <section>
-          <h1 className="text-xl font-semibold">Storage</h1>
-          <SectionHeader />
-          <div className="mt-4 rounded-lg border border-border bg-muted/40 p-5 text-sm text-muted-foreground">
-            <p>This workspace uses the platform default storage.</p>
-            <p className="mt-2 text-xs text-muted-foreground/70">
-              Customizing storage for a default-backed workspace isn&apos;t supported here yet
-              &mdash; set it at workspace creation.
-            </p>
-          </div>
-        </section>
-      );
-    }
-
+  if (conns.isError) {
+    const status = (conns.error as ApiError | null)?.status;
     if (status === 403) {
       return (
-        <section>
-          <h1 className="text-xl font-semibold">Storage</h1>
-          <SectionHeader />
-          <Alert className="mt-4">
-            <HardDrive className="h-4 w-4" />
-            <AlertTitle>Insufficient permissions</AlertTitle>
-            <AlertDescription>
-              Requires workspace-admin to view storage configuration.
-            </AlertDescription>
-          </Alert>
-        </section>
+        <Alert>
+          <HardDrive className="h-4 w-4" />
+          <AlertTitle>Insufficient permissions</AlertTitle>
+          <AlertDescription>
+            Requires workspace-admin to manage storage.
+          </AlertDescription>
+        </Alert>
       );
     }
-
     return (
-      <section>
-        <h1 className="text-xl font-semibold">Storage</h1>
-        <SectionHeader />
-        <Alert variant="destructive" className="mt-4">
-          <AlertTitle>Failed to load storage configuration</AlertTitle>
-          <AlertDescription>Something went wrong. Please try again.</AlertDescription>
-        </Alert>
-      </section>
+      <Alert variant="destructive">
+        <AlertTitle>Failed to load storage connections</AlertTitle>
+        <AlertDescription>Something went wrong. Please try again.</AlertDescription>
+      </Alert>
     );
   }
 
-  const info = storage.data!;
+  const rows = conns.data ?? [];
 
   return (
     <section>
-      <h1 className="text-xl font-semibold">Storage</h1>
-      <SectionHeader />
-      <StorageEditForm ws={ws} info={info} />
+      <SectionHeader onAdd={() => setAddOpen(true)} />
+
+      <div className="mt-4">
+        {rows.length === 0 ? (
+          <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
+            <p>No storage connections yet.</p>
+          </div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="text-left text-muted-foreground">
+              <tr className="border-b border-border">
+                <th className="py-2 pr-4 font-medium">Name</th>
+                <th className="py-2 pr-4 font-medium">Purpose</th>
+                <th className="py-2 pr-4 font-medium">Provider</th>
+                <th className="py-2 pr-4 font-medium">Bucket</th>
+                <th className="py-2 pr-4 font-medium">Endpoint</th>
+                <th className="py-2 pr-4 font-medium">Secret</th>
+                <th className="py-2 font-medium sr-only">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((conn) => (
+                <tr key={conn.id} className="border-b border-border last:border-b-0">
+                  <td className="py-2 pr-4 font-medium">{conn.name}</td>
+                  <td className="py-2 pr-4 text-muted-foreground">
+                    {conn.purpose ?? <span className="text-muted-foreground/50">—</span>}
+                  </td>
+                  <td className="py-2 pr-4">
+                    <Badge variant="secondary">{conn.provider}</Badge>
+                  </td>
+                  <td className="py-2 pr-4 font-mono text-muted-foreground">{conn.bucket}</td>
+                  <td className="py-2 pr-4 text-muted-foreground">
+                    {conn.endpoint ?? "AWS default"}
+                  </td>
+                  <td className="py-2 pr-4">
+                    <Badge variant={conn.has_secret ? "secondary" : "outline"}>
+                      {conn.has_secret ? "Configured" : "Not set"}
+                    </Badge>
+                  </td>
+                  <td className="py-2 text-right">
+                    <div className="flex items-center justify-end gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-muted-foreground"
+                        onClick={() => setBrowseTarget(conn)}
+                        aria-label={`Browse files for ${conn.name}`}
+                      >
+                        <FolderOpen className="h-4 w-4" />
+                        Browse
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-muted-foreground"
+                        onClick={() => setEditTarget(conn)}
+                        aria-label={`Edit ${conn.name}`}
+                      >
+                        <Pencil className="h-4 w-4" />
+                        Edit
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-muted-foreground hover:text-destructive"
+                        onClick={() => setDeleteTarget(conn)}
+                        aria-label={`Delete ${conn.name}`}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                        Delete
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Add dialog */}
+      <StorageConnDialog
+        ws={ws}
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        editConn={null}
+      />
+
+      {/* Edit dialog — key forces remount when target changes so useState initializers re-run */}
+      <StorageConnDialog
+        key={editTarget?.id ?? "__edit-closed"}
+        ws={ws}
+        open={editTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) setEditTarget(null);
+        }}
+        editConn={editTarget}
+      />
+
+      {/* Delete confirm */}
+      <ConfirmDeleteDialog
+        open={deleteTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) setDeleteTarget(null);
+        }}
+        title={deleteTarget ? `Delete «${deleteTarget.name}»?` : "Delete storage connection?"}
+        description="This storage connection will be removed. Any catalogs or notebooks that reference it may break."
+        confirmText="delete"
+        onConfirm={() => {
+          if (deleteTarget) deleteMutation.mutate(deleteTarget.id);
+        }}
+      />
     </section>
   );
 }
 
-function SectionHeader() {
+function SectionHeader({ onAdd }: { onAdd: () => void }) {
   return (
-    <p className="mt-1 text-sm text-muted-foreground">
-      Manage this workspace&apos;s catalog storage credentials and connection settings.
-    </p>
+    <div className="flex items-start justify-between gap-4">
+      <div>
+        <h2 className="text-base font-semibold">Storage</h2>
+        <p className="text-sm text-muted-foreground">
+          Storage connections this workspace can use (catalogs, file storage&hellip;).
+        </p>
+      </div>
+      <Button onClick={onAdd}>
+        <Plus className="h-4 w-4" />
+        Add connection
+      </Button>
+    </div>
   );
 }
 
-function StorageEditForm({ ws, info }: { ws: string; info: WorkspaceStorageInfo }) {
-  const updateMutation = useUpdateStorage(ws);
+function StorageConnDialog({
+  ws,
+  open,
+  onOpenChange,
+  editConn,
+}: {
+  ws: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  editConn: StorageConn | null;
+}) {
+  const isEdit = editConn !== null;
+  const createMutation = useCreateStorageConn(ws);
+  const updateMutation = useUpdateStorageConn(ws);
 
-  const [endpoint, setEndpoint] = useState(info.endpoint ?? "");
-  const [region, setRegion] = useState(info.region);
-  const [accessKey, setAccessKey] = useState(info.access_key);
+  const [name, setName] = useState(editConn?.name ?? "");
+  const [purpose, setPurpose] = useState(editConn?.purpose ?? "");
+  const [endpoint, setEndpoint] = useState(editConn?.endpoint ?? "");
+  const [region, setRegion] = useState(editConn?.region ?? "");
+  const [bucket, setBucket] = useState(editConn?.bucket ?? "");
+  const [keyPrefix, setKeyPrefix] = useState(editConn?.key_prefix ?? "");
+  const [accessKey, setAccessKey] = useState(editConn?.access_key ?? "");
   const [secretKey, setSecretKey] = useState("");
-  const [pathStyle, setPathStyle] = useState(false);
+  const [pathStyle, setPathStyle] = useState(editConn?.path_style ?? true);
+  const [error, setError] = useState<string | null>(null);
 
-  const [successMsg, setSuccessMsg] = useState<string | null>(null);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // When the dialog opens with a different target, reset fields
+  function resetToConn(conn: StorageConn | null) {
+    setName(conn?.name ?? "");
+    setPurpose(conn?.purpose ?? "");
+    setEndpoint(conn?.endpoint ?? "");
+    setRegion(conn?.region ?? "");
+    setBucket(conn?.bucket ?? "");
+    setKeyPrefix(conn?.key_prefix ?? "");
+    setAccessKey(conn?.access_key ?? "");
+    setSecretKey("");
+    setPathStyle(conn?.path_style ?? true);
+    setError(null);
+    createMutation.reset();
+    updateMutation.reset();
+  }
+
+  function handleOpenChange(next: boolean) {
+    if (!next) resetToConn(null);
+    onOpenChange(next);
+  }
+
+  const isPending = createMutation.isPending || updateMutation.isPending;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setSuccessMsg(null);
-    setErrorMsg(null);
+    setError(null);
 
-    const req: UpdateStorageRequest = {
-      provider: info.provider,
-      bucket: info.bucket,
-      key_prefix: info.key_prefix,
+    const input: StorageConnInput = {
+      name: name.trim(),
+      purpose: purpose.trim().length > 0 ? purpose.trim() : null,
+      provider: "s3",
       endpoint: endpoint.trim().length > 0 ? endpoint.trim() : null,
       region: region.trim(),
+      bucket: bucket.trim(),
+      key_prefix: keyPrefix.trim().length > 0 ? keyPrefix.trim() : null,
       access_key: accessKey.trim(),
+      // On create: always send secret_key. On edit: only if typed.
       secret_key: secretKey.length > 0 ? secretKey : null,
       path_style: pathStyle,
     };
 
     try {
-      await updateMutation.mutateAsync(req);
-      setSuccessMsg("Storage updated.");
-      setSecretKey(""); // clear secret field after save
+      if (isEdit && editConn) {
+        await updateMutation.mutateAsync({ id: editConn.id, input });
+      } else {
+        await createMutation.mutateAsync(input);
+      }
+      handleOpenChange(false);
     } catch (err) {
-      setErrorMsg((err as ApiError).message ?? "Failed to update storage.");
+      setError((err as ApiError).message ?? "Failed to save storage connection.");
     }
   }
 
-  const keyPrefixDisplay =
-    info.key_prefix && info.key_prefix.length > 0
-      ? info.key_prefix
-      : `workspaces/${ws}/warehouse`;
-
   return (
-    <form onSubmit={handleSubmit} className="mt-4 space-y-5">
-      {/* Re-point warning */}
-      <Alert className="border-amber-500/40 bg-amber-50/60 text-amber-900 dark:bg-amber-900/20 dark:text-amber-200">
-        <TriangleAlert className="h-4 w-4 text-amber-500" />
-        <AlertTitle>Changing credentials re-points this catalog warehouse</AlertTitle>
-        <AlertDescription>
-          Updating the endpoint or credentials re-points this workspace&apos;s catalog warehouse.
-          The bucket and location are fixed after provisioning; existing data is not migrated.
-        </AlertDescription>
-      </Alert>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogContent>
+        <form onSubmit={handleSubmit}>
+          <DialogHeader>
+            <DialogTitle>
+              {isEdit ? "Edit storage connection" : "Add storage connection"}
+            </DialogTitle>
+            <DialogDescription>
+              {isEdit
+                ? "Update the connection details. Leave secret key blank to keep the current secret."
+                : "Connect an S3-compatible object store. Egret validates reachability on save."}
+            </DialogDescription>
+          </DialogHeader>
 
-      <Card>
-        <CardContent className="pt-6 space-y-5">
-          {/* Fixed / read-only fields */}
-          <fieldset className="space-y-4">
-            <legend className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
-              Fixed (set at provisioning)
-            </legend>
-
+          <div className="my-4 space-y-4">
             <div className="space-y-1.5">
-              <Label htmlFor="storage-provider" className="text-muted-foreground">
-                Provider
-              </Label>
+              <Label htmlFor="sc-name">Name</Label>
               <Input
-                id="storage-provider"
-                value={info.provider}
-                disabled
-                aria-label="Provider (fixed)"
+                id="sc-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. prod-lakehouse"
+                required
+                autoFocus={!isEdit}
               />
-              <p className="text-xs text-muted-foreground">Fixed after provisioning.</p>
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor="storage-bucket" className="text-muted-foreground">
-                Bucket
-              </Label>
+              <Label htmlFor="sc-purpose">Purpose</Label>
               <Input
-                id="storage-bucket"
-                value={info.bucket}
-                disabled
-                aria-label="Bucket (fixed)"
+                id="sc-purpose"
+                value={purpose}
+                onChange={(e) => setPurpose(e.target.value)}
+                placeholder="Optional (e.g. catalog, notebooks)"
               />
-              <p className="text-xs text-muted-foreground">Fixed after provisioning.</p>
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor="storage-key-prefix" className="text-muted-foreground">
-                Key prefix
-              </Label>
+              <Label htmlFor="sc-endpoint">Endpoint</Label>
               <Input
-                id="storage-key-prefix"
-                value={keyPrefixDisplay}
-                disabled
-                aria-label="Key prefix (fixed)"
-              />
-              <p className="text-xs text-muted-foreground">Fixed after provisioning.</p>
-            </div>
-          </fieldset>
-
-          {/* Editable fields */}
-          <fieldset className="space-y-4 border-t border-border pt-5">
-            <legend className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
-              Credentials &amp; connection (editable)
-            </legend>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="storage-endpoint">Endpoint</Label>
-              <Input
-                id="storage-endpoint"
+                id="sc-endpoint"
                 value={endpoint}
                 onChange={(e) => setEndpoint(e.target.value)}
-                placeholder="Leave blank for AWS default (e.g. https://s3.example.com)"
+                placeholder="Leave blank for AWS (e.g. https://minio.corp.local)"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="sc-region">Region</Label>
+                <Input
+                  id="sc-region"
+                  value={region}
+                  onChange={(e) => setRegion(e.target.value)}
+                  placeholder="e.g. us-east-1"
+                  required
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="sc-bucket">Bucket</Label>
+                <Input
+                  id="sc-bucket"
+                  value={bucket}
+                  onChange={(e) => setBucket(e.target.value)}
+                  placeholder="e.g. my-data-lake"
+                  required
+                />
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="sc-key-prefix">Key prefix</Label>
+              <Input
+                id="sc-key-prefix"
+                value={keyPrefix}
+                onChange={(e) => setKeyPrefix(e.target.value)}
+                placeholder="Optional — e.g. workspaces/eng"
               />
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor="storage-region">Region</Label>
+              <Label htmlFor="sc-access-key">Access key</Label>
               <Input
-                id="storage-region"
-                value={region}
-                onChange={(e) => setRegion(e.target.value)}
-                placeholder="e.g. us-east-1"
-                required
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="storage-access-key">Access key</Label>
-              <Input
-                id="storage-access-key"
+                id="sc-access-key"
                 value={accessKey}
                 onChange={(e) => setAccessKey(e.target.value)}
                 placeholder="Access key ID"
@@ -242,56 +388,57 @@ function StorageEditForm({ ws, info }: { ws: string; info: WorkspaceStorageInfo 
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor="storage-secret-key">Secret key</Label>
+              <Label htmlFor="sc-secret-key">
+                Secret key{isEdit ? "" : " *"}
+              </Label>
               <Input
-                id="storage-secret-key"
+                id="sc-secret-key"
                 type="password"
                 value={secretKey}
                 onChange={(e) => setSecretKey(e.target.value)}
-                placeholder="Leave blank to keep current"
+                placeholder={
+                  isEdit ? "Leave blank to keep current" : "Secret access key"
+                }
+                required={!isEdit}
                 autoComplete="new-password"
               />
-              {info.has_secret && (
-                <p className="text-xs text-muted-foreground">A secret is currently configured.</p>
-              )}
             </div>
 
             <div className="flex items-center gap-3">
               <input
                 type="checkbox"
-                id="storage-path-style"
+                id="sc-path-style"
                 checked={pathStyle}
                 onChange={(e) => setPathStyle(e.target.checked)}
                 className="h-4 w-4 rounded border-border accent-primary cursor-pointer"
               />
-              <Label htmlFor="storage-path-style">
+              <Label htmlFor="sc-path-style">
                 Force path-style URL (s3.region.amazonaws.com/bucket)
               </Label>
             </div>
-          </fieldset>
-        </CardContent>
-      </Card>
 
-      {successMsg && (
-        <Alert>
-          <AlertTitle>Success</AlertTitle>
-          <AlertDescription>{successMsg}</AlertDescription>
-        </Alert>
-      )}
+            {error && (
+              <Alert variant="destructive">
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+          </div>
 
-      {errorMsg && (
-        <Alert variant="destructive">
-          <AlertTitle>Update failed</AlertTitle>
-          <AlertDescription>{errorMsg}</AlertDescription>
-        </Alert>
-      )}
-
-      <div className="flex justify-end">
-        <Button type="submit" disabled={updateMutation.isPending}>
-          {updateMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-          Save
-        </Button>
-      </div>
-    </form>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => handleOpenChange(false)}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" disabled={isPending}>
+              {isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+              {isEdit ? "Save changes" : "Add connection"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }

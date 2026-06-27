@@ -1,5 +1,5 @@
 //! Postgres access: a pooled connection wrapper and the embedded migrator.
-//! (touched to re-embed migration 0029_workspace_storage)
+//! (touched to re-embed migrations through 0030_workspace_storages)
 
 use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::postgres::PgPoolOptions;
