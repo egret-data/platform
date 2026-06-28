@@ -147,6 +147,35 @@ export function useCatalogNamespaces(ws: string, wid: string, enabled = true) {
   });
 }
 
+export function useCreateNamespace(ws: string, wid: string) {
+  const queryClient = useQueryClient();
+  return useMutation<unknown, ApiError, { parent: string | null; name: string }>({
+    mutationFn: (body) =>
+      apiJson(`/ws/${ws}/catalog/warehouses/${wid}/namespaces`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: catalogKeys.namespaces(ws, wid) });
+    },
+  });
+}
+
+export function useDeleteNamespace(ws: string, wid: string) {
+  const queryClient = useQueryClient();
+  return useMutation<void, ApiError, string>({
+    mutationFn: async (ns) => {
+      await apiFetch(`/ws/${ws}/catalog/warehouses/${wid}/namespaces/${encodeURIComponent(ns)}`, {
+        method: "DELETE",
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: catalogKeys.namespaces(ws, wid) });
+    },
+  });
+}
+
 export function useNamespaceContents(ws: string, wid: string, ns: string | null) {
   return useQuery<NamespaceContents>({
     queryKey: ns ? catalogKeys.tables(ws, wid, ns) : ["catalog", ws, wid, "tables", "none"],

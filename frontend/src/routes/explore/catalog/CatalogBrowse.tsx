@@ -1,18 +1,48 @@
 import { useState } from "react";
-import { Database, Eye, Table2 } from "lucide-react";
+import { Database, Eye, Loader2, Plus, Table2, Trash2 } from "lucide-react";
 import {
+  type NamespaceDto,
   nsDotted,
   useCatalogNamespaces,
+  useCreateNamespace,
+  useDeleteNamespace,
   useNamespaceContents,
   useTableDetail,
 } from "@/api/catalog";
+import { ApiError } from "@/api/client";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+const ROOT = "(root)";
 
 export default function CatalogBrowse({ ws, wid }: { ws: string; wid: string }) {
   const namespaces = useCatalogNamespaces(ws, wid);
+  const deleteMutation = useDeleteNamespace(ws, wid);
 
   const [ns, setNs] = useState<string | null>(null);
   const [table, setTable] = useState<string | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const contents = useNamespaceContents(ws, wid, ns);
   const detail = useTableDetail(ws, wid, ns, table);
@@ -22,13 +52,40 @@ export default function CatalogBrowse({ ws, wid }: { ws: string; wid: string }) 
     setTable(null);
   }
 
+  function confirmDelete() {
+    const dotted = deleteTarget;
+    if (!dotted) return;
+    setDeleteError(null);
+    deleteMutation.mutate(dotted, {
+      onSuccess: () => {
+        if (ns === dotted) {
+          setNs(null);
+          setTable(null);
+        }
+        setDeleteTarget(null);
+      },
+      onError: (err) => {
+        setDeleteError((err as ApiError).message ?? "Failed to delete namespace.");
+      },
+    });
+  }
+
   return (
     <div className="p-4">
       <div className="grid grid-cols-[16rem_1fr] gap-4">
         {/* Left: namespaces */}
         <div className="rounded border border-border">
-          <div className="border-b border-border px-3 py-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            Namespaces
+          <div className="flex items-center justify-between border-b border-border px-3 py-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            <span>Namespaces</span>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 text-muted-foreground"
+              onClick={() => setAddOpen(true)}
+              aria-label="New namespace"
+            >
+              <Plus className="h-4 w-4" />
+            </Button>
           </div>
           {namespaces.isLoading ? (
             <div className="p-3">
@@ -44,11 +101,11 @@ export default function CatalogBrowse({ ws, wid }: { ws: string; wid: string }) 
                 const dotted = nsDotted(n.levels);
                 const active = dotted === ns;
                 return (
-                  <li key={dotted}>
+                  <li key={dotted} className="group flex items-center gap-1">
                     <button
                       type="button"
                       onClick={() => selectNamespace(dotted)}
-                      className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm transition-colors ${
+                      className={`flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left text-sm transition-colors ${
                         active
                           ? "bg-accent text-accent-foreground"
                           : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
@@ -57,6 +114,18 @@ export default function CatalogBrowse({ ws, wid }: { ws: string; wid: string }) 
                       <Database className="h-4 w-4 shrink-0" />
                       <span className="truncate font-mono">{dotted}</span>
                     </button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 shrink-0 text-muted-foreground opacity-0 hover:text-destructive group-hover:opacity-100"
+                      onClick={() => {
+                        setDeleteError(null);
+                        setDeleteTarget(dotted);
+                      }}
+                      aria-label={`Delete ${dotted}`}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
                   </li>
                 );
               })}
@@ -77,7 +146,134 @@ export default function CatalogBrowse({ ws, wid }: { ws: string; wid: string }) 
           )}
         </div>
       </div>
+
+      {/* New namespace dialog — keyed so useState resets between opens */}
+      <NewNamespaceDialog
+        key={addOpen ? "open" : "closed"}
+        ws={ws}
+        wid={wid}
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        namespaces={namespaces.data ?? []}
+      />
+
+      {/* Delete confirm */}
+      <ConfirmDeleteDialog
+        open={deleteTarget !== null}
+        onOpenChange={(o) => {
+          // Keep deleteError visible after the dialog auto-closes on a rejected
+          // delete; it's cleared when the next delete target is opened.
+          if (!o) setDeleteTarget(null);
+        }}
+        title={deleteTarget ? `Delete «${deleteTarget}»?` : "Delete namespace?"}
+        description="Only an empty namespace can be deleted. If it still has tables or child namespaces the server will reject it."
+        confirmText="delete"
+        onConfirm={confirmDelete}
+      />
+      {deleteError && (
+        <Alert variant="destructive" className="mt-4">
+          <AlertDescription>{deleteError}</AlertDescription>
+        </Alert>
+      )}
     </div>
+  );
+}
+
+function NewNamespaceDialog({
+  ws,
+  wid,
+  open,
+  onOpenChange,
+  namespaces,
+}: {
+  ws: string;
+  wid: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  namespaces: NamespaceDto[];
+}) {
+  const createMutation = useCreateNamespace(ws, wid);
+  const [name, setName] = useState("");
+  const [parent, setParent] = useState<string>(ROOT);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    try {
+      await createMutation.mutateAsync({
+        parent: parent === ROOT ? null : parent,
+        name: name.trim(),
+      });
+      onOpenChange(false);
+    } catch (err) {
+      setError((err as ApiError).message ?? "Failed to create namespace.");
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <form onSubmit={handleSubmit}>
+          <DialogHeader>
+            <DialogTitle>New namespace</DialogTitle>
+            <DialogDescription>
+              Create a namespace under a parent, or at the root of the warehouse.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="my-4 space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="ns-name">Name</Label>
+              <Input
+                id="ns-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. sales"
+                required
+                autoFocus
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="ns-parent">Parent</Label>
+              <Select value={parent} onValueChange={setParent}>
+                <SelectTrigger id="ns-parent" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ROOT}>{ROOT}</SelectItem>
+                  {namespaces.map((n) => {
+                    const dotted = nsDotted(n.levels);
+                    return (
+                      <SelectItem key={dotted} value={dotted}>
+                        {dotted}
+                      </SelectItem>
+                    );
+                  })}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {error && (
+              <Alert variant="destructive">
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={createMutation.isPending || name.trim().length === 0}>
+              {createMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+              Create
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
