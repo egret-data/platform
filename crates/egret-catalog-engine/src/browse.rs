@@ -1255,43 +1255,75 @@ struct UpdateStorageConnRequest {
     path_style: bool,
 }
 
-/// Resolve the connection's `secret_ref` (a `workspace_secrets` id) by Epic-B
-/// precedence:
-///   (a) `new_secret` present → mint a new named secret and use its id,
-///   (b) else `secret_id` present → validate ownership via `get_meta` and use it,
-///   (c) else → `existing` (the keep-current `secret_ref`, `None` on create).
+/// Phase A (BEFORE the reachability probe): resolve the PLAINTEXT to test with,
+/// WITHOUT creating any `workspace_secrets` row, by Epic-B precedence:
+///   (a) `new_secret` present → its `value` (nothing is persisted yet),
+///   (b) else `secret_id` present → validate ownership via `get_meta`, then
+///       `resolve_plaintext`,
+///   (c) else → the existing conn's `secret_ref` plaintext (keep-current), or
+///       `None` when there is no existing secret.
 ///
-/// Also returns the resolved plaintext for the reachability probe, when a secret
-/// is in play (so create/update can probe the real credentials before persist).
-async fn resolve_conn_secret(
+/// Crucially this NEVER mints a named secret: if the probe (or the later conn
+/// store write) fails, no row is orphaned. The mint happens in [`persist_conn_secret`]
+/// only after the probe succeeds.
+async fn resolve_conn_plaintext(
     st: &BrowseState,
     ws: Uuid,
     secret_id: Option<Uuid>,
     new_secret: Option<&egret_secrets::NewSecret>,
     existing: Option<Uuid>,
-) -> Result<(Option<Uuid>, Option<String>), BrowseApiError> {
+) -> Result<Option<String>, BrowseApiError> {
+    match (new_secret, secret_id) {
+        (Some(n), _) => Ok(Some(n.value.clone())),
+        (None, Some(id)) => {
+            // Validate the named secret belongs to this workspace (404 otherwise).
+            st.workspace_secrets.get_meta(ws, id).await?;
+            Ok(Some(st.workspace_secrets.resolve_plaintext(ws, id).await?))
+        }
+        (None, None) => match existing {
+            Some(id) => Ok(Some(st.workspace_secrets.resolve_plaintext(ws, id).await?)),
+            None => Ok(None),
+        },
+    }
+}
+
+/// Phase B (AFTER the reachability probe succeeds): compute the `secret_ref` to
+/// persist, minting the inline `new_secret` NOW (and only now):
+///   (a) `new_secret` present → `workspace_secrets.create(...)` → its fresh id,
+///   (b) else `secret_id` present → that id (already validated in Phase A),
+///   (c) else → `existing` (the keep-current `secret_ref`).
+///
+/// A freshly-minted id (case a) is returned alongside `true` so the caller can
+/// roll it back if the subsequent conn store write fails — otherwise a failed
+/// insert would orphan the just-created named secret.
+async fn persist_conn_secret(
+    st: &BrowseState,
+    ws: Uuid,
+    secret_id: Option<Uuid>,
+    new_secret: Option<&egret_secrets::NewSecret>,
+    existing: Option<Uuid>,
+) -> Result<(Option<Uuid>, bool), BrowseApiError> {
     match (new_secret, secret_id) {
         (Some(n), _) => {
             let id = st
                 .workspace_secrets
                 .create(ws, &n.name, None, &n.value)
                 .await?;
-            Ok((Some(id), Some(n.value.clone())))
+            Ok((Some(id), true))
         }
-        (None, Some(id)) => {
-            // Validate the named secret belongs to this workspace (404 otherwise).
-            st.workspace_secrets.get_meta(ws, id).await?;
-            let plaintext = st.workspace_secrets.resolve_plaintext(ws, id).await?;
-            Ok((Some(id), Some(plaintext)))
-        }
-        (None, None) => {
-            // Keep-current: resolve the existing named secret's plaintext for the
-            // probe (if any).
-            let plaintext = match existing {
-                Some(id) => Some(st.workspace_secrets.resolve_plaintext(ws, id).await?),
-                None => None,
-            };
-            Ok((existing, plaintext))
+        (None, Some(id)) => Ok((Some(id), false)),
+        (None, None) => Ok((existing, false)),
+    }
+}
+
+/// Best-effort roll back a named secret minted in [`persist_conn_secret`] when the
+/// conn store write that should have referenced it failed. Logs on failure so a
+/// cleanup miss is visible but never masks the original error.
+async fn rollback_minted_secret(st: &BrowseState, ws: Uuid, minted: Option<Uuid>) {
+    if let Some(id) = minted {
+        if let Err(e) = st.workspace_secrets.delete(ws, id).await {
+            tracing::warn!(secret_id = %id, error = %e,
+                "failed to roll back named secret after storage conn write failure");
         }
     }
 }
@@ -1376,16 +1408,12 @@ async fn create_storage_conn(
         ));
     }
 
-    // Resolve the named secret (mint inline / reference existing / none) BEFORE
-    // probing, so the live reachability check runs against the real credentials.
-    let (secret_ref, plaintext) = resolve_conn_secret(
-        &st,
-        ctx.workspace_id.0,
-        req.secret_id,
-        req.new_secret.as_ref(),
-        None,
-    )
-    .await?;
+    let ws = ctx.workspace_id.0;
+
+    // Phase A: resolve the plaintext to PROBE with, WITHOUT minting anything yet —
+    // so a failed probe never orphans a named secret.
+    let plaintext =
+        resolve_conn_plaintext(&st, ws, req.secret_id, req.new_secret.as_ref(), None).await?;
 
     let cfg = StorageConfig {
         endpoint: req.endpoint.clone(),
@@ -1396,6 +1424,11 @@ async fn create_storage_conn(
         path_style: req.path_style,
     };
     validate_reachable(&cfg, req.key_prefix.as_deref()).await?;
+
+    // Phase B: only AFTER the probe succeeds, mint the inline `new_secret` (if any)
+    // and compute the `secret_ref` to persist.
+    let (secret_ref, minted) =
+        persist_conn_secret(&st, ws, req.secret_id, req.new_secret.as_ref(), None).await?;
 
     let input = StorageConnInput {
         name: req.name,
@@ -1409,11 +1442,14 @@ async fn create_storage_conn(
         secret_ref,
         path_style: req.path_style,
     };
-    let conn = st
-        .store
-        .create_storage_conn(ctx.workspace_id.0, &input)
-        .await
-        .map_err(map_create_conn_error)?;
+    let conn = match st.store.create_storage_conn(ws, &input).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            // Roll back a just-minted named secret so a failed insert never orphans it.
+            rollback_minted_secret(&st, ws, minted.then_some(secret_ref).flatten()).await;
+            return Err(map_create_conn_error(e));
+        }
+    };
 
     Ok((
         StatusCode::CREATED,
@@ -1440,17 +1476,18 @@ async fn update_storage_conn(
         ));
     }
 
+    let ws = ctx.workspace_id.0;
     let existing = st
         .store
-        .get_storage_conn(ctx.workspace_id.0, id)
+        .get_storage_conn(ws, id)
         .await?
         .ok_or(BrowseApiError::NotFound)?;
 
-    // Resolve the named secret by the same precedence as create, keeping the
-    // existing `secret_ref` when neither `new_secret` nor `secret_id` is supplied.
-    let (secret_ref, plaintext) = resolve_conn_secret(
+    // Phase A: resolve the plaintext to PROBE with (keep-current when neither
+    // `new_secret` nor `secret_id` is supplied), WITHOUT minting anything yet.
+    let plaintext = resolve_conn_plaintext(
         &st,
-        ctx.workspace_id.0,
+        ws,
         req.secret_id,
         req.new_secret.as_ref(),
         existing.secret_ref,
@@ -1467,6 +1504,17 @@ async fn update_storage_conn(
     };
     validate_reachable(&cfg, req.key_prefix.as_deref()).await?;
 
+    // Phase B: only AFTER the probe succeeds, mint the inline `new_secret` (if any)
+    // and compute the `secret_ref` to persist (else keep the existing one).
+    let (secret_ref, minted) = persist_conn_secret(
+        &st,
+        ws,
+        req.secret_id,
+        req.new_secret.as_ref(),
+        existing.secret_ref,
+    )
+    .await?;
+
     let input = StorageConnInput {
         name: req.name,
         purpose: req.purpose,
@@ -1479,14 +1527,20 @@ async fn update_storage_conn(
         secret_ref,
         path_style: req.path_style,
     };
-    let updated = st
-        .store
-        .update_storage_conn(ctx.workspace_id.0, id, &input)
-        .await
-        .map_err(map_create_conn_error)?;
+    let updated = match st.store.update_storage_conn(ws, id, &input).await {
+        Ok(updated) => updated,
+        Err(e) => {
+            // Roll back a just-minted named secret so a failed update never orphans it.
+            rollback_minted_secret(&st, ws, minted.then_some(secret_ref).flatten()).await;
+            return Err(map_create_conn_error(e));
+        }
+    };
     if updated {
         Ok(StatusCode::OK)
     } else {
+        // The conn vanished between the ownership check and the write; if we minted
+        // a secret for it, that secret is now orphaned — roll it back.
+        rollback_minted_secret(&st, ws, minted.then_some(secret_ref).flatten()).await;
         Err(BrowseApiError::NotFound)
     }
 }

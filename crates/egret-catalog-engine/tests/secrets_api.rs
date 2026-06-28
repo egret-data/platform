@@ -519,3 +519,77 @@ async fn referenced_secret_delete_is_409_then_unused_deletes() {
         "deleting an unused secret must be 204"
     );
 }
+
+#[tokio::test]
+async fn failed_storage_register_with_new_secret_creates_no_orphan() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, "admin", "ws_admin").await;
+    let secrets_base = format!("/ws/{}/secrets", f.slug);
+    let storages_base = format!("/ws/{}/storages", f.slug);
+
+    // Baseline: no named secrets in the workspace yet.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &secrets_base, &token, None))
+        .await
+        .unwrap();
+    let (_status, _b, json) = into_json(resp).await;
+    let before = json.as_array().unwrap().len();
+
+    // Register a storage connection with an UNREACHABLE endpoint plus an inline
+    // `new_secret`. The reachability probe must fail → 400, and because the named
+    // secret is minted only AFTER a successful probe, NOTHING is created.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &storages_base,
+            &token,
+            Some(serde_json::json!({
+                "name": "orphan-test",
+                "provider": "s3",
+                "endpoint": "http://127.0.0.1:1",
+                "region": "us-east-1",
+                "bucket": "warehouse",
+                "key_prefix": "conns/orphan",
+                "access_key": "egret",
+                "new_secret": { "name": "would-orphan", "value": "egretsecret" },
+                "path_style": true,
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, _b, json) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unreachable endpoint must fail the probe → 400; body={json}"
+    );
+
+    // No new named secret was created — the list count is unchanged and the would-be
+    // orphan name is absent.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &secrets_base, &token, None))
+        .await
+        .unwrap();
+    let (_status, _b, json) = into_json(resp).await;
+    let after = json.as_array().unwrap();
+    assert_eq!(
+        after.len(),
+        before,
+        "a failed storage register must not mint a named secret; body={json}"
+    );
+    assert!(
+        after
+            .iter()
+            .all(|s| s["name"].as_str() != Some("would-orphan")),
+        "the inline new_secret must not be persisted on probe failure; body={json}"
+    );
+}
