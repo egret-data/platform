@@ -2,10 +2,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ApiError } from "@/api/client";
 
 const namespacesMock = vi.fn();
 const contentsMock = vi.fn();
 const tableDetailMock = vi.fn();
+const createNamespaceMock = vi.fn();
+const deleteNamespaceMock = vi.fn();
 
 vi.mock("@/api/catalog", () => ({
   nsDotted: (levels: string[]) => levels.join("."),
@@ -13,6 +16,8 @@ vi.mock("@/api/catalog", () => ({
   useNamespaceContents: (_ws: string, wid: string, ns: string | null) => contentsMock(wid, ns),
   useTableDetail: (_ws: string, wid: string, ns: string | null, table: string | null) =>
     tableDetailMock(wid, ns, table),
+  useCreateNamespace: () => ({ mutateAsync: createNamespaceMock, isPending: false }),
+  useDeleteNamespace: () => ({ mutate: deleteNamespaceMock, isPending: false }),
 }));
 
 import CatalogBrowse from "../CatalogBrowse";
@@ -30,6 +35,9 @@ beforeEach(() => {
   namespacesMock.mockReset();
   contentsMock.mockReset();
   tableDetailMock.mockReset();
+  createNamespaceMock.mockReset();
+  deleteNamespaceMock.mockReset();
+  createNamespaceMock.mockResolvedValue(undefined);
   namespacesMock.mockReturnValue({
     data: [{ levels: ["sales"] }, { levels: ["sales", "2024"] }],
     isLoading: false,
@@ -82,5 +90,60 @@ describe("Catalog browser", () => {
     expect(screen.getByText("write.format.default")).toBeInTheDocument();
     expect(screen.getByText("42")).toBeInTheDocument();
     expect(tableDetailMock).toHaveBeenCalledWith("wh-1", "sales", "orders");
+  });
+
+  it("creates a root namespace from the New namespace dialog", async () => {
+    const user = userEvent.setup();
+    renderAt();
+
+    await user.click(screen.getByRole("button", { name: "New namespace" }));
+    await user.type(screen.getByLabelText("Name"), "marketing");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(createNamespaceMock).toHaveBeenCalledWith({ parent: null, name: "marketing" });
+  });
+
+  it("creates a nested namespace when a parent is picked", async () => {
+    const user = userEvent.setup();
+    renderAt();
+
+    await user.click(screen.getByRole("button", { name: "New namespace" }));
+    await user.type(screen.getByLabelText("Name"), "y2024");
+
+    // Open the Parent select and choose "sales".
+    await user.click(screen.getByRole("combobox"));
+    await user.click(await screen.findByRole("option", { name: "sales" }));
+
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(createNamespaceMock).toHaveBeenCalledWith({ parent: "sales", name: "y2024" });
+  });
+
+  it("surfaces a 409 duplicate error inline in the dialog", async () => {
+    createNamespaceMock.mockRejectedValueOnce(new ApiError(409, "namespace already exists"));
+    const user = userEvent.setup();
+    renderAt();
+
+    await user.click(screen.getByRole("button", { name: "New namespace" }));
+    await user.type(screen.getByLabelText("Name"), "sales");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(await screen.findByText("namespace already exists")).toBeInTheDocument();
+  });
+
+  it("deletes a namespace after confirmation and surfaces a 409 not-empty error", async () => {
+    deleteNamespaceMock.mockImplementation((_ns: string, opts: { onError: (e: ApiError) => void }) => {
+      opts.onError(new ApiError(409, "namespace is not empty"));
+    });
+    const user = userEvent.setup();
+    renderAt();
+
+    await user.click(screen.getByRole("button", { name: "Delete sales.2024" }));
+    // Type the confirm word, then confirm.
+    await user.type(screen.getByPlaceholderText("delete"), "delete");
+    await user.click(screen.getByRole("button", { name: /^Delete$/ }));
+
+    expect(deleteNamespaceMock).toHaveBeenCalledWith("sales.2024", expect.anything());
+    expect(await screen.findByText("namespace is not empty")).toBeInTheDocument();
   });
 });

@@ -53,12 +53,12 @@ use uuid::Uuid;
 
 use lakekeeper::api::iceberg::types::{PageToken, Prefix};
 use lakekeeper::api::iceberg::v1::namespace::{
-    ListNamespacesQuery, NamespaceParameters, NamespaceService,
+    ListNamespacesQuery, NamespaceDropFlags, NamespaceParameters, NamespaceService,
 };
 use lakekeeper::api::iceberg::v1::tables::TablesService;
 use lakekeeper::api::iceberg::v1::tables::{ListTablesQuery, LoadTableRequest, TableParameters};
 use lakekeeper::api::iceberg::v1::views::ViewService;
-use lakekeeper::api::iceberg::v1::ListTablesResponse;
+use lakekeeper::api::iceberg::v1::{CreateNamespaceRequest, ListTablesResponse};
 use lakekeeper::api::{ApiContext, RequestMetadata};
 use lakekeeper::iceberg::{NamespaceIdent, TableIdent};
 
@@ -130,7 +130,13 @@ pub fn browse_router() -> Router<BrowseState> {
         // UUID (workspace-scoped, 404 cross-tenant) before any lakekeeper read.
         .route(
             "/ws/{workspace}/catalog/warehouses/{wid}/namespaces",
-            get(list_namespaces),
+            get(list_namespaces).post(create_namespace_route),
+        )
+        // Workspace-admin namespace DDL (gated `workspace:manage_members`): drop a
+        // namespace (empty-only; a non-empty namespace → 409).
+        .route(
+            "/ws/{workspace}/catalog/warehouses/{wid}/namespaces/{ns}",
+            delete(drop_namespace_route),
         )
         .route(
             "/ws/{workspace}/catalog/warehouses/{wid}/namespaces/{ns}/tables",
@@ -377,6 +383,34 @@ async fn authorized_warehouse(
 
     Ok(Resolved {
         // lakekeeper's default `prefix_template = "{warehouse_id}"`.
+        prefix: Prefix::from(lk_id.to_string()),
+        request_metadata,
+    })
+}
+
+/// Admin-gated variant of [`authorized_warehouse`]: gates
+/// `workspace:manage_members` (the workspace-admin gate, identical to the gate
+/// the token mint/revoke + storage-conn handlers use via [`require_workspace_admin`])
+/// instead of `catalog:read`, then resolves the egret warehouse-row id `wid` to
+/// its lakekeeper UUID, scoped to the caller's workspace (cross-workspace `wid` →
+/// 404). Used by the namespace DDL routes (create / drop), which a mere catalog
+/// reader must not perform.
+async fn authorized_warehouse_admin(
+    st: &BrowseState,
+    ctx: &WorkspaceContext,
+    wid: Uuid,
+) -> Result<Resolved, BrowseApiError> {
+    // RBAC FIRST: the session must hold the workspace-admin permission.
+    require_workspace_admin(st, ctx).await?;
+
+    // Then resolve the requested warehouse's lakekeeper UUID, scoped to the
+    // caller's workspace (cross-workspace `wid` → NotFound).
+    let lk_id = st.store.lakekeeper_id(ctx.workspace_id.0, wid).await?;
+
+    let request_metadata =
+        system_request_metadata(&st.system_user).map_err(|_| BrowseApiError::Internal)?;
+
+    Ok(Resolved {
         prefix: Prefix::from(lk_id.to_string()),
         request_metadata,
     })
@@ -742,6 +776,130 @@ async fn list_namespaces_one_level(
 /// Parse a dotted namespace path segment (`a.b.c`) into its levels.
 fn parse_ns(ns: &str) -> Vec<String> {
     ns.split('.').map(|s| s.to_string()).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Workspace-admin namespace DDL (create incl. nested / drop empty-only).
+//
+// Gated `workspace:manage_members` (the workspace-admin gate) via
+// [`authorized_warehouse_admin`], which also resolves the `{wid}` warehouse-row
+// to its lakekeeper UUID scoped to the caller's workspace (cross-workspace `wid`
+// → 404, IDOR closed). These drive lakekeeper's typed
+// `NamespaceService::create_namespace` / `drop_namespace`.
+// ---------------------------------------------------------------------------
+
+/// Request body to create a namespace: an optional dotted `parent` (a top-level
+/// namespace when omitted/empty) and a single `name` level to create under it.
+#[derive(Deserialize)]
+struct CreateNamespaceBody {
+    #[serde(default)]
+    parent: Option<String>,
+    name: String,
+}
+
+/// POST `/api/ws/{workspace}/catalog/warehouses/{wid}/namespaces` — create a
+/// namespace (top-level, or nested under `parent`).
+///
+/// `name` is a SINGLE level: it is trimmed and rejected (400) if empty or if it
+/// contains a `.` (dotted nesting is expressed via `parent`, not by smuggling
+/// dots into the leaf name). A duplicate namespace, or a missing parent, maps to
+/// 409 (lakekeeper returns 409 `AlreadyExistsException` for a dup and 404 for a
+/// missing parent — surfaced here as a clear conflict / not-found).
+async fn create_namespace_route(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, wid)): Path<(String, Uuid)>,
+    Json(req): Json<CreateNamespaceBody>,
+) -> Result<Response, BrowseApiError> {
+    let r = authorized_warehouse_admin(&st, &ctx, wid).await?;
+
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err(BrowseApiError::BadRequest(
+            "namespace name must not be empty".to_string(),
+        ));
+    }
+    if name.contains('.') {
+        return Err(BrowseApiError::BadRequest(
+            "namespace name must not contain '.'; nest via the parent instead".to_string(),
+        ));
+    }
+
+    // Build the full level path: the (trimmed, non-empty) parent's levels, then
+    // the new leaf name.
+    let mut levels: Vec<String> = match req.parent.as_deref().map(str::trim) {
+        Some(p) if !p.is_empty() => parse_ns(p),
+        _ => Vec::new(),
+    };
+    levels.push(name.to_string());
+
+    let ident = NamespaceIdent::from_vec(levels.clone()).map_err(|_| BrowseApiError::Internal)?;
+
+    let request = CreateNamespaceRequest {
+        namespace: ident,
+        properties: None,
+    };
+
+    <EngineServer as NamespaceService<EngineState>>::create_namespace(
+        Some(r.prefix.clone()),
+        request,
+        st.engine.clone(),
+        r.request_metadata,
+    )
+    .await
+    .map_err(|e| {
+        let code = e.error.code;
+        if code == StatusCode::CONFLICT.as_u16() {
+            BrowseApiError::Conflict("a namespace with that name already exists".to_string())
+        } else if code == StatusCode::NOT_FOUND.as_u16() {
+            // A nested create whose parent does not exist.
+            BrowseApiError::Conflict("the parent namespace does not exist".to_string())
+        } else if code == StatusCode::BAD_REQUEST.as_u16() {
+            BrowseApiError::BadRequest("invalid namespace".to_string())
+        } else {
+            BrowseApiError::Engine(e)
+        }
+    })?;
+
+    Ok((StatusCode::CREATED, Json(NamespaceDto { levels })).into_response())
+}
+
+/// DELETE `/api/ws/{workspace}/catalog/warehouses/{wid}/namespaces/{ns}` — drop a
+/// namespace. EMPTY-ONLY: a namespace that still contains tables/views or child
+/// namespaces is rejected with 409 (lakekeeper returns 409
+/// `NamespaceNotEmptyException` for that case). Non-recursive: no `force`,
+/// `purge`, or `recursive` flags are set.
+async fn drop_namespace_route(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, wid, ns)): Path<(String, Uuid, String)>,
+) -> Result<StatusCode, BrowseApiError> {
+    let r = authorized_warehouse_admin(&st, &ctx, wid).await?;
+
+    let ident = NamespaceIdent::from_vec(parse_ns(&ns)).map_err(|_| BrowseApiError::Internal)?;
+    let params = NamespaceParameters {
+        prefix: Some(r.prefix.clone()),
+        namespace: ident,
+    };
+
+    <EngineServer as NamespaceService<EngineState>>::drop_namespace(
+        params,
+        // Empty-only, non-recursive drop: leave all flags at their default false.
+        NamespaceDropFlags::default(),
+        st.engine.clone(),
+        r.request_metadata,
+    )
+    .await
+    .map_err(|e| {
+        if e.error.code == StatusCode::CONFLICT.as_u16() {
+            // NamespaceNotEmptyException (or a protected child) → 409.
+            BrowseApiError::Conflict("namespace is not empty".to_string())
+        } else {
+            BrowseApiError::Engine(e)
+        }
+    })?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Collect all table-or-view identifiers (names) under `parent`, paginating.
