@@ -343,6 +343,15 @@ function NamespaceContentsView({
   );
 }
 
+/** Compact one-line summary picking the common Iceberg snapshot counters. */
+function snapshotSummary(summary: Record<string, string>): string {
+  const parts: string[] = [];
+  if (summary["added-records"] != null) parts.push(`+${summary["added-records"]} rows`);
+  if (summary["added-data-files"] != null) parts.push(`+${summary["added-data-files"]} files`);
+  if (summary["total-records"] != null) parts.push(`${summary["total-records"]} total`);
+  return parts.length > 0 ? parts.join(", ") : "—";
+}
+
 function TableDetailView({
   ns,
   table,
@@ -372,6 +381,8 @@ function TableDetailView({
         <>
           <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-muted-foreground">
             <span className="font-mono break-all">{detail.data.location}</span>
+            <span>format v{detail.data.format_version}</span>
+            <span>updated {new Date(detail.data.last_updated_ms).toLocaleString()}</span>
           </div>
           <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
             <span>
@@ -380,9 +391,6 @@ function TableDetailView({
             <span>
               <span className="text-muted-foreground">Current snapshot:</span>{" "}
               {detail.data.current_snapshot_id ?? "—"}
-            </span>
-            <span>
-              <span className="text-muted-foreground">Snapshots:</span> {detail.data.snapshot_count}
             </span>
           </div>
 
@@ -406,6 +414,88 @@ function TableDetailView({
                 ))}
               </tbody>
             </table>
+          </div>
+
+          <div>
+            <h2 className="mb-2 text-sm font-medium text-muted-foreground">Partition spec</h2>
+            {detail.data.partition_fields.length > 0 ? (
+              <table className="w-full text-sm">
+                <thead className="text-left text-muted-foreground">
+                  <tr className="border-b border-border">
+                    <th className="py-1 pr-4 font-medium">Field</th>
+                    <th className="py-1 pr-4 font-medium">Source column</th>
+                    <th className="py-1 font-medium">Transform</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {detail.data.partition_fields.map((p) => (
+                    <tr key={p.name} className="border-b border-border last:border-b-0">
+                      <td className="py-1 pr-4 font-mono">{p.name}</td>
+                      <td className="py-1 pr-4 font-mono text-muted-foreground">{p.source_column}</td>
+                      <td className="py-1 font-mono text-muted-foreground">{p.transform}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p className="text-sm text-muted-foreground">Unpartitioned</p>
+            )}
+          </div>
+
+          {detail.data.sort_fields.length > 0 && (
+            <div>
+              <h2 className="mb-2 text-sm font-medium text-muted-foreground">Sort order</h2>
+              <table className="w-full text-sm">
+                <thead className="text-left text-muted-foreground">
+                  <tr className="border-b border-border">
+                    <th className="py-1 pr-4 font-medium">Column</th>
+                    <th className="py-1 pr-4 font-medium">Transform</th>
+                    <th className="py-1 pr-4 font-medium">Direction</th>
+                    <th className="py-1 font-medium">Nulls</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {detail.data.sort_fields.map((s) => (
+                    <tr key={s.column} className="border-b border-border last:border-b-0">
+                      <td className="py-1 pr-4 font-mono">{s.column}</td>
+                      <td className="py-1 pr-4 font-mono text-muted-foreground">{s.transform}</td>
+                      <td className="py-1 pr-4">{s.direction}</td>
+                      <td className="py-1">{s.null_order}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div>
+            <h2 className="mb-2 text-sm font-medium text-muted-foreground">Snapshots</h2>
+            {detail.data.snapshots.length > 0 ? (
+              <table className="w-full text-sm">
+                <thead className="text-left text-muted-foreground">
+                  <tr className="border-b border-border">
+                    <th className="py-1 pr-4 font-medium">Snapshot id</th>
+                    <th className="py-1 pr-4 font-medium">Time</th>
+                    <th className="py-1 pr-4 font-medium">Operation</th>
+                    <th className="py-1 font-medium">Summary</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {detail.data.snapshots.map((s) => (
+                    <tr key={s.snapshot_id} className="border-b border-border last:border-b-0">
+                      <td className="py-1 pr-4 font-mono">{s.snapshot_id}</td>
+                      <td className="py-1 pr-4 text-muted-foreground">
+                        {new Date(s.timestamp_ms).toLocaleString()}
+                      </td>
+                      <td className="py-1 pr-4">{s.operation}</td>
+                      <td className="py-1 text-muted-foreground">{snapshotSummary(s.summary)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p className="text-sm text-muted-foreground">No snapshots yet.</p>
+            )}
           </div>
 
           {Object.keys(detail.data.properties).length > 0 && (
