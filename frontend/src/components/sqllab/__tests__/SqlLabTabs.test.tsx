@@ -18,7 +18,7 @@ function mockApi() {
   vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
     const u = String(url); const m = (init?.method ?? "GET").toUpperCase();
     const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200, headers: { "content-type": "application/json" } });
-    if (u.includes("/me/databases")) return json([{ id: "db1", name: "trino", engine: "trino" }]);
+    if (u.match(/\/ws\/[^/]+\/databases$/)) return json([{ id: "db1", name: "trino", engine: "trino" }]);
     if (u.includes("/sqllab/databases/")) return json([]);            // schema selects
     if (u.endsWith("/sqllab/queries")) return json([]);              // saved list
     if (u.endsWith("/queries") && m === "GET") return json([]);      // history

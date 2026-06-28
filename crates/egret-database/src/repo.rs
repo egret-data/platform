@@ -54,14 +54,13 @@ impl DatabaseRepo {
         &self.secrets
     }
 
-    /// Internal pool accessor for sibling modules (e.g. grants).
-    pub(crate) fn pool(&self) -> &sqlx::PgPool {
-        &self.db.pool
-    }
-
-    /// Register a new database, sealing `secret` if provided.
-    pub async fn create(
+    /// Register a new database owned by `workspace_id`, sealing `secret` if provided.
+    ///
+    /// ADR-19 per-workspace model: the row is stamped with its owning workspace
+    /// so workspace-scoped reads can filter it.
+    pub async fn create_in_workspace(
         &self,
+        workspace_id: Uuid,
         input: &DatabaseInput,
         created_by: Option<UserId>,
     ) -> Result<Database, DatabaseError> {
@@ -71,8 +70,8 @@ impl DatabaseRepo {
         };
         let opts = serde_json::to_value(&input.options).unwrap_or(serde_json::json!({}));
         let row = sqlx::query_as::<_, Row>(
-            "INSERT INTO databases (name, engine, host, port, options, secret_id, created_by) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+            "INSERT INTO databases (name, engine, host, port, options, secret_id, created_by, workspace_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
              RETURNING id, name, engine, host, port, options, secret_id, status",
         )
         .bind(&input.name)
@@ -82,6 +81,7 @@ impl DatabaseRepo {
         .bind(opts)
         .bind(secret_id)
         .bind(created_by.map(|u| u.0))
+        .bind(workspace_id)
         .fetch_one(&self.db.pool)
         .await
         .map_err(|e| match &e {
@@ -117,29 +117,80 @@ impl DatabaseRepo {
         .into_database()
     }
 
-    pub async fn list(&self) -> Result<Vec<Database>, DatabaseError> {
+    /// Databases owned by a workspace (ordered by name).
+    ///
+    /// Ownership query (ADR-19 per-workspace model): rows are filtered by their
+    /// own `workspace_id` column. Used by the workspace router and the query
+    /// engine to scope visibility.
+    pub async fn list_for_workspace(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<Database>, DatabaseError> {
         let rows = sqlx::query_as::<_, Row>(
             "SELECT id, name, engine, host, port, options, secret_id, status \
-             FROM databases ORDER BY name",
+             FROM databases WHERE workspace_id = $1 ORDER BY name",
         )
+        .bind(workspace_id)
         .fetch_all(&self.db.pool)
         .await?;
         rows.into_iter().map(Row::into_database).collect()
     }
 
-    /// Update fields; if `secret` is present, re-seal and replace (delete the old secret).
-    pub async fn update(
+    /// Open the stored plaintext secret for a database (used by the connection tester).
+    pub async fn open_secret(&self, id: Uuid) -> Result<Option<String>, DatabaseError> {
+        let secret_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT secret_id FROM databases WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.db.pool)
+                .await?
+                .flatten();
+        match secret_id {
+            None => Ok(None),
+            Some(sid) => Ok(Some(self.secrets.get(sid).await?)),
+        }
+    }
+
+    /// Fetch a database only if it belongs to `workspace_id`.
+    ///
+    /// IDOR-safe: a row owned by another workspace (or absent) is reported as
+    /// `NotFound`, never leaked.
+    pub async fn get_in_workspace(
         &self,
+        workspace_id: Uuid,
+        id: Uuid,
+    ) -> Result<Database, DatabaseError> {
+        sqlx::query_as::<_, Row>(
+            "SELECT id, name, engine, host, port, options, secret_id, status \
+             FROM databases WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .fetch_optional(&self.db.pool)
+        .await?
+        .ok_or_else(|| DatabaseError::NotFound(id.to_string()))?
+        .into_database()
+    }
+
+    /// Update a database scoped to `workspace_id`.
+    ///
+    /// Ownership is checked first (404 before any mutation), then the same
+    /// secret rotation/cleanup logic as [`update`](Self::update) runs, with every
+    /// statement additionally constrained to the owning workspace.
+    pub async fn update_in_workspace(
+        &self,
+        workspace_id: Uuid,
         id: Uuid,
         input: &DatabaseInput,
         _actor: Option<UserId>,
     ) -> Result<Database, DatabaseError> {
-        self.get(id).await?; // 404 if the row is missing
-        let old_secret_id: Option<Uuid> =
-            sqlx::query_scalar("SELECT secret_id FROM databases WHERE id = $1")
-                .bind(id)
-                .fetch_one(&self.db.pool)
-                .await?;
+        self.get_in_workspace(workspace_id, id).await?; // 404 if not owned, before any mutation
+        let old_secret_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT secret_id FROM databases WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .fetch_one(&self.db.pool)
+        .await?;
 
         // Seal a new secret only when a non-empty plaintext is supplied.
         let sealed_new = match &input.secret {
@@ -152,7 +203,7 @@ impl DatabaseRepo {
 
         let res = sqlx::query(
             "UPDATE databases SET name=$2, engine=$3, host=$4, port=$5, options=$6, \
-                 secret_id=$7, updated_at=now() WHERE id=$1",
+                 secret_id=$7, updated_at=now() WHERE id=$1 AND workspace_id=$8",
         )
         .bind(id)
         .bind(&input.name)
@@ -161,6 +212,7 @@ impl DatabaseRepo {
         .bind(input.port)
         .bind(opts)
         .bind(new_secret_id)
+        .bind(workspace_id)
         .execute(&self.db.pool)
         .await
         .map_err(|e| match &e {
@@ -190,19 +242,30 @@ impl DatabaseRepo {
                 }
             }
         }
-        self.get(id).await
+        self.get_in_workspace(workspace_id, id).await
     }
 
-    /// Delete the database and its secret.
-    pub async fn delete(&self, id: Uuid) -> Result<(), DatabaseError> {
-        let secret_id: Option<Uuid> =
-            sqlx::query_scalar("SELECT secret_id FROM databases WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&self.db.pool)
-                .await?
-                .flatten();
-        sqlx::query("DELETE FROM databases WHERE id = $1")
+    /// Delete a database scoped to `workspace_id` (and its secret).
+    ///
+    /// Ownership is checked first (404 if not owned), then the row is deleted
+    /// under the same workspace constraint and its sealed secret is cleaned up.
+    pub async fn delete_in_workspace(
+        &self,
+        workspace_id: Uuid,
+        id: Uuid,
+    ) -> Result<(), DatabaseError> {
+        self.get_in_workspace(workspace_id, id).await?; // 404 if not owned
+        let secret_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT secret_id FROM databases WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .fetch_optional(&self.db.pool)
+        .await?
+        .flatten();
+        sqlx::query("DELETE FROM databases WHERE id = $1 AND workspace_id = $2")
             .bind(id)
+            .bind(workspace_id)
             .execute(&self.db.pool)
             .await?;
         if let Some(sid) = secret_id {
@@ -214,27 +277,22 @@ impl DatabaseRepo {
         Ok(())
     }
 
-    /// Open the stored plaintext secret for a database (used by the connection tester).
-    pub async fn open_secret(&self, id: Uuid) -> Result<Option<String>, DatabaseError> {
-        let secret_id: Option<Uuid> =
-            sqlx::query_scalar("SELECT secret_id FROM databases WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&self.db.pool)
-                .await?
-                .flatten();
-        match secret_id {
-            None => Ok(None),
-            Some(sid) => Ok(Some(self.secrets.get(sid).await?)),
-        }
-    }
-
-    /// Record the last connection-test result.
-    pub async fn set_status(&self, id: Uuid, status: &str) -> Result<(), DatabaseError> {
-        sqlx::query("UPDATE databases SET status=$2, updated_at=now() WHERE id=$1")
-            .bind(id)
-            .bind(status)
-            .execute(&self.db.pool)
-            .await?;
+    /// Record the last connection-test result, scoped to the owning workspace
+    /// (defense-in-depth: the status write cannot touch another workspace's row).
+    pub async fn set_status(
+        &self,
+        workspace_id: Uuid,
+        id: Uuid,
+        status: &str,
+    ) -> Result<(), DatabaseError> {
+        sqlx::query(
+            "UPDATE databases SET status=$3, updated_at=now() WHERE id=$1 AND workspace_id=$2",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .bind(status)
+        .execute(&self.db.pool)
+        .await?;
         Ok(())
     }
 }

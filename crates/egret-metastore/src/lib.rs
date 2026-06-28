@@ -1,5 +1,5 @@
 //! Postgres access: a pooled connection wrapper and the embedded migrator.
-//! (touched to re-embed migrations through 0030_workspace_storages)
+//! (touched to re-embed migrations through 0031_databases_per_workspace)
 
 use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::postgres::PgPoolOptions;
@@ -11,6 +11,7 @@ use sqlx::PgPool;
 // migration 0026: drop legacy catalog metadata tables (lakekeeper is the engine)
 // migration 0027: per-token permissions on catalog_tokens
 // migration 0028: per-token namespace_scope on catalog_tokens
+// migration 0031: per-workspace DB connections (databases.workspace_id; drop workspace_database_grant)
 /// All SQL migrations, embedded at compile time from the workspace `migrations/` dir.
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
