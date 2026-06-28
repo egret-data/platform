@@ -333,8 +333,42 @@ struct ColumnDto {
     required: bool,
 }
 
+/// One field of the table's default partition spec. `source_column` is the
+/// human-readable schema column name the partition transform reads (resolved
+/// from the field's `source_id`), so the UI never has to map ids back itself.
+#[derive(Serialize)]
+struct PartitionFieldDto {
+    name: String,
+    source_column: String,
+    transform: String,
+}
+
+/// One field of the table's default sort order, column name + transform +
+/// direction (`ascending`/`descending`) + null ordering (`first`/`last`).
+#[derive(Serialize)]
+struct SortFieldDto {
+    column: String,
+    transform: String,
+    direction: String,
+    null_order: String,
+}
+
+/// One entry of the table's snapshot history. `summary` carries the snapshot's
+/// `operation` (already promoted to its own field) plus the remaining
+/// additional-properties (e.g. added/deleted record counts).
+#[derive(Serialize)]
+struct SnapshotDto {
+    snapshot_id: i64,
+    parent_snapshot_id: Option<i64>,
+    timestamp_ms: i64,
+    operation: String,
+    summary: BTreeMap<String, String>,
+}
+
 /// Compact, UI-friendly projection of a table's current state. Deliberately
-/// does NOT dump the whole `TableMetadata`.
+/// does NOT dump the whole `TableMetadata` — only the fields the table-detail
+/// view renders, all sourced from the metadata the load already returns (no
+/// query execution).
 #[derive(Serialize)]
 struct TableDetail {
     name: String,
@@ -344,6 +378,16 @@ struct TableDetail {
     current_snapshot_id: Option<i64>,
     snapshot_count: usize,
     properties: BTreeMap<String, String>,
+    /// Iceberg format version (1, 2, or 3).
+    format_version: u8,
+    /// Epoch-millis the metadata was last updated.
+    last_updated_ms: i64,
+    /// Default partition spec fields ([] when unpartitioned).
+    partition_fields: Vec<PartitionFieldDto>,
+    /// Default sort order fields ([] when unsorted).
+    sort_fields: Vec<SortFieldDto>,
+    /// Snapshot history, newest first ([] before the first commit).
+    snapshots: Vec<SnapshotDto>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1033,6 +1077,58 @@ async fn table_detail(
     // Location: the loaded metadata's table location (its storage root).
     let location = md.location().to_string();
 
+    // Resolve a partition/sort `source_id` to its schema column name; fall back
+    // to the raw id string if the field is somehow absent (shouldn't happen for
+    // a bound spec/order, but never panic on read).
+    let col_name = |id: i32| {
+        schema
+            .field_by_id(id)
+            .map(|f| f.name.clone())
+            .unwrap_or_else(|| id.to_string())
+    };
+
+    let partition_fields = md
+        .default_partition_spec()
+        .fields()
+        .iter()
+        .map(|pf| PartitionFieldDto {
+            name: pf.name.clone(),
+            source_column: col_name(pf.source_id),
+            transform: pf.transform.to_string(),
+        })
+        .collect();
+
+    let sort_fields = md
+        .default_sort_order()
+        .fields
+        .iter()
+        .map(|sf| SortFieldDto {
+            column: col_name(sf.source_id),
+            transform: sf.transform.to_string(),
+            direction: sf.direction.to_string(),
+            null_order: sf.null_order.to_string(),
+        })
+        .collect();
+
+    let mut snapshots: Vec<SnapshotDto> = md
+        .snapshots()
+        .map(|s| SnapshotDto {
+            snapshot_id: s.snapshot_id(),
+            parent_snapshot_id: s.parent_snapshot_id(),
+            timestamp_ms: s.timestamp_ms(),
+            // `Operation` exposes `as_str()` (no `Display`).
+            operation: s.summary().operation.as_str().to_string(),
+            summary: s
+                .summary()
+                .additional_properties
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        })
+        .collect();
+    // Newest first.
+    snapshots.sort_by_key(|s| std::cmp::Reverse(s.timestamp_ms));
+
     Ok(Json(TableDetail {
         name: table,
         location,
@@ -1041,6 +1137,11 @@ async fn table_detail(
         current_snapshot_id: md.current_snapshot_id(),
         snapshot_count: md.snapshots().count(),
         properties,
+        format_version: md.format_version() as u8,
+        last_updated_ms: md.last_updated_ms(),
+        partition_fields,
+        sort_fields,
+        snapshots,
     }))
 }
 
