@@ -8,9 +8,10 @@
 //! IN LAKEKEEPER (created via the engine) and preserves the egret tenant
 //! boundary:
 //!   - a `ws_viewer` member of the workspace can list the namespace/table and
-//!     read table detail (200),
+//!     read table detail (200) under the warehouse-scoped routes,
 //!   - an authenticated non-member is Forbidden (403),
-//!   - a member of workspace X requesting workspace Y is Forbidden (403, IDOR).
+//!   - a member of workspace X requesting workspace Y is Forbidden (403, IDOR),
+//!   - a cross-workspace warehouse-row id `{wid}` is 404 (IDOR).
 //!
 //! Seeding the lakekeeper data reuses the roundtrip harness's flow: provision a
 //! per-workspace warehouse, then drive the bare engine router (with an injected
@@ -65,7 +66,8 @@ struct Fixture {
     slug: String,
     workspace_id: WorkspaceId,
     owner: UserId,
-    warehouse_id: Uuid,
+    /// The egret warehouse-ROW id (`{wid}` path segment of the browse routes).
+    wid: Uuid,
     ns_name: String,
     table_name: String,
 }
@@ -140,6 +142,14 @@ async fn setup() -> Option<Fixture> {
     .await
     .expect("provision warehouse (needs MinIO reachable + writable `warehouse` bucket)");
 
+    // The egret warehouse-row id for the new `{wid}`-scoped browse routes (the
+    // provision helper persists it as the workspace's `'default'` warehouse).
+    let wid = store
+        .get_warehouse_by_name(workspace_id.0, "default")
+        .await
+        .expect("default warehouse row")
+        .id;
+
     // Seed a namespace + table IN LAKEKEEPER via the bare engine router, using the
     // warehouse UUID as the `{prefix}` (lakekeeper's default prefix_template).
     let seed_app = egret_catalog_engine::catalog_engine_router(engine_state.clone())
@@ -198,16 +208,7 @@ async fn setup() -> Option<Fixture> {
     let app = browse_router().with_state(BrowseState {
         engine: engine_state,
         store: store.clone(),
-        secret_store: secret_store.clone(),
         workspace_secrets: egret_secrets::WorkspaceSecretStore::new(db.clone(), secret_store),
-        default_storage: egret_storage::StorageConfig {
-            endpoint: Some("http://localhost:9000".to_string()),
-            region: "local-01".to_string(),
-            bucket: "warehouse".to_string(),
-            access_key: "egret".to_string(),
-            secret_key: "egretsecret".to_string(),
-            path_style: true,
-        },
         system_user: SYSTEM_USER.into(),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
@@ -223,7 +224,7 @@ async fn setup() -> Option<Fixture> {
         slug,
         workspace_id,
         owner,
-        warehouse_id,
+        wid,
         ns_name,
         table_name,
     })
@@ -294,35 +295,13 @@ async fn viewer_browses_lakekeeper_namespace_table_and_detail() {
         return;
     };
     let token = add_member(&f, "viewer", "ws_viewer").await;
-
-    // summary → warehouse id/name.
-    let resp = f
-        .app
-        .clone()
-        .oneshot(get(&format!("/ws/{}/catalog", f.slug), Some(&token)))
-        .await
-        .unwrap();
-    let (status, json) = into_json(resp).await;
-    assert_eq!(status, StatusCode::OK, "summary; body={json}");
-    assert_eq!(
-        json["id"],
-        f.warehouse_id.to_string(),
-        "id is warehouse uuid"
-    );
-    assert_eq!(json["name"], f.slug, "name is the warehouse (= slug)");
-    assert!(
-        json["warehouse_location"].as_str().is_some(),
-        "warehouse_location present; body={json}"
-    );
+    let base = format!("/ws/{}/catalog/warehouses/{}", f.slug, f.wid);
 
     // list namespaces → the seeded namespace appears.
     let resp = f
         .app
         .clone()
-        .oneshot(get(
-            &format!("/ws/{}/catalog/namespaces", f.slug),
-            Some(&token),
-        ))
+        .oneshot(get(&format!("{base}/namespaces"), Some(&token)))
         .await
         .unwrap();
     let (status, json) = into_json(resp).await;
@@ -339,7 +318,7 @@ async fn viewer_browses_lakekeeper_namespace_table_and_detail() {
         .app
         .clone()
         .oneshot(get(
-            &format!("/ws/{}/catalog/namespaces/{}/tables", f.slug, f.ns_name),
+            &format!("{base}/namespaces/{}/tables", f.ns_name),
             Some(&token),
         ))
         .await
@@ -358,10 +337,7 @@ async fn viewer_browses_lakekeeper_namespace_table_and_detail() {
         .app
         .clone()
         .oneshot(get(
-            &format!(
-                "/ws/{}/catalog/namespaces/{}/tables/{}",
-                f.slug, f.ns_name, f.table_name
-            ),
+            &format!("{base}/namespaces/{}/tables/{}", f.ns_name, f.table_name),
             Some(&token),
         ))
         .await
@@ -389,7 +365,7 @@ async fn non_member_is_403() {
         .app
         .clone()
         .oneshot(get(
-            &format!("/ws/{}/catalog/namespaces", f.slug),
+            &format!("/ws/{}/catalog/warehouses/{}/namespaces", f.slug, f.wid),
             Some(&token),
         ))
         .await
@@ -407,25 +383,64 @@ async fn member_of_x_cannot_read_y_catalog_idor() {
     let token = add_member(&f, "x_member", "ws_viewer").await;
     let slug_y = seed_other_workspace(&f).await;
 
-    // Sanity: the token reaches its own workspace X.
+    // Sanity: the token reaches its own workspace X warehouse namespaces.
     let ok = f
         .app
         .clone()
-        .oneshot(get(&format!("/ws/{}/catalog", f.slug), Some(&token)))
+        .oneshot(get(
+            &format!("/ws/{}/catalog/warehouses/{}/namespaces", f.slug, f.wid),
+            Some(&token),
+        ))
         .await
         .unwrap();
     assert_eq!(ok.status(), StatusCode::OK, "member reaches own workspace");
 
-    // IDOR: X-member token against Y → 403.
+    // IDOR: X-member token against Y's slug → 403 (workspace membership fails
+    // before any warehouse resolution).
     let resp = f
         .app
         .clone()
-        .oneshot(get(&format!("/ws/{slug_y}/catalog"), Some(&token)))
+        .oneshot(get(
+            &format!("/ws/{slug_y}/catalog/warehouses/{}/namespaces", f.wid),
+            Some(&token),
+        ))
         .await
         .unwrap();
     assert_eq!(
         resp.status(),
         StatusCode::FORBIDDEN,
         "a member of X must not read workspace Y's catalog"
+    );
+}
+
+/// Cross-workspace warehouse-row IDOR: an X member naming X's OWN slug but a
+/// warehouse-row id that belongs to ANOTHER workspace must be 404 — the
+/// warehouse store query is workspace-scoped, so a foreign `{wid}` never resolves.
+#[tokio::test]
+async fn cross_workspace_wid_is_404() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, "x_member", "ws_viewer").await;
+
+    // A warehouse-row id that does NOT belong to workspace X.
+    let foreign_wid = Uuid::now_v7();
+    let resp = f
+        .app
+        .clone()
+        .oneshot(get(
+            &format!(
+                "/ws/{}/catalog/warehouses/{}/namespaces",
+                f.slug, foreign_wid
+            ),
+            Some(&token),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "a warehouse-row id outside the workspace must 404 (IDOR closed)"
     );
 }

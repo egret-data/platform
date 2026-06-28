@@ -1,9 +1,7 @@
-pub mod storage;
 pub mod storage_conn;
 pub mod store;
 pub mod tokens;
 pub mod warehouse;
-pub use storage::WorkspaceStorageRow;
 pub use storage_conn::WorkspaceStorageConn;
 pub use store::CatalogStore;
 pub use tokens::CatalogToken;

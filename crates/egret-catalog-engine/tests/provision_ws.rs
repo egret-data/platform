@@ -88,13 +88,12 @@ async fn provision_workspace_warehouse_maps_and_is_idempotent() {
     let storage_cfg = dev_storage_config();
 
     // No mapping yet.
-    assert_eq!(
+    assert!(
         store
-            .warehouse_for_workspace(workspace_id)
+            .get_warehouse_by_name(workspace_id, "default")
             .await
-            .expect("query mapping"),
-        None,
-        "freshly-seeded workspace has no warehouse mapping"
+            .is_err(),
+        "freshly-seeded workspace has no `default` warehouse mapping"
     );
 
     // 1st provision: creates the warehouse (live MinIO validate_access) + mapping.
@@ -109,16 +108,15 @@ async fn provision_workspace_warehouse_maps_and_is_idempotent() {
     .await
     .expect("provision warehouse (needs MinIO reachable + writable `warehouse` bucket)");
 
-    // Mapping resolves both ways to the returned warehouse UUID.
+    // The persisted `default` warehouse row maps to the returned warehouse UUID.
     assert_eq!(
-        store.warehouse_for_workspace(workspace_id).await.unwrap(),
-        Some(wh),
-        "warehouse_for_workspace resolves to the provisioned warehouse"
-    );
-    assert_eq!(
-        store.warehouse_for_slug(&slug).await.unwrap(),
-        Some(wh),
-        "warehouse_for_slug resolves to the provisioned warehouse"
+        store
+            .get_warehouse_by_name(workspace_id, "default")
+            .await
+            .unwrap()
+            .warehouse_id,
+        wh,
+        "the `default` warehouse row resolves to the provisioned warehouse"
     );
 
     // 2nd provision: idempotent — same UUID, no error, no second warehouse.

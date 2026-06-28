@@ -22,10 +22,6 @@ pub mod pool;
 /// Prod (non-`test-utils`) provisioning of a per-workspace lakekeeper warehouse
 /// + the egret-side workspace→warehouse mapping. CE-2 T4.
 pub mod provision_ws;
-/// Concrete [`egret_workspace::provision::WarehouseProvisioner`] impl backed by
-/// the embedded lakekeeper engine (CE-2 T5). The composition root constructs one
-/// and sets it on `WorkspaceState.warehouse_provisioner`.
-pub mod provisioner;
 // The headless spike provisioner mints a bootstrap principal via
 // `RequestMetadata::test_user`, which only exists under lakekeeper's
 // `test-utils` feature. Gate the whole module (and its re-export) on the crate's
@@ -53,7 +49,6 @@ pub use pool::{build_isolated_pool, LAKEKEEPER_SCHEMA};
 #[cfg(feature = "test-utils")]
 pub use provision::{ensure_spike_warehouse, SPIKE_WAREHOUSE_NAME};
 pub use provision_ws::provision_workspace_warehouse;
-pub use provisioner::EngineWarehouseProvisioner;
 
 /// Run lakekeeper's Postgres catalog migrations against an isolated
 /// `lakekeeper` schema in the database addressed by `dsn`.

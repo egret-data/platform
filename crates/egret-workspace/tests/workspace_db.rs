@@ -245,7 +245,6 @@ async fn ws_state(db: &Db) -> WorkspaceState {
             chrono::Duration::hours(24),
             chrono::Duration::minutes(60),
         ),
-        warehouse_provisioner: None,
     }
 }
 

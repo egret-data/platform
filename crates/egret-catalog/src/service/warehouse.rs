@@ -211,69 +211,28 @@ impl CatalogStore {
         .ok_or_else(|| CatalogError::NotFound("warehouse".into()))
     }
 
-    // -----------------------------------------------------------------------
-    // Legacy 1:1 helpers — KEPT so the engine / front_auth crates keep
-    // compiling until the next task migrates their callers. Repointed at the
-    // new `workspace_warehouses` table (the legacy `workspace_warehouse` table
-    // is dropped in migration 0034). Each picks the `name = 'default'` row,
-    // falling back to the earliest-created warehouse for the workspace.
-    // -----------------------------------------------------------------------
-
-    /// Persist a workspace → warehouse mapping (legacy). Idempotent: if a
-    /// `'default'` warehouse already exists for `workspace_id` the INSERT is
-    /// silently ignored (first-write-wins on the `(workspace_id, name)` unique).
-    pub async fn upsert_warehouse(
+    /// Fetch a warehouse by its `name` within `workspace_id`.
+    ///
+    /// Returns `CatalogError::NotFound` when the workspace has no warehouse by
+    /// that name. Used by the seed/test provisioning helper to short-circuit when
+    /// a `'default'` warehouse already exists.
+    pub async fn get_warehouse_by_name(
         &self,
         workspace_id: Uuid,
-        warehouse_id: Uuid,
-    ) -> Result<(), CatalogError> {
-        sqlx::query(
-            "INSERT INTO workspace_warehouses (workspace_id, warehouse_id, name) \
-             VALUES ($1, $2, 'default') \
-             ON CONFLICT (workspace_id, name) DO NOTHING",
+        name: &str,
+    ) -> Result<WorkspaceWarehouse, CatalogError> {
+        let row: WarehouseRow = sqlx::query_as::<_, WarehouseRow>(
+            "SELECT id, warehouse_id, name, storage_conn_id, created_at \
+             FROM workspace_warehouses \
+             WHERE workspace_id = $1 AND name = $2",
         )
         .bind(workspace_id)
-        .bind(warehouse_id)
-        .execute(self.pool())
-        .await
-        .map_err(CatalogError::Db)?;
-        Ok(())
-    }
-
-    /// Return the lakekeeper warehouse UUID for `workspace_id` (legacy), or
-    /// `None` if no warehouse has been provisioned yet. Prefers the
-    /// `'default'` warehouse, then the earliest-created one.
-    pub async fn warehouse_for_workspace(
-        &self,
-        workspace_id: Uuid,
-    ) -> Result<Option<Uuid>, CatalogError> {
-        sqlx::query_scalar::<_, Uuid>(
-            "SELECT warehouse_id FROM workspace_warehouses \
-             WHERE workspace_id = $1 \
-             ORDER BY (name = 'default') DESC, created_at ASC \
-             LIMIT 1",
-        )
-        .bind(workspace_id)
+        .bind(name)
         .fetch_optional(self.pool())
         .await
-        .map_err(CatalogError::Db)
-    }
+        .map_err(CatalogError::Db)?
+        .ok_or_else(|| CatalogError::NotFound("warehouse".into()))?;
 
-    /// Return the lakekeeper warehouse UUID for the workspace identified by
-    /// `slug` (legacy), or `None` if the slug is unknown or has no warehouse
-    /// yet. Prefers the `'default'` warehouse, then the earliest-created one.
-    pub async fn warehouse_for_slug(&self, slug: &str) -> Result<Option<Uuid>, CatalogError> {
-        sqlx::query_scalar::<_, Uuid>(
-            "SELECT ww.warehouse_id \
-             FROM workspace_warehouses ww \
-             JOIN workspaces w ON w.id = ww.workspace_id \
-             WHERE w.slug = $1 \
-             ORDER BY (ww.name = 'default') DESC, ww.created_at ASC \
-             LIMIT 1",
-        )
-        .bind(slug)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(CatalogError::Db)
+        Ok(row.into())
     }
 }

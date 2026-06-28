@@ -69,14 +69,17 @@ async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
 }
 
 /// Seed a fresh owner + workspace through the egret-side (sqlx-0.8) repos and
-/// provision its lakekeeper warehouse; return `(workspace_id, slug, warehouse_uuid)`.
+/// provision its lakekeeper warehouse; return
+/// `(workspace_id, slug, warehouse_uuid, warehouse_row_id)`. The last element is
+/// the egret warehouse-ROW id a token is now minted FOR (its `lakekeeper_id`
+/// resolves back to `warehouse_uuid`).
 async fn seed_workspace_with_warehouse(
     db: &Db,
     store: &CatalogStore,
     engine_state: &lakekeeper::api::ApiContext<egret_catalog_engine::EngineState>,
     storage_cfg: &StorageConfig,
     tag: &str,
-) -> (Uuid, String, Uuid) {
+) -> (Uuid, String, Uuid, Uuid) {
     let suffix = Uuid::now_v7().simple().to_string();
     let owner = UserRepo::new(db.clone())
         .insert_local(&format!("{tag}-{suffix}@egret.test"), "T5 Owner", "x")
@@ -100,7 +103,13 @@ async fn seed_workspace_with_warehouse(
     .await
     .expect("provision warehouse (needs MinIO reachable + writable `warehouse` bucket)");
 
-    (workspace_id, slug, warehouse)
+    let wid = store
+        .get_warehouse_by_name(workspace_id, "default")
+        .await
+        .expect("default warehouse row")
+        .id;
+
+    (workspace_id, slug, warehouse, wid)
 }
 
 #[tokio::test]
@@ -128,16 +137,17 @@ async fn front_auth_enforces_per_workspace_ownership() {
     let storage_cfg = dev_storage_config();
 
     // --- Two workspaces, both with real warehouses --------------------------
-    let (ws_a, slug_a, wh_a) =
+    let (ws_a, slug_a, wh_a, wid_a) =
         seed_workspace_with_warehouse(&db, &store, &engine_state, &storage_cfg, "t5a").await;
-    let (_ws_b, _slug_b, wh_b) =
+    let (_ws_b, _slug_b, wh_b, _wid_b) =
         seed_workspace_with_warehouse(&db, &store, &engine_state, &storage_cfg, "t5b").await;
     assert_ne!(wh_a, wh_b, "the two workspaces get distinct warehouses");
 
-    // --- Mint an egret catalog token for workspace A ------------------------
+    // --- Mint an egret catalog token for workspace A's warehouse ------------
     let (_token_row, token_a) = store
         .create_token(
             ws_a,
+            wid_a,
             "t5-token-a",
             &["catalog:read".to_string(), "catalog:write".to_string()],
             &[],
@@ -327,20 +337,21 @@ async fn front_auth_enforces_per_token_permissions() {
     let storage_cfg = dev_storage_config();
 
     // --- One workspace with a real warehouse --------------------------------
-    let (ws_a, slug_a, wh_a) =
+    let (ws_a, slug_a, wh_a, wid_a) =
         seed_workspace_with_warehouse(&db, &store, &engine_state, &storage_cfg, "t6a").await;
 
     let prefix_a = wh_a.to_string();
 
     // --- Mint read-only and read-write tokens for workspace A ---------------
     let (_row, token_ro) = store
-        .create_token(ws_a, "t6-ro", &["catalog:read".to_string()], &[])
+        .create_token(ws_a, wid_a, "t6-ro", &["catalog:read".to_string()], &[])
         .await
         .expect("mint read-only token");
 
     let (_row, token_rw) = store
         .create_token(
             ws_a,
+            wid_a,
             "t6-rw",
             &["catalog:read".to_string(), "catalog:write".to_string()],
             &[],
@@ -610,7 +621,7 @@ async fn front_auth_full_scope_token_is_unrestricted() {
 
     let store = CatalogStore::new(db.clone());
     let storage_cfg = dev_storage_config();
-    let (ws_a, _slug_a, wh_a) =
+    let (ws_a, _slug_a, wh_a, wid_a) =
         seed_workspace_with_warehouse(&db, &store, &engine_state, &storage_cfg, "ce4full").await;
     let prefix = wh_a.to_string();
 
@@ -618,6 +629,7 @@ async fn front_auth_full_scope_token_is_unrestricted() {
     let (_row, token) = store
         .create_token(
             ws_a,
+            wid_a,
             "ce4-full",
             &["catalog:read".to_string(), "catalog:write".to_string()],
             &[],
@@ -720,7 +732,7 @@ async fn front_auth_namespace_scope_is_enforced() {
 
     let store = CatalogStore::new(db.clone());
     let storage_cfg = dev_storage_config();
-    let (ws_a, _slug_a, wh_a) =
+    let (ws_a, _slug_a, wh_a, wid_a) =
         seed_workspace_with_warehouse(&db, &store, &engine_state, &storage_cfg, "ce4ns").await;
     let prefix = wh_a.to_string();
 
@@ -731,6 +743,7 @@ async fn front_auth_namespace_scope_is_enforced() {
     let (_row, full) = store
         .create_token(
             ws_a,
+            wid_a,
             "ce4ns-full",
             &["catalog:read".to_string(), "catalog:write".to_string()],
             &[],
@@ -765,6 +778,7 @@ async fn front_auth_namespace_scope_is_enforced() {
     let (_row, scoped) = store
         .create_token(
             ws_a,
+            wid_a,
             "ce4ns-marts",
             &["catalog:read".to_string(), "catalog:write".to_string()],
             &["marts".to_string()],

@@ -120,6 +120,7 @@ async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()
     match action {
         CatalogAction::MintToken {
             workspace,
+            warehouse,
             label,
             perms,
             namespaces,
@@ -152,13 +153,23 @@ async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()
                 .context("looking up workspace")?
                 .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace}"))?;
 
+            // Resolve the named warehouse within the workspace (a token is now
+            // minted FOR a specific warehouse).
+            let wh = store
+                .get_warehouse_by_name(ws.id.0, &warehouse)
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("warehouse '{warehouse}' not found in workspace '{workspace}'")
+                })?;
+
             let (token_row, raw) = store
-                .create_token(ws.id.0, &label, &permissions, &namespace_scope)
+                .create_token(ws.id.0, wh.id, &label, &permissions, &namespace_scope)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
             println!("Token id      : {}", token_row.id);
             println!("Workspace     : {} ({})", workspace, ws.id.0);
+            println!("Warehouse     : {} ({})", warehouse, wh.id);
             println!("Label         : {}", token_row.label);
             println!("Permissions   : {}", token_row.permissions.join(","));
             let scope_display = if token_row.namespace_scope.is_empty() {
@@ -181,15 +192,25 @@ async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()
             println!("Token {id} revoked.");
         }
 
-        CatalogAction::ListTokens { workspace } => {
+        CatalogAction::ListTokens {
+            workspace,
+            warehouse,
+        } => {
             let ws = workspaces
                 .get_by_slug(&workspace)
                 .await
                 .context("looking up workspace")?
                 .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace}"))?;
 
+            let wh = store
+                .get_warehouse_by_name(ws.id.0, &warehouse)
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("warehouse '{warehouse}' not found in workspace '{workspace}'")
+                })?;
+
             let tokens = store
-                .list_tokens(ws.id.0)
+                .list_tokens_for_warehouse(ws.id.0, wh.id)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -253,9 +274,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     //   2. bootstrap the default project under the stable system principal,
     //   3. build the engine `ApiContext` (`build_state`),
     //   4. assemble the engine router fronted by egret's per-workspace
-    //      token-ownership middleware (`mount_catalog_engine`, A-3), and
-    //   5. construct the concrete `WarehouseProvisioner` so workspace creation
-    //      provisions a per-workspace warehouse (flips the T4 `None` to `Some`).
+    //      token-ownership middleware (`mount_catalog_engine`, A-3).
+    // Workspace creation no longer auto-provisions a warehouse; warehouses are
+    // now created on demand via the per-warehouse management API.
     // This is the single composition point that makes the engine live; the
     // lakekeeper graph (and its second `sqlx` major) stays contained here.
     // Hoisted so BOTH the engine block (per-workspace storage secrets, CE-5) and
@@ -279,11 +300,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // and database connections reference named secrets.
     let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
 
-    let (catalog_engine, warehouse_provisioner, catalog_browse): (
-        Option<axum::Router>,
-        egret_workspace::provision::SharedWarehouseProvisioner,
-        Option<axum::Router>,
-    ) = if config.catalog.enabled {
+    let (catalog_engine, catalog_browse): (Option<axum::Router>, Option<axum::Router>) = if config
+        .catalog
+        .enabled
+    {
         let dsn = &config.database.url;
         egret_catalog_engine::run_lakekeeper_migrations(dsn)
             .await
@@ -300,14 +320,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .context("bootstrapping lakekeeper default project")?;
 
         let engine_store = egret_catalog::service::CatalogStore::new(db.clone());
-        let storage_cfg = egret_storage::StorageConfig {
-            endpoint: config.storage.endpoint.clone(),
-            region: config.storage.region.clone(),
-            bucket: config.storage.bucket.clone(),
-            access_key: config.storage.access_key.clone(),
-            secret_key: config.storage.secret_key.clone(),
-            path_style: config.storage.path_style,
-        };
 
         let router =
             egret_catalog_engine::mount_catalog_engine(engine_state.clone(), engine_store.clone());
@@ -320,30 +332,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             egret_catalog_engine::browse_router().with_state(egret_catalog_engine::BrowseState {
                 engine: engine_state.clone(),
                 store: egret_catalog::service::CatalogStore::new(db.clone()),
-                // CE-5 storage re-point: the browse router's `PUT .../catalog/storage`
-                // seals/unseals per-workspace S3 secrets through the same vault the
-                // provisioner uses.
-                secret_store: secrets.clone(),
                 workspace_secrets: workspace_secrets.clone(),
-                // The same global storage config threaded into the provisioner
-                // below; carried so the browse router can lazily provision a
-                // warehouse and report the effective default storage for a
-                // workspace that predates catalog enablement (e.g. `eng`).
-                default_storage: storage_cfg.clone(),
                 system_user: config.catalog.system_user.clone().into(),
                 sessions: sessions.clone(),
                 workspaces: WorkspaceRepo::new(db.clone()),
                 authz: Authorizer::new(db.clone()),
             });
-
-        let provisioner: std::sync::Arc<dyn egret_workspace::provision::WarehouseProvisioner> =
-            std::sync::Arc::new(egret_catalog_engine::EngineWarehouseProvisioner::new(
-                engine_state,
-                engine_store,
-                storage_cfg,
-                config.catalog.system_user.clone(),
-                secrets.clone(),
-            ));
 
         let gc_cancel = egret_catalog_engine::CancellationToken::new();
         egret_catalog_engine::spawn_gc_workers(gc_registry, gc_cancel.clone());
@@ -357,9 +351,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             });
         }
 
-        (Some(router), Some(provisioner), Some(browse_router))
+        (Some(router), Some(browse_router))
     } else {
-        (None, None, None)
+        (None, None)
     };
 
     let workspace = WorkspaceState {
@@ -368,10 +362,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         authz: Authorizer::new(db.clone()),
         users: users.clone(),
         sessions: sessions.clone(),
-        // Per-workspace warehouse provisioning hook (CE-2 T4/T5). `Some` once the
-        // embedded lakekeeper engine is built above (catalog enabled); workspace
-        // creation then provisions a per-workspace warehouse via the engine.
-        warehouse_provisioner,
     };
 
     let oidc = if config.oidc.enabled {
