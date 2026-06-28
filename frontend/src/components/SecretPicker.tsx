@@ -98,11 +98,12 @@ export function SecretPicker({ ws, value, hasExisting, onChange }: SecretPickerP
       </Select>
 
       {showNew && (
-        <div className="space-y-2 rounded-md border border-border p-3">
+        <div className="space-y-3 pt-1">
           <div className="space-y-1.5">
             <Label htmlFor="new-secret-name">New secret name</Label>
             <Input
               id="new-secret-name"
+              className="w-full"
               value={newName}
               onChange={(e) => handleNewName(e.target.value)}
               placeholder="e.g. prod-s3-secret"
@@ -113,6 +114,7 @@ export function SecretPicker({ ws, value, hasExisting, onChange }: SecretPickerP
             <Input
               id="new-secret-value"
               type="password"
+              className="w-full"
               value={newValue}
               onChange={(e) => handleNewValue(e.target.value)}
               placeholder="Enter a value"
