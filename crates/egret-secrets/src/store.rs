@@ -54,6 +54,23 @@ impl SecretStore {
         Ok(id)
     }
 
+    /// Re-seal a new plaintext into an existing secret row (rotation). Referencing
+    /// rows keep their id, so consumers immediately read the new value.
+    pub async fn update(&self, id: Uuid, plaintext: &str) -> Result<(), SecretsError> {
+        let (nonce, ct) = self.crypto()?.seal(plaintext)?;
+        let n = sqlx::query("UPDATE secrets SET nonce=$2, ciphertext=$3, key_id=$4 WHERE id=$1")
+            .bind(id)
+            .bind(nonce)
+            .bind(ct)
+            .bind(&self.key_id)
+            .execute(&self.db.pool)
+            .await?;
+        if n.rows_affected() == 0 {
+            return Err(SecretsError::NotFound);
+        }
+        Ok(())
+    }
+
     /// Fetch and decrypt a secret by id.
     pub async fn get(&self, id: Uuid) -> Result<String, SecretsError> {
         let row: Option<(Vec<u8>, Vec<u8>)> =
