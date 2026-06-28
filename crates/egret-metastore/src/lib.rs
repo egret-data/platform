@@ -57,3 +57,5 @@ mod tests {
         );
     }
 }
+
+// migration registry: 0033_databases_name_per_workspace
