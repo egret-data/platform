@@ -57,6 +57,10 @@ fn build_state(db: egret_metastore::Db) -> EngineState {
     let databases = DatabaseRepo::new(
         db.clone(),
         egret_secrets::SecretStore::new(db.clone(), None),
+        egret_secrets::WorkspaceSecretStore::new(
+            db.clone(),
+            egret_secrets::SecretStore::new(db.clone(), None),
+        ),
     );
     let storage: Arc<dyn ObjectStore> = Arc::new(MemStore::default());
     let limits = Limits {

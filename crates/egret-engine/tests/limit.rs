@@ -108,6 +108,10 @@ async fn per_query_limit_caps_rows() {
         egret_database::DatabaseRepo::new(
             db.clone(),
             egret_secrets::SecretStore::new(db.clone(), None),
+            egret_secrets::WorkspaceSecretStore::new(
+                db.clone(),
+                egret_secrets::SecretStore::new(db.clone(), None),
+            ),
         ),
         Arc::new(TrinoFactory {
             host: u.host_str().unwrap().into(),
