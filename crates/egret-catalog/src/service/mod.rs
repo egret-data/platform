@@ -8,3 +8,4 @@ pub use storage_conn::WorkspaceStorageConn;
 pub use store::CatalogStore;
 pub use tokens::CatalogToken;
 pub use tokens::TokenAuth;
+pub use warehouse::WorkspaceWarehouse;

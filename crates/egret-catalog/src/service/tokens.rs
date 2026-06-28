@@ -21,6 +21,7 @@ use super::store::CatalogStore;
 pub struct CatalogToken {
     pub id: Uuid,
     pub workspace_id: Uuid,
+    pub warehouse_id: Uuid,
     pub label: String,
     pub permissions: Vec<String>,
     pub namespace_scope: Vec<String>,
@@ -31,6 +32,7 @@ pub struct CatalogToken {
 #[derive(Debug)]
 pub struct TokenAuth {
     pub workspace_id: Uuid,
+    pub warehouse_id: Uuid,
     pub permissions: Vec<String>,
     pub namespace_scope: Vec<String>,
 }
@@ -99,6 +101,7 @@ fn validate_namespace_scope(scope: &[String]) -> Result<(), CatalogError> {
 struct TokenRow {
     id: Uuid,
     workspace_id: Uuid,
+    warehouse_id: Uuid,
     label: String,
     permissions: Vec<String>,
     namespace_scope: Vec<String>,
@@ -110,6 +113,7 @@ impl From<TokenRow> for CatalogToken {
         CatalogToken {
             id: r.id,
             workspace_id: r.workspace_id,
+            warehouse_id: r.warehouse_id,
             label: r.label,
             permissions: r.permissions,
             namespace_scope: r.namespace_scope,
@@ -122,6 +126,7 @@ impl From<TokenRow> for CatalogToken {
 #[derive(sqlx::FromRow)]
 struct AuthRow {
     workspace_id: Uuid,
+    warehouse_id: Uuid,
     permissions: Vec<String>,
     namespace_scope: Vec<String>,
 }
@@ -143,6 +148,7 @@ impl CatalogStore {
     pub async fn create_token(
         &self,
         workspace_id: Uuid,
+        warehouse_id: Uuid,
         label: &str,
         permissions: &[String],
         namespace_scope: &[String],
@@ -154,11 +160,13 @@ impl CatalogStore {
         let hash = hash_token(&raw);
 
         let row: TokenRow = sqlx::query_as::<_, TokenRow>(
-            "INSERT INTO catalog_tokens (workspace_id, token_hash, label, permissions, namespace_scope) \
-             VALUES ($1, $2, $3, $4, $5) \
-             RETURNING id, workspace_id, label, permissions, namespace_scope, created_at",
+            "INSERT INTO catalog_tokens \
+             (workspace_id, warehouse_id, token_hash, label, permissions, namespace_scope) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             RETURNING id, workspace_id, warehouse_id, label, permissions, namespace_scope, created_at",
         )
         .bind(workspace_id)
+        .bind(warehouse_id)
         .bind(&hash)
         .bind(label)
         .bind(permissions)
@@ -182,7 +190,7 @@ impl CatalogStore {
     pub async fn authenticate_token(&self, raw: &str) -> Result<TokenAuth, CatalogError> {
         let hash = hash_token(raw);
         let row: AuthRow = sqlx::query_as::<_, AuthRow>(
-            "SELECT workspace_id, permissions, namespace_scope FROM catalog_tokens \
+            "SELECT workspace_id, warehouse_id, permissions, namespace_scope FROM catalog_tokens \
              WHERE token_hash = $1 AND revoked_at IS NULL",
         )
         .bind(&hash)
@@ -193,6 +201,7 @@ impl CatalogStore {
 
         Ok(TokenAuth {
             workspace_id: row.workspace_id,
+            warehouse_id: row.warehouse_id,
             permissions: row.permissions,
             namespace_scope: row.namespace_scope,
         })
@@ -253,12 +262,35 @@ impl CatalogStore {
     /// List all non-revoked tokens for a workspace (hashes excluded).
     pub async fn list_tokens(&self, workspace_id: Uuid) -> Result<Vec<CatalogToken>, CatalogError> {
         let rows: Vec<TokenRow> = sqlx::query_as::<_, TokenRow>(
-            "SELECT id, workspace_id, label, permissions, namespace_scope, created_at \
+            "SELECT id, workspace_id, warehouse_id, label, permissions, namespace_scope, created_at \
              FROM catalog_tokens \
              WHERE workspace_id = $1 AND revoked_at IS NULL \
              ORDER BY created_at ASC",
         )
         .bind(workspace_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(CatalogError::Db)?;
+
+        Ok(rows.into_iter().map(CatalogToken::from).collect())
+    }
+
+    /// List all non-revoked tokens for a single warehouse within a workspace
+    /// (hashes excluded). The `workspace_id` guard keeps the lookup
+    /// workspace-scoped even though `warehouse_id` is globally unique.
+    pub async fn list_tokens_for_warehouse(
+        &self,
+        workspace_id: Uuid,
+        warehouse_id: Uuid,
+    ) -> Result<Vec<CatalogToken>, CatalogError> {
+        let rows: Vec<TokenRow> = sqlx::query_as::<_, TokenRow>(
+            "SELECT id, workspace_id, warehouse_id, label, permissions, namespace_scope, created_at \
+             FROM catalog_tokens \
+             WHERE workspace_id = $1 AND warehouse_id = $2 AND revoked_at IS NULL \
+             ORDER BY created_at ASC",
+        )
+        .bind(workspace_id)
+        .bind(warehouse_id)
         .fetch_all(self.pool())
         .await
         .map_err(CatalogError::Db)?;
