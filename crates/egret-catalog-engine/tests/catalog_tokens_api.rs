@@ -11,10 +11,11 @@
 //!     path is a 404 (cross-tenant IDOR closed),
 //!   - malformed permission requests are 400.
 //!
-//! Unlike `browse_api.rs`, these routes never touch lakekeeper, so this harness
-//! does NOT provision a warehouse (no MinIO needed) — it only seeds workspaces,
-//! members, and sessions, then drives the browse router with an authenticated
-//! cookie.
+//! Tokens are now scoped to a specific warehouse, so the routes live under
+//! `/ws/{ws}/catalog/warehouses/{wid}/tokens`. The harness seeds a warehouse ROW
+//! directly via the store (`insert_warehouse`, no lakekeeper/MinIO needed) — the
+//! token routes themselves never touch lakekeeper — then drives the browse router
+//! with an authenticated cookie.
 //!
 //! Run with:
 //!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
@@ -50,6 +51,8 @@ struct Fixture {
     slug: String,
     workspace_id: WorkspaceId,
     owner: UserId,
+    /// The egret warehouse-row id the token routes are scoped under (`{wid}`).
+    wid: Uuid,
 }
 
 async fn into_json(resp: Response) -> (StatusCode, Vec<u8>, serde_json::Value) {
@@ -98,22 +101,21 @@ async fn setup() -> Option<Fixture> {
         .expect("seed workspace");
     let workspace_id: WorkspaceId = ws.id;
 
+    // Seed a warehouse ROW (the token routes are scoped under `{wid}`). These
+    // routes never touch lakekeeper, so the lakekeeper UUID is arbitrary.
+    let wid = store
+        .insert_warehouse(workspace_id.0, Uuid::now_v7(), "default", None)
+        .await
+        .expect("seed warehouse row")
+        .id;
+
     let crypto =
         egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
     let secret_store = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
     let app = browse_router().with_state(BrowseState {
         engine: engine_state,
         store: store.clone(),
-        secret_store: secret_store.clone(),
         workspace_secrets: egret_secrets::WorkspaceSecretStore::new(db.clone(), secret_store),
-        default_storage: egret_storage::StorageConfig {
-            endpoint: Some("http://localhost:9000".to_string()),
-            region: "local-01".to_string(),
-            bucket: "warehouse".to_string(),
-            access_key: "egret".to_string(),
-            secret_key: "egretsecret".to_string(),
-            path_style: true,
-        },
         system_user: SYSTEM_USER.into(),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
@@ -130,6 +132,7 @@ async fn setup() -> Option<Fixture> {
         slug,
         workspace_id,
         owner,
+        wid,
     })
 }
 
@@ -166,9 +169,15 @@ async fn seed_other_workspace_token(f: &Fixture) -> Uuid {
         .create(&slug, "Token Other", owner)
         .await
         .expect("seed other workspace");
+    let y_wid = f
+        .store
+        .insert_warehouse(ws.id.0, Uuid::now_v7(), "default", None)
+        .await
+        .expect("seed Y warehouse")
+        .id;
     let (token, _raw) = f
         .store
-        .create_token(ws.id.0, "y-token", &["catalog:read".into()], &[])
+        .create_token(ws.id.0, y_wid, "y-token", &["catalog:read".into()], &[])
         .await
         .expect("mint Y token");
     token.id
@@ -196,7 +205,7 @@ async fn admin_can_mint_list_and_revoke_tokens() {
         return;
     };
     let token = add_member(&f, "admin", "ws_admin").await;
-    let base = format!("/ws/{}/catalog/tokens", f.slug);
+    let base = format!("/ws/{}/catalog/warehouses/{}/tokens", f.slug, f.wid);
 
     // MINT
     let body = serde_json::json!({
@@ -295,7 +304,10 @@ async fn revoke_of_foreign_workspace_token_is_404() {
         .clone()
         .oneshot(req(
             "DELETE",
-            &format!("/ws/{}/catalog/tokens/{}", f.slug, foreign_id),
+            &format!(
+                "/ws/{}/catalog/warehouses/{}/tokens/{}",
+                f.slug, f.wid, foreign_id
+            ),
             &token,
             None,
         ))
@@ -308,6 +320,71 @@ async fn revoke_of_foreign_workspace_token_is_404() {
     );
 }
 
+/// A token minted FOR warehouse B (same workspace) must NOT be revocable via
+/// warehouse A's `{wid}` path — the store-layer `warehouse_id` guard scopes the
+/// revoke to the warehouse, not just the workspace.
+#[tokio::test]
+async fn revoke_of_other_warehouse_token_is_404_and_token_survives() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, "admin", "ws_admin").await;
+
+    // A SECOND warehouse (B) in the SAME workspace, and a token minted for B.
+    let wid_b = f
+        .store
+        .insert_warehouse(f.workspace_id.0, Uuid::now_v7(), "warehouse-b", None)
+        .await
+        .expect("seed warehouse B")
+        .id;
+    let (token_b, _raw) = f
+        .store
+        .create_token(
+            f.workspace_id.0,
+            wid_b,
+            "b-token",
+            &["catalog:read".into()],
+            &[],
+        )
+        .await
+        .expect("mint token for warehouse B");
+
+    // Attempt to revoke B's token via warehouse A's path (`f.wid`) → 404.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!(
+                "/ws/{}/catalog/warehouses/{}/tokens/{}",
+                f.slug, f.wid, token_b.id
+            ),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "a token from warehouse B must not be revocable via warehouse A's path"
+    );
+
+    // And B's token is STILL active (listed under warehouse B).
+    let still = f
+        .store
+        .list_tokens_for_warehouse(f.workspace_id.0, wid_b)
+        .await
+        .expect("list warehouse B tokens")
+        .iter()
+        .any(|t| t.id == token_b.id);
+    assert!(
+        still,
+        "B's token must remain active after the failed revoke"
+    );
+}
+
 #[tokio::test]
 async fn non_admin_member_is_403() {
     let Some(f) = setup().await else {
@@ -315,7 +392,7 @@ async fn non_admin_member_is_403() {
         return;
     };
     let token = add_member(&f, "viewer", "ws_viewer").await;
-    let base = format!("/ws/{}/catalog/tokens", f.slug);
+    let base = format!("/ws/{}/catalog/warehouses/{}/tokens", f.slug, f.wid);
 
     // GET (list) → 403.
     let resp = f
@@ -379,7 +456,7 @@ async fn mint_rejects_bad_permissions() {
         return;
     };
     let token = add_member(&f, "admin", "ws_admin").await;
-    let base = format!("/ws/{}/catalog/tokens", f.slug);
+    let base = format!("/ws/{}/catalog/warehouses/{}/tokens", f.slug, f.wid);
 
     // Unknown permission → 400.
     let resp = f
@@ -433,7 +510,7 @@ async fn mint_dedups_duplicate_permissions() {
         return;
     };
     let token = add_member(&f, "admin", "ws_admin").await;
-    let base = format!("/ws/{}/catalog/tokens", f.slug);
+    let base = format!("/ws/{}/catalog/warehouses/{}/tokens", f.slug, f.wid);
 
     let resp = f
         .app

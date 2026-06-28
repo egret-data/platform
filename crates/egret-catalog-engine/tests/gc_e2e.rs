@@ -164,10 +164,18 @@ async fn dropped_with_purge_is_reclaimed_by_gc_workers() {
     .expect("provision warehouse (needs MinIO reachable + writable `warehouse` bucket)");
     let prefix = warehouse.to_string();
 
-    // Full-scope rw token for this workspace, used for all catalog ops below.
+    // The egret warehouse-row id the token is now minted FOR.
+    let wid = store
+        .get_warehouse_by_name(workspace_id, "default")
+        .await
+        .expect("default warehouse row")
+        .id;
+
+    // Full-scope rw token for this workspace's warehouse, used for all catalog ops.
     let (_row, token) = store
         .create_token(
             workspace_id,
+            wid,
             "gce2e-token",
             &["catalog:read".to_string(), "catalog:write".to_string()],
             &[],

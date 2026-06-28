@@ -1,67 +1,29 @@
 import { useState } from "react";
-import { useParams } from "react-router-dom";
-import { Boxes, Database, Eye, Table2 } from "lucide-react";
+import { Database, Eye, Table2 } from "lucide-react";
 import {
   nsDotted,
   useCatalogNamespaces,
-  useCatalogSummary,
   useNamespaceContents,
   useTableDetail,
 } from "@/api/catalog";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 
-export default function CatalogBrowse() {
-  const ws = useParams().workspace!;
-  const summary = useCatalogSummary(ws);
-
-  const hasCatalog = !!summary.data;
-  const namespaces = useCatalogNamespaces(ws, hasCatalog);
+export default function CatalogBrowse({ ws, wid }: { ws: string; wid: string }) {
+  const namespaces = useCatalogNamespaces(ws, wid);
 
   const [ns, setNs] = useState<string | null>(null);
   const [table, setTable] = useState<string | null>(null);
 
-  const contents = useNamespaceContents(ws, ns);
-  const detail = useTableDetail(ws, ns, table);
+  const contents = useNamespaceContents(ws, wid, ns);
+  const detail = useTableDetail(ws, wid, ns, table);
 
   function selectNamespace(value: string) {
     setNs(value);
     setTable(null);
   }
 
-  if (summary.isLoading) {
-    return (
-      <div className="p-4">
-        <ListSkeleton cols={3} />
-      </div>
-    );
-  }
-
-  if (summary.isError) {
-    return (
-      <div className="p-4">
-        <p className="text-destructive">Failed to load catalog.</p>
-      </div>
-    );
-  }
-
-  if (!summary.data) {
-    return (
-      <div className="p-4">
-        <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
-          <Boxes className="mx-auto mb-3 h-8 w-8 opacity-60" />
-          <p>No catalog provisioned for this workspace yet.</p>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="p-4">
-      <div className="mb-4 flex items-baseline justify-between">
-        <h2 className="text-base font-semibold">{summary.data.name}</h2>
-        <span className="font-mono text-xs text-muted-foreground">{summary.data.warehouse_location}</span>
-      </div>
-
       <div className="grid grid-cols-[16rem_1fr] gap-4">
         {/* Left: namespaces */}
         <div className="rounded border border-border">

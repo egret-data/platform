@@ -1,5 +1,5 @@
 //! Postgres access: a pooled connection wrapper and the embedded migrator.
-//! (touched to re-embed migrations through 0032_workspace_secrets)
+//! (touched to re-embed migrations through 0034_workspace_warehouses; warehouse_id NOT NULL)
 
 use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::postgres::PgPoolOptions;

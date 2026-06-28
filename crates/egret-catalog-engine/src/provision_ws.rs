@@ -39,14 +39,15 @@ use anyhow::Context as _;
 use egret_catalog::service::CatalogStore;
 use egret_storage::StorageConfig;
 use lakekeeper::api::management::v1::warehouse::{
-    CreateWarehouseRequest, ListWarehousesRequest, Service as WarehouseService,
+    CreateWarehouseRequest, Service as WarehouseService,
 };
-use lakekeeper::api::management::v1::ApiServer;
-use lakekeeper::api::ApiContext;
+use lakekeeper::api::management::v1::{ApiServer, DeleteWarehouseQuery};
+use lakekeeper::api::{ApiContext, RequestMetadata};
 use lakekeeper::service::storage::s3::S3AccessKeyCredential;
 use lakekeeper::service::storage::{
     S3Credential, S3Flavor, S3Profile, StorageCredential, StorageProfile,
 };
+use lakekeeper::service::WarehouseId;
 use lakekeeper::ProjectId;
 use lakekeeper_storage_postgres::{PostgresBackend, SecretsState};
 use uuid::Uuid;
@@ -90,13 +91,14 @@ pub async fn provision_workspace_warehouse(
     storage_cfg: &StorageConfig,
     system_user: &str,
 ) -> anyhow::Result<Uuid> {
-    // Layer-1 idempotency: if egret already has a mapping, trust it.
-    if let Some(existing) = catalog_store
-        .warehouse_for_workspace(workspace_id)
+    // Idempotency: if the workspace already owns a `'default'` warehouse, return
+    // its lakekeeper id without re-creating anything. (Tests reuse this helper to
+    // seed catalog data; prod no longer auto-provisions.)
+    if let Ok(existing) = catalog_store
+        .get_warehouse_by_name(workspace_id, "default")
         .await
-        .map_err(|e| anyhow::anyhow!("reading workspace→warehouse mapping: {e}"))?
     {
-        return Ok(existing);
+        return Ok(existing.warehouse_id);
     }
 
     // The default (nil-UUID) project that `bootstrap` seeded.
@@ -106,69 +108,101 @@ pub async fn provision_workspace_warehouse(
     let request_metadata = system_request_metadata(system_user)
         .context("building system principal for warehouse provisioning")?;
 
-    let storage_profile = build_storage_profile(storage_cfg, slug)?;
-    let storage_credential = build_storage_credential(storage_cfg);
+    let warehouse_id = create_warehouse_on(
+        engine_state,
+        request_metadata,
+        project_id,
+        slug,
+        storage_cfg,
+    )
+    .await
+    .with_context(|| format!("provisioning warehouse for workspace `{slug}`"))?;
+
+    // Persist the egret-side row as the workspace's `'default'` warehouse.
+    catalog_store
+        .insert_warehouse(workspace_id, warehouse_id, "default", None)
+        .await
+        .map_err(|e| anyhow::anyhow!("persisting workspace→warehouse mapping: {e}"))?;
+
+    Ok(warehouse_id)
+}
+
+/// Create a lakekeeper warehouse named `name` on the storage described by `cfg`,
+/// returning its UUID. Reusable building block for the per-warehouse CRUD routes
+/// (a workspace now owns N user-managed warehouses, each on a registered storage
+/// connection) and for [`provision_workspace_warehouse`].
+///
+/// The warehouse's S3 key prefix is `warehouses/{name}` (NOT the legacy
+/// per-workspace `workspaces/{slug}/warehouse`), so two warehouses on the SAME
+/// bucket never collide on their storage location — lakekeeper rejects a
+/// create whose profile overlaps an existing warehouse's location.
+///
+/// `create_warehouse` runs a live `validate_access` S3 round-trip, so a failure
+/// here (bad credentials, unreachable endpoint, name/overlap conflict) is a
+/// genuine integration error the caller surfaces (the CRUD route maps it to 400).
+pub(crate) async fn create_warehouse_on(
+    engine_state: ApiContext<EngineState>,
+    request_metadata: RequestMetadata,
+    project_id: ProjectId,
+    name: &str,
+    cfg: &StorageConfig,
+) -> anyhow::Result<Uuid> {
+    let storage_profile = build_warehouse_storage_profile(cfg, name)?;
+    let storage_credential = build_storage_credential(cfg);
 
     let create_req = CreateWarehouseRequest::builder()
-        .warehouse_name(slug.to_string())
-        .project_id(project_id.clone())
+        .warehouse_name(name.to_string())
+        .project_id(project_id)
         .storage_profile(storage_profile)
         .storage_credential(storage_credential)
         .build();
 
-    let warehouse_id = match <EngineApiServer as WarehouseService<_, _, _>>::create_warehouse(
+    let resp = <EngineApiServer as WarehouseService<_, _, _>>::create_warehouse(
         create_req,
-        engine_state.clone(),
-        request_metadata.clone(),
+        engine_state,
+        request_metadata,
     )
     .await
-    {
-        Ok(resp) => *resp.warehouse_id(),
-        // Layer-2 idempotency: a conflict means lakekeeper already has a
-        // warehouse by this name (CE-1: the overlap check can fire before the
-        // name-unique check, so the error type varies — don't parse it, just
-        // look the warehouse up by name).
-        Err(e) if is_warehouse_conflict(&e) => {
-            warehouse_id_by_name(engine_state, request_metadata, project_id, slug)
-                .await
-                .with_context(|| {
-                    format!("recovering existing warehouse `{slug}` after create conflict")
-                })?
-        }
-        Err(e) => {
-            return Err(anyhow::anyhow!("create_warehouse `{slug}` failed: {e:?}"));
-        }
-    };
-
-    // Persist the mapping. `upsert_warehouse` is `ON CONFLICT DO NOTHING`
-    // (first-write-wins), so a concurrent provisioner that won the race leaves
-    // its id in place — re-read to return the authoritative mapping.
-    catalog_store
-        .upsert_warehouse(workspace_id, warehouse_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("persisting workspace→warehouse mapping: {e}"))?;
-
-    let stored = catalog_store
-        .warehouse_for_workspace(workspace_id)
-        .await
-        .map_err(|e| anyhow::anyhow!("re-reading workspace→warehouse mapping: {e}"))?
-        .unwrap_or(warehouse_id);
-    Ok(stored)
+    .map_err(|e| anyhow::anyhow!("create_warehouse `{name}` failed: {e:?}"))?;
+    Ok(*resp.warehouse_id())
 }
 
-/// Build the S3 [`StorageProfile`] for a workspace warehouse from egret's
-/// runtime [`StorageConfig`]. Bucket comes from the config; the key prefix
-/// namespaces the workspace as `workspaces/<slug>/warehouse`.
-///
-/// Crate-internal so the storage-update handler ([`crate::browse`]) can build an
-/// identically-shaped profile when RE-pointing an existing warehouse — lakekeeper
-/// requires the new profile to keep the same location (bucket + key prefix), so
-/// the re-point reuses this same `workspaces/<slug>/warehouse` derivation.
-pub(crate) fn build_storage_profile(
+/// Delete a lakekeeper warehouse by UUID (and all its associated resources).
+/// Reusable from the per-warehouse CRUD `DELETE` route, run AFTER the egret-side
+/// ownership check resolves the lakekeeper id.
+pub(crate) async fn delete_warehouse(
+    engine_state: ApiContext<EngineState>,
+    request_metadata: RequestMetadata,
+    warehouse_id: Uuid,
+) -> anyhow::Result<()> {
+    <EngineApiServer as WarehouseService<_, _, _>>::delete_warehouse(
+        WarehouseId::from(warehouse_id),
+        // `force` deletes even a protected warehouse; egret warehouses are never
+        // protection-flagged, so this only matters defensively.
+        DeleteWarehouseQuery { force: true },
+        engine_state,
+        request_metadata,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("delete_warehouse `{warehouse_id}` failed: {e:?}"))
+}
+
+/// Build the S3 [`StorageProfile`] for a warehouse named `name`, laid out at the
+/// unique `warehouses/{name}` key prefix (so co-bucket warehouses never overlap).
+fn build_warehouse_storage_profile(
     cfg: &StorageConfig,
-    slug: &str,
+    name: &str,
 ) -> anyhow::Result<StorageProfile> {
-    let key_prefix = format!("workspaces/{slug}/warehouse");
+    build_storage_profile_at(cfg, &format!("warehouses/{name}"))
+}
+
+/// Build the S3 [`StorageProfile`] for `cfg` at an explicit `key_prefix`. Used by
+/// [`build_warehouse_storage_profile`] (per-warehouse `warehouses/<name>` layout).
+fn build_storage_profile_at(
+    cfg: &StorageConfig,
+    key_prefix: &str,
+) -> anyhow::Result<StorageProfile> {
+    let key_prefix = key_prefix.to_string();
 
     // A custom endpoint marks an S3-compatible store (MinIO); when absent we are
     // talking to real AWS and leave the endpoint unset. `S3Profile::builder()` is
@@ -203,56 +237,10 @@ pub(crate) fn build_storage_profile(
 }
 
 /// Build the S3 access-key [`StorageCredential`] from egret's [`StorageConfig`].
-/// Crate-internal so the storage-update handler can reuse it (see
-/// [`build_storage_profile`]).
-pub(crate) fn build_storage_credential(cfg: &StorageConfig) -> StorageCredential {
+fn build_storage_credential(cfg: &StorageConfig) -> StorageCredential {
     StorageCredential::S3(S3Credential::AccessKey(S3AccessKeyCredential {
         access_key_id: cfg.access_key.clone(),
         secret_access_key: cfg.secret_key.clone(),
         external_id: None,
     }))
-}
-
-/// Look up an existing warehouse's UUID by name within `project_id`. Used to
-/// recover the id after `create_warehouse` reports an already-exists conflict.
-async fn warehouse_id_by_name(
-    engine_state: ApiContext<EngineState>,
-    request_metadata: lakekeeper::api::RequestMetadata,
-    project_id: ProjectId,
-    name: &str,
-) -> anyhow::Result<Uuid> {
-    let list_req = ListWarehousesRequest {
-        warehouse_status: None,
-        project_id: Some(project_id),
-    };
-    let resp = <EngineApiServer as WarehouseService<_, _, _>>::list_warehouses(
-        list_req,
-        engine_state,
-        request_metadata,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("list_warehouses failed: {e:?}"))?;
-
-    resp.warehouses
-        .into_iter()
-        .find(|w| w.name == name)
-        .map(|w| *w.warehouse_id)
-        .ok_or_else(|| {
-            anyhow::anyhow!("warehouse `{name}` not found after create reported a conflict")
-        })
-}
-
-/// Whether an error from `create_warehouse` indicates the warehouse already
-/// exists (treated as "recover by name lookup").
-///
-/// CE-1 finding: lakekeeper validates the storage profile for **overlap**
-/// against existing warehouses BEFORE the name-unique check, so a duplicate
-/// `create_warehouse` with the same name AND the same bucket+prefix can return
-/// `CreateWarehouseStorageProfileOverlap` (HTTP 400) rather than a 409 name
-/// conflict. We treat any of those as "already provisioned".
-fn is_warehouse_conflict(e: &lakekeeper::api::IcebergErrorResponse) -> bool {
-    e.error.code == http::StatusCode::CONFLICT.as_u16()
-        || e.error.r#type.contains("WarehouseName")
-        || e.error.r#type.contains("AlreadyExists")
-        || e.error.r#type.contains("StorageProfileOverlap")
 }

@@ -10,14 +10,17 @@
 //! inside the engine (the authorizer, which also enforces `namespace_scope`):
 //!
 //! 1. **AUTHN** — extract the `Bearer` token and resolve it to an egret
-//!    `TokenAuth { workspace_id, permissions, namespace_scope }` via
-//!    [`CatalogStore::authenticate_token`]. A missing / unknown / revoked token
-//!    is `401 UNAUTHORIZED`.
+//!    `TokenAuth { workspace_id, warehouse_id, permissions, namespace_scope }`
+//!    via [`CatalogStore::authenticate_token`]. A missing / unknown / revoked
+//!    token is `401 UNAUTHORIZED`.
 //! 2. **AUTHZ (A-3 ownership)** — the warehouse UUID lives in the request path
-//!    as lakekeeper's `{prefix}` segment. We look up the workspace's own
-//!    warehouse via [`CatalogStore::warehouse_for_workspace`] and require
-//!    `prefix == expected_warehouse`; any mismatch is `403 FORBIDDEN`. This is
-//!    the cross-tenant guard: token A may only touch workspace A's warehouse.
+//!    as lakekeeper's `{prefix}` segment. A token is now minted FOR a specific
+//!    warehouse (`TokenAuth::warehouse_id`, an egret-side warehouse row id), so
+//!    we resolve that row's lakekeeper UUID via
+//!    [`CatalogStore::lakekeeper_id`] (workspace-scoped) and require
+//!    `prefix == that lakekeeper UUID`; any mismatch is `403 FORBIDDEN`. This is
+//!    the cross-tenant guard: a token may only touch the one warehouse it was
+//!    minted for (and that warehouse belongs to the token's workspace).
 //! 3. **AUTHZ (CE-3 scope)** — [`required_permission`] classifies the request
 //!    by `(method, path)` and checks that the resolved token's `permissions`
 //!    slice contains the required `"catalog:read"` or `"catalog:write"` value.
@@ -217,12 +220,14 @@ pub async fn front_auth(
             // The `{prefix}` segment is the warehouse UUID per lakekeeper's
             // default `prefix_template = "{warehouse_id}"`.
             let requested_wh = Uuid::parse_str(prefix).map_err(|_| StatusCode::FORBIDDEN)?;
+            // Resolve the lakekeeper UUID of the warehouse this token was minted
+            // for (workspace-scoped, so a token can never name another tenant's
+            // warehouse row). A missing/cross-workspace row → 403.
             let expected_wh = state
                 .store
-                .warehouse_for_workspace(auth.workspace_id)
+                .lakekeeper_id(auth.workspace_id, auth.warehouse_id)
                 .await
-                .map_err(|_| StatusCode::FORBIDDEN)?
-                .ok_or(StatusCode::FORBIDDEN)?;
+                .map_err(|_| StatusCode::FORBIDDEN)?;
             if requested_wh != expected_wh {
                 return Err(StatusCode::FORBIDDEN);
             }

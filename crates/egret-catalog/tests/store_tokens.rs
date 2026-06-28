@@ -1,6 +1,6 @@
 //! DB-gated catalog-token store tests. Self-skip without DATABASE_URL.
 mod common;
-use common::{seed_workspace, store};
+use common::{seed_warehouse, seed_workspace, store};
 use egret_catalog::service::tokens::hash_token;
 
 /// Full read+write permissions, used by most existing tests.
@@ -15,8 +15,9 @@ async fn create_token_and_workspace_for_token_returns_workspace_id() {
         return;
     };
     let ws = seed_workspace(&s).await;
+    let wh = seed_warehouse(&s, ws).await;
     let (token_row, raw) = s
-        .create_token(ws, "test-engine", &rw_perms(), &[])
+        .create_token(ws, wh, "test-engine", &rw_perms(), &[])
         .await
         .unwrap();
     assert_eq!(token_row.workspace_id, ws);
@@ -50,8 +51,9 @@ async fn revoked_token_returns_not_found() {
         return;
     };
     let ws = seed_workspace(&s).await;
+    let wh = seed_warehouse(&s, ws).await;
     let (token_row, raw) = s
-        .create_token(ws, "revoke-me", &rw_perms(), &[])
+        .create_token(ws, wh, "revoke-me", &rw_perms(), &[])
         .await
         .unwrap();
 
@@ -74,8 +76,9 @@ async fn stored_value_is_hash_not_raw_token() {
         return;
     };
     let ws = seed_workspace(&s).await;
+    let wh = seed_warehouse(&s, ws).await;
     let (token_row, raw) = s
-        .create_token(ws, "hash-check", &rw_perms(), &[])
+        .create_token(ws, wh, "hash-check", &rw_perms(), &[])
         .await
         .unwrap();
 
@@ -101,8 +104,15 @@ async fn list_tokens_for_workspace() {
         return;
     };
     let ws = seed_workspace(&s).await;
-    let (r1, _) = s.create_token(ws, "alpha", &rw_perms(), &[]).await.unwrap();
-    let (r2, _) = s.create_token(ws, "beta", &rw_perms(), &[]).await.unwrap();
+    let wh = seed_warehouse(&s, ws).await;
+    let (r1, _) = s
+        .create_token(ws, wh, "alpha", &rw_perms(), &[])
+        .await
+        .unwrap();
+    let (r2, _) = s
+        .create_token(ws, wh, "beta", &rw_perms(), &[])
+        .await
+        .unwrap();
 
     let tokens = s.list_tokens(ws).await.unwrap();
     let ids: Vec<_> = tokens.iter().map(|t| t.id).collect();
@@ -121,8 +131,9 @@ async fn create_token_with_read_only_perms() {
         return;
     };
     let ws = seed_workspace(&s).await;
+    let wh = seed_warehouse(&s, ws).await;
     let ro_perms = vec!["catalog:read".to_string()];
-    let (token_row, raw) = s.create_token(ws, "ro", &ro_perms, &[]).await.unwrap();
+    let (token_row, raw) = s.create_token(ws, wh, "ro", &ro_perms, &[]).await.unwrap();
     assert_eq!(token_row.permissions, ro_perms);
 
     let auth = s.authenticate_token(&raw).await.unwrap();
@@ -137,8 +148,9 @@ async fn create_token_rejects_unknown_permission() {
         return;
     };
     let ws = seed_workspace(&s).await;
+    let wh = seed_warehouse(&s, ws).await;
     let err = s
-        .create_token(ws, "x", &["catalog:admin".to_string()], &[])
+        .create_token(ws, wh, "x", &["catalog:admin".to_string()], &[])
         .await
         .unwrap_err();
     assert!(
@@ -154,7 +166,8 @@ async fn create_token_rejects_empty_permissions() {
         return;
     };
     let ws = seed_workspace(&s).await;
-    let err = s.create_token(ws, "x", &[], &[]).await.unwrap_err();
+    let wh = seed_warehouse(&s, ws).await;
+    let err = s.create_token(ws, wh, "x", &[], &[]).await.unwrap_err();
     assert!(
         matches!(err, egret_catalog::CatalogError::BadRequest(_)),
         "expected BadRequest for empty permissions, got: {err:?}"
@@ -173,8 +186,9 @@ async fn revoke_token_for_workspace_guards_by_workspace() {
     };
     let ws_a = seed_workspace(&s).await;
     let ws_b = seed_workspace(&s).await;
+    let wh_a = seed_warehouse(&s, ws_a).await;
     let (token, _raw) = s
-        .create_token(ws_a, "guard", &rw_perms(), &[])
+        .create_token(ws_a, wh_a, "guard", &rw_perms(), &[])
         .await
         .unwrap();
 
@@ -228,9 +242,10 @@ async fn create_token_with_namespace_scope() {
         return;
     };
     let ws = seed_workspace(&s).await;
+    let wh = seed_warehouse(&s, ws).await;
     let ns: Vec<String> = vec!["marts".to_string(), "staging.raw".to_string()];
     let (token_row, raw) = s
-        .create_token(ws, "scoped", &rw_perms(), &ns)
+        .create_token(ws, wh, "scoped", &rw_perms(), &ns)
         .await
         .unwrap();
     assert_eq!(token_row.namespace_scope, ns);
@@ -248,7 +263,11 @@ async fn create_token_empty_namespace_scope_means_all() {
         return;
     };
     let ws = seed_workspace(&s).await;
-    let (token_row, raw) = s.create_token(ws, "all", &rw_perms(), &[]).await.unwrap();
+    let wh = seed_warehouse(&s, ws).await;
+    let (token_row, raw) = s
+        .create_token(ws, wh, "all", &rw_perms(), &[])
+        .await
+        .unwrap();
     assert_eq!(token_row.namespace_scope, Vec::<String>::new());
 
     let auth = s.authenticate_token(&raw).await.unwrap();
@@ -262,8 +281,9 @@ async fn create_token_rejects_malformed_namespace_empty_string() {
         return;
     };
     let ws = seed_workspace(&s).await;
+    let wh = seed_warehouse(&s, ws).await;
     let err = s
-        .create_token(ws, "bad", &rw_perms(), &["".to_string()])
+        .create_token(ws, wh, "bad", &rw_perms(), &["".to_string()])
         .await
         .unwrap_err();
     assert!(
@@ -279,8 +299,9 @@ async fn create_token_rejects_malformed_namespace_leading_dot() {
         return;
     };
     let ws = seed_workspace(&s).await;
+    let wh = seed_warehouse(&s, ws).await;
     let err = s
-        .create_token(ws, "bad", &rw_perms(), &[".bad".to_string()])
+        .create_token(ws, wh, "bad", &rw_perms(), &[".bad".to_string()])
         .await
         .unwrap_err();
     assert!(
@@ -296,8 +317,9 @@ async fn create_token_rejects_malformed_namespace_trailing_dot() {
         return;
     };
     let ws = seed_workspace(&s).await;
+    let wh = seed_warehouse(&s, ws).await;
     let err = s
-        .create_token(ws, "bad", &rw_perms(), &["bad.".to_string()])
+        .create_token(ws, wh, "bad", &rw_perms(), &["bad.".to_string()])
         .await
         .unwrap_err();
     assert!(
@@ -313,8 +335,9 @@ async fn create_token_rejects_malformed_namespace_double_dot() {
         return;
     };
     let ws = seed_workspace(&s).await;
+    let wh = seed_warehouse(&s, ws).await;
     let err = s
-        .create_token(ws, "bad", &rw_perms(), &["a..b".to_string()])
+        .create_token(ws, wh, "bad", &rw_perms(), &["a..b".to_string()])
         .await
         .unwrap_err();
     assert!(

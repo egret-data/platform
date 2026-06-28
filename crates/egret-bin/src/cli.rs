@@ -39,6 +39,11 @@ pub enum CatalogAction {
         /// Workspace slug (e.g. "engineering").
         #[arg(long)]
         workspace: String,
+        /// Name of the warehouse (within the workspace) this token is scoped to.
+        /// A workspace now owns N user-managed warehouses; a token authenticates
+        /// against exactly one. Defaults to "default".
+        #[arg(long, default_value = "default")]
+        warehouse: String,
         /// Human-readable label, e.g. "trino-prod".
         #[arg(long, default_value = "default")]
         label: String,
@@ -58,11 +63,15 @@ pub enum CatalogAction {
         #[arg(long)]
         id: Uuid,
     },
-    /// List all active (non-revoked) tokens for a workspace.
+    /// List all active (non-revoked) tokens for a workspace warehouse.
     ListTokens {
         /// Workspace slug.
         #[arg(long)]
         workspace: String,
+        /// Name of the warehouse (within the workspace) whose tokens to list.
+        /// Defaults to "default".
+        #[arg(long, default_value = "default")]
+        warehouse: String,
     },
 }
 
@@ -112,6 +121,7 @@ mod tests {
             Command::Catalog {
                 action: CatalogAction::MintToken {
                     workspace: "eng".into(),
+                    warehouse: "default".into(),
                     label: "default".into(),
                     perms: "read,write".into(),
                     namespaces: "".into(),
@@ -136,6 +146,7 @@ mod tests {
             Command::Catalog {
                 action: CatalogAction::MintToken {
                     workspace: "eng".into(),
+                    warehouse: "default".into(),
                     label: "trino-prod".into(),
                     perms: "read,write".into(),
                     namespaces: "".into(),
@@ -161,6 +172,7 @@ mod tests {
             Command::Catalog {
                 action: CatalogAction::MintToken {
                     workspace: "eng".into(),
+                    warehouse: "default".into(),
                     label: "default".into(),
                     perms: "read".into(),
                     namespaces: "".into(),
@@ -183,6 +195,7 @@ mod tests {
             Command::Catalog {
                 action: CatalogAction::MintToken {
                     workspace: "eng".into(),
+                    warehouse: "default".into(),
                     label: "default".into(),
                     perms: "write".into(),
                     namespaces: "".into(),
@@ -268,6 +281,7 @@ mod tests {
             Command::Catalog {
                 action: CatalogAction::ListTokens {
                     workspace: "eng".into(),
+                    warehouse: "default".into(),
                 }
             }
         );

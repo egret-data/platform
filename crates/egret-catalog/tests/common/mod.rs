@@ -34,3 +34,12 @@ pub async fn seed_workspace_with_slug(s: &CatalogStore) -> (Uuid, String) {
         .expect("seed workspace");
     (id, slug)
 }
+
+/// Seed a `'default'` warehouse for `workspace_id` and return its egret-side
+/// row id (the value tokens reference via `warehouse_id`).
+pub async fn seed_warehouse(s: &CatalogStore, workspace_id: Uuid) -> Uuid {
+    s.insert_warehouse(workspace_id, Uuid::new_v4(), "default", None)
+        .await
+        .expect("seed warehouse")
+        .id
+}
