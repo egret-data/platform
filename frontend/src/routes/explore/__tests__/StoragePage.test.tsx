@@ -31,7 +31,34 @@ vi.mock("@/api/storage", () => ({
   downloadObject: vi.fn(),
 }));
 
+// SecretPicker pulls the named-secrets list; stub it so the Select renders.
+vi.mock("@/api/secrets", () => ({
+  useSecrets: () => ({
+    data: [{ id: "sec-1", name: "existing-secret", used_by: 0, created_at: "2025-01-01T00:00:00Z" }],
+    isLoading: false,
+    isError: false,
+    error: null,
+  }),
+}));
+
 import StoragePage from "@/routes/explore/StoragePage";
+
+// Drive the SecretPicker: pick "New secret" via the hidden native <select>,
+// then fill the revealed name + value inputs.
+async function fillNewSecret(name: string, value: string) {
+  const native = Array.from(
+    document.querySelectorAll<HTMLSelectElement>("select"),
+  ).find((s) => Array.from(s.options).some((o) => o.value === "__new__"));
+  if (!native) throw new Error("SecretPicker native select not found");
+  fireEvent.change(native, { target: { value: "__new__" } });
+  await waitFor(() => screen.getByLabelText(/new secret name/i));
+  fireEvent.change(screen.getByLabelText(/new secret name/i), {
+    target: { value: name },
+  });
+  fireEvent.change(screen.getByLabelText(/new secret value/i), {
+    target: { value },
+  });
+}
 
 // ── Render helper ─────────────────────────────────────────────────────────────
 function renderAt() {
@@ -244,7 +271,6 @@ describe("StoragePage", () => {
     fireEvent.change(screen.getByLabelText(/^region/i), { target: { value: "us-east-1" } });
     fireEvent.change(screen.getByLabelText(/^bucket/i), { target: { value: "test-bucket" } });
     fireEvent.change(screen.getByLabelText(/^access key/i), { target: { value: "AKIATEST" } });
-    fireEvent.change(screen.getByLabelText(/^secret key/i), { target: { value: "secretTest" } });
 
     fireEvent.click(screen.getByRole("button", { name: /add connection/i, hidden: false }));
 
@@ -283,9 +309,7 @@ describe("StoragePage", () => {
     fireEvent.change(screen.getByLabelText(/^access key/i), {
       target: { value: "AKIANEWKEY" },
     });
-    fireEvent.change(screen.getByLabelText(/^secret key/i), {
-      target: { value: "newSecret123" },
-    });
+    await fillNewSecret("s3-secret", "newSecret123");
 
     fireEvent.click(screen.getByRole("button", { name: /add connection/i, hidden: false }));
 
@@ -296,7 +320,7 @@ describe("StoragePage", () => {
           region: "ap-southeast-1",
           bucket: "new-bucket",
           access_key: "AKIANEWKEY",
-          secret_key: "newSecret123",
+          new_secret: { name: "s3-secret", value: "newSecret123" },
           provider: "s3",
         }),
       );
@@ -325,9 +349,6 @@ describe("StoragePage", () => {
     });
     fireEvent.change(screen.getByLabelText(/^access key/i), {
       target: { value: "AKIAKEY" },
-    });
-    fireEvent.change(screen.getByLabelText(/^secret key/i), {
-      target: { value: "secret" },
     });
 
     fireEvent.click(screen.getByRole("button", { name: /add connection/i, hidden: false }));
@@ -369,23 +390,19 @@ describe("StoragePage", () => {
     const bucketInput = screen.getByDisplayValue("my-data-lake");
     fireEvent.change(bucketInput, { target: { value: "updated-bucket" } });
 
-    // Leave secret blank → should not send it (null)
+    // Keep current secret (default on edit) → no secret fields in payload.
     fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
 
     await waitFor(() => {
-      expect(updateMutateAsync).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: "conn-1",
-          input: expect.objectContaining({
-            bucket: "updated-bucket",
-            secret_key: null,
-          }),
-        }),
-      );
+      const call = updateMutateAsync.mock.calls[0][0];
+      expect(call.id).toBe("conn-1");
+      expect(call.input.bucket).toBe("updated-bucket");
+      expect(call.input.secret_id).toBeUndefined();
+      expect(call.input.new_secret).toBeUndefined();
     });
   });
 
-  it("sends secret_key when user types a new secret in the Edit dialog", async () => {
+  it("sends new_secret when the user creates a secret in the Edit dialog", async () => {
     renderAt();
 
     const editButtons = screen.getAllByRole("button", { name: /edit/i });
@@ -393,15 +410,16 @@ describe("StoragePage", () => {
 
     await waitFor(() => screen.getByText("Edit storage connection"));
 
-    const secretInput = screen.getByLabelText(/^secret key/i);
-    fireEvent.change(secretInput, { target: { value: "newSecret!" } });
+    await fillNewSecret("rotated", "newSecret!");
 
     fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
 
     await waitFor(() => {
       expect(updateMutateAsync).toHaveBeenCalledWith(
         expect.objectContaining({
-          input: expect.objectContaining({ secret_key: "newSecret!" }),
+          input: expect.objectContaining({
+            new_secret: { name: "rotated", value: "newSecret!" },
+          }),
         }),
       );
     });

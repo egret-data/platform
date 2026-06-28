@@ -44,6 +44,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { SecretPicker, type SecretSelection } from "@/components/SecretPicker";
 
 function statusVariant(status: string): "default" | "destructive" | "secondary" {
   if (status === "ok") return "default";
@@ -295,7 +296,7 @@ function DatabaseConnDialog({
   const [catalog, setCatalog] = useState(editConn?.options.catalog ?? "");
   const [schema, setSchema] = useState(editConn?.options.database ?? "");
   const [httpScheme, setHttpScheme] = useState(editConn?.options.http_scheme ?? "");
-  const [secret, setSecret] = useState("");
+  const [secretSel, setSecretSel] = useState<SecretSelection>({});
   const [error, setError] = useState<string | null>(null);
 
   function resetToConn(conn: DatabaseConn | null) {
@@ -307,7 +308,7 @@ function DatabaseConnDialog({
     setCatalog(conn?.options.catalog ?? "");
     setSchema(conn?.options.database ?? "");
     setHttpScheme(conn?.options.http_scheme ?? "");
-    setSecret("");
+    setSecretSel({});
     setError(null);
     createMutation.reset();
     updateMutation.reset();
@@ -337,8 +338,9 @@ function DatabaseConnDialog({
       host: host.trim(),
       port: Number(port),
       options,
-      // On create: send secret (may be empty). On edit: only if typed.
-      secret: secret.length > 0 ? secret : null,
+      // Reference an existing named secret or create a new one. On edit with no
+      // change, secretSel is `{}` so the backend keeps the current secret.
+      ...secretSel,
     };
 
     try {
@@ -463,17 +465,12 @@ function DatabaseConnDialog({
               </div>
             </div>
 
-            <div className="space-y-1.5">
-              <Label htmlFor="db-secret">Password{isEdit ? "" : ""}</Label>
-              <Input
-                id="db-secret"
-                type="password"
-                value={secret}
-                onChange={(e) => setSecret(e.target.value)}
-                placeholder={isEdit ? "Leave blank to keep current" : "Password (optional)"}
-                autoComplete="new-password"
-              />
-            </div>
+            <SecretPicker
+              ws={ws}
+              value={secretSel}
+              hasExisting={!!editConn?.has_secret}
+              onChange={setSecretSel}
+            />
 
             {error && (
               <Alert variant="destructive">

@@ -6,6 +6,7 @@ import {
   Database,
   FolderKanban,
   HardDrive,
+  KeyRound,
   LayoutDashboard,
   type LucideIcon,
   NotebookText,
@@ -42,6 +43,7 @@ const EXPLORE_GROUPS: NavGroup[] = [
       { label: "Catalog", icon: Boxes },
       { label: "Storage", icon: HardDrive },
       { label: "Databases", icon: Database },
+      { label: "Secrets", icon: KeyRound },
     ],
   },
 ];

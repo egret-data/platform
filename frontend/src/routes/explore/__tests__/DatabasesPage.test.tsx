@@ -22,7 +22,34 @@ vi.mock("@/api/databases", () => ({
   useTestDatabase: () => testMutation(),
 }));
 
+// SecretPicker pulls the named-secrets list; stub it so the Select renders.
+vi.mock("@/api/secrets", () => ({
+  useSecrets: () => ({
+    data: [{ id: "sec-1", name: "existing-secret", used_by: 0, created_at: "2025-01-01T00:00:00Z" }],
+    isLoading: false,
+    isError: false,
+    error: null,
+  }),
+}));
+
 import DatabasesPage from "@/routes/explore/DatabasesPage";
+
+// Drive the SecretPicker: pick "New secret" via the hidden native <select>,
+// then fill the revealed name + value inputs.
+async function fillNewSecret(name: string, value: string) {
+  const native = Array.from(
+    document.querySelectorAll<HTMLSelectElement>("select"),
+  ).find((s) => Array.from(s.options).some((o) => o.value === "__new__"));
+  if (!native) throw new Error("SecretPicker native select not found");
+  fireEvent.change(native, { target: { value: "__new__" } });
+  await waitFor(() => screen.getByLabelText(/new secret name/i));
+  fireEvent.change(screen.getByLabelText(/new secret name/i), {
+    target: { value: name },
+  });
+  fireEvent.change(screen.getByLabelText(/new secret value/i), {
+    target: { value },
+  });
+}
 
 // ── Render helper ─────────────────────────────────────────────────────────────
 function renderAt() {
@@ -181,7 +208,7 @@ describe("DatabasesPage", () => {
     fireEvent.change(screen.getByLabelText(/^user$/i), { target: { value: "alice" } });
     fireEvent.change(screen.getByLabelText(/^catalog$/i), { target: { value: "iceberg" } });
     fireEvent.change(screen.getByLabelText(/^schema$/i), { target: { value: "public" } });
-    fireEvent.change(screen.getByLabelText(/^password$/i), { target: { value: "pw123" } });
+    await fillNewSecret("db-secret", "pw123");
 
     fireEvent.click(screen.getByRole("button", { name: /add connection/i, hidden: false }));
 
@@ -192,7 +219,7 @@ describe("DatabasesPage", () => {
           engine: "trino",
           host: "db.example.com",
           port: 8080,
-          secret: "pw123",
+          new_secret: { name: "db-secret", value: "pw123" },
           options: expect.objectContaining({
             user: "alice",
             catalog: "iceberg",
@@ -218,11 +245,12 @@ describe("DatabasesPage", () => {
     expect(screen.getByDisplayValue("svc")).toBeInTheDocument();
     expect(screen.getByDisplayValue("iceberg")).toBeInTheDocument();
     expect(screen.getByDisplayValue("analytics")).toBeInTheDocument();
-    // Secret is blank on edit
-    expect((screen.getByLabelText(/^password$/i) as HTMLInputElement).value).toBe("");
+    // On edit the SecretPicker defaults to "Keep current secret" — no plaintext
+    // secret input is rendered until the user opts to create a new one.
+    expect(screen.queryByLabelText(/new secret value/i)).not.toBeInTheDocument();
   });
 
-  it("calls updateMutation with null secret when password left blank", async () => {
+  it("omits secret fields on edit when the current secret is kept", async () => {
     renderAt();
 
     const editButtons = screen.getAllByRole("button", { name: /^edit/i });
@@ -233,15 +261,15 @@ describe("DatabasesPage", () => {
     const hostInput = screen.getByDisplayValue("trino.corp.local");
     fireEvent.change(hostInput, { target: { value: "new-host" } });
 
+    // Keep current secret (default on edit) → no secret fields in payload.
     fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
 
     await waitFor(() => {
-      expect(updateMutateAsync).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: "db-1",
-          input: expect.objectContaining({ host: "new-host", secret: null }),
-        }),
-      );
+      const call = updateMutateAsync.mock.calls[0][0];
+      expect(call.id).toBe("db-1");
+      expect(call.input.host).toBe("new-host");
+      expect(call.input.secret_id).toBeUndefined();
+      expect(call.input.new_secret).toBeUndefined();
     });
   });
 

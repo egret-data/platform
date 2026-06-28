@@ -25,7 +25,10 @@ export interface StorageConnInput {
   bucket: string;
   key_prefix?: string | null;
   access_key: string;
-  secret_key?: string | null;
+  // Reference an existing named secret, or create-and-reference a new one.
+  // Both omitted on update keeps the current secret.
+  secret_id?: string;
+  new_secret?: { name: string; value: string };
   path_style: boolean;
 }
 

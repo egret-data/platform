@@ -33,6 +33,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { SecretPicker, type SecretSelection } from "@/components/SecretPicker";
 import FileBrowser from "@/routes/explore/storage/FileBrowser";
 
 export default function StoragePage() {
@@ -271,7 +272,7 @@ function StorageConnDialog({
   const [bucket, setBucket] = useState(editConn?.bucket ?? "");
   const [keyPrefix, setKeyPrefix] = useState(editConn?.key_prefix ?? "");
   const [accessKey, setAccessKey] = useState(editConn?.access_key ?? "");
-  const [secretKey, setSecretKey] = useState("");
+  const [secretSel, setSecretSel] = useState<SecretSelection>({});
   const [pathStyle, setPathStyle] = useState(editConn?.path_style ?? true);
   const [error, setError] = useState<string | null>(null);
 
@@ -285,7 +286,7 @@ function StorageConnDialog({
     setBucket(conn?.bucket ?? "");
     setKeyPrefix(conn?.key_prefix ?? "");
     setAccessKey(conn?.access_key ?? "");
-    setSecretKey("");
+    setSecretSel({});
     setPathStyle(conn?.path_style ?? true);
     setError(null);
     createMutation.reset();
@@ -312,8 +313,9 @@ function StorageConnDialog({
       bucket: bucket.trim(),
       key_prefix: keyPrefix.trim().length > 0 ? keyPrefix.trim() : null,
       access_key: accessKey.trim(),
-      // On create: always send secret_key. On edit: only if typed.
-      secret_key: secretKey.length > 0 ? secretKey : null,
+      // Reference an existing named secret or create a new one. On edit with no
+      // change, secretSel is `{}` so the backend keeps the current secret.
+      ...secretSel,
       path_style: pathStyle,
     };
 
@@ -440,22 +442,12 @@ function StorageConnDialog({
               />
             </div>
 
-            <div className="space-y-1.5">
-              <Label htmlFor="sc-secret-key">
-                Secret key{isEdit ? "" : " *"}
-              </Label>
-              <Input
-                id="sc-secret-key"
-                type="password"
-                value={secretKey}
-                onChange={(e) => setSecretKey(e.target.value)}
-                placeholder={
-                  isEdit ? "Leave blank to keep current" : "Secret access key"
-                }
-                required={!isEdit}
-                autoComplete="new-password"
-              />
-            </div>
+            <SecretPicker
+              ws={ws}
+              value={secretSel}
+              hasExisting={!!editConn?.has_secret}
+              onChange={setSecretSel}
+            />
 
             <div className="flex items-center gap-3">
               <input
