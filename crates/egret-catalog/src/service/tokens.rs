@@ -259,6 +259,33 @@ impl CatalogStore {
         Ok(r.rows_affected() == 1)
     }
 
+    /// Revoke a token by id, scoped to BOTH its `workspace_id` and `warehouse_id`
+    /// (and only if not already revoked).
+    ///
+    /// Returns `true` when exactly one row was revoked, `false` otherwise (the
+    /// token does not exist, belongs to another workspace, belongs to another
+    /// warehouse within this workspace, or was already revoked). The
+    /// `warehouse_id` guard is defense-in-depth: a token minted for warehouse A
+    /// can never be revoked via warehouse B's path even within the same workspace.
+    pub async fn revoke_token_for_warehouse(
+        &self,
+        workspace_id: Uuid,
+        warehouse_id: Uuid,
+        id: Uuid,
+    ) -> Result<bool, CatalogError> {
+        let r = sqlx::query(
+            "UPDATE catalog_tokens SET revoked_at = now() \
+             WHERE id = $1 AND workspace_id = $2 AND warehouse_id = $3 AND revoked_at IS NULL",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .bind(warehouse_id)
+        .execute(self.pool())
+        .await
+        .map_err(CatalogError::from)?;
+        Ok(r.rows_affected() == 1)
+    }
+
     /// List all non-revoked tokens for a workspace (hashes excluded).
     pub async fn list_tokens(&self, workspace_id: Uuid) -> Result<Vec<CatalogToken>, CatalogError> {
         let rows: Vec<TokenRow> = sqlx::query_as::<_, TokenRow>(

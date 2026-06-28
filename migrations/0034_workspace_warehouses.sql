@@ -30,5 +30,11 @@ UPDATE catalog_tokens t SET warehouse_id = wh.id
 FROM workspace_warehouses wh
 WHERE wh.workspace_id = t.workspace_id AND wh.name = 'default';
 
+-- A token with no resolvable warehouse is unusable under the per-warehouse model;
+-- drop it, then enforce the contract (the Rust type is a non-Option `Uuid`, so a
+-- NULL row would panic on deserialize).
+DELETE FROM catalog_tokens WHERE warehouse_id IS NULL;
+ALTER TABLE catalog_tokens ALTER COLUMN warehouse_id SET NOT NULL;
+
 DROP TABLE workspace_warehouse;
 DROP TABLE workspace_storage;

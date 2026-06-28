@@ -320,6 +320,71 @@ async fn revoke_of_foreign_workspace_token_is_404() {
     );
 }
 
+/// A token minted FOR warehouse B (same workspace) must NOT be revocable via
+/// warehouse A's `{wid}` path — the store-layer `warehouse_id` guard scopes the
+/// revoke to the warehouse, not just the workspace.
+#[tokio::test]
+async fn revoke_of_other_warehouse_token_is_404_and_token_survives() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, "admin", "ws_admin").await;
+
+    // A SECOND warehouse (B) in the SAME workspace, and a token minted for B.
+    let wid_b = f
+        .store
+        .insert_warehouse(f.workspace_id.0, Uuid::now_v7(), "warehouse-b", None)
+        .await
+        .expect("seed warehouse B")
+        .id;
+    let (token_b, _raw) = f
+        .store
+        .create_token(
+            f.workspace_id.0,
+            wid_b,
+            "b-token",
+            &["catalog:read".into()],
+            &[],
+        )
+        .await
+        .expect("mint token for warehouse B");
+
+    // Attempt to revoke B's token via warehouse A's path (`f.wid`) → 404.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!(
+                "/ws/{}/catalog/warehouses/{}/tokens/{}",
+                f.slug, f.wid, token_b.id
+            ),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "a token from warehouse B must not be revocable via warehouse A's path"
+    );
+
+    // And B's token is STILL active (listed under warehouse B).
+    let still = f
+        .store
+        .list_tokens_for_warehouse(f.workspace_id.0, wid_b)
+        .await
+        .expect("list warehouse B tokens")
+        .iter()
+        .any(|t| t.id == token_b.id);
+    assert!(
+        still,
+        "B's token must remain active after the failed revoke"
+    );
+}
+
 #[tokio::test]
 async fn non_admin_member_is_403() {
     let Some(f) = setup().await else {

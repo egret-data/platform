@@ -536,17 +536,43 @@ async fn create_warehouse(
     })?;
 
     // Persist the egret row mapping the workspace's warehouse → its lakekeeper id.
-    // A duplicate name within the workspace → 409-style conflict.
-    let wh = st
+    // A duplicate name within the workspace → 409-style conflict. If the insert
+    // fails AFTER the lakekeeper warehouse was created, that warehouse is now
+    // orphaned — best-effort roll it back (mirrors the seal-then-rollback pattern
+    // the storage-conn handlers use for a just-minted named secret).
+    let wh = match st
         .store
         .insert_warehouse(ws, lk_id, &req.name, Some(req.storage_conn_id))
         .await
-        .map_err(|e| match e {
-            CatalogError::AlreadyExists(_) => {
-                BrowseApiError::Conflict("a warehouse with that name already exists".to_string())
+    {
+        Ok(wh) => wh,
+        Err(e) => {
+            // Best-effort roll back the just-created lakekeeper warehouse so a
+            // failed egret-row insert never orphans it.
+            match system_request_metadata(&st.system_user).ok() {
+                Some(rm) => {
+                    if let Err(de) =
+                        crate::provision_ws::delete_warehouse(st.engine.clone(), rm, lk_id).await
+                    {
+                        tracing::warn!(
+                            error = ?de, warehouse_id = %lk_id,
+                            "failed to roll back orphaned lakekeeper warehouse after egret row insert failed"
+                        );
+                    }
+                }
+                None => tracing::warn!(
+                    warehouse_id = %lk_id,
+                    "could not build system principal to roll back orphaned lakekeeper warehouse"
+                ),
             }
-            other => other.into(),
-        })?;
+            return Err(match e {
+                CatalogError::AlreadyExists(_) => BrowseApiError::Conflict(
+                    "a warehouse with that name already exists".to_string(),
+                ),
+                other => other.into(),
+            });
+        }
+    };
 
     Ok((
         StatusCode::CREATED,
@@ -1006,20 +1032,11 @@ async fn revoke_token(
     // Verify the warehouse belongs to this workspace (cross-workspace → 404).
     st.store.get_warehouse(ws, wid).await?;
 
-    // Confirm the token belongs to THIS warehouse before revoking (so a token id
-    // from another warehouse in the same workspace can't be revoked via this
-    // warehouse's path).
-    let belongs = st
-        .store
-        .list_tokens_for_warehouse(ws, wid)
-        .await?
-        .iter()
-        .any(|t| t.id == id);
-    if !belongs {
-        return Err(BrowseApiError::NotFound);
-    }
-
-    let revoked = st.store.revoke_token_for_workspace(id, ws).await?;
+    // Revoke scoped to BOTH the workspace AND the warehouse: a token minted for
+    // another warehouse in the same workspace returns `false` here (→ 404), so it
+    // can't be revoked via this warehouse's path. The store-layer warehouse_id
+    // guard is the defense-in-depth boundary (no separate list pre-check needed).
+    let revoked = st.store.revoke_token_for_warehouse(ws, wid, id).await?;
     if revoked {
         Ok(StatusCode::NO_CONTENT)
     } else {
