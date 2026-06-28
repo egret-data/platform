@@ -41,6 +41,7 @@ const EXPLORE_GROUPS: NavGroup[] = [
     items: [
       { label: "Catalog", icon: Boxes },
       { label: "Storage", icon: HardDrive },
+      { label: "Databases", icon: Database },
     ],
   },
 ];
@@ -49,7 +50,6 @@ const ADMIN_GROUPS: NavGroup[] = [
   {
     heading: "Administration",
     items: [
-      { label: "Databases", icon: Database },
       { label: "Catalog", icon: Boxes },
       { label: "Policies", icon: ShieldCheck },
       { label: "Users", icon: Users },

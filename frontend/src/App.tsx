@@ -27,7 +27,7 @@ import CatalogArea from "@/routes/explore/catalog/CatalogArea";
 import CatalogBrowse from "@/routes/explore/catalog/CatalogBrowse";
 import CatalogAccess from "@/routes/explore/catalog/CatalogAccess";
 import StoragePage from "@/routes/explore/StoragePage";
-import Databases from "@/routes/admin/Databases";
+import DatabasesPage from "@/routes/explore/DatabasesPage";
 import Catalog from "@/routes/admin/Catalog";
 import Policies from "@/routes/admin/Policies";
 import Users from "@/routes/admin/Users";
@@ -64,6 +64,7 @@ function ExploreRoutes() {
             <Route path="access" element={<CatalogAccess />} />
           </Route>
           <Route path="storage" element={<StoragePage />} />
+          <Route path="databases" element={<DatabasesPage />} />
           <Route path="*" element={<Navigate to="sql-lab" replace />} />
         </Routes>
       </AppShell>
@@ -76,14 +77,13 @@ function AdminRoutes() {
     <RequirePlatform>
       <AppShell>
         <Routes>
-          <Route index element={<Navigate to="databases" replace />} />
-          <Route path="databases" element={<Databases />} />
+          <Route index element={<Navigate to="catalog" replace />} />
           <Route path="catalog" element={<Catalog />} />
           <Route path="policies" element={<Policies />} />
           <Route path="users" element={<Users />} />
           <Route path="workspaces" element={<Workspaces />} />
           <Route path="monitoring" element={<Monitoring />} />
-          <Route path="*" element={<Navigate to="databases" replace />} />
+          <Route path="*" element={<Navigate to="catalog" replace />} />
         </Routes>
       </AppShell>
     </RequirePlatform>

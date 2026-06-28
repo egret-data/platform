@@ -29,7 +29,7 @@ export const csvUrl = (ws: string, id: string) => `/api/ws/${ws}/queries/${id}/r
 export function useDatabases(ws: string) {
   return useQuery<DatabaseListItem[]>({
     queryKey: qk.databases(ws),
-    queryFn: () => apiJson<DatabaseListItem[]>(`/me/databases?workspace=${encodeURIComponent(ws)}`),
+    queryFn: () => apiJson<DatabaseListItem[]>(`/ws/${encodeURIComponent(ws)}/databases`),
   });
 }
 
