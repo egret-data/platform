@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { useParams } from "react-router-dom";
 import { Check, Copy, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
 
 import {
@@ -26,10 +25,9 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 
-export default function CatalogAccess() {
-  const ws = useParams().workspace!;
-  const tokens = useCatalogTokens(ws);
-  const revokeMutation = useRevokeToken(ws);
+export default function CatalogAccess({ ws, wid }: { ws: string; wid: string }) {
+  const tokens = useCatalogTokens(ws, wid);
+  const revokeMutation = useRevokeToken(ws, wid);
 
   const [mintOpen, setMintOpen] = useState(false);
   const [revokeTarget, setRevokeTarget] = useState<CatalogTokenDto | null>(null);
@@ -128,7 +126,7 @@ export default function CatalogAccess() {
         )}
       </div>
 
-      <MintTokenDialog ws={ws} open={mintOpen} onOpenChange={setMintOpen} />
+      <MintTokenDialog ws={ws} wid={wid} open={mintOpen} onOpenChange={setMintOpen} />
 
       <ConfirmDeleteDialog
         open={revokeTarget !== null}
@@ -167,14 +165,16 @@ type MintPhase = "form" | "reveal";
 
 function MintTokenDialog({
   ws,
+  wid,
   open,
   onOpenChange,
 }: {
   ws: string;
+  wid: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const mintMutation = useMintToken(ws);
+  const mintMutation = useMintToken(ws, wid);
 
   const [phase, setPhase] = useState<MintPhase>("form");
   const [label, setLabel] = useState("");

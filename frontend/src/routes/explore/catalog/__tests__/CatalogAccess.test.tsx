@@ -1,22 +1,29 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const tokensMock = vi.fn();
 const mintMutateAsync = vi.fn();
 const revokeMutate = vi.fn();
 const mintReset = vi.fn();
+const useCatalogTokensMock = vi.fn();
+const useMintTokenMock = vi.fn();
+const useRevokeTokenMock = vi.fn();
 
 vi.mock("@/api/catalog", () => ({
-  useCatalogTokens: () => tokensMock(),
-  useMintToken: () => ({
-    mutateAsync: mintMutateAsync,
-    reset: mintReset,
-    isPending: false,
-  }),
-  useRevokeToken: () => ({ mutate: revokeMutate }),
+  useCatalogTokens: (ws: string, wid: string) => {
+    useCatalogTokensMock(ws, wid);
+    return tokensMock();
+  },
+  useMintToken: (ws: string, wid: string) => {
+    useMintTokenMock(ws, wid);
+    return { mutateAsync: mintMutateAsync, reset: mintReset, isPending: false };
+  },
+  useRevokeToken: (ws: string, wid: string) => {
+    useRevokeTokenMock(ws, wid);
+    return { mutate: revokeMutate };
+  },
 }));
 
 import CatalogAccess from "../CatalogAccess";
@@ -25,11 +32,7 @@ function renderAt() {
   const qc = new QueryClient();
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={["/explore/eng/catalog/access"]}>
-        <Routes>
-          <Route path="/explore/:workspace/catalog/access" element={<CatalogAccess />} />
-        </Routes>
-      </MemoryRouter>
+      <CatalogAccess ws="eng" wid="wh-1" />
     </QueryClientProvider>,
   );
 }
@@ -56,10 +59,19 @@ beforeEach(() => {
   mintMutateAsync.mockReset();
   revokeMutate.mockReset();
   mintReset.mockReset();
+  useCatalogTokensMock.mockReset();
+  useMintTokenMock.mockReset();
+  useRevokeTokenMock.mockReset();
   tokensMock.mockReturnValue({ data: tokenRows, isLoading: false, isError: false });
 });
 
 describe("CatalogAccess", () => {
+  it("scopes its hooks to the warehouse id", () => {
+    renderAt();
+    expect(useCatalogTokensMock).toHaveBeenCalledWith("eng", "wh-1");
+    expect(useRevokeTokenMock).toHaveBeenCalledWith("eng", "wh-1");
+  });
+
   it("renders the token list with permission badges and namespace scope", () => {
     renderAt();
 
@@ -90,7 +102,10 @@ describe("CatalogAccess", () => {
 
     await user.click(screen.getByRole("button", { name: /mint token/i }));
 
-    // Read is on by default; turn write off is not needed. Set label.
+    // The mint hook is scoped to the warehouse id.
+    expect(useMintTokenMock).toHaveBeenCalledWith("eng", "wh-1");
+
+    // Read is on by default. Set label.
     await user.type(screen.getByPlaceholderText("e.g. dbt-ci"), "ci-token");
 
     // Submit the dialog form.
@@ -116,9 +131,8 @@ describe("CatalogAccess", () => {
     await user.click(within(row1).getByRole("button", { name: /revoke/i }));
 
     // ConfirmDeleteDialog gates its action button behind typing the confirm
-    // word — here "revoke" (our confirmText). Note: confirmText is the typed-
-    // confirmation word + input placeholder, NOT the button label. The action
-    // button is always literally labelled "Delete", so match that exactly.
+    // word — here "revoke" (our confirmText). The action button is always
+    // literally labelled "Delete", so match that exactly.
     const confirmDialog = screen.getByRole("alertdialog");
     await user.type(within(confirmDialog).getByPlaceholderText("revoke"), "revoke");
     await user.click(within(confirmDialog).getByRole("button", { name: "Delete" }));

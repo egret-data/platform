@@ -23,9 +23,8 @@ import ChartExplore from "@/routes/explore/ChartExplore";
 import Dashboards from "@/routes/explore/Dashboards";
 import DashboardView from "@/routes/explore/DashboardView";
 import Notebooks from "@/routes/explore/Notebooks";
-import CatalogArea from "@/routes/explore/catalog/CatalogArea";
-import CatalogBrowse from "@/routes/explore/catalog/CatalogBrowse";
-import CatalogAccess from "@/routes/explore/catalog/CatalogAccess";
+import WarehousesList from "@/routes/explore/catalog/WarehousesList";
+import WarehouseDetail from "@/routes/explore/catalog/WarehouseDetail";
 import StoragePage from "@/routes/explore/StoragePage";
 import DatabasesPage from "@/routes/explore/DatabasesPage";
 import SecretsPage from "@/routes/explore/SecretsPage";
@@ -60,10 +59,8 @@ function ExploreRoutes() {
           <Route path="dashboards" element={<Dashboards />} />
           <Route path="dashboards/:id" element={<DashboardView />} />
           <Route path="notebooks" element={<Notebooks />} />
-          <Route path="catalog" element={<CatalogArea />}>
-            <Route index element={<CatalogBrowse />} />
-            <Route path="access" element={<CatalogAccess />} />
-          </Route>
+          <Route path="catalog" element={<WarehousesList />} />
+          <Route path="catalog/:wid" element={<WarehouseDetail />} />
           <Route path="storage" element={<StoragePage />} />
           <Route path="databases" element={<DatabasesPage />} />
           <Route path="secrets" element={<SecretsPage />} />
