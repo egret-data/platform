@@ -138,7 +138,11 @@ async fn test_saved(
     .await;
     let _ = st
         .repo
-        .set_status(id, if outcome.ok { "ok" } else { "error" })
+        .set_status(
+            ctx.workspace_id.0,
+            id,
+            if outcome.ok { "ok" } else { "error" },
+        )
         .await;
     Ok(Json(outcome))
 }

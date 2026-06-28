@@ -277,13 +277,22 @@ impl DatabaseRepo {
         Ok(())
     }
 
-    /// Record the last connection-test result.
-    pub async fn set_status(&self, id: Uuid, status: &str) -> Result<(), DatabaseError> {
-        sqlx::query("UPDATE databases SET status=$2, updated_at=now() WHERE id=$1")
-            .bind(id)
-            .bind(status)
-            .execute(&self.db.pool)
-            .await?;
+    /// Record the last connection-test result, scoped to the owning workspace
+    /// (defense-in-depth: the status write cannot touch another workspace's row).
+    pub async fn set_status(
+        &self,
+        workspace_id: Uuid,
+        id: Uuid,
+        status: &str,
+    ) -> Result<(), DatabaseError> {
+        sqlx::query(
+            "UPDATE databases SET status=$3, updated_at=now() WHERE id=$1 AND workspace_id=$2",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .bind(status)
+        .execute(&self.db.pool)
+        .await?;
         Ok(())
     }
 }
