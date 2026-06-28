@@ -15,6 +15,10 @@ fn build_state(db: Db) -> BiState {
         databases: egret_database::DatabaseRepo::new(
             db.clone(),
             egret_secrets::SecretStore::new(db.clone(), None),
+            egret_secrets::WorkspaceSecretStore::new(
+                db.clone(),
+                egret_secrets::SecretStore::new(db.clone(), None),
+            ),
         ),
         sessions: egret_auth::session::SessionService::new(
             db.clone(),

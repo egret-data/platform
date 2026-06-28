@@ -121,6 +121,10 @@ async fn setup(sleep_ms: u64) -> Option<(JobManager, QueryStore, Uuid, Uuid)> {
         egret_database::DatabaseRepo::new(
             db.clone(),
             egret_secrets::SecretStore::new(db.clone(), None),
+            egret_secrets::WorkspaceSecretStore::new(
+                db.clone(),
+                egret_secrets::SecretStore::new(db.clone(), None),
+            ),
         ),
         Arc::new(FakeFactory { sleep_ms }),
         storage,

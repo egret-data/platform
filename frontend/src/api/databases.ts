@@ -27,8 +27,10 @@ export interface DatabaseConnInput {
   host: string;
   port: number;
   options: ConnOptions;
-  // Write-only. null/"" keeps the existing secret on update.
-  secret: string | null;
+  // Reference an existing named secret, or create-and-reference a new one.
+  // Both omitted on update keeps the current secret.
+  secret_id?: string;
+  new_secret?: { name: string; value: string };
 }
 
 export interface TestOutcome {

@@ -109,6 +109,10 @@ async fn setup() -> Option<Fixture> {
         engine: engine_state,
         store: store.clone(),
         secret_store: secret_store.clone(),
+        workspace_secrets: egret_secrets::WorkspaceSecretStore::new(
+            db.clone(),
+            secret_store.clone(),
+        ),
         default_storage: egret_storage::StorageConfig {
             endpoint: Some("http://localhost:9000".to_string()),
             region: "local-01".to_string(),
@@ -160,10 +164,18 @@ async fn add_member(f: &Fixture, email_tag: &str, role: &str) -> String {
 async fn seed_conn(f: &mut Fixture, secret_store: &egret_secrets::SecretStore) -> Uuid {
     let root = format!("conns/{}", Uuid::new_v4().simple());
     f.root = root.clone();
-    let secret_ref = secret_store
-        .put("test_conn", "egretsecret")
+    // Epic B: the connection references a NAMED workspace secret, not a raw vault
+    // id — `conn_s3` resolves `secret_ref` via `WorkspaceSecretStore`.
+    let ws_secrets = egret_secrets::WorkspaceSecretStore::new(f.db.clone(), secret_store.clone());
+    let secret_ref = ws_secrets
+        .create(
+            f.workspace_id.0,
+            &format!("sec-{}", Uuid::new_v4().simple()),
+            None,
+            "egretsecret",
+        )
         .await
-        .expect("seal secret");
+        .expect("create named secret");
     let input = StorageConnInput {
         name: format!("conn-{}", Uuid::new_v4().simple()),
         purpose: None,

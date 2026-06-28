@@ -59,7 +59,10 @@ pub struct Database {
 
 // ── Request DTOs ──────────────────────────────────────────────────────────────
 
-/// Register/update body. `secret` is plaintext, accepted only on write, never returned.
+/// Register/update body. Credentials are a NAMED secret (Epic B): either
+/// `new_secret` (mint a new named secret inline) or `secret_id` (reference an
+/// existing named secret in the workspace). Omitting both registers a connection
+/// with no secret (or, on update, keeps the existing one).
 #[derive(Debug, Deserialize)]
 pub struct DatabaseInput {
     pub name: String,
@@ -69,7 +72,9 @@ pub struct DatabaseInput {
     #[serde(default)]
     pub options: ConnOptions,
     #[serde(default)]
-    pub secret: Option<String>,
+    pub secret_id: Option<Uuid>,
+    #[serde(default)]
+    pub new_secret: Option<egret_secrets::NewSecret>,
 }
 
 /// Body for testing an unsaved connection (no `name`).

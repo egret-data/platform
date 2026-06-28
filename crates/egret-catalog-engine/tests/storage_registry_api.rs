@@ -107,6 +107,10 @@ async fn setup() -> Option<Fixture> {
         engine: engine_state,
         store: store.clone(),
         secret_store: secret_store.clone(),
+        workspace_secrets: egret_secrets::WorkspaceSecretStore::new(
+            db.clone(),
+            secret_store.clone(),
+        ),
         default_storage: egret_storage::StorageConfig {
             endpoint: Some("http://localhost:9000".to_string()),
             region: "local-01".to_string(),
@@ -211,7 +215,8 @@ async fn admin_can_register_list_edit_and_delete_storage_conns() {
     let token = add_member(&f, "admin", "ws_admin").await;
     let base = format!("/ws/{}/storages", f.slug);
 
-    // REGISTER (live reachability probe against MinIO).
+    // REGISTER (live reachability probe against MinIO). Epic B: credentials are
+    // supplied as a NAMED secret minted inline via `new_secret`.
     let body = serde_json::json!({
         "name": "minio-main",
         "provider": "s3",
@@ -220,7 +225,7 @@ async fn admin_can_register_list_edit_and_delete_storage_conns() {
         "bucket": "warehouse",
         "key_prefix": "conns/test",
         "access_key": "egret",
-        "secret_key": "egretsecret",
+        "new_secret": { "name": "minio-creds", "value": "egretsecret" },
         "path_style": true,
     });
     let resp = f
@@ -250,8 +255,12 @@ async fn admin_can_register_list_edit_and_delete_storage_conns() {
         .expect("get conn")
         .expect("conn exists");
     let secret_ref = conn.secret_ref.expect("secret_ref persisted");
-    let plaintext = f.secret_store.get(secret_ref).await.expect("unseal secret");
-    assert_eq!(plaintext, "egretsecret", "sealed secret round-trips");
+    let ws_secrets = egret_secrets::WorkspaceSecretStore::new(f.db.clone(), f.secret_store.clone());
+    let plaintext = ws_secrets
+        .resolve_plaintext(f.workspace_id.0, secret_ref)
+        .await
+        .expect("resolve named secret");
+    assert_eq!(plaintext, "egretsecret", "named secret round-trips");
 
     // LIST — present, NO secret leaked.
     let resp = f
@@ -363,7 +372,7 @@ async fn register_with_bogus_creds_is_400() {
                 "bucket": "warehouse",
                 "key_prefix": "conns/bad",
                 "access_key": "egret",
-                "secret_key": "wrong",
+                "new_secret": { "name": "bad-creds", "value": "wrong" },
                 "path_style": true,
             })),
         ))

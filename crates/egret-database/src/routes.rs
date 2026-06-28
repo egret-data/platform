@@ -10,12 +10,13 @@ use axum::extract::{FromRef, Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use egret_auth::session::SessionService;
+use egret_secrets::WorkspaceSecretStore;
 use egret_workspace::context::WsContext;
 use egret_workspace::rbac::Authorizer;
 use egret_workspace::workspaces::WorkspaceRepo;
 use uuid::Uuid;
 
-use crate::error::DbApiError;
+use crate::error::{DatabaseError, DbApiError};
 use crate::model::{DatabaseDetailDto, DatabaseInput, TestInput, TestOutcome};
 use crate::repo::DatabaseRepo;
 
@@ -25,6 +26,10 @@ pub struct DatabaseState {
     pub authz: Authorizer,
     pub sessions: SessionService,
     pub workspaces: WorkspaceRepo,
+    /// Named per-workspace secret layer (Epic B). The create/update routes
+    /// resolve a `new_secret`/`secret_id` to a `workspace_secrets` id before
+    /// handing a plain `Option<Uuid>` to the repo.
+    pub workspace_secrets: WorkspaceSecretStore,
 }
 
 // The WsContext extractor needs SessionService, WorkspaceRepo and Authorizer
@@ -67,15 +72,53 @@ async fn list(
     Ok(Json(dbs.into_iter().map(Into::into).collect()))
 }
 
+/// Resolve the connection's stored `secret_id` (a `workspace_secrets` id) by
+/// Epic-B precedence:
+///   (a) `new_secret` present → mint a new named secret and use its id,
+///   (b) else `secret_id` present → validate ownership via `get_meta` and use it,
+///   (c) else → `existing` (the keep-current id; `None` on create).
+async fn resolve_secret_id(
+    st: &DatabaseState,
+    workspace_id: Uuid,
+    body: &DatabaseInput,
+    existing: Option<Uuid>,
+) -> Result<Option<Uuid>, DbApiError> {
+    match (&body.new_secret, body.secret_id) {
+        (Some(n), _) => {
+            let id = st
+                .workspace_secrets
+                .create(workspace_id, &n.name, None, &n.value)
+                .await
+                .map_err(DatabaseError::from)?;
+            Ok(Some(id))
+        }
+        (None, Some(id)) => {
+            // Validate the named secret belongs to this workspace (404 otherwise).
+            st.workspace_secrets
+                .get_meta(workspace_id, id)
+                .await
+                .map_err(DatabaseError::from)?;
+            Ok(Some(id))
+        }
+        (None, None) => Ok(existing),
+    }
+}
+
 async fn create(
     State(st): State<DatabaseState>,
     WsContext(ctx): WsContext,
     Json(body): Json<DatabaseInput>,
 ) -> Result<Json<DatabaseDetailDto>, DbApiError> {
     st.authz.require_workspace(&ctx, PERM_MANAGE).await?;
+    let secret_id = resolve_secret_id(&st, ctx.workspace_id.0, &body, None).await?;
     let db = st
         .repo
-        .create_in_workspace(ctx.workspace_id.0, &body, Some(ctx.principal.user_id))
+        .create_in_workspace(
+            ctx.workspace_id.0,
+            &body,
+            secret_id,
+            Some(ctx.principal.user_id),
+        )
         .await?;
     Ok(Json(db.into()))
 }
@@ -101,9 +144,18 @@ async fn update(
     Json(body): Json<DatabaseInput>,
 ) -> Result<Json<DatabaseDetailDto>, DbApiError> {
     st.authz.require_workspace(&ctx, PERM_MANAGE).await?;
+    // Keep-current default: the row's existing secret id (404 if not owned).
+    let existing = st.repo.current_secret_id(ctx.workspace_id.0, id).await?;
+    let secret_id = resolve_secret_id(&st, ctx.workspace_id.0, &body, existing).await?;
     Ok(Json(
         st.repo
-            .update_in_workspace(ctx.workspace_id.0, id, &body, Some(ctx.principal.user_id))
+            .update_in_workspace(
+                ctx.workspace_id.0,
+                id,
+                &body,
+                secret_id,
+                Some(ctx.principal.user_id),
+            )
             .await?
             .into(),
     ))

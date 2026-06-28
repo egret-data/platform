@@ -28,6 +28,7 @@ import CatalogBrowse from "@/routes/explore/catalog/CatalogBrowse";
 import CatalogAccess from "@/routes/explore/catalog/CatalogAccess";
 import StoragePage from "@/routes/explore/StoragePage";
 import DatabasesPage from "@/routes/explore/DatabasesPage";
+import SecretsPage from "@/routes/explore/SecretsPage";
 import Catalog from "@/routes/admin/Catalog";
 import Policies from "@/routes/admin/Policies";
 import Users from "@/routes/admin/Users";
@@ -65,6 +66,7 @@ function ExploreRoutes() {
           </Route>
           <Route path="storage" element={<StoragePage />} />
           <Route path="databases" element={<DatabasesPage />} />
+          <Route path="secrets" element={<SecretsPage />} />
           <Route path="*" element={<Navigate to="sql-lab" replace />} />
         </Routes>
       </AppShell>

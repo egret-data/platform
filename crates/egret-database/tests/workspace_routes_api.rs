@@ -35,6 +35,7 @@ struct Fixture {
     users: UserRepo,
     members: MemberRepo,
     sessions: SessionService,
+    workspace_secrets: egret_secrets::WorkspaceSecretStore,
     slug_a: String,
     slug_b: String,
     ws_a: WorkspaceId,
@@ -90,11 +91,13 @@ async fn setup() -> Option<Fixture> {
         .await
         .expect("seed ws B");
 
+    let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
     let app = workspace_database_router().with_state(DatabaseState {
-        repo: DatabaseRepo::new(db.clone(), secrets),
+        repo: DatabaseRepo::new(db.clone(), secrets, workspace_secrets.clone()),
         authz: Authorizer::new(db.clone()),
         sessions: sessions.clone(),
         workspaces,
+        workspace_secrets: workspace_secrets.clone(),
     });
 
     Some(Fixture {
@@ -102,6 +105,7 @@ async fn setup() -> Option<Fixture> {
         users,
         members: MemberRepo::new(db.clone()),
         sessions,
+        workspace_secrets,
         slug_a,
         slug_b,
         ws_a: ws_a.id,
@@ -150,7 +154,6 @@ fn db_body(name: &str) -> serde_json::Value {
         "engine": "trino",
         "host": "trino.local",
         "port": 8080,
-        "secret": null,
     })
 }
 
@@ -297,6 +300,97 @@ async fn non_admin_member_is_403() {
         StatusCode::FORBIDDEN,
         "a non-admin member must not list databases"
     );
+}
+
+#[tokio::test]
+async fn create_with_new_secret_mints_named_secret() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, f.ws_a, "admin", "ws_admin").await;
+    let base = format!("/ws/{}/databases", f.slug_a);
+
+    // Epic B: `new_secret` mints a named secret inline and binds the connection.
+    let body = serde_json::json!({
+        "name": "conn-newsecret",
+        "engine": "trino",
+        "host": "trino.local",
+        "port": 8080,
+        "new_secret": { "name": "db-creds", "value": "s3cr3t" },
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &base, &token, Some(body)))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "create with new_secret; body={json}"
+    );
+    assert_eq!(
+        json["has_secret"],
+        serde_json::json!(true),
+        "a minted named secret must make has_secret true; body={json}"
+    );
+    // The named secret exists in the workspace with used_by = 1.
+    let secrets = f
+        .workspace_secrets
+        .list(f.ws_a.0)
+        .await
+        .expect("list secrets");
+    let meta = secrets
+        .iter()
+        .find(|s| s.name == "db-creds")
+        .expect("minted named secret listed");
+    assert_eq!(meta.used_by, 1, "the new connection references the secret");
+}
+
+#[tokio::test]
+async fn create_with_secret_id_references_existing_named_secret() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, f.ws_a, "admin", "ws_admin").await;
+    let base = format!("/ws/{}/databases", f.slug_a);
+
+    // Pre-create a named secret, then reference it by id.
+    let secret_id = f
+        .workspace_secrets
+        .create(f.ws_a.0, "shared-db-creds", None, "pre-made")
+        .await
+        .expect("pre-create secret");
+
+    let body = serde_json::json!({
+        "name": "conn-secretid",
+        "engine": "trino",
+        "host": "trino.local",
+        "port": 8080,
+        "secret_id": secret_id,
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &base, &token, Some(body)))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "create with secret_id; body={json}");
+    assert_eq!(
+        json["has_secret"],
+        serde_json::json!(true),
+        "referencing an existing named secret must make has_secret true; body={json}"
+    );
+    let meta = f
+        .workspace_secrets
+        .get_meta(f.ws_a.0, secret_id)
+        .await
+        .expect("get_meta");
+    assert_eq!(meta.used_by, 1, "the connection now references the secret");
 }
 
 #[tokio::test]

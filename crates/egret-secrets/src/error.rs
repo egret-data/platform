@@ -11,6 +11,12 @@ pub enum SecretsError {
     /// Secret row not found.
     #[error("secret not found")]
     NotFound,
+    /// A named secret with this name already exists in the workspace.
+    #[error("secret named {0:?} already exists")]
+    AlreadyExists(String),
+    /// The named secret is still referenced by connections and cannot be deleted.
+    #[error("secret is in use by {0} connection(s)")]
+    InUse(i64),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
