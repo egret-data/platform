@@ -12,6 +12,7 @@ rand.workspace = true
 base64.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+serde = { workspace = true, features = ["derive"] }
 sqlx.workspace = true
 thiserror.workspace = true
 

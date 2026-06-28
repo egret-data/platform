@@ -39,7 +39,8 @@ async fn setup() -> Option<Fixture> {
     let crypto =
         egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
     let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
-    let repo = DatabaseRepo::new(db.clone(), secrets);
+    let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
+    let repo = DatabaseRepo::new(db.clone(), secrets, workspace_secrets);
 
     let users = UserRepo::new(db.clone());
     let suffix = Uuid::new_v4().simple().to_string();
@@ -73,7 +74,8 @@ fn input(name: &str) -> DatabaseInput {
         host: "trino.local".to_string(),
         port: 8080,
         options: ConnOptions::default(),
-        secret: None,
+        secret_id: None,
+        new_secret: None,
     }
 }
 
@@ -88,7 +90,7 @@ async fn workspace_scoped_repo_enforces_ownership() {
     // CREATE in workspace A.
     let created = f
         .repo
-        .create_in_workspace(f.ws_a, &input(&name), Some(f.creator))
+        .create_in_workspace(f.ws_a, &input(&name), None, Some(f.creator))
         .await
         .expect("create in ws A");
     let id = created.id;
@@ -126,7 +128,7 @@ async fn workspace_scoped_repo_enforces_ownership() {
     assert!(
         matches!(
             f.repo
-                .update_in_workspace(f.ws_b, id, &foreign, Some(f.creator))
+                .update_in_workspace(f.ws_b, id, &foreign, None, Some(f.creator))
                 .await,
             Err(DatabaseError::NotFound(_))
         ),
@@ -144,7 +146,7 @@ async fn workspace_scoped_repo_enforces_ownership() {
     owned.port = 9090;
     let updated = f
         .repo
-        .update_in_workspace(f.ws_a, id, &owned, Some(f.creator))
+        .update_in_workspace(f.ws_a, id, &owned, None, Some(f.creator))
         .await
         .expect("update in ws A");
     assert_eq!(updated.host, "trino-2.local");

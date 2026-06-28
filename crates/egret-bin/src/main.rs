@@ -274,6 +274,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         egret_secrets::SecretStore::new(db.clone(), crypto)
     };
 
+    // Epic B: the named per-workspace secret layer over the vault. Built once from
+    // the shared vault and threaded into the browse + database states so storage
+    // and database connections reference named secrets.
+    let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
+
     let (catalog_engine, warehouse_provisioner, catalog_browse): (
         Option<axum::Router>,
         egret_workspace::provision::SharedWarehouseProvisioner,
@@ -319,6 +324,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 // seals/unseals per-workspace S3 secrets through the same vault the
                 // provisioner uses.
                 secret_store: secrets.clone(),
+                workspace_secrets: workspace_secrets.clone(),
                 // The same global storage config threaded into the provisioner
                 // below; carried so the browse router can lazily provision a
                 // warehouse and report the effective default storage for a
@@ -414,13 +420,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // `secrets` (the SecretStore) was hoisted above the engine block so the
     // per-workspace storage provisioner shares it; the database block reuses the
     // same instance for database-connection secrets.
-    let databases = egret_database::DatabaseRepo::new(db.clone(), secrets.clone());
+    let databases =
+        egret_database::DatabaseRepo::new(db.clone(), secrets.clone(), workspace_secrets.clone());
 
     let database = Some(egret_database::DatabaseState {
         repo: databases.clone(),
         authz: Authorizer::new(db.clone()),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
+        workspace_secrets: workspace_secrets.clone(),
     });
 
     let engine = {

@@ -100,10 +100,12 @@ async fn setup() -> Option<Fixture> {
 
     let crypto =
         egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
+    let secret_store = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
     let app = browse_router().with_state(BrowseState {
         engine: engine_state,
         store: store.clone(),
-        secret_store: egret_secrets::SecretStore::new(db.clone(), Some(crypto)),
+        secret_store: secret_store.clone(),
+        workspace_secrets: egret_secrets::WorkspaceSecretStore::new(db.clone(), secret_store),
         default_storage: egret_storage::StorageConfig {
             endpoint: Some("http://localhost:9000".to_string()),
             region: "local-01".to_string(),

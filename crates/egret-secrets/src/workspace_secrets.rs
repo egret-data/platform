@@ -7,10 +7,21 @@
 
 use chrono::{DateTime, Utc};
 use egret_metastore::Db;
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::error::SecretsError;
 use crate::store::SecretStore;
+
+/// Request shape for creating a brand-new named secret inline while registering a
+/// connection (storage or database): `{ "name": ..., "value": ... }`. The value
+/// is plaintext, accepted only on write and never returned. Shared across the
+/// HTTP layers so each connection type can mint a named secret in one request.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NewSecret {
+    pub name: String,
+    pub value: String,
+}
 
 /// Metadata for a named workspace secret. Never exposes the plaintext value.
 #[derive(Debug, Clone)]

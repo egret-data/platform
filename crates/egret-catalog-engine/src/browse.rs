@@ -92,6 +92,11 @@ pub struct BrowseState {
     /// the storage-update handler can persist a new secret and read the existing
     /// one when a re-point omits `secret_key`.
     pub secret_store: egret_secrets::SecretStore,
+    /// Named per-workspace secret layer (Epic B). Storage connections reference a
+    /// `workspace_secrets` id via `secret_ref`; this store creates / resolves /
+    /// counts those named secrets. Threaded so the secrets routes and the storage
+    /// connection create/update/resolve all go through one named layer.
+    pub workspace_secrets: egret_secrets::WorkspaceSecretStore,
     /// The GLOBAL default S3 storage config (the same one threaded into the
     /// `EngineWarehouseProvisioner`). Used to (a) lazily provision a warehouse for
     /// a workspace that predates catalog-enablement and has no custom storage row,
@@ -162,6 +167,18 @@ pub fn browse_router() -> Router<BrowseState> {
             "/ws/{workspace}/storages/{id}",
             axum::routing::put(update_storage_conn).delete(delete_storage_conn),
         )
+        // Workspace-admin named-secret registry (Epic B, gated
+        // `workspace:manage_members`). CRUD on `workspace_secrets`; values are
+        // write-only and never echoed back. Referenced by storage + database
+        // connections via a named secret id.
+        .route(
+            "/ws/{workspace}/secrets",
+            get(list_secrets).post(create_secret),
+        )
+        .route(
+            "/ws/{workspace}/secrets/{id}",
+            axum::routing::put(update_secret).delete(delete_secret),
+        )
         // Workspace-admin per-connection object browser (gated
         // `workspace:manage_members`): a MinIO-console-like file manager confined
         // STRICTLY to the connection's `key_prefix` root (see `safe_key`). List +
@@ -202,6 +219,8 @@ enum BrowseApiError {
     Engine(lakekeeper::api::IcebergErrorResponse),
     /// Client-supplied input was invalid → 400.
     BadRequest(String),
+    /// A conflicting state (duplicate name, or a still-referenced secret) → 409.
+    Conflict(String),
     /// The targeted resource does not exist (or belongs to another tenant) → 404.
     NotFound,
     /// An internal failure building the system principal etc.
@@ -226,6 +245,21 @@ impl From<egret_core::Error> for BrowseApiError {
 impl From<lakekeeper::api::IcebergErrorResponse> for BrowseApiError {
     fn from(e: lakekeeper::api::IcebergErrorResponse) -> Self {
         BrowseApiError::Engine(e)
+    }
+}
+impl From<egret_secrets::SecretsError> for BrowseApiError {
+    fn from(e: egret_secrets::SecretsError) -> Self {
+        use egret_secrets::SecretsError;
+        match e {
+            SecretsError::NotFound => BrowseApiError::NotFound,
+            SecretsError::AlreadyExists(name) => {
+                BrowseApiError::Conflict(format!("a secret named {name:?} already exists"))
+            }
+            SecretsError::InUse(n) => {
+                BrowseApiError::Conflict(format!("in use by {n} connections"))
+            }
+            _ => BrowseApiError::Internal,
+        }
     }
 }
 
@@ -253,6 +287,7 @@ impl IntoResponse for BrowseApiError {
                 (StatusCode::NOT_FOUND, "catalog not provisioned".to_string())
             }
             BrowseApiError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
+            BrowseApiError::Conflict(m) => (StatusCode::CONFLICT, m),
             BrowseApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             BrowseApiError::Engine(e) => {
                 let code =
@@ -1173,8 +1208,10 @@ impl From<WorkspaceStorageConn> for WorkspaceStorageConnDto {
     }
 }
 
-/// Request body to register a storage connection. `secret_key` is REQUIRED on
-/// create (we need credentials to seal + probe).
+/// Request body to register a storage connection. Credentials are supplied as a
+/// NAMED secret (Epic B): either `new_secret` (mint a new named secret inline) or
+/// `secret_id` (reference an existing named secret in the workspace). Omitting
+/// both registers a connection with no secret.
 #[derive(Deserialize)]
 struct CreateStorageConnRequest {
     name: String,
@@ -1188,12 +1225,16 @@ struct CreateStorageConnRequest {
     #[serde(default)]
     key_prefix: Option<String>,
     access_key: String,
-    secret_key: String,
+    #[serde(default)]
+    secret_id: Option<Uuid>,
+    #[serde(default)]
+    new_secret: Option<egret_secrets::NewSecret>,
     path_style: bool,
 }
 
-/// Request body to edit a storage connection. `secret_key` is OPTIONAL: when
-/// `None`, the existing sealed secret is reused (keep-current).
+/// Request body to edit a storage connection. Credentials follow the same named
+/// precedence as create; omitting both `new_secret` and `secret_id` keeps the
+/// existing `secret_ref` (keep-current).
 #[derive(Deserialize)]
 struct UpdateStorageConnRequest {
     name: String,
@@ -1208,8 +1249,51 @@ struct UpdateStorageConnRequest {
     key_prefix: Option<String>,
     access_key: String,
     #[serde(default)]
-    secret_key: Option<String>,
+    secret_id: Option<Uuid>,
+    #[serde(default)]
+    new_secret: Option<egret_secrets::NewSecret>,
     path_style: bool,
+}
+
+/// Resolve the connection's `secret_ref` (a `workspace_secrets` id) by Epic-B
+/// precedence:
+///   (a) `new_secret` present → mint a new named secret and use its id,
+///   (b) else `secret_id` present → validate ownership via `get_meta` and use it,
+///   (c) else → `existing` (the keep-current `secret_ref`, `None` on create).
+///
+/// Also returns the resolved plaintext for the reachability probe, when a secret
+/// is in play (so create/update can probe the real credentials before persist).
+async fn resolve_conn_secret(
+    st: &BrowseState,
+    ws: Uuid,
+    secret_id: Option<Uuid>,
+    new_secret: Option<&egret_secrets::NewSecret>,
+    existing: Option<Uuid>,
+) -> Result<(Option<Uuid>, Option<String>), BrowseApiError> {
+    match (new_secret, secret_id) {
+        (Some(n), _) => {
+            let id = st
+                .workspace_secrets
+                .create(ws, &n.name, None, &n.value)
+                .await?;
+            Ok((Some(id), Some(n.value.clone())))
+        }
+        (None, Some(id)) => {
+            // Validate the named secret belongs to this workspace (404 otherwise).
+            st.workspace_secrets.get_meta(ws, id).await?;
+            let plaintext = st.workspace_secrets.resolve_plaintext(ws, id).await?;
+            Ok((Some(id), Some(plaintext)))
+        }
+        (None, None) => {
+            // Keep-current: resolve the existing named secret's plaintext for the
+            // probe (if any).
+            let plaintext = match existing {
+                Some(id) => Some(st.workspace_secrets.resolve_plaintext(ws, id).await?),
+                None => None,
+            };
+            Ok((existing, plaintext))
+        }
+    }
 }
 
 /// Probe that the storage described by `cfg` is reachable with the given
@@ -1292,21 +1376,26 @@ async fn create_storage_conn(
         ));
     }
 
+    // Resolve the named secret (mint inline / reference existing / none) BEFORE
+    // probing, so the live reachability check runs against the real credentials.
+    let (secret_ref, plaintext) = resolve_conn_secret(
+        &st,
+        ctx.workspace_id.0,
+        req.secret_id,
+        req.new_secret.as_ref(),
+        None,
+    )
+    .await?;
+
     let cfg = StorageConfig {
         endpoint: req.endpoint.clone(),
         region: req.region.clone(),
         bucket: req.bucket.clone(),
         access_key: req.access_key.clone(),
-        secret_key: req.secret_key.clone(),
+        secret_key: plaintext.unwrap_or_default(),
         path_style: req.path_style,
     };
     validate_reachable(&cfg, req.key_prefix.as_deref()).await?;
-
-    let secret_ref = st
-        .secret_store
-        .put("workspace_storage_conn", &req.secret_key)
-        .await
-        .map_err(|_| BrowseApiError::Internal)?;
 
     let input = StorageConnInput {
         name: req.name,
@@ -1317,7 +1406,7 @@ async fn create_storage_conn(
         bucket: req.bucket,
         key_prefix: req.key_prefix,
         access_key: req.access_key,
-        secret_ref: Some(secret_ref),
+        secret_ref,
         path_style: req.path_style,
     };
     let conn = st
@@ -1357,46 +1446,26 @@ async fn update_storage_conn(
         .await?
         .ok_or(BrowseApiError::NotFound)?;
 
-    // Resolve the effective secret: the request's `secret_key` if present, else
-    // the existing sealed secret (keep-current).
-    let secret_key = match &req.secret_key {
-        Some(s) => s.clone(),
-        None => {
-            let secret_ref = existing.secret_ref.ok_or_else(|| {
-                BrowseApiError::BadRequest(
-                    "secret_key is required (no existing secret to keep)".to_string(),
-                )
-            })?;
-            st.secret_store
-                .get(secret_ref)
-                .await
-                .map_err(|_| BrowseApiError::Internal)?
-        }
-    };
+    // Resolve the named secret by the same precedence as create, keeping the
+    // existing `secret_ref` when neither `new_secret` nor `secret_id` is supplied.
+    let (secret_ref, plaintext) = resolve_conn_secret(
+        &st,
+        ctx.workspace_id.0,
+        req.secret_id,
+        req.new_secret.as_ref(),
+        existing.secret_ref,
+    )
+    .await?;
 
     let cfg = StorageConfig {
         endpoint: req.endpoint.clone(),
         region: req.region.clone(),
         bucket: req.bucket.clone(),
         access_key: req.access_key.clone(),
-        secret_key,
+        secret_key: plaintext.unwrap_or_default(),
         path_style: req.path_style,
     };
     validate_reachable(&cfg, req.key_prefix.as_deref()).await?;
-
-    // Seal a new secret only when one was supplied; otherwise keep the existing
-    // `secret_ref`.
-    // TODO: new secret_ref orphans in the vault if the subsequent
-    // update_storage_conn fails; clean up old/new refs holistically later.
-    let secret_ref = match &req.secret_key {
-        Some(s) => Some(
-            st.secret_store
-                .put("workspace_storage_conn", s)
-                .await
-                .map_err(|_| BrowseApiError::Internal)?,
-        ),
-        None => existing.secret_ref,
-    };
 
     let input = StorageConnInput {
         name: req.name,
@@ -1438,6 +1507,144 @@ async fn delete_storage_conn(
     } else {
         Err(BrowseApiError::NotFound)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Workspace-admin named-secret registry (Epic B): CRUD on `workspace_secrets`.
+//
+// Gated `workspace:manage_members` (the workspace-admin gate), and IDOR-safe:
+// every operation is scoped to `ctx.workspace_id` (bound by `WsContext`) and the
+// `WorkspaceSecretStore` queries every row by BOTH id AND workspace_id, so a
+// cross-workspace id resolves to 404. The secret VALUE is write-only: it is
+// sealed through the vault and NEVER serialized into any response.
+// ---------------------------------------------------------------------------
+
+/// A named secret as exposed to the workspace-admin UI. Carries the reference
+/// count (`used_by`) but never the value.
+#[derive(Serialize)]
+struct WorkspaceSecretDto {
+    id: Uuid,
+    name: String,
+    description: Option<String>,
+    created_at: DateTime<Utc>,
+    used_by: i64,
+}
+
+impl From<egret_secrets::WorkspaceSecretMeta> for WorkspaceSecretDto {
+    fn from(m: egret_secrets::WorkspaceSecretMeta) -> Self {
+        WorkspaceSecretDto {
+            id: m.id,
+            name: m.name,
+            description: m.description,
+            created_at: m.created_at,
+            used_by: m.used_by,
+        }
+    }
+}
+
+/// Request body to create a named secret. `value` is plaintext, sealed and never
+/// returned.
+#[derive(Deserialize)]
+struct CreateSecretRequest {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    value: String,
+}
+
+/// Request body to edit a named secret. `name`/`description` rename it (when
+/// present); `value` rotates the underlying sealed value (when present).
+#[derive(Deserialize)]
+struct UpdateSecretRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    value: Option<String>,
+}
+
+/// GET `/api/ws/{workspace}/secrets` — list this workspace's named secrets.
+async fn list_secrets(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<Vec<WorkspaceSecretDto>>, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+    let metas = st.workspace_secrets.list(ctx.workspace_id.0).await?;
+    Ok(Json(
+        metas.into_iter().map(WorkspaceSecretDto::from).collect(),
+    ))
+}
+
+/// POST `/api/ws/{workspace}/secrets` — create a named secret (201 with meta).
+async fn create_secret(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Json(req): Json<CreateSecretRequest>,
+) -> Result<Response, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+    let id = st
+        .workspace_secrets
+        .create(
+            ctx.workspace_id.0,
+            &req.name,
+            req.description.as_deref(),
+            &req.value,
+        )
+        .await?;
+    let meta = st
+        .workspace_secrets
+        .get_meta(ctx.workspace_id.0, id)
+        .await?;
+    Ok((StatusCode::CREATED, Json(WorkspaceSecretDto::from(meta))).into_response())
+}
+
+/// PUT `/api/ws/{workspace}/secrets/{id}` — rename and/or rotate the value.
+///
+/// 404 (not 403) when the id does not belong to this workspace (IDOR closed).
+async fn update_secret(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    Json(req): Json<UpdateSecretRequest>,
+) -> Result<Json<WorkspaceSecretDto>, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+    let ws = ctx.workspace_id.0;
+
+    // Rename when either name or description is supplied; the rename takes the
+    // (possibly unchanged) current name when only the description is given.
+    if req.name.is_some() || req.description.is_some() {
+        let current = st.workspace_secrets.get_meta(ws, id).await?;
+        let name = req.name.as_deref().unwrap_or(&current.name);
+        let description = match &req.name {
+            // Description present (Some) overrides; absent keeps the current one.
+            _ if req.description.is_some() => req.description.as_deref(),
+            _ => current.description.as_deref(),
+        };
+        st.workspace_secrets
+            .rename(ws, id, name, description)
+            .await?;
+    }
+    if let Some(value) = &req.value {
+        st.workspace_secrets.update_value(ws, id, value).await?;
+    }
+
+    let meta = st.workspace_secrets.get_meta(ws, id).await?;
+    Ok(Json(WorkspaceSecretDto::from(meta)))
+}
+
+/// DELETE `/api/ws/{workspace}/secrets/{id}` — delete a named secret (204).
+///
+/// 404 (not 403) when the id does not belong to this workspace (IDOR closed); a
+/// still-referenced secret is 409 with `{ "error": "in use by N connections" }`.
+async fn delete_secret(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> Result<StatusCode, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+    st.workspace_secrets.delete(ctx.workspace_id.0, id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------------------
@@ -1526,8 +1733,8 @@ async fn conn_s3(
 
     let secret_key = match conn.secret_ref {
         Some(secret_ref) => st
-            .secret_store
-            .get(secret_ref)
+            .workspace_secrets
+            .resolve_plaintext(ws, secret_ref)
             .await
             .map_err(|_| BrowseApiError::Internal)?,
         None => String::new(),

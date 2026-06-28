@@ -144,6 +144,10 @@ async fn setup() -> Option<Fixture> {
         engine: engine_state,
         store: store.clone(),
         secret_store: secret_store.clone(),
+        workspace_secrets: egret_secrets::WorkspaceSecretStore::new(
+            db.clone(),
+            secret_store.clone(),
+        ),
         default_storage: dev_storage_config(),
         system_user: SYSTEM_USER.into(),
         sessions: sessions.clone(),

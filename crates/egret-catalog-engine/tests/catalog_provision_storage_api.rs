@@ -109,6 +109,10 @@ async fn setup() -> Option<Fixture> {
     let app = browse_router().with_state(BrowseState {
         engine: engine_state,
         store: store.clone(),
+        workspace_secrets: egret_secrets::WorkspaceSecretStore::new(
+            db.clone(),
+            secret_store.clone(),
+        ),
         secret_store,
         default_storage: dev_storage_config(),
         system_user: SYSTEM_USER.into(),

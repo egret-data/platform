@@ -2,7 +2,7 @@
 
 use egret_core::UserId;
 use egret_metastore::Db;
-use egret_secrets::SecretStore;
+use egret_secrets::{SecretStore, WorkspaceSecretStore};
 use uuid::Uuid;
 
 use crate::error::DatabaseError;
@@ -12,6 +12,7 @@ use crate::model::{ConnOptions, Database, DatabaseInput, Engine};
 pub struct DatabaseRepo {
     db: Db,
     secrets: SecretStore,
+    workspace_secrets: WorkspaceSecretStore,
 }
 
 #[derive(sqlx::FromRow)]
@@ -45,8 +46,12 @@ impl Row {
 }
 
 impl DatabaseRepo {
-    pub fn new(db: Db, secrets: SecretStore) -> Self {
-        Self { db, secrets }
+    pub fn new(db: Db, secrets: SecretStore, workspace_secrets: WorkspaceSecretStore) -> Self {
+        Self {
+            db,
+            secrets,
+            workspace_secrets,
+        }
     }
 
     /// Expose the secret store (used by routes to open a stored secret for testing).
@@ -54,7 +59,15 @@ impl DatabaseRepo {
         &self.secrets
     }
 
-    /// Register a new database owned by `workspace_id`, sealing `secret` if provided.
+    /// Expose the named workspace-secret store (Epic B: routes resolve a
+    /// `new_secret`/`secret_id` to a named secret id before create/update).
+    pub fn workspace_secrets(&self) -> &WorkspaceSecretStore {
+        &self.workspace_secrets
+    }
+
+    /// Register a new database owned by `workspace_id`, binding the already-resolved
+    /// named secret id (Epic B: the route resolves `new_secret`/`secret_id` to a
+    /// `workspace_secrets` id; the repo just binds it — no sealing here).
     ///
     /// ADR-19 per-workspace model: the row is stamped with its owning workspace
     /// so workspace-scoped reads can filter it.
@@ -62,14 +75,11 @@ impl DatabaseRepo {
         &self,
         workspace_id: Uuid,
         input: &DatabaseInput,
+        secret_id: Option<Uuid>,
         created_by: Option<UserId>,
     ) -> Result<Database, DatabaseError> {
-        let secret_id = match &input.secret {
-            Some(s) if !s.is_empty() => Some(self.secrets.put("db_password", s).await?),
-            _ => None,
-        };
         let opts = serde_json::to_value(&input.options).unwrap_or(serde_json::json!({}));
-        let row = sqlx::query_as::<_, Row>(
+        sqlx::query_as::<_, Row>(
             "INSERT INTO databases (name, engine, host, port, options, secret_id, created_by, workspace_id) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
              RETURNING id, name, engine, host, port, options, secret_id, status",
@@ -89,20 +99,8 @@ impl DatabaseRepo {
                 DatabaseError::AlreadyExists(input.name.clone())
             }
             _ => DatabaseError::Db(e),
-        });
-        // If insert failed after sealing a secret, clean it up to avoid orphans.
-        match row {
-            Ok(r) => r.into_database(),
-            Err(e) => {
-                if let Some(sid) = secret_id {
-                    if let Err(del) = self.secrets.delete(sid).await {
-                        tracing::warn!(secret_id = %sid, error = %del,
-                            "failed to clean up orphaned secret after insert failure");
-                    }
-                }
-                Err(e)
-            }
-        }
+        })?
+        .into_database()
     }
 
     pub async fn get(&self, id: Uuid) -> Result<Database, DatabaseError> {
@@ -136,18 +134,44 @@ impl DatabaseRepo {
         rows.into_iter().map(Row::into_database).collect()
     }
 
-    /// Open the stored plaintext secret for a database (used by the connection tester).
+    /// Open the stored plaintext secret for a database (used by the connection
+    /// tester). The named secret (Epic B) is resolved workspace-scoped: the
+    /// owning `workspace_id` is read from the row itself, so the engine job and
+    /// the test route keep the same `open_secret(id)` signature. NULL `secret_id`
+    /// (or no row) → `Ok(None)`.
     pub async fn open_secret(&self, id: Uuid) -> Result<Option<String>, DatabaseError> {
-        let secret_id: Option<Uuid> =
-            sqlx::query_scalar("SELECT secret_id FROM databases WHERE id = $1")
+        let row: Option<(Option<Uuid>, Uuid)> =
+            sqlx::query_as("SELECT secret_id, workspace_id FROM databases WHERE id = $1")
                 .bind(id)
                 .fetch_optional(&self.db.pool)
-                .await?
-                .flatten();
-        match secret_id {
-            None => Ok(None),
-            Some(sid) => Ok(Some(self.secrets.get(sid).await?)),
+                .await?;
+        match row {
+            Some((Some(secret_id), workspace_id)) => Ok(Some(
+                self.workspace_secrets
+                    .resolve_plaintext(workspace_id, secret_id)
+                    .await?,
+            )),
+            _ => Ok(None),
         }
+    }
+
+    /// The current `secret_id` bound to a database owned by `workspace_id`
+    /// (used by the update route to keep the existing named secret when neither
+    /// `new_secret` nor `secret_id` is supplied). `NotFound` if the row is absent
+    /// or owned by another workspace (IDOR closed); `Ok(None)` if it has no secret.
+    pub async fn current_secret_id(
+        &self,
+        workspace_id: Uuid,
+        id: Uuid,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        let row: Option<Option<Uuid>> = sqlx::query_scalar(
+            "SELECT secret_id FROM databases WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .fetch_optional(&self.db.pool)
+        .await?;
+        row.ok_or_else(|| DatabaseError::NotFound(id.to_string()))
     }
 
     /// Fetch a database only if it belongs to `workspace_id`.
@@ -171,37 +195,26 @@ impl DatabaseRepo {
         .into_database()
     }
 
-    /// Update a database scoped to `workspace_id`.
+    /// Update a database scoped to `workspace_id`, binding the already-resolved
+    /// named secret id (Epic B: the route resolves `new_secret`/`secret_id`,
+    /// defaulting to the existing `secret_ref` for keep-current; the repo just
+    /// binds the resulting id — no sealing or rotation cleanup here, since named
+    /// secrets are shared and owned by `WorkspaceSecretStore`).
     ///
-    /// Ownership is checked first (404 before any mutation), then the same
-    /// secret rotation/cleanup logic as [`update`](Self::update) runs, with every
-    /// statement additionally constrained to the owning workspace.
+    /// Ownership is checked first (404 before any mutation), and every statement
+    /// is constrained to the owning workspace.
     pub async fn update_in_workspace(
         &self,
         workspace_id: Uuid,
         id: Uuid,
         input: &DatabaseInput,
+        secret_id: Option<Uuid>,
         _actor: Option<UserId>,
     ) -> Result<Database, DatabaseError> {
         self.get_in_workspace(workspace_id, id).await?; // 404 if not owned, before any mutation
-        let old_secret_id: Option<Uuid> = sqlx::query_scalar(
-            "SELECT secret_id FROM databases WHERE id = $1 AND workspace_id = $2",
-        )
-        .bind(id)
-        .bind(workspace_id)
-        .fetch_one(&self.db.pool)
-        .await?;
-
-        // Seal a new secret only when a non-empty plaintext is supplied.
-        let sealed_new = match &input.secret {
-            Some(s) if !s.is_empty() => Some(self.secrets.put("db_password", s).await?),
-            _ => None,
-        };
-        // Keep the existing secret when none supplied.
-        let new_secret_id = sealed_new.or(old_secret_id);
         let opts = serde_json::to_value(&input.options).unwrap_or(serde_json::json!({}));
 
-        let res = sqlx::query(
+        sqlx::query(
             "UPDATE databases SET name=$2, engine=$3, host=$4, port=$5, options=$6, \
                  secret_id=$7, updated_at=now() WHERE id=$1 AND workspace_id=$8",
         )
@@ -211,7 +224,7 @@ impl DatabaseRepo {
         .bind(&input.host)
         .bind(input.port)
         .bind(opts)
-        .bind(new_secret_id)
+        .bind(secret_id)
         .bind(workspace_id)
         .execute(&self.db.pool)
         .await
@@ -220,60 +233,29 @@ impl DatabaseRepo {
                 DatabaseError::AlreadyExists(input.name.clone())
             }
             _ => DatabaseError::Db(e),
-        });
+        })?;
 
-        if let Err(e) = res {
-            // Roll back a freshly-sealed secret so a failed update can't orphan it.
-            if let Some(nid) = sealed_new {
-                if let Err(del) = self.secrets.delete(nid).await {
-                    tracing::warn!(secret_id = %nid, error = %del,
-                        "failed to clean up orphaned secret after update failure");
-                }
-            }
-            return Err(e);
-        }
-
-        // Rotation: delete the old secret only if we actually sealed a new one.
-        if sealed_new.is_some() {
-            if let Some(old) = old_secret_id {
-                if let Err(del) = self.secrets.delete(old).await {
-                    tracing::warn!(secret_id = %old, error = %del,
-                        "failed to delete rotated-out secret");
-                }
-            }
-        }
         self.get_in_workspace(workspace_id, id).await
     }
 
-    /// Delete a database scoped to `workspace_id` (and its secret).
+    /// Delete a database scoped to `workspace_id`.
     ///
     /// Ownership is checked first (404 if not owned), then the row is deleted
-    /// under the same workspace constraint and its sealed secret is cleaned up.
+    /// under the same workspace constraint. The referenced NAMED secret (Epic B)
+    /// is left intact — it is shared and owned by `WorkspaceSecretStore`; removing
+    /// a connection only drops its reference (decrementing the secret's
+    /// `used_by`), it does not delete the secret.
     pub async fn delete_in_workspace(
         &self,
         workspace_id: Uuid,
         id: Uuid,
     ) -> Result<(), DatabaseError> {
         self.get_in_workspace(workspace_id, id).await?; // 404 if not owned
-        let secret_id: Option<Uuid> = sqlx::query_scalar(
-            "SELECT secret_id FROM databases WHERE id = $1 AND workspace_id = $2",
-        )
-        .bind(id)
-        .bind(workspace_id)
-        .fetch_optional(&self.db.pool)
-        .await?
-        .flatten();
         sqlx::query("DELETE FROM databases WHERE id = $1 AND workspace_id = $2")
             .bind(id)
             .bind(workspace_id)
             .execute(&self.db.pool)
             .await?;
-        if let Some(sid) = secret_id {
-            if let Err(del) = self.secrets.delete(sid).await {
-                tracing::warn!(secret_id = %sid, error = %del,
-                    "failed to delete secret for removed database");
-            }
-        }
         Ok(())
     }
 

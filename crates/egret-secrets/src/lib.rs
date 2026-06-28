@@ -8,4 +8,4 @@ mod workspace_secrets;
 pub use crypto::Crypto;
 pub use error::SecretsError;
 pub use store::SecretStore;
-pub use workspace_secrets::{WorkspaceSecretMeta, WorkspaceSecretStore};
+pub use workspace_secrets::{NewSecret, WorkspaceSecretMeta, WorkspaceSecretStore};
