@@ -20,6 +20,24 @@ export interface CatalogColumn {
   type: string;
   required: boolean;
 }
+export interface PartitionField {
+  name: string;
+  source_column: string;
+  transform: string;
+}
+export interface SortField {
+  column: string;
+  transform: string;
+  direction: string;
+  null_order: string;
+}
+export interface Snapshot {
+  snapshot_id: number;
+  parent_snapshot_id: number | null;
+  timestamp_ms: number;
+  operation: string;
+  summary: Record<string, string>;
+}
 export interface TableDetail {
   name: string;
   location: string;
@@ -28,6 +46,11 @@ export interface TableDetail {
   current_snapshot_id: number | null;
   snapshot_count: number;
   properties: Record<string, string>;
+  format_version: number;
+  last_updated_ms: number;
+  partition_fields: PartitionField[];
+  sort_fields: SortField[];
+  snapshots: Snapshot[];
 }
 
 /** Dotted render of a namespace's levels, e.g. ["sales","2024"] → "sales.2024". */

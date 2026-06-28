@@ -53,10 +53,28 @@ beforeEach(() => {
       name: "orders",
       location: "s3://wh/orders",
       current_schema_id: 1,
-      columns: [{ name: "id", type: "long", required: true }],
+      columns: [
+        { name: "id", type: "long", required: true },
+        { name: "addr", type: "struct<city:string,zip:string>", required: false },
+      ],
       current_snapshot_id: 42,
       snapshot_count: 3,
       properties: { "write.format.default": "parquet" },
+      format_version: 2,
+      last_updated_ms: 1750000000000,
+      partition_fields: [{ name: "country", source_column: "country", transform: "identity" }],
+      sort_fields: [
+        { column: "id", transform: "identity", direction: "ascending", null_order: "first" },
+      ],
+      snapshots: [
+        {
+          snapshot_id: 1,
+          parent_snapshot_id: null,
+          timestamp_ms: 1750000000000,
+          operation: "append",
+          summary: { "added-records": "5", "added-data-files": "1", "total-records": "5" },
+        },
+      ],
     },
     isLoading: false,
     isError: false,
@@ -86,10 +104,73 @@ describe("Catalog browser", () => {
 
     // Selecting a table shows its detail (schema column + snapshot info).
     await user.click(screen.getByText("orders"));
-    expect(screen.getByText("id")).toBeInTheDocument();
+    // "id" appears in both the schema table and the sort-order table.
+    expect(screen.getAllByText("id").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("write.format.default")).toBeInTheDocument();
     expect(screen.getByText("42")).toBeInTheDocument();
     expect(tableDetailMock).toHaveBeenCalledWith("wh-1", "sales", "orders");
+  });
+
+  it("renders the sectioned table detail: meta, partition, sort, snapshots, nested type", async () => {
+    const user = userEvent.setup();
+    renderAt();
+    await user.click(screen.getByText("sales"));
+    await user.click(screen.getByText("orders"));
+
+    // Header meta: format version + updated.
+    expect(screen.getByText("format v2")).toBeInTheDocument();
+    expect(screen.getByText(/^updated /)).toBeInTheDocument();
+
+    // Nested type renders as a string in the schema table.
+    expect(screen.getByText("struct<city:string,zip:string>")).toBeInTheDocument();
+
+    // Partition spec table with the field.
+    expect(screen.getByRole("columnheader", { name: "Source column" })).toBeInTheDocument();
+    // "country" is both the partition field name and its source column.
+    expect(screen.getAllByText("country").length).toBeGreaterThanOrEqual(2);
+
+    // Sort order table (present only when sort_fields exist).
+    expect(screen.getByText("Sort order")).toBeInTheDocument();
+    expect(screen.getByText("ascending")).toBeInTheDocument();
+    expect(screen.getByText("first")).toBeInTheDocument();
+
+    // Snapshots table with operation + compact summary.
+    expect(screen.getByText("Snapshots")).toBeInTheDocument();
+    expect(screen.getByText("append")).toBeInTheDocument();
+    expect(screen.getByText("+5 rows, +1 files, 5 total")).toBeInTheDocument();
+
+    // Properties.
+    expect(screen.getByText("parquet")).toBeInTheDocument();
+  });
+
+  it("shows empty states: Unpartitioned, no sort section, and no snapshots", async () => {
+    tableDetailMock.mockReturnValue({
+      data: {
+        name: "orders",
+        location: "s3://wh/orders",
+        current_schema_id: 1,
+        columns: [{ name: "id", type: "long", required: true }],
+        current_snapshot_id: null,
+        snapshot_count: 0,
+        properties: {},
+        format_version: 2,
+        last_updated_ms: 1750000000000,
+        partition_fields: [],
+        sort_fields: [],
+        snapshots: [],
+      },
+      isLoading: false,
+      isError: false,
+    });
+    const user = userEvent.setup();
+    renderAt();
+    await user.click(screen.getByText("sales"));
+    await user.click(screen.getByText("orders"));
+
+    expect(screen.getByText("Unpartitioned")).toBeInTheDocument();
+    expect(screen.getByText("No snapshots yet.")).toBeInTheDocument();
+    // Sort order section is omitted entirely when there are no sort fields.
+    expect(screen.queryByText("Sort order")).not.toBeInTheDocument();
   });
 
   it("creates a root namespace from the New namespace dialog", async () => {
