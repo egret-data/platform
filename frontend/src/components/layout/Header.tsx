@@ -33,7 +33,7 @@ export function Header() {
   const location = useLocation();
   const navigate = useNavigate();
   const { workspace } = useParams<{ workspace?: string }>();
-  const isAdmin = location.pathname.startsWith("/admin");
+  const isAdmin = location.pathname.startsWith("/control-plane");
   const canAdmin = (me?.platform_roles?.length ?? 0) > 0;
 
   // Persist the current workspace slug so Explorer can be restored from Admin
@@ -68,9 +68,9 @@ export function Header() {
 
       {canAdmin && !isAdmin && (
         <Button asChild variant="ghost" size="sm" className="gap-2">
-          <Link to="/admin">
+          <Link to="/control-plane">
             <Settings className="h-4 w-4" />
-            Admin
+            Control Plane
           </Link>
         </Button>
       )}

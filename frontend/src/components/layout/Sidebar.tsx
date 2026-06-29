@@ -1,21 +1,10 @@
+import { useState } from "react";
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
-  Activity,
-  BarChart3,
-  Boxes,
-  Database,
-  FolderKanban,
-  HardDrive,
-  KeyRound,
-  LayoutDashboard,
-  type LucideIcon,
-  NotebookText,
-  PanelLeftClose,
-  PanelLeftOpen,
-  ShieldCheck,
-  SquareTerminal,
-  Table2,
-  Users,
+  Activity, BarChart3, Bell, Boxes, ChevronDown, ChevronRight, Database,
+  FolderKanban, HardDrive, KeyRound, LayoutDashboard, type LucideIcon,
+  NotebookText, PanelLeftClose, PanelLeftOpen, Plug, Server, Share2, ShieldCheck,
+  SquareTerminal, Table2, Users, Waypoints, Workflow,
 } from "lucide-react";
 import {
   Tooltip,
@@ -38,6 +27,27 @@ const EXPLORE_GROUPS: NavGroup[] = [
     ],
   },
   {
+    heading: "Data Engineering",
+    items: [
+      { label: "Data API", icon: Plug },
+      { label: "Pipelines", icon: Waypoints },
+    ],
+  },
+  {
+    heading: "Automate",
+    items: [
+      { label: "Workflows", icon: Workflow },
+      { label: "Alerts", icon: Bell },
+    ],
+  },
+  {
+    heading: "Data Governance",
+    items: [
+      { label: "Policies", icon: ShieldCheck },
+      { label: "Data Lineage", icon: Share2 },
+    ],
+  },
+  {
     heading: "Manage",
     items: [
       { label: "Catalog", icon: Boxes },
@@ -48,20 +58,33 @@ const EXPLORE_GROUPS: NavGroup[] = [
   },
 ];
 
-const ADMIN_GROUPS: NavGroup[] = [
+const CONTROL_PLANE_GROUPS: NavGroup[] = [
   {
-    heading: "Administration",
+    heading: "Control Plane",
     items: [
-      { label: "Catalog", icon: Boxes },
-      { label: "Policies", icon: ShieldCheck },
-      { label: "Users", icon: Users },
       { label: "Workspaces", icon: FolderKanban },
+      { label: "Resources", icon: Server },
       { label: "Monitoring", icon: Activity },
+      { label: "Users", icon: Users },
+      { label: "Platform Policies", icon: ShieldCheck },
+      { label: "Catalog", icon: Boxes },
     ],
   },
 ];
 
 const slug = (s: string) => s.toLowerCase().replace(/\s+/g, "-");
+
+/** localStorage key holding the headings of collapsed sidebar groups. */
+const COLLAPSED_GROUPS_KEY = "egret:sidebar-collapsed-groups";
+
+function loadCollapsedGroups(): Set<string> {
+  try {
+    const raw = localStorage.getItem(COLLAPSED_GROUPS_KEY);
+    return new Set(raw ? (JSON.parse(raw) as string[]) : []);
+  } catch {
+    return new Set();
+  }
+}
 
 interface SidebarProps {
   collapsed: boolean;
@@ -69,10 +92,27 @@ interface SidebarProps {
 }
 
 export function Sidebar({ collapsed, onToggle }: SidebarProps) {
-  const isAdmin = useLocation().pathname.startsWith("/admin");
+  const isAdmin = useLocation().pathname.startsWith("/control-plane");
   const { workspace } = useParams();
-  const groups = isAdmin ? ADMIN_GROUPS : EXPLORE_GROUPS;
-  const base = isAdmin ? "/admin" : `/explore/${workspace ?? ""}`;
+  const groups = isAdmin ? CONTROL_PLANE_GROUPS : EXPLORE_GROUPS;
+  const base = isAdmin ? "/control-plane" : `/explore/${workspace ?? ""}`;
+
+  // Per-group collapse (only meaningful when the sidebar itself is expanded).
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(loadCollapsedGroups);
+
+  const toggleGroup = (heading: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(heading)) next.delete(heading);
+      else next.add(heading);
+      try {
+        localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify([...next]));
+      } catch {
+        /* ignore quota / unavailable storage */
+      }
+      return next;
+    });
+  };
 
   const linkClass = ({ isActive }: { isActive: boolean }) =>
     `flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
@@ -111,23 +151,41 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
 
   return (
     <nav
-      className={`flex shrink-0 flex-col gap-1 border-r border-border bg-card p-3 transition-[width] duration-200 ${
+      className={`flex shrink-0 flex-col gap-1 overflow-y-auto border-r border-border bg-card p-3 transition-[width] duration-200 ${
         collapsed ? "w-16" : "w-56"
       }`}
     >
-      {groups.map(({ heading, items }, groupIndex) => (
-        <div key={heading} className={groupIndex > 0 ? "mt-2" : undefined}>
-          {!collapsed && (
-            <p className="px-3 pb-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              {heading}
-            </p>
-          )}
-          {collapsed && groupIndex > 0 && (
-            <hr className="my-1 border-border" />
-          )}
-          {items.map(renderItem)}
-        </div>
-      ))}
+      {groups.map(({ heading, items }, groupIndex) => {
+        // Icon-rail mode: no headings / no per-group collapse, just separated icons.
+        if (collapsed) {
+          return (
+            <div key={heading} className={groupIndex > 0 ? "mt-2" : undefined}>
+              {groupIndex > 0 && <hr className="my-1 border-border" />}
+              {items.map(renderItem)}
+            </div>
+          );
+        }
+
+        const groupCollapsed = collapsedGroups.has(heading);
+        return (
+          <div key={heading} className={groupIndex > 0 ? "mt-2" : undefined}>
+            <button
+              type="button"
+              onClick={() => toggleGroup(heading)}
+              aria-expanded={!groupCollapsed}
+              className="flex w-full items-center justify-between rounded-md px-3 py-1 text-xs font-medium uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <span>{heading}</span>
+              {groupCollapsed ? (
+                <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+              ) : (
+                <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+              )}
+            </button>
+            {!groupCollapsed && items.map(renderItem)}
+          </div>
+        );
+      })}
 
       {/* Toggle button pinned to bottom */}
       {collapsed ? (
