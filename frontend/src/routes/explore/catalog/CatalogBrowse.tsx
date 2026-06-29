@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Check, Copy, Loader2 } from "lucide-react";
 import {
@@ -130,17 +130,19 @@ export default function CatalogBrowse({ ws, wid }: { ws: string; wid: string }) 
                   {(ns.split(".") as string[]).map((lvl, i, arr) => {
                     const dotted = arr.slice(0, i + 1).join(".");
                     return (
-                      <BreadcrumbItem key={dotted}>
-                        <BreadcrumbLink
-                          asChild
-                          className="cursor-pointer font-mono"
-                        >
-                          <button type="button" onClick={() => setSelection(dotted, null)}>
-                            {lvl}
-                          </button>
-                        </BreadcrumbLink>
+                      <Fragment key={dotted}>
+                        <BreadcrumbItem>
+                          <BreadcrumbLink
+                            asChild
+                            className="cursor-pointer font-mono"
+                          >
+                            <button type="button" onClick={() => setSelection(dotted, null)}>
+                              {lvl}
+                            </button>
+                          </BreadcrumbLink>
+                        </BreadcrumbItem>
                         <BreadcrumbSeparator />
-                      </BreadcrumbItem>
+                      </Fragment>
                     );
                   })}
                   <BreadcrumbItem>
@@ -148,12 +150,7 @@ export default function CatalogBrowse({ ws, wid }: { ws: string; wid: string }) 
                   </BreadcrumbItem>
                 </BreadcrumbList>
               </Breadcrumb>
-              <TableDetailView
-                ns={ns}
-                table={table}
-                detail={detail}
-                onBack={() => setSelection(ns, null)}
-              />
+              <TableDetailView table={table} detail={detail} />
             </div>
           ) : (
             <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
@@ -303,26 +300,14 @@ function snapshotSummary(summary: Record<string, string>): string {
 }
 
 function TableDetailView({
-  ns,
   table,
   detail,
-  onBack,
 }: {
-  ns: string;
   table: string;
   detail: ReturnType<typeof useTableDetail>;
-  onBack: () => void;
 }) {
   return (
     <div className="max-w-5xl space-y-4">
-      <div className="flex items-center gap-2 text-sm">
-        <button type="button" onClick={onBack} className="text-muted-foreground hover:text-foreground hover:underline">
-          {ns}
-        </button>
-        <span className="text-muted-foreground">/</span>
-        <span className="font-mono font-medium">{table}</span>
-      </div>
-
       {detail.isLoading ? (
         <ListSkeleton cols={3} />
       ) : detail.isError ? (
