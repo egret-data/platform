@@ -16,8 +16,25 @@ const useMintTokenMock = vi.fn();
 const useUpdateTokenMock = vi.fn();
 const useRotateTokenMock = vi.fn();
 const useRevokeTokenMock = vi.fn();
+const useCatalogNamespacesMock = vi.fn();
+const useNamespaceContentsMock = vi.fn();
 
 vi.mock("@/api/catalog", () => ({
+  nsDotted: (levels: string[]) => levels.join("."),
+  useCatalogNamespaces: (ws: string, wid: string) => {
+    useCatalogNamespacesMock(ws, wid);
+    return { data: [{ levels: ["sale"] }, { levels: ["marketing"] }, { levels: ["marketing", "ads"] }] };
+  },
+  useNamespaceContents: (ws: string, wid: string, ns: string | null) => {
+    useNamespaceContentsMock(ws, wid, ns);
+    // Per-namespace table fixtures.
+    const tables: Record<string, string[]> = {
+      sale: ["orders", "returns"],
+      marketing: ["campaigns", "leads"],
+      "marketing.ads": ["clicks"],
+    };
+    return { data: { tables: ns ? (tables[ns] ?? []) : [], views: [] } };
+  },
   useCatalogTokens: (ws: string, wid: string) => {
     useCatalogTokensMock(ws, wid);
     return tokensMock();
@@ -55,20 +72,26 @@ const tokenRows = [
   {
     id: "t1",
     label: "dbt-ci",
-    permissions: ["catalog:read", "catalog:write"],
-    namespace_scope: [],
-    table_scope: [],
+    scope: [{ namespace: "*", table: null, permissions: ["read", "write"] }],
     created_at: "2026-01-01T00:00:00Z",
   },
   {
     id: "t2",
     label: "marts-reader",
-    permissions: ["catalog:read"],
-    namespace_scope: ["marts"],
-    table_scope: ["marts.daily"],
+    scope: [
+      { namespace: "sale", table: null, permissions: ["read"] },
+      { namespace: "marketing", table: "campaigns", permissions: ["read", "write"] },
+    ],
     created_at: "2026-01-02T00:00:00Z",
   },
 ];
+
+/** Open a Radix Select (by accessible name) and click the option labelled `option`. */
+async function selectOption(user: ReturnType<typeof userEvent.setup>, trigger: HTMLElement, option: string | RegExp) {
+  await user.click(trigger);
+  const listbox = await screen.findByRole("listbox");
+  await user.click(within(listbox).getByRole("option", { name: option }));
+}
 
 beforeEach(() => {
   tokensMock.mockReset();
@@ -84,6 +107,8 @@ beforeEach(() => {
   useUpdateTokenMock.mockReset();
   useRotateTokenMock.mockReset();
   useRevokeTokenMock.mockReset();
+  useCatalogNamespacesMock.mockReset();
+  useNamespaceContentsMock.mockReset();
   tokensMock.mockReturnValue({ data: tokenRows, isLoading: false, isError: false });
 });
 
@@ -96,80 +121,118 @@ describe("CatalogAccess", () => {
     expect(useRotateTokenMock).toHaveBeenCalledWith("eng", "wh-1");
   });
 
-  it("renders the token list with permission badges, namespace + table scope", () => {
+  it("renders the token list with a grant summary per token", () => {
     renderAt();
 
-    // First token: both read + write badges.
+    // First token: a single all-namespaces read+write grant.
     const row1 = screen.getByText("dbt-ci").closest("tr")!;
-    expect(within(row1).getByText("read")).toBeInTheDocument();
-    expect(within(row1).getByText("write")).toBeInTheDocument();
-    // Empty namespace_scope renders "*", empty table_scope renders "All tables".
-    expect(within(row1).getByText("*")).toBeInTheDocument();
-    expect(within(row1).getByText("All tables")).toBeInTheDocument();
+    expect(within(row1).getByText("* (read, write)")).toBeInTheDocument();
 
-    // Second token: read only, scoped to "marts" / "marts.daily".
+    // Second token: two grants summarised independently.
     const row2 = screen.getByText("marts-reader").closest("tr")!;
-    expect(within(row2).getByText("read")).toBeInTheDocument();
-    expect(within(row2).queryByText("write")).not.toBeInTheDocument();
-    expect(within(row2).getByText("marts")).toBeInTheDocument();
-    expect(within(row2).getByText("marts.daily")).toBeInTheDocument();
+    expect(within(row2).getByText("sale (read)")).toBeInTheDocument();
+    expect(within(row2).getByText("marketing.campaigns (read, write)")).toBeInTheDocument();
   });
 
-  it("mints a token: parses table_scope and reveals the raw secret once", async () => {
-    mintMutateAsync.mockResolvedValue({
-      token: tokenRows[0],
-      raw: "egret_cat_SECRET_RAW_VALUE",
-    });
+  it("adds and removes grant rows in the builder", async () => {
     const user = userEvent.setup();
     renderAt();
 
-    // Raw is not present before submit.
-    expect(screen.queryByText("egret_cat_SECRET_RAW_VALUE")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /mint token/i }));
+
+    // Mint starts with exactly one default grant row.
+    expect(screen.getAllByTestId("grant-row")).toHaveLength(1);
+
+    // Add a resource → two rows.
+    await user.click(screen.getByRole("button", { name: /add resource/i }));
+    expect(screen.getAllByTestId("grant-row")).toHaveLength(2);
+
+    // Remove the second row → back to one.
+    const rows = screen.getAllByTestId("grant-row");
+    await user.click(within(rows[1]).getByRole("button", { name: /remove resource/i }));
+    expect(screen.getAllByTestId("grant-row")).toHaveLength(1);
+  });
+
+  it("populates the table select from the chosen namespace", async () => {
+    const user = userEvent.setup();
+    renderAt();
 
     await user.click(screen.getByRole("button", { name: /mint token/i }));
 
-    // The mint hook is scoped to the warehouse id.
+    const row = screen.getByTestId("grant-row");
+    // Choose a concrete namespace.
+    await selectOption(user, within(row).getByRole("combobox", { name: /namespace/i }), "marketing");
+    expect(useNamespaceContentsMock).toHaveBeenCalledWith("eng", "wh-1", "marketing");
+
+    // Its tables are now offered in the table select.
+    await user.click(within(row).getByRole("combobox", { name: /table/i }));
+    const listbox = await screen.findByRole("listbox");
+    expect(within(listbox).getByRole("option", { name: "campaigns" })).toBeInTheDocument();
+    expect(within(listbox).getByRole("option", { name: "leads" })).toBeInTheDocument();
+  });
+
+  it("disables the table picker when the namespace is '*'", async () => {
+    const user = userEvent.setup();
+    renderAt();
+
+    await user.click(screen.getByRole("button", { name: /mint token/i }));
+    const row = screen.getByTestId("grant-row");
+
+    await selectOption(user, within(row).getByRole("combobox", { name: /namespace/i }), /all namespaces/i);
+
+    // The table picker is disabled and forced to "All tables".
+    expect(within(row).getByRole("combobox", { name: /table/i })).toBeDisabled();
+  });
+
+  it("guards against an empty scope (no permissions selected)", async () => {
+    const user = userEvent.setup();
+    renderAt();
+
+    await user.click(screen.getByRole("button", { name: /mint token/i }));
+    await user.type(screen.getByPlaceholderText("e.g. dbt-ci"), "ci-token");
+
+    // Default row has read on — toggle it off so the only grant has no perm.
+    const row = screen.getByTestId("grant-row");
+    await user.click(within(row).getByRole("button", { name: /^read$/i }));
+
+    await user.click(screen.getByRole("button", { name: /^mint token$/i }));
+
+    expect(mintMutateAsync).not.toHaveBeenCalled();
+    expect(screen.getByText(/at least one permission/i)).toBeInTheDocument();
+  });
+
+  it("mints a token: submits the parsed scope and reveals the raw secret once", async () => {
+    mintMutateAsync.mockResolvedValue({ token: tokenRows[0], raw: "egret_cat_SECRET_RAW_VALUE" });
+    const user = userEvent.setup();
+    renderAt();
+
+    expect(screen.queryByText("egret_cat_SECRET_RAW_VALUE")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /mint token/i }));
     expect(useMintTokenMock).toHaveBeenCalledWith("eng", "wh-1");
 
-    // Read is on by default. Set label + table scope (newline + comma separated).
     await user.type(screen.getByPlaceholderText("e.g. dbt-ci"), "ci-token");
-    await user.type(
-      screen.getByPlaceholderText(/leave blank for all tables/i),
-      "sales.orders, marts.daily",
-    );
 
-    // Submit the dialog form.
-    const submit = screen.getByRole("button", { name: /^mint token$/i });
-    await user.click(submit);
+    const row = screen.getByTestId("grant-row");
+    await selectOption(user, within(row).getByRole("combobox", { name: /namespace/i }), "sale");
+    await selectOption(user, within(row).getByRole("combobox", { name: /table/i }), "orders");
+    // Add write so the grant is read+write.
+    await user.click(within(row).getByRole("button", { name: /^write$/i }));
+
+    await user.click(screen.getByRole("button", { name: /^mint token$/i }));
 
     expect(mintMutateAsync).toHaveBeenCalledTimes(1);
     const req = mintMutateAsync.mock.calls[0][0];
-    expect(req.permissions).toEqual(["read"]);
     expect(req.label).toBe("ci-token");
-    expect(req.namespace_scope).toEqual([]);
-    expect(req.table_scope).toEqual(["sales.orders", "marts.daily"]);
+    expect(req.scope).toEqual([
+      { namespace: "sale", table: "orders", permissions: ["read", "write"] },
+    ]);
 
-    // Reveal phase shows the raw secret exactly once.
     const reveals = await screen.findAllByText("egret_cat_SECRET_RAW_VALUE");
     expect(reveals).toHaveLength(1);
   });
 
-  it("rejects an invalid single-segment table scope before minting", async () => {
-    const user = userEvent.setup();
-    renderAt();
-
-    await user.click(screen.getByRole("button", { name: /mint token/i }));
-    await user.type(screen.getByPlaceholderText("e.g. dbt-ci"), "ci-token");
-    await user.type(screen.getByPlaceholderText(/leave blank for all tables/i), "orders");
-
-    await user.click(screen.getByRole("button", { name: /^mint token$/i }));
-
-    // Client-side rejection: mint hook is never called, error is surfaced.
-    expect(mintMutateAsync).not.toHaveBeenCalled();
-    expect(screen.getByText(/Invalid table scope/i)).toBeInTheDocument();
-  });
-
-  it("edits a token: pre-fills from the row and submits via useUpdateToken", async () => {
+  it("edits a token: pre-fills the builder from token.scope and submits", async () => {
     updateMutateAsync.mockResolvedValue(tokenRows[1]);
     const user = userEvent.setup();
     renderAt();
@@ -177,15 +240,11 @@ describe("CatalogAccess", () => {
     const row2 = screen.getByText("marts-reader").closest("tr")!;
     await user.click(within(row2).getByRole("button", { name: /edit/i }));
 
-    // Pre-filled from the row.
+    // Pre-filled label + two grant rows.
     const labelInput = screen.getByPlaceholderText("e.g. dbt-ci") as HTMLInputElement;
     expect(labelInput.value).toBe("marts-reader");
-    const tablesInput = screen.getByPlaceholderText(
-      /leave blank for all tables/i,
-    ) as HTMLTextAreaElement;
-    expect(tablesInput.value).toBe("marts.daily");
+    expect(screen.getAllByTestId("grant-row")).toHaveLength(2);
 
-    // Change the label and submit.
     await user.clear(labelInput);
     await user.type(labelInput, "marts-reader-2");
     await user.click(screen.getByRole("button", { name: /save changes/i }));
@@ -194,28 +253,34 @@ describe("CatalogAccess", () => {
     const arg = updateMutateAsync.mock.calls[0][0];
     expect(arg.id).toBe("t2");
     expect(arg.body.label).toBe("marts-reader-2");
-    expect(arg.body.permissions).toEqual(["read"]);
-    expect(arg.body.namespace_scope).toEqual(["marts"]);
-    expect(arg.body.table_scope).toEqual(["marts.daily"]);
+    expect(arg.body.scope).toEqual([
+      { namespace: "sale", table: null, permissions: ["read"] },
+      { namespace: "marketing", table: "campaigns", permissions: ["read", "write"] },
+    ]);
+  });
+
+  it("surfaces a server 400 when minting", async () => {
+    mintMutateAsync.mockRejectedValue(new Error("scope must have at least one grant"));
+    const user = userEvent.setup();
+    renderAt();
+
+    await user.click(screen.getByRole("button", { name: /mint token/i }));
+    await user.type(screen.getByPlaceholderText("e.g. dbt-ci"), "ci-token");
+    await user.click(screen.getByRole("button", { name: /^mint token$/i }));
+
+    expect(await screen.findByText(/at least one grant/i)).toBeInTheDocument();
   });
 
   it("rotates a token: calls useRotateToken and reveals the new raw secret", async () => {
-    rotateMutateAsync.mockResolvedValue({
-      token: tokenRows[0],
-      raw: "egret_cat_ROTATED_SECRET",
-    });
+    rotateMutateAsync.mockResolvedValue({ token: tokenRows[0], raw: "egret_cat_ROTATED_SECRET" });
     const user = userEvent.setup();
     renderAt();
 
     const row1 = screen.getByText("dbt-ci").closest("tr")!;
     await user.click(within(row1).getByRole("button", { name: /rotate/i }));
-
-    // Confirm phase → confirm the rotation.
     await user.click(screen.getByRole("button", { name: /^rotate token$/i }));
 
     expect(rotateMutateAsync).toHaveBeenCalledWith("t1");
-
-    // The new raw secret is revealed (reuse of the mint reveal UI).
     const reveals = await screen.findAllByText("egret_cat_ROTATED_SECRET");
     expect(reveals).toHaveLength(1);
   });
@@ -227,9 +292,6 @@ describe("CatalogAccess", () => {
     const row1 = screen.getByText("dbt-ci").closest("tr")!;
     await user.click(within(row1).getByRole("button", { name: /revoke/i }));
 
-    // ConfirmDeleteDialog gates its action button behind typing the confirm
-    // word — here "revoke" (our confirmText). The action button is always
-    // literally labelled "Delete", so match that exactly.
     const confirmDialog = screen.getByRole("alertdialog");
     await user.type(within(confirmDialog).getByPlaceholderText("revoke"), "revoke");
     await user.click(within(confirmDialog).getByRole("button", { name: "Delete" }));

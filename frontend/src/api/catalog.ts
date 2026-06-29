@@ -70,27 +70,32 @@ export const catalogKeys = {
 
 // ── Workspace admin types ──────────────────────────────────────────────────
 
+/**
+ * A single resource grant. `namespace === "*"` means all namespaces;
+ * `table === null` means all tables in the namespace subtree.
+ */
+export interface Grant {
+  namespace: string;
+  table: string | null;
+  permissions: ("read" | "write")[];
+}
+
 export interface CatalogTokenDto {
   id: string;
   label: string;
-  permissions: string[];
-  namespace_scope: string[];
-  table_scope: string[];
+  scope: Grant[];
   created_at: string;
+  rotated_at?: string | null;
 }
 
 export interface MintTokenRequest {
   label: string;
-  permissions: string[];
-  namespace_scope: string[];
-  table_scope: string[];
+  scope: Grant[];
 }
 
 export interface UpdateTokenRequest {
   label: string;
-  permissions: string[];
-  namespace_scope: string[];
-  table_scope: string[];
+  scope: Grant[];
 }
 
 export interface MintTokenResponse {
