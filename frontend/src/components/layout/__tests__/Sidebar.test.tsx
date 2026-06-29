@@ -58,9 +58,16 @@ describe("Sidebar – workspace zones", () => {
       "Policies",
       "Data Lineage",
       "Catalog",
+      "Engines",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }
+    // 'Databases' was renamed to 'Engines' in Manage.
+    expect(screen.queryByRole("link", { name: "Databases" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Engines" })).toHaveAttribute(
+      "href",
+      "/explore/eng/engines",
+    );
   });
 
   test("dropped items are gone", () => {
@@ -99,7 +106,7 @@ describe("Sidebar – workspace zones", () => {
 });
 
 describe("Sidebar – Control Plane group", () => {
-  test("renders the Control Plane heading and items at /control-plane hrefs", () => {
+  test("renders the trimmed Control Plane items (Workspaces, Engines, Users)", () => {
     renderSidebar("/control-plane/workspaces");
     expect(screen.getByText("Control Plane")).toBeInTheDocument();
 
@@ -107,12 +114,17 @@ describe("Sidebar – Control Plane group", () => {
       "href",
       "/control-plane/workspaces",
     );
-    expect(screen.getByRole("link", { name: "Resources" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Engines" })).toHaveAttribute(
       "href",
-      "/control-plane/resources",
+      "/control-plane/engines",
     );
-    expect(
-      screen.getByRole("link", { name: "Platform Policies" }),
-    ).toHaveAttribute("href", "/control-plane/platform-policies");
+    expect(screen.getByRole("link", { name: "Users" })).toHaveAttribute(
+      "href",
+      "/control-plane/users",
+    );
+    // Dropped from the Control Plane.
+    for (const gone of ["Resources", "Monitoring", "Platform Policies", "Catalog"]) {
+      expect(screen.queryByRole("link", { name: gone })).not.toBeInTheDocument();
+    }
   });
 });

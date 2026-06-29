@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { ThemeProvider } from "@/components/theme-provider";
 import { AuthProvider } from "@/auth/AuthProvider";
-import { RequireAuth, RequirePlatform, RequireWorkspace } from "@/auth/guards";
+import { RequireAuth, RequireGlobalAdmin, RequireWorkspace } from "@/auth/guards";
 import { AppShell } from "@/components/layout/AppShell";
 import { LoginPage } from "@/auth/LoginPage";
 import { NotFound } from "@/routes/NotFound";
@@ -29,7 +29,7 @@ import StoragePage from "@/routes/explore/StoragePage";
 import DatabasesPage from "@/routes/explore/DatabasesPage";
 import SecretsPage from "@/routes/explore/SecretsPage";
 import { Placeholder } from "@/routes/Placeholder";
-import ControlPlaneResources from "@/routes/control-plane/ControlPlaneResources";
+import ControlPlaneEngines from "@/routes/control-plane/ControlPlaneEngines";
 
 const qc = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1, staleTime: 30000 } } });
 
@@ -59,7 +59,7 @@ function ExploreRoutes() {
           <Route path="catalog" element={<WarehousesList />} />
           <Route path="catalog/:wid" element={<WarehouseDetail />} />
           <Route path="storage" element={<StoragePage />} />
-          <Route path="databases" element={<DatabasesPage />} />
+          <Route path="engines" element={<DatabasesPage />} />
           <Route path="secrets" element={<SecretsPage />} />
           <Route path="data-api" element={<Placeholder title="Data API" />} />
           <Route path="pipelines" element={<Placeholder title="Pipelines" />} />
@@ -76,20 +76,17 @@ function ExploreRoutes() {
 
 function ControlPlaneRoutes() {
   return (
-    <RequirePlatform>
+    <RequireGlobalAdmin>
       <AppShell>
         <Routes>
           <Route index element={<Navigate to="workspaces" replace />} />
           <Route path="workspaces" element={<Placeholder title="Workspaces" />} />
-          <Route path="resources" element={<ControlPlaneResources />} />
-          <Route path="monitoring" element={<Placeholder title="Monitoring" />} />
+          <Route path="engines" element={<ControlPlaneEngines />} />
           <Route path="users" element={<Placeholder title="Users" />} />
-          <Route path="platform-policies" element={<Placeholder title="Platform Policies" />} />
-          <Route path="catalog" element={<Placeholder title="Catalog" />} />
           <Route path="*" element={<Navigate to="workspaces" replace />} />
         </Routes>
       </AppShell>
-    </RequirePlatform>
+    </RequireGlobalAdmin>
   );
 }
 

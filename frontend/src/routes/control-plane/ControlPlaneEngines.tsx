@@ -19,21 +19,22 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 /**
- * Control Plane → Resources
+ * Control Plane → Engines
  *
- * A structured, no-backend frame for the future engine-resource registry
+ * A structured, no-backend frame for the future platform engine registry
  * (Trino / StarRocks / Spark Connect). It renders the eventual layout — type
- * tabs, the resource table header, an empty state per tab, and a stub
- * "Add resource" button — but makes no API calls. The real CRUD + assignment
- * + live monitoring arrive in a later epic.
+ * tabs, the engine table header (incl. live Status/health, folded in here),
+ * an empty state per tab, and a stub "Add engine" button — but makes no API
+ * calls. Real provisioning + per-workspace assignment + live monitoring arrive
+ * in a later epic.
  */
 
-type ResourceType = {
+type EngineType = {
   value: string;
   label: string;
 };
 
-const RESOURCE_TYPES: ResourceType[] = [
+const ENGINE_TYPES: EngineType[] = [
   { value: "trino", label: "Trino" },
   { value: "starrocks", label: "StarRocks" },
   { value: "spark-connect", label: "Spark Connect" },
@@ -41,7 +42,7 @@ const RESOURCE_TYPES: ResourceType[] = [
 
 const COLUMNS = ["Name", "Type", "Endpoint", "Status", "Workspaces", "Actions"];
 
-function ResourceTable({ label }: { label: string }) {
+function EngineTable({ label }: { label: string }) {
   return (
     <Table>
       <TableHeader>
@@ -62,7 +63,7 @@ function ResourceTable({ label }: { label: string }) {
             colSpan={COLUMNS.length}
             className="py-10 text-center text-muted-foreground"
           >
-            No {label} resources yet — connect one in a later phase.
+            No {label} engines yet — provision one in a later phase.
           </TableCell>
         </TableRow>
       </TableBody>
@@ -70,39 +71,40 @@ function ResourceTable({ label }: { label: string }) {
   );
 }
 
-export default function ControlPlaneResources() {
+export default function ControlPlaneEngines() {
   return (
-    <Card data-testid="resources-frame">
+    <Card data-testid="engines-frame">
       <CardHeader>
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
             <CardTitle className="flex items-center gap-2 text-lg">
               <Server className="h-5 w-5 text-muted-foreground" />
-              Resources
+              Engines
             </CardTitle>
             <CardDescription>
-              Query engines available to workspaces (Trino, StarRocks, Spark
-              Connect). Provisioning &amp; assignment arrive in a later phase.
+              Platform query engines (Trino, StarRocks, Spark Connect). Provision
+              new engines and assign them to workspaces — arrives in a later
+              phase.
             </CardDescription>
           </div>
           <Button disabled title="Coming soon">
             <Plus className="h-4 w-4" />
-            Add resource
+            Add engine
           </Button>
         </div>
       </CardHeader>
       <CardContent>
-        <Tabs defaultValue={RESOURCE_TYPES[0].value}>
+        <Tabs defaultValue={ENGINE_TYPES[0].value}>
           <TabsList>
-            {RESOURCE_TYPES.map((type) => (
+            {ENGINE_TYPES.map((type) => (
               <TabsTrigger key={type.value} value={type.value}>
                 {type.label}
               </TabsTrigger>
             ))}
           </TabsList>
-          {RESOURCE_TYPES.map((type) => (
+          {ENGINE_TYPES.map((type) => (
             <TabsContent key={type.value} value={type.value}>
-              <ResourceTable label={type.label} />
+              <EngineTable label={type.label} />
             </TabsContent>
           ))}
         </Tabs>

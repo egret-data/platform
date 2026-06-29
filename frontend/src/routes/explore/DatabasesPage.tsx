@@ -102,14 +102,14 @@ export default function DatabasesPage() {
           <DatabaseIcon className="h-4 w-4" />
           <AlertTitle>Insufficient permissions</AlertTitle>
           <AlertDescription>
-            Requires workspace-admin to manage databases.
+            Requires workspace-admin to manage engines.
           </AlertDescription>
         </Alert>
       );
     }
     return (
       <Alert variant="destructive">
-        <AlertTitle>Failed to load databases</AlertTitle>
+        <AlertTitle>Failed to load engines</AlertTitle>
         <AlertDescription>Something went wrong. Please try again.</AlertDescription>
       </Alert>
     );
@@ -124,7 +124,7 @@ export default function DatabasesPage() {
       <div className="mt-4">
         {rows.length === 0 ? (
           <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
-            <p>No database connections yet.</p>
+            <p>No engines connected yet.</p>
           </div>
         ) : (
           <table className="w-full text-sm">
@@ -245,8 +245,8 @@ export default function DatabasesPage() {
         onOpenChange={(o) => {
           if (!o) setDeleteTarget(null);
         }}
-        title={deleteTarget ? `Delete «${deleteTarget.name}»?` : "Delete database connection?"}
-        description="This database connection will be removed. Any SQL Lab tabs or charts that reference it may break."
+        title={deleteTarget ? `Delete «${deleteTarget.name}»?` : "Delete engine connection?"}
+        description="This engine connection will be removed. Any SQL Lab tabs or charts that reference it may break."
         confirmText="delete"
         onConfirm={() => {
           if (deleteTarget) deleteMutation.mutate(deleteTarget.id);
@@ -260,7 +260,7 @@ function SectionHeader({ onAdd }: { onAdd: () => void }) {
   return (
     <div className="flex items-start justify-between gap-4">
       <div>
-        <h2 className="text-base font-semibold">Databases</h2>
+        <h2 className="text-base font-semibold">Engines</h2>
         <p className="text-sm text-muted-foreground">
           Query engine connections this workspace can use in SQL Lab and charts.
         </p>
@@ -351,7 +351,7 @@ function DatabaseConnDialog({
       }
       handleOpenChange(false);
     } catch (err) {
-      setError((err as ApiError).message ?? "Failed to save database connection.");
+      setError((err as ApiError).message ?? "Failed to save engine connection.");
     }
   }
 
@@ -361,7 +361,7 @@ function DatabaseConnDialog({
         <form onSubmit={handleSubmit}>
           <DialogHeader>
             <DialogTitle>
-              {isEdit ? "Edit database connection" : "Add database connection"}
+              {isEdit ? "Edit engine connection" : "Add engine connection"}
             </DialogTitle>
             <DialogDescription>
               {isEdit

@@ -163,7 +163,7 @@ describe("DatabasesPage", () => {
       error: null,
     });
     renderAt();
-    expect(screen.getByText("No database connections yet.")).toBeInTheDocument();
+    expect(screen.getByText("No engines connected yet.")).toBeInTheDocument();
   });
 
   it("shows skeleton while loading", () => {
@@ -189,7 +189,7 @@ describe("DatabasesPage", () => {
     renderAt();
 
     expect(
-      screen.getByText("Requires workspace-admin to manage databases."),
+      screen.getByText("Requires workspace-admin to manage engines."),
     ).toBeInTheDocument();
     expect(screen.queryByText("Add connection")).not.toBeInTheDocument();
   });
@@ -200,7 +200,7 @@ describe("DatabasesPage", () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
 
-    await waitFor(() => screen.getByText("Add database connection"));
+    await waitFor(() => screen.getByText("Add engine connection"));
 
     fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "new-db" } });
     fireEvent.change(screen.getByLabelText(/^host$/i), { target: { value: "db.example.com" } });
@@ -238,7 +238,7 @@ describe("DatabasesPage", () => {
     const editButtons = screen.getAllByRole("button", { name: /^edit/i });
     fireEvent.click(editButtons[0]);
 
-    await waitFor(() => screen.getByText("Edit database connection"));
+    await waitFor(() => screen.getByText("Edit engine connection"));
 
     expect(screen.getByDisplayValue("prod-trino")).toBeInTheDocument();
     expect(screen.getByDisplayValue("trino.corp.local")).toBeInTheDocument();
@@ -256,7 +256,7 @@ describe("DatabasesPage", () => {
     const editButtons = screen.getAllByRole("button", { name: /^edit/i });
     fireEvent.click(editButtons[0]);
 
-    await waitFor(() => screen.getByText("Edit database connection"));
+    await waitFor(() => screen.getByText("Edit engine connection"));
 
     const hostInput = screen.getByDisplayValue("trino.corp.local");
     fireEvent.change(hostInput, { target: { value: "new-host" } });
