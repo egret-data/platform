@@ -1,6 +1,6 @@
 //! Postgres access: a pooled connection wrapper and the embedded migrator.
-//! (touched to re-embed migrations through 0036_catalog_token_scope; token scope
-//! v2 — the `scope` jsonb grants column replaces permissions/namespace_scope/table_scope)
+//! (touched to re-embed migrations through 0037_notebooks; adds notebooks +
+//! notebook_cells tables and RBAC perms for notebook:read/write)
 
 use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::postgres::PgPoolOptions;
