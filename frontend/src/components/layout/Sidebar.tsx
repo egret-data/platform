@@ -1,21 +1,9 @@
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
-  Activity,
-  BarChart3,
-  Boxes,
-  Database,
-  FolderKanban,
-  HardDrive,
-  KeyRound,
-  LayoutDashboard,
-  type LucideIcon,
-  NotebookText,
-  PanelLeftClose,
-  PanelLeftOpen,
-  ShieldCheck,
-  SquareTerminal,
-  Table2,
-  Users,
+  Activity, BadgeCheck, BarChart3, Bell, Boxes, Code, Database, FolderKanban,
+  HardDrive, KeyRound, LayoutDashboard, type LucideIcon, NotebookText,
+  PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Server, Share2, ShieldCheck,
+  SquareTerminal, Table2, Users, Waypoints, Workflow,
 } from "lucide-react";
 import {
   Tooltip,
@@ -35,6 +23,25 @@ const EXPLORE_GROUPS: NavGroup[] = [
       { label: "Charts", icon: BarChart3 },
       { label: "Dashboards", icon: LayoutDashboard },
       { label: "Notebooks", icon: NotebookText },
+      { label: "Alerts", icon: Bell },
+    ],
+  },
+  {
+    heading: "Data Engineering",
+    items: [
+      { label: "Data API", icon: Plug },
+      { label: "Workflows", icon: Workflow },
+      { label: "Pipelines", icon: Waypoints },
+      { label: "Code IDE", icon: Code },
+    ],
+  },
+  {
+    heading: "Data Governance",
+    items: [
+      { label: "Policies", icon: ShieldCheck },
+      { label: "Data Lineage", icon: Share2 },
+      { label: "Query Audit", icon: ScrollText },
+      { label: "Data Quality", icon: BadgeCheck },
     ],
   },
   {
@@ -52,11 +59,12 @@ const CONTROL_PLANE_GROUPS: NavGroup[] = [
   {
     heading: "Control Plane",
     items: [
-      { label: "Catalog", icon: Boxes },
-      { label: "Policies", icon: ShieldCheck },
-      { label: "Users", icon: Users },
       { label: "Workspaces", icon: FolderKanban },
+      { label: "Resources", icon: Server },
       { label: "Monitoring", icon: Activity },
+      { label: "Users", icon: Users },
+      { label: "Platform Policies", icon: ShieldCheck },
+      { label: "Catalog", icon: Boxes },
     ],
   },
 ];
