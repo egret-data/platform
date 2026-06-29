@@ -34,7 +34,8 @@ export function Header() {
   const navigate = useNavigate();
   const { workspace } = useParams<{ workspace?: string }>();
   const isAdmin = location.pathname.startsWith("/control-plane");
-  const canAdmin = (me?.platform_roles?.length ?? 0) > 0;
+  // Control Plane is global-admin only — a platform role alone isn't enough.
+  const canAdmin = me?.platform_roles?.includes("platform_admin") ?? false;
 
   // Persist the current workspace slug so Explorer can be restored from Admin
   useEffect(() => {

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
-  Activity, BarChart3, Bell, Boxes, ChevronDown, ChevronRight, Database,
+  BarChart3, Bell, Boxes, ChevronDown, ChevronRight, Database,
   FolderKanban, HardDrive, KeyRound, LayoutDashboard, type LucideIcon,
   NotebookText, PanelLeftClose, PanelLeftOpen, Plug, Server, Share2, ShieldCheck,
   SquareTerminal, Table2, Users, Waypoints, Workflow,
@@ -27,17 +27,17 @@ const EXPLORE_GROUPS: NavGroup[] = [
     ],
   },
   {
-    heading: "Data Engineering",
-    items: [
-      { label: "Data API", icon: Plug },
-      { label: "Pipelines", icon: Waypoints },
-    ],
-  },
-  {
     heading: "Automate",
     items: [
       { label: "Workflows", icon: Workflow },
       { label: "Alerts", icon: Bell },
+    ],
+  },
+  {
+    heading: "Data Engineering",
+    items: [
+      { label: "Data API", icon: Plug },
+      { label: "Pipelines", icon: Waypoints },
     ],
   },
   {
@@ -52,22 +52,21 @@ const EXPLORE_GROUPS: NavGroup[] = [
     items: [
       { label: "Catalog", icon: Boxes },
       { label: "Storage", icon: HardDrive },
-      { label: "Databases", icon: Database },
+      { label: "Engines", icon: Database },
       { label: "Secrets", icon: KeyRound },
     ],
   },
 ];
 
+// Control Plane = global-admin only; platform-level concerns: workspaces,
+// engine provisioning, and user role/workspace assignment.
 const CONTROL_PLANE_GROUPS: NavGroup[] = [
   {
     heading: "Control Plane",
     items: [
       { label: "Workspaces", icon: FolderKanban },
-      { label: "Resources", icon: Server },
-      { label: "Monitoring", icon: Activity },
+      { label: "Engines", icon: Server },
       { label: "Users", icon: Users },
-      { label: "Platform Policies", icon: ShieldCheck },
-      { label: "Catalog", icon: Boxes },
     ],
   },
 ];

@@ -52,7 +52,7 @@ afterEach(() => vi.restoreAllMocks());
 const ME_WITH_ROLE: Me = {
   user_id: "u1",
   email: "admin@example.com",
-  platform_roles: ["admin"],
+  platform_roles: ["platform_admin"],
 };
 
 /** LocationProbe lets us assert navigate() side-effects */

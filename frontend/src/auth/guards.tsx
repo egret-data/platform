@@ -17,6 +17,16 @@ export function RequirePlatform({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
+/**
+ * Control Plane is global-admin only: a platform role alone (e.g. `data_steward`)
+ * is NOT enough — the user must hold `platform_admin`.
+ */
+export function RequireGlobalAdmin({ children }: { children: ReactNode }) {
+  const { me } = useAuth();
+  if (!me || !me.platform_roles.includes("platform_admin")) return <Forbidden />;
+  return <>{children}</>;
+}
+
 export function RequireWorkspace({ children }: { children: ReactNode }) {
   const { workspace } = useParams();
   const { data, isLoading } = useMyWorkspaces(true);
