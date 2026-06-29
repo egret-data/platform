@@ -12,6 +12,8 @@ import {
   useWarehouseTasks,
 } from "@/api/catalog";
 import { Badge } from "@/components/ui/badge";
+import { Card } from "@/components/ui/card";
+import { DetailSection } from "@/components/explore/DetailSection";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -267,8 +269,10 @@ function StatisticsTab({ ws, wid }: { ws: string; wid: string }) {
   const entries = stats.data?.entries ?? [];
   if (entries.length === 0) {
     return (
-      <div className="p-4 text-sm text-muted-foreground">
-        No statistics yet — lakekeeper computes these hourly.
+      <div className="max-w-3xl p-4">
+        <Card className="p-4 text-sm text-muted-foreground">
+          No statistics yet — lakekeeper computes these hourly.
+        </Card>
       </div>
     );
   }
@@ -277,36 +281,38 @@ function StatisticsTab({ ws, wid }: { ws: string; wid: string }) {
   const history = entries.slice(1);
 
   return (
-    <div className="flex flex-col gap-6 p-4">
-      <div className="flex flex-wrap items-baseline gap-x-8 gap-y-2">
+    <div className="max-w-3xl space-y-4 p-4">
+      <Card className="flex flex-wrap items-baseline gap-x-8 gap-y-2 p-4">
         <Stat label="Tables" value={latest.number_of_tables} />
         <Stat label="Views" value={latest.number_of_views} />
         <span className="text-sm text-muted-foreground">
           as of <RelativeTime iso={latest.timestamp} />
         </span>
-      </div>
+      </Card>
 
       {history.length > 0 && (
-        <table className="max-w-xl text-sm">
-          <thead>
-            <tr className="border-b text-left text-muted-foreground">
-              <th className="py-1.5 pr-6 font-medium">Time</th>
-              <th className="py-1.5 pr-6 font-medium">Tables</th>
-              <th className="py-1.5 font-medium">Views</th>
-            </tr>
-          </thead>
-          <tbody>
-            {history.map((e) => (
-              <tr key={e.timestamp} className="border-b last:border-0">
-                <td className="py-1.5 pr-6">
-                  <RelativeTime iso={e.timestamp} />
-                </td>
-                <td className="py-1.5 pr-6">{e.number_of_tables}</td>
-                <td className="py-1.5">{e.number_of_views}</td>
+        <DetailSection title="History">
+          <table className="text-sm">
+            <thead>
+              <tr className="border-b text-left text-muted-foreground">
+                <th className="py-1.5 pr-8 font-medium">Time</th>
+                <th className="py-1.5 pr-8 font-medium">Tables</th>
+                <th className="py-1.5 font-medium">Views</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {history.map((e) => (
+                <tr key={e.timestamp} className="border-b last:border-0">
+                  <td className="py-1.5 pr-8">
+                    <RelativeTime iso={e.timestamp} />
+                  </td>
+                  <td className="py-1.5 pr-8">{e.number_of_tables}</td>
+                  <td className="py-1.5">{e.number_of_views}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </DetailSection>
       )}
     </div>
   );
@@ -334,39 +340,47 @@ function TasksTab({ ws, wid }: { ws: string; wid: string }) {
 
   const rows = tasks.data ?? [];
   if (rows.length === 0) {
-    return <div className="p-4 text-sm text-muted-foreground">No tasks.</div>;
+    return (
+      <div className="p-4">
+        <DetailSection title="Tasks">
+          <p className="text-sm text-muted-foreground">No tasks.</p>
+        </DetailSection>
+      </div>
+    );
   }
 
   return (
     <div className="p-4">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b text-left text-muted-foreground">
-            <th className="py-1.5 pr-6 font-medium">Type</th>
-            <th className="py-1.5 pr-6 font-medium">Status</th>
-            <th className="py-1.5 pr-6 font-medium">Entity</th>
-            <th className="py-1.5 pr-6 font-medium">Created</th>
-            <th className="py-1.5 font-medium">Attempt</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((t) => (
-            <tr key={t.task_id} className="border-b last:border-0">
-              <td className="py-1.5 pr-6 font-mono text-xs">{t.task_type}</td>
-              <td className="py-1.5 pr-6">
-                <Badge variant={statusVariant(t.status)}>{t.status}</Badge>
-              </td>
-              <td className="py-1.5 pr-6">
-                {t.entity_name ?? <span className="text-muted-foreground/50">—</span>}
-              </td>
-              <td className="py-1.5 pr-6">
-                <RelativeTime iso={t.created_at} />
-              </td>
-              <td className="py-1.5">{t.attempt}</td>
+      <DetailSection title="Tasks">
+        <table className="text-sm">
+          <thead>
+            <tr className="border-b text-left text-muted-foreground">
+              <th className="py-1.5 pr-8 font-medium">Type</th>
+              <th className="py-1.5 pr-8 font-medium">Status</th>
+              <th className="py-1.5 pr-8 font-medium">Entity</th>
+              <th className="py-1.5 pr-8 font-medium">Created</th>
+              <th className="py-1.5 font-medium">Attempt</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.map((t) => (
+              <tr key={t.task_id} className="border-b last:border-0">
+                <td className="py-1.5 pr-8 font-mono text-xs">{t.task_type}</td>
+                <td className="py-1.5 pr-8">
+                  <Badge variant={statusVariant(t.status)}>{t.status}</Badge>
+                </td>
+                <td className="py-1.5 pr-8">
+                  {t.entity_name ?? <span className="text-muted-foreground/50">—</span>}
+                </td>
+                <td className="py-1.5 pr-8">
+                  <RelativeTime iso={t.created_at} />
+                </td>
+                <td className="py-1.5">{t.attempt}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </DetailSection>
     </div>
   );
 }

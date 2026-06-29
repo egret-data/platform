@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { Check, Copy, Database, Eye, Loader2, Plus, Table2, Trash2 } from "lucide-react";
 import {
   type NamespaceDto,
@@ -10,6 +10,7 @@ import {
   useTableDetail,
 } from "@/api/catalog";
 import { ApiError } from "@/api/client";
+import { DetailSection } from "@/components/explore/DetailSection";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -535,18 +536,6 @@ function TableDetailView({
         </>
       ) : null}
     </div>
-  );
-}
-
-/** A labelled card wrapping one table-detail section (header strip + body). */
-function DetailSection({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <Card className="overflow-hidden">
-      <div className="border-b bg-muted/40 px-4 py-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        {title}
-      </div>
-      <div className="overflow-x-auto p-4">{children}</div>
-    </Card>
   );
 }
 
