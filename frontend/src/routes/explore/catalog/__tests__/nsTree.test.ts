@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildNamespaceTree } from "../namespaceTree";
+import { buildNamespaceTree } from "../nsTree";
 
 describe("buildNamespaceTree", () => {
   it("folds a flat namespace list into a nested tree", () => {

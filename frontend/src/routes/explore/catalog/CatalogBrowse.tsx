@@ -1,12 +1,12 @@
-import { useState } from "react";
-import { Check, Copy, Database, Eye, Loader2, Plus, Table2, Trash2 } from "lucide-react";
+import { useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { Check, Copy, Loader2 } from "lucide-react";
 import {
   type NamespaceDto,
   nsDotted,
   useCatalogNamespaces,
   useCreateNamespace,
   useDeleteNamespace,
-  useNamespaceContents,
   useTableDetail,
 } from "@/api/catalog";
 import { ApiError } from "@/api/client";
@@ -14,6 +14,14 @@ import { DetailSection } from "@/components/explore/DetailSection";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
@@ -35,6 +43,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { timeAgo, fullTimestamp } from "@/lib/relativeTime";
+import { buildNamespaceTree } from "./nsTree";
+import { NamespaceTree } from "./NamespaceTree";
 
 const ROOT = "(root)";
 
@@ -42,18 +52,24 @@ export default function CatalogBrowse({ ws, wid }: { ws: string; wid: string }) 
   const namespaces = useCatalogNamespaces(ws, wid);
   const deleteMutation = useDeleteNamespace(ws, wid);
 
-  const [ns, setNs] = useState<string | null>(null);
-  const [table, setTable] = useState<string | null>(null);
+  const [sp, setSp] = useSearchParams();
+  const ns = sp.get("ns");
+  const table = sp.get("table");
+
   const [addOpen, setAddOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  const contents = useNamespaceContents(ws, wid, ns);
+  const tree = useMemo(() => buildNamespaceTree(namespaces.data ?? []), [namespaces.data]);
   const detail = useTableDetail(ws, wid, ns, table);
 
-  function selectNamespace(value: string) {
-    setNs(value);
-    setTable(null);
+  function setSelection(nextNs: string | null, nextTable: string | null) {
+    const next = new URLSearchParams(sp);
+    if (nextNs) next.set("ns", nextNs);
+    else next.delete("ns");
+    if (nextNs && nextTable) next.set("table", nextTable);
+    else next.delete("table");
+    setSp(next, { replace: false });
   }
 
   function confirmDelete() {
@@ -62,10 +78,7 @@ export default function CatalogBrowse({ ws, wid }: { ws: string; wid: string }) 
     setDeleteError(null);
     deleteMutation.mutate(dotted, {
       onSuccess: () => {
-        if (ns === dotted) {
-          setNs(null);
-          setTable(null);
-        }
+        if (ns === dotted) setSelection(null, null);
         setDeleteTarget(null);
       },
       onError: (err) => {
@@ -76,77 +89,76 @@ export default function CatalogBrowse({ ws, wid }: { ws: string; wid: string }) 
 
   return (
     <div className="p-4">
-      <div className="grid grid-cols-[16rem_1fr] gap-4">
-        {/* Left: namespaces */}
-        <div className="rounded border border-border">
-          <div className="flex items-center justify-between border-b border-border px-3 py-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            <span>Namespaces</span>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-6 w-6 text-muted-foreground"
-              onClick={() => setAddOpen(true)}
-              aria-label="New namespace"
-            >
-              <Plus className="h-4 w-4" />
-            </Button>
-          </div>
+      <div className="grid grid-cols-[18rem_1fr] gap-4">
+        {/* Left: namespace tree */}
+        <div className="min-w-0">
           {namespaces.isLoading ? (
-            <div className="p-3">
+            <div className="rounded border border-border p-3">
               <ListSkeleton rows={5} cols={1} />
             </div>
           ) : namespaces.isError ? (
-            <p className="p-3 text-sm text-destructive">Failed to load namespaces.</p>
-          ) : (namespaces.data ?? []).length === 0 ? (
-            <p className="p-3 text-sm text-muted-foreground">No namespaces.</p>
+            <div className="rounded border border-border p-3">
+              <p className="text-sm text-destructive">Failed to load namespaces.</p>
+            </div>
+          ) : tree.length === 0 ? (
+            <div className="rounded border border-border p-3">
+              <p className="text-sm text-muted-foreground">No namespaces.</p>
+            </div>
           ) : (
-            <ul className="p-1">
-              {(namespaces.data ?? []).map((n) => {
-                const dotted = nsDotted(n.levels);
-                const active = dotted === ns;
-                return (
-                  <li key={dotted} className="group flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => selectNamespace(dotted)}
-                      className={`flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left text-sm transition-colors ${
-                        active
-                          ? "bg-accent text-accent-foreground"
-                          : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
-                      }`}
-                    >
-                      <Database className="h-4 w-4 shrink-0" />
-                      <span className="truncate font-mono">{dotted}</span>
-                    </button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 shrink-0 text-muted-foreground opacity-0 hover:text-destructive group-hover:opacity-100"
-                      onClick={() => {
-                        setDeleteError(null);
-                        setDeleteTarget(dotted);
-                      }}
-                      aria-label={`Delete ${dotted}`}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </li>
-                );
-              })}
-            </ul>
+            <NamespaceTree
+              ws={ws}
+              wid={wid}
+              tree={tree}
+              selectedNs={ns}
+              selectedTable={table}
+              onSelectTable={(n, t) => setSelection(n, t)}
+              onDeleteNamespace={(d) => {
+                setDeleteError(null);
+                setDeleteTarget(d);
+              }}
+              onNewNamespace={() => setAddOpen(true)}
+            />
           )}
         </div>
 
-        {/* Right: tables/views + detail */}
+        {/* Right: breadcrumb + detail */}
         <div className="min-w-0">
-          {!ns ? (
-            <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
-              <p>Select a namespace to browse its tables and views.</p>
+          {ns && table ? (
+            <div className="space-y-4">
+              <Breadcrumb>
+                <BreadcrumbList>
+                  {(ns.split(".") as string[]).map((lvl, i, arr) => {
+                    const dotted = arr.slice(0, i + 1).join(".");
+                    return (
+                      <BreadcrumbItem key={dotted}>
+                        <BreadcrumbLink
+                          asChild
+                          className="cursor-pointer font-mono"
+                        >
+                          <button type="button" onClick={() => setSelection(dotted, null)}>
+                            {lvl}
+                          </button>
+                        </BreadcrumbLink>
+                        <BreadcrumbSeparator />
+                      </BreadcrumbItem>
+                    );
+                  })}
+                  <BreadcrumbItem>
+                    <BreadcrumbPage className="font-mono">{table}</BreadcrumbPage>
+                  </BreadcrumbItem>
+                </BreadcrumbList>
+              </Breadcrumb>
+              <TableDetailView
+                ns={ns}
+                table={table}
+                detail={detail}
+                onBack={() => setSelection(ns, null)}
+              />
             </div>
-          ) : table ? (
-            <TableDetailView ns={ns} table={table} detail={detail} onBack={() => setTable(null)} />
           ) : (
-            <NamespaceContentsView ns={ns} contents={contents} onSelectTable={setTable} />
+            <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
+              <p>Select a table to view its detail.</p>
+            </div>
           )}
         </div>
       </div>
@@ -278,72 +290,6 @@ function NewNamespaceDialog({
         </form>
       </DialogContent>
     </Dialog>
-  );
-}
-
-function NamespaceContentsView({
-  ns,
-  contents,
-  onSelectTable,
-}: {
-  ns: string;
-  contents: ReturnType<typeof useNamespaceContents>;
-  onSelectTable: (t: string) => void;
-}) {
-  if (contents.isLoading) return <ListSkeleton cols={2} />;
-  if (contents.isError) return <p className="text-sm text-destructive">Failed to load tables.</p>;
-
-  const tables = contents.data?.tables ?? [];
-  const views = contents.data?.views ?? [];
-
-  if (tables.length === 0 && views.length === 0) {
-    return (
-      <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
-        <p>
-          <span className="font-mono">{ns}</span> has no tables or views.
-        </p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-4">
-      <div>
-        <h2 className="mb-2 text-sm font-medium text-muted-foreground">Tables</h2>
-        {tables.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No tables.</p>
-        ) : (
-          <ul className="rounded border border-border">
-            {tables.map((t) => (
-              <li key={t} className="border-b border-border last:border-b-0">
-                <button
-                  type="button"
-                  onClick={() => onSelectTable(t)}
-                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-accent"
-                >
-                  <Table2 className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <span className="font-mono">{t}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      {views.length > 0 && (
-        <div>
-          <h2 className="mb-2 text-sm font-medium text-muted-foreground">Views</h2>
-          <ul className="rounded border border-border">
-            {views.map((v) => (
-              <li key={v} className="flex items-center gap-2 border-b border-border px-3 py-2 text-sm last:border-b-0">
-                <Eye className="h-4 w-4 shrink-0 text-muted-foreground" />
-                <span className="font-mono">{v}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </div>
   );
 }
 

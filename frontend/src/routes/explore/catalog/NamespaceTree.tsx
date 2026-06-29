@@ -4,7 +4,7 @@ import { useNamespaceContents } from "@/api/catalog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import { type NsNode, nodeMatchesFilter } from "./namespaceTree";
+import { type NsNode, nodeMatchesFilter } from "./nsTree";
 
 export const MAX_VISIBLE = 200;
 
