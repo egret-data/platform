@@ -151,6 +151,7 @@ async fn front_auth_enforces_per_workspace_ownership() {
             "t5-token-a",
             &["catalog:read".to_string(), "catalog:write".to_string()],
             &[],
+            &[],
         )
         .await
         .expect("mint catalog token for workspace A");
@@ -344,7 +345,14 @@ async fn front_auth_enforces_per_token_permissions() {
 
     // --- Mint read-only and read-write tokens for workspace A ---------------
     let (_row, token_ro) = store
-        .create_token(ws_a, wid_a, "t6-ro", &["catalog:read".to_string()], &[])
+        .create_token(
+            ws_a,
+            wid_a,
+            "t6-ro",
+            &["catalog:read".to_string()],
+            &[],
+            &[],
+        )
         .await
         .expect("mint read-only token");
 
@@ -354,6 +362,7 @@ async fn front_auth_enforces_per_token_permissions() {
             wid_a,
             "t6-rw",
             &["catalog:read".to_string(), "catalog:write".to_string()],
+            &[],
             &[],
         )
         .await
@@ -633,6 +642,7 @@ async fn front_auth_full_scope_token_is_unrestricted() {
             "ce4-full",
             &["catalog:read".to_string(), "catalog:write".to_string()],
             &[],
+            &[],
         )
         .await
         .expect("mint full-scope rw token");
@@ -747,6 +757,7 @@ async fn front_auth_namespace_scope_is_enforced() {
             "ce4ns-full",
             &["catalog:read".to_string(), "catalog:write".to_string()],
             &[],
+            &[],
         )
         .await
         .expect("mint full-scope token");
@@ -782,6 +793,7 @@ async fn front_auth_namespace_scope_is_enforced() {
             "ce4ns-marts",
             &["catalog:read".to_string(), "catalog:write".to_string()],
             &["marts".to_string()],
+            &[],
         )
         .await
         .expect("mint marts-scoped token");

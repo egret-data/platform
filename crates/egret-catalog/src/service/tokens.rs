@@ -25,6 +25,7 @@ pub struct CatalogToken {
     pub label: String,
     pub permissions: Vec<String>,
     pub namespace_scope: Vec<String>,
+    pub table_scope: Vec<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -35,6 +36,7 @@ pub struct TokenAuth {
     pub warehouse_id: Uuid,
     pub permissions: Vec<String>,
     pub namespace_scope: Vec<String>,
+    pub table_scope: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -92,6 +94,20 @@ fn validate_namespace_scope(scope: &[String]) -> Result<(), CatalogError> {
     Ok(())
 }
 
+/// Validate a fully-qualified table scope entry: dotted `namespace.table`,
+/// at least two non-empty segments (namespace + table).
+fn validate_table_scope(scope: &[String]) -> Result<(), CatalogError> {
+    for t in scope {
+        let segs: Vec<&str> = t.split('.').collect();
+        if segs.len() < 2 || segs.iter().any(|s| s.is_empty()) {
+            return Err(CatalogError::BadRequest(format!(
+                "invalid table scope '{t}': must be a dotted namespace.table with no empty segments"
+            )));
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // CatalogStore — token methods
 // ---------------------------------------------------------------------------
@@ -105,6 +121,7 @@ struct TokenRow {
     label: String,
     permissions: Vec<String>,
     namespace_scope: Vec<String>,
+    table_scope: Vec<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -117,6 +134,7 @@ impl From<TokenRow> for CatalogToken {
             label: r.label,
             permissions: r.permissions,
             namespace_scope: r.namespace_scope,
+            table_scope: r.table_scope,
             created_at: r.created_at,
         }
     }
@@ -129,6 +147,7 @@ struct AuthRow {
     warehouse_id: Uuid,
     permissions: Vec<String>,
     namespace_scope: Vec<String>,
+    table_scope: Vec<String>,
 }
 
 impl CatalogStore {
@@ -152,18 +171,20 @@ impl CatalogStore {
         label: &str,
         permissions: &[String],
         namespace_scope: &[String],
+        table_scope: &[String],
     ) -> Result<(CatalogToken, String), CatalogError> {
         validate_permissions(permissions)?;
         validate_namespace_scope(namespace_scope)?;
+        validate_table_scope(table_scope)?;
 
         let raw = generate_raw_token();
         let hash = hash_token(&raw);
 
         let row: TokenRow = sqlx::query_as::<_, TokenRow>(
             "INSERT INTO catalog_tokens \
-             (workspace_id, warehouse_id, token_hash, label, permissions, namespace_scope) \
-             VALUES ($1, $2, $3, $4, $5, $6) \
-             RETURNING id, workspace_id, warehouse_id, label, permissions, namespace_scope, created_at",
+             (workspace_id, warehouse_id, token_hash, label, permissions, namespace_scope, table_scope) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+             RETURNING id, workspace_id, warehouse_id, label, permissions, namespace_scope, table_scope, created_at",
         )
         .bind(workspace_id)
         .bind(warehouse_id)
@@ -171,6 +192,7 @@ impl CatalogStore {
         .bind(label)
         .bind(permissions)
         .bind(namespace_scope)
+        .bind(table_scope)
         .fetch_one(self.pool())
         .await
         .map_err(|e| match &e {
@@ -190,7 +212,7 @@ impl CatalogStore {
     pub async fn authenticate_token(&self, raw: &str) -> Result<TokenAuth, CatalogError> {
         let hash = hash_token(raw);
         let row: AuthRow = sqlx::query_as::<_, AuthRow>(
-            "SELECT workspace_id, warehouse_id, permissions, namespace_scope FROM catalog_tokens \
+            "SELECT workspace_id, warehouse_id, permissions, namespace_scope, table_scope FROM catalog_tokens \
              WHERE token_hash = $1 AND revoked_at IS NULL",
         )
         .bind(&hash)
@@ -204,6 +226,7 @@ impl CatalogStore {
             warehouse_id: row.warehouse_id,
             permissions: row.permissions,
             namespace_scope: row.namespace_scope,
+            table_scope: row.table_scope,
         })
     }
 
@@ -289,7 +312,7 @@ impl CatalogStore {
     /// List all non-revoked tokens for a workspace (hashes excluded).
     pub async fn list_tokens(&self, workspace_id: Uuid) -> Result<Vec<CatalogToken>, CatalogError> {
         let rows: Vec<TokenRow> = sqlx::query_as::<_, TokenRow>(
-            "SELECT id, workspace_id, warehouse_id, label, permissions, namespace_scope, created_at \
+            "SELECT id, workspace_id, warehouse_id, label, permissions, namespace_scope, table_scope, created_at \
              FROM catalog_tokens \
              WHERE workspace_id = $1 AND revoked_at IS NULL \
              ORDER BY created_at ASC",
@@ -311,7 +334,7 @@ impl CatalogStore {
         warehouse_id: Uuid,
     ) -> Result<Vec<CatalogToken>, CatalogError> {
         let rows: Vec<TokenRow> = sqlx::query_as::<_, TokenRow>(
-            "SELECT id, workspace_id, warehouse_id, label, permissions, namespace_scope, created_at \
+            "SELECT id, workspace_id, warehouse_id, label, permissions, namespace_scope, table_scope, created_at \
              FROM catalog_tokens \
              WHERE workspace_id = $1 AND warehouse_id = $2 AND revoked_at IS NULL \
              ORDER BY created_at ASC",
@@ -323,5 +346,80 @@ impl CatalogStore {
         .map_err(CatalogError::Db)?;
 
         Ok(rows.into_iter().map(CatalogToken::from).collect())
+    }
+
+    /// Update a token's label/permissions/scopes in place (hash untouched, so the
+    /// existing secret keeps working). Scoped to (id, workspace, warehouse): returns
+    /// the updated row, or `NotFound` when the id is not this warehouse's token.
+    // The (id, workspace, warehouse) guard tuple plus the four editable fields
+    // intentionally exceed clippy's arg threshold; grouping them into a struct
+    // would obscure the SQL bind order with no real call-site benefit.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_token_for_warehouse(
+        &self,
+        workspace_id: Uuid,
+        warehouse_id: Uuid,
+        id: Uuid,
+        label: &str,
+        permissions: &[String],
+        namespace_scope: &[String],
+        table_scope: &[String],
+    ) -> Result<CatalogToken, CatalogError> {
+        validate_permissions(permissions)?;
+        validate_namespace_scope(namespace_scope)?;
+        validate_table_scope(table_scope)?;
+        let row: Option<TokenRow> = sqlx::query_as::<_, TokenRow>(
+            "UPDATE catalog_tokens \
+             SET label = $4, permissions = $5, namespace_scope = $6, table_scope = $7 \
+             WHERE id = $1 AND workspace_id = $2 AND warehouse_id = $3 AND revoked_at IS NULL \
+             RETURNING id, workspace_id, warehouse_id, label, permissions, namespace_scope, table_scope, created_at",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .bind(warehouse_id)
+        .bind(label)
+        .bind(permissions)
+        .bind(namespace_scope)
+        .bind(table_scope)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(CatalogError::Db)?;
+        row.map(CatalogToken::from)
+            .ok_or_else(|| CatalogError::NotFound("catalog token".into()))
+    }
+
+    /// Rotate a token's secret: generate a new raw, overwrite token_hash for the
+    /// SAME row (label/scopes/created_at preserved, rotated_at = now). Returns the
+    /// row + the new raw (shown once). NotFound when not this warehouse's token.
+    pub async fn rotate_token_for_warehouse(
+        &self,
+        workspace_id: Uuid,
+        warehouse_id: Uuid,
+        id: Uuid,
+    ) -> Result<(CatalogToken, String), CatalogError> {
+        let raw = generate_raw_token();
+        let hash = hash_token(&raw);
+        let row: Option<TokenRow> = sqlx::query_as::<_, TokenRow>(
+            "UPDATE catalog_tokens \
+             SET token_hash = $4, rotated_at = now() \
+             WHERE id = $1 AND workspace_id = $2 AND warehouse_id = $3 AND revoked_at IS NULL \
+             RETURNING id, workspace_id, warehouse_id, label, permissions, namespace_scope, table_scope, created_at",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .bind(warehouse_id)
+        .bind(&hash)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|e| match &e {
+            sqlx::Error::Database(d) if d.is_unique_violation() => {
+                CatalogError::AlreadyExists("token".into())
+            }
+            _ => CatalogError::Db(e),
+        })?;
+        let token = row
+            .map(CatalogToken::from)
+            .ok_or_else(|| CatalogError::NotFound("catalog token".into()))?;
+        Ok((token, raw))
     }
 }

@@ -179,6 +179,7 @@ async fn dropped_with_purge_is_reclaimed_by_gc_workers() {
             "gce2e-token",
             &["catalog:read".to_string(), "catalog:write".to_string()],
             &[],
+            &[],
         )
         .await
         .expect("mint full-scope rw token");

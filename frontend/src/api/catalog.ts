@@ -75,6 +75,7 @@ export interface CatalogTokenDto {
   label: string;
   permissions: string[];
   namespace_scope: string[];
+  table_scope: string[];
   created_at: string;
 }
 
@@ -82,6 +83,14 @@ export interface MintTokenRequest {
   label: string;
   permissions: string[];
   namespace_scope: string[];
+  table_scope: string[];
+}
+
+export interface UpdateTokenRequest {
+  label: string;
+  permissions: string[];
+  namespace_scope: string[];
+  table_scope: string[];
 }
 
 export interface MintTokenResponse {
@@ -283,6 +292,39 @@ export function useMintToken(ws: string, wid: string) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(req),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: catalogKeys.tokens(ws, wid) });
+    },
+  });
+}
+
+export interface UpdateTokenArgs {
+  id: string;
+  body: UpdateTokenRequest;
+}
+
+export function useUpdateToken(ws: string, wid: string) {
+  const queryClient = useQueryClient();
+  return useMutation<CatalogTokenDto, ApiError, UpdateTokenArgs>({
+    mutationFn: ({ id, body }) =>
+      apiJson<CatalogTokenDto>(`/ws/${ws}/catalog/warehouses/${wid}/tokens/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: catalogKeys.tokens(ws, wid) });
+    },
+  });
+}
+
+export function useRotateToken(ws: string, wid: string) {
+  const queryClient = useQueryClient();
+  return useMutation<MintTokenResponse, ApiError, string>({
+    mutationFn: (id) =>
+      apiJson<MintTokenResponse>(`/ws/${ws}/catalog/warehouses/${wid}/tokens/${id}/rotate`, {
+        method: "POST",
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: catalogKeys.tokens(ws, wid) });
