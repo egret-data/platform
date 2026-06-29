@@ -26,6 +26,7 @@ use axum::http::{Request as HttpRequest, StatusCode};
 use axum::response::Response;
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
+use egret_catalog::service::tokens::Grant;
 use egret_catalog::service::CatalogStore;
 use egret_catalog_engine::{
     browse_router, build_state, ensure_bootstrapped, run_lakekeeper_migrations, BrowseState,
@@ -177,17 +178,19 @@ async fn seed_other_workspace_token(f: &Fixture) -> Uuid {
         .id;
     let (token, _raw) = f
         .store
-        .create_token(
-            ws.id.0,
-            y_wid,
-            "y-token",
-            &["catalog:read".into()],
-            &[],
-            &[],
-        )
+        .create_token(ws.id.0, y_wid, "y-token", &star_grant(&["catalog:read"]))
         .await
         .expect("mint Y token");
     token.id
+}
+
+/// A single all-namespaces grant with the given full perm strings.
+fn star_grant(perms: &[&str]) -> Vec<Grant> {
+    vec![Grant {
+        namespace: "*".to_string(),
+        table: None,
+        permissions: perms.iter().map(|p| p.to_string()).collect(),
+    }]
 }
 
 fn req(method: &str, uri: &str, token: &str, body: Option<serde_json::Value>) -> HttpRequest<Body> {
@@ -214,11 +217,10 @@ async fn admin_can_mint_list_and_revoke_tokens() {
     let token = add_member(&f, "admin", "ws_admin").await;
     let base = format!("/ws/{}/catalog/warehouses/{}/tokens", f.slug, f.wid);
 
-    // MINT
+    // MINT — a single whole-namespace `marts` grant with read+write.
     let body = serde_json::json!({
         "label": "ci",
-        "permissions": ["read", "write"],
-        "namespace_scope": ["marts"],
+        "scope": [{ "namespace": "marts", "table": null, "permissions": ["read", "write"] }],
     });
     let resp = f
         .app
@@ -233,14 +235,9 @@ async fn admin_can_mint_list_and_revoke_tokens() {
         "mint returns a non-empty raw token; body={json}"
     );
     assert_eq!(
-        json["token"]["permissions"],
-        serde_json::json!(["catalog:read", "catalog:write"]),
-        "perms mapped to catalog:* ; body={json}"
-    );
-    assert_eq!(
-        json["token"]["namespace_scope"],
-        serde_json::json!(["marts"]),
-        "namespace_scope preserved; body={json}"
+        json["token"]["scope"],
+        serde_json::json!([{ "namespace": "marts", "table": null, "permissions": ["read", "write"] }]),
+        "scope reflected (short perms) on the DTO; body={json}"
     );
     let minted_id = json["token"]["id"].as_str().unwrap().to_string();
     let raw_secret = json["raw"].as_str().unwrap().to_string();
@@ -351,9 +348,7 @@ async fn revoke_of_other_warehouse_token_is_404_and_token_survives() {
             f.workspace_id.0,
             wid_b,
             "b-token",
-            &["catalog:read".into()],
-            &[],
-            &[],
+            &star_grant(&["catalog:read"]),
         )
         .await
         .expect("mint token for warehouse B");
@@ -426,8 +421,7 @@ async fn non_admin_member_is_403() {
             &token,
             Some(serde_json::json!({
                 "label": "x",
-                "permissions": ["read"],
-                "namespace_scope": [],
+                "scope": [{ "namespace": "*", "table": null, "permissions": ["read"] }],
             })),
         ))
         .await
@@ -458,7 +452,7 @@ async fn non_admin_member_is_403() {
 }
 
 #[tokio::test]
-async fn mint_rejects_bad_permissions() {
+async fn mint_rejects_bad_grants() {
     let Some(f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
@@ -466,7 +460,7 @@ async fn mint_rejects_bad_permissions() {
     let token = add_member(&f, "admin", "ws_admin").await;
     let base = format!("/ws/{}/catalog/warehouses/{}/tokens", f.slug, f.wid);
 
-    // Unknown permission → 400.
+    // Unknown permission in a grant → 400.
     let resp = f
         .app
         .clone()
@@ -476,8 +470,7 @@ async fn mint_rejects_bad_permissions() {
             &token,
             Some(serde_json::json!({
                 "label": "x",
-                "permissions": ["bogus"],
-                "namespace_scope": [],
+                "scope": [{ "namespace": "*", "table": null, "permissions": ["bogus"] }],
             })),
         ))
         .await
@@ -488,7 +481,21 @@ async fn mint_rejects_bad_permissions() {
         "unknown permission → 400"
     );
 
-    // Empty permissions → 400.
+    // Empty scope (no grants) → 400.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &base,
+            &token,
+            Some(serde_json::json!({ "label": "x", "scope": [] })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "empty scope → 400");
+
+    // A grant with no permissions → 400.
     let resp = f
         .app
         .clone()
@@ -498,8 +505,7 @@ async fn mint_rejects_bad_permissions() {
             &token,
             Some(serde_json::json!({
                 "label": "x",
-                "permissions": [],
-                "namespace_scope": [],
+                "scope": [{ "namespace": "*", "table": null, "permissions": [] }],
             })),
         ))
         .await
@@ -507,12 +513,14 @@ async fn mint_rejects_bad_permissions() {
     assert_eq!(
         resp.status(),
         StatusCode::BAD_REQUEST,
-        "empty permissions → 400"
+        "a grant with no permissions → 400"
     );
 }
 
+/// Minting with a MULTI-grant scope persists it and lists it back on the DTO
+/// (short perms, exact resource shapes preserved per grant).
 #[tokio::test]
-async fn mint_dedups_duplicate_permissions() {
+async fn mint_with_multi_grant_scope_persists_and_lists() {
     let Some(f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
@@ -520,6 +528,11 @@ async fn mint_dedups_duplicate_permissions() {
     let token = add_member(&f, "admin", "ws_admin").await;
     let base = format!("/ws/{}/catalog/warehouses/{}/tokens", f.slug, f.wid);
 
+    // `sale` whole-namespace read + `marketing.campaigns` read+write.
+    let scope = serde_json::json!([
+        { "namespace": "sale", "table": null, "permissions": ["read"] },
+        { "namespace": "marketing", "table": "campaigns", "permissions": ["read", "write"] },
+    ]);
     let resp = f
         .app
         .clone()
@@ -527,59 +540,19 @@ async fn mint_dedups_duplicate_permissions() {
             "POST",
             &base,
             &token,
-            Some(serde_json::json!({
-                "label": "dup",
-                "permissions": ["read", "read"],
-                "namespace_scope": [],
-            })),
+            Some(serde_json::json!({ "label": "scoped", "scope": scope })),
         ))
         .await
         .unwrap();
     let (status, _bytes, json) = into_json(resp).await;
     assert_eq!(status, StatusCode::OK, "mint; body={json}");
     assert_eq!(
-        json["token"]["permissions"],
-        serde_json::json!(["catalog:read"]),
-        "duplicate input perms collapse to a single mapped perm; body={json}"
-    );
-}
-
-/// Minting with a `table_scope` persists it and lists it back on the DTO.
-#[tokio::test]
-async fn mint_with_table_scope_persists_and_lists() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
-    let token = add_member(&f, "admin", "ws_admin").await;
-    let base = format!("/ws/{}/catalog/warehouses/{}/tokens", f.slug, f.wid);
-
-    let resp = f
-        .app
-        .clone()
-        .oneshot(req(
-            "POST",
-            &base,
-            &token,
-            Some(serde_json::json!({
-                "label": "scoped",
-                "permissions": ["read"],
-                "namespace_scope": ["sale"],
-                "table_scope": ["sale.orders"],
-            })),
-        ))
-        .await
-        .unwrap();
-    let (status, _bytes, json) = into_json(resp).await;
-    assert_eq!(status, StatusCode::OK, "mint; body={json}");
-    assert_eq!(
-        json["token"]["table_scope"],
-        serde_json::json!(["sale.orders"]),
-        "table_scope persisted on mint; body={json}"
+        json["token"]["scope"], scope,
+        "multi-grant scope persisted on mint; body={json}"
     );
     let id = json["token"]["id"].as_str().unwrap().to_string();
 
-    // LIST reflects the table_scope on the row.
+    // LIST reflects the scope on the row.
     let resp = f
         .app
         .clone()
@@ -594,16 +567,13 @@ async fn mint_with_table_scope_persists_and_lists() {
         .iter()
         .find(|t| t["id"].as_str() == Some(id.as_str()))
         .expect("minted row listed");
-    assert_eq!(
-        row["table_scope"],
-        serde_json::json!(["sale.orders"]),
-        "table_scope listed; body={json}"
-    );
+    assert_eq!(row["scope"], scope, "scope listed; body={json}");
 }
 
-/// A single-segment table scope entry (no namespace) is rejected with 400.
+/// A table grant on the `"*"` all-namespaces sentinel is rejected with 400 (a
+/// table grant needs a concrete namespace).
 #[tokio::test]
-async fn mint_rejects_malformed_table_scope() {
+async fn mint_rejects_table_grant_on_star() {
     let Some(f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
@@ -620,8 +590,7 @@ async fn mint_rejects_malformed_table_scope() {
             &token,
             Some(serde_json::json!({
                 "label": "bad",
-                "permissions": ["read"],
-                "table_scope": ["orders"],
+                "scope": [{ "namespace": "*", "table": "orders", "permissions": ["read"] }],
             })),
         ))
         .await
@@ -629,13 +598,12 @@ async fn mint_rejects_malformed_table_scope() {
     assert_eq!(
         resp.status(),
         StatusCode::BAD_REQUEST,
-        "a table_scope entry without a namespace must 400"
+        "a table grant on the '*' namespace must 400"
     );
 }
 
-/// PUT edits label + permissions + namespace_scope + table_scope in place; GET
-/// reflects the change and the ORIGINAL raw secret still authenticates with the
-/// new scope (the hash is untouched).
+/// PUT replaces the scope in place; GET reflects the change and the ORIGINAL raw
+/// secret still authenticates with the new grants (the hash is untouched).
 #[tokio::test]
 async fn edit_token_updates_scope() {
     let Some(f) = setup().await else {
@@ -645,7 +613,7 @@ async fn edit_token_updates_scope() {
     let token = add_member(&f, "admin", "ws_admin").await;
     let base = format!("/ws/{}/catalog/warehouses/{}/tokens", f.slug, f.wid);
 
-    // MINT (read-only, ns=sale, table=sale.orders).
+    // MINT (read-only, single sale.orders table grant).
     let resp = f
         .app
         .clone()
@@ -655,9 +623,7 @@ async fn edit_token_updates_scope() {
             &token,
             Some(serde_json::json!({
                 "label": "before",
-                "permissions": ["read"],
-                "namespace_scope": ["sale"],
-                "table_scope": ["sale.orders"],
+                "scope": [{ "namespace": "sale", "table": "orders", "permissions": ["read"] }],
             })),
         ))
         .await
@@ -666,7 +632,11 @@ async fn edit_token_updates_scope() {
     let id = json["token"]["id"].as_str().unwrap().to_string();
     let raw = json["raw"].as_str().unwrap().to_string();
 
-    // PUT — widen perms, change ns + table scope, rename.
+    // PUT — replace with a multi-grant read+write scope, rename.
+    let new_scope = serde_json::json!([
+        { "namespace": "marts", "table": null, "permissions": ["read", "write"] },
+        { "namespace": "marketing", "table": "campaigns", "permissions": ["read"] },
+    ]);
     let resp = f
         .app
         .clone()
@@ -674,43 +644,26 @@ async fn edit_token_updates_scope() {
             "PUT",
             &format!("{base}/{id}"),
             &token,
-            Some(serde_json::json!({
-                "label": "after",
-                "permissions": ["read", "write"],
-                "namespace_scope": ["marts"],
-                "table_scope": ["marts.daily", "marts.weekly"],
-            })),
+            Some(serde_json::json!({ "label": "after", "scope": new_scope })),
         ))
         .await
         .unwrap();
     let (status, _b, json) = into_json(resp).await;
     assert_eq!(status, StatusCode::OK, "edit; body={json}");
     assert_eq!(json["label"], "after", "label updated; body={json}");
-    assert_eq!(
-        json["permissions"],
-        serde_json::json!(["catalog:read", "catalog:write"]),
-        "perms updated; body={json}"
-    );
-    assert_eq!(
-        json["namespace_scope"],
-        serde_json::json!(["marts"]),
-        "ns scope updated; body={json}"
-    );
-    assert_eq!(
-        json["table_scope"],
-        serde_json::json!(["marts.daily", "marts.weekly"]),
-        "table scope updated; body={json}"
-    );
+    assert_eq!(json["scope"], new_scope, "scope replaced; body={json}");
 
-    // The ORIGINAL raw still authenticates and carries the NEW scope.
+    // The ORIGINAL raw still authenticates and carries the NEW grants; the
+    // derived union permissions are {read, write}.
     let auth = f
         .store
         .authenticate_token(&raw)
         .await
         .expect("original secret still valid after edit");
     assert_eq!(auth.permissions, vec!["catalog:read", "catalog:write"]);
-    assert_eq!(auth.namespace_scope, vec!["marts"]);
-    assert_eq!(auth.table_scope, vec!["marts.daily", "marts.weekly"]);
+    assert_eq!(auth.grants.len(), 2, "both grants flow into TokenAuth");
+    assert_eq!(auth.grants[0].namespace, "marts");
+    assert_eq!(auth.grants[1].table.as_deref(), Some("campaigns"));
 }
 
 /// POST rotate mints a NEW secret for the same row: the old raw stops
@@ -734,9 +687,7 @@ async fn rotate_token_invalidates_old_secret() {
             &token,
             Some(serde_json::json!({
                 "label": "rot",
-                "permissions": ["read"],
-                "namespace_scope": ["sale"],
-                "table_scope": ["sale.orders"],
+                "scope": [{ "namespace": "sale", "table": "orders", "permissions": ["read"] }],
             })),
         ))
         .await
@@ -773,8 +724,8 @@ async fn rotate_token_invalidates_old_secret() {
         "label preserved; body={json}"
     );
     assert_eq!(
-        json["token"]["table_scope"],
-        serde_json::json!(["sale.orders"]),
+        json["token"]["scope"],
+        serde_json::json!([{ "namespace": "sale", "table": "orders", "permissions": ["read"] }]),
         "scope preserved across rotate; body={json}"
     );
 
@@ -788,8 +739,9 @@ async fn rotate_token_invalidates_old_secret() {
         .authenticate_token(&raw2)
         .await
         .expect("new secret authenticates");
-    assert_eq!(auth.namespace_scope, vec!["sale"]);
-    assert_eq!(auth.table_scope, vec!["sale.orders"]);
+    assert_eq!(auth.grants.len(), 1);
+    assert_eq!(auth.grants[0].namespace, "sale");
+    assert_eq!(auth.grants[0].table.as_deref(), Some("orders"));
 }
 
 /// Editing or rotating a token that belongs to ANOTHER warehouse (same
@@ -816,9 +768,7 @@ async fn edit_and_rotate_cross_warehouse_404() {
             f.workspace_id.0,
             wid_b,
             "b-token",
-            &["catalog:read".into()],
-            &[],
-            &[],
+            &star_grant(&["catalog:read"]),
         )
         .await
         .expect("mint token for warehouse B");
@@ -836,7 +786,7 @@ async fn edit_and_rotate_cross_warehouse_404() {
             &token,
             Some(serde_json::json!({
                 "label": "hijack",
-                "permissions": ["read", "write"],
+                "scope": [{ "namespace": "*", "table": null, "permissions": ["read", "write"] }],
             })),
         ))
         .await
@@ -869,42 +819,50 @@ async fn edit_and_rotate_cross_warehouse_404() {
     );
 }
 
-/// Focused table-scope coverage: a table-scoped token round-trips its scope
-/// through `authenticate_token` into `TokenAuth.table_scope`, which is exactly
-/// what `front_auth` puts into the `"egret"` claim's `tables` field. The
-/// authorizer's table-FQN allow/deny decision over that claim is unit-tested in
-/// `authorizer.rs` (`gate_table_*` / `table_scope_*`). The FULL live REST path
-/// (create two iceberg tables, load the allowed one + deny the sibling + filter
-/// the list) requires lakekeeper + MinIO table creation and is deferred to the
-/// manual real-Trino integration test.
+/// Focused grant coverage: a mixed-grant token round-trips its scope through
+/// `authenticate_token` into `TokenAuth.grants` — exactly what `front_auth` puts
+/// into the `"egret"` claim's `grants` array. The authorizer's per-resource
+/// allow/deny OR matrix over those grants is unit-tested in `authorizer.rs`
+/// (`mixed_grants_or_semantics` / `gate_*`). The FULL live REST path (create two
+/// iceberg tables, allow the read grant + deny elsewhere across namespaces)
+/// requires lakekeeper + MinIO table creation and is deferred to the manual
+/// real-Trino integration test.
 #[tokio::test]
-async fn table_scope_round_trips_into_token_auth() {
+async fn mixed_grants_round_trip_into_token_auth() {
     let Some(f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
+    let scope = vec![
+        Grant {
+            namespace: "sale".into(),
+            table: None,
+            permissions: vec!["catalog:read".into()],
+        },
+        Grant {
+            namespace: "marketing".into(),
+            table: Some("campaigns".into()),
+            permissions: vec!["catalog:read".into(), "catalog:write".into()],
+        },
+    ];
     let (_token, raw) = f
         .store
-        .create_token(
-            f.workspace_id.0,
-            f.wid,
-            "tbl",
-            &["catalog:read".into()],
-            &["sale".into()],
-            &["sale.orders".into()],
-        )
+        .create_token(f.workspace_id.0, f.wid, "tbl", &scope)
         .await
-        .expect("mint table-scoped token");
+        .expect("mint mixed-grant token");
 
     let auth = f
         .store
         .authenticate_token(&raw)
         .await
-        .expect("authenticate table-scoped token");
+        .expect("authenticate mixed-grant token");
     assert_eq!(
-        auth.table_scope,
-        vec!["sale.orders".to_string()],
-        "table_scope flows into TokenAuth (→ the `tables` front-auth claim)"
+        auth.grants, scope,
+        "grants flow verbatim into TokenAuth (→ the `grants` front-auth claim)"
     );
-    assert_eq!(auth.namespace_scope, vec!["sale".to_string()]);
+    // Coarse-gate union = {read, write}.
+    assert_eq!(
+        auth.permissions,
+        vec!["catalog:read".to_string(), "catalog:write".to_string()]
+    );
 }

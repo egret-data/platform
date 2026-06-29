@@ -40,7 +40,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use egret_auth::session::SessionService;
 use egret_catalog::service::storage_conn::{StorageConnInput, WorkspaceStorageConn};
-use egret_catalog::service::tokens::CatalogToken;
+use egret_catalog::service::tokens::{CatalogToken, Grant};
 use egret_catalog::service::CatalogStore;
 use egret_catalog::CatalogError;
 use egret_core::WorkspaceContext;
@@ -1317,15 +1317,54 @@ async fn warehouse_tasks(
 // is returned exactly once, only from mint.
 // ---------------------------------------------------------------------------
 
+/// A resource grant as carried on the wire (API), using the SHORT UI permission
+/// forms (`"read"` / `"write"`). Mapped to/from the store's [`Grant`] (which uses
+/// the full `catalog:read` / `catalog:write` strings) at the route boundary.
+#[derive(Serialize, Deserialize)]
+struct GrantDto {
+    /// Dotted namespace prefix, or `"*"` for all namespaces.
+    namespace: String,
+    /// `None` = all tables in the namespace; else an exact table name.
+    #[serde(default)]
+    table: Option<String>,
+    /// Short perm forms (`"read"` / `"write"`).
+    permissions: Vec<String>,
+}
+
+impl GrantDto {
+    /// Convert a request `GrantDto` (short perms) into a store [`Grant`] (full
+    /// perms), mapping each permission and rejecting unknown ones.
+    fn into_grant(self) -> Result<Grant, BrowseApiError> {
+        let permissions = self
+            .permissions
+            .iter()
+            .map(|p| map_permission(p))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Grant {
+            namespace: self.namespace,
+            table: self.table,
+            permissions,
+        })
+    }
+}
+
+impl From<Grant> for GrantDto {
+    fn from(g: Grant) -> Self {
+        GrantDto {
+            namespace: g.namespace,
+            table: g.table,
+            permissions: g.permissions.iter().map(|p| unmap_permission(p)).collect(),
+        }
+    }
+}
+
 /// A catalog token as exposed to the workspace-admin UI. Deliberately omits the
 /// stored hash (and never carries the raw secret).
 #[derive(Serialize)]
 struct CatalogTokenDto {
     id: Uuid,
     label: String,
-    permissions: Vec<String>,
-    namespace_scope: Vec<String>,
-    table_scope: Vec<String>,
+    scope: Vec<GrantDto>,
     created_at: DateTime<Utc>,
 }
 
@@ -1334,36 +1373,26 @@ impl From<CatalogToken> for CatalogTokenDto {
         CatalogTokenDto {
             id: t.id,
             label: t.label,
-            permissions: t.permissions,
-            namespace_scope: t.namespace_scope,
-            table_scope: t.table_scope,
+            scope: t.scope.into_iter().map(GrantDto::from).collect(),
             created_at: t.created_at,
         }
     }
 }
 
-/// Request body for minting a token. `permissions` are the short UI forms
-/// (`"read"` / `"write"`) which we map to the catalog permission strings.
+/// Request body for minting a token: a label plus a resource-grant `scope`
+/// (grants carry the short UI perms, mapped to the catalog strings at the store).
 #[derive(Deserialize)]
 struct MintTokenRequest {
     label: String,
-    permissions: Vec<String>,
-    #[serde(default)]
-    namespace_scope: Vec<String>,
-    #[serde(default)]
-    table_scope: Vec<String>,
+    scope: Vec<GrantDto>,
 }
 
-/// Request body for editing a token in place (label / permissions / scopes).
-/// The secret is untouched (use the rotate route to change it).
+/// Request body for editing a token in place (label / scope). The secret is
+/// untouched (use the rotate route to change it).
 #[derive(Deserialize)]
 struct UpdateTokenRequest {
     label: String,
-    permissions: Vec<String>,
-    #[serde(default)]
-    namespace_scope: Vec<String>,
-    #[serde(default)]
-    table_scope: Vec<String>,
+    scope: Vec<GrantDto>,
 }
 
 /// Mint response: the persisted token plus the raw secret (shown once).
@@ -1392,6 +1421,17 @@ fn map_permission(p: &str) -> Result<String, BrowseApiError> {
         other => Err(BrowseApiError::BadRequest(format!(
             "unknown permission '{other}'; valid values are: read, write"
         ))),
+    }
+}
+
+/// Map a stored catalog permission string back to its short UI form. An unknown
+/// value (should never occur for a stored grant) is passed through unchanged so
+/// the DTO never drops a permission silently.
+fn unmap_permission(p: &str) -> String {
+    match p {
+        "catalog:read" => "read".to_string(),
+        "catalog:write" => "write".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -1425,36 +1465,28 @@ async fn mint_token(
     // Verify the warehouse belongs to this workspace first (cross-workspace → 404).
     st.store.get_warehouse(ws, wid).await?;
 
-    if req.permissions.is_empty() {
-        return Err(BrowseApiError::BadRequest(
-            "permissions must not be empty".to_string(),
-        ));
-    }
-    let mut perms = req
-        .permissions
-        .iter()
-        .map(|p| map_permission(p))
-        .collect::<Result<Vec<_>, _>>()?;
-    // Dedup so e.g. `["read","read"]` persists a single `catalog:read`.
-    perms.sort();
-    perms.dedup();
+    let scope = scope_into_grants(req.scope)?;
 
-    let (token, raw) = st
-        .store
-        .create_token(
-            ws,
-            wid,
-            &req.label,
-            &perms,
-            &req.namespace_scope,
-            &req.table_scope,
-        )
-        .await?;
+    let (token, raw) = st.store.create_token(ws, wid, &req.label, &scope).await?;
 
     Ok(Json(MintTokenResponse {
         token: token.into(),
         raw,
     }))
+}
+
+/// Convert a request `scope` (short-perm [`GrantDto`]s) into store [`Grant`]s,
+/// mapping perms and rejecting an empty scope up front (the store's
+/// `validate_grants` also enforces this, but a clear 400 here avoids a round
+/// trip). Per-grant validity (namespace/table shape, perm subset) is enforced by
+/// the store.
+fn scope_into_grants(scope: Vec<GrantDto>) -> Result<Vec<Grant>, BrowseApiError> {
+    if scope.is_empty() {
+        return Err(BrowseApiError::BadRequest(
+            "scope must have at least one grant".to_string(),
+        ));
+    }
+    scope.into_iter().map(GrantDto::into_grant).collect()
 }
 
 /// PUT `/api/ws/{workspace}/catalog/warehouses/{wid}/tokens/{id}` — edit a
@@ -1473,30 +1505,11 @@ async fn update_token(
     // Verify the warehouse belongs to this workspace first (cross-workspace → 404).
     st.store.get_warehouse(ws, wid).await?;
 
-    if req.permissions.is_empty() {
-        return Err(BrowseApiError::BadRequest(
-            "permissions must not be empty".to_string(),
-        ));
-    }
-    let mut perms = req
-        .permissions
-        .iter()
-        .map(|p| map_permission(p))
-        .collect::<Result<Vec<_>, _>>()?;
-    perms.sort();
-    perms.dedup();
+    let scope = scope_into_grants(req.scope)?;
 
     let token = st
         .store
-        .update_token_for_warehouse(
-            ws,
-            wid,
-            id,
-            &req.label,
-            &perms,
-            &req.namespace_scope,
-            &req.table_scope,
-        )
+        .update_token_for_warehouse(ws, wid, id, &req.label, &scope)
         .await?;
     Ok(Json(token.into()))
 }

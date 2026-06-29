@@ -1,12 +1,16 @@
 import { useState } from "react";
-import { Check, Copy, KeyRound, Loader2, Pencil, Plus, RotateCw, Trash2 } from "lucide-react";
+import { Check, Copy, KeyRound, Loader2, Pencil, Plus, RotateCw, Trash2, X } from "lucide-react";
 
 import {
   type CatalogTokenDto,
+  type Grant,
   type MintTokenRequest,
   type UpdateTokenRequest,
+  nsDotted,
+  useCatalogNamespaces,
   useCatalogTokens,
   useMintToken,
+  useNamespaceContents,
   useRevokeToken,
   useRotateToken,
   useUpdateToken,
@@ -15,7 +19,6 @@ import { ApiError } from "@/api/client";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
@@ -27,24 +30,26 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
-/** Split free text on newlines/commas, trim, drop empties → string[]. */
-function parseScope(text: string): string[] {
-  return text
-    .split(/[\n,]/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-}
+/** All-namespaces sentinel. */
+const ALL_NS = "*";
+/** Select value used for the "All tables" option (Radix can't carry null). */
+const ALL_TABLES = "__all_tables__";
 
-/** A table scope entry must be a dotted `namespace.table` with ≥2 non-empty segments. */
-function invalidTableScope(entries: string[]): string | null {
-  for (const t of entries) {
-    const segs = t.split(".");
-    if (segs.length < 2 || segs.some((s) => s.length === 0)) {
-      return `Invalid table scope «${t}»: use a dotted namespace.table (e.g. sales.orders).`;
-    }
-  }
-  return null;
+/** A grant whose perms are the short ("read"/"write") API form. */
+type GrantState = Grant;
+
+/** Human summary of a single grant, e.g. `sale (read, write)` or `marketing.campaigns (read)`. */
+function grantSummary(g: Grant): string {
+  const target = g.table ? `${g.namespace}.${g.table}` : g.namespace;
+  return `${target} (${g.permissions.join(", ")})`;
 }
 
 export default function CatalogAccess({ ws, wid }: { ws: string; wid: string }) {
@@ -104,9 +109,7 @@ export default function CatalogAccess({ ws, wid }: { ws: string; wid: string }) 
             <thead className="text-left text-muted-foreground">
               <tr className="border-b border-border">
                 <th className="py-2 pr-4 font-medium">Label</th>
-                <th className="py-2 pr-4 font-medium">Permissions</th>
-                <th className="py-2 pr-4 font-medium">Namespaces</th>
-                <th className="py-2 pr-4 font-medium">Tables</th>
+                <th className="py-2 pr-4 font-medium">Scope</th>
                 <th className="py-2 pr-4 font-medium">Created</th>
                 <th className="py-2 font-medium sr-only">Actions</th>
               </tr>
@@ -114,31 +117,18 @@ export default function CatalogAccess({ ws, wid }: { ws: string; wid: string }) 
             <tbody>
               {rows.map((token) => (
                 <tr key={token.id} className="border-b border-border last:border-b-0">
-                  <td className="py-2 pr-4 font-medium">{token.label}</td>
-                  <td className="py-2 pr-4">
-                    <div className="flex flex-wrap gap-1">
-                      {token.permissions.includes("catalog:read") && (
-                        <Badge variant="secondary">read</Badge>
-                      )}
-                      {token.permissions.includes("catalog:write") && (
-                        <Badge variant="secondary">write</Badge>
-                      )}
+                  <td className="py-2 pr-4 font-medium align-top">{token.label}</td>
+                  <td className="py-2 pr-4 align-top">
+                    <div className="flex flex-col gap-0.5 font-mono text-xs text-muted-foreground">
+                      {token.scope.map((g, i) => (
+                        <span key={i}>{grantSummary(g)}</span>
+                      ))}
                     </div>
                   </td>
-                  <td className="py-2 pr-4 font-mono text-muted-foreground">
-                    {token.namespace_scope.length === 0
-                      ? "*"
-                      : token.namespace_scope.join(", ")}
-                  </td>
-                  <td className="py-2 pr-4 font-mono text-muted-foreground">
-                    {token.table_scope.length === 0
-                      ? "All tables"
-                      : token.table_scope.join(", ")}
-                  </td>
-                  <td className="py-2 pr-4 text-muted-foreground">
+                  <td className="py-2 pr-4 text-muted-foreground align-top">
                     <RelativeTime iso={token.created_at} />
                   </td>
-                  <td className="py-2 text-right">
+                  <td className="py-2 text-right align-top">
                     <div className="flex justify-end gap-1">
                       <Button
                         variant="ghost"
@@ -229,19 +219,204 @@ function SectionHeader({ onMint }: { onMint: () => void }) {
   );
 }
 
-/** Shared editable fields for the mint + edit dialogs. */
+// ── Grant builder ────────────────────────────────────────────────────────────
+
+function defaultGrant(firstNamespace: string | undefined): GrantState {
+  return { namespace: firstNamespace ?? ALL_NS, table: null, permissions: ["read"] };
+}
+
+/** Validate the builder rows; returns an error string or null. */
+function validateGrants(grants: GrantState[]): string | null {
+  if (grants.length === 0) {
+    return "Add at least one grant (resource) to the scope.";
+  }
+  for (const g of grants) {
+    if (g.permissions.length === 0) {
+      return "Each resource needs at least one permission (read or write).";
+    }
+  }
+  return null;
+}
+
+function GrantRow({
+  ws,
+  wid,
+  namespaces,
+  grant,
+  onChange,
+  onRemove,
+}: {
+  ws: string;
+  wid: string;
+  namespaces: string[];
+  grant: GrantState;
+  onChange: (next: GrantState) => void;
+  onRemove: () => void;
+}) {
+  const isAllNs = grant.namespace === ALL_NS;
+  // Only fetch tables for a concrete namespace.
+  const contents = useNamespaceContents(ws, wid, isAllNs ? null : grant.namespace);
+  const tables = contents.data?.tables ?? [];
+
+  function handleNamespace(next: string) {
+    if (next === ALL_NS) {
+      // "*" forces all-tables (table grants need a concrete namespace).
+      onChange({ ...grant, namespace: ALL_NS, table: null });
+    } else {
+      onChange({ ...grant, namespace: next, table: null });
+    }
+  }
+
+  function handleTable(next: string) {
+    onChange({ ...grant, table: next === ALL_TABLES ? null : next });
+  }
+
+  function togglePerm(perm: "read" | "write", on: boolean) {
+    const set = new Set(grant.permissions);
+    if (on) set.add(perm);
+    else set.delete(perm);
+    // Keep a stable read-before-write order.
+    const ordered = (["read", "write"] as const).filter((p) => set.has(p));
+    onChange({ ...grant, permissions: ordered });
+  }
+
+  return (
+    <div
+      data-testid="grant-row"
+      className="flex flex-wrap items-end gap-2 rounded-md border border-border p-2"
+    >
+      <div className="space-y-1">
+        <span className="text-xs text-muted-foreground">Namespace</span>
+        <Select value={grant.namespace} onValueChange={handleNamespace}>
+          <SelectTrigger aria-label="Namespace" className="w-40">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL_NS}>All namespaces (*)</SelectItem>
+            {namespaces.map((ns) => (
+              <SelectItem key={ns} value={ns}>
+                {ns}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="space-y-1">
+        <span className="text-xs text-muted-foreground">Table</span>
+        <Select
+          value={grant.table ?? ALL_TABLES}
+          onValueChange={handleTable}
+          disabled={isAllNs}
+        >
+          <SelectTrigger aria-label="Table" className="w-40" disabled={isAllNs}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL_TABLES}>All tables</SelectItem>
+            {tables.map((t) => (
+              <SelectItem key={t} value={t}>
+                {t}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="space-y-1">
+        <span className="text-xs text-muted-foreground">Permissions</span>
+        <div className="flex gap-2">
+          <PermissionToggle
+            label="Read"
+            checked={grant.permissions.includes("read")}
+            onChange={(on) => togglePerm("read", on)}
+          />
+          <PermissionToggle
+            label="Write"
+            checked={grant.permissions.includes("write")}
+            onChange={(on) => togglePerm("write", on)}
+          />
+        </div>
+      </div>
+
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        aria-label="Remove resource"
+        className="ml-auto text-muted-foreground hover:text-destructive"
+        onClick={onRemove}
+      >
+        <X className="h-4 w-4" />
+      </Button>
+    </div>
+  );
+}
+
+function GrantBuilder({
+  ws,
+  wid,
+  namespaces,
+  grants,
+  onChange,
+}: {
+  ws: string;
+  wid: string;
+  namespaces: string[];
+  grants: GrantState[];
+  onChange: (next: GrantState[]) => void;
+}) {
+  function update(idx: number, next: GrantState) {
+    onChange(grants.map((g, i) => (i === idx ? next : g)));
+  }
+  function remove(idx: number) {
+    onChange(grants.filter((_, i) => i !== idx));
+  }
+  function add() {
+    onChange([...grants, defaultGrant(namespaces[0])]);
+  }
+
+  return (
+    <div className="space-y-2">
+      <span className="text-sm font-medium">Scope</span>
+      <div className="space-y-2">
+        {grants.map((g, i) => (
+          <GrantRow
+            key={i}
+            ws={ws}
+            wid={wid}
+            namespaces={namespaces}
+            grant={g}
+            onChange={(next) => update(i, next)}
+            onRemove={() => remove(i)}
+          />
+        ))}
+      </div>
+      <Button type="button" variant="outline" size="sm" onClick={add}>
+        <Plus className="h-4 w-4" />
+        Add resource
+      </Button>
+    </div>
+  );
+}
+
+// ── Shared dialog form ───────────────────────────────────────────────────────
+
 interface TokenFormState {
   label: string;
-  read: boolean;
-  write: boolean;
-  namespaces: string;
-  tables: string;
+  grants: GrantState[];
 }
 
 function TokenFormFields({
+  ws,
+  wid,
+  namespaces,
   state,
   onChange,
 }: {
+  ws: string;
+  wid: string;
+  namespaces: string[];
   state: TokenFormState;
   onChange: (next: TokenFormState) => void;
 }) {
@@ -257,58 +432,16 @@ function TokenFormFields({
         />
       </div>
 
-      <div className="space-y-1.5">
-        <span className="text-sm font-medium">Permissions</span>
-        <div className="flex gap-2">
-          <PermissionToggle
-            label="Read"
-            checked={state.read}
-            onChange={(read) => onChange({ ...state, read })}
-          />
-          <PermissionToggle
-            label="Write"
-            checked={state.write}
-            onChange={(write) => onChange({ ...state, write })}
-          />
-        </div>
-        {!state.read && !state.write && (
-          <p className="text-xs text-destructive">Select at least one permission.</p>
-        )}
-      </div>
-
-      <div className="space-y-1.5">
-        <span className="text-sm font-medium">Namespaces</span>
-        <Input
-          value={state.namespaces}
-          onChange={(e) => onChange({ ...state, namespaces: e.target.value })}
-          placeholder="marts, staging — leave blank for all"
-        />
-      </div>
-
-      <div className="space-y-1.5">
-        <span className="text-sm font-medium">Tables</span>
-        <textarea
-          value={state.tables}
-          onChange={(e) => onChange({ ...state, tables: e.target.value })}
-          placeholder="sales.orders, marts.daily — leave blank for all tables"
-          rows={3}
-          className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        />
-        <p className="text-xs text-muted-foreground">
-          Dotted namespace.table per line or comma-separated. Leave blank for all tables.
-        </p>
-      </div>
+      <GrantBuilder
+        ws={ws}
+        wid={wid}
+        namespaces={namespaces}
+        grants={state.grants}
+        onChange={(grants) => onChange({ ...state, grants })}
+      />
     </>
   );
 }
-
-const emptyForm: TokenFormState = {
-  label: "",
-  read: true,
-  write: false,
-  namespaces: "",
-  tables: "",
-};
 
 /** Reusable one-time secret reveal (mint + rotate share this). */
 function RevealSecret({ raw, onDone }: { raw: string; onDone: () => void }) {
@@ -380,15 +513,29 @@ function MintTokenDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const mintMutation = useMintToken(ws, wid);
+  const nsQuery = useCatalogNamespaces(ws, wid);
+  const namespaces = (nsQuery.data ?? []).map((n) => nsDotted(n.levels));
 
   const [phase, setPhase] = useState<MintPhase>("form");
-  const [form, setForm] = useState<TokenFormState>(emptyForm);
+  const [form, setForm] = useState<TokenFormState>(() => ({ label: "", grants: [defaultGrant(undefined)] }));
+  const [seeded, setSeeded] = useState(false);
   const [raw, setRaw] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Seed the default grant's namespace from the first real namespace once loaded.
+  if (open && !seeded && namespaces.length > 0) {
+    setSeeded(true);
+    setForm((f) =>
+      f.grants.length === 1 && f.grants[0].namespace === ALL_NS && f.grants[0].table === null
+        ? { ...f, grants: [defaultGrant(namespaces[0])] }
+        : f,
+    );
+  }
+
   function reset() {
     setPhase("form");
-    setForm(emptyForm);
+    setForm({ label: "", grants: [defaultGrant(undefined)] });
+    setSeeded(false);
     setRaw(null);
     setError(null);
     mintMutation.reset();
@@ -399,32 +546,20 @@ function MintTokenDialog({
     onOpenChange(next);
   }
 
-  const canSubmit =
-    form.label.trim().length > 0 && (form.read || form.write) && !mintMutation.isPending;
+  const canSubmit = form.label.trim().length > 0 && !mintMutation.isPending;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!canSubmit) return;
     setError(null);
 
-    const table_scope = parseScope(form.tables);
-    const tableErr = invalidTableScope(table_scope);
-    if (tableErr) {
-      setError(tableErr);
+    const grantErr = validateGrants(form.grants);
+    if (grantErr) {
+      setError(grantErr);
       return;
     }
 
-    const permissions = [
-      ...(form.read ? ["read"] : []),
-      ...(form.write ? ["write"] : []),
-    ];
-
-    const req: MintTokenRequest = {
-      label: form.label.trim(),
-      permissions,
-      namespace_scope: parseScope(form.namespaces),
-      table_scope,
-    };
+    const req: MintTokenRequest = { label: form.label.trim(), scope: form.grants };
 
     try {
       const res = await mintMutation.mutateAsync(req);
@@ -448,7 +583,13 @@ function MintTokenDialog({
             </DialogHeader>
 
             <div className="my-4 space-y-4">
-              <TokenFormFields state={form} onChange={setForm} />
+              <TokenFormFields
+                ws={ws}
+                wid={wid}
+                namespaces={namespaces}
+                state={form}
+                onChange={setForm}
+              />
 
               {error && (
                 <Alert variant="destructive">
@@ -487,8 +628,10 @@ function EditTokenDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const updateMutation = useUpdateToken(ws, wid);
+  const nsQuery = useCatalogNamespaces(ws, wid);
+  const namespaces = (nsQuery.data ?? []).map((n) => nsDotted(n.levels));
 
-  const [form, setForm] = useState<TokenFormState>(emptyForm);
+  const [form, setForm] = useState<TokenFormState>({ label: "", grants: [] });
   const [error, setError] = useState<string | null>(null);
   // Re-seed the form whenever a new token target is opened.
   const [seededId, setSeededId] = useState<string | null>(null);
@@ -496,10 +639,12 @@ function EditTokenDialog({
     setSeededId(token.id);
     setForm({
       label: token.label,
-      read: token.permissions.includes("catalog:read"),
-      write: token.permissions.includes("catalog:write"),
-      namespaces: token.namespace_scope.join("\n"),
-      tables: token.table_scope.join("\n"),
+      // Deep-copy the grants so edits don't mutate the cached token.
+      grants: token.scope.map((g) => ({
+        namespace: g.namespace,
+        table: g.table,
+        permissions: [...g.permissions],
+      })),
     });
     setError(null);
     updateMutation.reset();
@@ -514,32 +659,20 @@ function EditTokenDialog({
     onOpenChange(next);
   }
 
-  const canSubmit =
-    form.label.trim().length > 0 && (form.read || form.write) && !updateMutation.isPending;
+  const canSubmit = form.label.trim().length > 0 && !updateMutation.isPending;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!token || !canSubmit) return;
     setError(null);
 
-    const table_scope = parseScope(form.tables);
-    const tableErr = invalidTableScope(table_scope);
-    if (tableErr) {
-      setError(tableErr);
+    const grantErr = validateGrants(form.grants);
+    if (grantErr) {
+      setError(grantErr);
       return;
     }
 
-    const permissions = [
-      ...(form.read ? ["read"] : []),
-      ...(form.write ? ["write"] : []),
-    ];
-
-    const body: UpdateTokenRequest = {
-      label: form.label.trim(),
-      permissions,
-      namespace_scope: parseScope(form.namespaces),
-      table_scope,
-    };
+    const body: UpdateTokenRequest = { label: form.label.trim(), scope: form.grants };
 
     try {
       await updateMutation.mutateAsync({ id: token.id, body });
@@ -556,13 +689,18 @@ function EditTokenDialog({
           <DialogHeader>
             <DialogTitle>Edit catalog token</DialogTitle>
             <DialogDescription>
-              Update the token&apos;s label, permissions, and scope. The existing secret keeps
-              working.
+              Update the token&apos;s label and resource scope. The existing secret keeps working.
             </DialogDescription>
           </DialogHeader>
 
           <div className="my-4 space-y-4">
-            <TokenFormFields state={form} onChange={setForm} />
+            <TokenFormFields
+              ws={ws}
+              wid={wid}
+              namespaces={namespaces}
+              state={form}
+              onChange={setForm}
+            />
 
             {error && (
               <Alert variant="destructive">

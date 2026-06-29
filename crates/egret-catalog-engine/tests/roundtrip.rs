@@ -68,9 +68,10 @@ use uuid::Uuid;
 ///
 /// CE-4: the engine now runs `EgretAuthorizer`, which gates DATA actions off the
 /// `egret` authentication claim (fail-closed without it). So we inject a
-/// token-shaped principal carrying a FULL-scope claim (`perms: [read, write]`,
-/// empty `ns` = all namespaces) — the same shape the prod front-auth bridge
-/// builds — so the round-trip proceeds through the real authorizer's claim path.
+/// token-shaped principal carrying a FULL-scope grants claim (a single `"*"`
+/// all-namespaces grant with read+write) — the same shape the prod front-auth
+/// bridge builds — so the round-trip proceeds through the real authorizer's
+/// grants claim path.
 async fn inject_request_metadata(mut request: Request, next: Next) -> Response {
     let uid = UserId::try_from(
         format!(
@@ -83,7 +84,11 @@ async fn inject_request_metadata(mut request: Request, next: Next) -> Response {
     let authentication = Authentication::builder()
         .token_header(None)
         .claims(serde_json::json!({
-            "egret": { "perms": ["catalog:read", "catalog:write"], "ns": [] }
+            "egret": {
+                "grants": [
+                    { "ns": "*", "table": null, "perms": ["catalog:read", "catalog:write"] }
+                ]
+            }
         }))
         .subject(uid.clone().into())
         .name(Some("Roundtrip Token".to_string()))

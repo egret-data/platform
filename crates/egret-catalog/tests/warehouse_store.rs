@@ -3,11 +3,17 @@
 //! a focus on workspace-scoping (cross-tenant rows must read as NotFound).
 mod common;
 use common::{seed_workspace, store};
+use egret_catalog::service::tokens::Grant;
 use egret_catalog::CatalogError;
 use uuid::Uuid;
 
-fn rw_perms() -> Vec<String> {
-    vec!["catalog:read".to_string(), "catalog:write".to_string()]
+/// A single all-namespaces read+write grant.
+fn rw_scope() -> Vec<Grant> {
+    vec![Grant {
+        namespace: "*".to_string(),
+        table: None,
+        permissions: vec!["catalog:read".to_string(), "catalog:write".to_string()],
+    }]
 }
 
 #[tokio::test]
@@ -189,10 +195,7 @@ async fn token_is_scoped_to_its_warehouse() {
         .await
         .unwrap();
 
-    let (token, raw) = s
-        .create_token(ws, wh1.id, "t", &rw_perms(), &[], &[])
-        .await
-        .unwrap();
+    let (token, raw) = s.create_token(ws, wh1.id, "t", &rw_scope()).await.unwrap();
     assert_eq!(token.warehouse_id, wh1.id);
 
     // Listed under its own warehouse.

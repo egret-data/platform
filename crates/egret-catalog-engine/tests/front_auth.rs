@@ -31,6 +31,7 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::response::Response;
 use egret_auth::users::UserRepo;
+use egret_catalog::service::tokens::Grant;
 use egret_catalog::service::CatalogStore;
 use egret_catalog_engine::{
     build_state, ensure_bootstrapped, mount_catalog_engine, provision_workspace_warehouse,
@@ -44,6 +45,25 @@ use tower::ServiceExt; // for `oneshot`
 use uuid::Uuid;
 
 const SYSTEM_USER: &str = "egret-system";
+
+/// A single all-namespaces grant (token scope v2 equivalent of the old empty
+/// `namespace_scope` = "all namespaces") with the given full perm strings.
+fn star_scope(perms: &[&str]) -> Vec<Grant> {
+    vec![Grant {
+        namespace: "*".to_string(),
+        table: None,
+        permissions: perms.iter().map(|p| p.to_string()).collect(),
+    }]
+}
+
+/// A single whole-namespace grant for `ns` with the given full perm strings.
+fn ns_scope(ns: &str, perms: &[&str]) -> Vec<Grant> {
+    vec![Grant {
+        namespace: ns.to_string(),
+        table: None,
+        permissions: perms.iter().map(|p| p.to_string()).collect(),
+    }]
+}
 
 /// Dev MinIO config matching the egret dev stack (bucket `warehouse`,
 /// egret/egretsecret, S3-compat at localhost:9000).
@@ -149,9 +169,7 @@ async fn front_auth_enforces_per_workspace_ownership() {
             ws_a,
             wid_a,
             "t5-token-a",
-            &["catalog:read".to_string(), "catalog:write".to_string()],
-            &[],
-            &[],
+            &star_scope(&["catalog:read", "catalog:write"]),
         )
         .await
         .expect("mint catalog token for workspace A");
@@ -345,14 +363,7 @@ async fn front_auth_enforces_per_token_permissions() {
 
     // --- Mint read-only and read-write tokens for workspace A ---------------
     let (_row, token_ro) = store
-        .create_token(
-            ws_a,
-            wid_a,
-            "t6-ro",
-            &["catalog:read".to_string()],
-            &[],
-            &[],
-        )
+        .create_token(ws_a, wid_a, "t6-ro", &star_scope(&["catalog:read"]))
         .await
         .expect("mint read-only token");
 
@@ -361,9 +372,7 @@ async fn front_auth_enforces_per_token_permissions() {
             ws_a,
             wid_a,
             "t6-rw",
-            &["catalog:read".to_string(), "catalog:write".to_string()],
-            &[],
-            &[],
+            &star_scope(&["catalog:read", "catalog:write"]),
         )
         .await
         .expect("mint read-write token");
@@ -640,9 +649,7 @@ async fn front_auth_full_scope_token_is_unrestricted() {
             ws_a,
             wid_a,
             "ce4-full",
-            &["catalog:read".to_string(), "catalog:write".to_string()],
-            &[],
-            &[],
+            &star_scope(&["catalog:read", "catalog:write"]),
         )
         .await
         .expect("mint full-scope rw token");
@@ -755,9 +762,7 @@ async fn front_auth_namespace_scope_is_enforced() {
             ws_a,
             wid_a,
             "ce4ns-full",
-            &["catalog:read".to_string(), "catalog:write".to_string()],
-            &[],
-            &[],
+            &star_scope(&["catalog:read", "catalog:write"]),
         )
         .await
         .expect("mint full-scope token");
@@ -791,9 +796,7 @@ async fn front_auth_namespace_scope_is_enforced() {
             ws_a,
             wid_a,
             "ce4ns-marts",
-            &["catalog:read".to_string(), "catalog:write".to_string()],
-            &["marts".to_string()],
-            &[],
+            &ns_scope("marts", &["catalog:read", "catalog:write"]),
         )
         .await
         .expect("mint marts-scoped token");

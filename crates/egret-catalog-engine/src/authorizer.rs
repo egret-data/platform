@@ -29,6 +29,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use axum::Router;
+use egret_catalog::service::tokens::Grant;
 use lakekeeper::{
     api::{iceberg::v1::Result, ApiContext, RequestMetadata},
     service::{
@@ -131,106 +132,129 @@ fn view_action_is_write(a: &CatalogViewAction) -> bool {
     }
 }
 
+/// The all-namespaces sentinel for a grant's `namespace`.
+const ALL_NS: &str = "*";
+
+/// The permission string required for an action of the given write-ness.
+fn need(is_write: bool) -> &'static str {
+    if is_write {
+        PERM_WRITE
+    } else {
+        PERM_READ
+    }
+}
+
 /// True if `scope_entry` (a dot-joined namespace prefix, e.g. `"staging.raw"`)
-/// is a subtree-prefix of `target` (the target namespace's dot-split levels).
+/// is a subtree-prefix of `target` (the target namespace's dot-split levels) —
+/// i.e. the grant's namespace is an ancestor-or-self of the target, so the grant
+/// covers the target.
 fn ns_prefix_matches(scope_entry: &str, target: &[String]) -> bool {
     let want: Vec<&str> = scope_entry.split('.').collect();
     want.len() <= target.len() && want.iter().zip(target).all(|(a, b)| a == b)
 }
 
-/// Core scope decision: the principal needs the right permission and (when
-/// `ns_scope` is non-empty) a subtree-prefix match against `target_ns`.
-fn decide_scope(
-    perms: &[String],
-    ns_scope: &[String],
-    target_ns: &[String],
-    is_write: bool,
-) -> bool {
-    let need = if is_write { PERM_WRITE } else { PERM_READ };
-    if !perms.iter().any(|p| p == need) {
-        return false;
-    }
-    if ns_scope.is_empty() {
-        return true;
-    }
-    ns_scope.iter().any(|e| ns_prefix_matches(e, target_ns))
+/// The reverse of [`ns_prefix_matches`]: true if `target` is an ancestor-or-self
+/// of `grant_ns` (the grant lives at-or-below `target`). Used for navigation:
+/// a `B.t2`-only grant must let the client read/list `B` (and the root) to
+/// reach the granted table. `"*"` is handled by the caller (covers everything).
+fn ns_prefix_matches_levels(target: &[String], grant_ns: &str) -> bool {
+    let grant_levels: Vec<&str> = grant_ns.split('.').collect();
+    target.len() <= grant_levels.len() && target.iter().zip(&grant_levels).all(|(a, b)| a == b)
 }
 
-/// Table-action decision: the namespace-level `decide_scope` must pass AND, when
-/// `table_scope` is non-empty, the target table's FQN (`target_ns.join(".") +
-/// "." + table_name`) must be an exact member of `table_scope`.
-///
-/// An empty `table_scope` falls back to the namespace decision unchanged, so a
-/// token with no table scope keeps its exact prior behaviour.
-fn decide_table_scope(
-    perms: &[String],
-    ns_scope: &[String],
-    table_scope: &[String],
-    target_ns: &[String],
-    table_name: &str,
-    is_write: bool,
-) -> bool {
-    if !decide_scope(perms, ns_scope, target_ns, is_write) {
-        return false;
-    }
-    if table_scope.is_empty() {
-        return true;
-    }
-    let mut fqn = target_ns.join(".");
-    fqn.push('.');
-    fqn.push_str(table_name);
-    table_scope.iter().any(|t| t == &fqn)
+/// True if grant `g`'s namespace covers `target` (the grant is at-or-above the
+/// target). `"*"` covers every namespace.
+fn grant_covers_ns(g: &Grant, target: &[String]) -> bool {
+    g.namespace == ALL_NS || ns_prefix_matches(&g.namespace, target)
 }
 
-/// Read a `"egret"` claim array field (`ns` / `tables`) into a `Vec<String>`,
-/// defaulting to empty when the field is absent or not an array.
-fn claim_string_array(claim: &serde_json::Value, field: &str) -> Vec<String> {
-    claim
-        .get(field)
-        .and_then(|x| x.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default()
+/// Table-action decision (OR over grants): allowed if ANY grant carries the
+/// needed perm, covers `target_ns`, and either has no `table` (whole-namespace)
+/// or names exactly `name`.
+fn decide_table(grants: &[Grant], target_ns: &[String], name: &str, is_write: bool) -> bool {
+    let need = need(is_write);
+    grants.iter().any(|g| {
+        g.permissions.iter().any(|p| p == need)
+            && grant_covers_ns(g, target_ns)
+            && g.table.as_deref().is_none_or(|t| t == name)
+    })
 }
 
-/// Extract `(perms, ns, tables)` from the request's `"egret"` authentication
-/// claim. Returns `None` (fail-closed) when there is no authentication or no
-/// claim. `ns` / `tables` default to empty when absent.
-fn egret_claim(metadata: &RequestMetadata) -> Option<(Vec<String>, Vec<String>, Vec<String>)> {
+/// Namespace READ decision (GetMetadata / List*): allowed if ANY grant with
+/// `read` *relates* to `target_ns` — it either covers the target, OR the target
+/// is an ancestor of the grant's namespace (navigation down to a granted child
+/// table). A table-only grant therefore lets the client list its namespace.
+fn decide_ns_read(grants: &[Grant], target_ns: &[String]) -> bool {
+    grants.iter().any(|g| {
+        g.permissions.iter().any(|p| p == PERM_READ)
+            && (grant_covers_ns(g, target_ns)
+                || (g.namespace != ALL_NS && ns_prefix_matches_levels(target_ns, &g.namespace)))
+    })
+}
+
+/// Namespace WRITE decision (Create*/Delete/UpdateProperties/SetProtection):
+/// allowed only via a WHOLE-namespace grant (`table is None`) with `write` that
+/// covers `target_ns`. A table-only grant never permits namespace writes.
+fn decide_ns_write(grants: &[Grant], target_ns: &[String]) -> bool {
+    grants.iter().any(|g| {
+        g.table.is_none()
+            && g.permissions.iter().any(|p| p == PERM_WRITE)
+            && grant_covers_ns(g, target_ns)
+    })
+}
+
+/// Object (view / generic-table) decision: allowed if ANY whole-namespace grant
+/// (`table is None`) with the needed perm covers `ns`. Views/generic tables are
+/// not individually pickable, so only whole-namespace grants cover them.
+fn decide_object_ns(grants: &[Grant], ns: &[String], is_write: bool) -> bool {
+    let need = need(is_write);
+    grants.iter().any(|g| {
+        g.table.is_none() && g.permissions.iter().any(|p| p == need) && grant_covers_ns(g, ns)
+    })
+}
+
+/// Extract the resource `grants` from the request's `"egret"` authentication
+/// claim (`{ "egret": { "grants": [ { "ns", "table", "perms" } ] } }`). Returns
+/// `None` (fail-closed) when there is no authentication or no `"egret"` claim;
+/// returns `Some(vec![])` (deny-all) when the claim is present but carries no
+/// grants. Malformed grant entries are skipped defensively.
+fn egret_grants(metadata: &RequestMetadata) -> Option<Vec<Grant>> {
     let v = metadata.authentication()?.claims("egret")?;
-    let perms = v
-        .get("perms")?
-        .as_array()?
+    let arr = v.get("grants")?.as_array()?;
+    let grants = arr
         .iter()
-        .filter_map(|x| x.as_str().map(String::from))
+        .filter_map(|g| {
+            let namespace = g.get("ns")?.as_str()?.to_string();
+            // `table` may be absent or JSON null (whole-namespace grant).
+            let table = g.get("table").and_then(|t| t.as_str()).map(String::from);
+            let permissions = g
+                .get("perms")?
+                .as_array()?
+                .iter()
+                .filter_map(|p| p.as_str().map(String::from))
+                .collect();
+            Some(Grant {
+                namespace,
+                table,
+                permissions,
+            })
+        })
         .collect();
-    let ns = claim_string_array(v, "ns");
-    let tables = claim_string_array(v, "tables");
-    Some((perms, ns, tables))
+    Some(grants)
 }
 
 impl EgretAuthorizer {
-    /// Shared data-action gate: bypass for the system principal, else evaluate
-    /// the egret scope claim against `target_ns` and the action's write-ness.
-    fn gate(&self, metadata: &RequestMetadata, target_ns: &[String], is_write: bool) -> bool {
-        // `user_id()` (not `actor()`) is the right bypass identity here: the
-        // system principal has a fixed `UserId` and never assumes a role, so the
-        // underlying user id is always the in-process principal we want to match.
-        if metadata.user_id() == Some(&self.system_principal) {
-            return true;
-        }
-        match egret_claim(metadata) {
-            Some((perms, ns, _tables)) => decide_scope(&perms, &ns, target_ns, is_write),
-            None => false,
-        }
+    /// Whether `metadata`'s principal is the system principal (the bootstrap /
+    /// in-process browse bypass). `user_id()` (not `actor()`) is the right bypass
+    /// identity: the system principal has a fixed `UserId` and never assumes a
+    /// role, so the underlying user id is always the in-process principal.
+    fn is_system(&self, metadata: &RequestMetadata) -> bool {
+        metadata.user_id() == Some(&self.system_principal)
     }
 
-    /// Table-action gate: like [`EgretAuthorizer::gate`] but also enforces the
-    /// token's `table_scope` against the target table's namespace + name. The
-    /// system principal still bypasses entirely; an absent claim fails closed.
+    /// Table-action gate: system bypass, else OR the token's grants over the
+    /// target table (namespace coverage + optional exact table + needed perm).
+    /// An absent `"egret"` claim fails closed.
     fn gate_table(
         &self,
         metadata: &RequestMetadata,
@@ -238,13 +262,47 @@ impl EgretAuthorizer {
         table_name: &str,
         is_write: bool,
     ) -> bool {
-        if metadata.user_id() == Some(&self.system_principal) {
+        if self.is_system(metadata) {
             return true;
         }
-        match egret_claim(metadata) {
-            Some((perms, ns, tables)) => {
-                decide_table_scope(&perms, &ns, &tables, target_ns, table_name, is_write)
+        match egret_grants(metadata) {
+            Some(grants) => decide_table(&grants, target_ns, table_name, is_write),
+            None => false,
+        }
+    }
+
+    /// Namespace-action gate: system bypass, else read uses the navigation-aware
+    /// [`decide_ns_read`] and write uses the whole-namespace [`decide_ns_write`].
+    /// An absent `"egret"` claim fails closed.
+    fn gate_namespace(
+        &self,
+        metadata: &RequestMetadata,
+        target_ns: &[String],
+        is_write: bool,
+    ) -> bool {
+        if self.is_system(metadata) {
+            return true;
+        }
+        match egret_grants(metadata) {
+            Some(grants) => {
+                if is_write {
+                    decide_ns_write(&grants, target_ns)
+                } else {
+                    decide_ns_read(&grants, target_ns)
+                }
             }
+            None => false,
+        }
+    }
+
+    /// Object (view / generic-table) gate: system bypass, else OR whole-namespace
+    /// grants over `ns`. An absent `"egret"` claim fails closed.
+    fn gate_object(&self, metadata: &RequestMetadata, ns: &[String], is_write: bool) -> bool {
+        if self.is_system(metadata) {
+            return true;
+        }
+        match egret_grants(metadata) {
+            Some(grants) => decide_object_ns(&grants, ns, is_write),
             None => false,
         }
     }
@@ -377,7 +435,7 @@ impl Authorizer for EgretAuthorizer {
                     || info.namespace().namespace_ident.as_ref().as_slice(),
                     |nwp| nwp.namespace_ident().as_ref().as_slice(),
                 );
-                self.gate(metadata, levels, namespace_action_is_write(action))
+                self.gate_namespace(metadata, levels, namespace_action_is_write(action))
             })
             .collect())
     }
@@ -423,7 +481,7 @@ impl Authorizer for EgretAuthorizer {
             .iter()
             .map(|(ns, action_on_view)| {
                 let action: CatalogViewAction = action_on_view.action.clone().into();
-                self.gate(
+                self.gate_object(
                     metadata,
                     ns.namespace_ident().as_ref(),
                     view_action_is_write(&action),
@@ -445,11 +503,11 @@ impl Authorizer for EgretAuthorizer {
         )],
     ) -> Result<Vec<bool>, IsAllowedActionError> {
         // TODO(CE-4): egret doesn't expose generic tables yet; gate conservatively
-        // as write (the system principal still bypasses via gate(); token
+        // as write (the system principal still bypasses via gate_object(); token
         // principals fail-closed — never the old unconditional AllowAll).
         Ok(actions
             .iter()
-            .map(|(ns, _)| self.gate(metadata, ns.namespace_ident().as_ref(), true))
+            .map(|(ns, _)| self.gate_object(metadata, ns.namespace_ident().as_ref(), true))
             .collect())
     }
 
@@ -625,7 +683,7 @@ mod tests {
         assert!(!view_action_is_write(&CatalogViewAction::IncludeInList));
     }
 
-    // --- ns_prefix_matches -------------------------------------------------
+    // --- ns_prefix_matches / ns_prefix_matches_levels ----------------------
 
     #[test]
     fn ns_prefix_matching() {
@@ -639,158 +697,156 @@ mod tests {
         assert!(!ns_prefix_matches("staging.raw", &target(&["staging"])));
     }
 
-    // --- decide_scope ------------------------------------------------------
-
     #[test]
-    fn decide_scope_perms() {
-        // read-only perm cannot write
-        assert!(!decide_scope(
-            &[s("catalog:read")],
-            &[],
-            &target(&["x"]),
-            true
-        ));
-        // read+write perm can write
-        assert!(decide_scope(
-            &[s("catalog:read"), s("catalog:write")],
-            &[],
-            &target(&["x"]),
-            true
-        ));
-        // read-only perm can read
-        assert!(decide_scope(
-            &[s("catalog:read")],
-            &[],
-            &target(&["x"]),
-            false
-        ));
-    }
-
-    #[test]
-    fn decide_scope_namespace() {
-        // empty ns scope => unrestricted
-        assert!(decide_scope(
-            &[s("catalog:read")],
-            &[],
-            &target(&["anything", "goes"]),
-            false
-        ));
-        // ns scope ["marts"] does not match target ["marketing"]
-        assert!(!decide_scope(
-            &[s("catalog:read")],
-            &[s("marts")],
+    fn ns_prefix_matches_levels_is_ancestor_or_self() {
+        // target is an ancestor-or-self of the grant ns → true (navigation).
+        assert!(ns_prefix_matches_levels(&[], "marketing")); // root
+        assert!(ns_prefix_matches_levels(
             &target(&["marketing"]),
-            false
+            "marketing"
         ));
-        // ns scope ["marts"] matches target ["marts", "x"]
-        assert!(decide_scope(
-            &[s("catalog:read")],
-            &[s("marts")],
-            &target(&["marts", "x"]),
-            false
+        assert!(ns_prefix_matches_levels(
+            &target(&["staging"]),
+            "staging.raw"
         ));
+        // target deeper than the grant ns → false.
+        assert!(!ns_prefix_matches_levels(
+            &target(&["staging", "raw", "x"]),
+            "staging.raw"
+        ));
+        // unrelated sibling → false.
+        assert!(!ns_prefix_matches_levels(&target(&["sales"]), "marketing"));
     }
 
-    // --- decide_table_scope ------------------------------------------------
+    // --- grant decisions: the OR matrix ------------------------------------
 
-    #[test]
-    fn table_scope_allows_listed_table_and_denies_others() {
-        // perms=read, ns empty, tables=["sale.orders"]
-        let perms = vec![s("catalog:read")];
-        let ns: Vec<String> = vec![];
-        let tables = vec![s("sale.orders")];
-        // target table sale.orders → allowed (read)
-        assert!(decide_table_scope(
-            &perms,
-            &ns,
-            &tables,
-            &target(&["sale"]),
-            "orders",
-            false
-        ));
-        // sibling sale.customers → denied
-        assert!(!decide_table_scope(
-            &perms,
-            &ns,
-            &tables,
-            &target(&["sale"]),
-            "customers",
-            false
-        ));
+    fn g(ns: &str, table: Option<&str>, perms: &[&str]) -> Grant {
+        Grant {
+            namespace: ns.into(),
+            table: table.map(|t| t.into()),
+            permissions: perms.iter().map(|p| p.to_string()).collect(),
+        }
     }
 
     #[test]
-    fn empty_table_scope_falls_back_to_namespace_decision() {
-        let perms = vec![s("catalog:read")];
-        // No table scope → unrestricted at table level (ns decision governs).
-        assert!(decide_table_scope(
-            &perms,
-            &[],
-            &[],
-            &target(&["sale"]),
-            "anything",
+    fn mixed_grants_or_semantics() {
+        // `sale` whole-namespace read-only + `marketing.campaigns` read+write.
+        let grants = vec![
+            g("sale", None, &["catalog:read"]),
+            g(
+                "marketing",
+                Some("campaigns"),
+                &["catalog:read", "catalog:write"],
+            ),
+        ];
+        // table actions
+        assert!(decide_table(&grants, &target(&["sale"]), "orders", false)); // sale read
+        assert!(!decide_table(&grants, &target(&["sale"]), "orders", true)); // sale write -> no
+        assert!(decide_table(
+            &grants,
+            &target(&["marketing"]),
+            "campaigns",
+            true
+        )); // mkt.campaigns write
+        assert!(!decide_table(
+            &grants,
+            &target(&["marketing"]),
+            "leads",
             false
-        ));
-        // Even with a matching table scope, a read-only perm cannot write.
-        assert!(!decide_table_scope(
-            &perms,
-            &[],
-            &[s("sale.orders")],
-            &target(&["sale"]),
-            "orders",
+        )); // other table
+        assert!(!decide_table(
+            &grants,
+            &target(&["finance"]),
+            "ledger",
+            false
+        )); // other ns
+            // namespace navigation: a table-only grant lets you read its namespace + root
+        assert!(decide_ns_read(&grants, &target(&["marketing"])));
+        assert!(decide_ns_read(&grants, &[])); // root list
+        assert!(!decide_ns_write(&grants, &target(&["marketing"]))); // no whole-ns write grant
+        assert!(!decide_ns_write(&grants, &target(&["sale"]))); // sale is read-only
+    }
+
+    #[test]
+    fn table_only_grant_navigation_and_write_boundary() {
+        // A SINGLE table-only grant `marketing.campaigns` (read+write).
+        let grants = vec![g(
+            "marketing",
+            Some("campaigns"),
+            &["catalog:read", "catalog:write"],
+        )];
+        // Listing/reading namespace `marketing` (and root) is allowed to navigate.
+        assert!(decide_ns_read(&grants, &target(&["marketing"])));
+        assert!(decide_ns_read(&grants, &[]));
+        // But creating a table in `marketing` is denied (no whole-ns write grant).
+        assert!(!decide_ns_write(&grants, &target(&["marketing"])));
+        // The granted table reads + writes; a sibling does neither.
+        assert!(decide_table(
+            &grants,
+            &target(&["marketing"]),
+            "campaigns",
             true
         ));
-    }
-
-    #[test]
-    fn table_scope_respects_namespace_boundary() {
-        // table FQN listed but namespace scope excludes the target → denied,
-        // because the ns gate must pass first.
-        let perms = vec![s("catalog:read")];
-        assert!(!decide_table_scope(
-            &perms,
-            &[s("marts")],
-            &[s("sale.orders")],
-            &target(&["sale"]),
-            "orders",
+        assert!(!decide_table(
+            &grants,
+            &target(&["marketing"]),
+            "leads",
             false
         ));
+        // Reading an UNRELATED namespace is denied (grant doesn't relate).
+        assert!(!decide_ns_read(&grants, &target(&["sales"])));
+        // Views/generic tables need a whole-namespace grant → a table-only grant denies.
+        assert!(!decide_object_ns(&grants, &target(&["marketing"]), false));
     }
 
     #[test]
-    fn table_scope_matches_nested_namespace_fqn() {
-        // Nested namespace: the FQN is the dotted ns levels + table name.
-        let perms = vec![s("catalog:read")];
-        let tables = vec![s("staging.raw.events")];
-        assert!(decide_table_scope(
-            &perms,
-            &[],
-            &tables,
+    fn whole_namespace_grant_covers_views_and_subtree() {
+        let grants = vec![g("staging", None, &["catalog:read", "catalog:write"])];
+        // Object (view/generic) action covered by the whole-ns grant.
+        assert!(decide_object_ns(&grants, &target(&["staging"]), false));
+        assert!(decide_object_ns(&grants, &target(&["staging"]), true));
+        // Subtree coverage for namespace write + tables.
+        assert!(decide_ns_write(&grants, &target(&["staging", "raw"])));
+        assert!(decide_table(
+            &grants,
             &target(&["staging", "raw"]),
             "events",
-            false
+            true
         ));
-        // Same name in a different namespace is NOT a match.
-        assert!(!decide_table_scope(
-            &perms,
-            &[],
-            &tables,
-            &target(&["staging"]),
-            "events",
-            false
-        ));
+        // Outside the subtree → denied.
+        assert!(!decide_ns_read(&grants, &target(&["prod"])));
     }
 
-    // --- gate_table: the in-engine table-FQN enforcer ----------------------
+    #[test]
+    fn star_grant_covers_all() {
+        let grants = vec![g("*", None, &["catalog:read"])];
+        assert!(decide_table(&grants, &target(&["anything"]), "t", false));
+        assert!(!decide_table(&grants, &target(&["anything"]), "t", true));
+        // `*` read covers namespace read + object read anywhere.
+        assert!(decide_ns_read(&grants, &target(&["deep", "tree"])));
+        assert!(decide_object_ns(&grants, &target(&["x"]), false));
+        // but not writes (read-only).
+        assert!(!decide_ns_write(&grants, &target(&["x"])));
+        assert!(!decide_object_ns(&grants, &target(&["x"]), true));
+    }
 
-    // --- gate: the in-engine enforcer (defense in depth) -------------------
+    #[test]
+    fn empty_scope_denies() {
+        assert!(!decide_table(&[], &target(&["sale"]), "orders", false));
+        assert!(!decide_ns_read(&[], &target(&["sale"])));
+        assert!(!decide_ns_read(&[], &[]));
+        assert!(!decide_ns_write(&[], &target(&["sale"])));
+        assert!(!decide_object_ns(&[], &target(&["sale"]), false));
+    }
+
+    // --- gate_*: the in-engine enforcers (defense in depth) ----------------
     //
-    // These exercise `EgretAuthorizer::gate` directly — the method ALL data
-    // actions funnel through, independent of egret's front-auth middleware. If
-    // the authorizer ever stops enforcing (system bypass widens, claim path
-    // fails open, ns boundary drops), these fail. This is the CE-4 guarantee
-    // that the engine itself — not just the front layer — denies out-of-scope
-    // requests.
+    // These exercise `EgretAuthorizer::gate_table` / `gate_namespace` /
+    // `gate_object` directly — the methods ALL data actions funnel through,
+    // independent of egret's front-auth middleware. If the authorizer ever stops
+    // enforcing (system bypass widens, claim path fails open, grant OR matrix
+    // breaks), these fail. This is the CE-4 guarantee that the engine itself —
+    // not just the front layer — denies out-of-scope requests.
 
     use lakekeeper::api::RequestMetadata;
     use lakekeeper::limes::Authentication;
@@ -818,6 +874,18 @@ mod tests {
         md
     }
 
+    /// A `"egret"` claim carrying the given grants in the wire shape
+    /// (`{ ns, table, perms }`), as `front_auth::token_request_metadata` builds.
+    fn grants_claim(grants: &[Grant]) -> serde_json::Value {
+        let arr: Vec<_> = grants
+            .iter()
+            .map(|g| {
+                serde_json::json!({ "ns": g.namespace, "table": g.table, "perms": g.permissions })
+            })
+            .collect();
+        serde_json::json!({ "egret": { "grants": arr } })
+    }
+
     /// An `EgretAuthorizer` whose system principal is `sys`.
     fn authorizer(sys: UserId) -> EgretAuthorizer {
         EgretAuthorizer {
@@ -827,33 +895,47 @@ mod tests {
     }
 
     #[test]
+    fn egret_grants_parses_wire_claim() {
+        let token = user_id("egret-catalog-token");
+        let grants = vec![
+            g("sale", None, &["catalog:read"]),
+            g(
+                "marketing",
+                Some("campaigns"),
+                &["catalog:read", "catalog:write"],
+            ),
+        ];
+        let md = metadata_with(&token, grants_claim(&grants));
+        assert_eq!(egret_grants(&md), Some(grants));
+    }
+
+    #[test]
     fn gate_allows_system_principal_unconditionally() {
         let sys = user_id("egret-system");
         let az = authorizer(sys.clone());
         // System principal, NO egret claim: still allowed for read AND write,
-        // any namespace. This is the bootstrap/browse bypass.
+        // any namespace, for tables, namespaces, and objects.
         let md = metadata_with(&sys, serde_json::json!({}));
-        assert!(az.gate(&md, &target(&["marketing"]), false));
-        assert!(az.gate(&md, &target(&["anything", "deep"]), true));
+        assert!(az.gate_namespace(&md, &target(&["marketing"]), false));
+        assert!(az.gate_namespace(&md, &target(&["anything", "deep"]), true));
+        assert!(az.gate_table(&md, &target(&["sale"]), "customers", true));
+        assert!(az.gate_object(&md, &target(&["sale"]), true));
     }
 
     #[test]
-    fn gate_denies_token_principal_out_of_namespace_scope() {
+    fn gate_namespace_enforces_grants() {
         let sys = user_id("egret-system");
         let az = authorizer(sys);
-        // A token principal (NOT the system one) scoped to `marts`, read-only.
         let token = user_id("egret-catalog-token");
-        let md = metadata_with(
-            &token,
-            serde_json::json!({ "egret": { "perms": ["catalog:read"], "ns": ["marts"] } }),
-        );
+        // `marts` whole-namespace, read-only.
+        let md = metadata_with(&token, grants_claim(&[g("marts", None, &["catalog:read"])]));
         // Allowed: read inside the `marts` subtree.
-        assert!(az.gate(&md, &target(&["marts"]), false));
-        assert!(az.gate(&md, &target(&["marts", "sales"]), false));
-        // Denied: a different namespace (the namespace_scope boundary).
-        assert!(!az.gate(&md, &target(&["marketing"]), false));
-        // Denied: a write, even within scope (read-only perm).
-        assert!(!az.gate(&md, &target(&["marts"]), true));
+        assert!(az.gate_namespace(&md, &target(&["marts"]), false));
+        assert!(az.gate_namespace(&md, &target(&["marts", "sales"]), false));
+        // Denied: a different namespace.
+        assert!(!az.gate_namespace(&md, &target(&["marketing"]), false));
+        // Denied: a write, even within scope (read-only grant).
+        assert!(!az.gate_namespace(&md, &target(&["marts"]), true));
     }
 
     #[test]
@@ -863,48 +945,59 @@ mod tests {
         // A non-system principal with NO egret claim is denied everything.
         let stranger = user_id("stranger");
         let md = metadata_with(&stranger, serde_json::json!({}));
-        assert!(!az.gate(&md, &target(&["marts"]), false));
-        assert!(!az.gate(&md, &target(&["marts"]), true));
+        assert!(!az.gate_namespace(&md, &target(&["marts"]), false));
+        assert!(!az.gate_table(&md, &target(&["marts"]), "t", false));
+        assert!(!az.gate_object(&md, &target(&["marts"]), false));
     }
 
     #[test]
-    fn gate_table_enforces_table_scope_via_claim() {
+    fn gate_table_enforces_grants_via_claim() {
         let sys = user_id("egret-system");
         let az = authorizer(sys.clone());
-        // Token scoped to a single table FQN in namespace `sale`.
+        // Token scoped to a single table grant in namespace `sale`.
         let token = user_id("egret-catalog-token");
         let md = metadata_with(
             &token,
-            serde_json::json!({
-                "egret": { "perms": ["catalog:read"], "ns": [], "tables": ["sale.orders"] }
-            }),
+            grants_claim(&[g("sale", Some("orders"), &["catalog:read"])]),
         );
-        // The listed table is allowed for read.
+        // The granted table is allowed for read.
         assert!(az.gate_table(&md, &target(&["sale"]), "orders", false));
         // A sibling table in the same namespace is denied.
         assert!(!az.gate_table(&md, &target(&["sale"]), "customers", false));
-        // Write is denied even on the listed table (read-only perm).
+        // Write is denied even on the granted table (read-only).
         assert!(!az.gate_table(&md, &target(&["sale"]), "orders", true));
-        // The system principal bypasses table scope entirely.
+        // The system principal bypasses entirely.
         let sys_md = metadata_with(&sys, serde_json::json!({}));
         assert!(az.gate_table(&sys_md, &target(&["sale"]), "customers", true));
     }
 
     #[test]
-    fn gate_table_without_table_scope_matches_namespace_gate() {
-        // An egret claim with no `tables` field must behave exactly like the
-        // namespace-only `gate` — no new restriction is introduced.
+    fn gate_mixed_grants_end_to_end() {
+        // Through the real claim → egret_grants → decide_* path.
         let sys = user_id("egret-system");
         let az = authorizer(sys);
         let token = user_id("egret-catalog-token");
         let md = metadata_with(
             &token,
-            serde_json::json!({ "egret": { "perms": ["catalog:read"], "ns": ["sale"] } }),
+            grants_claim(&[
+                g("sale", None, &["catalog:read"]),
+                g(
+                    "marketing",
+                    Some("campaigns"),
+                    &["catalog:read", "catalog:write"],
+                ),
+            ]),
         );
-        // In scope → allowed for any table name.
+        // sale: read table yes, write table no.
         assert!(az.gate_table(&md, &target(&["sale"]), "orders", false));
-        assert!(az.gate_table(&md, &target(&["sale"]), "customers", false));
-        // Out of namespace scope → denied.
-        assert!(!az.gate_table(&md, &target(&["marketing"]), "orders", false));
+        assert!(!az.gate_table(&md, &target(&["sale"]), "orders", true));
+        // marketing.campaigns: write yes; sibling no.
+        assert!(az.gate_table(&md, &target(&["marketing"]), "campaigns", true));
+        assert!(!az.gate_table(&md, &target(&["marketing"]), "leads", false));
+        // Navigation: listing `marketing` allowed (table-only grant); create denied.
+        assert!(az.gate_namespace(&md, &target(&["marketing"]), false));
+        assert!(!az.gate_namespace(&md, &target(&["marketing"]), true));
+        // Unrelated namespace fully denied.
+        assert!(!az.gate_namespace(&md, &target(&["finance"]), false));
     }
 }

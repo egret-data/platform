@@ -162,8 +162,29 @@ async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()
                     anyhow::anyhow!("warehouse '{warehouse}' not found in workspace '{workspace}'")
                 })?;
 
+            // Token scope v2: the CLI mints a single resource grant. Each
+            // namespace from `--namespaces` (or the `"*"` all-namespaces sentinel
+            // when none are given) becomes a whole-namespace grant carrying the
+            // requested permissions, preserving the prior CLI behaviour.
+            let scope: Vec<egret_catalog::service::tokens::Grant> = if namespace_scope.is_empty() {
+                vec![egret_catalog::service::tokens::Grant {
+                    namespace: "*".to_string(),
+                    table: None,
+                    permissions: permissions.clone(),
+                }]
+            } else {
+                namespace_scope
+                    .iter()
+                    .map(|ns| egret_catalog::service::tokens::Grant {
+                        namespace: ns.clone(),
+                        table: None,
+                        permissions: permissions.clone(),
+                    })
+                    .collect()
+            };
+
             let (token_row, raw) = store
-                .create_token(ws.id.0, wh.id, &label, &permissions, &namespace_scope, &[])
+                .create_token(ws.id.0, wh.id, &label, &scope)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -171,13 +192,7 @@ async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()
             println!("Workspace     : {} ({})", workspace, ws.id.0);
             println!("Warehouse     : {} ({})", warehouse, wh.id);
             println!("Label         : {}", token_row.label);
-            println!("Permissions   : {}", token_row.permissions.join(","));
-            let scope_display = if token_row.namespace_scope.is_empty() {
-                "*".to_string()
-            } else {
-                token_row.namespace_scope.join(",")
-            };
-            println!("Namespaces    : {scope_display}");
+            println!("Scope         : {}", fmt_scope(&token_row.scope));
             println!("Created at    : {}", token_row.created_at.to_rfc3339());
             println!();
             println!("Raw token (store this now — it will NOT be shown again):");
@@ -218,22 +233,16 @@ async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()
                 println!("No active tokens for workspace '{workspace}'.");
             } else {
                 println!(
-                    "{:<38}  {:<20}  {:<20}  {:<20}  CREATED AT",
-                    "TOKEN ID", "LABEL", "PERMISSIONS", "NAMESPACE SCOPE"
+                    "{:<38}  {:<20}  {:<40}  CREATED AT",
+                    "TOKEN ID", "LABEL", "SCOPE (grants)"
                 );
                 println!("{}", "-".repeat(120));
                 for t in tokens {
-                    let scope = if t.namespace_scope.is_empty() {
-                        "*".to_string()
-                    } else {
-                        t.namespace_scope.join(",")
-                    };
                     println!(
-                        "{:<38}  {:<20}  {:<20}  {:<20}  {}",
+                        "{:<38}  {:<20}  {:<40}  {}",
                         t.id,
                         t.label,
-                        t.permissions.join(","),
-                        scope,
+                        fmt_scope(&t.scope),
                         t.created_at.to_rfc3339()
                     );
                 }
@@ -242,6 +251,22 @@ async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()
     }
 
     Ok(())
+}
+
+/// Format a token's resource-grant scope for CLI display, e.g.
+/// `* (catalog:read)`, `sale (catalog:read)`, `marketing.campaigns (catalog:read,catalog:write)`.
+fn fmt_scope(scope: &[egret_catalog::service::tokens::Grant]) -> String {
+    scope
+        .iter()
+        .map(|g| {
+            let resource = match &g.table {
+                Some(t) => format!("{}.{t}", g.namespace),
+                None => g.namespace.clone(),
+            };
+            format!("{resource} ({})", g.permissions.join(","))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 async fn serve(config: Config) -> anyhow::Result<()> {

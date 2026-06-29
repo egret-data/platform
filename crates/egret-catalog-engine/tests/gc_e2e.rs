@@ -47,6 +47,7 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::response::Response;
 use egret_auth::users::UserRepo;
+use egret_catalog::service::tokens::Grant;
 use egret_catalog::service::CatalogStore;
 use egret_catalog_engine::{
     build_state_with_gc_poll, ensure_bootstrapped, mount_catalog_engine,
@@ -177,9 +178,11 @@ async fn dropped_with_purge_is_reclaimed_by_gc_workers() {
             workspace_id,
             wid,
             "gce2e-token",
-            &["catalog:read".to_string(), "catalog:write".to_string()],
-            &[],
-            &[],
+            &[Grant {
+                namespace: "*".to_string(),
+                table: None,
+                permissions: vec!["catalog:read".to_string(), "catalog:write".to_string()],
+            }],
         )
         .await
         .expect("mint full-scope rw token");
