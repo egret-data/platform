@@ -173,6 +173,38 @@ describe("Catalog browser", () => {
     expect(screen.queryByText("Sort order")).not.toBeInTheDocument();
   });
 
+  it("renders without crashing when the backend omits the enriched fields (version skew)", async () => {
+    // A stale/older backend returns only the legacy table-detail shape: no
+    // partition_fields / sort_fields / snapshots / format_version / last_updated_ms.
+    // The view must degrade gracefully, not white-screen.
+    tableDetailMock.mockReturnValue({
+      data: {
+        name: "orders",
+        location: "s3://wh/orders",
+        current_schema_id: 1,
+        columns: [{ name: "id", type: "long", required: true }],
+        current_snapshot_id: null,
+        snapshot_count: 0,
+        properties: {},
+        // enriched fields intentionally absent
+      },
+      isLoading: false,
+      isError: false,
+    });
+    const user = userEvent.setup();
+    renderAt();
+    await user.click(screen.getByText("sales"));
+    await user.click(screen.getByText("orders"));
+
+    // The schema still renders, and the new sections degrade to their empty states.
+    expect(screen.getByText("Schema")).toBeInTheDocument();
+    expect(screen.getByText("Unpartitioned")).toBeInTheDocument();
+    expect(screen.getByText("No snapshots yet.")).toBeInTheDocument();
+    expect(screen.queryByText("Sort order")).not.toBeInTheDocument();
+    // No format/updated chips when those fields are absent.
+    expect(screen.queryByText(/^format v/)).not.toBeInTheDocument();
+  });
+
   it("creates a root namespace from the New namespace dialog", async () => {
     const user = userEvent.setup();
     renderAt();
