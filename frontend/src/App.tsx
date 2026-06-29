@@ -61,6 +61,15 @@ function ExploreRoutes() {
           <Route path="storage" element={<StoragePage />} />
           <Route path="databases" element={<DatabasesPage />} />
           <Route path="secrets" element={<SecretsPage />} />
+          <Route path="alerts" element={<Placeholder title="Alerts" />} />
+          <Route path="data-api" element={<Placeholder title="Data API" />} />
+          <Route path="workflows" element={<Placeholder title="Workflows" />} />
+          <Route path="pipelines" element={<Placeholder title="Pipelines" />} />
+          <Route path="code-ide" element={<Placeholder title="Code IDE" />} />
+          <Route path="policies" element={<Placeholder title="Policies" />} />
+          <Route path="data-lineage" element={<Placeholder title="Data Lineage" />} />
+          <Route path="query-audit" element={<Placeholder title="Query Audit" />} />
+          <Route path="data-quality" element={<Placeholder title="Data Quality" />} />
           <Route path="*" element={<Navigate to="sql-lab" replace />} />
         </Routes>
       </AppShell>
