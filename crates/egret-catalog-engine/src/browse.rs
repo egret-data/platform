@@ -59,9 +59,17 @@ use lakekeeper::api::iceberg::v1::tables::TablesService;
 use lakekeeper::api::iceberg::v1::tables::{ListTablesQuery, LoadTableRequest, TableParameters};
 use lakekeeper::api::iceberg::v1::views::ViewService;
 use lakekeeper::api::iceberg::v1::{CreateNamespaceRequest, ListTablesResponse};
+use lakekeeper::api::management::v1::tasks::{
+    ListTasksRequest, Service as TasksMgmtService, TaskStatus,
+};
+use lakekeeper::api::management::v1::warehouse::Service as WarehouseMgmtService;
+use lakekeeper::api::management::v1::{ApiServer, GetWarehouseStatisticsQuery};
 use lakekeeper::api::{ApiContext, RequestMetadata};
 use lakekeeper::iceberg::{NamespaceIdent, TableIdent};
+use lakekeeper::service::WarehouseId;
+use lakekeeper_storage_postgres::{PostgresBackend, SecretsState};
 
+use crate::authorizer::EgretAuthorizer;
 use crate::bootstrap::system_request_metadata;
 use crate::mount::{EngineServer, EngineState};
 
@@ -145,6 +153,15 @@ pub fn browse_router() -> Router<BrowseState> {
         .route(
             "/ws/{workspace}/catalog/warehouses/{wid}/namespaces/{ns}/tables/{table}",
             get(table_detail),
+        )
+        // Read-only management tabs (catalog sub-epic 4), gated `catalog:read`.
+        .route(
+            "/ws/{workspace}/catalog/warehouses/{wid}/statistics",
+            get(warehouse_statistics),
+        )
+        .route(
+            "/ws/{workspace}/catalog/warehouses/{wid}/tasks",
+            get(warehouse_tasks),
         )
         // Workspace-admin catalog token management, scoped to a warehouse `{wid}`
         // (gated `workspace:manage_members`). A token authenticates against exactly
@@ -401,6 +418,9 @@ struct TableDetail {
 /// before any lakekeeper read.
 struct Resolved {
     prefix: Prefix,
+    /// The resolved lakekeeper warehouse UUID (ownership-checked). Needed by the
+    /// management-API reads (statistics / tasks) that take a `WarehouseId`.
+    lakekeeper_id: Uuid,
     request_metadata: RequestMetadata,
 }
 
@@ -428,6 +448,7 @@ async fn authorized_warehouse(
     Ok(Resolved {
         // lakekeeper's default `prefix_template = "{warehouse_id}"`.
         prefix: Prefix::from(lk_id.to_string()),
+        lakekeeper_id: lk_id,
         request_metadata,
     })
 }
@@ -456,9 +477,15 @@ async fn authorized_warehouse_admin(
 
     Ok(Resolved {
         prefix: Prefix::from(lk_id.to_string()),
+        lakekeeper_id: lk_id,
         request_metadata,
     })
 }
+
+/// `ApiServer` specialized to egret's concrete backends — the type whose
+/// management `Service` impls carry `get_warehouse_statistics` / `list_tasks`.
+/// Mirrors `provision_ws::EngineApiServer`.
+type EngineApiServer = ApiServer<PostgresBackend, EgretAuthorizer, SecretsState>;
 
 /// Empty/default list-namespaces query starting at top level.
 fn ns_query(parent: Option<NamespaceIdent>) -> ListNamespacesQuery {
@@ -1143,6 +1170,106 @@ async fn table_detail(
         sort_fields,
         snapshots,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Read-only management-API tabs (catalog sub-epic 4), under the `{wid}` scope.
+// Gated `catalog:read` via `authorized_warehouse` (IDOR-safe `{wid}` → lakekeeper
+// UUID). Both are pure reads — no mutation, no `control_tasks`.
+// ---------------------------------------------------------------------------
+
+/// One statistics sample (a point in lakekeeper's lazily-computed hourly series).
+#[derive(Serialize)]
+struct StatEntryDto {
+    timestamp: DateTime<Utc>,
+    number_of_tables: i64,
+    number_of_views: i64,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+struct StatisticsDto {
+    entries: Vec<StatEntryDto>,
+}
+
+/// GET /ws/{ws}/catalog/warehouses/{wid}/statistics
+async fn warehouse_statistics(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, wid)): Path<(String, Uuid)>,
+) -> Result<Json<StatisticsDto>, BrowseApiError> {
+    let r = authorized_warehouse(&st, &ctx, wid).await?;
+    let resp = <EngineApiServer as WarehouseMgmtService<_, _, _>>::get_warehouse_statistics(
+        WarehouseId::from(r.lakekeeper_id),
+        GetWarehouseStatisticsQuery {
+            page_token: PageToken::Empty,
+            page_size: None,
+        },
+        st.engine.clone(),
+        r.request_metadata,
+    )
+    .await?;
+
+    let mut entries: Vec<StatEntryDto> = resp
+        .stats
+        .into_iter()
+        .map(|s| StatEntryDto {
+            timestamp: s.timestamp,
+            number_of_tables: s.number_of_tables,
+            number_of_views: s.number_of_views,
+            updated_at: s.updated_at,
+        })
+        .collect();
+    // Newest first.
+    entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
+    Ok(Json(StatisticsDto { entries }))
+}
+
+/// A GC/maintenance task row as exposed to the UI. `task_type` is the lakekeeper
+/// queue name (e.g. `tabular_expiration`); `status` serializes as lakekeeper's
+/// SCREAMING_SNAKE_CASE (`RUNNING`/`SCHEDULED`/`SUCCESS`/`FAILED`/…).
+#[derive(Serialize)]
+struct TaskDto {
+    task_id: String,
+    task_type: String,
+    status: TaskStatus,
+    entity_name: Option<String>,
+    created_at: DateTime<Utc>,
+    scheduled_for: DateTime<Utc>,
+    attempt: i32,
+    progress: f32,
+}
+
+/// GET /ws/{ws}/catalog/warehouses/{wid}/tasks
+async fn warehouse_tasks(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, wid)): Path<(String, Uuid)>,
+) -> Result<Json<Vec<TaskDto>>, BrowseApiError> {
+    let r = authorized_warehouse(&st, &ctx, wid).await?;
+    let resp = <EngineApiServer as TasksMgmtService<_, _, _>>::list_tasks(
+        WarehouseId::from(r.lakekeeper_id),
+        ListTasksRequest::default(),
+        st.engine.clone(),
+        r.request_metadata,
+    )
+    .await?;
+
+    let tasks = resp
+        .tasks
+        .into_iter()
+        .map(|t| TaskDto {
+            task_id: t.task_id.to_string(),
+            task_type: t.queue_name.to_string(),
+            status: t.status,
+            entity_name: t.entity_name.map(|levels| levels.join(".")),
+            created_at: t.created_at,
+            scheduled_for: t.scheduled_for,
+            attempt: t.attempt,
+            progress: t.progress,
+        })
+        .collect();
+    Ok(Json(tasks))
 }
 
 // ---------------------------------------------------------------------------
