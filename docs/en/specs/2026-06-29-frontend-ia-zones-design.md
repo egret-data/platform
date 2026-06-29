@@ -6,6 +6,16 @@
 ## Goal
 Restructure the navigation into clear zones and stand up the **frames** (mostly placeholder pages) for the next wave of features, without implementing those features. Rename the platform "Admin" area to **Control Plane**.
 
+## Revision (shipped, 2026-06-29) — trimmed + collapsible
+After live review the sidebar was too long, so the workspace zones were trimmed and a new **Automate** zone added; each group heading is now a **collapsible** chevron button (default expanded; collapsed headings persisted in `localStorage` under `egret:sidebar-collapsed-groups`). Final workspace zones:
+- **Explore**: SQL Lab · Datasets · Charts · Dashboards · Notebooks
+- **Data Engineering**: Data API · Pipelines
+- **Automate** *(new — mainly for analysts)*: Workflows · Alerts
+- **Data Governance**: Policies · Data Lineage
+- **Manage**: Catalog · Storage · Databases · Secrets
+
+**Dropped** (not built): Code IDE, Query Audit, Data Quality (+ their routes). **Alerts** moved Explore→Automate; **Workflows** moved Data Engineering→Automate. Control Plane is unchanged from §2 below. The §1/§Routes/§Icons sections below describe the first cut; this revision supersedes their item lists.
+
 ## Background (current state)
 - `components/layout/Sidebar.tsx`: two `NavGroup[]` — `EXPLORE_GROUPS` (workspace: **Explore** = SQL Lab/Datasets/Charts/Dashboards/Notebooks; **Manage** = Catalog/Storage/Databases/Secrets) and `ADMIN_GROUPS` (heading "Administration": Catalog/Policies/Users/Workspaces/Monitoring). `isAdmin = pathname.startsWith("/admin")` picks the group set + base (`/admin` vs `/explore/{ws}`). Items route to `${base}/${slug(label)}`.
 - `App.tsx`: `ExploreRoutes` (`/explore/:workspace/*`) and `AdminRoutes` (`/admin/*`); admin pages live in `routes/admin/*` and are `<Placeholder title=… />`.

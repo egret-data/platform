@@ -11,8 +11,9 @@
  *   - collapsed: boolean + onToggle: () => void props
  */
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
@@ -32,29 +33,40 @@ function renderSidebar(initialPath: string) {
   );
 }
 
+beforeEach(() => {
+  localStorage.clear(); // groups default to expanded
+});
+
 describe("Sidebar – workspace zones", () => {
-  test("renders the four zone headings", () => {
+  test("renders the five zone headings", () => {
     renderSidebar("/explore/eng/sql-lab");
     expect(screen.getByText("Explore")).toBeInTheDocument();
     expect(screen.getByText("Data Engineering")).toBeInTheDocument();
+    expect(screen.getByText("Automate")).toBeInTheDocument();
     expect(screen.getByText("Data Governance")).toBeInTheDocument();
     expect(screen.getByText("Manage")).toBeInTheDocument();
   });
 
-  test("renders representative items from each new zone", () => {
+  test("renders representative items from each zone", () => {
     renderSidebar("/explore/eng/sql-lab");
     for (const label of [
-      "Alerts",
+      "SQL Lab",
       "Data API",
-      "Workflows",
       "Pipelines",
-      "Code IDE",
+      "Workflows",
+      "Alerts",
       "Policies",
       "Data Lineage",
-      "Query Audit",
-      "Data Quality",
+      "Catalog",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
+    }
+  });
+
+  test("dropped items are gone", () => {
+    renderSidebar("/explore/eng/sql-lab");
+    for (const label of ["Code IDE", "Query Audit", "Data Quality"]) {
+      expect(screen.queryByRole("link", { name: label })).not.toBeInTheDocument();
     }
   });
 
@@ -64,22 +76,25 @@ describe("Sidebar – workspace zones", () => {
       "href",
       "/explore/eng/data-api",
     );
-    expect(screen.getByRole("link", { name: "Code IDE" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Workflows" })).toHaveAttribute(
       "href",
-      "/explore/eng/code-ide",
+      "/explore/eng/workflows",
     );
     expect(screen.getByRole("link", { name: "Data Lineage" })).toHaveAttribute(
       "href",
       "/explore/eng/data-lineage",
     );
-    expect(screen.getByRole("link", { name: "Query Audit" })).toHaveAttribute(
-      "href",
-      "/explore/eng/query-audit",
-    );
-    expect(screen.getByRole("link", { name: "Data Quality" })).toHaveAttribute(
-      "href",
-      "/explore/eng/data-quality",
-    );
+  });
+
+  test("a group heading collapses/expands its items", async () => {
+    const user = userEvent.setup();
+    renderSidebar("/explore/eng/sql-lab");
+    // 'Data Engineering' starts expanded → Data API visible.
+    expect(screen.getByRole("link", { name: "Data API" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Data Engineering/i }));
+    expect(screen.queryByRole("link", { name: "Data API" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Data Engineering/i }));
+    expect(screen.getByRole("link", { name: "Data API" })).toBeInTheDocument();
   });
 });
 
