@@ -240,15 +240,16 @@ impl NotebookStore {
         Ok(id)
     }
 
-    /// Partial update on a single cell. Includes `AND notebook_id=$3` to defend
-    /// against cross-notebook IDOR at the SQL level.
+    /// Partial update on a single cell. Includes `AND notebook_id=$2` to defend
+    /// against cross-notebook IDOR at the SQL level; a row that doesn't belong to
+    /// `nb` matches nothing → `NotFound` (so the route surfaces a 404).
     pub async fn update_cell(
         &self,
         nb: Uuid,
         cid: Uuid,
         p: &UpdateCell,
     ) -> Result<(), NotebookApiError> {
-        sqlx::query(
+        let result = sqlx::query(
             "UPDATE notebook_cells SET \
              cell_type  = COALESCE($3, cell_type), \
              source     = COALESCE($4, source), \
@@ -261,17 +262,28 @@ impl NotebookStore {
         .bind(p.source.as_deref())
         .execute(&self.db.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            return Err(NotebookApiError::from(egret_core::Error::NotFound(
+                "cell".into(),
+            )));
+        }
         self.touch(nb).await?;
         Ok(())
     }
 
-    /// Delete a cell. Includes `AND notebook_id=$2` (cross-notebook IDOR defense).
+    /// Delete a cell. Includes `AND notebook_id=$2` (cross-notebook IDOR defense);
+    /// a row that doesn't belong to `nb` matches nothing → `NotFound` (404).
     pub async fn delete_cell(&self, nb: Uuid, cid: Uuid) -> Result<(), NotebookApiError> {
-        sqlx::query("DELETE FROM notebook_cells WHERE id=$1 AND notebook_id=$2")
+        let result = sqlx::query("DELETE FROM notebook_cells WHERE id=$1 AND notebook_id=$2")
             .bind(cid)
             .bind(nb)
             .execute(&self.db.pool)
             .await?;
+        if result.rows_affected() == 0 {
+            return Err(NotebookApiError::from(egret_core::Error::NotFound(
+                "cell".into(),
+            )));
+        }
         self.touch(nb).await?;
         Ok(())
     }

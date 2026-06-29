@@ -507,7 +507,7 @@ async fn cell_crud_happy_path_and_nested_idor() {
 
     // Nested IDOR: cell of notebook X addressed under notebook Y → 404.
     // (write_scoped passes for Y since owner owns Y, but the cell row is scoped
-    //  by notebook_id so the parent mismatch is rejected.)
+    //  by notebook_id so the parent mismatch matches no rows → NotFound.)
     let resp = f
         .app
         .clone()
@@ -521,10 +521,30 @@ async fn cell_crud_happy_path_and_nested_idor() {
         .unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::NO_CONTENT,
-        "DELETE returns 204 but the foreign cell is untouched (store scoped by notebook_id)"
+        StatusCode::NOT_FOUND,
+        "cross-notebook DELETE must 404 (foreign cell not in this notebook)"
     );
-    // Prove notebook X still has both cells (the cross-notebook delete was a no-op).
+
+    // Same for PATCH: updating notebook X's cell under notebook Y → 404.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &format!("/ws/{}/notebooks/{nb_y}/cells/{cid_x}", f.slug_a),
+            &owner_tok,
+            Some(serde_json::json!({ "source": "hijacked" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "cross-notebook PATCH must 404 (foreign cell not in this notebook)"
+    );
+
+    // Prove notebook X still has both cells (the cross-notebook ops were rejected,
+    // not silently applied) — the foreign cell is provably untouched.
     let resp = f
         .app
         .clone()
@@ -540,7 +560,16 @@ async fn cell_crud_happy_path_and_nested_idor() {
     assert_eq!(
         json["cells"].as_array().unwrap().len(),
         2,
-        "cross-notebook DELETE must NOT remove notebook X's cell (nested IDOR closed)"
+        "cross-notebook ops must NOT touch notebook X's cells (nested IDOR closed)"
+    );
+    let still_unchanged = json["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["id"].as_str() == Some(cid_x.as_str()) && c["source"] == "print(1)");
+    assert!(
+        still_unchanged,
+        "the foreign cell's source must remain the owner's value, not 'hijacked'"
     );
 
     // DELETE the cell under its real parent → cell count drops to 1.
