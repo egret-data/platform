@@ -99,17 +99,17 @@ function renderHeader({ initialPath, me = ME_WITH_ROLE }: WrapperOptions) {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("PortalToggle – Admin portal", () => {
-  test("shows Explorer button when under /admin", () => {
-    renderHeader({ initialPath: "/admin" });
+describe("PortalToggle – Control Plane portal", () => {
+  test("shows Explorer button when under /control-plane", () => {
+    renderHeader({ initialPath: "/control-plane" });
     expect(screen.getByRole("button", { name: /explorer/i })).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /admin/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /control plane/i })).not.toBeInTheDocument();
   });
 
   test("Explorer button navigates to stored workspace", async () => {
     localStorage.setItem("egret:last-workspace", "my-workspace");
     const user = userEvent.setup();
-    renderHeader({ initialPath: "/admin" });
+    renderHeader({ initialPath: "/control-plane" });
 
     await user.click(screen.getByRole("button", { name: /explorer/i }));
 
@@ -120,7 +120,7 @@ describe("PortalToggle – Admin portal", () => {
   test("Explorer button falls back to / when no stored workspace", async () => {
     localStorage.removeItem("egret:last-workspace");
     const user = userEvent.setup();
-    renderHeader({ initialPath: "/admin" });
+    renderHeader({ initialPath: "/control-plane" });
 
     await user.click(screen.getByRole("button", { name: /explorer/i }));
 
@@ -129,18 +129,18 @@ describe("PortalToggle – Admin portal", () => {
 });
 
 describe("PortalToggle – Explorer portal", () => {
-  test("shows Admin link when under /explore/:workspace and user has a platform role", () => {
+  test("shows Control Plane link when under /explore/:workspace and user has a platform role", () => {
     renderHeader({ initialPath: "/explore/my-workspace" });
-    expect(screen.getByRole("link", { name: /admin/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /control plane/i })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /explorer/i })).not.toBeInTheDocument();
   });
 
-  test("does NOT show Admin link when user has no platform roles", () => {
+  test("does NOT show Control Plane link when user has no platform roles", () => {
     renderHeader({
       initialPath: "/explore/my-workspace",
       me: { ...ME_WITH_ROLE, platform_roles: [] },
     });
-    expect(screen.queryByRole("link", { name: /admin/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /control plane/i })).not.toBeInTheDocument();
   });
 
   test("visiting /explore/:workspace persists workspace to localStorage", async () => {

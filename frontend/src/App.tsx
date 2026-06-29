@@ -28,11 +28,8 @@ import WarehouseDetail from "@/routes/explore/catalog/WarehouseDetail";
 import StoragePage from "@/routes/explore/StoragePage";
 import DatabasesPage from "@/routes/explore/DatabasesPage";
 import SecretsPage from "@/routes/explore/SecretsPage";
-import Catalog from "@/routes/admin/Catalog";
-import Policies from "@/routes/admin/Policies";
-import Users from "@/routes/admin/Users";
-import Workspaces from "@/routes/admin/Workspaces";
-import Monitoring from "@/routes/admin/Monitoring";
+import { Placeholder } from "@/routes/Placeholder";
+import ControlPlaneResources from "@/routes/control-plane/ControlPlaneResources";
 
 const qc = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1, staleTime: 30000 } } });
 
@@ -71,18 +68,19 @@ function ExploreRoutes() {
   );
 }
 
-function AdminRoutes() {
+function ControlPlaneRoutes() {
   return (
     <RequirePlatform>
       <AppShell>
         <Routes>
-          <Route index element={<Navigate to="catalog" replace />} />
-          <Route path="catalog" element={<Catalog />} />
-          <Route path="policies" element={<Policies />} />
-          <Route path="users" element={<Users />} />
-          <Route path="workspaces" element={<Workspaces />} />
-          <Route path="monitoring" element={<Monitoring />} />
-          <Route path="*" element={<Navigate to="catalog" replace />} />
+          <Route index element={<Navigate to="workspaces" replace />} />
+          <Route path="workspaces" element={<Placeholder title="Workspaces" />} />
+          <Route path="resources" element={<ControlPlaneResources />} />
+          <Route path="monitoring" element={<Placeholder title="Monitoring" />} />
+          <Route path="users" element={<Placeholder title="Users" />} />
+          <Route path="platform-policies" element={<Placeholder title="Platform Policies" />} />
+          <Route path="catalog" element={<Placeholder title="Catalog" />} />
+          <Route path="*" element={<Navigate to="workspaces" replace />} />
         </Routes>
       </AppShell>
     </RequirePlatform>
@@ -99,7 +97,7 @@ export default function App() {
               <Route path="/login" element={<LoginRoute />} />
               <Route path="/" element={<RequireAuth><HomeRedirect /></RequireAuth>} />
               <Route path="/explore/:workspace/*" element={<RequireAuth><ExploreRoutes /></RequireAuth>} />
-              <Route path="/admin/*" element={<RequireAuth><AdminRoutes /></RequireAuth>} />
+              <Route path="/control-plane/*" element={<RequireAuth><ControlPlaneRoutes /></RequireAuth>} />
               <Route path="*" element={<NotFound />} />
             </Routes>
           </AuthProvider>

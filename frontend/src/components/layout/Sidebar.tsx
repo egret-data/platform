@@ -48,9 +48,9 @@ const EXPLORE_GROUPS: NavGroup[] = [
   },
 ];
 
-const ADMIN_GROUPS: NavGroup[] = [
+const CONTROL_PLANE_GROUPS: NavGroup[] = [
   {
-    heading: "Administration",
+    heading: "Control Plane",
     items: [
       { label: "Catalog", icon: Boxes },
       { label: "Policies", icon: ShieldCheck },
@@ -69,10 +69,10 @@ interface SidebarProps {
 }
 
 export function Sidebar({ collapsed, onToggle }: SidebarProps) {
-  const isAdmin = useLocation().pathname.startsWith("/admin");
+  const isAdmin = useLocation().pathname.startsWith("/control-plane");
   const { workspace } = useParams();
-  const groups = isAdmin ? ADMIN_GROUPS : EXPLORE_GROUPS;
-  const base = isAdmin ? "/admin" : `/explore/${workspace ?? ""}`;
+  const groups = isAdmin ? CONTROL_PLANE_GROUPS : EXPLORE_GROUPS;
+  const base = isAdmin ? "/control-plane" : `/explore/${workspace ?? ""}`;
 
   const linkClass = ({ isActive }: { isActive: boolean }) =>
     `flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
