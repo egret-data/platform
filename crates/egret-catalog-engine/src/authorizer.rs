@@ -435,7 +435,18 @@ impl Authorizer for EgretAuthorizer {
                     || info.namespace().namespace_ident.as_ref().as_slice(),
                     |nwp| nwp.namespace_ident().as_ref().as_slice(),
                 );
-                self.gate_namespace(metadata, levels, namespace_action_is_write(action))
+                match action {
+                    // `ListEverything` controls lakekeeper's "skip per-entity authz"
+                    // short-circuit in `list_entities!`. Only a whole-namespace read
+                    // grant should enable it; a table-specific grant must fall through
+                    // to per-entity `IncludeInList` filtering (handled by
+                    // `are_allowed_table_actions_impl` / `gate_table`), so the listing
+                    // hides tables/views the token cannot access.
+                    CatalogNamespaceAction::ListEverything => {
+                        self.gate_object(metadata, levels, false)
+                    }
+                    _ => self.gate_namespace(metadata, levels, namespace_action_is_write(action)),
+                }
             })
             .collect())
     }
@@ -837,6 +848,32 @@ mod tests {
         assert!(!decide_ns_read(&[], &[]));
         assert!(!decide_ns_write(&[], &target(&["sale"])));
         assert!(!decide_object_ns(&[], &target(&["sale"]), false));
+    }
+
+    #[test]
+    fn list_everything_needs_whole_namespace_grant() {
+        // `ListEverything` is routed to `decide_object_ns` (whole-namespace read),
+        // NOT `decide_ns_read`, so lakekeeper per-entity-filters a table-only
+        // grant's listing instead of returning the whole namespace.
+        let table_only = vec![g("sale", Some("orders"), &["catalog:read"])];
+        // Endpoint reachable + the granted table visible...
+        assert!(decide_ns_read(&table_only, &target(&["sale"])));
+        assert!(decide_table(
+            &table_only,
+            &target(&["sale"]),
+            "orders",
+            false
+        ));
+        // ...but NOT "list everything" → per-entity filtering kicks in.
+        assert!(!decide_object_ns(&table_only, &target(&["sale"]), false));
+
+        // A whole-namespace read grant CAN list everything.
+        let whole = vec![g("sale", None, &["catalog:read"])];
+        assert!(decide_object_ns(&whole, &target(&["sale"]), false));
+
+        // A `*` grant lists everything anywhere.
+        let star = vec![g("*", None, &["catalog:read"])];
+        assert!(decide_object_ns(&star, &target(&["anything"]), false));
     }
 
     // --- gate_*: the in-engine enforcers (defense in depth) ----------------
