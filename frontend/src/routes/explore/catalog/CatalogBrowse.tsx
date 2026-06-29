@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Database, Eye, Loader2, Plus, Table2, Trash2 } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { Check, Copy, Database, Eye, Loader2, Plus, Table2, Trash2 } from "lucide-react";
 import {
   type NamespaceDto,
   nsDotted,
@@ -12,7 +12,9 @@ import {
 import { ApiError } from "@/api/client";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
   Dialog,
@@ -31,6 +33,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { timeAgo, fullTimestamp } from "@/lib/relativeTime";
 
 const ROOT = "(root)";
 
@@ -364,7 +367,7 @@ function TableDetailView({
   onBack: () => void;
 }) {
   return (
-    <div className="space-y-4">
+    <div className="max-w-5xl space-y-4">
       <div className="flex items-center gap-2 text-sm">
         <button type="button" onClick={onBack} className="text-muted-foreground hover:text-foreground hover:underline">
           {ns}
@@ -379,118 +382,133 @@ function TableDetailView({
         <p className="text-sm text-destructive">Failed to load table detail.</p>
       ) : detail.data ? (
         <>
-          <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-muted-foreground">
-            <span className="font-mono break-all">{detail.data.location}</span>
-            {detail.data.format_version != null && <span>format v{detail.data.format_version}</span>}
-            {detail.data.last_updated_ms != null && (
-              <span>updated {new Date(detail.data.last_updated_ms).toLocaleString()}</span>
-            )}
-          </div>
-          <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
-            <span>
-              <span className="text-muted-foreground">Schema id:</span> {detail.data.current_schema_id}
-            </span>
-            <span>
-              <span className="text-muted-foreground">Current snapshot:</span>{" "}
-              {detail.data.current_snapshot_id ?? "—"}
-            </span>
-          </div>
+          <Card className="space-y-3 p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-base font-medium">{table}</span>
+              {detail.data.format_version != null && (
+                <Badge variant="secondary">format v{detail.data.format_version}</Badge>
+              )}
+            </div>
+            <div className="flex items-center gap-1.5 text-sm">
+              <span className="truncate font-mono text-muted-foreground">{detail.data.location}</span>
+              <CopyButton value={detail.data.location} />
+            </div>
+            <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+              <span>
+                <span className="text-muted-foreground">Schema id</span>{" "}
+                <span className="font-mono">{detail.data.current_schema_id}</span>
+              </span>
+              <span>
+                <span className="text-muted-foreground">Current snapshot</span>{" "}
+                <span className="font-mono">{detail.data.current_snapshot_id ?? "—"}</span>
+              </span>
+              {detail.data.last_updated_ms != null && (
+                <span
+                  className="text-muted-foreground"
+                  title={fullTimestamp(new Date(detail.data.last_updated_ms).toISOString())}
+                >
+                  updated {timeAgo(new Date(detail.data.last_updated_ms).toISOString())}
+                </span>
+              )}
+            </div>
+          </Card>
 
-          <div>
-            <h2 className="mb-2 text-sm font-medium text-muted-foreground">Schema</h2>
-            <table className="w-full text-sm">
+          <DetailSection title="Schema">
+            <table className="text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr className="border-b border-border">
-                  <th className="py-1 pr-4 font-medium">Column</th>
-                  <th className="py-1 pr-4 font-medium">Type</th>
-                  <th className="py-1 font-medium">Nullable</th>
+                  <th className="py-1.5 pr-8 font-medium">Column</th>
+                  <th className="py-1.5 pr-8 font-medium">Type</th>
+                  <th className="py-1.5 font-medium">Nullable</th>
                 </tr>
               </thead>
               <tbody>
                 {detail.data.columns.map((c) => (
                   <tr key={c.name} className="border-b border-border last:border-b-0">
-                    <td className="py-1 pr-4 font-mono">{c.name}</td>
-                    <td className="py-1 pr-4 font-mono text-muted-foreground">{c.type}</td>
-                    <td className="py-1">{c.required ? "no" : "yes"}</td>
+                    <td className="py-1.5 pr-8 font-mono">{c.name}</td>
+                    <td className="py-1.5 pr-8 font-mono text-muted-foreground">{c.type}</td>
+                    <td className="py-1.5 text-muted-foreground">{c.required ? "No" : "Yes"}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          </div>
+          </DetailSection>
 
-          <div>
-            <h2 className="mb-2 text-sm font-medium text-muted-foreground">Partition spec</h2>
-            {(detail.data.partition_fields ?? []).length > 0 ? (
-              <table className="w-full text-sm">
-                <thead className="text-left text-muted-foreground">
-                  <tr className="border-b border-border">
-                    <th className="py-1 pr-4 font-medium">Field</th>
-                    <th className="py-1 pr-4 font-medium">Source column</th>
-                    <th className="py-1 font-medium">Transform</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(detail.data.partition_fields ?? []).map((p) => (
-                    <tr key={p.name} className="border-b border-border last:border-b-0">
-                      <td className="py-1 pr-4 font-mono">{p.name}</td>
-                      <td className="py-1 pr-4 font-mono text-muted-foreground">{p.source_column}</td>
-                      <td className="py-1 font-mono text-muted-foreground">{p.transform}</td>
+          <div className="grid gap-4 md:grid-cols-2">
+            <DetailSection title="Partition spec">
+              {(detail.data.partition_fields ?? []).length > 0 ? (
+                <table className="text-sm">
+                  <thead className="text-left text-muted-foreground">
+                    <tr className="border-b border-border">
+                      <th className="py-1.5 pr-8 font-medium">Field</th>
+                      <th className="py-1.5 pr-8 font-medium">Source column</th>
+                      <th className="py-1.5 font-medium">Transform</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <p className="text-sm text-muted-foreground">Unpartitioned</p>
+                  </thead>
+                  <tbody>
+                    {(detail.data.partition_fields ?? []).map((p) => (
+                      <tr key={p.name} className="border-b border-border last:border-b-0">
+                        <td className="py-1.5 pr-8 font-mono">{p.name}</td>
+                        <td className="py-1.5 pr-8 font-mono text-muted-foreground">{p.source_column}</td>
+                        <td className="py-1.5 font-mono text-muted-foreground">{p.transform}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <p className="text-sm text-muted-foreground">Unpartitioned</p>
+              )}
+            </DetailSection>
+
+            {(detail.data.sort_fields ?? []).length > 0 && (
+              <DetailSection title="Sort order">
+                <table className="text-sm">
+                  <thead className="text-left text-muted-foreground">
+                    <tr className="border-b border-border">
+                      <th className="py-1.5 pr-8 font-medium">Column</th>
+                      <th className="py-1.5 pr-8 font-medium">Transform</th>
+                      <th className="py-1.5 pr-8 font-medium">Direction</th>
+                      <th className="py-1.5 font-medium">Nulls</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(detail.data.sort_fields ?? []).map((s) => (
+                      <tr key={s.column} className="border-b border-border last:border-b-0">
+                        <td className="py-1.5 pr-8 font-mono">{s.column}</td>
+                        <td className="py-1.5 pr-8 font-mono text-muted-foreground">{s.transform}</td>
+                        <td className="py-1.5 pr-8">{s.direction}</td>
+                        <td className="py-1.5">{s.null_order}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </DetailSection>
             )}
           </div>
 
-          {(detail.data.sort_fields ?? []).length > 0 && (
-            <div>
-              <h2 className="mb-2 text-sm font-medium text-muted-foreground">Sort order</h2>
-              <table className="w-full text-sm">
-                <thead className="text-left text-muted-foreground">
-                  <tr className="border-b border-border">
-                    <th className="py-1 pr-4 font-medium">Column</th>
-                    <th className="py-1 pr-4 font-medium">Transform</th>
-                    <th className="py-1 pr-4 font-medium">Direction</th>
-                    <th className="py-1 font-medium">Nulls</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(detail.data.sort_fields ?? []).map((s) => (
-                    <tr key={s.column} className="border-b border-border last:border-b-0">
-                      <td className="py-1 pr-4 font-mono">{s.column}</td>
-                      <td className="py-1 pr-4 font-mono text-muted-foreground">{s.transform}</td>
-                      <td className="py-1 pr-4">{s.direction}</td>
-                      <td className="py-1">{s.null_order}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          <div>
-            <h2 className="mb-2 text-sm font-medium text-muted-foreground">Snapshots</h2>
+          <DetailSection title="Snapshots">
             {(detail.data.snapshots ?? []).length > 0 ? (
-              <table className="w-full text-sm">
+              <table className="text-sm">
                 <thead className="text-left text-muted-foreground">
                   <tr className="border-b border-border">
-                    <th className="py-1 pr-4 font-medium">Snapshot id</th>
-                    <th className="py-1 pr-4 font-medium">Time</th>
-                    <th className="py-1 pr-4 font-medium">Operation</th>
-                    <th className="py-1 font-medium">Summary</th>
+                    <th className="py-1.5 pr-8 font-medium">Snapshot id</th>
+                    <th className="py-1.5 pr-8 font-medium">Time</th>
+                    <th className="py-1.5 pr-8 font-medium">Operation</th>
+                    <th className="py-1.5 font-medium">Summary</th>
                   </tr>
                 </thead>
                 <tbody>
                   {(detail.data.snapshots ?? []).map((s) => (
                     <tr key={s.snapshot_id} className="border-b border-border last:border-b-0">
-                      <td className="py-1 pr-4 font-mono">{s.snapshot_id}</td>
-                      <td className="py-1 pr-4 text-muted-foreground">
-                        {new Date(s.timestamp_ms).toLocaleString()}
+                      <td className="py-1.5 pr-8 font-mono">{s.snapshot_id}</td>
+                      <td
+                        className="py-1.5 pr-8 text-muted-foreground"
+                        title={fullTimestamp(new Date(s.timestamp_ms).toISOString())}
+                      >
+                        {timeAgo(new Date(s.timestamp_ms).toISOString())}
                       </td>
-                      <td className="py-1 pr-4">{s.operation}</td>
-                      <td className="py-1 text-muted-foreground">{snapshotSummary(s.summary)}</td>
+                      <td className="py-1.5 pr-8">{s.operation}</td>
+                      <td className="py-1.5 text-muted-foreground">{snapshotSummary(s.summary)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -498,25 +516,56 @@ function TableDetailView({
             ) : (
               <p className="text-sm text-muted-foreground">No snapshots yet.</p>
             )}
-          </div>
+          </DetailSection>
 
           {Object.keys(detail.data.properties).length > 0 && (
-            <div>
-              <h2 className="mb-2 text-sm font-medium text-muted-foreground">Properties</h2>
-              <table className="w-full text-sm">
+            <DetailSection title="Properties">
+              <table className="text-sm">
                 <tbody>
                   {Object.entries(detail.data.properties).map(([k, v]) => (
                     <tr key={k} className="border-b border-border last:border-b-0">
-                      <td className="py-1 pr-4 font-mono text-muted-foreground">{k}</td>
-                      <td className="py-1 font-mono break-all">{v}</td>
+                      <td className="py-1.5 pr-8 font-mono text-muted-foreground">{k}</td>
+                      <td className="py-1.5 font-mono break-all">{v}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-            </div>
+            </DetailSection>
           )}
         </>
       ) : null}
     </div>
+  );
+}
+
+/** A labelled card wrapping one table-detail section (header strip + body). */
+function DetailSection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <Card className="overflow-hidden">
+      <div className="border-b bg-muted/40 px-4 py-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        {title}
+      </div>
+      <div className="overflow-x-auto p-4">{children}</div>
+    </Card>
+  );
+}
+
+/** Copy-to-clipboard icon button with a transient check confirmation. */
+function CopyButton({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        navigator.clipboard?.writeText(value);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      }}
+      className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+      title="Copy location"
+      aria-label="Copy location"
+    >
+      {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+    </button>
   );
 }
