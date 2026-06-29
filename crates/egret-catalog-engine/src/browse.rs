@@ -1193,6 +1193,10 @@ struct StatisticsDto {
 }
 
 /// GET /ws/{ws}/catalog/warehouses/{wid}/statistics
+///
+/// Returns only the most-recent page of lakekeeper's hourly statistics series
+/// (the spec scopes this tab to "the first page of stats"); older samples beyond
+/// one page are intentionally not paginated here.
 async fn warehouse_statistics(
     State(st): State<BrowseState>,
     WsContext(ctx): WsContext,
@@ -1241,22 +1245,46 @@ struct TaskDto {
 }
 
 /// GET /ws/{ws}/catalog/warehouses/{wid}/tasks
+///
+/// Paginates the full task list: loops `list_tasks` over `next_page_token`
+/// (mirroring [`list_namespaces_one_level`]) so the UI never sees a silently
+/// truncated set. `ListTasksRequest`'s cursor is a plain `page_token:
+/// Option<String>` — first page is `default()`, subsequent pages re-use it with
+/// `page_token` set to the previous response's `next_page_token`; we stop when
+/// that is `None` (no infinite-loop risk).
 async fn warehouse_tasks(
     State(st): State<BrowseState>,
     WsContext(ctx): WsContext,
     Path((_ws, wid)): Path<(String, Uuid)>,
 ) -> Result<Json<Vec<TaskDto>>, BrowseApiError> {
     let r = authorized_warehouse(&st, &ctx, wid).await?;
-    let resp = <EngineApiServer as TasksMgmtService<_, _, _>>::list_tasks(
-        WarehouseId::from(r.lakekeeper_id),
-        ListTasksRequest::default(),
-        st.engine.clone(),
-        r.request_metadata,
-    )
-    .await?;
+    let warehouse_id = WarehouseId::from(r.lakekeeper_id);
 
-    let tasks = resp
-        .tasks
+    let mut all: Vec<lakekeeper::api::management::v1::tasks::WarehouseTaskInfo> = Vec::new();
+    let mut page_token: Option<String> = None;
+    let mut request_metadata = r.request_metadata;
+    loop {
+        let resp = <EngineApiServer as TasksMgmtService<_, _, _>>::list_tasks(
+            warehouse_id,
+            ListTasksRequest {
+                page_token: page_token.take(),
+                ..ListTasksRequest::default()
+            },
+            st.engine.clone(),
+            request_metadata.clone(),
+        )
+        .await?;
+        all.extend(resp.tasks);
+        match resp.next_page_token {
+            Some(token) if !token.is_empty() => page_token = Some(token),
+            _ => break,
+        }
+        // Refresh the principal for the next page (defensive; cheap).
+        request_metadata =
+            system_request_metadata(&st.system_user).map_err(|_| BrowseApiError::Internal)?;
+    }
+
+    let tasks = all
         .into_iter()
         .map(|t| TaskDto {
             task_id: t.task_id.to_string(),
