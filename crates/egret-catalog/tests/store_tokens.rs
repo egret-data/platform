@@ -1,11 +1,21 @@
 //! DB-gated catalog-token store tests. Self-skip without DATABASE_URL.
 mod common;
 use common::{seed_warehouse, seed_workspace, store};
-use egret_catalog::service::tokens::hash_token;
+use egret_catalog::service::tokens::{hash_token, Grant};
 
-/// Full read+write permissions, used by most existing tests.
-fn rw_perms() -> Vec<String> {
-    vec!["catalog:read".to_string(), "catalog:write".to_string()]
+/// A single all-namespaces grant with the given full perm strings — the common
+/// "read everything" / "read+write everything" shape.
+fn star_grant(perms: &[&str]) -> Vec<Grant> {
+    vec![Grant {
+        namespace: "*".to_string(),
+        table: None,
+        permissions: perms.iter().map(|p| p.to_string()).collect(),
+    }]
+}
+
+/// Full read+write all-namespaces scope, used by most existing tests.
+fn rw_scope() -> Vec<Grant> {
+    star_grant(&["catalog:read", "catalog:write"])
 }
 
 #[tokio::test]
@@ -17,7 +27,7 @@ async fn create_token_and_workspace_for_token_returns_workspace_id() {
     let ws = seed_workspace(&s).await;
     let wh = seed_warehouse(&s, ws).await;
     let (token_row, raw) = s
-        .create_token(ws, wh, "test-engine", &rw_perms(), &[], &[])
+        .create_token(ws, wh, "test-engine", &rw_scope())
         .await
         .unwrap();
     assert_eq!(token_row.workspace_id, ws);
@@ -53,7 +63,7 @@ async fn revoked_token_returns_not_found() {
     let ws = seed_workspace(&s).await;
     let wh = seed_warehouse(&s, ws).await;
     let (token_row, raw) = s
-        .create_token(ws, wh, "revoke-me", &rw_perms(), &[], &[])
+        .create_token(ws, wh, "revoke-me", &rw_scope())
         .await
         .unwrap();
 
@@ -78,7 +88,7 @@ async fn stored_value_is_hash_not_raw_token() {
     let ws = seed_workspace(&s).await;
     let wh = seed_warehouse(&s, ws).await;
     let (token_row, raw) = s
-        .create_token(ws, wh, "hash-check", &rw_perms(), &[], &[])
+        .create_token(ws, wh, "hash-check", &rw_scope())
         .await
         .unwrap();
 
@@ -105,14 +115,8 @@ async fn list_tokens_for_workspace() {
     };
     let ws = seed_workspace(&s).await;
     let wh = seed_warehouse(&s, ws).await;
-    let (r1, _) = s
-        .create_token(ws, wh, "alpha", &rw_perms(), &[], &[])
-        .await
-        .unwrap();
-    let (r2, _) = s
-        .create_token(ws, wh, "beta", &rw_perms(), &[], &[])
-        .await
-        .unwrap();
+    let (r1, _) = s.create_token(ws, wh, "alpha", &rw_scope()).await.unwrap();
+    let (r2, _) = s.create_token(ws, wh, "beta", &rw_scope()).await.unwrap();
 
     let tokens = s.list_tokens(ws).await.unwrap();
     let ids: Vec<_> = tokens.iter().map(|t| t.id).collect();
@@ -121,27 +125,62 @@ async fn list_tokens_for_workspace() {
 }
 
 // ---------------------------------------------------------------------------
-// New CE-3 tests
+// Grant scope (token scope v2)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn create_token_with_read_only_perms() {
+async fn create_token_with_read_only_scope() {
     let Some(s) = store().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
     let ws = seed_workspace(&s).await;
     let wh = seed_warehouse(&s, ws).await;
-    let ro_perms = vec!["catalog:read".to_string()];
-    let (token_row, raw) = s
-        .create_token(ws, wh, "ro", &ro_perms, &[], &[])
-        .await
-        .unwrap();
-    assert_eq!(token_row.permissions, ro_perms);
+    let scope = star_grant(&["catalog:read"]);
+    let (token_row, raw) = s.create_token(ws, wh, "ro", &scope).await.unwrap();
+    assert_eq!(token_row.scope, scope);
 
     let auth = s.authenticate_token(&raw).await.unwrap();
     assert_eq!(auth.workspace_id, ws);
-    assert_eq!(auth.permissions, ro_perms);
+    // The coarse-gate union holds only read.
+    assert_eq!(auth.permissions, vec!["catalog:read".to_string()]);
+    assert_eq!(auth.grants, scope);
+}
+
+/// Round-trip a multi-grant scope: it persists on the row, lists back unchanged,
+/// authenticates into `TokenAuth.grants`, and the derived union `permissions`
+/// is the deduped union of every grant's perms.
+#[tokio::test]
+async fn multi_grant_scope_round_trips_with_union_permissions() {
+    let Some(s) = store().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let ws = seed_workspace(&s).await;
+    let wh = seed_warehouse(&s, ws).await;
+    let scope = vec![
+        Grant {
+            namespace: "sale".into(),
+            table: None,
+            permissions: vec!["catalog:read".into()],
+        },
+        Grant {
+            namespace: "marketing".into(),
+            table: Some("campaigns".into()),
+            permissions: vec!["catalog:read".into(), "catalog:write".into()],
+        },
+    ];
+    let (token_row, raw) = s.create_token(ws, wh, "mixed", &scope).await.unwrap();
+    assert_eq!(token_row.scope, scope, "scope persists on the row");
+
+    let auth = s.authenticate_token(&raw).await.unwrap();
+    assert_eq!(auth.grants, scope, "grants flow into TokenAuth");
+    // Deduped union of {read} ∪ {read,write} = {read, write} (sorted).
+    assert_eq!(
+        auth.permissions,
+        vec!["catalog:read".to_string(), "catalog:write".to_string()],
+        "permissions is the deduped union for the coarse gate"
+    );
 }
 
 #[tokio::test]
@@ -153,7 +192,7 @@ async fn create_token_rejects_unknown_permission() {
     let ws = seed_workspace(&s).await;
     let wh = seed_warehouse(&s, ws).await;
     let err = s
-        .create_token(ws, wh, "x", &["catalog:admin".to_string()], &[], &[])
+        .create_token(ws, wh, "x", &star_grant(&["catalog:admin"]))
         .await
         .unwrap_err();
     assert!(
@@ -163,7 +202,22 @@ async fn create_token_rejects_unknown_permission() {
 }
 
 #[tokio::test]
-async fn create_token_rejects_empty_permissions() {
+async fn create_token_rejects_empty_scope() {
+    let Some(s) = store().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let ws = seed_workspace(&s).await;
+    let wh = seed_warehouse(&s, ws).await;
+    let err = s.create_token(ws, wh, "x", &[]).await.unwrap_err();
+    assert!(
+        matches!(err, egret_catalog::CatalogError::BadRequest(_)),
+        "expected BadRequest for empty scope, got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn create_token_rejects_grant_with_empty_permissions() {
     let Some(s) = store().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
@@ -171,12 +225,21 @@ async fn create_token_rejects_empty_permissions() {
     let ws = seed_workspace(&s).await;
     let wh = seed_warehouse(&s, ws).await;
     let err = s
-        .create_token(ws, wh, "x", &[], &[], &[])
+        .create_token(
+            ws,
+            wh,
+            "x",
+            &[Grant {
+                namespace: "*".into(),
+                table: None,
+                permissions: vec![],
+            }],
+        )
         .await
         .unwrap_err();
     assert!(
         matches!(err, egret_catalog::CatalogError::BadRequest(_)),
-        "expected BadRequest for empty permissions, got: {err:?}"
+        "expected BadRequest for a grant with no permissions, got: {err:?}"
     );
 }
 
@@ -194,7 +257,7 @@ async fn revoke_token_for_workspace_guards_by_workspace() {
     let ws_b = seed_workspace(&s).await;
     let wh_a = seed_warehouse(&s, ws_a).await;
     let (token, _raw) = s
-        .create_token(ws_a, wh_a, "guard", &rw_perms(), &[], &[])
+        .create_token(ws_a, wh_a, "guard", &rw_scope())
         .await
         .unwrap();
 
@@ -238,7 +301,7 @@ async fn revoke_token_for_workspace_guards_by_workspace() {
 }
 
 // ---------------------------------------------------------------------------
-// CE-4: namespace_scope tests
+// Grant validation (namespace / table shape)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -249,35 +312,24 @@ async fn create_token_with_namespace_scope() {
     };
     let ws = seed_workspace(&s).await;
     let wh = seed_warehouse(&s, ws).await;
-    let ns: Vec<String> = vec!["marts".to_string(), "staging.raw".to_string()];
-    let (token_row, raw) = s
-        .create_token(ws, wh, "scoped", &rw_perms(), &ns, &[])
-        .await
-        .unwrap();
-    assert_eq!(token_row.namespace_scope, ns);
+    let scope = vec![
+        Grant {
+            namespace: "marts".into(),
+            table: None,
+            permissions: vec!["catalog:read".into(), "catalog:write".into()],
+        },
+        Grant {
+            namespace: "staging.raw".into(),
+            table: None,
+            permissions: vec!["catalog:read".into(), "catalog:write".into()],
+        },
+    ];
+    let (token_row, raw) = s.create_token(ws, wh, "scoped", &scope).await.unwrap();
+    assert_eq!(token_row.scope, scope);
 
     let auth = s.authenticate_token(&raw).await.unwrap();
     assert_eq!(auth.workspace_id, ws);
-    assert_eq!(auth.permissions, rw_perms());
-    assert_eq!(auth.namespace_scope, ns);
-}
-
-#[tokio::test]
-async fn create_token_empty_namespace_scope_means_all() {
-    let Some(s) = store().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
-    let ws = seed_workspace(&s).await;
-    let wh = seed_warehouse(&s, ws).await;
-    let (token_row, raw) = s
-        .create_token(ws, wh, "all", &rw_perms(), &[], &[])
-        .await
-        .unwrap();
-    assert_eq!(token_row.namespace_scope, Vec::<String>::new());
-
-    let auth = s.authenticate_token(&raw).await.unwrap();
-    assert_eq!(auth.namespace_scope, Vec::<String>::new());
+    assert_eq!(auth.grants, scope);
 }
 
 #[tokio::test]
@@ -289,12 +341,21 @@ async fn create_token_rejects_malformed_namespace_empty_string() {
     let ws = seed_workspace(&s).await;
     let wh = seed_warehouse(&s, ws).await;
     let err = s
-        .create_token(ws, wh, "bad", &rw_perms(), &["".to_string()], &[])
+        .create_token(
+            ws,
+            wh,
+            "bad",
+            &[Grant {
+                namespace: "".into(),
+                table: None,
+                permissions: vec!["catalog:read".into()],
+            }],
+        )
         .await
         .unwrap_err();
     assert!(
         matches!(err, egret_catalog::CatalogError::BadRequest(_)),
-        "expected BadRequest for empty namespace entry, got: {err:?}"
+        "expected BadRequest for empty namespace, got: {err:?}"
     );
 }
 
@@ -307,30 +368,21 @@ async fn create_token_rejects_malformed_namespace_leading_dot() {
     let ws = seed_workspace(&s).await;
     let wh = seed_warehouse(&s, ws).await;
     let err = s
-        .create_token(ws, wh, "bad", &rw_perms(), &[".bad".to_string()], &[])
+        .create_token(
+            ws,
+            wh,
+            "bad",
+            &[Grant {
+                namespace: ".bad".into(),
+                table: None,
+                permissions: vec!["catalog:read".into()],
+            }],
+        )
         .await
         .unwrap_err();
     assert!(
         matches!(err, egret_catalog::CatalogError::BadRequest(_)),
         "expected BadRequest for leading-dot namespace, got: {err:?}"
-    );
-}
-
-#[tokio::test]
-async fn create_token_rejects_malformed_namespace_trailing_dot() {
-    let Some(s) = store().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
-    let ws = seed_workspace(&s).await;
-    let wh = seed_warehouse(&s, ws).await;
-    let err = s
-        .create_token(ws, wh, "bad", &rw_perms(), &["bad.".to_string()], &[])
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(err, egret_catalog::CatalogError::BadRequest(_)),
-        "expected BadRequest for trailing-dot namespace, got: {err:?}"
     );
 }
 
@@ -343,11 +395,74 @@ async fn create_token_rejects_malformed_namespace_double_dot() {
     let ws = seed_workspace(&s).await;
     let wh = seed_warehouse(&s, ws).await;
     let err = s
-        .create_token(ws, wh, "bad", &rw_perms(), &["a..b".to_string()], &[])
+        .create_token(
+            ws,
+            wh,
+            "bad",
+            &[Grant {
+                namespace: "a..b".into(),
+                table: None,
+                permissions: vec!["catalog:read".into()],
+            }],
+        )
         .await
         .unwrap_err();
     assert!(
         matches!(err, egret_catalog::CatalogError::BadRequest(_)),
         "expected BadRequest for double-dot namespace, got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn create_token_rejects_dotted_table_name() {
+    let Some(s) = store().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let ws = seed_workspace(&s).await;
+    let wh = seed_warehouse(&s, ws).await;
+    let err = s
+        .create_token(
+            ws,
+            wh,
+            "bad",
+            &[Grant {
+                namespace: "sale".into(),
+                table: Some("a.b".into()),
+                permissions: vec!["catalog:read".into()],
+            }],
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, egret_catalog::CatalogError::BadRequest(_)),
+        "expected BadRequest for a dotted table name, got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn create_token_rejects_table_grant_on_star_namespace() {
+    let Some(s) = store().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let ws = seed_workspace(&s).await;
+    let wh = seed_warehouse(&s, ws).await;
+    let err = s
+        .create_token(
+            ws,
+            wh,
+            "bad",
+            &[Grant {
+                namespace: "*".into(),
+                table: Some("orders".into()),
+                permissions: vec!["catalog:read".into()],
+            }],
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, egret_catalog::CatalogError::BadRequest(_)),
+        "expected BadRequest for a table grant on the '*' namespace, got: {err:?}"
     );
 }

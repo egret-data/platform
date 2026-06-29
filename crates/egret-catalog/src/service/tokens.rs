@@ -13,6 +13,26 @@ use uuid::Uuid;
 use super::store::CatalogStore;
 
 // ---------------------------------------------------------------------------
+// Resource-grant model (token scope v2).
+// ---------------------------------------------------------------------------
+
+/// A single resource grant: a namespace (or the `"*"` all-namespaces sentinel),
+/// an optional exact table within it, and the permissions granted on that
+/// resource. Token scope is a list of grants, evaluated with OR semantics: an
+/// action is allowed if ANY grant matches the target resource AND carries the
+/// needed permission. An empty list grants nothing (least-privilege).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct Grant {
+    /// Dotted namespace prefix (subtree match), or `"*"` for all namespaces.
+    pub namespace: String,
+    /// `None` = all tables in the namespace subtree; else an exact table name.
+    #[serde(default)]
+    pub table: Option<String>,
+    /// Full perm strings: a non-empty subset of `{"catalog:read","catalog:write"}`.
+    pub permissions: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Public row type — token_hash is intentionally absent.
 // ---------------------------------------------------------------------------
 
@@ -23,9 +43,8 @@ pub struct CatalogToken {
     pub workspace_id: Uuid,
     pub warehouse_id: Uuid,
     pub label: String,
-    pub permissions: Vec<String>,
-    pub namespace_scope: Vec<String>,
-    pub table_scope: Vec<String>,
+    /// The token's resource-grant scope (OR-evaluated; empty = no access).
+    pub scope: Vec<Grant>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -34,9 +53,12 @@ pub struct CatalogToken {
 pub struct TokenAuth {
     pub workspace_id: Uuid,
     pub warehouse_id: Uuid,
+    /// The token's resource grants (the per-resource authz decision lives in the
+    /// authorizer, which reads these from the claim).
+    pub grants: Vec<Grant>,
+    /// The deduped UNION of every grant's permissions — used by the front-auth
+    /// coarse gate (does the token hold ANY read / ANY write).
     pub permissions: Vec<String>,
-    pub namespace_scope: Vec<String>,
-    pub table_scope: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -83,45 +105,71 @@ fn validate_namespace(ns: &str) -> bool {
     !ns.is_empty() && ns.split('.').all(|s| !s.is_empty())
 }
 
-fn validate_namespace_scope(scope: &[String]) -> Result<(), CatalogError> {
-    for ns in scope {
-        if !validate_namespace(ns) {
+/// The all-namespaces sentinel for a grant's `namespace`.
+const ALL_NS: &str = "*";
+
+/// Validate a token's resource-grant scope.
+///
+/// Rules:
+/// * the list must be non-empty (least-privilege: an empty scope grants nothing,
+///   so an empty scope is almost certainly a mistake and is rejected up front);
+/// * each grant's `namespace` is either the `"*"` sentinel or a valid dotted
+///   namespace (no leading/trailing/consecutive dots);
+/// * a present `table` must be a single non-empty segment (no dots) and requires
+///   a concrete namespace (a `"*"` table grant is meaningless);
+/// * each grant's `permissions` is a non-empty subset of the valid perms.
+fn validate_grants(grants: &[Grant]) -> Result<(), CatalogError> {
+    if grants.is_empty() {
+        return Err(CatalogError::BadRequest(
+            "scope must have at least one grant".into(),
+        ));
+    }
+    for g in grants {
+        if g.namespace != ALL_NS && !validate_namespace(&g.namespace) {
             return Err(CatalogError::BadRequest(format!(
-                "invalid namespace '{ns}': must be non-empty with no leading, trailing, or consecutive dots"
+                "invalid grant namespace '{}'",
+                g.namespace
             )));
         }
+        if let Some(t) = &g.table {
+            if t.is_empty() || t.contains('.') {
+                return Err(CatalogError::BadRequest(format!("invalid grant table '{t}'")));
+            }
+            if g.namespace == ALL_NS {
+                return Err(CatalogError::BadRequest(
+                    "a table grant needs a concrete namespace".into(),
+                ));
+            }
+        }
+        validate_permissions(&g.permissions)?;
     }
     Ok(())
 }
 
-/// Validate a fully-qualified table scope entry: dotted `namespace.table`,
-/// at least two non-empty segments (namespace + table).
-fn validate_table_scope(scope: &[String]) -> Result<(), CatalogError> {
-    for t in scope {
-        let segs: Vec<&str> = t.split('.').collect();
-        if segs.len() < 2 || segs.iter().any(|s| s.is_empty()) {
-            return Err(CatalogError::BadRequest(format!(
-                "invalid table scope '{t}': must be a dotted namespace.table with no empty segments"
-            )));
-        }
-    }
-    Ok(())
+/// Deduped union of every grant's permissions (stable order, deduped).
+fn union_permissions(grants: &[Grant]) -> Vec<String> {
+    let mut perms: Vec<String> = grants
+        .iter()
+        .flat_map(|g| g.permissions.iter().cloned())
+        .collect();
+    perms.sort();
+    perms.dedup();
+    perms
 }
 
 // ---------------------------------------------------------------------------
 // CatalogStore — token methods
 // ---------------------------------------------------------------------------
 
-/// Internal row type for sqlx, mapping the DB columns we SELECT.
+/// Internal row type for sqlx, mapping the DB columns we SELECT. `scope` is the
+/// jsonb grants column, decoded into a typed `Vec<Grant>`.
 #[derive(sqlx::FromRow)]
 struct TokenRow {
     id: Uuid,
     workspace_id: Uuid,
     warehouse_id: Uuid,
     label: String,
-    permissions: Vec<String>,
-    namespace_scope: Vec<String>,
-    table_scope: Vec<String>,
+    scope: sqlx::types::Json<Vec<Grant>>,
     created_at: DateTime<Utc>,
 }
 
@@ -132,9 +180,7 @@ impl From<TokenRow> for CatalogToken {
             workspace_id: r.workspace_id,
             warehouse_id: r.warehouse_id,
             label: r.label,
-            permissions: r.permissions,
-            namespace_scope: r.namespace_scope,
-            table_scope: r.table_scope,
+            scope: r.scope.0,
             created_at: r.created_at,
         }
     }
@@ -145,22 +191,18 @@ impl From<TokenRow> for CatalogToken {
 struct AuthRow {
     workspace_id: Uuid,
     warehouse_id: Uuid,
-    permissions: Vec<String>,
-    namespace_scope: Vec<String>,
-    table_scope: Vec<String>,
+    scope: sqlx::types::Json<Vec<Grant>>,
 }
 
 impl CatalogStore {
-    /// Create a new catalog token for `workspace_id` with the given `permissions`
-    /// and optional `namespace_scope`.
+    /// Create a new catalog token for `workspace_id` with the given resource
+    /// `scope` (token scope v2).
     ///
-    /// `permissions` must be a non-empty subset of `{"catalog:read","catalog:write"}`;
-    /// any unknown value returns `CatalogError::BadRequest`.
-    ///
-    /// `namespace_scope` is a list of dot-separated namespace identifiers
-    /// (e.g. `"marts"`, `"staging.raw"`). An empty slice means the token is
-    /// scoped to all namespaces. Each entry must be non-empty with no
-    /// leading, trailing, or consecutive dots.
+    /// `scope` is a non-empty list of [`Grant`]s, OR-evaluated by the authorizer.
+    /// Each grant's namespace is either the `"*"` sentinel or a valid dotted
+    /// namespace; a present `table` must be a single non-empty segment in a
+    /// concrete namespace; each grant's permissions are a non-empty subset of
+    /// `{"catalog:read","catalog:write"}`. Any violation → `CatalogError::BadRequest`.
     ///
     /// Returns the persisted `CatalogToken` row plus the **raw token** (shown
     /// once; the caller must relay it to the user immediately).
@@ -169,30 +211,24 @@ impl CatalogStore {
         workspace_id: Uuid,
         warehouse_id: Uuid,
         label: &str,
-        permissions: &[String],
-        namespace_scope: &[String],
-        table_scope: &[String],
+        scope: &[Grant],
     ) -> Result<(CatalogToken, String), CatalogError> {
-        validate_permissions(permissions)?;
-        validate_namespace_scope(namespace_scope)?;
-        validate_table_scope(table_scope)?;
+        validate_grants(scope)?;
 
         let raw = generate_raw_token();
         let hash = hash_token(&raw);
 
         let row: TokenRow = sqlx::query_as::<_, TokenRow>(
             "INSERT INTO catalog_tokens \
-             (workspace_id, warehouse_id, token_hash, label, permissions, namespace_scope, table_scope) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) \
-             RETURNING id, workspace_id, warehouse_id, label, permissions, namespace_scope, table_scope, created_at",
+             (workspace_id, warehouse_id, token_hash, label, scope) \
+             VALUES ($1, $2, $3, $4, $5) \
+             RETURNING id, workspace_id, warehouse_id, label, scope, created_at",
         )
         .bind(workspace_id)
         .bind(warehouse_id)
         .bind(&hash)
         .bind(label)
-        .bind(permissions)
-        .bind(namespace_scope)
-        .bind(table_scope)
+        .bind(sqlx::types::Json(scope))
         .fetch_one(self.pool())
         .await
         .map_err(|e| match &e {
@@ -212,7 +248,7 @@ impl CatalogStore {
     pub async fn authenticate_token(&self, raw: &str) -> Result<TokenAuth, CatalogError> {
         let hash = hash_token(raw);
         let row: AuthRow = sqlx::query_as::<_, AuthRow>(
-            "SELECT workspace_id, warehouse_id, permissions, namespace_scope, table_scope FROM catalog_tokens \
+            "SELECT workspace_id, warehouse_id, scope FROM catalog_tokens \
              WHERE token_hash = $1 AND revoked_at IS NULL",
         )
         .bind(&hash)
@@ -221,12 +257,13 @@ impl CatalogStore {
         .map_err(CatalogError::Db)?
         .ok_or_else(|| CatalogError::NotFound("catalog token".into()))?;
 
+        let grants = row.scope.0;
+        let permissions = union_permissions(&grants);
         Ok(TokenAuth {
             workspace_id: row.workspace_id,
             warehouse_id: row.warehouse_id,
-            permissions: row.permissions,
-            namespace_scope: row.namespace_scope,
-            table_scope: row.table_scope,
+            grants,
+            permissions,
         })
     }
 
@@ -312,7 +349,7 @@ impl CatalogStore {
     /// List all non-revoked tokens for a workspace (hashes excluded).
     pub async fn list_tokens(&self, workspace_id: Uuid) -> Result<Vec<CatalogToken>, CatalogError> {
         let rows: Vec<TokenRow> = sqlx::query_as::<_, TokenRow>(
-            "SELECT id, workspace_id, warehouse_id, label, permissions, namespace_scope, table_scope, created_at \
+            "SELECT id, workspace_id, warehouse_id, label, scope, created_at \
              FROM catalog_tokens \
              WHERE workspace_id = $1 AND revoked_at IS NULL \
              ORDER BY created_at ASC",
@@ -334,7 +371,7 @@ impl CatalogStore {
         warehouse_id: Uuid,
     ) -> Result<Vec<CatalogToken>, CatalogError> {
         let rows: Vec<TokenRow> = sqlx::query_as::<_, TokenRow>(
-            "SELECT id, workspace_id, warehouse_id, label, permissions, namespace_scope, table_scope, created_at \
+            "SELECT id, workspace_id, warehouse_id, label, scope, created_at \
              FROM catalog_tokens \
              WHERE workspace_id = $1 AND warehouse_id = $2 AND revoked_at IS NULL \
              ORDER BY created_at ASC",
@@ -348,39 +385,29 @@ impl CatalogStore {
         Ok(rows.into_iter().map(CatalogToken::from).collect())
     }
 
-    /// Update a token's label/permissions/scopes in place (hash untouched, so the
-    /// existing secret keeps working). Scoped to (id, workspace, warehouse): returns
-    /// the updated row, or `NotFound` when the id is not this warehouse's token.
-    // The (id, workspace, warehouse) guard tuple plus the four editable fields
-    // intentionally exceed clippy's arg threshold; grouping them into a struct
-    // would obscure the SQL bind order with no real call-site benefit.
-    #[allow(clippy::too_many_arguments)]
+    /// Update a token's label/scope in place (hash untouched, so the existing
+    /// secret keeps working). Scoped to (id, workspace, warehouse): returns the
+    /// updated row, or `NotFound` when the id is not this warehouse's token.
     pub async fn update_token_for_warehouse(
         &self,
         workspace_id: Uuid,
         warehouse_id: Uuid,
         id: Uuid,
         label: &str,
-        permissions: &[String],
-        namespace_scope: &[String],
-        table_scope: &[String],
+        scope: &[Grant],
     ) -> Result<CatalogToken, CatalogError> {
-        validate_permissions(permissions)?;
-        validate_namespace_scope(namespace_scope)?;
-        validate_table_scope(table_scope)?;
+        validate_grants(scope)?;
         let row: Option<TokenRow> = sqlx::query_as::<_, TokenRow>(
             "UPDATE catalog_tokens \
-             SET label = $4, permissions = $5, namespace_scope = $6, table_scope = $7 \
+             SET label = $4, scope = $5 \
              WHERE id = $1 AND workspace_id = $2 AND warehouse_id = $3 AND revoked_at IS NULL \
-             RETURNING id, workspace_id, warehouse_id, label, permissions, namespace_scope, table_scope, created_at",
+             RETURNING id, workspace_id, warehouse_id, label, scope, created_at",
         )
         .bind(id)
         .bind(workspace_id)
         .bind(warehouse_id)
         .bind(label)
-        .bind(permissions)
-        .bind(namespace_scope)
-        .bind(table_scope)
+        .bind(sqlx::types::Json(scope))
         .fetch_optional(self.pool())
         .await
         .map_err(CatalogError::Db)?;
@@ -403,7 +430,7 @@ impl CatalogStore {
             "UPDATE catalog_tokens \
              SET token_hash = $4, rotated_at = now() \
              WHERE id = $1 AND workspace_id = $2 AND warehouse_id = $3 AND revoked_at IS NULL \
-             RETURNING id, workspace_id, warehouse_id, label, permissions, namespace_scope, table_scope, created_at",
+             RETURNING id, workspace_id, warehouse_id, label, scope, created_at",
         )
         .bind(id)
         .bind(workspace_id)

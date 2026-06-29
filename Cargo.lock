@@ -2460,6 +2460,8 @@ dependencies = [
  "egret-metastore",
  "hex",
  "rand 0.8.6",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
  "sqlx 0.8.6",
  "thiserror 2.0.18",
