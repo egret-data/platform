@@ -107,6 +107,10 @@ describe("Catalog browse tree", () => {
     // Detail rendered without any clicks.
     expect(tableDetailMock).toHaveBeenCalledWith("wh-1", "sale", "orders");
     expect(screen.getByText("write.format.default")).toBeInTheDocument();
+    // The tree auto-expands the ancestors of the deep-linked ns, so its
+    // contents are visible in the tree (not only in the detail pane):
+    expect(screen.getByText("2024")).toBeInTheDocument(); // child namespace
+    expect(screen.getByText("customers")).toBeInTheDocument(); // sibling table leaf
   });
 
   it("creates a root namespace from the New namespace dialog", async () => {

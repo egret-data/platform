@@ -1,12 +1,39 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Database, Eye, Plus, Table2, Trash2 } from "lucide-react";
 import { useNamespaceContents } from "@/api/catalog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import { type NsNode, nodeMatchesFilter } from "./nsTree";
+import { type NsNode } from "./nsTree";
 
 export const MAX_VISIBLE = 200;
+
+/** All ancestor dotted paths of `ns` (including `ns` itself), or empty. */
+function seedFromNs(ns: string | null): Set<string> {
+  const set = new Set<string>();
+  if (!ns) return set;
+  const levels = ns.split(".");
+  levels.forEach((_, i) => set.add(levels.slice(0, i + 1).join(".")));
+  return set;
+}
+
+/**
+ * Collect the dotted paths of every node that matches `q` itself or has a
+ * descendant that matches, so per-node visibility checks are O(1) lookups
+ * instead of re-walking the subtree on every render.
+ */
+function collectMatches(nodes: NsNode[], q: string, out: Set<string>): boolean {
+  let anyHere = false;
+  for (const node of nodes) {
+    const childMatch = collectMatches(node.children, q, out);
+    const selfMatch = node.dotted.toLowerCase().includes(q);
+    if (selfMatch || childMatch) {
+      out.add(node.dotted);
+      anyHere = true;
+    }
+  }
+  return anyHere;
+}
 
 export function NamespaceTree({
   ws,
@@ -28,7 +55,18 @@ export function NamespaceTree({
   onNewNamespace: () => void;
 }): JSX.Element {
   const [filter, setFilter] = useState("");
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [expanded, setExpanded] = useState<Set<string>>(() => seedFromNs(selectedNs));
+
+  // Keep the deep-link's ancestors expanded when navigating to a new ns while
+  // mounted (e.g. clicking a breadcrumb or a fresh deep-link).
+  useEffect(() => {
+    if (!selectedNs) return;
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      for (const path of seedFromNs(selectedNs)) next.add(path);
+      return next;
+    });
+  }, [selectedNs]);
 
   const toggle = (dotted: string) => {
     setExpanded((prev) => {
@@ -39,16 +77,25 @@ export function NamespaceTree({
     });
   };
 
+  // Precompute, once per (tree, filter), the set of dotted paths that match the
+  // filter themselves or have a matching descendant — so the per-node expand and
+  // child-visibility checks below are O(1) lookups rather than subtree re-walks.
+  const hasFilter = filter.trim().length > 0;
+  const matchSet = useMemo(() => {
+    const set = new Set<string>();
+    if (hasFilter) collectMatches(tree, filter.trim().toLowerCase(), set);
+    return set;
+  }, [tree, filter, hasFilter]);
+
   // A node is effectively-expanded if explicitly expanded, or (when filtering)
   // it has a descendant match so the match is revealed.
-  const hasFilter = filter.trim().length > 0;
   const isExpanded = (node: NsNode): boolean => {
     if (expanded.has(node.dotted)) return true;
-    if (hasFilter && node.children.some((c) => nodeMatchesFilter(c, filter))) return true;
+    if (hasFilter && node.children.some((c) => matchSet.has(c.dotted))) return true;
     return false;
   };
 
-  const visibleRoots = hasFilter ? tree.filter((n) => nodeMatchesFilter(n, filter)) : tree;
+  const visibleRoots = hasFilter ? tree.filter((n) => matchSet.has(n.dotted)) : tree;
 
   return (
     <div className="rounded border border-border">
@@ -68,7 +115,7 @@ export function NamespaceTree({
         <Input
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filter namespaces & tables…"
+          placeholder="Filter namespaces…"
           className="h-8"
         />
       </div>
@@ -81,6 +128,8 @@ export function NamespaceTree({
             node={node}
             depth={0}
             filter={filter}
+            matchSet={matchSet}
+            hasFilter={hasFilter}
             isExpanded={isExpanded}
             onToggle={toggle}
             selectedNs={selectedNs}
@@ -100,6 +149,8 @@ function TreeNode({
   node,
   depth,
   filter,
+  matchSet,
+  hasFilter,
   isExpanded,
   onToggle,
   selectedNs,
@@ -112,6 +163,8 @@ function TreeNode({
   node: NsNode;
   depth: number;
   filter: string;
+  matchSet: Set<string>;
+  hasFilter: boolean;
   isExpanded: (node: NsNode) => boolean;
   onToggle: (dotted: string) => void;
   selectedNs: string | null;
@@ -135,9 +188,9 @@ function TreeNode({
   const total = leaves.length;
   const shown = leaves.slice(0, MAX_VISIBLE);
 
-  // When filtering, child namespaces are themselves filtered.
-  const childNodes = lc
-    ? node.children.filter((c) => nodeMatchesFilter(c, filter))
+  // When filtering, child namespaces are themselves filtered (O(1) set lookup).
+  const childNodes = hasFilter
+    ? node.children.filter((c) => matchSet.has(c.dotted))
     : node.children;
 
   return (
@@ -182,6 +235,8 @@ function TreeNode({
               node={child}
               depth={depth + 1}
               filter={filter}
+              matchSet={matchSet}
+              hasFilter={hasFilter}
               isExpanded={isExpanded}
               onToggle={onToggle}
               selectedNs={selectedNs}
