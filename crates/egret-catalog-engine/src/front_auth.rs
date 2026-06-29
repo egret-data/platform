@@ -7,12 +7,14 @@
 //! `Extension<RequestMetadata>` and the authorizer gates data actions off its
 //! `"egret"` claim. So egret's tenant boundary is enforced in two layers: HERE
 //! in front (workspace ownership + coarse read/write permission), and AGAIN
-//! inside the engine (the authorizer, which also enforces `namespace_scope`):
+//! inside the engine (the authorizer, which evaluates the per-token resource
+//! `grants` with OR semantics):
 //!
 //! 1. **AUTHN** — extract the `Bearer` token and resolve it to an egret
-//!    `TokenAuth { workspace_id, warehouse_id, permissions, namespace_scope }`
-//!    via [`CatalogStore::authenticate_token`]. A missing / unknown / revoked
-//!    token is `401 UNAUTHORIZED`.
+//!    `TokenAuth { workspace_id, warehouse_id, grants, permissions }` (the
+//!    `permissions` are the deduped union of the grants' perms, for the coarse
+//!    gate) via [`CatalogStore::authenticate_token`]. A missing / unknown /
+//!    revoked token is `401 UNAUTHORIZED`.
 //! 2. **AUTHZ (A-3 ownership)** — the warehouse UUID lives in the request path
 //!    as lakekeeper's `{prefix}` segment. A token is now minted FOR a specific
 //!    warehouse (`TokenAuth::warehouse_id`, an egret-side warehouse row id), so
@@ -28,10 +30,10 @@
 //! 4. **Principal injection (CE-4)** — on success we insert a `RequestMetadata`
 //!    carrying a real per-token lakekeeper principal (`Actor::Principal`, a fixed
 //!    synthetic [`token_principal_id`] distinct from the system principal) whose
-//!    `"egret"` authentication claim carries this token's `perms` +
-//!    `namespace_scope`. [`EgretAuthorizer`] reads that claim to re-enforce the
-//!    permission scope AND the per-namespace `namespace_scope` boundary inside
-//!    the engine — the latter is enforced ONLY here-plus-authorizer, since the
+//!    `"egret"` authentication claim carries this token's resource `grants`.
+//!    [`EgretAuthorizer`] reads that claim to re-enforce the per-resource grant
+//!    decision (namespace / table coverage + per-grant read/write) inside the
+//!    engine — that boundary is enforced ONLY here-plus-authorizer, since the
 //!    front layer is namespace-agnostic. (The handlers' `Extension<_>` extractor
 //!    500s without the metadata, so injection is also load-bearing for routing.)
 //!
@@ -245,7 +247,10 @@ pub async fn front_auth(
         }
     }
 
-    // --- AUTHZ (scope): check the token holds the required permission ----------
+    // --- AUTHZ (coarse scope): the token holds the required permission ---------
+    // This is the COARSE union gate (does the token carry ANY read / ANY write).
+    // The per-resource decision (which namespace/table each grant covers) is
+    // re-evaluated inside the engine by `EgretAuthorizer` over the grants claim.
     let need = required_permission(req.method(), &path);
     if !auth.permissions.iter().any(|p| p == need) {
         return Err(StatusCode::FORBIDDEN);
@@ -253,9 +258,9 @@ pub async fn front_auth(
 
     // --- Principal injection: a real token principal carrying the egret scope --
     // Inject a per-token lakekeeper principal whose `"egret"` authentication
-    // claim carries this token's perms + namespace_scope, so `EgretAuthorizer`
-    // re-enforces the same scope INSIDE the engine (defense in depth, and the
-    // sole enforcer of the per-namespace `namespace_scope` boundary).
+    // claim carries this token's resource `grants`, so `EgretAuthorizer`
+    // re-enforces the per-resource grant decision INSIDE the engine (defense in
+    // depth, and the sole enforcer of the per-grant namespace/table boundary).
     req.extensions_mut().insert(token_request_metadata(&auth));
 
     Ok(next.run(req).await)

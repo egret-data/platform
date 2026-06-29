@@ -106,6 +106,11 @@ fn validate_namespace(ns: &str) -> bool {
 }
 
 /// The all-namespaces sentinel for a grant's `namespace`.
+///
+/// `"*"` is RESERVED as this sentinel: a grant with `namespace == "*"` matches
+/// every namespace. A literal Iceberg namespace named `*` would therefore
+/// collide with the sentinel and is not addressable by a concrete grant; this is
+/// acceptable because `*` is not a valid Iceberg namespace level in practice.
 const ALL_NS: &str = "*";
 
 /// Validate a token's resource-grant scope.
@@ -243,8 +248,8 @@ impl CatalogStore {
         Ok((row.into(), raw))
     }
 
-    /// Authenticate `raw` and return the workspace + permissions + namespace_scope
-    /// (only if not revoked).
+    /// Authenticate `raw` and return the workspace + warehouse + resource `grants`
+    /// (plus the deduped union `permissions`), only if not revoked.
     ///
     /// Maps a miss to `CatalogError::NotFound` so the caller can return 401.
     pub async fn authenticate_token(&self, raw: &str) -> Result<TokenAuth, CatalogError> {
