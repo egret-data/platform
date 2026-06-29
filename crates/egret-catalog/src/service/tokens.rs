@@ -133,7 +133,9 @@ fn validate_grants(grants: &[Grant]) -> Result<(), CatalogError> {
         }
         if let Some(t) = &g.table {
             if t.is_empty() || t.contains('.') {
-                return Err(CatalogError::BadRequest(format!("invalid grant table '{t}'")));
+                return Err(CatalogError::BadRequest(format!(
+                    "invalid grant table '{t}'"
+                )));
             }
             if g.namespace == ALL_NS {
                 return Err(CatalogError::BadRequest(

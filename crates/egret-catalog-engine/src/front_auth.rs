@@ -127,23 +127,29 @@ static TOKEN_PRINCIPAL_ID: std::sync::LazyLock<UserId> = std::sync::LazyLock::ne
 /// egret catalog token.
 ///
 /// It installs the synthetic [`token_principal_id`] as `Actor::Principal` and
-/// carries the token's `permissions` + `namespace_scope` + `table_scope` in the
-/// `"egret"` authentication claim — exactly the shape [`EgretAuthorizer`] reads
-/// to gate data actions
-/// (`{ "egret": { "perms": [...], "ns": [...], "tables": [...] } }`). The front-auth
+/// carries the token's resource `grants` in the `"egret"` authentication claim —
+/// exactly the shape [`EgretAuthorizer`] reads to gate data actions
+/// (`{ "egret": { "grants": [ { "ns", "table", "perms" } ] } }`). The front-auth
 /// ownership + permission checks above are belt-and-braces; the authorizer is
 /// the in-engine, defense-in-depth enforcer of the same scope.
 fn token_request_metadata(auth: &TokenAuth) -> RequestMetadata {
     let uid = TOKEN_PRINCIPAL_ID.clone();
+    // Serialize each grant under the short claim keys the authorizer's
+    // `egret_grants` parser expects.
+    let grants: Vec<_> = auth
+        .grants
+        .iter()
+        .map(|g| {
+            serde_json::json!({
+                "ns": g.namespace,
+                "table": g.table,
+                "perms": g.permissions,
+            })
+        })
+        .collect();
     let authentication = Authentication::builder()
         .token_header(None)
-        .claims(serde_json::json!({
-            "egret": {
-                "perms": auth.permissions,
-                "ns": auth.namespace_scope,
-                "tables": auth.table_scope
-            }
-        }))
+        .claims(serde_json::json!({ "egret": { "grants": grants } }))
         .subject(uid.clone().into())
         .name(Some("Egret Catalog Token".to_string()))
         .email(None)
