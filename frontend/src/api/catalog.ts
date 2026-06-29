@@ -64,6 +64,8 @@ export const catalogKeys = {
   table: (ws: string, wid: string, ns: string, table: string) =>
     ["catalog", ws, wid, "table", ns, table] as const,
   tokens: (ws: string, wid: string) => ["catalog", ws, wid, "tokens"] as const,
+  statistics: (ws: string, wid: string) => ["catalog", ws, wid, "statistics"] as const,
+  tasks: (ws: string, wid: string) => ["catalog", ws, wid, "tasks"] as const,
 };
 
 // ── Workspace admin types ──────────────────────────────────────────────────
@@ -218,6 +220,46 @@ export function useTableDetail(ws: string, wid: string, ns: string | null, table
         `/ws/${ws}/catalog/warehouses/${wid}/namespaces/${encodeURIComponent(ns!)}/tables/${encodeURIComponent(table!)}`,
       ),
     enabled: !!ns && !!table,
+  });
+}
+
+// ── Per-warehouse statistics + tasks (read-only management tabs) ────────────
+
+export interface WarehouseStatEntry {
+  timestamp: string;
+  number_of_tables: number;
+  number_of_views: number;
+  updated_at: string;
+}
+
+export interface WarehouseTask {
+  task_id: string;
+  task_type: string;
+  status: string;
+  entity_name: string | null;
+  created_at: string;
+  scheduled_for: string;
+  attempt: number;
+  progress: number;
+}
+
+export function useWarehouseStatistics(ws: string, wid: string) {
+  return useQuery<{ entries: WarehouseStatEntry[] }, ApiError>({
+    queryKey: catalogKeys.statistics(ws, wid),
+    queryFn: () =>
+      apiJson<{ entries: WarehouseStatEntry[] }>(
+        `/ws/${ws}/catalog/warehouses/${wid}/statistics`,
+      ),
+    retry: false,
+  });
+}
+
+export function useWarehouseTasks(ws: string, wid: string) {
+  return useQuery<WarehouseTask[], ApiError>({
+    queryKey: catalogKeys.tasks(ws, wid),
+    queryFn: () =>
+      apiJson<WarehouseTask[]>(`/ws/${ws}/catalog/warehouses/${wid}/tasks`),
+    retry: false,
   });
 }
 

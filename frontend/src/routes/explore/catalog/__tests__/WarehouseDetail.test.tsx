@@ -5,21 +5,26 @@ import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const warehouseMock = vi.fn();
+const statsMock = vi.fn();
+const tasksMock = vi.fn();
 const browseProps = vi.fn();
 const accessProps = vi.fn();
 
 vi.mock("@/api/catalog", () => ({
-  useWarehouse: () => warehouseMock(),
+  useWarehouse: (ws: string, wid: string) => warehouseMock(ws, wid),
   useRenameWarehouse: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useWarehouseStatistics: (ws: string, wid: string) => statsMock(ws, wid),
+  useWarehouseTasks: (ws: string, wid: string) => tasksMock(ws, wid),
 }));
 
+// CatalogBrowse / CatalogAccess are heavy children unrelated to these tabs;
+// stub them but spy on their props so the prop-passing contract stays covered.
 vi.mock("../CatalogBrowse", () => ({
   default: (props: { ws: string; wid: string }) => {
     browseProps(props);
     return <div>Browse content</div>;
   },
 }));
-
 vi.mock("../CatalogAccess", () => ({
   default: (props: { ws: string; wid: string }) => {
     accessProps(props);
@@ -44,6 +49,8 @@ function renderAt() {
 
 beforeEach(() => {
   warehouseMock.mockReset();
+  statsMock.mockReset();
+  tasksMock.mockReset();
   browseProps.mockReset();
   accessProps.mockReset();
   warehouseMock.mockReturnValue({
@@ -58,6 +65,36 @@ beforeEach(() => {
     isError: false,
     error: null,
   });
+  statsMock.mockReturnValue({
+    data: {
+      entries: [
+        {
+          timestamp: "2026-06-29T10:00:00Z",
+          number_of_tables: 7,
+          number_of_views: 2,
+          updated_at: "2026-06-29T10:05:00Z",
+        },
+      ],
+    },
+    isLoading: false,
+    isError: false,
+  });
+  tasksMock.mockReturnValue({
+    data: [
+      {
+        task_id: "t-1",
+        task_type: "tabular_expiration",
+        status: "SUCCESS",
+        entity_name: "sale.orders",
+        created_at: "2026-06-29T09:00:00Z",
+        scheduled_for: "2026-06-29T09:00:00Z",
+        attempt: 1,
+        progress: 1.0,
+      },
+    ],
+    isLoading: false,
+    isError: false,
+  });
 });
 
 describe("WarehouseDetail", () => {
@@ -71,11 +108,13 @@ describe("WarehouseDetail", () => {
     );
   });
 
-  it("renders the three tabs", () => {
+  it("renders all five tabs", () => {
     renderAt();
     expect(screen.getByRole("tab", { name: "Browse" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Access" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Details" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Statistics" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Tasks" })).toBeInTheDocument();
   });
 
   it("passes ws + wid to the Browse tab", () => {
@@ -109,5 +148,37 @@ describe("WarehouseDetail", () => {
     });
     renderAt();
     expect(screen.getByText("Warehouse not found")).toBeInTheDocument();
+  });
+
+  it("renders the Statistics tab with the latest counts", async () => {
+    const user = userEvent.setup();
+    renderAt();
+    await user.click(screen.getByRole("tab", { name: "Statistics" }));
+    expect(statsMock).toHaveBeenCalledWith("eng", "wh-1");
+    expect(screen.getByText("7")).toBeInTheDocument(); // tables
+    expect(screen.getByText("2")).toBeInTheDocument(); // views
+  });
+
+  it("renders the Tasks tab with a row + status badge", async () => {
+    const user = userEvent.setup();
+    renderAt();
+    await user.click(screen.getByRole("tab", { name: "Tasks" }));
+    expect(tasksMock).toHaveBeenCalledWith("eng", "wh-1");
+    expect(screen.getByText("tabular_expiration")).toBeInTheDocument();
+    expect(screen.getByText("sale.orders")).toBeInTheDocument();
+    expect(screen.getByText("SUCCESS")).toBeInTheDocument();
+  });
+
+  it("shows empty states when there is no data", async () => {
+    statsMock.mockReturnValue({ data: { entries: [] }, isLoading: false, isError: false });
+    tasksMock.mockReturnValue({ data: [], isLoading: false, isError: false });
+    const user = userEvent.setup();
+    renderAt();
+
+    await user.click(screen.getByRole("tab", { name: "Statistics" }));
+    expect(screen.getByText(/No statistics yet/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Tasks" }));
+    expect(screen.getByText("No tasks.")).toBeInTheDocument();
   });
 });

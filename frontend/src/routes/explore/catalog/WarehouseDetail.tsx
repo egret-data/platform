@@ -3,7 +3,15 @@ import { Link, useParams } from "react-router-dom";
 import { ArrowLeft, Loader2, Pencil } from "lucide-react";
 
 import { type ApiError } from "@/api/client";
-import { type Warehouse, useRenameWarehouse, useWarehouse } from "@/api/catalog";
+import {
+  type Warehouse,
+  type WarehouseTask,
+  useRenameWarehouse,
+  useWarehouse,
+  useWarehouseStatistics,
+  useWarehouseTasks,
+} from "@/api/catalog";
+import { Badge } from "@/components/ui/badge";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -92,6 +100,8 @@ export default function WarehouseDetail() {
           <TabsTrigger value="browse">Browse</TabsTrigger>
           <TabsTrigger value="access">Access</TabsTrigger>
           <TabsTrigger value="details">Details</TabsTrigger>
+          <TabsTrigger value="statistics">Statistics</TabsTrigger>
+          <TabsTrigger value="tasks">Tasks</TabsTrigger>
         </TabsList>
 
         <TabsContent value="browse">
@@ -106,6 +116,14 @@ export default function WarehouseDetail() {
 
         <TabsContent value="details">
           <DetailsTab ws={ws} warehouse={wh} />
+        </TabsContent>
+
+        <TabsContent value="statistics">
+          <StatisticsTab ws={ws} wid={wid} />
+        </TabsContent>
+
+        <TabsContent value="tasks">
+          <TasksTab ws={ws} wid={wid} />
         </TabsContent>
       </Tabs>
     </div>
@@ -233,4 +251,137 @@ function RenameDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+function StatisticsTab({ ws, wid }: { ws: string; wid: string }) {
+  const stats = useWarehouseStatistics(ws, wid);
+
+  if (stats.isLoading) {
+    return (
+      <div className="p-4">
+        <ListSkeleton rows={2} cols={2} />
+      </div>
+    );
+  }
+
+  const entries = stats.data?.entries ?? [];
+  if (entries.length === 0) {
+    return (
+      <div className="p-4 text-sm text-muted-foreground">
+        No statistics yet — lakekeeper computes these hourly.
+      </div>
+    );
+  }
+
+  const latest = entries[0];
+  const history = entries.slice(1);
+
+  return (
+    <div className="flex flex-col gap-6 p-4">
+      <div className="flex flex-wrap items-baseline gap-x-8 gap-y-2">
+        <Stat label="Tables" value={latest.number_of_tables} />
+        <Stat label="Views" value={latest.number_of_views} />
+        <span className="text-sm text-muted-foreground">
+          as of <RelativeTime iso={latest.timestamp} />
+        </span>
+      </div>
+
+      {history.length > 0 && (
+        <table className="max-w-xl text-sm">
+          <thead>
+            <tr className="border-b text-left text-muted-foreground">
+              <th className="py-1.5 pr-6 font-medium">Time</th>
+              <th className="py-1.5 pr-6 font-medium">Tables</th>
+              <th className="py-1.5 font-medium">Views</th>
+            </tr>
+          </thead>
+          <tbody>
+            {history.map((e) => (
+              <tr key={e.timestamp} className="border-b last:border-0">
+                <td className="py-1.5 pr-6">
+                  <RelativeTime iso={e.timestamp} />
+                </td>
+                <td className="py-1.5 pr-6">{e.number_of_tables}</td>
+                <td className="py-1.5">{e.number_of_views}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function Stat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="flex flex-col">
+      <span className="text-2xl font-semibold tabular-nums">{value}</span>
+      <span className="text-xs text-muted-foreground">{label}</span>
+    </div>
+  );
+}
+
+function TasksTab({ ws, wid }: { ws: string; wid: string }) {
+  const tasks = useWarehouseTasks(ws, wid);
+
+  if (tasks.isLoading) {
+    return (
+      <div className="p-4">
+        <ListSkeleton rows={3} cols={4} />
+      </div>
+    );
+  }
+
+  const rows = tasks.data ?? [];
+  if (rows.length === 0) {
+    return <div className="p-4 text-sm text-muted-foreground">No tasks.</div>;
+  }
+
+  return (
+    <div className="p-4">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="border-b text-left text-muted-foreground">
+            <th className="py-1.5 pr-6 font-medium">Type</th>
+            <th className="py-1.5 pr-6 font-medium">Status</th>
+            <th className="py-1.5 pr-6 font-medium">Entity</th>
+            <th className="py-1.5 pr-6 font-medium">Created</th>
+            <th className="py-1.5 font-medium">Attempt</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((t) => (
+            <tr key={t.task_id} className="border-b last:border-0">
+              <td className="py-1.5 pr-6 font-mono text-xs">{t.task_type}</td>
+              <td className="py-1.5 pr-6">
+                <Badge variant={statusVariant(t.status)}>{t.status}</Badge>
+              </td>
+              <td className="py-1.5 pr-6">
+                {t.entity_name ?? <span className="text-muted-foreground/50">—</span>}
+              </td>
+              <td className="py-1.5 pr-6">
+                <RelativeTime iso={t.created_at} />
+              </td>
+              <td className="py-1.5">{t.attempt}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function statusVariant(
+  status: WarehouseTask["status"],
+): "default" | "secondary" | "destructive" | "outline" {
+  switch (status) {
+    case "RUNNING":
+      return "default";
+    case "SUCCESS":
+      return "secondary";
+    case "FAILED":
+      return "destructive";
+    default: // SCHEDULED / STOPPING / CANCELLED
+      return "outline";
+  }
 }
