@@ -110,3 +110,45 @@ pub struct UpdateCell {
 pub struct ReorderCells {
     pub order: Vec<Uuid>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn engine_roundtrips() {
+        assert_eq!(Engine::parse(Engine::Daft.as_str()), Some(Engine::Daft));
+        assert_eq!(
+            Engine::parse(Engine::SparkConnect.as_str()),
+            Some(Engine::SparkConnect)
+        );
+        assert_eq!(Engine::parse("nope"), None);
+    }
+
+    #[test]
+    fn cell_type_roundtrips() {
+        assert_eq!(
+            CellType::parse(CellType::Code.as_str()),
+            Some(CellType::Code)
+        );
+        assert_eq!(
+            CellType::parse(CellType::Markdown.as_str()),
+            Some(CellType::Markdown)
+        );
+        assert_eq!(CellType::parse(CellType::Sql.as_str()), Some(CellType::Sql));
+        assert_eq!(CellType::parse("nope"), None);
+    }
+
+    #[test]
+    fn enums_serialize_to_expected_strings() {
+        assert_eq!(
+            serde_json::to_value(Engine::SparkConnect).unwrap(),
+            json!("spark_connect")
+        );
+        assert_eq!(
+            serde_json::to_value(CellType::Markdown).unwrap(),
+            json!("markdown")
+        );
+    }
+}

@@ -16,7 +16,7 @@ impl From<Error> for NotebookApiError {
 
 impl From<sqlx::Error> for NotebookApiError {
     fn from(e: sqlx::Error) -> Self {
-        Self(Error::Internal(anyhow::anyhow!(e.to_string())))
+        Self(Error::Internal(anyhow::anyhow!(e)))
     }
 }
 
