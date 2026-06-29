@@ -162,13 +162,16 @@ impl NotebookStore {
     }
 
     /// Fetch a notebook and all its cells (cells ordered by cell_order, created_at).
+    /// `viewer` is used to set `summary.is_owner` so callers can't forget it.
     pub async fn get_with_cells(
         &self,
         id: Uuid,
+        viewer: Uuid,
     ) -> Result<Option<NotebookDetail>, NotebookApiError> {
-        let Some((summary, _ws)) = self.get_summary(id).await? else {
+        let Some((mut summary, _ws)) = self.get_summary(id).await? else {
             return Ok(None);
         };
+        summary.is_owner = summary.owner_user_id == viewer;
         let cells = sqlx::query_as::<_, CellRow>(
             "SELECT id, cell_type, source, cell_order, execution_count, \
              last_output, last_execution_time_ms \
@@ -352,10 +355,11 @@ mod tests {
         let id = store.create(ws, user, "My NB", "daft").await.unwrap();
 
         // create seeds exactly one empty code cell
-        let detail = store.get_with_cells(id).await.unwrap().unwrap();
+        let detail = store.get_with_cells(id, user).await.unwrap().unwrap();
         assert_eq!(detail.cells.len(), 1);
         assert_eq!(detail.cells[0].cell_type, "code");
         assert_eq!(detail.cells[0].source, "");
+        assert!(detail.summary.is_owner, "owner viewer => is_owner true");
 
         let list = store.list_visible(ws, user).await.unwrap();
         assert_eq!(list.len(), 1);
@@ -363,7 +367,7 @@ mod tests {
         assert!(list[0].is_owner);
 
         store.delete(id).await.unwrap();
-        assert!(store.get_with_cells(id).await.unwrap().is_none());
+        assert!(store.get_with_cells(id, user).await.unwrap().is_none());
         assert!(store.list_visible(ws, user).await.unwrap().is_empty());
     }
 
@@ -412,19 +416,25 @@ mod tests {
 
         // create seeds 1 cell; add a second
         let c2 = store.add_cell(nb, "markdown", "# hi", 1).await.unwrap();
-        let detail = store.get_with_cells(nb).await.unwrap().unwrap();
+        let detail = store.get_with_cells(nb, user).await.unwrap().unwrap();
         let c1 = detail.cells[0].id; // seeded code cell (order 0)
         assert_eq!(detail.cells.len(), 2);
 
         // Reorder: put c2 first
         store.reorder(nb, &[c2, c1]).await.unwrap();
-        let after = store.get_with_cells(nb).await.unwrap().unwrap();
+        let after = store.get_with_cells(nb, user).await.unwrap().unwrap();
         assert_eq!(after.cells[0].id, c2);
 
         // Delete c1
         store.delete_cell(nb, c1).await.unwrap();
         assert_eq!(
-            store.get_with_cells(nb).await.unwrap().unwrap().cells.len(),
+            store
+                .get_with_cells(nb, user)
+                .await
+                .unwrap()
+                .unwrap()
+                .cells
+                .len(),
             1
         );
     }
@@ -449,7 +459,7 @@ mod tests {
             .await
             .unwrap();
 
-        let detail = store.get_with_cells(nb).await.unwrap().unwrap();
+        let detail = store.get_with_cells(nb, user).await.unwrap().unwrap();
         assert_eq!(detail.summary.name, "renamed");
         assert_eq!(detail.summary.description, "desc");
         assert_eq!(detail.summary.engine, "daft"); // unchanged
@@ -463,7 +473,7 @@ mod tests {
         let (ws, user) = seed(&db).await;
         let nb = store.create(ws, user, "nb", "daft").await.unwrap();
 
-        let detail = store.get_with_cells(nb).await.unwrap().unwrap();
+        let detail = store.get_with_cells(nb, user).await.unwrap().unwrap();
         let cid = detail.cells[0].id;
 
         store
@@ -478,7 +488,7 @@ mod tests {
             .await
             .unwrap();
 
-        let after = store.get_with_cells(nb).await.unwrap().unwrap();
+        let after = store.get_with_cells(nb, user).await.unwrap().unwrap();
         assert_eq!(after.cells[0].cell_type, "sql");
         assert_eq!(after.cells[0].source, "SELECT 1");
         let _ = ws;
