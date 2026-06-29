@@ -381,8 +381,10 @@ function TableDetailView({
         <>
           <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-muted-foreground">
             <span className="font-mono break-all">{detail.data.location}</span>
-            <span>format v{detail.data.format_version}</span>
-            <span>updated {new Date(detail.data.last_updated_ms).toLocaleString()}</span>
+            {detail.data.format_version != null && <span>format v{detail.data.format_version}</span>}
+            {detail.data.last_updated_ms != null && (
+              <span>updated {new Date(detail.data.last_updated_ms).toLocaleString()}</span>
+            )}
           </div>
           <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
             <span>
@@ -418,7 +420,7 @@ function TableDetailView({
 
           <div>
             <h2 className="mb-2 text-sm font-medium text-muted-foreground">Partition spec</h2>
-            {detail.data.partition_fields.length > 0 ? (
+            {(detail.data.partition_fields ?? []).length > 0 ? (
               <table className="w-full text-sm">
                 <thead className="text-left text-muted-foreground">
                   <tr className="border-b border-border">
@@ -428,7 +430,7 @@ function TableDetailView({
                   </tr>
                 </thead>
                 <tbody>
-                  {detail.data.partition_fields.map((p) => (
+                  {(detail.data.partition_fields ?? []).map((p) => (
                     <tr key={p.name} className="border-b border-border last:border-b-0">
                       <td className="py-1 pr-4 font-mono">{p.name}</td>
                       <td className="py-1 pr-4 font-mono text-muted-foreground">{p.source_column}</td>
@@ -442,7 +444,7 @@ function TableDetailView({
             )}
           </div>
 
-          {detail.data.sort_fields.length > 0 && (
+          {(detail.data.sort_fields ?? []).length > 0 && (
             <div>
               <h2 className="mb-2 text-sm font-medium text-muted-foreground">Sort order</h2>
               <table className="w-full text-sm">
@@ -455,7 +457,7 @@ function TableDetailView({
                   </tr>
                 </thead>
                 <tbody>
-                  {detail.data.sort_fields.map((s) => (
+                  {(detail.data.sort_fields ?? []).map((s) => (
                     <tr key={s.column} className="border-b border-border last:border-b-0">
                       <td className="py-1 pr-4 font-mono">{s.column}</td>
                       <td className="py-1 pr-4 font-mono text-muted-foreground">{s.transform}</td>
@@ -470,7 +472,7 @@ function TableDetailView({
 
           <div>
             <h2 className="mb-2 text-sm font-medium text-muted-foreground">Snapshots</h2>
-            {detail.data.snapshots.length > 0 ? (
+            {(detail.data.snapshots ?? []).length > 0 ? (
               <table className="w-full text-sm">
                 <thead className="text-left text-muted-foreground">
                   <tr className="border-b border-border">
@@ -481,7 +483,7 @@ function TableDetailView({
                   </tr>
                 </thead>
                 <tbody>
-                  {detail.data.snapshots.map((s) => (
+                  {(detail.data.snapshots ?? []).map((s) => (
                     <tr key={s.snapshot_id} className="border-b border-border last:border-b-0">
                       <td className="py-1 pr-4 font-mono">{s.snapshot_id}</td>
                       <td className="py-1 pr-4 text-muted-foreground">
