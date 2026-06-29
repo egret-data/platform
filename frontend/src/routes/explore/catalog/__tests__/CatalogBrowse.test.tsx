@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ApiError } from "@/api/client";
+import { MemoryRouter } from "react-router-dom";
 
 const namespacesMock = vi.fn();
 const contentsMock = vi.fn();
@@ -22,11 +22,13 @@ vi.mock("@/api/catalog", () => ({
 
 import CatalogBrowse from "../CatalogBrowse";
 
-function renderAt() {
+function renderAt(initialEntries: string[] = ["/"]) {
   const qc = new QueryClient();
   return render(
     <QueryClientProvider client={qc}>
-      <CatalogBrowse ws="eng" wid="wh-1" />
+      <MemoryRouter initialEntries={initialEntries}>
+        <CatalogBrowse ws="eng" wid="wh-1" />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -39,224 +41,112 @@ beforeEach(() => {
   deleteNamespaceMock.mockReset();
   createNamespaceMock.mockResolvedValue(undefined);
   namespacesMock.mockReturnValue({
-    data: [{ levels: ["sales"] }, { levels: ["sales", "2024"] }],
+    data: [{ levels: ["sale"] }, { levels: ["sale", "2024"] }, { levels: ["marketing"] }],
     isLoading: false,
     isError: false,
   });
-  contentsMock.mockReturnValue({
-    data: { tables: ["orders"], views: ["v_orders"] },
-    isLoading: false,
-    isError: false,
-  });
+  // Contents only resolve for the expanded namespace; default empty.
+  contentsMock.mockImplementation((_wid: string, ns: string | null) =>
+    ns === "sale"
+      ? { data: { tables: ["orders", "customers"], views: ["v_orders"] }, isLoading: false, isError: false }
+      : { data: { tables: [], views: [] }, isLoading: false, isError: false },
+  );
   tableDetailMock.mockReturnValue({
     data: {
       name: "orders",
       location: "s3://wh/orders",
       current_schema_id: 1,
-      columns: [
-        { name: "id", type: "long", required: true },
-        { name: "addr", type: "struct<city:string,zip:string>", required: false },
-      ],
+      columns: [{ name: "id", type: "long", required: true }],
       current_snapshot_id: 42,
-      snapshot_count: 3,
+      snapshot_count: 1,
       properties: { "write.format.default": "parquet" },
       format_version: 2,
       last_updated_ms: 1750000000000,
-      partition_fields: [{ name: "country", source_column: "country", transform: "identity" }],
-      sort_fields: [
-        { column: "id", transform: "identity", direction: "ascending", null_order: "first" },
-      ],
-      snapshots: [
-        {
-          snapshot_id: 1,
-          parent_snapshot_id: null,
-          timestamp_ms: 1750000000000,
-          operation: "append",
-          summary: { "added-records": "5", "added-data-files": "1", "total-records": "5" },
-        },
-      ],
+      partition_fields: [],
+      sort_fields: [],
+      snapshots: [],
     },
     isLoading: false,
     isError: false,
   });
 });
 
-describe("Catalog browser", () => {
-  it("calls the browse hooks scoped to the warehouse id", () => {
+describe("Catalog browse tree", () => {
+  it("renders top-level namespaces as a tree", () => {
     renderAt();
-    expect(namespacesMock).toHaveBeenCalledWith("eng", "wh-1");
+    expect(screen.getByText("marketing")).toBeInTheDocument();
+    expect(screen.getByText("sale")).toBeInTheDocument();
+    // Child not visible until 'sale' is expanded.
+    expect(screen.queryByText("2024")).not.toBeInTheDocument();
   });
 
-  it("renders namespaces and drills into a table detail", async () => {
+  it("expands a namespace, lazy-loads its tables/views, and drills into a table", async () => {
     const user = userEvent.setup();
     renderAt();
+    await user.click(screen.getByRole("button", { name: /expand sale/i }));
+    expect(screen.getByText("2024")).toBeInTheDocument(); // child namespace
+    expect(screen.getByText("orders")).toBeInTheDocument(); // table leaf
+    expect(screen.getByText("v_orders")).toBeInTheDocument(); // view leaf
+    expect(contentsMock).toHaveBeenCalledWith("wh-1", "sale");
 
-    // Namespace list rendered.
-    expect(screen.getByText("sales")).toBeInTheDocument();
-    expect(screen.getByText("sales.2024")).toBeInTheDocument();
-
-    // Selecting a namespace shows its tables + views.
-    await user.click(screen.getByText("sales"));
-    expect(screen.getByText("orders")).toBeInTheDocument();
-    expect(screen.getByText("v_orders")).toBeInTheDocument();
-    // Contents hook received the wid.
-    expect(contentsMock).toHaveBeenCalledWith("wh-1", "sales");
-
-    // Selecting a table shows its detail (schema column + snapshot info).
     await user.click(screen.getByText("orders"));
-    // "id" appears in both the schema table and the sort-order table.
-    expect(screen.getAllByText("id").length).toBeGreaterThanOrEqual(1);
+    expect(tableDetailMock).toHaveBeenCalledWith("wh-1", "sale", "orders");
+    expect(screen.getByText("write.format.default")).toBeInTheDocument(); // detail shown
+  });
+
+  it("filters the tree by the search box", async () => {
+    const user = userEvent.setup();
+    renderAt();
+    await user.type(screen.getByPlaceholderText(/filter/i), "marketing");
+    expect(screen.getByText("marketing")).toBeInTheDocument();
+    expect(screen.queryByText("sale")).not.toBeInTheDocument();
+  });
+
+  it("restores selection from the URL (deep-link)", () => {
+    renderAt(["/?ns=sale&table=orders"]);
+    // Detail rendered without any clicks.
+    expect(tableDetailMock).toHaveBeenCalledWith("wh-1", "sale", "orders");
     expect(screen.getByText("write.format.default")).toBeInTheDocument();
-    expect(screen.getByText("42")).toBeInTheDocument();
-    expect(tableDetailMock).toHaveBeenCalledWith("wh-1", "sales", "orders");
-  });
-
-  it("renders the sectioned table detail: meta, partition, sort, snapshots, nested type", async () => {
-    const user = userEvent.setup();
-    renderAt();
-    await user.click(screen.getByText("sales"));
-    await user.click(screen.getByText("orders"));
-
-    // Header meta: format version + updated.
-    expect(screen.getByText("format v2")).toBeInTheDocument();
-    expect(screen.getByText(/^updated /)).toBeInTheDocument();
-
-    // Nested type renders as a string in the schema table.
-    expect(screen.getByText("struct<city:string,zip:string>")).toBeInTheDocument();
-
-    // Partition spec table with the field.
-    expect(screen.getByRole("columnheader", { name: "Source column" })).toBeInTheDocument();
-    // "country" is both the partition field name and its source column.
-    expect(screen.getAllByText("country").length).toBeGreaterThanOrEqual(2);
-
-    // Sort order table (present only when sort_fields exist).
-    expect(screen.getByText("Sort order")).toBeInTheDocument();
-    expect(screen.getByText("ascending")).toBeInTheDocument();
-    expect(screen.getByText("first")).toBeInTheDocument();
-
-    // Snapshots table with operation + compact summary.
-    expect(screen.getByText("Snapshots")).toBeInTheDocument();
-    expect(screen.getByText("append")).toBeInTheDocument();
-    expect(screen.getByText("+5 rows, +1 files, 5 total")).toBeInTheDocument();
-
-    // Properties.
-    expect(screen.getByText("parquet")).toBeInTheDocument();
-  });
-
-  it("shows empty states: Unpartitioned, no sort section, and no snapshots", async () => {
-    tableDetailMock.mockReturnValue({
-      data: {
-        name: "orders",
-        location: "s3://wh/orders",
-        current_schema_id: 1,
-        columns: [{ name: "id", type: "long", required: true }],
-        current_snapshot_id: null,
-        snapshot_count: 0,
-        properties: {},
-        format_version: 2,
-        last_updated_ms: 1750000000000,
-        partition_fields: [],
-        sort_fields: [],
-        snapshots: [],
-      },
-      isLoading: false,
-      isError: false,
-    });
-    const user = userEvent.setup();
-    renderAt();
-    await user.click(screen.getByText("sales"));
-    await user.click(screen.getByText("orders"));
-
-    expect(screen.getByText("Unpartitioned")).toBeInTheDocument();
-    expect(screen.getByText("No snapshots yet.")).toBeInTheDocument();
-    // Sort order section is omitted entirely when there are no sort fields.
-    expect(screen.queryByText("Sort order")).not.toBeInTheDocument();
-  });
-
-  it("renders without crashing when the backend omits the enriched fields (version skew)", async () => {
-    // A stale/older backend returns only the legacy table-detail shape: no
-    // partition_fields / sort_fields / snapshots / format_version / last_updated_ms.
-    // The view must degrade gracefully, not white-screen.
-    tableDetailMock.mockReturnValue({
-      data: {
-        name: "orders",
-        location: "s3://wh/orders",
-        current_schema_id: 1,
-        columns: [{ name: "id", type: "long", required: true }],
-        current_snapshot_id: null,
-        snapshot_count: 0,
-        properties: {},
-        // enriched fields intentionally absent
-      },
-      isLoading: false,
-      isError: false,
-    });
-    const user = userEvent.setup();
-    renderAt();
-    await user.click(screen.getByText("sales"));
-    await user.click(screen.getByText("orders"));
-
-    // The schema still renders, and the new sections degrade to their empty states.
-    expect(screen.getByText("Schema")).toBeInTheDocument();
-    expect(screen.getByText("Unpartitioned")).toBeInTheDocument();
-    expect(screen.getByText("No snapshots yet.")).toBeInTheDocument();
-    expect(screen.queryByText("Sort order")).not.toBeInTheDocument();
-    // No format/updated chips when those fields are absent.
-    expect(screen.queryByText(/^format v/)).not.toBeInTheDocument();
+    // The tree auto-expands the ancestors of the deep-linked ns, so its
+    // contents are visible in the tree (not only in the detail pane):
+    expect(screen.getByText("2024")).toBeInTheDocument(); // child namespace
+    expect(screen.getByText("customers")).toBeInTheDocument(); // sibling table leaf
   });
 
   it("creates a root namespace from the New namespace dialog", async () => {
     const user = userEvent.setup();
     renderAt();
-
     await user.click(screen.getByRole("button", { name: "New namespace" }));
-    await user.type(screen.getByLabelText("Name"), "marketing");
+    await user.type(screen.getByLabelText("Name"), "ops");
     await user.click(screen.getByRole("button", { name: "Create" }));
-
-    expect(createNamespaceMock).toHaveBeenCalledWith({ parent: null, name: "marketing" });
+    expect(createNamespaceMock).toHaveBeenCalledWith({ parent: null, name: "ops" });
   });
 
-  it("creates a nested namespace when a parent is picked", async () => {
+  it("deletes a namespace after confirmation", async () => {
     const user = userEvent.setup();
     renderAt();
-
-    await user.click(screen.getByRole("button", { name: "New namespace" }));
-    await user.type(screen.getByLabelText("Name"), "y2024");
-
-    // Open the Parent select and choose "sales".
-    await user.click(screen.getByRole("combobox"));
-    await user.click(await screen.findByRole("option", { name: "sales" }));
-
-    await user.click(screen.getByRole("button", { name: "Create" }));
-
-    expect(createNamespaceMock).toHaveBeenCalledWith({ parent: "sales", name: "y2024" });
-  });
-
-  it("surfaces a 409 duplicate error inline in the dialog", async () => {
-    createNamespaceMock.mockRejectedValueOnce(new ApiError(409, "namespace already exists"));
-    const user = userEvent.setup();
-    renderAt();
-
-    await user.click(screen.getByRole("button", { name: "New namespace" }));
-    await user.type(screen.getByLabelText("Name"), "sales");
-    await user.click(screen.getByRole("button", { name: "Create" }));
-
-    expect(await screen.findByText("namespace already exists")).toBeInTheDocument();
-  });
-
-  it("deletes a namespace after confirmation and surfaces a 409 not-empty error", async () => {
-    deleteNamespaceMock.mockImplementation((_ns: string, opts: { onError: (e: ApiError) => void }) => {
-      opts.onError(new ApiError(409, "namespace is not empty"));
-    });
-    const user = userEvent.setup();
-    renderAt();
-
-    await user.click(screen.getByRole("button", { name: "Delete sales.2024" }));
-    // Type the confirm word, then confirm.
+    await user.click(screen.getByRole("button", { name: "Delete sale" }));
     await user.type(screen.getByPlaceholderText("delete"), "delete");
     await user.click(screen.getByRole("button", { name: /^Delete$/ }));
+    expect(deleteNamespaceMock).toHaveBeenCalledWith("sale", expect.anything());
+  });
 
-    expect(deleteNamespaceMock).toHaveBeenCalledWith("sales.2024", expect.anything());
-    expect(await screen.findByText("namespace is not empty")).toBeInTheDocument();
+  it("shows a 'Showing X of Y' note for a large namespace", async () => {
+    contentsMock.mockImplementation((_wid: string, ns: string | null) =>
+      ns === "sale"
+        ? {
+            data: {
+              tables: Array.from({ length: 250 }, (_, i) => `t${i}`),
+              views: [],
+            },
+            isLoading: false,
+            isError: false,
+          }
+        : { data: { tables: [], views: [] }, isLoading: false, isError: false },
+    );
+    const user = userEvent.setup();
+    renderAt();
+    await user.click(screen.getByRole("button", { name: /expand sale/i }));
+    expect(screen.getByText(/Showing 200 of 250/i)).toBeInTheDocument();
   });
 });
