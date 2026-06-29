@@ -190,7 +190,7 @@ async fn token_is_scoped_to_its_warehouse() {
         .unwrap();
 
     let (token, raw) = s
-        .create_token(ws, wh1.id, "t", &rw_perms(), &[])
+        .create_token(ws, wh1.id, "t", &rw_perms(), &[], &[])
         .await
         .unwrap();
     assert_eq!(token.warehouse_id, wh1.id);

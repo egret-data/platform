@@ -163,7 +163,7 @@ async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()
                 })?;
 
             let (token_row, raw) = store
-                .create_token(ws.id.0, wh.id, &label, &permissions, &namespace_scope)
+                .create_token(ws.id.0, wh.id, &label, &permissions, &namespace_scope, &[])
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
