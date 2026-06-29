@@ -156,9 +156,50 @@ fn decide_scope(
     ns_scope.iter().any(|e| ns_prefix_matches(e, target_ns))
 }
 
-/// Extract `(perms, ns)` from the request's `"egret"` authentication claim.
-/// Returns `None` (fail-closed) when there is no authentication or no claim.
-fn egret_claim(metadata: &RequestMetadata) -> Option<(Vec<String>, Vec<String>)> {
+/// Table-action decision: the namespace-level `decide_scope` must pass AND, when
+/// `table_scope` is non-empty, the target table's FQN (`target_ns.join(".") +
+/// "." + table_name`) must be an exact member of `table_scope`.
+///
+/// An empty `table_scope` falls back to the namespace decision unchanged, so a
+/// token with no table scope keeps its exact prior behaviour.
+fn decide_table_scope(
+    perms: &[String],
+    ns_scope: &[String],
+    table_scope: &[String],
+    target_ns: &[String],
+    table_name: &str,
+    is_write: bool,
+) -> bool {
+    if !decide_scope(perms, ns_scope, target_ns, is_write) {
+        return false;
+    }
+    if table_scope.is_empty() {
+        return true;
+    }
+    let mut fqn = target_ns.join(".");
+    fqn.push('.');
+    fqn.push_str(table_name);
+    table_scope.iter().any(|t| t == &fqn)
+}
+
+/// Read a `"egret"` claim array field (`ns` / `tables`) into a `Vec<String>`,
+/// defaulting to empty when the field is absent or not an array.
+fn claim_string_array(claim: &serde_json::Value, field: &str) -> Vec<String> {
+    claim
+        .get(field)
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Extract `(perms, ns, tables)` from the request's `"egret"` authentication
+/// claim. Returns `None` (fail-closed) when there is no authentication or no
+/// claim. `ns` / `tables` default to empty when absent.
+fn egret_claim(metadata: &RequestMetadata) -> Option<(Vec<String>, Vec<String>, Vec<String>)> {
     let v = metadata.authentication()?.claims("egret")?;
     let perms = v
         .get("perms")?
@@ -166,16 +207,9 @@ fn egret_claim(metadata: &RequestMetadata) -> Option<(Vec<String>, Vec<String>)>
         .iter()
         .filter_map(|x| x.as_str().map(String::from))
         .collect();
-    let ns = v
-        .get("ns")
-        .and_then(|x| x.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    Some((perms, ns))
+    let ns = claim_string_array(v, "ns");
+    let tables = claim_string_array(v, "tables");
+    Some((perms, ns, tables))
 }
 
 impl EgretAuthorizer {
@@ -189,7 +223,28 @@ impl EgretAuthorizer {
             return true;
         }
         match egret_claim(metadata) {
-            Some((perms, ns)) => decide_scope(&perms, &ns, target_ns, is_write),
+            Some((perms, ns, _tables)) => decide_scope(&perms, &ns, target_ns, is_write),
+            None => false,
+        }
+    }
+
+    /// Table-action gate: like [`EgretAuthorizer::gate`] but also enforces the
+    /// token's `table_scope` against the target table's namespace + name. The
+    /// system principal still bypasses entirely; an absent claim fails closed.
+    fn gate_table(
+        &self,
+        metadata: &RequestMetadata,
+        target_ns: &[String],
+        table_name: &str,
+        is_write: bool,
+    ) -> bool {
+        if metadata.user_id() == Some(&self.system_principal) {
+            return true;
+        }
+        match egret_claim(metadata) {
+            Some((perms, ns, tables)) => {
+                decide_table_scope(&perms, &ns, &tables, target_ns, table_name, is_write)
+            }
             None => false,
         }
     }
@@ -341,9 +396,13 @@ impl Authorizer for EgretAuthorizer {
             .iter()
             .map(|(ns, action_on_table)| {
                 let action: CatalogTableAction = action_on_table.action.clone().into();
-                self.gate(
+                // Namespace levels come from the caller-resolved tuple element
+                // (`ns`); the table NAME comes from the action's own table ident.
+                let table_ident = action_on_table.info.table_ident();
+                self.gate_table(
                     metadata,
                     ns.namespace_ident().as_ref(),
+                    &table_ident.name,
                     table_action_is_write(&action),
                 )
             })
@@ -632,6 +691,98 @@ mod tests {
         ));
     }
 
+    // --- decide_table_scope ------------------------------------------------
+
+    #[test]
+    fn table_scope_allows_listed_table_and_denies_others() {
+        // perms=read, ns empty, tables=["sale.orders"]
+        let perms = vec![s("catalog:read")];
+        let ns: Vec<String> = vec![];
+        let tables = vec![s("sale.orders")];
+        // target table sale.orders → allowed (read)
+        assert!(decide_table_scope(
+            &perms,
+            &ns,
+            &tables,
+            &target(&["sale"]),
+            "orders",
+            false
+        ));
+        // sibling sale.customers → denied
+        assert!(!decide_table_scope(
+            &perms,
+            &ns,
+            &tables,
+            &target(&["sale"]),
+            "customers",
+            false
+        ));
+    }
+
+    #[test]
+    fn empty_table_scope_falls_back_to_namespace_decision() {
+        let perms = vec![s("catalog:read")];
+        // No table scope → unrestricted at table level (ns decision governs).
+        assert!(decide_table_scope(
+            &perms,
+            &[],
+            &[],
+            &target(&["sale"]),
+            "anything",
+            false
+        ));
+        // Even with a matching table scope, a read-only perm cannot write.
+        assert!(!decide_table_scope(
+            &perms,
+            &[],
+            &[s("sale.orders")],
+            &target(&["sale"]),
+            "orders",
+            true
+        ));
+    }
+
+    #[test]
+    fn table_scope_respects_namespace_boundary() {
+        // table FQN listed but namespace scope excludes the target → denied,
+        // because the ns gate must pass first.
+        let perms = vec![s("catalog:read")];
+        assert!(!decide_table_scope(
+            &perms,
+            &[s("marts")],
+            &[s("sale.orders")],
+            &target(&["sale"]),
+            "orders",
+            false
+        ));
+    }
+
+    #[test]
+    fn table_scope_matches_nested_namespace_fqn() {
+        // Nested namespace: the FQN is the dotted ns levels + table name.
+        let perms = vec![s("catalog:read")];
+        let tables = vec![s("staging.raw.events")];
+        assert!(decide_table_scope(
+            &perms,
+            &[],
+            &tables,
+            &target(&["staging", "raw"]),
+            "events",
+            false
+        ));
+        // Same name in a different namespace is NOT a match.
+        assert!(!decide_table_scope(
+            &perms,
+            &[],
+            &tables,
+            &target(&["staging"]),
+            "events",
+            false
+        ));
+    }
+
+    // --- gate_table: the in-engine table-FQN enforcer ----------------------
+
     // --- gate: the in-engine enforcer (defense in depth) -------------------
     //
     // These exercise `EgretAuthorizer::gate` directly — the method ALL data
@@ -714,5 +865,46 @@ mod tests {
         let md = metadata_with(&stranger, serde_json::json!({}));
         assert!(!az.gate(&md, &target(&["marts"]), false));
         assert!(!az.gate(&md, &target(&["marts"]), true));
+    }
+
+    #[test]
+    fn gate_table_enforces_table_scope_via_claim() {
+        let sys = user_id("egret-system");
+        let az = authorizer(sys.clone());
+        // Token scoped to a single table FQN in namespace `sale`.
+        let token = user_id("egret-catalog-token");
+        let md = metadata_with(
+            &token,
+            serde_json::json!({
+                "egret": { "perms": ["catalog:read"], "ns": [], "tables": ["sale.orders"] }
+            }),
+        );
+        // The listed table is allowed for read.
+        assert!(az.gate_table(&md, &target(&["sale"]), "orders", false));
+        // A sibling table in the same namespace is denied.
+        assert!(!az.gate_table(&md, &target(&["sale"]), "customers", false));
+        // Write is denied even on the listed table (read-only perm).
+        assert!(!az.gate_table(&md, &target(&["sale"]), "orders", true));
+        // The system principal bypasses table scope entirely.
+        let sys_md = metadata_with(&sys, serde_json::json!({}));
+        assert!(az.gate_table(&sys_md, &target(&["sale"]), "customers", true));
+    }
+
+    #[test]
+    fn gate_table_without_table_scope_matches_namespace_gate() {
+        // An egret claim with no `tables` field must behave exactly like the
+        // namespace-only `gate` — no new restriction is introduced.
+        let sys = user_id("egret-system");
+        let az = authorizer(sys);
+        let token = user_id("egret-catalog-token");
+        let md = metadata_with(
+            &token,
+            serde_json::json!({ "egret": { "perms": ["catalog:read"], "ns": ["sale"] } }),
+        );
+        // In scope → allowed for any table name.
+        assert!(az.gate_table(&md, &target(&["sale"]), "orders", false));
+        assert!(az.gate_table(&md, &target(&["sale"]), "customers", false));
+        // Out of namespace scope → denied.
+        assert!(!az.gate_table(&md, &target(&["marketing"]), "orders", false));
     }
 }
