@@ -35,7 +35,7 @@ use axum::body::Bytes;
 use axum::extract::{FromRef, Path, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use egret_auth::session::SessionService;
@@ -172,7 +172,11 @@ pub fn browse_router() -> Router<BrowseState> {
         )
         .route(
             "/ws/{workspace}/catalog/warehouses/{wid}/tokens/{id}",
-            delete(revoke_token),
+            put(update_token).delete(revoke_token),
+        )
+        .route(
+            "/ws/{workspace}/catalog/warehouses/{wid}/tokens/{id}/rotate",
+            post(rotate_token),
         )
         // Workspace-admin per-workspace storage-connection registry (gated
         // `workspace:manage_members`). CRUD with a live reachability probe on
@@ -1321,6 +1325,7 @@ struct CatalogTokenDto {
     label: String,
     permissions: Vec<String>,
     namespace_scope: Vec<String>,
+    table_scope: Vec<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -1331,6 +1336,7 @@ impl From<CatalogToken> for CatalogTokenDto {
             label: t.label,
             permissions: t.permissions,
             namespace_scope: t.namespace_scope,
+            table_scope: t.table_scope,
             created_at: t.created_at,
         }
     }
@@ -1344,6 +1350,20 @@ struct MintTokenRequest {
     permissions: Vec<String>,
     #[serde(default)]
     namespace_scope: Vec<String>,
+    #[serde(default)]
+    table_scope: Vec<String>,
+}
+
+/// Request body for editing a token in place (label / permissions / scopes).
+/// The secret is untouched (use the rotate route to change it).
+#[derive(Deserialize)]
+struct UpdateTokenRequest {
+    label: String,
+    permissions: Vec<String>,
+    #[serde(default)]
+    namespace_scope: Vec<String>,
+    #[serde(default)]
+    table_scope: Vec<String>,
 }
 
 /// Mint response: the persisted token plus the raw secret (shown once).
@@ -1421,9 +1441,81 @@ async fn mint_token(
 
     let (token, raw) = st
         .store
-        .create_token(ws, wid, &req.label, &perms, &req.namespace_scope)
+        .create_token(
+            ws,
+            wid,
+            &req.label,
+            &perms,
+            &req.namespace_scope,
+            &req.table_scope,
+        )
         .await?;
 
+    Ok(Json(MintTokenResponse {
+        token: token.into(),
+        raw,
+    }))
+}
+
+/// PUT `/api/ws/{workspace}/catalog/warehouses/{wid}/tokens/{id}` — edit a
+/// token's label / permissions / scopes in place (the secret is unchanged).
+///
+/// 404 when the id is not this workspace warehouse's token (IDOR closed by the
+/// store-layer workspace + warehouse guard).
+async fn update_token(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, wid, id)): Path<(String, Uuid, Uuid)>,
+    Json(req): Json<UpdateTokenRequest>,
+) -> Result<Json<CatalogTokenDto>, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+    let ws = ctx.workspace_id.0;
+    // Verify the warehouse belongs to this workspace first (cross-workspace → 404).
+    st.store.get_warehouse(ws, wid).await?;
+
+    if req.permissions.is_empty() {
+        return Err(BrowseApiError::BadRequest(
+            "permissions must not be empty".to_string(),
+        ));
+    }
+    let mut perms = req
+        .permissions
+        .iter()
+        .map(|p| map_permission(p))
+        .collect::<Result<Vec<_>, _>>()?;
+    perms.sort();
+    perms.dedup();
+
+    let token = st
+        .store
+        .update_token_for_warehouse(
+            ws,
+            wid,
+            id,
+            &req.label,
+            &perms,
+            &req.namespace_scope,
+            &req.table_scope,
+        )
+        .await?;
+    Ok(Json(token.into()))
+}
+
+/// POST `/api/ws/{workspace}/catalog/warehouses/{wid}/tokens/{id}/rotate` —
+/// generate a new secret for the SAME token row (label/scopes/created_at kept).
+///
+/// Returns the row plus the new raw secret (shown once). 404 when the id is not
+/// this workspace warehouse's token.
+async fn rotate_token(
+    State(st): State<BrowseState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, wid, id)): Path<(String, Uuid, Uuid)>,
+) -> Result<Json<MintTokenResponse>, BrowseApiError> {
+    require_workspace_admin(&st, &ctx).await?;
+    let ws = ctx.workspace_id.0;
+    // Verify the warehouse belongs to this workspace first (cross-workspace → 404).
+    st.store.get_warehouse(ws, wid).await?;
+    let (token, raw) = st.store.rotate_token_for_warehouse(ws, wid, id).await?;
     Ok(Json(MintTokenResponse {
         token: token.into(),
         raw,

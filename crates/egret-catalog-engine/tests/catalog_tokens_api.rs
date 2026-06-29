@@ -177,7 +177,14 @@ async fn seed_other_workspace_token(f: &Fixture) -> Uuid {
         .id;
     let (token, _raw) = f
         .store
-        .create_token(ws.id.0, y_wid, "y-token", &["catalog:read".into()], &[])
+        .create_token(
+            ws.id.0,
+            y_wid,
+            "y-token",
+            &["catalog:read".into()],
+            &[],
+            &[],
+        )
         .await
         .expect("mint Y token");
     token.id
@@ -345,6 +352,7 @@ async fn revoke_of_other_warehouse_token_is_404_and_token_survives() {
             wid_b,
             "b-token",
             &["catalog:read".into()],
+            &[],
             &[],
         )
         .await
@@ -534,4 +542,369 @@ async fn mint_dedups_duplicate_permissions() {
         serde_json::json!(["catalog:read"]),
         "duplicate input perms collapse to a single mapped perm; body={json}"
     );
+}
+
+/// Minting with a `table_scope` persists it and lists it back on the DTO.
+#[tokio::test]
+async fn mint_with_table_scope_persists_and_lists() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, "admin", "ws_admin").await;
+    let base = format!("/ws/{}/catalog/warehouses/{}/tokens", f.slug, f.wid);
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &base,
+            &token,
+            Some(serde_json::json!({
+                "label": "scoped",
+                "permissions": ["read"],
+                "namespace_scope": ["sale"],
+                "table_scope": ["sale.orders"],
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, _bytes, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "mint; body={json}");
+    assert_eq!(
+        json["token"]["table_scope"],
+        serde_json::json!(["sale.orders"]),
+        "table_scope persisted on mint; body={json}"
+    );
+    let id = json["token"]["id"].as_str().unwrap().to_string();
+
+    // LIST reflects the table_scope on the row.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &base, &token, None))
+        .await
+        .unwrap();
+    let (status, _bytes, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list; body={json}");
+    let row = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"].as_str() == Some(id.as_str()))
+        .expect("minted row listed");
+    assert_eq!(
+        row["table_scope"],
+        serde_json::json!(["sale.orders"]),
+        "table_scope listed; body={json}"
+    );
+}
+
+/// A single-segment table scope entry (no namespace) is rejected with 400.
+#[tokio::test]
+async fn mint_rejects_malformed_table_scope() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, "admin", "ws_admin").await;
+    let base = format!("/ws/{}/catalog/warehouses/{}/tokens", f.slug, f.wid);
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &base,
+            &token,
+            Some(serde_json::json!({
+                "label": "bad",
+                "permissions": ["read"],
+                "table_scope": ["orders"],
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "a table_scope entry without a namespace must 400"
+    );
+}
+
+/// PUT edits label + permissions + namespace_scope + table_scope in place; GET
+/// reflects the change and the ORIGINAL raw secret still authenticates with the
+/// new scope (the hash is untouched).
+#[tokio::test]
+async fn edit_token_updates_scope() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, "admin", "ws_admin").await;
+    let base = format!("/ws/{}/catalog/warehouses/{}/tokens", f.slug, f.wid);
+
+    // MINT (read-only, ns=sale, table=sale.orders).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &base,
+            &token,
+            Some(serde_json::json!({
+                "label": "before",
+                "permissions": ["read"],
+                "namespace_scope": ["sale"],
+                "table_scope": ["sale.orders"],
+            })),
+        ))
+        .await
+        .unwrap();
+    let (_s, _b, json) = into_json(resp).await;
+    let id = json["token"]["id"].as_str().unwrap().to_string();
+    let raw = json["raw"].as_str().unwrap().to_string();
+
+    // PUT — widen perms, change ns + table scope, rename.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("{base}/{id}"),
+            &token,
+            Some(serde_json::json!({
+                "label": "after",
+                "permissions": ["read", "write"],
+                "namespace_scope": ["marts"],
+                "table_scope": ["marts.daily", "marts.weekly"],
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, _b, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "edit; body={json}");
+    assert_eq!(json["label"], "after", "label updated; body={json}");
+    assert_eq!(
+        json["permissions"],
+        serde_json::json!(["catalog:read", "catalog:write"]),
+        "perms updated; body={json}"
+    );
+    assert_eq!(
+        json["namespace_scope"],
+        serde_json::json!(["marts"]),
+        "ns scope updated; body={json}"
+    );
+    assert_eq!(
+        json["table_scope"],
+        serde_json::json!(["marts.daily", "marts.weekly"]),
+        "table scope updated; body={json}"
+    );
+
+    // The ORIGINAL raw still authenticates and carries the NEW scope.
+    let auth = f
+        .store
+        .authenticate_token(&raw)
+        .await
+        .expect("original secret still valid after edit");
+    assert_eq!(auth.permissions, vec!["catalog:read", "catalog:write"]);
+    assert_eq!(auth.namespace_scope, vec!["marts"]);
+    assert_eq!(auth.table_scope, vec!["marts.daily", "marts.weekly"]);
+}
+
+/// POST rotate mints a NEW secret for the same row: the old raw stops
+/// authenticating, the new raw authenticates with the same id + label + scopes.
+#[tokio::test]
+async fn rotate_token_invalidates_old_secret() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, "admin", "ws_admin").await;
+    let base = format!("/ws/{}/catalog/warehouses/{}/tokens", f.slug, f.wid);
+
+    // MINT.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &base,
+            &token,
+            Some(serde_json::json!({
+                "label": "rot",
+                "permissions": ["read"],
+                "namespace_scope": ["sale"],
+                "table_scope": ["sale.orders"],
+            })),
+        ))
+        .await
+        .unwrap();
+    let (_s, _b, json) = into_json(resp).await;
+    let id = json["token"]["id"].as_str().unwrap().to_string();
+    let raw1 = json["raw"].as_str().unwrap().to_string();
+
+    // raw1 authenticates before rotation.
+    assert!(
+        f.store.authenticate_token(&raw1).await.is_ok(),
+        "raw1 valid before rotate"
+    );
+
+    // ROTATE.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &format!("{base}/{id}/rotate"), &token, None))
+        .await
+        .unwrap();
+    let (status, _b, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "rotate; body={json}");
+    let raw2 = json["raw"].as_str().unwrap().to_string();
+    assert!(!raw2.is_empty(), "rotate returns a new raw; body={json}");
+    assert_ne!(raw1, raw2, "rotated secret differs from the original");
+    assert_eq!(
+        json["token"]["id"].as_str(),
+        Some(id.as_str()),
+        "same row id after rotate; body={json}"
+    );
+    assert_eq!(
+        json["token"]["label"], "rot",
+        "label preserved; body={json}"
+    );
+    assert_eq!(
+        json["token"]["table_scope"],
+        serde_json::json!(["sale.orders"]),
+        "scope preserved across rotate; body={json}"
+    );
+
+    // raw1 no longer authenticates; raw2 does, with the SAME scope.
+    assert!(
+        f.store.authenticate_token(&raw1).await.is_err(),
+        "old secret invalidated after rotate"
+    );
+    let auth = f
+        .store
+        .authenticate_token(&raw2)
+        .await
+        .expect("new secret authenticates");
+    assert_eq!(auth.namespace_scope, vec!["sale"]);
+    assert_eq!(auth.table_scope, vec!["sale.orders"]);
+}
+
+/// Editing or rotating a token that belongs to ANOTHER warehouse (same
+/// workspace) via this warehouse's path is a 404 — the store-layer warehouse
+/// guard scopes both mutations, closing the cross-warehouse IDOR.
+#[tokio::test]
+async fn edit_and_rotate_cross_warehouse_404() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, "admin", "ws_admin").await;
+
+    // Second warehouse B + a token minted for it.
+    let wid_b = f
+        .store
+        .insert_warehouse(f.workspace_id.0, Uuid::now_v7(), "warehouse-b", None)
+        .await
+        .expect("seed warehouse B")
+        .id;
+    let (token_b, _raw) = f
+        .store
+        .create_token(
+            f.workspace_id.0,
+            wid_b,
+            "b-token",
+            &["catalog:read".into()],
+            &[],
+            &[],
+        )
+        .await
+        .expect("mint token for warehouse B");
+
+    // PUT via warehouse A's path → 404.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!(
+                "/ws/{}/catalog/warehouses/{}/tokens/{}",
+                f.slug, f.wid, token_b.id
+            ),
+            &token,
+            Some(serde_json::json!({
+                "label": "hijack",
+                "permissions": ["read", "write"],
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "editing warehouse B's token via warehouse A must 404"
+    );
+
+    // POST rotate via warehouse A's path → 404.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!(
+                "/ws/{}/catalog/warehouses/{}/tokens/{}/rotate",
+                f.slug, f.wid, token_b.id
+            ),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "rotating warehouse B's token via warehouse A must 404"
+    );
+}
+
+/// Focused table-scope coverage: a table-scoped token round-trips its scope
+/// through `authenticate_token` into `TokenAuth.table_scope`, which is exactly
+/// what `front_auth` puts into the `"egret"` claim's `tables` field. The
+/// authorizer's table-FQN allow/deny decision over that claim is unit-tested in
+/// `authorizer.rs` (`gate_table_*` / `table_scope_*`). The FULL live REST path
+/// (create two iceberg tables, load the allowed one + deny the sibling + filter
+/// the list) requires lakekeeper + MinIO table creation and is deferred to the
+/// manual real-Trino integration test.
+#[tokio::test]
+async fn table_scope_round_trips_into_token_auth() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let (_token, raw) = f
+        .store
+        .create_token(
+            f.workspace_id.0,
+            f.wid,
+            "tbl",
+            &["catalog:read".into()],
+            &["sale".into()],
+            &["sale.orders".into()],
+        )
+        .await
+        .expect("mint table-scoped token");
+
+    let auth = f
+        .store
+        .authenticate_token(&raw)
+        .await
+        .expect("authenticate table-scoped token");
+    assert_eq!(
+        auth.table_scope,
+        vec!["sale.orders".to_string()],
+        "table_scope flows into TokenAuth (→ the `tables` front-auth claim)"
+    );
+    assert_eq!(auth.namespace_scope, vec!["sale".to_string()]);
 }
