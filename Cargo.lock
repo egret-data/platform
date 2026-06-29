@@ -2603,6 +2603,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "egret-notebook"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "egret-auth",
+ "egret-core",
+ "egret-metastore",
+ "egret-workspace",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "sqlx 0.8.6",
+ "thiserror 2.0.18",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "egret-ranger"
 version = "0.1.0"
 dependencies = [
