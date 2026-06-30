@@ -42,6 +42,10 @@ pub struct ConnOptions {
     /// StarRocks default database (optional).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database: Option<String>,
+    /// Trino only: run each query as the logged-in user (X-Trino-User).
+    /// Requires Trino impersonation + Ranger. Default false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impersonate: Option<bool>,
 }
 
 /// A full database registration row (no secret material).

@@ -1,5 +1,5 @@
 //! Postgres access: a pooled connection wrapper and the embedded migrator.
-//! (touched to re-embed migrations: 0037 removes notebook engine column)
+//! (touched to re-embed migrations: 0037 removes notebook engine column; 0040_user_username adds users.username citext)
 
 use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::postgres::PgPoolOptions;
@@ -60,3 +60,4 @@ mod tests {
 
 // migration registry: 0033_databases_name_per_workspace
 // migration registry: 0039_notebook_resource_access
+// migration registry: 0040_user_username

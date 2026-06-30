@@ -8,6 +8,8 @@ export interface ConnOptions {
   http_scheme?: string;
   catalog?: string;
   database?: string;
+  /** Trino only: run each query as the logged-in user (X-Trino-User). */
+  impersonate?: boolean;
 }
 
 export interface DatabaseConn {

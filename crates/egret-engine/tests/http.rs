@@ -92,7 +92,8 @@ fn build_state(db: egret_metastore::Db) -> EngineState {
         limits,
         sessions,
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
-        authz: egret_workspace::rbac::Authorizer::new(db),
+        authz: egret_workspace::rbac::Authorizer::new(db.clone()),
+        users: egret_auth::users::UserRepo::new(db),
     }
 }
 

@@ -121,6 +121,72 @@ impl UserRepo {
             .map_err(db_err)?;
         Ok(())
     }
+
+    /// Return the stable username for `user_id`, deriving and persisting one if
+    /// not yet set.  The username is the email local-part slugified to
+    /// `[a-z0-9_-]`; collisions are resolved by appending `-2`, `-3`, …
+    pub async fn ensure_username(&self, user_id: UserId) -> Result<String> {
+        // 1. Fast path: username already set.
+        let existing: Option<Option<String>> =
+            sqlx::query_scalar("SELECT username::text FROM users WHERE id = $1")
+                .bind(user_id.0)
+                .fetch_optional(&self.db.pool)
+                .await
+                .map_err(db_err)?;
+
+        match existing {
+            None => {
+                return Err(egret_core::Error::NotFound(format!("user {user_id:?}")));
+            }
+            Some(Some(u)) => return Ok(u),
+            Some(None) => {} // need to derive
+        }
+
+        // 2. Derive base slug from email local-part.
+        let email: String = sqlx::query_scalar("SELECT email::text FROM users WHERE id = $1")
+            .bind(user_id.0)
+            .fetch_one(&self.db.pool)
+            .await
+            .map_err(db_err)?;
+        let base = slugify_localpart(&email);
+
+        // 3. Try base, then base-2, base-3, … until the unique UPDATE sticks.
+        for n in 1..1000u32 {
+            let cand = if n == 1 {
+                base.clone()
+            } else {
+                format!("{base}-{n}")
+            };
+            let res =
+                sqlx::query("UPDATE users SET username = $2 WHERE id = $1 AND username IS NULL")
+                    .bind(user_id.0)
+                    .bind(&cand)
+                    .execute(&self.db.pool)
+                    .await;
+            match res {
+                Ok(r) if r.rows_affected() == 1 => return Ok(cand),
+                Ok(_) => {
+                    // Another concurrent caller set our username first — re-read.
+                    if let Some(u) = sqlx::query_scalar::<_, Option<String>>(
+                        "SELECT username::text FROM users WHERE id = $1",
+                    )
+                    .bind(user_id.0)
+                    .fetch_one(&self.db.pool)
+                    .await
+                    .map_err(db_err)?
+                    {
+                        return Ok(u);
+                    }
+                }
+                Err(sqlx::Error::Database(d)) if d.is_unique_violation() => continue,
+                Err(e) => return Err(db_err(e)),
+            }
+        }
+
+        Err(egret_core::Error::Internal(anyhow::anyhow!(
+            "could not allocate a unique username for user {user_id:?} after 999 attempts"
+        )))
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -148,4 +214,64 @@ impl From<UserRow> for User {
 
 fn db_err(e: sqlx::Error) -> egret_core::Error {
     egret_core::Error::Internal(anyhow::anyhow!(e))
+}
+
+/// Derive a username slug from an email address.
+/// Lowercases the local-part, keeps only `[a-z0-9_-]` chars, collapses
+/// repeated hyphens/underscores, and falls back to `"user"` if empty.
+fn slugify_localpart(email: &str) -> String {
+    let local = email.split('@').next().unwrap_or("").to_lowercase();
+    // Replace any run of chars outside [a-z0-9_-] with a single '-'
+    let mut slug = String::with_capacity(local.len());
+    let mut prev_dash = false;
+    for ch in local.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            slug.push(ch);
+            prev_dash = false;
+        } else if !prev_dash {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    // Trim leading/trailing dashes
+    let slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        "user".to_string()
+    } else {
+        slug
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egret_metastore::Db;
+
+    #[test]
+    fn slugify_rules() {
+        assert_eq!(slugify_localpart("Alice@Corp.com"), "alice");
+        assert_eq!(slugify_localpart("alice@other.com"), "alice");
+        assert_eq!(slugify_localpart("john.doe@example.com"), "john-doe");
+        assert_eq!(slugify_localpart("@empty.com"), "user");
+        assert_eq!(slugify_localpart("!!!@x.com"), "user");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn ensure_username_derives_and_is_stable(pool: sqlx::PgPool) {
+        let repo = UserRepo::new(Db { pool });
+        let a = repo
+            .insert_local("Alice@Corp.com", "Alice", "x")
+            .await
+            .unwrap();
+        let u1 = repo.ensure_username(a).await.unwrap();
+        assert_eq!(u1, "alice"); // slug of local-part
+        let u2 = repo.ensure_username(a).await.unwrap();
+        assert_eq!(u2, "alice"); // stable (no re-derive)
+        let b = repo
+            .insert_local("alice@other.com", "Alice2", "x")
+            .await
+            .unwrap();
+        let ub = repo.ensure_username(b).await.unwrap();
+        assert_eq!(ub, "alice-2"); // collision suffix
+    }
 }

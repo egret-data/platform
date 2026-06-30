@@ -15,6 +15,7 @@ fn trino_spec() -> Option<egret_engine::connector::ConnSpec> {
             ..Default::default()
         },
         secret: None,
+        session_user: None,
     })
 }
 

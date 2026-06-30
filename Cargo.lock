@@ -2425,6 +2425,7 @@ name = "egret-bin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "axum-extra 0.10.3",
  "base64 0.22.1",
@@ -2608,9 +2609,11 @@ name = "egret-notebook"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "chrono",
  "egret-auth",
+ "egret-catalog",
  "egret-core",
  "egret-metastore",
  "egret-workspace",

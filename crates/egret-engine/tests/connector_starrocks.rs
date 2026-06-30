@@ -15,6 +15,7 @@ fn spec(host: &str, port: i32) -> ConnSpec {
             ..Default::default()
         },
         secret: None,
+        session_user: None,
     }
 }
 

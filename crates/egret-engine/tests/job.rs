@@ -1,5 +1,5 @@
 //! DB-gated JobManager tests with an injected fake connector.
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -43,14 +43,32 @@ impl Connector for FakeConnector {
 }
 struct FakeFactory {
     sleep_ms: u64,
+    /// Records the last `session_user` passed to `build` for test assertions.
+    last_session_user: Arc<Mutex<Option<Option<String>>>>,
 }
+
+impl FakeFactory {
+    fn new(sleep_ms: u64) -> Self {
+        FakeFactory {
+            sleep_ms,
+            last_session_user: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn last_session_user(&self) -> Option<Option<String>> {
+        self.last_session_user.lock().unwrap().clone()
+    }
+}
+
 #[async_trait]
 impl ConnectorFactory for FakeFactory {
     async fn build(
         &self,
         _db: &Database,
         _secret: Option<String>,
+        session_user: Option<String>,
     ) -> Result<Box<dyn Connector>, egret_engine::EngineError> {
+        *self.last_session_user.lock().unwrap() = Some(session_user);
         Ok(Box::new(FakeConnector {
             sleep_ms: self.sleep_ms,
         }))
@@ -97,7 +115,7 @@ impl ObjectStore for MemStore {
     }
 }
 
-async fn setup(sleep_ms: u64) -> Option<(JobManager, QueryStore, Uuid, Uuid)> {
+async fn setup(sleep_ms: u64) -> Option<(JobManager, QueryStore, Uuid, Uuid, Arc<FakeFactory>)> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
@@ -108,14 +126,17 @@ async fn setup(sleep_ms: u64) -> Option<(JobManager, QueryStore, Uuid, Uuid)> {
             .await
             .unwrap();
     let did: Uuid = sqlx::query_scalar(
-        "INSERT INTO databases (name,engine,host,port) VALUES ($1,'trino','h',8080) RETURNING id",
+        "INSERT INTO databases (name,engine,host,port,workspace_id) \
+         VALUES ($1,'trino','h',8080,$2) RETURNING id",
     )
     .bind(format!("db_{}", Uuid::new_v4().simple()))
+    .bind(wid)
     .fetch_one(&db.pool)
     .await
     .unwrap();
     let store = QueryStore::new(db.clone());
     let storage: Arc<dyn ObjectStore> = Arc::new(MemStore::default());
+    let factory = Arc::new(FakeFactory::new(sleep_ms));
     let jobs = JobManager::new(
         store.clone(),
         egret_database::DatabaseRepo::new(
@@ -126,7 +147,7 @@ async fn setup(sleep_ms: u64) -> Option<(JobManager, QueryStore, Uuid, Uuid)> {
                 egret_secrets::SecretStore::new(db.clone(), None),
             ),
         ),
-        Arc::new(FakeFactory { sleep_ms }),
+        factory.clone(),
         storage,
         "s3://warehouse".into(),
         "query-results".into(),
@@ -136,7 +157,7 @@ async fn setup(sleep_ms: u64) -> Option<(JobManager, QueryStore, Uuid, Uuid)> {
         },
         100,
     );
-    Some((jobs, store, wid, did))
+    Some((jobs, store, wid, did, factory))
 }
 
 async fn wait_status(store: &QueryStore, id: Uuid, want: QueryStatus, tries: u32) -> QueryStatus {
@@ -152,11 +173,14 @@ async fn wait_status(store: &QueryStore, id: Uuid, want: QueryStatus, tries: u32
 
 #[tokio::test]
 async fn submit_runs_to_finished() {
-    let Some((jobs, store, wid, did)) = setup(0).await else {
+    let Some((jobs, store, wid, did, _factory)) = setup(0).await else {
         eprintln!("skip");
         return;
     };
-    let id = jobs.submit(wid, did, None, "SELECT 1", None).await.unwrap();
+    let id = jobs
+        .submit(wid, did, None, None, "SELECT 1", None)
+        .await
+        .unwrap();
     assert_eq!(
         wait_status(&store, id, QueryStatus::Finished, 40).await,
         QueryStatus::Finished
@@ -168,15 +192,38 @@ async fn submit_runs_to_finished() {
 
 #[tokio::test]
 async fn cancel_sets_cancelled() {
-    let Some((jobs, store, wid, did)) = setup(2000).await else {
+    let Some((jobs, store, wid, did, _factory)) = setup(2000).await else {
         eprintln!("skip");
         return;
     };
-    let id = jobs.submit(wid, did, None, "SELECT 1", None).await.unwrap();
+    let id = jobs
+        .submit(wid, did, None, None, "SELECT 1", None)
+        .await
+        .unwrap();
     wait_status(&store, id, QueryStatus::Running, 20).await;
     jobs.cancel(id).await.unwrap();
     assert_eq!(
         wait_status(&store, id, QueryStatus::Cancelled, 40).await,
         QueryStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn session_user_reaches_factory() {
+    let Some((jobs, store, wid, did, factory)) = setup(0).await else {
+        eprintln!("skip");
+        return;
+    };
+    let id = jobs
+        .submit(wid, did, None, Some("alice".to_string()), "SELECT 1", None)
+        .await
+        .unwrap();
+    // Wait for the job to run (factory.build is called inside the spawned task).
+    wait_status(&store, id, QueryStatus::Finished, 40).await;
+    // Assert the factory captured the session_user we passed.
+    assert_eq!(
+        factory.last_session_user(),
+        Some(Some("alice".to_string())),
+        "factory.build must receive session_user=Some(\"alice\")"
     );
 }

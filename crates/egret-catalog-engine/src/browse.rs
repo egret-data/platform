@@ -939,6 +939,71 @@ async fn create_namespace_route(
     Ok((StatusCode::CREATED, Json(NamespaceDto { levels })).into_response())
 }
 
+/// Idempotently ensure a single top-level `namespace` exists in the lakekeeper
+/// warehouse identified by `lakekeeper_warehouse_id`, treating an already-exists
+/// conflict as success.
+///
+/// This is the in-process, non-HTTP entry point the notebook runtime
+/// provisioner uses (the composition root wires it behind
+/// `egret_notebook::NamespaceProvisioner`). It mirrors the body of
+/// [`create_namespace_route`] but takes a pre-resolved lakekeeper warehouse
+/// UUID and the system principal directly, so it does NOT perform egret session
+/// RBAC or workspace-ownership resolution — the caller MUST have already
+/// resolved `lakekeeper_warehouse_id` from a workspace-scoped egret warehouse
+/// row (e.g. via [`CatalogStore::lakekeeper_id`]) so the tenant boundary is
+/// enforced before this call.
+///
+/// `namespace` is a SINGLE top-level level (no dotted nesting). The driving
+/// lakekeeper call is `NamespaceService::create_namespace`, authorized by the
+/// stable system principal derived from `system_user`.
+///
+/// # Errors
+/// Returns an error if the namespace name is invalid, or if lakekeeper fails for
+/// a reason other than "already exists" (a 409 conflict is mapped to `Ok(())`).
+pub async fn ensure_namespace(
+    engine: &ApiContext<EngineState>,
+    system_user: &str,
+    lakekeeper_warehouse_id: Uuid,
+    namespace: &str,
+) -> anyhow::Result<()> {
+    let name = namespace.trim();
+    if name.is_empty() {
+        anyhow::bail!("namespace name must not be empty");
+    }
+    if name.contains('.') {
+        anyhow::bail!("namespace name must not contain '.'");
+    }
+
+    // lakekeeper's default `prefix_template = "{warehouse_id}"`.
+    let prefix = Prefix::from(lakekeeper_warehouse_id.to_string());
+    let request_metadata = system_request_metadata(system_user)?;
+
+    let ident = NamespaceIdent::from_vec(vec![name.to_string()])
+        .map_err(|e| anyhow::anyhow!("invalid namespace `{name}`: {e:?}"))?;
+    let request = CreateNamespaceRequest {
+        namespace: ident,
+        properties: None,
+    };
+
+    match <EngineServer as NamespaceService<EngineState>>::create_namespace(
+        Some(prefix),
+        request,
+        engine.clone(),
+        request_metadata,
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        // A duplicate namespace is lakekeeper's 409 `AlreadyExistsException`.
+        // Idempotent provisioning treats that as success.
+        Err(e) if e.error.code == StatusCode::CONFLICT.as_u16() => Ok(()),
+        Err(e) => Err(anyhow::anyhow!(
+            "lakekeeper create_namespace `{name}` failed: {}",
+            e.error.message
+        )),
+    }
+}
+
 /// DELETE `/api/ws/{workspace}/catalog/warehouses/{wid}/namespaces/{ns}` — drop a
 /// namespace. EMPTY-ONLY: a namespace that still contains tables/views or child
 /// namespaces is rejected with 409 (lakekeeper returns 409

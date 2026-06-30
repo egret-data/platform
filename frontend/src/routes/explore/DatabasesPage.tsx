@@ -45,6 +45,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { SecretPicker, type SecretSelection } from "@/components/SecretPicker";
+import { Switch } from "@/components/ui/switch";
 
 function statusVariant(status: string): "default" | "destructive" | "secondary" {
   if (status === "ok") return "default";
@@ -296,6 +297,7 @@ function DatabaseConnDialog({
   const [catalog, setCatalog] = useState(editConn?.options.catalog ?? "");
   const [schema, setSchema] = useState(editConn?.options.database ?? "");
   const [httpScheme, setHttpScheme] = useState(editConn?.options.http_scheme ?? "");
+  const [impersonate, setImpersonate] = useState(editConn?.options.impersonate ?? false);
   const [secretSel, setSecretSel] = useState<SecretSelection>({});
   const [error, setError] = useState<string | null>(null);
 
@@ -308,6 +310,7 @@ function DatabaseConnDialog({
     setCatalog(conn?.options.catalog ?? "");
     setSchema(conn?.options.database ?? "");
     setHttpScheme(conn?.options.http_scheme ?? "");
+    setImpersonate(conn?.options.impersonate ?? false);
     setSecretSel({});
     setError(null);
     createMutation.reset();
@@ -330,6 +333,7 @@ function DatabaseConnDialog({
       http_scheme: httpScheme.trim().length > 0 ? httpScheme.trim() : undefined,
       catalog: catalog.trim().length > 0 ? catalog.trim() : undefined,
       database: schema.trim().length > 0 ? schema.trim() : undefined,
+      impersonate: engine === "trino" && impersonate ? true : undefined,
     };
 
     const input: DatabaseConnInput = {
@@ -464,6 +468,25 @@ function DatabaseConnDialog({
                 />
               </div>
             </div>
+
+            {engine === "trino" && (
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="db-impersonate" className="font-normal">
+                    Run queries as the logged-in user
+                  </Label>
+                  <Switch
+                    id="db-impersonate"
+                    checked={impersonate}
+                    onCheckedChange={setImpersonate}
+                    aria-label="Run queries as the logged-in user"
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Requires Trino impersonation + Ranger
+                </p>
+              </div>
+            )}
 
             <SecretPicker
               ws={ws}

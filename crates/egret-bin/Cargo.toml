@@ -30,6 +30,7 @@ egret-database.workspace = true
 egret-engine.workspace = true
 egret-bi.workspace = true
 egret-notebook.workspace = true
+async-trait.workspace = true
 tokio.workspace = true
 axum.workspace = true
 clap.workspace = true
