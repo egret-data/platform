@@ -4,9 +4,11 @@ pub mod env;
 pub mod error;
 pub mod launcher;
 pub mod manager;
+pub mod reaper;
 pub mod registry;
 pub mod routes;
 pub mod subprocess;
 
 pub use manager::{KernelManager, KernelStatus};
+pub use reaper::{reap_once, spawn_reaper};
 pub use routes::{kernel_router, KernelState};
