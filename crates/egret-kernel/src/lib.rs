@@ -2,6 +2,7 @@
 
 pub mod env;
 pub mod error;
+pub mod gateway;
 pub mod launcher;
 pub mod manager;
 pub mod notebook_kernels;
