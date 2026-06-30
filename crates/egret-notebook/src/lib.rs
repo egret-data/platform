@@ -8,4 +8,5 @@ pub mod store;
 
 pub use provisioning::{provision_notebook_access, NamespaceProvisioner, Provisioned};
 pub use routes::{notebook_router, NotebookState};
+pub use runtime::{build_notebook_runtime, NotebookRuntime, RuntimeCatalog};
 pub use store::NotebookStore;

@@ -1,0 +1,448 @@
+//! Kernel lifecycle HTTP route tests.
+//!
+//! Covers:
+//! - `POST /ws/{ws}/kernel` → 200 `{phase:"ready", url}`; FakeLauncher received
+//!   env with `EGRET_NOTEBOOK_RUNTIME` key.
+//! - `GET /ws/{ws}/kernel` → 200 `{phase, url}` after start.
+//! - `DELETE /ws/{ws}/kernel` → 204; subsequent GET returns `{phase:"none"}`.
+//! - NON-member → 403/404 on POST (auth gate fires BEFORE provisioning).
+//! - User A's POST creates a row keyed to A; user B's GET in the same ws returns
+//!   their own (none), not A's row — per-(user×workspace) keying.
+//!
+//! All tests receive a fresh auto-migrated scratch DB via `#[sqlx::test]` and
+//! never touch the shared dev `egret` database.
+
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::http::{Request as HttpRequest, StatusCode};
+use axum::response::Response;
+use egret_auth::session::SessionService;
+use egret_auth::users::UserRepo;
+use egret_catalog::service::CatalogStore;
+use egret_core::ids::{UserId, WorkspaceId};
+use egret_kernel::kernel_router;
+use egret_kernel::launcher::FakeLauncher;
+use egret_kernel::manager::KernelManager;
+use egret_kernel::registry::KernelRegistry;
+use egret_kernel::routes::KernelState;
+use egret_metastore::Db;
+use egret_notebook::error::NotebookApiError;
+use egret_notebook::{NamespaceProvisioner, NotebookState, NotebookStore};
+use egret_workspace::members::MemberRepo;
+use egret_workspace::rbac::Authorizer;
+use egret_workspace::workspaces::WorkspaceRepo;
+use http_body_util::BodyExt;
+use tower::ServiceExt; // oneshot
+use uuid::Uuid;
+
+// ── Fake NamespaceProvisioner ────────────────────────────────────────────────
+
+/// Always succeeds; no lakekeeper in unit tests.
+struct FakeProvisioner;
+
+#[async_trait::async_trait]
+impl NamespaceProvisioner for FakeProvisioner {
+    async fn ensure_namespace(
+        &self,
+        _warehouse_id: Uuid,
+        _namespace: &str,
+    ) -> Result<(), NotebookApiError> {
+        Ok(())
+    }
+}
+
+// ── Fixture ──────────────────────────────────────────────────────────────────
+
+struct Fixture {
+    app: axum::Router,
+    users: UserRepo,
+    members: MemberRepo,
+    sessions: SessionService,
+    slug: String,
+    ws: WorkspaceId,
+    owner: UserId,
+    db: Db,
+    launcher: Arc<FakeLauncher>,
+}
+
+async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json = serde_json::from_slice(&bytes).unwrap_or_else(
+        |_| serde_json::json!({ "_raw": String::from_utf8_lossy(&bytes).to_string() }),
+    );
+    (status, json)
+}
+
+async fn setup(pool: sqlx::PgPool) -> Fixture {
+    let db = Db { pool };
+
+    let users = UserRepo::new(db.clone());
+    let sessions = SessionService::new(
+        db.clone(),
+        chrono::Duration::hours(24),
+        chrono::Duration::minutes(60),
+    );
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    let owner = users
+        .insert_local(
+            &format!("kernelowner-{suffix}@egret.test"),
+            "Kernel Owner",
+            "x",
+        )
+        .await
+        .expect("seed owner");
+
+    let workspaces = WorkspaceRepo::new(db.clone());
+    let slug = format!("kws{suffix}");
+    let ws_created = workspaces
+        .create(&slug, "Kernel WS", owner)
+        .await
+        .expect("seed workspace");
+    let ws = ws_created.id;
+
+    let launcher = Arc::new(FakeLauncher::default());
+    let registry = KernelRegistry::new(db.clone());
+    let manager = Arc::new(KernelManager::new(
+        registry,
+        launcher.clone(),
+        std::time::Duration::from_secs(1800),
+    ));
+
+    let notebook_state = NotebookState {
+        store: NotebookStore::new(db.clone()),
+        sessions: sessions.clone(),
+        workspaces: workspaces.clone(),
+        authz: Authorizer::new(db.clone()),
+        catalog: CatalogStore::new(db.clone()),
+        provisioner: Arc::new(FakeProvisioner),
+        users: UserRepo::new(db.clone()),
+        catalog_base_url: "http://localhost:8181".into(),
+    };
+
+    let app = kernel_router().with_state(KernelState {
+        manager,
+        notebook: notebook_state,
+        sessions: sessions.clone(),
+        workspaces: workspaces.clone(),
+        authz: Authorizer::new(db.clone()),
+        api_url: "http://localhost:3000".into(),
+    });
+
+    Fixture {
+        app,
+        users,
+        members: MemberRepo::new(db.clone()),
+        sessions,
+        slug,
+        ws,
+        owner,
+        db,
+        launcher,
+    }
+}
+
+/// Seed a workspace_warehouses row so `build_notebook_runtime` can find a warehouse.
+async fn seed_warehouse(db: &Db, ws_id: WorkspaceId) -> Uuid {
+    sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO workspace_warehouses (workspace_id, warehouse_id, name) \
+         VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(ws_id.0)
+    .bind(Uuid::new_v4())
+    .bind(format!("ktest-wh-{}", Uuid::new_v4().simple()))
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed warehouse")
+}
+
+/// Insert a user, add as member of `workspace` with `role`, return `(user_id, token)`.
+async fn add_member(
+    f: &Fixture,
+    workspace: WorkspaceId,
+    tag: &str,
+    role: &str,
+) -> (UserId, String) {
+    let email = format!("{tag}_{}@egret.local", Uuid::new_v4().simple());
+    let uid = f
+        .users
+        .insert_local(&email, "Test", "x")
+        .await
+        .expect("insert user");
+    f.members
+        .add(workspace, "user", uid.0, role, f.owner)
+        .await
+        .expect("seed member");
+    let token = f
+        .sessions
+        .create(uid, "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token;
+    (uid, token)
+}
+
+fn req(method: &str, uri: &str, token: &str) -> HttpRequest<Body> {
+    HttpRequest::builder()
+        .method(method)
+        .uri(uri)
+        .header("Cookie", format!("egret_session={token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+/// `POST /ws/{ws}/kernel` → 200 `{phase:"ready", url}`.
+/// The FakeLauncher must have received an env containing `EGRET_NOTEBOOK_RUNTIME`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn post_kernel_starts_and_launcher_got_runtime_env(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_warehouse(&f.db, f.ws).await;
+    let (_uid, token) = add_member(&f, f.ws, "starter", "ws_editor").await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &format!("/ws/{}/kernel", f.slug), &token))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "POST kernel → 200; body={json}");
+    assert_eq!(
+        json["phase"].as_str(),
+        Some("ready"),
+        "phase must be ready; body={json}"
+    );
+    assert!(
+        json["url"].as_str().map(|u| !u.is_empty()).unwrap_or(false),
+        "url must be non-empty; body={json}"
+    );
+
+    // The FakeLauncher must have recorded an ensure() call with EGRET_NOTEBOOK_RUNTIME.
+    let inner = f.launcher.inner.lock().unwrap();
+    assert_eq!(
+        inner.ensured.len(),
+        1,
+        "launcher.ensure called exactly once"
+    );
+    let env = &inner.ensured[0].1;
+    assert!(
+        env.contains_key("EGRET_NOTEBOOK_RUNTIME"),
+        "env must contain EGRET_NOTEBOOK_RUNTIME; keys={:?}",
+        env.keys().collect::<Vec<_>>()
+    );
+    // Sanity: the EGRET_NOTEBOOK_RUNTIME value must be valid JSON.
+    let raw = env.get("EGRET_NOTEBOOK_RUNTIME").unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(raw).expect("EGRET_NOTEBOOK_RUNTIME must be valid JSON");
+    assert!(
+        v.get("username").is_some(),
+        "EGRET_NOTEBOOK_RUNTIME JSON must have 'username'"
+    );
+}
+
+/// `GET /ws/{ws}/kernel` → 200 with phase + url after a start.
+#[sqlx::test(migrations = "../../migrations")]
+async fn get_kernel_returns_status_after_start(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_warehouse(&f.db, f.ws).await;
+    let (_uid, token) = add_member(&f, f.ws, "getter", "ws_editor").await;
+    let uri = format!("/ws/{}/kernel", f.slug);
+
+    // Start the kernel first.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &uri, &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "POST kernel → 200");
+
+    // GET → 200 with phase and url.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &uri, &token))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "GET kernel → 200; body={json}");
+    assert!(
+        json.get("phase").is_some(),
+        "GET must return a phase; body={json}"
+    );
+}
+
+/// `GET /ws/{ws}/kernel` before any start → 200 `{phase:"none"}`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn get_kernel_before_start_returns_none(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_warehouse(&f.db, f.ws).await;
+    let (_uid, token) = add_member(&f, f.ws, "prestart", "ws_viewer").await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("/ws/{}/kernel", f.slug), &token))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET before start → 200; body={json}"
+    );
+    assert_eq!(
+        json["phase"].as_str(),
+        Some("none"),
+        "phase must be none before start; body={json}"
+    );
+}
+
+/// `DELETE /ws/{ws}/kernel` → 204 and the registry row is gone.
+#[sqlx::test(migrations = "../../migrations")]
+async fn delete_kernel_removes_row(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_warehouse(&f.db, f.ws).await;
+    let (_uid, token) = add_member(&f, f.ws, "stopper", "ws_editor").await;
+    let uri = format!("/ws/{}/kernel", f.slug);
+
+    // Start.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &uri, &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "POST kernel → 200");
+
+    // DELETE → 204.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &uri, &token))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "DELETE kernel → 204");
+
+    // GET now returns none (registry row deleted).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &uri, &token))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET after delete → 200; body={json}"
+    );
+    assert_eq!(
+        json["phase"].as_str(),
+        Some("none"),
+        "phase must be none after stop; body={json}"
+    );
+
+    // The launcher must have recorded a stop call.
+    let inner = f.launcher.inner.lock().unwrap();
+    assert_eq!(
+        inner.stopped.len(),
+        1,
+        "launcher.stop must have been called once"
+    );
+}
+
+/// A NON-member (no workspace membership) → 403/404 on POST.
+///
+/// Critical: the auth gate must fire BEFORE any provisioning work.
+/// We confirm by asserting the FakeLauncher was NOT called.
+#[sqlx::test(migrations = "../../migrations")]
+async fn non_member_post_is_rejected_before_provisioning(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_warehouse(&f.db, f.ws).await;
+
+    // A user with NO membership in this workspace.
+    let outsider = f
+        .users
+        .insert_local(
+            &format!("outsider_{}@egret.test", Uuid::new_v4().simple()),
+            "Outsider",
+            "x",
+        )
+        .await
+        .expect("insert outsider");
+    let outsider_tok = f
+        .sessions
+        .create(outsider, "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/ws/{}/kernel", f.slug),
+            &outsider_tok,
+        ))
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    assert!(
+        status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
+        "non-member POST must be 403 or 404; got {status}"
+    );
+
+    // The launcher must NOT have been called (gate fires before provisioning).
+    let inner = f.launcher.inner.lock().unwrap();
+    assert_eq!(
+        inner.ensured.len(),
+        0,
+        "launcher.ensure must NOT be called for an unauthorized request; ensured={:?}",
+        inner.ensured.iter().map(|(k, _)| k).collect::<Vec<_>>()
+    );
+}
+
+/// User A's kernel is NOT visible to user B.
+///
+/// A does POST → kernel row keyed to A. B does GET → must see `{phase:"none"}`,
+/// not A's kernel, proving per-(user×workspace) keying.
+#[sqlx::test(migrations = "../../migrations")]
+async fn per_user_keying_user_b_does_not_see_user_a_kernel(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_warehouse(&f.db, f.ws).await;
+
+    let (_uid_a, token_a) = add_member(&f, f.ws, "user-a", "ws_editor").await;
+    let (_uid_b, token_b) = add_member(&f, f.ws, "user-b", "ws_editor").await;
+    let uri = format!("/ws/{}/kernel", f.slug);
+
+    // User A starts their kernel.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &uri, &token_a))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "user A POST → 200");
+
+    // User B's GET must return none (their own key has no row).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &uri, &token_b))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "user B GET → 200; body={json}");
+    assert_eq!(
+        json["phase"].as_str(),
+        Some("none"),
+        "user B must see their own (none) kernel, not user A's; body={json}"
+    );
+}
