@@ -24,6 +24,7 @@ import Dashboards from "@/routes/explore/Dashboards";
 import DashboardView from "@/routes/explore/DashboardView";
 import Notebooks from "@/routes/explore/Notebooks";
 import NotebookPage from "@/routes/explore/NotebookPage";
+import NotebookSettings from "@/routes/explore/NotebookSettings";
 import WarehousesList from "@/routes/explore/catalog/WarehousesList";
 import WarehouseDetail from "@/routes/explore/catalog/WarehouseDetail";
 import StoragePage from "@/routes/explore/StoragePage";
@@ -58,6 +59,7 @@ function ExploreRoutes() {
           <Route path="dashboards/:id" element={<DashboardView />} />
           <Route path="notebooks" element={<Notebooks />} />
           <Route path="notebooks/:id" element={<NotebookPage />} />
+          <Route path="notebook-settings" element={<NotebookSettings />} />
           <Route path="catalog" element={<WarehousesList />} />
           <Route path="catalog/:wid" element={<WarehouseDetail />} />
           <Route path="storage" element={<StoragePage />} />

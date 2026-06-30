@@ -413,4 +413,37 @@ describe("Notebooks list", () => {
     renderAt();
     expect(notebooksMock).toHaveBeenCalledWith("eng", { trashed: false });
   });
+
+  // ── Notebook settings gear button ──────────────────────────────────────────
+
+  it("renders a 'Notebook settings' gear button in the header", () => {
+    renderAt();
+    expect(
+      screen.getByRole("button", { name: "Notebook settings" }),
+    ).toBeInTheDocument();
+  });
+
+  it("clicking 'Notebook settings' navigates to /explore/:workspace/notebook-settings", async () => {
+    const qc = new QueryClient();
+    render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <MemoryRouter initialEntries={["/explore/eng/notebooks"]}>
+            <Routes>
+              <Route path="/explore/:workspace/notebooks" element={<Notebooks />} />
+              <Route
+                path="/explore/:workspace/notebook-settings"
+                element={<div>NotebookSettingsPage</div>}
+              />
+            </Routes>
+          </MemoryRouter>
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Notebook settings" }));
+    await waitFor(() => {
+      expect(screen.getByText("NotebookSettingsPage")).toBeInTheDocument();
+    });
+  });
 });

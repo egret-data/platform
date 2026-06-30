@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Search, Star, Trash2, FolderPlus, ListChecks, Loader2 } from "lucide-react";
+import { Search, Settings, Star, Trash2, FolderPlus, ListChecks, Loader2 } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import {
@@ -247,6 +247,7 @@ function NotebookActionsMenu({
 
 export default function Notebooks() {
   const ws = useParams().workspace!;
+  const navigate = useNavigate();
 
   const [showTrash, setShowTrash] = useState(false);
   const { data, isLoading } = useNotebooks(ws, { trashed: showTrash });
@@ -461,6 +462,19 @@ export default function Notebooks() {
               <TooltipContent side="bottom">New folder</TooltipContent>
             </Tooltip>
           )}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                size="icon"
+                variant="outline"
+                aria-label="Notebook settings"
+                onClick={() => navigate(`/explore/${ws}/notebook-settings`)}
+              >
+                <Settings className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">Notebook settings</TooltipContent>
+          </Tooltip>
           <Button onClick={() => setNewOpen(true)}>+ Notebook</Button>
         </div>
       </div>
