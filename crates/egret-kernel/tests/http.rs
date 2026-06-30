@@ -52,6 +52,25 @@ impl NamespaceProvisioner for FakeProvisioner {
     }
 }
 
+// ── Stub EngineTokenMinter ────────────────────────────────────────────────────
+
+/// Returns a canned engine token regardless of user.
+struct StubMinter;
+
+#[async_trait::async_trait]
+impl egret_notebook::engine_token::EngineTokenMinter for StubMinter {
+    async fn mint(
+        &self,
+        _u: uuid::Uuid,
+    ) -> Result<egret_notebook::engine_token::EngineToken, egret_notebook::engine_token::BrokerError>
+    {
+        Ok(egret_notebook::engine_token::EngineToken {
+            access_token: "stub.jwt".into(),
+            expires_at: chrono::DateTime::<chrono::Utc>::from_timestamp(4102444800, 0).unwrap(),
+        })
+    }
+}
+
 // ── Fixture ──────────────────────────────────────────────────────────────────
 
 struct Fixture {
@@ -120,6 +139,7 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         provisioner: Arc::new(FakeProvisioner),
         users: UserRepo::new(db.clone()),
         catalog_base_url: "http://localhost:8181".into(),
+        engine_minter: Arc::new(StubMinter),
     };
 
     let app = kernel_router().with_state(KernelState {
@@ -132,6 +152,7 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         notebook_kernels: egret_kernel::NotebookKernelStore::new(db.clone()),
         proxy: Arc::new(egret_kernel::BackendWsProxy),
         query_runner: Arc::new(egret_kernel::query::FakeQueryRunner::default()),
+        engine_minter: Arc::new(StubMinter),
     });
 
     Fixture {
@@ -859,6 +880,52 @@ async fn kernel_query_rejects_bad_token(pool: sqlx::PgPool) {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "bad token → 401");
+}
+
+// ── notebook-runtime token refresh tests ──────────────────────────────────────
+
+/// Valid kernel token → 200 with the minted engine token body.
+#[sqlx::test(migrations = "../../migrations")]
+async fn notebook_runtime_token_returns_minted_token(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    let token = mint_kernel_token(&f.db, f.ws, f.owner).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(bearer_post(
+            &format!("/ws/{}/notebook-runtime/token", f.slug),
+            &token,
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "valid token → 200; body={json}");
+    assert_eq!(
+        json["access_token"].as_str(),
+        Some("stub.jwt"),
+        "must return the minted access_token; body={json}"
+    );
+}
+
+/// No Authorization header → 401.
+#[sqlx::test(migrations = "../../migrations")]
+async fn notebook_runtime_token_requires_auth(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+
+    let req = HttpRequest::builder()
+        .method("POST")
+        .uri(format!("/ws/{}/notebook-runtime/token", f.slug))
+        .header("Content-Type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "no auth header → 401"
+    );
 }
 
 /// Engine present but NOT enabled for notebooks → 403.

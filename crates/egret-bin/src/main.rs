@@ -740,6 +740,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             databases: databases.clone(),
             factory: std::sync::Arc::new(egret_engine::connector::DefaultConnectorFactory),
         }),
+        // Task 7: reuse the SAME broker Arc as NotebookState — one minter.
+        engine_minter: engine_minter.clone(),
     });
     // ── end kernel wiring ───────────────────────────────────────────────────────
 

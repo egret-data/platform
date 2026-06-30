@@ -55,6 +55,9 @@ pub struct KernelState {
     /// Injected engine-execution seam for `POST /kernel/query`. The concrete
     /// runner (egret-engine + egret-database) is wired in from egret-bin.
     pub query_runner: Arc<dyn crate::query::NotebookQueryRunner>,
+    /// Mints fresh per-user engine JWTs for `POST /ws/{ws}/notebook-runtime/token`.
+    /// Shares the SAME `EngineTokenBroker` Arc as `NotebookState` (wired in egret-bin).
+    pub engine_minter: std::sync::Arc<dyn egret_notebook::engine_token::EngineTokenMinter>,
 }
 
 impl FromRef<KernelState> for SessionService {
@@ -92,6 +95,10 @@ pub fn kernel_router() -> Router<KernelState> {
             get(channels),
         )
         .route("/kernel/query", post(kernel_query))
+        .route(
+            "/ws/{workspace}/notebook-runtime/token",
+            post(notebook_runtime_token),
+        )
 }
 
 // ── "No kernel" sentinel ──────────────────────────────────────────────────────
@@ -439,6 +446,24 @@ async fn kernel_query(
         "rows": rows.rows,
         "truncated": rows.truncated,
     })))
+}
+
+// ── notebook-runtime token refresh ────────────────────────────────────────────
+
+/// `POST /ws/{workspace}/notebook-runtime/token` — mint a fresh short-lived engine
+/// JWT for the kernel-token's user. Auth = `EGRET_KERNEL_TOKEN` bearer; identity
+/// comes ONLY from `KernelIdentity` — the `{workspace}` path segment is accepted
+/// for URL symmetry but never trusted for auth. Returns ONLY the caller's token.
+async fn notebook_runtime_token(
+    id: KernelIdentity,
+    State(st): State<KernelState>,
+) -> Result<Json<egret_notebook::engine_token::EngineToken>, KernelApiError> {
+    let tok = st
+        .engine_minter
+        .mint(id.user_id)
+        .await
+        .map_err(|e| KernelApiError(egret_core::Error::Internal(anyhow::anyhow!(e))))?;
+    Ok(Json(tok))
 }
 
 // ── bring IntoResponse into scope for the status handler ─────────────────────
