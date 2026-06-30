@@ -118,6 +118,42 @@ impl KernelRegistry {
         Ok(())
     }
 
+    /// Set the hashed kernel token + its expiry for `key`.
+    pub async fn set_token(
+        &self,
+        key: KernelKey,
+        token_hash: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), KernelError> {
+        sqlx::query(
+            "UPDATE kernels SET token_hash = $3, token_expires_at = $4 \
+             WHERE user_id = $1 AND workspace_id = $2",
+        )
+        .bind(key.user_id)
+        .bind(key.workspace_id)
+        .bind(token_hash)
+        .bind(expires_at)
+        .execute(&self.db.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Resolve a hashed kernel token to its `(user_id, workspace_id)`, if a live
+    /// (unexpired) kernel row carries it.
+    pub async fn resolve_token(&self, token_hash: &str) -> Result<Option<KernelKey>, KernelError> {
+        let row: Option<(Uuid, Uuid)> = sqlx::query_as(
+            "SELECT user_id, workspace_id FROM kernels \
+             WHERE token_hash = $1 AND token_expires_at > now()",
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.db.pool)
+        .await?;
+        Ok(row.map(|(user_id, workspace_id)| KernelKey {
+            user_id,
+            workspace_id,
+        }))
+    }
+
     /// Return all kernel keys whose `last_used_at` is strictly before `before`.
     ///
     /// Used by the idle reaper to find stale kernels.
@@ -171,6 +207,42 @@ mod tests {
         .expect("insert workspace");
 
         (ws_id, user_id)
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn set_and_resolve_token(pool: sqlx::PgPool) {
+        let db = Db { pool };
+        let reg = KernelRegistry::new(db.clone());
+        let (ws, user) = seed(&db).await;
+        let key = KernelKey {
+            user_id: user,
+            workspace_id: ws,
+        };
+        reg.upsert(key, "http://127.0.0.1:1", Some(1), "ready")
+            .await
+            .unwrap();
+
+        // No token yet → resolve returns None.
+        assert!(reg.resolve_token("deadbeef").await.unwrap().is_none());
+
+        // Set a token → resolves to this key while unexpired.
+        reg.set_token(key, "abc123", Utc::now() + chrono::Duration::hours(1))
+            .await
+            .unwrap();
+        assert_eq!(reg.resolve_token("abc123").await.unwrap(), Some(key));
+
+        // Expired token → not resolved.
+        reg.set_token(key, "old", Utc::now() - chrono::Duration::minutes(1))
+            .await
+            .unwrap();
+        assert!(reg.resolve_token("old").await.unwrap().is_none());
+
+        // Deleting the row revokes the token.
+        reg.set_token(key, "live", Utc::now() + chrono::Duration::hours(1))
+            .await
+            .unwrap();
+        reg.delete(key).await.unwrap();
+        assert!(reg.resolve_token("live").await.unwrap().is_none());
     }
 
     #[sqlx::test(migrations = "../../migrations")]
