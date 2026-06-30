@@ -20,8 +20,9 @@ chrono.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
 tower.workspace = true
 http-body-util = "0.1"
