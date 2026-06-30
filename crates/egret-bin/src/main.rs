@@ -325,10 +325,16 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // and database connections reference named secrets.
     let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
 
-    let (catalog_engine, catalog_browse): (Option<axum::Router>, Option<axum::Router>) = if config
-        .catalog
-        .enabled
-    {
+    // The embedded lakekeeper engine `ApiContext` is also hoisted out of this
+    // block so the notebook-runtime namespace provisioner (below) can drive
+    // `egret_catalog_engine::ensure_namespace` in-process, with the same system
+    // principal the browse API uses.
+    type CatalogEngineCtx = egret_catalog_engine::ApiContext<egret_catalog_engine::EngineState>;
+    let (catalog_engine, catalog_browse, catalog_engine_ctx): (
+        Option<axum::Router>,
+        Option<axum::Router>,
+        Option<CatalogEngineCtx>,
+    ) = if config.catalog.enabled {
         let dsn = &config.database.url;
         egret_catalog_engine::run_lakekeeper_migrations(dsn)
             .await
@@ -376,9 +382,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             });
         }
 
-        (Some(router), Some(browse_router))
+        (Some(router), Some(browse_router), Some(engine_state))
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     let workspace = WorkspaceState {
@@ -501,14 +507,60 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         folders: egret_bi::folder::FolderRepo::new(db.clone()),
     });
 
-    // TODO(T7): replace StubProvisioner with the real lakekeeper-backed
-    // NamespaceProvisioner (wired through the catalog engine's NamespaceService).
-    // This stub always succeeds (treats every namespace as already-existing),
-    // which is safe in a dev environment where lakekeeper manages the namespace
-    // out-of-band; it will fail silently in production until T7 is merged.
-    struct StubProvisioner;
+    // T7: the real lakekeeper-backed namespace provisioner for the notebook
+    // runtime. It resolves the egret warehouse-row id to its lakekeeper UUID
+    // (via `CatalogStore::lakekeeper_id_by_row`) and drives the catalog engine's
+    // in-process `ensure_namespace` (= `NamespaceService::create_namespace`,
+    // already-exists → Ok) under the configured system principal. Wired only
+    // when the catalog engine is enabled; when it is not, namespace creation has
+    // no backing engine, so we fall back to a no-op (the notebook runtime cannot
+    // mint a usable catalog token without a warehouse anyway).
+    struct RealNamespaceProvisioner {
+        engine: CatalogEngineCtx,
+        catalog: CatalogStore,
+        system_user: String,
+    }
+
     #[async_trait::async_trait]
-    impl egret_notebook::NamespaceProvisioner for StubProvisioner {
+    impl egret_notebook::NamespaceProvisioner for RealNamespaceProvisioner {
+        async fn ensure_namespace(
+            &self,
+            warehouse_id: uuid::Uuid,
+            namespace: &str,
+        ) -> Result<(), egret_notebook::error::NotebookApiError> {
+            use egret_notebook::error::NotebookApiError;
+            // egret warehouse-row id → lakekeeper warehouse UUID.
+            let lakekeeper_id = self
+                .catalog
+                .lakekeeper_id_by_row(warehouse_id)
+                .await
+                .map_err(|e| match e {
+                    egret_catalog::CatalogError::NotFound(m) => {
+                        NotebookApiError(egret_core::Error::NotFound(m))
+                    }
+                    other => NotebookApiError(egret_core::Error::Internal(anyhow::anyhow!(other))),
+                })?;
+            // Idempotent in-process create (already-exists = Ok).
+            egret_catalog_engine::ensure_namespace(
+                &self.engine,
+                &self.system_user,
+                lakekeeper_id,
+                namespace,
+            )
+            .await
+            .map_err(|e| NotebookApiError(egret_core::Error::Internal(e)))
+        }
+    }
+
+    /// No-op provisioner used when the catalog engine is disabled (no embedded
+    /// lakekeeper to create namespaces in). The notebook runtime endpoint also
+    /// has no warehouse to mint a token against in that mode, so this is never
+    /// reached on a real provisioning path; it only keeps `NotebookState`
+    /// constructible.
+    struct NoopNamespaceProvisioner;
+
+    #[async_trait::async_trait]
+    impl egret_notebook::NamespaceProvisioner for NoopNamespaceProvisioner {
         async fn ensure_namespace(
             &self,
             _warehouse_id: uuid::Uuid,
@@ -517,6 +569,16 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             Ok(())
         }
     }
+
+    let provisioner: std::sync::Arc<dyn egret_notebook::NamespaceProvisioner> =
+        match catalog_engine_ctx {
+            Some(engine) => std::sync::Arc::new(RealNamespaceProvisioner {
+                engine,
+                catalog: CatalogStore::new(db.clone()),
+                system_user: config.catalog.system_user.clone(),
+            }),
+            None => std::sync::Arc::new(NoopNamespaceProvisioner),
+        };
 
     let catalog_base_url = config
         .catalog
@@ -530,7 +592,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         workspaces: WorkspaceRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
         catalog: CatalogStore::new(db.clone()),
-        provisioner: std::sync::Arc::new(StubProvisioner),
+        provisioner,
         users: UserRepo::new(db.clone()),
         catalog_base_url,
     });

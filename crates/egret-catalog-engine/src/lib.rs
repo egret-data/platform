@@ -33,8 +33,9 @@ pub mod provision;
 
 pub use authorizer::EgretAuthorizer;
 pub use bootstrap::ensure_bootstrapped;
-pub use browse::{browse_router, BrowseState};
+pub use browse::{browse_router, ensure_namespace, BrowseState};
 pub use front_auth::{front_auth, FrontAuthState};
+pub use lakekeeper::api::ApiContext;
 pub use lakekeeper::CancellationToken;
 /// Test-only [`build_state`] variant that takes the task-queue poll interval, so
 /// integration tests can register the built-in GC queues with a short cadence.

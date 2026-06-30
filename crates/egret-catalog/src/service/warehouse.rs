@@ -211,6 +211,26 @@ impl CatalogStore {
         .ok_or_else(|| CatalogError::NotFound("warehouse".into()))
     }
 
+    /// Resolve an egret warehouse-row `id` to its lakekeeper `warehouse_id`
+    /// WITHOUT a workspace scope.
+    ///
+    /// `workspace_warehouses.id` is a globally-unique PK, so the row id alone
+    /// resolves the lakekeeper UUID. This is for in-process callers (e.g. the
+    /// notebook-runtime namespace provisioner) that hold only the egret row id
+    /// and have already enforced the workspace tenant boundary upstream when
+    /// they obtained it. Workspace-scoped callers MUST use [`Self::lakekeeper_id`]
+    /// instead, which closes cross-workspace IDOR.
+    ///
+    /// Returns `CatalogError::NotFound` for a missing id.
+    pub async fn lakekeeper_id_by_row(&self, id: Uuid) -> Result<Uuid, CatalogError> {
+        sqlx::query_scalar::<_, Uuid>("SELECT warehouse_id FROM workspace_warehouses WHERE id = $1")
+            .bind(id)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(CatalogError::Db)?
+            .ok_or_else(|| CatalogError::NotFound("warehouse".into()))
+    }
+
     /// Fetch a warehouse by its `name` within `workspace_id`.
     ///
     /// Returns `CatalogError::NotFound` when the workspace has no warehouse by
