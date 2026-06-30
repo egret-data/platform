@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { Loader2, NotebookText, Pencil, Plus, Trash2 } from "lucide-react";
+import { Loader2, Search } from "lucide-react";
 
 import {
   type Engine,
@@ -11,6 +11,9 @@ import {
   useUpdateNotebook,
 } from "@/api/notebooks";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { RelativeTime } from "@/components/explore/RelativeTime";
+import { RowActionsMenu } from "@/components/explore/RowActionsMenu";
+import { SortableHeader, type SortState } from "@/components/explore/SortableHeader";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
@@ -22,6 +25,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -31,6 +38,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+
+type SortKey = "name" | "updated_at";
 
 // ── New notebook dialog ───────────────────────────────────────────────────────
 
@@ -195,85 +204,135 @@ function RenameNotebookDialog({
   );
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function formatDate(iso: string) {
-  try {
-    return new Date(iso).toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-  } catch {
-    return iso;
-  }
-}
-
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function Notebooks() {
   const ws = useParams().workspace!;
-  const notebooks = useNotebooks(ws);
+  const navigate = useNavigate();
+  const { data, isLoading } = useNotebooks(ws);
   const deleteMutation = useDeleteNotebook(ws);
 
   const [newOpen, setNewOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<NotebookSummary | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<NotebookSummary | null>(null);
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
 
-  if (notebooks.isLoading) {
-    return (
-      <section>
-        <SectionHeader onAdd={() => setNewOpen(true)} />
-        <div className="mt-4">
-          <ListSkeleton rows={3} cols={4} />
-        </div>
-      </section>
-    );
+  const rows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    let r = (data ?? []).filter((n) => (!q ? true : n.name.toLowerCase().includes(q)));
+    r = [...r].sort((a, b) => {
+      const cmp =
+        sort.key === "name"
+          ? a.name.localeCompare(b.name)
+          : a.updated_at.localeCompare(b.updated_at);
+      return sort.dir === "asc" ? cmp : -cmp;
+    });
+    return r;
+  }, [data, query, sort]);
+
+  function onSort(key: SortKey) {
+    setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
   }
 
-  const rows = notebooks.data ?? [];
+  const hasData = !!data && data.length > 0;
 
   return (
-    <section>
-      <SectionHeader onAdd={() => setNewOpen(true)} />
-
-      <div className="mt-4">
-        {rows.length === 0 ? (
-          <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
-            <p>No notebooks yet.</p>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {rows.map((nb) => (
-              <NotebookCard
-                key={nb.id}
-                ws={ws}
-                notebook={nb}
-                onRename={() => setRenameTarget(nb)}
-                onDelete={() => setDeleteTarget(nb)}
-              />
-            ))}
-          </div>
-        )}
+    <div className="p-4">
+      <div className="mb-4 flex items-center justify-between">
+        <h1 className="text-lg font-semibold">Notebooks</h1>
+        <Button onClick={() => setNewOpen(true)}>New notebook</Button>
       </div>
 
-      {/* New notebook dialog */}
+      {isLoading ? (
+        <ListSkeleton cols={4} />
+      ) : hasData ? (
+        <>
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <div className="relative max-w-xs flex-1">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                className="pl-8"
+                placeholder="Search notebooks…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            </div>
+          </div>
+
+          {rows.length > 0 ? (
+            <table className="w-full text-sm">
+              <thead className="text-left text-muted-foreground">
+                <tr>
+                  <SortableHeader sortKey="name" label="Name" current={sort} onSort={onSort} className="pl-6" />
+                  <th>Engine</th>
+                  <th>Visibility</th>
+                  <SortableHeader sortKey="updated_at" label="Updated" current={sort} onSort={onSort} />
+                  <th className="w-8" />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((nb) => (
+                  <tr key={nb.id} className="border-t hover:bg-accent">
+                    <td className="py-1 pl-6">
+                      <Link className="font-medium hover:underline" to={`/explore/${ws}/notebooks/${nb.id}`}>
+                        {nb.name}
+                      </Link>
+                    </td>
+                    <td>
+                      <Badge variant="secondary">{nb.engine}</Badge>
+                    </td>
+                    <td>
+                      {nb.is_public ? (
+                        <Badge variant="outline">Public</Badge>
+                      ) : (
+                        <span className="text-muted-foreground">Private</span>
+                      )}
+                    </td>
+                    <td className="text-muted-foreground">
+                      <RelativeTime iso={nb.updated_at} />
+                    </td>
+                    <td>
+                      <RowActionsMenu label={`Actions for ${nb.name}`}>
+                        <DropdownMenuItem onClick={() => navigate(`/explore/${ws}/notebooks/${nb.id}`)}>
+                          Open
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => setRenameTarget(nb)}>Rename</DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          className="text-destructive focus:text-destructive"
+                          onClick={() => setDeleteTarget(nb)}
+                        >
+                          Delete
+                        </DropdownMenuItem>
+                      </RowActionsMenu>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p className="text-muted-foreground">No notebooks match your search.</p>
+          )}
+        </>
+      ) : (
+        <p className="text-muted-foreground">No notebooks yet.</p>
+      )}
+
       <NewNotebookDialog ws={ws} open={newOpen} onOpenChange={setNewOpen} />
 
-      {/* Rename dialog — key forces remount when target changes */}
       {renameTarget && (
         <RenameNotebookDialog
           key={renameTarget.id}
           ws={ws}
           notebook={renameTarget}
-          open={renameTarget !== null}
+          open
           onOpenChange={(o) => {
             if (!o) setRenameTarget(null);
           }}
         />
       )}
 
-      {/* Delete typed-confirm */}
       <ConfirmDeleteDialog
         open={deleteTarget !== null}
         onOpenChange={(o) => {
@@ -286,80 +345,6 @@ export default function Notebooks() {
           if (deleteTarget) deleteMutation.mutate(deleteTarget.id);
         }}
       />
-    </section>
-  );
-}
-
-// ── Sub-components ────────────────────────────────────────────────────────────
-
-function SectionHeader({ onAdd }: { onAdd: () => void }) {
-  return (
-    <div className="flex items-start justify-between gap-4">
-      <div>
-        <h2 className="text-base font-semibold">Notebooks</h2>
-        <p className="text-sm text-muted-foreground">
-          Python / SQL notebooks backed by the Daft or Spark Connect engine.
-        </p>
-      </div>
-      <Button onClick={onAdd}>
-        <Plus className="h-4 w-4" />
-        New notebook
-      </Button>
-    </div>
-  );
-}
-
-function NotebookCard({
-  ws,
-  notebook,
-  onRename,
-  onDelete,
-}: {
-  ws: string;
-  notebook: NotebookSummary;
-  onRename: () => void;
-  onDelete: () => void;
-}) {
-  return (
-    <div className="rounded-lg border border-border bg-card p-4 shadow-sm flex flex-col gap-2">
-      <div className="flex items-start justify-between gap-2">
-        <Link
-          to={`/explore/${ws}/notebooks/${notebook.id}`}
-          className="flex min-w-0 items-center gap-2 font-medium hover:underline"
-        >
-          <NotebookText className="h-4 w-4 shrink-0 text-muted-foreground" />
-          <span className="truncate">{notebook.name}</span>
-        </Link>
-        <div className="flex shrink-0 items-center gap-1">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-muted-foreground"
-            onClick={onRename}
-            aria-label={`Rename ${notebook.name}`}
-          >
-            <Pencil className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="text-muted-foreground hover:text-destructive"
-            onClick={onDelete}
-            aria-label={`Delete ${notebook.name}`}
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </Button>
-        </div>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-1.5">
-        <Badge variant="secondary">{notebook.engine}</Badge>
-        {notebook.is_public && <Badge variant="outline">Public</Badge>}
-      </div>
-
-      <p className="text-xs text-muted-foreground">
-        Updated {formatDate(notebook.updated_at)}
-      </p>
     </div>
   );
 }

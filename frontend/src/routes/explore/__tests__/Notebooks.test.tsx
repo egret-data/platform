@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -112,18 +113,32 @@ describe("Notebooks", () => {
     expect(screen.getByText("Shared Report")).toBeInTheDocument();
   });
 
-  it("shows a Public badge on a public notebook but not on a private one", () => {
+  it("renders as a table with Name / Engine / Visibility / Updated headers", () => {
     renderAt();
-    const publicBadges = screen.getAllByText("Public");
-    expect(publicBadges.length).toBe(1);
-    // The public badge should be near "Shared Report"
-    expect(publicBadges[0]).toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getByText("Engine")).toBeInTheDocument();
+    expect(screen.getByText("Visibility")).toBeInTheDocument();
+    expect(screen.getByText("Updated")).toBeInTheDocument();
+  });
+
+  it("shows a Public badge on a public notebook and Private on a private one", () => {
+    renderAt();
+    expect(screen.getAllByText("Public").length).toBe(1);
+    expect(screen.getByText("Private")).toBeInTheDocument();
   });
 
   it("shows engine badges", () => {
     renderAt();
     expect(screen.getByText("daft")).toBeInTheDocument();
     expect(screen.getByText("spark_connect")).toBeInTheDocument();
+  });
+
+  it("filters rows by the search box", async () => {
+    const user = userEvent.setup();
+    renderAt();
+    await user.type(screen.getByPlaceholderText(/search notebooks/i), "Shared");
+    expect(screen.queryByText("My Analysis")).not.toBeInTheDocument();
+    expect(screen.getByText("Shared Report")).toBeInTheDocument();
   });
 
   it("shows empty state when list is []", () => {
@@ -137,7 +152,7 @@ describe("Notebooks", () => {
     expect(screen.getByText("No notebooks yet.")).toBeInTheDocument();
   });
 
-  it("does not render cards while isLoading", () => {
+  it("does not render rows while isLoading", () => {
     notebooksMock.mockReturnValue({
       data: undefined,
       isLoading: true,
@@ -193,14 +208,15 @@ describe("Notebooks", () => {
     });
   });
 
-  // ── Delete typed-confirm ─────────────────────────────────────────────────
+  // ── Row actions menu → Delete ─────────────────────────────────────────────
 
-  it("delete typed-confirm → calls useDeleteNotebook with the id", async () => {
+  it("delete via the row actions menu → typed-confirm → calls useDeleteNotebook with the id", async () => {
+    const user = userEvent.setup();
     renderAt();
 
-    // Find and click the delete button for the first notebook
-    const deleteBtn = screen.getByRole("button", { name: /delete My Analysis/i });
-    fireEvent.click(deleteBtn);
+    // Open the per-row actions menu, then choose Delete.
+    await user.click(screen.getByRole("button", { name: /actions for My Analysis/i }));
+    await user.click(await screen.findByRole("menuitem", { name: /^delete$/i }));
 
     await waitFor(() => {
       expect(screen.getByText(/Delete «My Analysis»/)).toBeInTheDocument();
@@ -209,21 +225,21 @@ describe("Notebooks", () => {
     const confirmInput = screen.getByPlaceholderText("delete");
     fireEvent.change(confirmInput, { target: { value: "delete" } });
 
-    const confirmBtn = screen.getByRole("button", { name: /^delete$/i });
-    fireEvent.click(confirmBtn);
+    fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
 
     await waitFor(() => {
       expect(deleteMutate).toHaveBeenCalledWith("nb-1");
     });
   });
 
-  // ── Rename dialog ─────────────────────────────────────────────────────────
+  // ── Row actions menu → Rename ─────────────────────────────────────────────
 
-  it("rename dialog → calls useUpdateNotebook mutateAsync with {name}", async () => {
+  it("rename via the row actions menu → calls useUpdateNotebook mutateAsync with {name}", async () => {
+    const user = userEvent.setup();
     renderAt();
 
-    const renameBtn = screen.getByRole("button", { name: /rename My Analysis/i });
-    fireEvent.click(renameBtn);
+    await user.click(screen.getByRole("button", { name: /actions for My Analysis/i }));
+    await user.click(await screen.findByRole("menuitem", { name: /^rename$/i }));
 
     await waitFor(() => screen.getByText(/Rename notebook/i));
 
