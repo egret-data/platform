@@ -114,6 +114,7 @@ fn oidc_cfg(issuer: &str) -> OidcConfig {
         scopes: vec!["openid".into(), "email".into(), "profile".into()],
         groups_claim: "groups".into(),
         post_login_redirect: "/".into(),
+        catalog_audience: "egret-catalog".into(),
     }
 }
 
