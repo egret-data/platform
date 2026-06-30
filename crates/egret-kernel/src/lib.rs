@@ -2,8 +2,11 @@
 
 pub mod env;
 pub mod error;
+pub mod gateway;
 pub mod launcher;
 pub mod manager;
+pub mod notebook_kernels;
+pub mod proxy;
 pub mod reaper;
 pub mod registry;
 pub mod routes;
@@ -11,6 +14,8 @@ pub mod subprocess;
 
 pub use launcher::KernelLauncher;
 pub use manager::{KernelManager, KernelStatus};
+pub use notebook_kernels::NotebookKernelStore;
+pub use proxy::{BackendWsProxy, KernelProxy};
 pub use reaper::{reap_once, spawn_reaper};
 pub use registry::KernelRegistry;
 pub use routes::{kernel_router, KernelState};

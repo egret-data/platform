@@ -14,6 +14,8 @@ pub enum KernelError {
     Spawn(String),
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
+    #[error("gateway error: {0}")]
+    Gateway(String),
 }
 
 /// HTTP-layer wrapper that maps `KernelError` / `egret_core::Error` to responses.
