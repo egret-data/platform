@@ -39,38 +39,18 @@ pub struct NotebookRuntime {
     pub catalogs: Vec<CatalogOption>,
 }
 
-/// `GET /ws/{workspace}/notebook-runtime`
+/// Build the [`NotebookRuntime`] manifest for `(ws, user_id)` without performing
+/// any HTTP authorization check. Steps 2–6 of the `runtime` handler.
 ///
-/// 1. Require `notebook:read`.
-/// 2. Resolve (or derive) the caller's stable username.
-/// 3. Pick the first warehouse row for the workspace (there is typically only
-///    one; if none exists the endpoint returns 404 — the workspace must have a
-///    warehouse before notebooks can be provisioned).
-/// 4. Provision the private namespace + fresh 1-grant token via
-///    `provision_notebook_access`.
-/// 5. Load enabled engines and catalogs from the settings store.
-/// 6. Return the manifest JSON.
-///
-/// **Warehouse selection:** we use the egret-side `workspace_warehouses` table
-/// (via `CatalogStore::list_warehouses`) and pick the first row ordered by
-/// name. The `catalog.warehouse` field in the response is set to that row's
-/// `name` field (the human-facing warehouse name, which mirrors the lakekeeper
-/// warehouse name used in catalog REST paths). If a workspace ever has multiple
-/// warehouses the admin can re-order them via rename to control which one the
-/// runtime picks; a future endpoint can expose the selection explicitly.
-pub async fn runtime(
-    State(st): State<NotebookState>,
-    WsContext(ctx): WsContext,
-) -> Result<Json<NotebookRuntime>, NotebookApiError> {
-    // 1. Authorization check.
-    st.authz
-        .require_workspace(&ctx, "notebook:read")
-        .await
-        .map_err(NotebookApiError::from)?;
-
-    let ws = ctx.workspace_id.0;
-    let user_id = ctx.principal.user_id;
-
+/// The HTTP handler is responsible for calling `require_workspace` before
+/// invoking this function. This split allows `egret-kernel` (and future
+/// callers) to reuse manifest construction without going through the HTTP
+/// layer.
+pub async fn build_notebook_runtime(
+    st: &NotebookState,
+    ws: uuid::Uuid,
+    user_id: egret_core::UserId,
+) -> Result<NotebookRuntime, NotebookApiError> {
     // 2. Resolve stable username.
     let username = st
         .users
@@ -124,8 +104,8 @@ pub async fn runtime(
         .filter(|c| c.enabled)
         .collect();
 
-    // 6. Build the manifest.
-    let manifest = NotebookRuntime {
+    // 6. Build and return the manifest.
+    Ok(NotebookRuntime {
         username,
         catalog: RuntimeCatalog {
             url: st.catalog_base_url.clone(),
@@ -135,7 +115,33 @@ pub async fn runtime(
         },
         engines,
         catalogs,
-    };
+    })
+}
+
+/// `GET /ws/{workspace}/notebook-runtime`
+///
+/// Steps:
+/// 1. Require `notebook:read`.
+///    2–6. Delegate to [`build_notebook_runtime`].
+///
+/// **Warehouse selection:** we use the egret-side `workspace_warehouses` table
+/// (via `CatalogStore::list_warehouses`) and pick the first row ordered by
+/// name. The `catalog.warehouse` field in the response is set to that row's
+/// `name` field (the human-facing warehouse name, which mirrors the lakekeeper
+/// warehouse name used in catalog REST paths). If a workspace ever has multiple
+/// warehouses the admin can re-order them via rename to control which one the
+/// runtime picks; a future endpoint can expose the selection explicitly.
+pub async fn runtime(
+    State(st): State<NotebookState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<NotebookRuntime>, NotebookApiError> {
+    // 1. Authorization check.
+    st.authz
+        .require_workspace(&ctx, "notebook:read")
+        .await
+        .map_err(NotebookApiError::from)?;
+
+    let manifest = build_notebook_runtime(&st, ctx.workspace_id.0, ctx.principal.user_id).await?;
 
     Ok(Json(manifest))
 }
