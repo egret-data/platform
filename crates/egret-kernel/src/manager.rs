@@ -89,13 +89,23 @@ impl KernelManager {
             }
         }
 
-        // Spawn (or re-spawn after stale/dead).
+        // Spawn (or re-spawn after stale/dead). Mint a fresh kernel token and
+        // inject it into the env so the kernel can call egret back.
+        let (token_plain, token_hash) = crate::kernel_token::mint();
+        let mut env = env.clone();
+        env.insert("EGRET_KERNEL_TOKEN".to_string(), token_plain);
+
         let h = self
             .launcher
-            .ensure(key, env, Duration::from_secs(90))
+            .ensure(key, &env, Duration::from_secs(90))
             .await?;
         self.registry
             .upsert(key, &h.url, h.pid, h.phase.as_str())
+            .await?;
+        let expires_at = chrono::Utc::now()
+            + chrono::Duration::from_std(crate::kernel_token::TOKEN_TTL).unwrap();
+        self.registry
+            .set_token(key, &token_hash, expires_at)
             .await?;
         Ok(KernelStatus {
             phase: h.phase,
@@ -272,6 +282,50 @@ mod tests {
         assert!(
             mgr.status(key).await.unwrap().is_none(),
             "status must return None when no kernel row exists"
+        );
+    }
+
+    // ── P1-T2: mint token on spawn ─────────────────────────────────────────────
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn ensure_running_mints_token_on_spawn_only(pool: sqlx::PgPool) {
+        let db = Db { pool };
+        let reg = KernelRegistry::new(db.clone());
+        let launcher = Arc::new(FakeLauncher::default());
+        let mgr = KernelManager::new(reg, launcher.clone(), Duration::from_secs(1800));
+        let (ws, user) = seed_kernel(&db).await;
+        let key = KernelKey {
+            user_id: user,
+            workspace_id: ws,
+        };
+        let env = KernelEnv::new();
+
+        // Spawn: the env handed to the launcher must carry EGRET_KERNEL_TOKEN, and the
+        // registry must resolve that token's hash back to this key.
+        mgr.ensure_running(key, &env).await.unwrap();
+        let plaintext = {
+            let g = launcher.inner.lock().unwrap();
+            g.ensured[0].1.get("EGRET_KERNEL_TOKEN").cloned()
+        };
+        let plaintext = plaintext.expect("spawn env must include EGRET_KERNEL_TOKEN");
+        assert!(!plaintext.is_empty());
+        let hash = crate::kernel_token::hash_token(&plaintext);
+        assert_eq!(
+            mgr.registry().resolve_token(&hash).await.unwrap(),
+            Some(key)
+        );
+
+        // Reuse (FakeLauncher reports Ready): no new ensure() call → token unchanged.
+        mgr.ensure_running(key, &env).await.unwrap();
+        assert_eq!(
+            launcher.inner.lock().unwrap().ensured.len(),
+            1,
+            "reuse must not re-spawn"
+        );
+        assert_eq!(
+            mgr.registry().resolve_token(&hash).await.unwrap(),
+            Some(key),
+            "token must persist across reuse"
         );
     }
 
