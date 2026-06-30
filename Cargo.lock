@@ -2458,6 +2458,8 @@ dependencies = [
  "egret-server",
  "egret-storage",
  "egret-workspace",
+ "reqwest 0.12.28",
+ "serde",
  "sqlx 0.8.6",
  "tokio",
  "tokio-util",
