@@ -140,9 +140,9 @@ impl AccessTokenVerifier for LimesVerifier {
     async fn verify(&self, token: &str) -> Result<String, JwtAuthError> {
         use lakekeeper::limes::Authenticator;
         let auth = self.inner.authenticate(token).await.map_err(|e| {
-            // Log the limes error (NEVER the token) so ops can distinguish an
-            // IdP/JWKS misconfiguration from a merely bad/expired token.
-            tracing::debug!("catalog jwt verify failed: {e}");
+            // Log the limes error (truncated, NEVER the token) so ops can
+            // distinguish an IdP/JWKS misconfiguration from a bad/expired token.
+            tracing::warn!("catalog jwt verify failed: {e:.200}");
             JwtAuthError::Unauthenticated
         })?;
         // The subject's id within the IdP is the OIDC `sub` claim — exactly what
