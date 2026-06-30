@@ -269,6 +269,65 @@ fn fmt_scope(scope: &[egret_catalog::service::tokens::Grant]) -> String {
         .join("; ")
 }
 
+/// Engine-backed query runner wired into `KernelState`.
+///
+/// Resolves the target database + its secret from the registry, builds the
+/// appropriate connector (Trino / StarRocks), impersonates the caller via
+/// `session_user`, and executes the SQL with a 60-second deadline.
+struct EngineQueryRunner {
+    databases: egret_database::DatabaseRepo,
+    factory: std::sync::Arc<dyn egret_engine::connector::ConnectorFactory>,
+}
+
+#[async_trait::async_trait]
+impl egret_kernel::query::NotebookQueryRunner for EngineQueryRunner {
+    async fn run(
+        &self,
+        database_id: uuid::Uuid,
+        session_user: String,
+        sql: String,
+        max_rows: usize,
+    ) -> Result<egret_kernel::query::QueryRows, egret_kernel::query::QueryRunError> {
+        use egret_kernel::query::{QueryColumn, QueryRows, QueryRunError};
+        let db = self
+            .databases
+            .get(database_id)
+            .await
+            .map_err(|e| QueryRunError::NotFound(e.to_string()))?;
+        let secret = self
+            .databases
+            .open_secret(database_id)
+            .await
+            .map_err(|e| QueryRunError::Engine(e.to_string()))?;
+        let connector = self
+            .factory
+            .build(&db, secret, Some(session_user))
+            .await
+            .map_err(|e| QueryRunError::Engine(e.to_string()))?;
+        let limits = egret_engine::model::Limits {
+            max_rows,
+            timeout: std::time::Duration::from_secs(60),
+        };
+        let fut = connector.execute(&sql, &limits, tokio_util::sync::CancellationToken::new());
+        let result = tokio::time::timeout(limits.timeout, fut)
+            .await
+            .map_err(|_| QueryRunError::Engine("query timed out".into()))?
+            .map_err(|e| QueryRunError::Engine(e.to_string()))?;
+        Ok(QueryRows {
+            columns: result
+                .columns
+                .into_iter()
+                .map(|c| QueryColumn {
+                    name: c.name,
+                    ty: c.ty,
+                })
+                .collect(),
+            rows: result.rows,
+            truncated: result.truncated,
+        })
+    }
+}
+
 async fn serve(config: Config) -> anyhow::Result<()> {
     let db = Db::connect(&config.database.url, config.database.max_connections)
         .await
@@ -653,6 +712,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         api_url,
         notebook_kernels: egret_kernel::NotebookKernelStore::new(db.clone()),
         proxy: std::sync::Arc::new(egret_kernel::BackendWsProxy),
+        query_runner: std::sync::Arc::new(EngineQueryRunner {
+            databases: databases.clone(),
+            factory: std::sync::Arc::new(egret_engine::connector::DefaultConnectorFactory),
+        }),
     });
     // ── end kernel wiring ───────────────────────────────────────────────────────
 

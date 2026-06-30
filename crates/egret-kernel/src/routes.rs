@@ -9,7 +9,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{FromRef, Path, State};
+use axum::extract::{FromRef, FromRequestParts, Path, State};
+use axum::http::header::AUTHORIZATION;
+use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -50,6 +52,9 @@ pub struct KernelState {
     pub api_url: String,
     pub notebook_kernels: NotebookKernelStore,
     pub proxy: Arc<dyn KernelProxy>,
+    /// Injected engine-execution seam for `POST /kernel/query`. The concrete
+    /// runner (egret-engine + egret-database) is wired in from egret-bin.
+    pub query_runner: Arc<dyn crate::query::NotebookQueryRunner>,
 }
 
 impl FromRef<KernelState> for SessionService {
@@ -86,6 +91,7 @@ pub fn kernel_router() -> Router<KernelState> {
             "/ws/{workspace}/notebooks/{notebook}/kernel/channels",
             get(channels),
         )
+        .route("/kernel/query", post(kernel_query))
 }
 
 // ── "No kernel" sentinel ──────────────────────────────────────────────────────
@@ -343,6 +349,96 @@ async fn channels(
     Ok(upgrade.on_upgrade(move |socket| async move {
         let _ = proxy.proxy_channels(socket, &url, &kid, on_activity).await;
     }))
+}
+
+// ── kernel query callback ─────────────────────────────────────────────────────
+
+/// Identity resolved from an `EGRET_KERNEL_TOKEN` bearer (the kernel-callback plane).
+pub struct KernelIdentity {
+    pub user_id: Uuid,
+    pub workspace_id: Uuid,
+}
+
+impl FromRequestParts<KernelState> for KernelIdentity {
+    type Rejection = KernelApiError;
+    async fn from_request_parts(
+        parts: &mut Parts,
+        st: &KernelState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = parts
+            .headers
+            .get(AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .ok_or(KernelApiError(egret_core::Error::Unauthorized))?;
+        let hash = crate::kernel_token::hash_token(token);
+        let key = st
+            .manager
+            .registry()
+            .resolve_token(&hash)
+            .await
+            .map_err(KernelApiError::from)?
+            .ok_or(KernelApiError(egret_core::Error::Unauthorized))?;
+        Ok(KernelIdentity {
+            user_id: key.user_id,
+            workspace_id: key.workspace_id,
+        })
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct QueryReq {
+    engine: String,
+    sql: String,
+    #[serde(default)]
+    max_rows: Option<usize>,
+}
+
+/// `POST /kernel/query` — run SQL on an enabled notebook engine as the
+/// token's user (Ranger `X-Trino-User`). Auth = `EGRET_KERNEL_TOKEN` bearer.
+async fn kernel_query(
+    State(st): State<KernelState>,
+    ident: KernelIdentity,
+    Json(req): Json<QueryReq>,
+) -> Result<Json<serde_json::Value>, KernelApiError> {
+    // Engine must be enabled for notebooks in the token's workspace.
+    let engines = st
+        .notebook
+        .store
+        .list_engine_options(ident.workspace_id)
+        .await
+        .map_err(|e| KernelApiError(e.0))?;
+    let eng = engines
+        .into_iter()
+        .find(|e| e.enabled && (e.id.to_string() == req.engine || e.name == req.engine))
+        .ok_or(KernelApiError(egret_core::Error::Forbidden))?;
+
+    let username = st
+        .notebook
+        .users
+        .ensure_username(egret_core::ids::UserId(ident.user_id))
+        .await
+        .map_err(KernelApiError::from)?;
+
+    let max_rows = req.max_rows.unwrap_or(10_000).min(100_000);
+    let rows = st
+        .query_runner
+        .run(eng.id, username, req.sql, max_rows)
+        .await
+        .map_err(|e| match e {
+            crate::query::QueryRunError::NotFound(m) => {
+                KernelApiError(egret_core::Error::NotFound(m))
+            }
+            crate::query::QueryRunError::Engine(m) => {
+                KernelApiError(egret_core::Error::InvalidInput(m))
+            }
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "columns": rows.columns,
+        "rows": rows.rows,
+        "truncated": rows.truncated,
+    })))
 }
 
 // ── bring IntoResponse into scope for the status handler ─────────────────────

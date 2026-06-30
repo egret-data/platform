@@ -4,6 +4,9 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[features]
+test-util = []
+
 [dependencies]
 egret-core.workspace = true
 egret-metastore.workspace = true
@@ -25,6 +28,9 @@ tracing.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 tower.workspace = true
@@ -32,3 +38,4 @@ http-body-util = "0.1"
 egret-catalog.workspace = true
 async-trait.workspace = true
 futures-channel.workspace = true
+egret-kernel = { path = ".", features = ["test-util"] }
