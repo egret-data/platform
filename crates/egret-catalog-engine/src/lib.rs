@@ -17,6 +17,11 @@ pub mod browse;
 /// Front-of-router auth + per-workspace token-ownership middleware (CE-2 T5 /
 /// A-3) for the embedded lakekeeper Iceberg REST engine.
 pub mod front_auth;
+/// OIDC-JWT catalog authentication (F2-P2): verify a Keycloak access token, map
+/// its subject to an egret user + workspace membership, and emit a default
+/// `notebook_{username}` read/write [`egret_catalog::service::TokenAuth`] — the
+/// same shape opaque catalog tokens produce, so front-auth stays unchanged.
+pub mod jwt_auth;
 pub mod mount;
 pub mod pool;
 /// Prod (non-`test-utils`) provisioning of a per-workspace lakekeeper warehouse
