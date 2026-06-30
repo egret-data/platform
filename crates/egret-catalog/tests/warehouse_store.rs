@@ -5,6 +5,7 @@ mod common;
 use common::{seed_workspace, store};
 use egret_catalog::service::tokens::Grant;
 use egret_catalog::CatalogError;
+use egret_metastore::Db;
 use uuid::Uuid;
 
 /// A single all-namespaces read+write grant.
@@ -213,4 +214,48 @@ async fn token_is_scoped_to_its_warehouse() {
     let auth = s.authenticate_token(&raw).await.unwrap();
     assert_eq!(auth.workspace_id, ws);
     assert_eq!(auth.warehouse_id, wh1.id);
+}
+
+// ---------------------------------------------------------------------------
+// Reverse lakekeeper-id resolver
+// ---------------------------------------------------------------------------
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn warehouse_by_lakekeeper_id_roundtrips(pool: sqlx::PgPool) {
+    use egret_catalog::service::CatalogStore;
+
+    let store = CatalogStore::new(Db { pool });
+
+    // Seed a workspace row.
+    let ws_id = Uuid::new_v4();
+    let slug = format!("ws_{}", ws_id.simple());
+    sqlx::query("INSERT INTO workspaces (id, slug, name, status) VALUES ($1, $2, $3, 'active')")
+        .bind(ws_id)
+        .bind(&slug)
+        .bind(&slug)
+        .execute(store.pool())
+        .await
+        .expect("seed workspace");
+
+    // Seed a warehouse row and capture the lakekeeper UUID.
+    let lakekeeper_uuid = Uuid::new_v4();
+    let wh = store
+        .insert_warehouse(ws_id, lakekeeper_uuid, "test-wh", None)
+        .await
+        .expect("insert warehouse");
+    let row_id = wh.id;
+
+    // Reverse resolution must return the owning (workspace_id, row_id).
+    let got = store
+        .warehouse_by_lakekeeper_id(lakekeeper_uuid)
+        .await
+        .unwrap();
+    assert_eq!(got, Some((ws_id, row_id)));
+
+    // Unknown lakekeeper UUID returns None.
+    let missing = store
+        .warehouse_by_lakekeeper_id(Uuid::new_v4())
+        .await
+        .unwrap();
+    assert_eq!(missing, None);
 }

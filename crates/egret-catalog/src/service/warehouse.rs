@@ -211,6 +211,23 @@ impl CatalogStore {
         .ok_or_else(|| CatalogError::NotFound("warehouse".into()))
     }
 
+    /// Reverse of `lakekeeper_id`: map a lakekeeper warehouse UUID back to the egret
+    /// `(workspace_id, warehouse_row_id)`. Used by JWT catalog auth, where the request
+    /// path prefix is the lakekeeper UUID and the token carries no workspace.
+    pub async fn warehouse_by_lakekeeper_id(
+        &self,
+        lakekeeper_uuid: Uuid,
+    ) -> Result<Option<(Uuid, Uuid)>, CatalogError> {
+        let row: Option<(Uuid, Uuid)> = sqlx::query_as(
+            "SELECT workspace_id, id FROM workspace_warehouses WHERE warehouse_id = $1",
+        )
+        .bind(lakekeeper_uuid)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(CatalogError::Db)?;
+        Ok(row)
+    }
+
     /// Resolve an egret warehouse-row `id` to its lakekeeper `warehouse_id`
     /// WITHOUT a workspace scope.
     ///
