@@ -16,10 +16,24 @@ pub struct OidcClaims {
 
 /// Result of a completed login: normalized claims + the raw refresh token
 /// (present only if the IdP issued one — e.g. `offline_access` scope).
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written to redact the refresh token; `Clone` is intentionally
+/// not derived so we keep as few copies of the credential alive as possible.
 pub struct OidcLogin {
     pub claims: OidcClaims,
     pub refresh_token: Option<String>,
+}
+
+impl std::fmt::Debug for OidcLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OidcLogin")
+            .field("claims", &self.claims)
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 /// JIT-provision the user (match by `sub`) and sync their OIDC group memberships.
