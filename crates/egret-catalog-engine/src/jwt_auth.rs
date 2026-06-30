@@ -35,6 +35,10 @@ pub enum JwtAuthError {
     /// Authenticated, but not a member of the target workspace, or the request's
     /// warehouse prefix does not resolve to a known warehouse.
     Forbidden,
+    /// A genuine internal fault (DB error, username derivation failure) — not an
+    /// auth decision. Maps to `500`, so ops can distinguish a backend failure
+    /// from a rejected credential.
+    Internal,
 }
 
 /// Authenticates a bearer JWT against a request's warehouse and maps it to a
@@ -92,7 +96,7 @@ impl CatalogJwtAuth {
         let username = egret_auth::users::UserRepo::new(self.db.clone())
             .ensure_username(user.id)
             .await
-            .map_err(|_| JwtAuthError::Unauthenticated)?;
+            .map_err(|_| JwtAuthError::Internal)?;
         let ns = format!("notebook_{username}");
         let perms = vec!["catalog:read".to_string(), "catalog:write".to_string()];
         Ok(TokenAuth {
@@ -135,11 +139,12 @@ impl LimesVerifier {
 impl AccessTokenVerifier for LimesVerifier {
     async fn verify(&self, token: &str) -> Result<String, JwtAuthError> {
         use lakekeeper::limes::Authenticator;
-        let auth = self
-            .inner
-            .authenticate(token)
-            .await
-            .map_err(|_| JwtAuthError::Unauthenticated)?;
+        let auth = self.inner.authenticate(token).await.map_err(|e| {
+            // Log the limes error (NEVER the token) so ops can distinguish an
+            // IdP/JWKS misconfiguration from a merely bad/expired token.
+            tracing::debug!("catalog jwt verify failed: {e}");
+            JwtAuthError::Unauthenticated
+        })?;
         // The subject's id within the IdP is the OIDC `sub` claim — exactly what
         // egret stores in `users.external_subject` for `provider = 'oidc'`.
         Ok(auth.subject().subject_in_idp().to_string())

@@ -411,8 +411,39 @@ async fn serve(config: Config) -> anyhow::Result<()> {
 
         let engine_store = egret_catalog::service::CatalogStore::new(db.clone());
 
-        let router =
-            egret_catalog_engine::mount_catalog_engine(engine_state.clone(), engine_store.clone());
+        // F2-P2: hybrid catalog auth — when OIDC is enabled, also accept a
+        // Keycloak access-token JWT (alongside opaque catalog_tokens). The limes
+        // verifier does network OIDC discovery at construction; if Keycloak is
+        // unreachable at boot we DO NOT crash — log a warning and fall back to
+        // `None` (opaque tokens keep working).
+        let catalog_jwt = if config.oidc.enabled {
+            match egret_catalog_engine::jwt_auth::LimesVerifier::new(
+                &config.oidc.issuer_url,
+                config.oidc.catalog_audience.clone(),
+            )
+            .await
+            {
+                Ok(v) => Some(std::sync::Arc::new(
+                    egret_catalog_engine::jwt_auth::CatalogJwtAuth::new(
+                        std::sync::Arc::new(v),
+                        std::sync::Arc::new(egret_catalog::service::CatalogStore::new(db.clone())),
+                        db.clone(),
+                    ),
+                )),
+                Err(e) => {
+                    tracing::warn!("catalog JWT auth disabled (verifier init failed): {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let router = egret_catalog_engine::mount_catalog_engine(
+            engine_state.clone(),
+            engine_store.clone(),
+            catalog_jwt,
+        );
 
         // CE-2 T6: the session-authed browse API (for the UI) reads the embedded
         // lakekeeper catalog via the engine `ApiContext`. Built here (in the
