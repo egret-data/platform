@@ -37,6 +37,10 @@ pub struct NotebookRuntime {
     pub engines: Vec<EngineOption>,
     /// Workspace catalogs (warehouses) enabled for notebooks.
     pub catalogs: Vec<CatalogOption>,
+    /// Short-lived per-user engine JWT the kernel presents to query engines.
+    pub engine_jwt: String,
+    /// Expiry of `engine_jwt` (RFC3339); kernels re-mint before this time.
+    pub engine_jwt_expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Build the [`NotebookRuntime`] manifest for `(ws, user_id)` without performing
@@ -104,6 +108,13 @@ pub async fn build_notebook_runtime(
         .filter(|c| c.enabled)
         .collect();
 
+    // 5b. Mint a short-lived per-user engine JWT for the kernel.
+    let engine_tok = st
+        .engine_minter
+        .mint(user_id.0)
+        .await
+        .map_err(|e| NotebookApiError(egret_core::Error::Internal(anyhow::anyhow!(e))))?;
+
     // 6. Build and return the manifest.
     Ok(NotebookRuntime {
         username,
@@ -115,6 +126,8 @@ pub async fn build_notebook_runtime(
         },
         engines,
         catalogs,
+        engine_jwt: engine_tok.access_token,
+        engine_jwt_expires_at: engine_tok.expires_at,
     })
 }
 

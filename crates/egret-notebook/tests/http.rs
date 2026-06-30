@@ -52,6 +52,25 @@ impl NamespaceProvisioner for FakeProvisioner {
     }
 }
 
+// ── Fake EngineTokenMinter ───────────────────────────────────────────────────
+
+/// Returns a canned engine JWT (no IdP in unit tests).
+struct FakeEngineMinter;
+
+#[async_trait::async_trait]
+impl egret_notebook::engine_token::EngineTokenMinter for FakeEngineMinter {
+    async fn mint(
+        &self,
+        _user: Uuid,
+    ) -> Result<egret_notebook::engine_token::EngineToken, egret_notebook::engine_token::BrokerError>
+    {
+        Ok(egret_notebook::engine_token::EngineToken {
+            access_token: "fake.engine.jwt".into(),
+            expires_at: chrono::DateTime::<chrono::Utc>::from_timestamp(4102444800, 0).unwrap(),
+        })
+    }
+}
+
 struct Fixture {
     app: axum::Router,
     users: UserRepo,
@@ -112,6 +131,7 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         provisioner: Arc::new(FakeProvisioner),
         users: UserRepo::new(db.clone()),
         catalog_base_url: "http://localhost:8181".into(),
+        engine_minter: Arc::new(FakeEngineMinter),
     });
 
     Fixture {

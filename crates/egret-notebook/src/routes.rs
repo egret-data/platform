@@ -52,6 +52,8 @@ pub struct NotebookState {
     /// Base URL of the Iceberg REST catalog (e.g. `http://localhost:8181`).
     /// Returned verbatim in the runtime manifest so the kernel can connect.
     pub catalog_base_url: String,
+    /// Mints short-lived per-user engine JWTs for the runtime manifest.
+    pub engine_minter: std::sync::Arc<dyn crate::engine_token::EngineTokenMinter>,
 }
 
 impl FromRef<NotebookState> for SessionService {
