@@ -1,7 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, apiJson } from "./client";
 
-export type Engine = "daft" | "spark_connect";
 export type CellType = "code" | "markdown" | "sql";
 
 export interface Cell {
@@ -18,7 +17,6 @@ export interface NotebookSummary {
   id: string;
   name: string;
   description: string;
-  engine: Engine;
   is_public: boolean;
   owner_user_id: string;
   is_owner: boolean;
@@ -102,7 +100,7 @@ export function useNotebook(ws: string, id: string | null) {
 export function useCreateNotebook(ws: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (b: { name?: string; engine?: Engine }) =>
+    mutationFn: (b: { name?: string }) =>
       apiJson<NotebookDetail>(base(ws), jsonBody("POST", b)),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.list(ws) }),
   });
@@ -112,7 +110,7 @@ export function useUpdateNotebook(ws: string, id: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (
-      b: Partial<Pick<NotebookSummary, "name" | "description" | "engine" | "is_public">>,
+      b: Partial<Pick<NotebookSummary, "name" | "description" | "is_public">>,
     ) => apiJson<NotebookDetail>(`${base(ws)}/${id}`, jsonBody("PATCH", b)),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.detail(ws, id) });

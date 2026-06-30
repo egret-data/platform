@@ -3,28 +3,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Engine {
-    Daft,
-    SparkConnect,
-}
-impl Engine {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Engine::Daft => "daft",
-            Engine::SparkConnect => "spark_connect",
-        }
-    }
-    pub fn parse(s: &str) -> Option<Engine> {
-        match s {
-            "daft" => Some(Engine::Daft),
-            "spark_connect" => Some(Engine::SparkConnect),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CellType {
     Code,
@@ -65,7 +43,6 @@ pub struct NotebookSummary {
     pub id: Uuid,
     pub name: String,
     pub description: String,
-    pub engine: String,
     pub is_public: bool,
     pub owner_user_id: Uuid,
     pub is_owner: bool,
@@ -95,14 +72,12 @@ pub struct NotebookDetail {
 #[derive(Debug, Deserialize)]
 pub struct CreateNotebook {
     pub name: Option<String>,
-    pub engine: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateNotebook {
     pub name: Option<String>,
     pub description: Option<String>,
-    pub engine: Option<String>,
     pub is_public: Option<bool>,
 }
 
@@ -130,16 +105,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn engine_roundtrips() {
-        assert_eq!(Engine::parse(Engine::Daft.as_str()), Some(Engine::Daft));
-        assert_eq!(
-            Engine::parse(Engine::SparkConnect.as_str()),
-            Some(Engine::SparkConnect)
-        );
-        assert_eq!(Engine::parse("nope"), None);
-    }
-
-    #[test]
     fn cell_type_roundtrips() {
         assert_eq!(
             CellType::parse(CellType::Code.as_str()),
@@ -155,10 +120,6 @@ mod tests {
 
     #[test]
     fn enums_serialize_to_expected_strings() {
-        assert_eq!(
-            serde_json::to_value(Engine::SparkConnect).unwrap(),
-            json!("spark_connect")
-        );
         assert_eq!(
             serde_json::to_value(CellType::Markdown).unwrap(),
             json!("markdown")

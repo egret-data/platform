@@ -5,7 +5,6 @@ CREATE TABLE notebooks (
     owner_user_id uuid NOT NULL REFERENCES users(id),
     name          text NOT NULL DEFAULT 'Untitled',
     description   text NOT NULL DEFAULT '',
-    engine        text NOT NULL DEFAULT 'daft',
     is_public     boolean NOT NULL DEFAULT false,
     created_at    timestamptz NOT NULL DEFAULT now(),
     updated_at    timestamptz NOT NULL DEFAULT now()

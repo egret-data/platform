@@ -22,8 +22,8 @@ use uuid::Uuid;
 
 use crate::error::NotebookApiError;
 use crate::model::{
-    CellType, CreateCell, CreateNotebook, Engine, NotebookDetail, NotebookSummary, ReorderCells,
-    SetFolder, UpdateCell, UpdateNotebook,
+    CellType, CreateCell, CreateNotebook, NotebookDetail, NotebookSummary, ReorderCells, SetFolder,
+    UpdateCell, UpdateNotebook,
 };
 use crate::store::NotebookStore;
 
@@ -152,12 +152,10 @@ async fn create(
         .require_workspace(&ctx, WRITE)
         .await
         .map_err(NotebookApiError::from)?;
-    let engine = b.engine.as_deref().unwrap_or("daft");
-    Engine::parse(engine).ok_or_else(|| Error::InvalidInput("invalid engine".into()))?;
     let name = b.name.as_deref().unwrap_or("Untitled");
     let id = st
         .store
-        .create(ctx.workspace_id.0, ctx.principal.user_id.0, name, engine)
+        .create(ctx.workspace_id.0, ctx.principal.user_id.0, name)
         .await?;
     let detail = st
         .store
@@ -197,9 +195,6 @@ async fn update(
         .await
         .map_err(NotebookApiError::from)?;
     write_scoped(&st, &ctx, id).await?;
-    if let Some(e) = &b.engine {
-        Engine::parse(e).ok_or_else(|| Error::InvalidInput("invalid engine".into()))?;
-    }
     st.store.update(id, &b).await?;
     let detail = st
         .store

@@ -77,7 +77,6 @@ const mockNotebook = {
   id: "nb-1",
   name: "Test Notebook",
   description: "A test notebook",
-  engine: "daft" as const,
   is_public: false,
   owner_user_id: "user-1",
   is_owner: true,
@@ -147,12 +146,6 @@ describe("NotebookPage", () => {
   it("shows the notebook name in the header", () => {
     renderAt();
     expect(screen.getByDisplayValue("Test Notebook")).toBeInTheDocument();
-  });
-
-  it("renders an engine select in the header", () => {
-    renderAt();
-    // Engine select — look for the native <select> or SelectTrigger text
-    expect(screen.getByRole("combobox", { name: /engine/i })).toBeInTheDocument();
   });
 
   it("renders a public toggle in the header", () => {

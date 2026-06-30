@@ -13,7 +13,7 @@
 //!   - PATCH/DELETE by a non-owner member → 403,
 //!   - cell add/update/delete/reorder happy path for the owner; a cell of
 //!     notebook X addressed under notebook Y → 404 (nested IDOR closed),
-//!   - unknown `engine` on create → 400; unknown `cell_type` on add → 400.
+//!   - unknown `cell_type` on add → 400.
 //!
 //! Run with:
 //!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret
@@ -181,7 +181,7 @@ async fn create_nb(f: &Fixture, slug: &str, token: &str) -> String {
             "POST",
             &format!("/ws/{slug}/notebooks"),
             token,
-            Some(serde_json::json!({ "name": "nb", "engine": "daft" })),
+            Some(serde_json::json!({ "name": "nb" })),
         ))
         .await
         .unwrap();
@@ -206,7 +206,7 @@ async fn create_and_get_owner_sees_seeded_cell() {
             "POST",
             &format!("/ws/{}/notebooks", f.slug_a),
             &token,
-            Some(serde_json::json!({ "name": "first", "engine": "daft" })),
+            Some(serde_json::json!({ "name": "first" })),
         ))
         .await
         .unwrap();
@@ -596,30 +596,12 @@ async fn cell_crud_happy_path_and_nested_idor() {
 }
 
 #[tokio::test]
-async fn unknown_engine_and_cell_type_are_400() {
+async fn unknown_cell_type_is_400() {
     let Some(f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
     let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
-
-    // Unknown engine on create → 400.
-    let resp = f
-        .app
-        .clone()
-        .oneshot(req(
-            "POST",
-            &format!("/ws/{}/notebooks", f.slug_a),
-            &owner_tok,
-            Some(serde_json::json!({ "name": "x", "engine": "bogus" })),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::BAD_REQUEST,
-        "unknown engine must be rejected"
-    );
 
     // Unknown cell_type on add_cell → 400.
     let id = create_nb(&f, &f.slug_a, &owner_tok).await;

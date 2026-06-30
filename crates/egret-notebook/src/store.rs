@@ -16,7 +16,6 @@ struct NotebookRow {
     owner_user_id: Uuid,
     name: String,
     description: String,
-    engine: String,
     is_public: bool,
     updated_at: chrono::DateTime<chrono::Utc>,
     folder_id: Option<Uuid>,
@@ -30,7 +29,6 @@ impl NotebookRow {
             id: self.id,
             name: self.name,
             description: self.description,
-            engine: self.engine,
             is_public: self.is_public,
             owner_user_id: self.owner_user_id,
             is_owner,
@@ -50,7 +48,6 @@ impl NotebookRow {
             id: self.id,
             name: self.name,
             description: self.description,
-            engine: self.engine,
             is_public: self.is_public,
             owner_user_id: owner,
             // caller (route) sets this
@@ -104,7 +101,7 @@ pub struct NotebookStore {
     db: Db,
 }
 
-const NB_COLS: &str = "id, workspace_id, owner_user_id, name, description, engine, is_public, \
+const NB_COLS: &str = "id, workspace_id, owner_user_id, name, description, is_public, \
      updated_at, folder_id, deleted_at";
 
 impl NotebookStore {
@@ -118,17 +115,15 @@ impl NotebookStore {
         ws: Uuid,
         owner: Uuid,
         name: &str,
-        engine: &str,
     ) -> Result<Uuid, NotebookApiError> {
         let mut tx = self.db.pool.begin().await?;
         let id: Uuid = sqlx::query_scalar(
-            "INSERT INTO notebooks (workspace_id, owner_user_id, name, engine) \
-             VALUES ($1,$2,$3,$4) RETURNING id",
+            "INSERT INTO notebooks (workspace_id, owner_user_id, name) \
+             VALUES ($1,$2,$3) RETURNING id",
         )
         .bind(ws)
         .bind(owner)
         .bind(name)
-        .bind(engine)
         .fetch_one(&mut *tx)
         .await?;
 
@@ -225,15 +220,13 @@ impl NotebookStore {
             "UPDATE notebooks SET \
              name        = COALESCE($2, name), \
              description = COALESCE($3, description), \
-             engine      = COALESCE($4, engine), \
-             is_public   = COALESCE($5, is_public), \
+             is_public   = COALESCE($4, is_public), \
              updated_at  = now() \
              WHERE id=$1",
         )
         .bind(id)
         .bind(p.name.as_deref())
         .bind(p.description.as_deref())
-        .bind(p.engine.as_deref())
         .bind(p.is_public)
         .execute(&self.db.pool)
         .await?;
@@ -473,7 +466,7 @@ mod tests {
         let store = NotebookStore::new(db.clone());
         let (ws, user) = seed(&db).await;
 
-        let id = store.create(ws, user, "My NB", "daft").await.unwrap();
+        let id = store.create(ws, user, "My NB").await.unwrap();
 
         // create seeds exactly one empty code cell
         let detail = store.get_with_cells(id, user).await.unwrap().unwrap();
@@ -505,7 +498,7 @@ mod tests {
         let (ws, alice) = seed(&db).await;
         let bob = seed_second_user(&db).await;
 
-        let id = store.create(ws, alice, "nb", "daft").await.unwrap();
+        let id = store.create(ws, alice, "nb").await.unwrap();
 
         // Trash → hidden from the live list, visible in the trash bin.
         store.trash(id).await.unwrap();
@@ -536,7 +529,6 @@ mod tests {
                 &crate::model::UpdateNotebook {
                     name: None,
                     description: None,
-                    engine: None,
                     is_public: Some(true),
                 },
             )
@@ -566,7 +558,7 @@ mod tests {
         let db = Db { pool };
         let store = NotebookStore::new(db.clone());
         let (ws, alice) = seed(&db).await;
-        let id = store.create(ws, alice, "nb", "daft").await.unwrap();
+        let id = store.create(ws, alice, "nb").await.unwrap();
 
         let fid: Uuid = sqlx::query_scalar(
             "INSERT INTO folders (workspace_id, entity_type, name, created_by) \
@@ -602,8 +594,8 @@ mod tests {
         let (ws, alice) = seed(&db).await;
         let bob = seed_second_user(&db).await;
 
-        let priv_nb = store.create(ws, alice, "priv", "daft").await.unwrap();
-        let pub_nb = store.create(ws, alice, "pub", "daft").await.unwrap();
+        let priv_nb = store.create(ws, alice, "priv").await.unwrap();
+        let pub_nb = store.create(ws, alice, "pub").await.unwrap();
         // Make pub_nb public.
         store
             .update(
@@ -611,7 +603,6 @@ mod tests {
                 &crate::model::UpdateNotebook {
                     name: None,
                     description: None,
-                    engine: None,
                     is_public: Some(true),
                 },
             )
@@ -636,7 +627,7 @@ mod tests {
         let db = Db { pool };
         let store = NotebookStore::new(db.clone());
         let (ws, user) = seed(&db).await;
-        let nb = store.create(ws, user, "nb", "daft").await.unwrap();
+        let nb = store.create(ws, user, "nb").await.unwrap();
 
         // create seeds 1 cell; add a second
         let c2 = store.add_cell(nb, "markdown", "# hi", 1).await.unwrap();
@@ -668,7 +659,7 @@ mod tests {
         let db = Db { pool };
         let store = NotebookStore::new(db.clone());
         let (ws, user) = seed(&db).await;
-        let nb = store.create(ws, user, "orig", "daft").await.unwrap();
+        let nb = store.create(ws, user, "orig").await.unwrap();
 
         store
             .update(
@@ -676,7 +667,6 @@ mod tests {
                 &crate::model::UpdateNotebook {
                     name: Some("renamed".into()),
                     description: Some("desc".into()),
-                    engine: None,
                     is_public: None,
                 },
             )
@@ -686,7 +676,6 @@ mod tests {
         let detail = store.get_with_cells(nb, user).await.unwrap().unwrap();
         assert_eq!(detail.summary.name, "renamed");
         assert_eq!(detail.summary.description, "desc");
-        assert_eq!(detail.summary.engine, "daft"); // unchanged
         let _ = ws;
     }
 
@@ -695,7 +684,7 @@ mod tests {
         let db = Db { pool };
         let store = NotebookStore::new(db.clone());
         let (ws, user) = seed(&db).await;
-        let nb = store.create(ws, user, "nb", "daft").await.unwrap();
+        let nb = store.create(ws, user, "nb").await.unwrap();
 
         let detail = store.get_with_cells(nb, user).await.unwrap().unwrap();
         let cid = detail.cells[0].id;

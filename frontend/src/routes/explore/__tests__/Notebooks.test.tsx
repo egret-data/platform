@@ -70,7 +70,6 @@ const mockNb1 = {
   id: "nb-1",
   name: "My Analysis",
   description: "Some analysis",
-  engine: "daft" as const,
   is_public: false,
   owner_user_id: "user-1",
   is_owner: true,
@@ -84,7 +83,6 @@ const mockNb2 = {
   id: "nb-2",
   name: "Shared Report",
   description: "",
-  engine: "spark_connect" as const,
   is_public: true,
   owner_user_id: "user-2",
   is_owner: false,
@@ -98,7 +96,6 @@ const createdNotebook = {
   id: "nb-new",
   name: "New Notebook",
   description: "",
-  engine: "daft" as const,
   is_public: false,
   owner_user_id: "user-1",
   is_owner: true,
@@ -160,10 +157,10 @@ describe("Notebooks list", () => {
     expect(screen.getByText("Shared Report")).toBeInTheDocument();
   });
 
-  it("renders as a table with Name / Engine / Visibility / Updated headers", () => {
+  it("renders as a table with Name / Visibility / Updated headers (no Engine)", () => {
     renderAt();
     expect(screen.getByRole("table")).toBeInTheDocument();
-    expect(screen.getByText("Engine")).toBeInTheDocument();
+    expect(screen.queryByText("Engine")).not.toBeInTheDocument();
     expect(screen.getByText("Visibility")).toBeInTheDocument();
     expect(screen.getByText("Updated")).toBeInTheDocument();
   });
@@ -172,12 +169,6 @@ describe("Notebooks list", () => {
     renderAt();
     expect(screen.getAllByText("Public").length).toBe(1);
     expect(screen.getByText("Private")).toBeInTheDocument();
-  });
-
-  it("shows engine badges", () => {
-    renderAt();
-    expect(screen.getByText("daft")).toBeInTheDocument();
-    expect(screen.getByText("spark_connect")).toBeInTheDocument();
   });
 
   it("filters rows by the search box", async () => {
@@ -294,7 +285,7 @@ describe("Notebooks list", () => {
 
   // ── New notebook dialog ─────────────────────────────────────────────────────
 
-  it("clicking '+ Notebook' opens dialog; submitting calls useCreateNotebook mutateAsync with {name, engine}", async () => {
+  it("clicking '+ Notebook' opens dialog; submitting calls useCreateNotebook mutateAsync with {name}", async () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /\+ notebook/i }));
 
@@ -302,18 +293,6 @@ describe("Notebooks list", () => {
 
     const nameInput = screen.getByLabelText(/^name$/i);
     fireEvent.change(nameInput, { target: { value: "Test NB" } });
-
-    // Engine defaults to daft; change to spark_connect via the native select
-    const native = Array.from(
-      document.querySelectorAll<HTMLSelectElement>("select"),
-    ).find((s) =>
-      Array.from(s.options).some(
-        (o) => o.value === "daft" || o.value === "spark_connect",
-      ),
-    );
-    if (native) {
-      fireEvent.change(native, { target: { value: "spark_connect" } });
-    }
 
     fireEvent.click(screen.getByRole("button", { name: /^create$/i }));
 

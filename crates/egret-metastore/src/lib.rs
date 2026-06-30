@@ -1,7 +1,5 @@
 //! Postgres access: a pooled connection wrapper and the embedded migrator.
-//! (touched to re-embed migrations through 0038_notebook_folders_trash; adds
-//! notebooks + notebook_cells tables and RBAC perms for notebook:read/write,
-//! plus notebook folder_id + deleted_at soft-delete columns)
+//! (touched to re-embed migrations: 0037 removes notebook engine column)
 
 use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::postgres::PgPoolOptions;

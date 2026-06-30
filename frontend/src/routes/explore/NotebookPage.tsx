@@ -5,7 +5,6 @@ import { ArrowLeft, Plus } from "lucide-react";
 import {
   type Cell,
   type CellType,
-  type Engine,
   useAddCell,
   useDeleteCell,
   useNotebook,
@@ -18,13 +17,6 @@ import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 
 // ── Cell with autosave ────────────────────────────────────────────────────────
@@ -112,10 +104,6 @@ export default function NotebookPage() {
     if (trimmed && trimmed !== notebook.data.name) {
       updateNotebook.mutate({ name: trimmed });
     }
-  };
-
-  const handleEngineChange = (engine: Engine) => {
-    updateNotebook.mutate({ engine });
   };
 
   const handlePublicToggle = (checked: boolean) => {
@@ -208,22 +196,6 @@ export default function NotebookPage() {
             className="max-w-xs text-base font-semibold"
             aria-label="Notebook name"
           />
-
-          {/* Engine select */}
-          <div className="flex items-center gap-2">
-            <Label htmlFor="nb-engine" className="text-sm">
-              Engine
-            </Label>
-            <Select value={nb.engine} onValueChange={handleEngineChange}>
-              <SelectTrigger id="nb-engine" className="w-36" aria-label="Engine">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="daft">Daft</SelectItem>
-                <SelectItem value="spark_connect">Spark Connect</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
 
           {/* Public toggle */}
           <div className="flex items-center gap-2">

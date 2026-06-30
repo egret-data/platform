@@ -3,7 +3,6 @@ import { Search, Star, Trash2, FolderPlus, ListChecks, Loader2 } from "lucide-re
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import {
-  type Engine,
   type NotebookSummary,
   useNotebooks,
   useCreateNotebook,
@@ -39,13 +38,6 @@ import {
 import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 type SortKey = "name" | "updated_at";
@@ -65,12 +57,10 @@ function NewNotebookDialog({
   const createMutation = useCreateNotebook(ws);
 
   const [name, setName] = useState("");
-  const [engine, setEngine] = useState<Engine>("daft");
 
   function handleOpenChange(next: boolean) {
     if (!next) {
       setName("");
-      setEngine("daft");
     }
     onOpenChange(next);
   }
@@ -80,7 +70,6 @@ function NewNotebookDialog({
     try {
       const created = await createMutation.mutateAsync({
         name: name.trim() || undefined,
-        engine,
       });
       handleOpenChange(false);
       navigate(`/explore/${ws}/notebooks/${created.id}`);
@@ -96,7 +85,7 @@ function NewNotebookDialog({
           <DialogHeader>
             <DialogTitle>Create notebook</DialogTitle>
             <DialogDescription>
-              Give your notebook a name and pick an execution engine.
+              Give your notebook a name.
             </DialogDescription>
           </DialogHeader>
 
@@ -110,19 +99,6 @@ function NewNotebookDialog({
                 placeholder="Untitled"
                 autoFocus
               />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="nb-engine">Engine</Label>
-              <Select value={engine} onValueChange={(v) => setEngine(v as Engine)}>
-                <SelectTrigger id="nb-engine" className="w-full">
-                  <SelectValue placeholder="Select an engine" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="daft">Daft</SelectItem>
-                  <SelectItem value="spark_connect">Spark Connect</SelectItem>
-                </SelectContent>
-              </Select>
             </div>
           </div>
 
@@ -387,9 +363,6 @@ export default function Notebooks() {
         </span>
       </td>
       <td>
-        <Badge variant="secondary">{nb.engine}</Badge>
-      </td>
-      <td>
         {nb.is_public ? (
           <Badge variant="outline">Public</Badge>
         ) : (
@@ -536,7 +509,6 @@ export default function Notebooks() {
                     </th>
                   )}
                   <SortableHeader sortKey="name" label="Name" current={sort} onSort={onSort} />
-                  <th>Engine</th>
                   <th>Visibility</th>
                   <SortableHeader sortKey="updated_at" label="Updated" current={sort} onSort={onSort} />
                   <th className="w-8" />
@@ -553,7 +525,7 @@ export default function Notebooks() {
                       <FolderHeaderRow
                         name={group.folder?.name ?? "Uncategorized"}
                         count={group.rows.length}
-                        colSpan={bulk.bulkMode ? 6 : 5}
+                        colSpan={bulk.bulkMode ? 5 : 4}
                         collapsed={isCollapsed}
                         onToggle={() => collapse.toggle(key)}
                         onRename={
