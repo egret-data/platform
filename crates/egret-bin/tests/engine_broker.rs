@@ -41,3 +41,37 @@ async fn mint_uses_stored_token_and_rotates(pool: sqlx::PgPool) {
     // rotated refresh token persisted back into the same secret row
     assert_eq!(secrets.get(sid).await.unwrap(), "rotated-rt");
 }
+
+/// A refresher that must never be reached: the broker should short-circuit when
+/// the user has no stored refresh token.
+struct PanicRefresher;
+#[async_trait::async_trait]
+impl OidcTokenRefresher for PanicRefresher {
+    async fn refresh(&self, _refresh_token: &str) -> Result<RefreshedToken, String> {
+        panic!("IdP refresh must not be called when there is no stored refresh token");
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn mint_without_stored_token_errors_before_idp(pool: sqlx::PgPool) {
+    let db = Db { pool };
+    // User exists, but NO oidc_refresh_tokens row.
+    let user_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (provider, external_subject, email, name) \
+         VALUES ('oidc','s2','u2@x','U2') RETURNING id",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    let crypto = Crypto::new(&[7u8; 32]).unwrap();
+    let secrets = SecretStore::new(db.clone(), Some(crypto));
+    let repo = OidcRefreshRepo::new(db.clone());
+
+    let broker = EngineTokenBroker::new(secrets, repo, PanicRefresher);
+    let err = broker.mint(user_id).await.unwrap_err();
+    assert!(matches!(
+        err,
+        egret_notebook::engine_token::BrokerError::NoRefreshToken
+    ));
+}

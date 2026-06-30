@@ -3,10 +3,20 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Clone, serde::Serialize)]
 pub struct EngineToken {
     pub access_token: String,
     pub expires_at: DateTime<Utc>,
+}
+
+// Redact the bearer token from Debug output (consistent with `OidcLogin`).
+impl std::fmt::Debug for EngineToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngineToken")
+            .field("access_token", &"[redacted]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -26,11 +36,13 @@ pub trait EngineTokenMinter: Send + Sync {
 }
 
 /// Test double: returns a canned token and records the last user.
+#[cfg(any(test, feature = "test-util"))]
 #[derive(Default)]
 pub struct FakeMinter {
     pub last: std::sync::Mutex<Option<Uuid>>,
 }
 
+#[cfg(any(test, feature = "test-util"))]
 #[async_trait::async_trait]
 impl EngineTokenMinter for FakeMinter {
     async fn mint(&self, user_id: Uuid) -> Result<EngineToken, BrokerError> {

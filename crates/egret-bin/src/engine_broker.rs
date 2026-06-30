@@ -105,6 +105,7 @@ impl<R: OidcTokenRefresher> EngineTokenMinter for EngineTokenBroker<R> {
         }
         Ok(EngineToken {
             access_token: refreshed.access_token,
+            // callers should re-mint a bit before expires_at to absorb clock skew
             expires_at: Utc::now() + Duration::seconds(refreshed.expires_in_secs),
         })
     }
