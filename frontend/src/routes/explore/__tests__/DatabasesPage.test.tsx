@@ -324,4 +324,95 @@ describe("DatabasesPage", () => {
       expect(deleteMutate).toHaveBeenCalledWith("db-1");
     });
   });
+
+  // ── Impersonate toggle (Trino only) ───────────────────────────────────────
+
+  it("shows the impersonate toggle when engine is trino in the Add dialog", async () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
+
+    await waitFor(() => screen.getByText("Add engine connection"));
+
+    // Default engine is trino — toggle should be present
+    expect(
+      screen.getByRole("switch", { name: /run queries as the logged-in user/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("hides the impersonate toggle when engine is starrocks in the Add dialog", async () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
+
+    await waitFor(() => screen.getByText("Add engine connection"));
+
+    // Switch to starrocks
+    const nativeSelect = Array.from(
+      document.querySelectorAll<HTMLSelectElement>("select"),
+    ).find((s) => Array.from(s.options).some((o) => o.value === "starrocks"));
+    if (nativeSelect) {
+      fireEvent.change(nativeSelect, { target: { value: "starrocks" } });
+    }
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("switch", { name: /run queries as the logged-in user/i }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  it("toggling the impersonate switch and submitting includes options.impersonate: true in the create payload", async () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
+
+    await waitFor(() => screen.getByText("Add engine connection"));
+
+    fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "trino-imp" } });
+    fireEvent.change(screen.getByLabelText(/^host$/i), { target: { value: "trino.example.com" } });
+    fireEvent.change(screen.getByLabelText(/^port$/i), { target: { value: "8080" } });
+
+    // Toggle the impersonate switch on
+    const impersonateSwitch = screen.getByRole("switch", {
+      name: /run queries as the logged-in user/i,
+    });
+    fireEvent.click(impersonateSwitch);
+
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i, hidden: false }));
+
+    await waitFor(() => {
+      expect(createMutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "trino-imp",
+          engine: "trino",
+          options: expect.objectContaining({
+            impersonate: true,
+          }),
+        }),
+      );
+    });
+  });
+
+  it("toggling the impersonate switch and submitting includes options.impersonate: true in the update payload", async () => {
+    // mockDb1 is trino with no impersonate set
+    renderAt();
+
+    const editButtons = screen.getAllByRole("button", { name: /^edit/i });
+    fireEvent.click(editButtons[0]);
+
+    await waitFor(() => screen.getByText("Edit engine connection"));
+
+    // Toggle impersonate switch on
+    const impersonateSwitch = screen.getByRole("switch", {
+      name: /run queries as the logged-in user/i,
+    });
+    fireEvent.click(impersonateSwitch);
+
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => {
+      const call = updateMutateAsync.mock.calls[0][0];
+      expect(call.input.options).toEqual(
+        expect.objectContaining({ impersonate: true }),
+      );
+    });
+  });
 });
