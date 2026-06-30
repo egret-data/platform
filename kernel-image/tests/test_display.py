@@ -1,5 +1,5 @@
 import sys, types
-from egret_kernel_helpers import display as disp
+from egret_kernel_helpers.display import display
 
 def _fake_ipython(monkeypatch):
     shown = []
@@ -22,12 +22,12 @@ def test_display_limits_dataframe(monkeypatch):
     shown = _fake_ipython(monkeypatch)
     _fake_daft_with_df(monkeypatch)
     df = _FakeDF()
-    disp.display(df, n=5)
+    display(df, n=5)
     assert df.limited == 5
     assert shown and shown[0] is df  # limit() returns self in the fake
 
 def test_display_falls_through_for_non_dataframe(monkeypatch):
     shown = _fake_ipython(monkeypatch)
     _fake_daft_with_df(monkeypatch)
-    disp.display({"a": 1})
+    display({"a": 1})
     assert shown == [{"a": 1}]

@@ -1,6 +1,6 @@
 import json, sys, types
 import pytest
-from egret_kernel_helpers import catalog as cat
+from egret_kernel_helpers.catalog import catalog
 
 MANIFEST = {
     "username": "alice",
@@ -23,9 +23,9 @@ def _fake_pyiceberg(monkeypatch):
 
 def test_catalog_builds_rest_catalog_from_manifest(monkeypatch):
     captured = _fake_pyiceberg(monkeypatch)
-    cat.catalog(env=ENV)
+    catalog(env=ENV)
     assert captured["props"] == {"uri": "http://c:8181", "warehouse": "main", "token": "tok"}
 
 def test_catalog_without_runtime_raises():
     with pytest.raises(RuntimeError):
-        cat.catalog(env={})
+        catalog(env={})

@@ -1,6 +1,6 @@
 import json, sys, types
 import pytest
-from egret_kernel_helpers import query as q
+from egret_kernel_helpers.query import query
 
 MANIFEST = {
     "username": "alice",
@@ -27,7 +27,7 @@ def test_query_posts_and_builds_dataframe(monkeypatch):
     def fake_post(url, body, token):
         calls["url"] = url; calls["body"] = json.loads(body); calls["token"] = token
         return {"columns": [{"name": "n", "type": "integer"}], "rows": [[1], [2]], "truncated": False}
-    df = q.query("trino-dev", "SELECT 1", env=ENV, http=fake_post)
+    df = query("trino-dev", "SELECT 1", env=ENV, http=fake_post)
     assert df == "DAFT_DF"
     assert calls["url"] == "http://egret:3000/api/kernel/query"
     assert calls["token"] == "egk_test"
@@ -38,4 +38,4 @@ def test_query_posts_and_builds_dataframe(monkeypatch):
 
 def test_query_requires_configuration():
     with pytest.raises(RuntimeError):
-        q.query("trino-dev", "SELECT 1", env={}, http=lambda *a: {})
+        query("trino-dev", "SELECT 1", env={}, http=lambda *a: {})
