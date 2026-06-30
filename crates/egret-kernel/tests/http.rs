@@ -231,6 +231,43 @@ fn req(method: &str, uri: &str, token: &str) -> HttpRequest<Body> {
         .unwrap()
 }
 
+/// Perform a real WebSocket upgrade handshake against `app` and return the HTTP
+/// status of the response (101 on a successful upgrade, otherwise the error
+/// status the handler produced).
+///
+/// axum's `WebSocketUpgrade` extractor requires hyper's `OnUpgrade` request
+/// extension, which only exists when the request is driven through a real HTTP
+/// server connection — `tower::oneshot` never populates it, so the extractor
+/// would always reject with 426. We therefore serve `app` on an ephemeral TCP
+/// port and use `tokio-tungstenite` as a real client: it returns the `101`
+/// response on success, or `Http(resp)` carrying the handler's error status.
+async fn ws_handshake(app: axum::Router, path: &str, token: &str) -> StatusCode {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::Error as TError;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let url = format!("ws://{addr}{path}");
+    let mut request = url.into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("Cookie", format!("egret_session={token}").parse().unwrap());
+
+    match tokio_tungstenite::connect_async(request).await {
+        Ok((stream, resp)) => {
+            // Successful upgrade. Close immediately so the proxy task unwinds.
+            drop(stream);
+            StatusCode::from_u16(resp.status().as_u16()).unwrap()
+        }
+        Err(TError::Http(resp)) => StatusCode::from_u16(resp.status().as_u16()).unwrap(),
+        Err(e) => panic!("ws handshake failed unexpectedly: {e}"),
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 /// `POST /ws/{ws}/kernel` → 200 `{phase:"ready", url}`.
@@ -624,5 +661,110 @@ async fn connect_non_member_rejected(pool: sqlx::PgPool) {
         f.launcher.inner.lock().unwrap().ensured.len(),
         0,
         "launcher must NOT be called for unauthorized connect"
+    );
+}
+
+// ── channels (WS proxy) tests ─────────────────────────────────────────────────
+
+/// Non-member → rejected (403/404) before any upgrade.
+#[sqlx::test(migrations = "../../migrations")]
+async fn channels_non_member_rejected(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_warehouse(&f.db, f.ws).await;
+    let nb = seed_notebook(&f.db, f.ws, f.owner).await;
+    let outsider = f
+        .users
+        .insert_local(
+            &format!("chout_{}@egret.test", Uuid::new_v4().simple()),
+            "Out",
+            "x",
+        )
+        .await
+        .unwrap();
+    let tok = f
+        .sessions
+        .create(outsider, "test", "127.0.0.1")
+        .await
+        .unwrap()
+        .token;
+
+    let status = ws_handshake(
+        f.app.clone(),
+        &format!("/ws/{}/notebooks/{}/kernel/channels", f.slug, nb),
+        &tok,
+    )
+    .await;
+    assert!(
+        status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
+        "non-member channels must be 403/404; got {status}"
+    );
+}
+
+/// Member but no kernel started → 409 Conflict (FE must call connect first).
+#[sqlx::test(migrations = "../../migrations")]
+async fn channels_kernel_not_started_conflict(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_warehouse(&f.db, f.ws).await;
+    let (uid, token) = add_member(&f, f.ws, "chmember", "ws_editor").await;
+    let nb = seed_notebook(&f.db, f.ws, uid).await;
+
+    let status = ws_handshake(
+        f.app.clone(),
+        &format!("/ws/{}/notebooks/{}/kernel/channels", f.slug, nb),
+        &token,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "channels with no started kernel must be 409"
+    );
+}
+
+/// Ready kernel → handler resolves the kernel id, upserts it, and upgrades (101).
+#[sqlx::test(migrations = "../../migrations")]
+async fn channels_ready_upgrades_and_resolves_kernel(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_warehouse(&f.db, f.ws).await;
+    let (uid, token) = add_member(&f, f.ws, "chready", "ws_editor").await;
+    let nb = seed_notebook(&f.db, f.ws, uid).await;
+
+    // Point the launcher (gateway url) at a fake gateway, then start the kernel (Ready).
+    let gw = spawn_fake_gateway().await;
+    f.launcher.inner.lock().unwrap().url = Some(gw);
+    let started = f
+        .app
+        .clone()
+        .oneshot(req("POST", &format!("/ws/{}/kernel", f.slug), &token))
+        .await
+        .unwrap();
+    assert_eq!(started.status(), StatusCode::OK, "kernel start → 200");
+
+    // Open channels — handler reaches on_upgrade and returns 101 Switching Protocols.
+    let status = ws_handshake(
+        f.app.clone(),
+        &format!("/ws/{}/notebooks/{}/kernel/channels", f.slug, nb),
+        &token,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SWITCHING_PROTOCOLS,
+        "ready kernel channels upgrade → 101; got {status}"
+    );
+
+    // The per-notebook kernel id was resolved (k1 from the fake gateway) and upserted.
+    let kid: Option<String> = sqlx::query_scalar(
+        "SELECT kernel_id FROM notebook_kernels WHERE notebook_id=$1 AND user_id=$2",
+    )
+    .bind(nb)
+    .bind(uid.0)
+    .fetch_optional(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        kid.as_deref(),
+        Some("k1"),
+        "channels must resolve+upsert the kernel id"
     );
 }

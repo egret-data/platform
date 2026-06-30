@@ -6,10 +6,12 @@
 //! caller's own `(user_id, workspace_id)` — never a path/body-supplied user.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{FromRef, Path, State};
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use egret_auth::session::SessionService;
 use egret_notebook::build_notebook_runtime;
@@ -79,6 +81,10 @@ pub fn kernel_router() -> Router<KernelState> {
         .route(
             "/ws/{workspace}/notebooks/{notebook}/kernel/connect",
             post(connect),
+        )
+        .route(
+            "/ws/{workspace}/notebooks/{notebook}/kernel/channels",
+            get(channels),
         )
 }
 
@@ -238,6 +244,105 @@ async fn connect(
     Ok(Json(
         serde_json::json!({ "phase": "ready", "kernel_id": kid }),
     ))
+}
+
+/// `GET /ws/{workspace}/notebooks/{notebook}/kernel/channels` — authenticate via the
+/// session cookie + `notebook:read`, require a Ready kernel, resolve the per-notebook
+/// kernel id, then upgrade and proxy the Jupyter channels WS to the gateway. Touches
+/// the kernel (throttled) per message so the idle reaper keeps it alive.
+async fn channels(
+    State(st): State<KernelState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, nb)): Path<(String, Uuid)>,
+    upgrade: WebSocketUpgrade,
+) -> Result<axum::response::Response, KernelApiError> {
+    st.authz
+        .require_workspace(&ctx, "notebook:read")
+        .await
+        .map_err(KernelApiError::from)?;
+
+    // Notebook must belong to this workspace AND be readable by the caller.
+    let (summary, nb_ws) = st
+        .notebook
+        .store
+        .get_summary(nb)
+        .await
+        .map_err(|e| KernelApiError(e.0))?
+        .ok_or_else(|| KernelApiError(egret_core::Error::NotFound("notebook not found".into())))?;
+    if nb_ws != ctx.workspace_id.0 {
+        return Err(KernelApiError(egret_core::Error::NotFound(
+            "notebook not found".into(),
+        )));
+    }
+    if !(summary.is_public || summary.owner_user_id == ctx.principal.user_id.0) {
+        return Err(KernelApiError(egret_core::Error::Forbidden));
+    }
+
+    let user = ctx.principal.user_id.0;
+    let key = KernelKey {
+        user_id: user,
+        workspace_id: ctx.workspace_id.0,
+    };
+
+    // The gateway must already be Ready (the FE calls `connect` first).
+    let status = st
+        .manager
+        .status(key)
+        .await
+        .map_err(KernelApiError::from)?
+        .filter(|s| s.phase == KernelPhase::Ready)
+        .ok_or_else(|| {
+            KernelApiError(egret_core::Error::Conflict(
+                "kernel not started; call connect first".into(),
+            ))
+        })?;
+
+    // Resolve the per-notebook kernel id (self-heal if connect was skipped).
+    let existing = st
+        .notebook_kernels
+        .get(nb, user)
+        .await
+        .map_err(KernelApiError::from)?;
+    let kid = crate::gateway::ensure_kernel(&status.url, existing.as_deref())
+        .await
+        .map_err(KernelApiError::from)?;
+    st.notebook_kernels
+        .upsert(nb, user, &kid)
+        .await
+        .map_err(KernelApiError::from)?;
+
+    // Throttled touch: at most once per 15s, off the hot path.
+    let last: Arc<std::sync::Mutex<Option<Instant>>> = Arc::new(std::sync::Mutex::new(None));
+    let on_activity: Arc<dyn Fn() + Send + Sync> = {
+        let st = st.clone();
+        let last = last.clone();
+        Arc::new(move || {
+            let now = Instant::now();
+            let due = {
+                let mut g = last.lock().unwrap();
+                let due = g
+                    .map(|t| now.duration_since(t) >= Duration::from_secs(15))
+                    .unwrap_or(true);
+                if due {
+                    *g = Some(now);
+                }
+                due
+            };
+            if due {
+                let st = st.clone();
+                tokio::spawn(async move {
+                    let _ = st.manager.touch(key).await;
+                    let _ = st.notebook_kernels.touch(nb, user).await;
+                });
+            }
+        })
+    };
+
+    let proxy = st.proxy.clone();
+    let url = status.url.clone();
+    Ok(upgrade.on_upgrade(move |socket| async move {
+        let _ = proxy.proxy_channels(socket, &url, &kid, on_activity).await;
+    }))
 }
 
 // ── bring IntoResponse into scope for the status handler ─────────────────────
