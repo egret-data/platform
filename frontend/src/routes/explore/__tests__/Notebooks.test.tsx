@@ -3,41 +3,69 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 // ── Mock factories ────────────────────────────────────────────────────────────
+
 const notebooksMock = vi.fn();
+const trashMutateAsync = vi.fn();
+const trashMutation = vi.fn();
+const restoreMutateAsync = vi.fn();
+const restoreMutation = vi.fn();
+const addBookmarkMutateAsync = vi.fn();
+const addBookmarkMutation = vi.fn();
+const removeBookmarkMutateAsync = vi.fn();
+const removeBookmarkMutation = vi.fn();
 const createMutateAsync = vi.fn();
 const createMutation = vi.fn();
 const updateMutateAsync = vi.fn();
 const updateMutation = vi.fn();
-const deleteMutate = vi.fn();
+const deleteMutateAsync = vi.fn();
 const deleteMutation = vi.fn();
 
 vi.mock("@/api/notebooks", () => ({
-  useNotebooks: () => notebooksMock(),
+  useNotebooks: (...args: unknown[]) => notebooksMock(...args),
   useCreateNotebook: () => createMutation(),
   useUpdateNotebook: () => updateMutation(),
   useDeleteNotebook: () => deleteMutation(),
+  useTrashNotebook: () => trashMutation(),
+  useRestoreNotebook: () => restoreMutation(),
+  useAddNotebookBookmark: () => addBookmarkMutation(),
+  useRemoveNotebookBookmark: () => removeBookmarkMutation(),
+}));
+
+vi.mock("@/api/folders", () => ({
+  useFolders: () => ({ data: [] }),
+  useSetFolder: () => ({ mutateAsync: vi.fn().mockResolvedValue({}) }),
+  useFolderMutations: () => ({
+    create: { mutateAsync: vi.fn().mockResolvedValue({ id: "f1", name: "F1" }) },
+    rename: { mutateAsync: vi.fn().mockResolvedValue({}) },
+    remove: { mutateAsync: vi.fn().mockResolvedValue(undefined) },
+  }),
 }));
 
 import Notebooks from "@/routes/explore/Notebooks";
 
 // ── Render helper ─────────────────────────────────────────────────────────────
+
 function renderAt() {
   const qc = new QueryClient();
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={["/explore/eng/notebooks"]}>
-        <Routes>
-          <Route path="/explore/:workspace/notebooks" element={<Notebooks />} />
-          <Route path="/explore/:workspace/notebooks/:id" element={<div>NotebookPage</div>} />
-        </Routes>
-      </MemoryRouter>
+      <TooltipProvider>
+        <MemoryRouter initialEntries={["/explore/eng/notebooks"]}>
+          <Routes>
+            <Route path="/explore/:workspace/notebooks" element={<Notebooks />} />
+            <Route path="/explore/:workspace/notebooks/:id" element={<div>NotebookPage</div>} />
+          </Routes>
+        </MemoryRouter>
+      </TooltipProvider>
     </QueryClientProvider>,
   );
 }
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
+
 const mockNb1 = {
   id: "nb-1",
   name: "My Analysis",
@@ -47,6 +75,9 @@ const mockNb1 = {
   owner_user_id: "user-1",
   is_owner: true,
   updated_at: "2026-06-01T10:00:00Z",
+  bookmarked: false,
+  folder_id: null,
+  deleted_at: null,
 };
 
 const mockNb2 = {
@@ -58,6 +89,9 @@ const mockNb2 = {
   owner_user_id: "user-2",
   is_owner: false,
   updated_at: "2026-06-02T12:00:00Z",
+  bookmarked: true,
+  folder_id: null,
+  deleted_at: null,
 };
 
 const createdNotebook = {
@@ -73,14 +107,23 @@ const createdNotebook = {
 };
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
+
 beforeEach(() => {
   notebooksMock.mockReset();
+  trashMutation.mockReset();
+  restoreMutation.mockReset();
+  addBookmarkMutation.mockReset();
+  removeBookmarkMutation.mockReset();
   createMutation.mockReset();
   updateMutation.mockReset();
   deleteMutation.mockReset();
+  trashMutateAsync.mockReset();
+  restoreMutateAsync.mockReset();
+  addBookmarkMutateAsync.mockReset();
+  removeBookmarkMutateAsync.mockReset();
   createMutateAsync.mockReset();
   updateMutateAsync.mockReset();
-  deleteMutate.mockReset();
+  deleteMutateAsync.mockReset();
 
   notebooksMock.mockReturnValue({
     data: [mockNb1, mockNb2],
@@ -89,23 +132,27 @@ beforeEach(() => {
     error: null,
   });
 
-  createMutation.mockReturnValue({
-    mutateAsync: createMutateAsync,
-    isPending: false,
-  });
-  updateMutation.mockReturnValue({
-    mutateAsync: updateMutateAsync,
-    isPending: false,
-  });
-  deleteMutation.mockReturnValue({ mutate: deleteMutate, isPending: false });
+  trashMutation.mockReturnValue({ mutateAsync: trashMutateAsync, isPending: false });
+  restoreMutation.mockReturnValue({ mutateAsync: restoreMutateAsync, isPending: false });
+  addBookmarkMutation.mockReturnValue({ mutateAsync: addBookmarkMutateAsync, isPending: false });
+  removeBookmarkMutation.mockReturnValue({ mutateAsync: removeBookmarkMutateAsync, isPending: false });
+  createMutation.mockReturnValue({ mutateAsync: createMutateAsync, isPending: false });
+  updateMutation.mockReturnValue({ mutateAsync: updateMutateAsync, isPending: false });
+  deleteMutation.mockReturnValue({ mutateAsync: deleteMutateAsync, isPending: false });
 
+  trashMutateAsync.mockResolvedValue(undefined);
+  restoreMutateAsync.mockResolvedValue(undefined);
+  addBookmarkMutateAsync.mockResolvedValue(undefined);
+  removeBookmarkMutateAsync.mockResolvedValue(undefined);
   createMutateAsync.mockResolvedValue(createdNotebook);
   updateMutateAsync.mockResolvedValue({ ...mockNb1, name: "Renamed" });
-  deleteMutate.mockResolvedValue(undefined);
+  deleteMutateAsync.mockResolvedValue(undefined);
 });
 
-describe("Notebooks", () => {
-  // ── List rendering ────────────────────────────────────────────────────────
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+describe("Notebooks list", () => {
+  // ── List rendering ──────────────────────────────────────────────────────────
 
   it("renders notebook names from mocked useNotebooks", () => {
     renderAt();
@@ -142,32 +189,114 @@ describe("Notebooks", () => {
   });
 
   it("shows empty state when list is []", () => {
-    notebooksMock.mockReturnValue({
-      data: [],
-      isLoading: false,
-      isError: false,
-      error: null,
-    });
+    notebooksMock.mockReturnValue({ data: [], isLoading: false, isError: false, error: null });
     renderAt();
     expect(screen.getByText("No notebooks yet.")).toBeInTheDocument();
   });
 
   it("does not render rows while isLoading", () => {
-    notebooksMock.mockReturnValue({
-      data: undefined,
-      isLoading: true,
-      isError: false,
-      error: null,
-    });
+    notebooksMock.mockReturnValue({ data: undefined, isLoading: true, isError: false, error: null });
     renderAt();
     expect(screen.queryByText("My Analysis")).not.toBeInTheDocument();
   });
 
-  // ── New notebook dialog ───────────────────────────────────────────────────
-
-  it("clicking New opens dialog; submitting calls useCreateNotebook mutateAsync with {name, engine}", async () => {
+  it("shows filtered empty message when bookmarks filter has no matches", () => {
+    notebooksMock.mockReturnValue({
+      data: [{ ...mockNb1, bookmarked: false }],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
     renderAt();
-    fireEvent.click(screen.getByRole("button", { name: /new notebook/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Bookmarks" }));
+    expect(screen.getByText("No bookmarked notebooks.")).toBeInTheDocument();
+  });
+
+  // ── Bookmark star toggle ────────────────────────────────────────────────────
+
+  it("clicking the star on an unbookmarked notebook calls addBookmark", async () => {
+    const user = userEvent.setup();
+    renderAt();
+    // nb1 is not bookmarked, nb2 is bookmarked; find nb1's star by aria-label
+    const star = screen.getByRole("button", { name: /bookmark My Analysis/i });
+    await user.click(star);
+    await waitFor(() => {
+      expect(addBookmarkMutateAsync).toHaveBeenCalledWith("nb-1");
+    });
+  });
+
+  it("clicking the star on a bookmarked notebook calls removeBookmark", async () => {
+    const user = userEvent.setup();
+    renderAt();
+    // nb2 is bookmarked
+    const star = screen.getByRole("button", { name: /unbookmark Shared Report/i });
+    await user.click(star);
+    await waitFor(() => {
+      expect(removeBookmarkMutateAsync).toHaveBeenCalledWith("nb-2");
+    });
+  });
+
+  it("bookmarks filter toggle calls useNotebooks without trashed (trash starts false)", () => {
+    renderAt();
+    // useNotebooks is called with (ws, {trashed: false}) on mount
+    expect(notebooksMock).toHaveBeenCalledWith("eng", { trashed: false });
+  });
+
+  // ── Trash toggle ────────────────────────────────────────────────────────────
+
+  it("clicking Trash button calls useNotebooks with {trashed: true}", () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: "Trash" }));
+    expect(notebooksMock).toHaveBeenCalledWith("eng", { trashed: true });
+  });
+
+  it("trash view shows 'Trash is empty.' when data is empty", () => {
+    notebooksMock.mockImplementation((_ws: string, opts?: { trashed?: boolean }) => ({
+      data: opts?.trashed ? [] : [mockNb1, mockNb2],
+      isLoading: false,
+    }));
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: "Trash" }));
+    expect(screen.getByText("Trash is empty.")).toBeInTheDocument();
+  });
+
+  it("trash view shows Restore and Delete permanently actions in row menu", async () => {
+    const trashedNb = { ...mockNb1, deleted_at: "2026-06-20T00:00:00Z" };
+    notebooksMock.mockImplementation((_ws: string, opts?: { trashed?: boolean }) => ({
+      data: opts?.trashed ? [trashedNb] : [mockNb1, mockNb2],
+      isLoading: false,
+    }));
+    const user = userEvent.setup();
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("My Analysis");
+    await user.click(screen.getAllByRole("button", { name: "Actions" })[0]);
+    expect(await screen.findByText("Restore")).toBeInTheDocument();
+    expect(screen.getByText("Delete permanently")).toBeInTheDocument();
+  });
+
+  it("Restore action calls useRestoreNotebook", async () => {
+    const trashedNb = { ...mockNb1, deleted_at: "2026-06-20T00:00:00Z" };
+    notebooksMock.mockImplementation((_ws: string, opts?: { trashed?: boolean }) => ({
+      data: opts?.trashed ? [trashedNb] : [mockNb1, mockNb2],
+      isLoading: false,
+    }));
+    const user = userEvent.setup();
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("My Analysis");
+    await user.click(screen.getAllByRole("button", { name: "Actions" })[0]);
+    await user.click(await screen.findByText("Restore"));
+    await waitFor(() => {
+      expect(restoreMutateAsync).toHaveBeenCalledWith("nb-1");
+    });
+  });
+
+  // ── New notebook dialog ─────────────────────────────────────────────────────
+
+  it("clicking '+ Notebook' opens dialog; submitting calls useCreateNotebook mutateAsync with {name, engine}", async () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /\+ notebook/i }));
 
     await waitFor(() => screen.getByText(/Create notebook/i));
 
@@ -197,7 +326,7 @@ describe("Notebooks", () => {
 
   it("navigates to new notebook after create", async () => {
     renderAt();
-    fireEvent.click(screen.getByRole("button", { name: /new notebook/i }));
+    fireEvent.click(screen.getByRole("button", { name: /\+ notebook/i }));
 
     await waitFor(() => screen.getByText(/Create notebook/i));
 
@@ -208,42 +337,16 @@ describe("Notebooks", () => {
     });
   });
 
-  // ── Row actions menu → Delete ─────────────────────────────────────────────
-
-  it("delete via the row actions menu → typed-confirm → calls useDeleteNotebook with the id", async () => {
-    const user = userEvent.setup();
-    renderAt();
-
-    // Open the per-row actions menu, then choose Delete.
-    await user.click(screen.getByRole("button", { name: /actions for My Analysis/i }));
-    await user.click(await screen.findByRole("menuitem", { name: /^delete$/i }));
-
-    await waitFor(() => {
-      expect(screen.getByText(/Delete «My Analysis»/)).toBeInTheDocument();
-    });
-
-    const confirmInput = screen.getByPlaceholderText("delete");
-    fireEvent.change(confirmInput, { target: { value: "delete" } });
-
-    fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
-
-    await waitFor(() => {
-      expect(deleteMutate).toHaveBeenCalledWith("nb-1");
-    });
-  });
-
-  // ── Row actions menu → Rename ─────────────────────────────────────────────
+  // ── Row actions menu → Rename ───────────────────────────────────────────────
 
   it("rename via the row actions menu → calls useUpdateNotebook mutateAsync with {name}", async () => {
     const user = userEvent.setup();
     renderAt();
 
-    await user.click(screen.getByRole("button", { name: /actions for My Analysis/i }));
-    await user.click(await screen.findByRole("menuitem", { name: /^rename$/i }));
+    await user.click(screen.getAllByRole("button", { name: "Actions" })[0]);
+    await user.click(await screen.findByText("Rename"));
 
-    await waitFor(() => screen.getByText(/Rename notebook/i));
-
-    const nameInput = screen.getByDisplayValue("My Analysis");
+    const nameInput = await screen.findByRole("textbox", { name: /name/i });
     fireEvent.change(nameInput, { target: { value: "Renamed" } });
 
     fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
@@ -253,5 +356,82 @@ describe("Notebooks", () => {
         expect.objectContaining({ name: "Renamed" }),
       );
     });
+  });
+
+  // ── Row actions menu → Move to Trash ───────────────────────────────────────
+
+  it("row menu → Move to Trash calls useTrashNotebook", async () => {
+    const user = userEvent.setup();
+    renderAt();
+
+    // Default sort is updated_at desc; nb-2 (2026-06-02) sorts before nb-1 (2026-06-01)
+    await user.click(screen.getAllByRole("button", { name: "Actions" })[0]);
+    await user.click(await screen.findByText("Move to Trash"));
+
+    await waitFor(() => {
+      expect(trashMutateAsync).toHaveBeenCalledWith("nb-2");
+    });
+  });
+
+  // ── Row actions menu → Delete permanently ─────────────────────────────────
+
+  it("permanent delete uses ConfirmDeleteDialog and calls useDeleteNotebook", async () => {
+    const trashedNb = { ...mockNb1, deleted_at: "2026-06-20T00:00:00Z" };
+    notebooksMock.mockImplementation((_ws: string, opts?: { trashed?: boolean }) => ({
+      data: opts?.trashed ? [trashedNb] : [mockNb1, mockNb2],
+      isLoading: false,
+    }));
+    const user = userEvent.setup();
+    renderAt();
+    // Switch to trash view
+    fireEvent.click(screen.getByRole("button", { name: "Trash" }));
+    await screen.findByText("My Analysis");
+    await user.click(screen.getAllByRole("button", { name: "Actions" })[0]);
+    await user.click(await screen.findByText("Delete permanently"));
+
+    // ConfirmDeleteDialog should open
+    const input = await screen.findByPlaceholderText("delete");
+    fireEvent.change(input, { target: { value: "delete" } });
+    fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+
+    await waitFor(() => {
+      expect(deleteMutateAsync).toHaveBeenCalledWith("nb-1");
+    });
+  });
+
+  // ── Header button cluster ───────────────────────────────────────────────────
+
+  it("header shows Bookmarks, Bulk select (when data), Trash, New folder, and + Notebook buttons", () => {
+    renderAt();
+    expect(screen.getByRole("button", { name: "Bookmarks" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Bulk select" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Trash" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New folder" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /\+ notebook/i })).toBeInTheDocument();
+  });
+
+  it("header title changes to 'Trash' when trash view is active", () => {
+    renderAt();
+    expect(screen.getByRole("heading", { name: "Notebooks" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Trash" }));
+    expect(screen.getByRole("heading", { name: "Trash" })).toBeInTheDocument();
+  });
+
+  // ── Bulk select ─────────────────────────────────────────────────────────────
+
+  it("clicking Bulk select shows checkboxes", async () => {
+    const user = userEvent.setup();
+    renderAt();
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+    const checkboxes = screen.getAllByRole("checkbox");
+    // 1 select-all + 2 per row
+    expect(checkboxes.length).toBeGreaterThanOrEqual(2);
+  });
+
+  // ── useNotebooks called with trashed: false on mount ────────────────────────
+
+  it("passes {trashed: false} to useNotebooks on initial render", () => {
+    renderAt();
+    expect(notebooksMock).toHaveBeenCalledWith("eng", { trashed: false });
   });
 });

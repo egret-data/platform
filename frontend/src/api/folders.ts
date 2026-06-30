@@ -1,13 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, apiJson } from "./client";
 
-export type EntityKind = "charts" | "dashboards" | "datasets";
+export type EntityKind = "charts" | "dashboards" | "datasets" | "notebooks";
 export interface Folder { id: string; name: string }
 
 const listKeyOf: Record<EntityKind, (ws: string) => readonly unknown[]> = {
   charts: (ws) => ["charts", ws],
   dashboards: (ws) => ["dashboards", ws],
   datasets: (ws) => ["datasets", ws, "list"],
+  notebooks: (ws) => ["notebooks", ws],
 };
 export const folderKeys = { list: (ws: string, kind: EntityKind) => ["folders", ws, kind] as const };
 

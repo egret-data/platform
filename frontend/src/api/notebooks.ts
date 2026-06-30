@@ -23,6 +23,9 @@ export interface NotebookSummary {
   owner_user_id: string;
   is_owner: boolean;
   updated_at: string;
+  bookmarked?: boolean;
+  folder_id?: string | null;
+  deleted_at?: string | null;
 }
 
 export interface NotebookDetail extends NotebookSummary {
@@ -44,10 +47,47 @@ function jsonBody(method: string, body?: unknown): RequestInit {
   };
 }
 
-export function useNotebooks(ws: string) {
+export function useNotebooks(ws: string, opts?: { trashed?: boolean }) {
+  const trashed = !!opts?.trashed;
   return useQuery<NotebookSummary[]>({
-    queryKey: qk.list(ws),
-    queryFn: () => apiJson<NotebookSummary[]>(base(ws)),
+    queryKey: [...qk.list(ws), { trashed }],
+    queryFn: () => apiJson<NotebookSummary[]>(`${base(ws)}${trashed ? "?trashed=true" : ""}`),
+  });
+}
+
+// POST /{id}/trash → 204
+export function useTrashNotebook(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiFetch(`${base(ws)}/${id}/trash`, { method: "POST" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.list(ws) }),
+  });
+}
+
+// POST /{id}/restore → 204
+export function useRestoreNotebook(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiFetch(`${base(ws)}/${id}/restore`, { method: "POST" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.list(ws) }),
+  });
+}
+
+// POST /{id}/bookmark → 204
+export function useAddNotebookBookmark(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiFetch(`${base(ws)}/${id}/bookmark`, { method: "POST" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.list(ws) }),
+  });
+}
+
+// DELETE /{id}/bookmark → 204
+export function useRemoveNotebookBookmark(ws: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiFetch(`${base(ws)}/${id}/bookmark`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.list(ws) }),
   });
 }
 
