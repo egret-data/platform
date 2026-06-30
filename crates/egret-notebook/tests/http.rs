@@ -1,5 +1,4 @@
 //! Notebook HTTP route tests — ownership + IDOR enforcement.
-//! DB-gated; self-skips without `DATABASE_URL`.
 //!
 //! These prove the `/ws/{workspace}/notebooks` router (`notebook_router`):
 //!   - create → 201 with exactly one seeded `code` cell; GET → 200, `is_owner`
@@ -15,9 +14,8 @@
 //!     notebook X addressed under notebook Y → 404 (nested IDOR closed),
 //!   - unknown `cell_type` on add → 400.
 //!
-//! Run with:
-//!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret
-//!   cargo test -p egret-notebook --test http -- --test-threads=1
+//! Each test receives a fresh, auto-migrated scratch database from `#[sqlx::test]`
+//! and never touches the shared dev `egret` database.
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
@@ -45,6 +43,7 @@ struct Fixture {
     ws_a: WorkspaceId,
     ws_b: WorkspaceId,
     owner: UserId,
+    db: Db,
 }
 
 async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
@@ -56,11 +55,8 @@ async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
     (status, json)
 }
 
-async fn setup() -> Option<Fixture> {
-    let dsn = std::env::var("DATABASE_URL").ok()?;
-
-    let db = Db::connect(&dsn, 5).await.expect("connect");
-    db.migrate().await.expect("migrate");
+async fn setup(pool: sqlx::PgPool) -> Fixture {
+    let db = Db { pool };
 
     let users = UserRepo::new(db.clone());
     let sessions = SessionService::new(
@@ -94,7 +90,7 @@ async fn setup() -> Option<Fixture> {
         authz: Authorizer::new(db.clone()),
     });
 
-    Some(Fixture {
+    Fixture {
         app,
         users,
         members: MemberRepo::new(db.clone()),
@@ -105,7 +101,8 @@ async fn setup() -> Option<Fixture> {
         ws_a: ws_a.id,
         ws_b: ws_b.id,
         owner,
-    })
+        db,
+    }
 }
 
 /// Insert a user, make it a member of `workspace` with `role`, and return
@@ -190,12 +187,9 @@ async fn create_nb(f: &Fixture, slug: &str, token: &str) -> String {
     json["id"].as_str().expect("id in body").to_string()
 }
 
-#[tokio::test]
-async fn create_and_get_owner_sees_seeded_cell() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+#[sqlx::test(migrations = "../../migrations")]
+async fn create_and_get_owner_sees_seeded_cell(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
     let (_uid, token) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
 
     // CREATE → 201 with exactly one seeded code cell.
@@ -234,12 +228,9 @@ async fn create_and_get_owner_sees_seeded_cell() {
     assert_eq!(json["is_owner"], serde_json::json!(true));
 }
 
-#[tokio::test]
-async fn non_owner_private_403_then_public_200() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+#[sqlx::test(migrations = "../../migrations")]
+async fn non_owner_private_403_then_public_200(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
     let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
     let (_other_uid, other_tok) = add_member(&f, f.ws_a, "other", "ws_editor").await;
     let id = create_nb(&f, &f.slug_a, &owner_tok).await;
@@ -288,12 +279,9 @@ async fn non_owner_private_403_then_public_200() {
     );
 }
 
-#[tokio::test]
-async fn platform_admin_has_no_override() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+#[sqlx::test(migrations = "../../migrations")]
+async fn platform_admin_has_no_override(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
     let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
     let (_admin_uid, admin_tok) = add_platform_admin(&f, "admin").await;
     let id = create_nb(&f, &f.slug_a, &owner_tok).await;
@@ -344,12 +332,9 @@ async fn platform_admin_has_no_override() {
     );
 }
 
-#[tokio::test]
-async fn cross_workspace_get_is_404() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+#[sqlx::test(migrations = "../../migrations")]
+async fn cross_workspace_get_is_404(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
     // Owner is a member of both A and B (so WsContext passes for the B path).
     let (owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
     f.members
@@ -377,12 +362,9 @@ async fn cross_workspace_get_is_404() {
     );
 }
 
-#[tokio::test]
-async fn non_owner_patch_and_delete_are_403() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+#[sqlx::test(migrations = "../../migrations")]
+async fn non_owner_patch_and_delete_are_403(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
     let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
     let (_other_uid, other_tok) = add_member(&f, f.ws_a, "other", "ws_editor").await;
     let id = create_nb(&f, &f.slug_a, &owner_tok).await;
@@ -418,12 +400,9 @@ async fn non_owner_patch_and_delete_are_403() {
     );
 }
 
-#[tokio::test]
-async fn cell_crud_happy_path_and_nested_idor() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+#[sqlx::test(migrations = "../../migrations")]
+async fn cell_crud_happy_path_and_nested_idor(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
     let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
     let nb_x = create_nb(&f, &f.slug_a, &owner_tok).await;
     let nb_y = create_nb(&f, &f.slug_a, &owner_tok).await;
@@ -595,12 +574,9 @@ async fn cell_crud_happy_path_and_nested_idor() {
     assert_eq!(json["cells"].as_array().unwrap().len(), 1);
 }
 
-#[tokio::test]
-async fn unknown_cell_type_is_400() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+#[sqlx::test(migrations = "../../migrations")]
+async fn unknown_cell_type_is_400(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
     let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
 
     // Unknown cell_type on add_cell → 400.
@@ -641,12 +617,9 @@ async fn list_nbs(f: &Fixture, slug: &str, token: &str, trashed: bool) -> serde_
     json
 }
 
-#[tokio::test]
-async fn trash_hides_and_restore_reappears() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+#[sqlx::test(migrations = "../../migrations")]
+async fn trash_hides_and_restore_reappears(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
     let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
     let id = create_nb(&f, &f.slug_a, &owner_tok).await;
 
@@ -701,12 +674,9 @@ async fn trash_hides_and_restore_reappears() {
     );
 }
 
-#[tokio::test]
-async fn non_owner_trash_is_403() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+#[sqlx::test(migrations = "../../migrations")]
+async fn non_owner_trash_is_403(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
     let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
     let (_other_uid, other_tok) = add_member(&f, f.ws_a, "other", "ws_editor").await;
     let id = create_nb(&f, &f.slug_a, &owner_tok).await;
@@ -729,12 +699,9 @@ async fn non_owner_trash_is_403() {
     );
 }
 
-#[tokio::test]
-async fn bookmark_is_per_user_and_allowed_on_public() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+#[sqlx::test(migrations = "../../migrations")]
+async fn bookmark_is_per_user_and_allowed_on_public(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
     let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
     let (_other_uid, other_tok) = add_member(&f, f.ws_a, "other", "ws_editor").await;
     let id = create_nb(&f, &f.slug_a, &owner_tok).await;
@@ -855,23 +822,15 @@ async fn create_folder(db: &Db, ws_id: WorkspaceId, entity_type: &str) -> Uuid {
     .expect("insert folder")
 }
 
-#[tokio::test]
-async fn set_folder_happy_path_and_guards() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
-    // We need a Db handle to seed folders; rebuild from DATABASE_URL.
-    let db = Db::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
-        .await
-        .unwrap();
-
+#[sqlx::test(migrations = "../../migrations")]
+async fn set_folder_happy_path_and_guards(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
     let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
     let id = create_nb(&f, &f.slug_a, &owner_tok).await;
     let uri = format!("/ws/{}/notebooks/{id}/folder", f.slug_a);
 
     // Happy path: a notebook folder in this workspace → 204, folder_id set.
-    let good = create_folder(&db, f.ws_a, "notebook").await;
+    let good = create_folder(&f.db, f.ws_a, "notebook").await;
     let resp = f
         .app
         .clone()
@@ -899,7 +858,7 @@ async fn set_folder_happy_path_and_guards() {
     );
 
     // Wrong entity_type (a dashboard folder in the same ws) → 404.
-    let wrong_type = create_folder(&db, f.ws_a, "dashboard").await;
+    let wrong_type = create_folder(&f.db, f.ws_a, "dashboard").await;
     let resp = f
         .app
         .clone()
@@ -918,7 +877,7 @@ async fn set_folder_happy_path_and_guards() {
     );
 
     // Folder belonging to a different workspace → 404.
-    let other_ws = create_folder(&db, f.ws_b, "notebook").await;
+    let other_ws = create_folder(&f.db, f.ws_b, "notebook").await;
     let resp = f
         .app
         .clone()
@@ -969,17 +928,11 @@ async fn seed_database_http(db: &Db, ws_id: WorkspaceId) -> Uuid {
     .expect("insert database for http test")
 }
 
-#[tokio::test]
-async fn get_settings_returns_engines_with_enabled_flags() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
-    let db = Db::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
-        .await
-        .unwrap();
+#[sqlx::test(migrations = "../../migrations")]
+async fn get_settings_returns_engines_with_enabled_flags(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
     let (_uid, token) = add_member(&f, f.ws_a, "viewer", "ws_viewer").await;
-    let db_id = seed_database_http(&db, f.ws_a).await;
+    let db_id = seed_database_http(&f.db, f.ws_a).await;
 
     // GET settings → 200, engine present with enabled=false.
     let resp = f
@@ -1002,17 +955,11 @@ async fn get_settings_returns_engines_with_enabled_flags() {
     let _ = db_id;
 }
 
-#[tokio::test]
-async fn put_settings_enables_and_get_reflects() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
-    let db = Db::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
-        .await
-        .unwrap();
+#[sqlx::test(migrations = "../../migrations")]
+async fn put_settings_enables_and_get_reflects(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
     let (_uid, token) = add_member(&f, f.ws_a, "admin", "ws_admin").await;
-    let db_id = seed_database_http(&db, f.ws_a).await;
+    let db_id = seed_database_http(&f.db, f.ws_a).await;
 
     // PUT → 200 with engines[0].enabled=true.
     let resp = f
@@ -1061,17 +1008,11 @@ async fn put_settings_enables_and_get_reflects() {
     assert_eq!(e["enabled"], serde_json::json!(true));
 }
 
-#[tokio::test]
-async fn put_settings_removes_engine_on_second_put() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
-    let db = Db::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
-        .await
-        .unwrap();
+#[sqlx::test(migrations = "../../migrations")]
+async fn put_settings_removes_engine_on_second_put(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
     let (_uid, token) = add_member(&f, f.ws_a, "admin2", "ws_admin").await;
-    let db_id = seed_database_http(&db, f.ws_a).await;
+    let db_id = seed_database_http(&f.db, f.ws_a).await;
 
     // Enable.
     f.app
@@ -1105,15 +1046,9 @@ async fn put_settings_removes_engine_on_second_put() {
     }
 }
 
-#[tokio::test]
-async fn put_settings_cross_workspace_engine_rejected() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
-    let db = Db::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
-        .await
-        .unwrap();
+#[sqlx::test(migrations = "../../migrations")]
+async fn put_settings_cross_workspace_engine_rejected(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
     let (uid, token) = add_member(&f, f.ws_a, "adminx", "ws_admin").await;
     // Also member of ws_b so WsContext works for both paths.
     f.members
@@ -1121,7 +1056,7 @@ async fn put_settings_cross_workspace_engine_rejected() {
         .await
         .expect("member of ws_b");
     // Create a database in ws_b.
-    let db_b = seed_database_http(&db, f.ws_b).await;
+    let db_b = seed_database_http(&f.db, f.ws_b).await;
 
     // Try to enable ws_b's database in ws_a → 400.
     let resp = f
@@ -1156,15 +1091,9 @@ async fn seed_warehouse_http(db: &Db, ws_id: WorkspaceId) -> Uuid {
     .expect("insert warehouse for http test")
 }
 
-#[tokio::test]
-async fn put_settings_cross_workspace_catalog_rejected() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
-    let db = Db::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
-        .await
-        .unwrap();
+#[sqlx::test(migrations = "../../migrations")]
+async fn put_settings_cross_workspace_catalog_rejected(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
     let (uid, token) = add_member(&f, f.ws_a, "adminc", "ws_admin").await;
     // Also a member of ws_b so WsContext passes — but the PUT targets ws_a.
     f.members
@@ -1173,8 +1102,8 @@ async fn put_settings_cross_workspace_catalog_rejected() {
         .expect("member of ws_b");
 
     // A VALID engine in ws_a, plus a FOREIGN catalog (warehouse) from ws_b.
-    let db_a = seed_database_http(&db, f.ws_a).await;
-    let wh_b = seed_warehouse_http(&db, f.ws_b).await;
+    let db_a = seed_database_http(&f.db, f.ws_a).await;
+    let wh_b = seed_warehouse_http(&f.db, f.ws_b).await;
 
     // PUT with valid engine_ids but a cross-tenant catalog_id → whole PUT 400.
     let resp = f
@@ -1225,12 +1154,9 @@ async fn put_settings_cross_workspace_catalog_rejected() {
     );
 }
 
-#[tokio::test]
-async fn put_settings_requires_manage_perm() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+#[sqlx::test(migrations = "../../migrations")]
+async fn put_settings_requires_manage_perm(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
     // ws_viewer role does NOT have workspace:manage_members.
     let (_uid, viewer_tok) = add_member(&f, f.ws_a, "viewer2", "ws_viewer").await;
 
@@ -1252,12 +1178,9 @@ async fn put_settings_requires_manage_perm() {
     );
 }
 
-#[tokio::test]
-async fn get_settings_allowed_for_notebook_read_member() {
-    let Some(f) = setup().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
+#[sqlx::test(migrations = "../../migrations")]
+async fn get_settings_allowed_for_notebook_read_member(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
     // ws_viewer has notebook:read (from role_permissions seed).
     let (_uid, viewer_tok) = add_member(&f, f.ws_a, "viewer3", "ws_viewer").await;
 
