@@ -501,11 +501,38 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         folders: egret_bi::folder::FolderRepo::new(db.clone()),
     });
 
+    // TODO(T7): replace StubProvisioner with the real lakekeeper-backed
+    // NamespaceProvisioner (wired through the catalog engine's NamespaceService).
+    // This stub always succeeds (treats every namespace as already-existing),
+    // which is safe in a dev environment where lakekeeper manages the namespace
+    // out-of-band; it will fail silently in production until T7 is merged.
+    struct StubProvisioner;
+    #[async_trait::async_trait]
+    impl egret_notebook::NamespaceProvisioner for StubProvisioner {
+        async fn ensure_namespace(
+            &self,
+            _warehouse_id: uuid::Uuid,
+            _namespace: &str,
+        ) -> Result<(), egret_notebook::error::NotebookApiError> {
+            Ok(())
+        }
+    }
+
+    let catalog_base_url = config
+        .catalog
+        .public_url
+        .clone()
+        .unwrap_or_else(|| "http://localhost:8080".into());
+
     let notebook = Some(egret_notebook::NotebookState {
         store: egret_notebook::NotebookStore::new(db.clone()),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
+        catalog: CatalogStore::new(db.clone()),
+        provisioner: std::sync::Arc::new(StubProvisioner),
+        users: UserRepo::new(db.clone()),
+        catalog_base_url,
     });
 
     let app = build_router(AppState {

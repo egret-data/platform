@@ -3,6 +3,7 @@ pub mod error;
 pub mod model;
 pub mod provisioning;
 pub mod routes;
+pub mod runtime;
 pub mod store;
 
 pub use provisioning::{provision_notebook_access, NamespaceProvisioner, Provisioned};
