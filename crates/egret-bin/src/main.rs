@@ -500,6 +500,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         folders: egret_bi::folder::FolderRepo::new(db.clone()),
     });
 
+    let notebook = Some(egret_notebook::NotebookState {
+        store: egret_notebook::NotebookStore::new(db.clone()),
+        sessions: sessions.clone(),
+        workspaces: WorkspaceRepo::new(db.clone()),
+        authz: Authorizer::new(db.clone()),
+    });
+
     let app = build_router(AppState {
         db: Some(db),
         auth: Some(auth),
@@ -511,6 +518,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         database,
         engine,
         bi,
+        notebook,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)

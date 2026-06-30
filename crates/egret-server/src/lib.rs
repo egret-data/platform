@@ -47,6 +47,8 @@ pub struct AppState {
     pub engine: Option<egret_engine::EngineState>,
     /// Present once the BI layer is wired (in `egret-bin`); `None` in unit tests.
     pub bi: Option<egret_bi::BiState>,
+    /// Present once the notebook layer is wired (in `egret-bin`); `None` in unit tests.
+    pub notebook: Option<egret_notebook::NotebookState>,
 }
 
 impl AppState {
@@ -63,6 +65,7 @@ impl AppState {
             database: None,
             engine: None,
             bi: None,
+            notebook: None,
         }
     }
 }
@@ -162,6 +165,14 @@ pub fn build_router(state: AppState) -> Router {
             .nest("/api", bi_routes)
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
             .with_state(bi);
+        router = router.merge(group);
+    }
+
+    if let Some(notebook) = state.notebook.clone() {
+        let group = Router::new()
+            .nest("/api", egret_notebook::notebook_router())
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(notebook);
         router = router.merge(group);
     }
 

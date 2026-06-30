@@ -1537,6 +1537,10 @@ fn kind_perms(kind: &str) -> Option<(&'static str, &'static str, &'static str)> 
         "charts" => Some(("chart", CH_READ, CH_MANAGE)),
         "dashboards" => Some(("dashboard", DB_READ, DB_MANAGE)),
         "datasets" => Some(("dataset", DS_READ, DS_MANAGE)),
+        // Notebooks live in egret-notebook but share the generic folder router;
+        // the perms already exist in the DB (migration 0037). Literal strings so
+        // we don't take a cross-crate dependency.
+        "notebooks" => Some(("notebook", "notebook:read", "notebook:write")),
         _ => None,
     }
 }
