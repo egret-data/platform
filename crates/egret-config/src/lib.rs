@@ -25,6 +25,8 @@ pub struct OidcConfig {
     pub scopes: Vec<String>,
     pub groups_claim: String,
     pub post_login_redirect: String,
+    /// Audience the catalog requires in an engine JWT's `aud` claim.
+    pub catalog_audience: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,6 +193,7 @@ impl Default for Config {
                 ],
                 groups_claim: "groups".into(),
                 post_login_redirect: "/".into(),
+                catalog_audience: "egret-catalog".into(),
             },
             security: SecurityConfig {
                 secret_key: String::new(),

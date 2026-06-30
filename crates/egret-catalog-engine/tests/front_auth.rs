@@ -175,7 +175,7 @@ async fn front_auth_enforces_per_workspace_ownership() {
         .expect("mint catalog token for workspace A");
 
     // --- The LIVE mounted router (front-auth + lakekeeper), same as prod -----
-    let app = mount_catalog_engine(engine_state.clone(), store.clone());
+    let app = mount_catalog_engine(engine_state.clone(), store.clone(), None);
 
     // Helper to fire a request and collect (status, json).
     let prefix_a = wh_a.to_string();
@@ -377,7 +377,7 @@ async fn front_auth_enforces_per_token_permissions() {
         .await
         .expect("mint read-write token");
 
-    let app = mount_catalog_engine(engine_state.clone(), store.clone());
+    let app = mount_catalog_engine(engine_state.clone(), store.clone(), None);
 
     // === A. Read-only token on A's prefix — GET namespaces → 200 ===========
     let resp = app
@@ -654,7 +654,7 @@ async fn front_auth_full_scope_token_is_unrestricted() {
         .await
         .expect("mint full-scope rw token");
 
-    let app = mount_catalog_engine(engine_state.clone(), store.clone());
+    let app = mount_catalog_engine(engine_state.clone(), store.clone(), None);
 
     // marts: create ns, create + load table.
     assert_eq!(
@@ -753,7 +753,7 @@ async fn front_auth_namespace_scope_is_enforced() {
         seed_workspace_with_warehouse(&db, &store, &engine_state, &storage_cfg, "ce4ns").await;
     let prefix = wh_a.to_string();
 
-    let app = mount_catalog_engine(engine_state.clone(), store.clone());
+    let app = mount_catalog_engine(engine_state.clone(), store.clone(), None);
 
     // A full-scope token pre-creates BOTH namespaces (so the marts-scoped token's
     // marketing denial is the authorizer refusing, not lakekeeper 404ing).

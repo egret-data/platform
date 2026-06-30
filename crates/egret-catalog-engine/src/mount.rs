@@ -237,11 +237,16 @@ pub fn catalog_engine_router(state: ApiContext<EngineState>) -> axum::Router {
 ///   (migrated + bootstrapped).
 /// * `store` — egret-side [`egret_catalog::service::CatalogStore`] resolving
 ///   `token → workspace → warehouse`.
+/// * `catalog_jwt` — optional OIDC-JWT authenticator (F2-P2) for the hybrid
+///   JWT-or-opaque path. `None` disables the JWT path (opaque tokens only). The
+///   verifier is built IdP-aware in `egret-bin` and passed in, so this module
+///   stays IdP-agnostic.
 pub fn mount_catalog_engine(
     engine_state: ApiContext<EngineState>,
     store: egret_catalog::service::CatalogStore,
+    catalog_jwt: Option<std::sync::Arc<crate::jwt_auth::CatalogJwtAuth>>,
 ) -> axum::Router {
-    let front = crate::front_auth::FrontAuthState::new(store);
+    let front = crate::front_auth::FrontAuthState::new(store, catalog_jwt);
     catalog_engine_router(engine_state).layer(axum::middleware::from_fn_with_state(
         front,
         crate::front_auth::front_auth,

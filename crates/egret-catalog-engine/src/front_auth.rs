@@ -82,13 +82,21 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct FrontAuthState {
     pub store: Arc<CatalogStore>,
+    /// Optional OIDC-JWT authenticator (F2-P2). When present, a bearer token that
+    /// *looks like* a JWT (three dot-separated segments) is verified via this
+    /// authenticator instead of the opaque `catalog_tokens` store. `None` when
+    /// OIDC is disabled (or its verifier failed to initialise at boot): JWTs are
+    /// then rejected and only opaque tokens are accepted.
+    pub jwt: Option<Arc<crate::jwt_auth::CatalogJwtAuth>>,
 }
 
 impl FrontAuthState {
-    /// Build the front-auth state over an egret-side [`CatalogStore`].
-    pub fn new(store: CatalogStore) -> Self {
+    /// Build the front-auth state over an egret-side [`CatalogStore`], optionally
+    /// with an OIDC-JWT authenticator for the hybrid (JWT-or-opaque) path.
+    pub fn new(store: CatalogStore, jwt: Option<Arc<crate::jwt_auth::CatalogJwtAuth>>) -> Self {
         Self {
             store: Arc::new(store),
+            jwt,
         }
     }
 }
@@ -218,13 +226,41 @@ pub async fn front_auth(
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let auth = state
-        .store
-        .authenticate_token(token)
-        .await
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
-
     let path = req.uri().path().to_owned();
+
+    // Hybrid authn: a bearer with three dot-separated segments is a JWT; an
+    // opaque `catalog_token` is random hex (no dots). JWTs go through the OIDC
+    // authenticator (when configured), opaque tokens through the token store.
+    // Either path yields the SAME `TokenAuth` shape, so everything below is
+    // identical regardless of which credential was presented.
+    let looks_like_jwt = token.split('.').count() == 3;
+    let auth = if looks_like_jwt {
+        match &state.jwt {
+            Some(j) => {
+                let prefix = first_path_segment(&path).ok_or(StatusCode::UNAUTHORIZED)?;
+                if prefix == "config" {
+                    // `/config` carries no warehouse prefix to resolve the JWT's
+                    // grant against; opaque tokens handle discovery.
+                    return Err(StatusCode::UNAUTHORIZED);
+                }
+                let wh = Uuid::parse_str(prefix).map_err(|_| StatusCode::UNAUTHORIZED)?;
+                j.authenticate(token, wh).await.map_err(|e| match e {
+                    crate::jwt_auth::JwtAuthError::Unauthenticated => StatusCode::UNAUTHORIZED,
+                    crate::jwt_auth::JwtAuthError::Forbidden => StatusCode::FORBIDDEN,
+                    crate::jwt_auth::JwtAuthError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+                })?
+            }
+            // A JWT was presented but OIDC is not configured: reject it (opaque
+            // tokens still work; we do not silently fall through to the store).
+            None => return Err(StatusCode::UNAUTHORIZED),
+        }
+    } else {
+        state
+            .store
+            .authenticate_token(token)
+            .await
+            .map_err(|_| StatusCode::UNAUTHORIZED)?
+    };
 
     // --- AUTHZ (ownership): enforce {prefix} (warehouse UUID) belongs to -------
     // --- the caller's workspace, unless this is the prefix-less /config call. --
