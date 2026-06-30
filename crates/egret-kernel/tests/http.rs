@@ -52,10 +52,32 @@ impl NamespaceProvisioner for FakeProvisioner {
     }
 }
 
+// ── Stub EngineTokenMinter ────────────────────────────────────────────────────
+
+/// Returns a canned engine token regardless of user.
+struct StubMinter;
+
+#[async_trait::async_trait]
+impl egret_notebook::engine_token::EngineTokenMinter for StubMinter {
+    async fn mint(
+        &self,
+        _u: uuid::Uuid,
+    ) -> Result<egret_notebook::engine_token::EngineToken, egret_notebook::engine_token::BrokerError>
+    {
+        Ok(egret_notebook::engine_token::EngineToken {
+            access_token: "stub.jwt".into(),
+            expires_at: chrono::DateTime::<chrono::Utc>::from_timestamp(4102444800, 0).unwrap(),
+        })
+    }
+}
+
 // ── Fixture ──────────────────────────────────────────────────────────────────
 
 struct Fixture {
     app: axum::Router,
+    /// The constructed `KernelState`, so tests can assemble alternative routers
+    /// (e.g. the production-shaped CSRF split) from the same wiring.
+    state: KernelState,
     users: UserRepo,
     members: MemberRepo,
     sessions: SessionService,
@@ -120,9 +142,10 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         provisioner: Arc::new(FakeProvisioner),
         users: UserRepo::new(db.clone()),
         catalog_base_url: "http://localhost:8181".into(),
+        engine_minter: Arc::new(StubMinter),
     };
 
-    let app = kernel_router().with_state(KernelState {
+    let state = KernelState {
         manager,
         notebook: notebook_state,
         sessions: sessions.clone(),
@@ -132,10 +155,15 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         notebook_kernels: egret_kernel::NotebookKernelStore::new(db.clone()),
         proxy: Arc::new(egret_kernel::BackendWsProxy),
         query_runner: Arc::new(egret_kernel::query::FakeQueryRunner::default()),
-    });
+        engine_minter: Arc::new(StubMinter),
+    };
+    let app = kernel_router()
+        .merge(egret_kernel::kernel_callback_router())
+        .with_state(state.clone());
 
     Fixture {
         app,
+        state,
         users,
         members: MemberRepo::new(db.clone()),
         sessions,
@@ -859,6 +887,110 @@ async fn kernel_query_rejects_bad_token(pool: sqlx::PgPool) {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "bad token → 401");
+}
+
+// ── notebook-runtime token refresh tests ──────────────────────────────────────
+
+/// Valid kernel token → 200 with the minted engine token body.
+#[sqlx::test(migrations = "../../migrations")]
+async fn notebook_runtime_token_returns_minted_token(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    let token = mint_kernel_token(&f.db, f.ws, f.owner).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(bearer_post(
+            &format!("/ws/{}/notebook-runtime/token", f.slug),
+            &token,
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "valid token → 200; body={json}");
+    assert_eq!(
+        json["access_token"].as_str(),
+        Some("stub.jwt"),
+        "must return the minted access_token; body={json}"
+    );
+}
+
+/// No Authorization header → 401.
+#[sqlx::test(migrations = "../../migrations")]
+async fn notebook_runtime_token_requires_auth(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+
+    let req = HttpRequest::builder()
+        .method("POST")
+        .uri(format!("/ws/{}/notebook-runtime/token", f.slug))
+        .header("Content-Type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap();
+    let resp = f.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "no auth header → 401"
+    );
+}
+
+/// CSRF split regression guard.
+///
+/// Assembles the router EXACTLY as egret-server does: `kernel_router()` behind
+/// `csrf_layer`, `kernel_callback_router()` CSRF-exempt. Then proves:
+///   * the bearer callback (`notebook-runtime/token`) is reachable with NO CSRF
+///     cookie → 200 (the kernel subprocess has no browser session/CSRF cookie);
+///   * a session lifecycle route under the CSRF group is still 403'd without a
+///     CSRF cookie — documenting why the two groups must stay split.
+/// Fails if anyone re-nests the callback routes under `csrf_layer`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn callback_routes_are_csrf_exempt_but_session_routes_are_not(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    let token = mint_kernel_token(&f.db, f.ws, f.owner).await;
+
+    // Production-shaped mount: session group behind CSRF, callback group exempt.
+    let app = axum::Router::new()
+        .merge(
+            axum::Router::new()
+                .nest("/api", kernel_router())
+                .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+                .with_state(f.state.clone()),
+        )
+        .merge(
+            axum::Router::new()
+                .nest("/api", egret_kernel::kernel_callback_router())
+                .with_state(f.state.clone()),
+        );
+
+    // Bearer callback, NO csrf cookie/header → reaches the handler → 200 (NOT 403).
+    let resp = app
+        .clone()
+        .oneshot(bearer_post(
+            &format!("/api/ws/{}/notebook-runtime/token", f.slug),
+            &token,
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "bearer callback must be reachable without a CSRF cookie"
+    );
+
+    // Session lifecycle route, NO csrf cookie → 403 from csrf_layer (the split).
+    let session_req = HttpRequest::builder()
+        .method("POST")
+        .uri(format!("/api/ws/{}/kernel", f.slug))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(session_req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "session route without a CSRF cookie must be 403 (CSRF-protected group)"
+    );
 }
 
 /// Engine present but NOT enabled for notebooks → 403.

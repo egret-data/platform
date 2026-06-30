@@ -37,6 +37,14 @@ pub struct NotebookRuntime {
     pub engines: Vec<EngineOption>,
     /// Workspace catalogs (warehouses) enabled for notebooks.
     pub catalogs: Vec<CatalogOption>,
+    /// Short-lived per-user engine JWT the kernel presents to query engines.
+    /// `None` when the caller has no stored refresh token (e.g. password/local
+    /// users or OIDC logins without an offline token) — minting is best-effort
+    /// since no P1 engine consumes this yet.
+    pub engine_jwt: Option<String>,
+    /// Expiry of `engine_jwt` (RFC3339); kernels re-mint before this time.
+    /// `None` whenever `engine_jwt` is `None`.
+    pub engine_jwt_expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Build the [`NotebookRuntime`] manifest for `(ws, user_id)` without performing
@@ -104,6 +112,18 @@ pub async fn build_notebook_runtime(
         .filter(|c| c.enabled)
         .collect();
 
+    // 5b. Best-effort mint of a short-lived per-user engine JWT for the kernel.
+    // Users without a stored refresh token (password/local logins, OIDC logins
+    // without an offline token) cannot mint one; that's not an error here since
+    // no P1 engine consumes this JWT yet — leave the field empty in that case.
+    let (engine_jwt, engine_jwt_expires_at) = match st.engine_minter.mint(user_id.0).await {
+        Ok(tok) => (Some(tok.access_token), Some(tok.expires_at)),
+        Err(e) => {
+            tracing::warn!("notebook engine token mint skipped: {e}");
+            (None, None)
+        }
+    };
+
     // 6. Build and return the manifest.
     Ok(NotebookRuntime {
         username,
@@ -115,6 +135,8 @@ pub async fn build_notebook_runtime(
         },
         engines,
         catalogs,
+        engine_jwt,
+        engine_jwt_expires_at,
     })
 }
 

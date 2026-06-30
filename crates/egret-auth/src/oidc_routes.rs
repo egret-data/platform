@@ -27,6 +27,8 @@ pub struct OidcRoutesState {
     pub sessions: SessionService,
     pub config: Config,
     pub cookie_key: Key,
+    pub secrets: egret_secrets::SecretStore,
+    pub refresh_repo: crate::oidc_refresh::OidcRefreshRepo,
 }
 
 impl FromRef<OidcRoutesState> for Key {
@@ -82,6 +84,20 @@ pub(crate) fn login_response(
     (private_jar, plain_jar, Redirect::to(redirect)).into_response()
 }
 
+/// The 500 response for a refresh-token persistence failure. Clears the state
+/// cookie and matches the error style used by the other arms in `oidc_callback`.
+/// The underlying error is logged via `tracing` at the callsite (never the token).
+fn persist_failed(jar: PrivateCookieJar) -> Response {
+    (
+        jar.remove(clear_state_cookie()),
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "refresh token persist failed",
+        ),
+    )
+        .into_response()
+}
+
 async fn oidc_callback(
     State(st): State<OidcRoutesState>,
     jar: PrivateCookieJar,
@@ -109,7 +125,7 @@ async fn oidc_callback(
             .into_response();
     }
 
-    let claims = match st
+    let login = match st
         .oidc
         .finish(&q.code, &state.pkce_verifier, &state.nonce)
         .await
@@ -123,7 +139,7 @@ async fn oidc_callback(
                 .into_response()
         }
     };
-    let user_id = match provision_and_sync(&st.users, &st.groups, &claims).await {
+    let user_id = match provision_and_sync(&st.users, &st.groups, &login.claims).await {
         Ok(id) => id,
         Err(egret_core::Error::Conflict(_)) => {
             return (
@@ -153,6 +169,41 @@ async fn oidc_callback(
                 .into_response()
         }
     };
+
+    // Persist the refresh token (encrypted) for the engine-token broker. Only the
+    // IdP-issued case (e.g. `offline_access` scope) carries one; otherwise skip.
+    // Reuse the existing secret row in place on re-login so we don't orphan rows.
+    if let Some(rt) = login.refresh_token.as_deref() {
+        // A transient DB error here must NOT be treated as "no existing row" —
+        // that would `put` a new secret and orphan the prior one. Propagate it.
+        let existing = match st.refresh_repo.get(user_id.0).await {
+            Ok(opt) => opt,
+            Err(e) => {
+                tracing::error!("oidc refresh persist (get): {e}");
+                return persist_failed(jar);
+            }
+        };
+        let secret_id = match existing {
+            Some(old_id) => match st.secrets.update(old_id, rt).await {
+                Ok(()) => old_id,
+                Err(e) => {
+                    tracing::error!("oidc refresh persist (update): {e}");
+                    return persist_failed(jar);
+                }
+            },
+            None => match st.secrets.put("oidc_refresh", rt).await {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::error!("oidc refresh persist (put): {e}");
+                    return persist_failed(jar);
+                }
+            },
+        };
+        if let Err(e) = st.refresh_repo.set(user_id.0, secret_id).await {
+            tracing::error!("oidc refresh persist (set): {e}");
+            return persist_failed(jar);
+        }
+    }
 
     let secure = st.config.session.secure;
     let max_age = st.config.session.absolute_ttl_hours as i64 * 3600;

@@ -206,10 +206,11 @@ async fn full_auth_code_flow_yields_claims() {
     assert_eq!(state, start.state, "state echoed back");
 
     // 3. finish: exchange code (PKCE) + validate id_token (nonce).
-    let claims = svc
+    let login = svc
         .finish(&code, &start.pkce_verifier, &start.nonce)
         .await
         .expect("finish");
+    let claims = login.claims;
     assert_eq!(claims.email, "tester@egret.local");
     assert!(
         claims.groups.iter().any(|g| g == "data-team"),

@@ -180,11 +180,19 @@ pub fn build_router(state: AppState) -> Router {
     }
 
     if let Some(kernel) = state.kernel.clone() {
-        let group = Router::new()
+        // Session-cookie kernel lifecycle/channels routes: CSRF-protected.
+        let session_group = Router::new()
             .nest("/api", egret_kernel::kernel_router())
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(kernel.clone());
+        router = router.merge(session_group);
+        // Kernel-token bearer callbacks (invoked by the kernel subprocess, which
+        // has no browser session/CSRF cookie): CSRF-exempt, like /catalog/v1 and
+        // the Ranger /service routes. Auth is the EGRET_KERNEL_TOKEN bearer.
+        let callback_group = Router::new()
+            .nest("/api", egret_kernel::kernel_callback_router())
             .with_state(kernel);
-        router = router.merge(group);
+        router = router.merge(callback_group);
     }
 
     router.with_state(state)

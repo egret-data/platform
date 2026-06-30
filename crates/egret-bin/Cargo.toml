@@ -4,6 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "egret_bin"
+path = "src/lib.rs"
+
 [[bin]]
 name = "egret"
 path = "src/main.rs"
@@ -43,4 +47,6 @@ chrono.workspace = true
 sqlx.workspace = true
 base64.workspace = true
 uuid.workspace = true
+reqwest.workspace = true
+serde.workspace = true
 axum-extra = { version = "0.10", features = ["cookie", "cookie-private"] }
