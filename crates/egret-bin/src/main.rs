@@ -269,6 +269,65 @@ fn fmt_scope(scope: &[egret_catalog::service::tokens::Grant]) -> String {
         .join("; ")
 }
 
+/// Engine-backed query runner wired into `KernelState`.
+///
+/// Resolves the target database + its secret from the registry, builds the
+/// appropriate connector (Trino / StarRocks), impersonates the caller via
+/// `session_user`, and executes the SQL with a 60-second deadline.
+struct EngineQueryRunner {
+    databases: egret_database::DatabaseRepo,
+    factory: std::sync::Arc<dyn egret_engine::connector::ConnectorFactory>,
+}
+
+#[async_trait::async_trait]
+impl egret_kernel::query::NotebookQueryRunner for EngineQueryRunner {
+    async fn run(
+        &self,
+        database_id: uuid::Uuid,
+        session_user: String,
+        sql: String,
+        max_rows: usize,
+    ) -> Result<egret_kernel::query::QueryRows, egret_kernel::query::QueryRunError> {
+        use egret_kernel::query::{QueryColumn, QueryRows, QueryRunError};
+        let db = self
+            .databases
+            .get(database_id)
+            .await
+            .map_err(|e| QueryRunError::NotFound(e.to_string()))?;
+        let secret = self
+            .databases
+            .open_secret(database_id)
+            .await
+            .map_err(|e| QueryRunError::Engine(e.to_string()))?;
+        let connector = self
+            .factory
+            .build(&db, secret, Some(session_user))
+            .await
+            .map_err(|e| QueryRunError::Engine(e.to_string()))?;
+        let limits = egret_engine::model::Limits {
+            max_rows,
+            timeout: std::time::Duration::from_secs(60),
+        };
+        let fut = connector.execute(&sql, &limits, tokio_util::sync::CancellationToken::new());
+        let result = tokio::time::timeout(limits.timeout, fut)
+            .await
+            .map_err(|_| QueryRunError::Engine("query timed out".into()))?
+            .map_err(|e| QueryRunError::Engine(e.to_string()))?;
+        Ok(QueryRows {
+            columns: result
+                .columns
+                .into_iter()
+                .map(|c| QueryColumn {
+                    name: c.name,
+                    ty: c.ty,
+                })
+                .collect(),
+            rows: result.rows,
+            truncated: result.truncated,
+        })
+    }
+}
+
 async fn serve(config: Config) -> anyhow::Result<()> {
     let db = Db::connect(&config.database.url, config.database.max_connections)
         .await
@@ -598,27 +657,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     };
     let notebook = Some(notebook_state.clone());
 
-    // Placeholder query runner for `POST /kernel/query`. The engine-backed
-    // runner (egret-engine + egret-database, impersonating via `X-Trino-User`)
-    // is wired in a later task; until then any query reports the engine as
-    // unavailable so the endpoint fails closed rather than panicking.
-    struct UnwiredQueryRunner;
-
-    #[async_trait::async_trait]
-    impl egret_kernel::NotebookQueryRunner for UnwiredQueryRunner {
-        async fn run(
-            &self,
-            _database_id: uuid::Uuid,
-            _session_user: String,
-            _sql: String,
-            _max_rows: usize,
-        ) -> Result<egret_kernel::QueryRows, egret_kernel::QueryRunError> {
-            Err(egret_kernel::QueryRunError::Engine(
-                "kernel query engine not yet wired".into(),
-            ))
-        }
-    }
-
     // ── Kernel lifecycle wiring (D1b T8) ────────────────────────────────────────
     // Startup sweep: subprocess kernels from a prior run are gone — clear stale rows.
     sqlx::query("DELETE FROM kernels")
@@ -674,9 +712,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         api_url,
         notebook_kernels: egret_kernel::NotebookKernelStore::new(db.clone()),
         proxy: std::sync::Arc::new(egret_kernel::BackendWsProxy),
-        // The concrete engine-backed runner is wired in a later task; until then
-        // `POST /kernel/query` reports the engine as unavailable.
-        query_runner: std::sync::Arc::new(UnwiredQueryRunner),
+        query_runner: std::sync::Arc::new(EngineQueryRunner {
+            databases: databases.clone(),
+            factory: std::sync::Arc::new(egret_engine::connector::DefaultConnectorFactory),
+        }),
     });
     // ── end kernel wiring ───────────────────────────────────────────────────────
 
