@@ -77,7 +77,11 @@ where
                         if gw_tx.send(out).await.is_err() { break; }
                     }
                 }
-                _ => break,
+                _ => {
+                    // client gone → tell the gateway, then stop
+                    let _ = gw_tx.send(TgMessage::Close(None)).await;
+                    break;
+                }
             },
             g = gw_rx.next() => match g {
                 Some(Ok(msg)) => {
@@ -86,7 +90,11 @@ where
                         if client_tx.send(out).await.is_err() { break; }
                     }
                 }
-                _ => break,
+                _ => {
+                    // gateway gone → tell the client, then stop
+                    let _ = client_tx.send(AxMessage::Close(None)).await;
+                    break;
+                }
             },
         }
     }
@@ -102,7 +110,15 @@ fn ax_to_tung(m: AxMessage) -> Option<TgMessage> {
         A::Binary(b) => TgMessage::Binary(b.to_vec().into()),
         A::Ping(b) => TgMessage::Ping(b.to_vec().into()),
         A::Pong(b) => TgMessage::Pong(b.to_vec().into()),
-        A::Close(_) => TgMessage::Close(None),
+        A::Close(Some(cf)) => {
+            use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+            use tokio_tungstenite::tungstenite::protocol::CloseFrame as TgClose;
+            TgMessage::Close(Some(TgClose {
+                code: CloseCode::from(cf.code),
+                reason: cf.reason.as_str().to_owned().into(),
+            }))
+        }
+        A::Close(None) => TgMessage::Close(None),
     })
 }
 
@@ -115,7 +131,14 @@ fn tung_to_ax(m: TgMessage) -> Option<AxMessage> {
         T::Binary(b) => A::Binary(b.to_vec().into()),
         T::Ping(b) => A::Ping(b.to_vec().into()),
         T::Pong(b) => A::Pong(b.to_vec().into()),
-        T::Close(_) => A::Close(None),
+        T::Close(Some(cf)) => {
+            use axum::extract::ws::CloseFrame as AxClose;
+            A::Close(Some(AxClose {
+                code: u16::from(cf.code),
+                reason: cf.reason.as_str().to_owned().into(),
+            }))
+        }
+        T::Close(None) => A::Close(None),
         T::Frame(_) => return None,
     })
 }
@@ -196,8 +219,14 @@ mod tests {
             count.load(Ordering::SeqCst)
         );
 
-        // Closing the client side ends the proxy cleanly.
+        // Closing the client side ends the proxy cleanly: dropping the inbound
+        // sender makes client_rx yield None, so the proxy must forward a Close
+        // to the gateway and finish within the timeout.
         drop(client_in_tx);
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), h).await;
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(2), h).await;
+        assert!(
+            joined.is_ok(),
+            "proxy task did not finish after client close"
+        );
     }
 }
