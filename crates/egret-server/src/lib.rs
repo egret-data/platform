@@ -49,6 +49,8 @@ pub struct AppState {
     pub bi: Option<egret_bi::BiState>,
     /// Present once the notebook layer is wired (in `egret-bin`); `None` in unit tests.
     pub notebook: Option<egret_notebook::NotebookState>,
+    /// Present once the kernel layer is wired (in `egret-bin`); `None` in unit tests.
+    pub kernel: Option<egret_kernel::KernelState>,
 }
 
 impl AppState {
@@ -66,6 +68,7 @@ impl AppState {
             engine: None,
             bi: None,
             notebook: None,
+            kernel: None,
         }
     }
 }
@@ -173,6 +176,14 @@ pub fn build_router(state: AppState) -> Router {
             .nest("/api", egret_notebook::notebook_router())
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
             .with_state(notebook);
+        router = router.merge(group);
+    }
+
+    if let Some(kernel) = state.kernel.clone() {
+        let group = Router::new()
+            .nest("/api", egret_kernel::kernel_router())
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(kernel);
         router = router.merge(group);
     }
 

@@ -586,7 +586,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| "http://localhost:8080".into());
 
-    let notebook = Some(egret_notebook::NotebookState {
+    let notebook_state = egret_notebook::NotebookState {
         store: egret_notebook::NotebookStore::new(db.clone()),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
@@ -594,8 +594,65 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         catalog: CatalogStore::new(db.clone()),
         provisioner,
         users: UserRepo::new(db.clone()),
-        catalog_base_url,
+        catalog_base_url: catalog_base_url.clone(),
+    };
+    let notebook = Some(notebook_state.clone());
+
+    // ── Kernel lifecycle wiring (D1b T8) ────────────────────────────────────────
+    // Startup sweep: subprocess kernels from a prior run are gone — clear stale rows.
+    sqlx::query("DELETE FROM kernels")
+        .execute(&db.pool)
+        .await
+        .ok();
+
+    let kernel_registry = egret_kernel::KernelRegistry::new(db.clone());
+    let kernel_launcher: std::sync::Arc<dyn egret_kernel::KernelLauncher> =
+        std::sync::Arc::new(egret_kernel::SubprocessLauncher::default());
+    let kernel_idle = std::time::Duration::from_secs(30 * 60); // 30 min idle timeout
+
+    let kernel_manager = std::sync::Arc::new(egret_kernel::KernelManager::new(
+        kernel_registry.clone(),
+        kernel_launcher.clone(),
+        kernel_idle,
+    ));
+
+    // Spawn the idle reaper (sweeps every 60 s; cancelled via the token on SIGINT).
+    let reaper_cancel = tokio_util::sync::CancellationToken::new();
+    egret_kernel::spawn_reaper(
+        kernel_registry,
+        kernel_launcher,
+        kernel_idle,
+        std::time::Duration::from_secs(60),
+        reaper_cancel.clone(),
+    );
+    {
+        let reaper_cancel = reaper_cancel.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!("SIGINT received, stopping kernel reaper");
+            reaper_cancel.cancel();
+        });
+    }
+
+    // api_url: the server's own externally-reachable base URL (for EGRET_API_URL
+    // forwarded to kernel processes as a callback base). Defaults to
+    // http://127.0.0.1:{port} from the configured listen address when catalog
+    // public_url is not set.
+    let api_url = config
+        .catalog
+        .public_url
+        .clone()
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}", config.server.port));
+
+    let kernel = Some(egret_kernel::KernelState {
+        manager: kernel_manager,
+        notebook: notebook_state,
+        sessions: sessions.clone(),
+        workspaces: WorkspaceRepo::new(db.clone()),
+        authz: Authorizer::new(db.clone()),
+        api_url,
     });
+    // ── end kernel wiring ───────────────────────────────────────────────────────
 
     let app = build_router(AppState {
         db: Some(db),
@@ -609,6 +666,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         engine,
         bi,
         notebook,
+        kernel,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)
