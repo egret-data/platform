@@ -80,6 +80,10 @@ impl FromRef<KernelState> for Authorizer {
 
 // ── Router ────────────────────────────────────────────────────────────────────
 
+/// Browser/session-cookie routes: the kernel lifecycle and notebook channels.
+///
+/// These are authenticated by the user's session cookie and MUST be mounted
+/// behind the CSRF layer in egret-server (they are mutating, browser-driven).
 pub fn kernel_router() -> Router<KernelState> {
     Router::new()
         .route(
@@ -94,6 +98,16 @@ pub fn kernel_router() -> Router<KernelState> {
             "/ws/{workspace}/notebooks/{notebook}/kernel/channels",
             get(channels),
         )
+}
+
+/// Kernel-token bearer callback routes invoked by the kernel SUBPROCESS, not a
+/// browser. They authenticate via `Authorization: Bearer <EGRET_KERNEL_TOKEN>`
+/// (the `KernelIdentity` extractor) and have NO browser session / CSRF cookie,
+/// so in egret-server they MUST be mounted CSRF-exempt (like `/catalog/v1` and
+/// the Ranger `/service` routes). Mounting these behind `csrf_layer` would 403
+/// every request before `KernelIdentity` runs.
+pub fn kernel_callback_router() -> Router<KernelState> {
+    Router::new()
         .route("/kernel/query", post(kernel_query))
         .route(
             "/ws/{workspace}/notebook-runtime/token",

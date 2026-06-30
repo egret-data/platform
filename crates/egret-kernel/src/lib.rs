@@ -21,5 +21,5 @@ pub use proxy::{BackendWsProxy, KernelProxy};
 pub use query::{NotebookQueryRunner, QueryColumn, QueryRows, QueryRunError};
 pub use reaper::{reap_once, spawn_reaper};
 pub use registry::KernelRegistry;
-pub use routes::{kernel_router, KernelState};
+pub use routes::{kernel_callback_router, kernel_router, KernelState};
 pub use subprocess::SubprocessLauncher;
