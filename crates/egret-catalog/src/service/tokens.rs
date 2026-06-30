@@ -353,6 +353,30 @@ impl CatalogStore {
         Ok(r.rows_affected() == 1)
     }
 
+    /// Revoke every non-revoked token for `workspace_id` carrying `label`
+    /// (sets `revoked_at = now()`), returning the number of rows revoked.
+    ///
+    /// Used by the per-user notebook-runtime provisioning to drop any previously
+    /// minted token before minting a fresh one, so at most one token with a given
+    /// deterministic label (e.g. `notebook-runtime:{user_id}`) is ever active in a
+    /// workspace. The `workspace_id` guard keeps the revoke workspace-scoped.
+    pub async fn revoke_tokens_by_label(
+        &self,
+        workspace_id: Uuid,
+        label: &str,
+    ) -> Result<u64, CatalogError> {
+        let r = sqlx::query(
+            "UPDATE catalog_tokens SET revoked_at = now() \
+             WHERE workspace_id = $1 AND label = $2 AND revoked_at IS NULL",
+        )
+        .bind(workspace_id)
+        .bind(label)
+        .execute(self.pool())
+        .await
+        .map_err(CatalogError::from)?;
+        Ok(r.rows_affected())
+    }
+
     /// List all non-revoked tokens for a workspace (hashes excluded).
     pub async fn list_tokens(&self, workspace_id: Uuid) -> Result<Vec<CatalogToken>, CatalogError> {
         let rows: Vec<TokenRow> = sqlx::query_as::<_, TokenRow>(

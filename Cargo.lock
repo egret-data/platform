@@ -2608,9 +2608,11 @@ name = "egret-notebook"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "chrono",
  "egret-auth",
+ "egret-catalog",
  "egret-core",
  "egret-metastore",
  "egret-workspace",
