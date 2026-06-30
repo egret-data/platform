@@ -598,6 +598,27 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     };
     let notebook = Some(notebook_state.clone());
 
+    // Placeholder query runner for `POST /kernel/query`. The engine-backed
+    // runner (egret-engine + egret-database, impersonating via `X-Trino-User`)
+    // is wired in a later task; until then any query reports the engine as
+    // unavailable so the endpoint fails closed rather than panicking.
+    struct UnwiredQueryRunner;
+
+    #[async_trait::async_trait]
+    impl egret_kernel::NotebookQueryRunner for UnwiredQueryRunner {
+        async fn run(
+            &self,
+            _database_id: uuid::Uuid,
+            _session_user: String,
+            _sql: String,
+            _max_rows: usize,
+        ) -> Result<egret_kernel::QueryRows, egret_kernel::QueryRunError> {
+            Err(egret_kernel::QueryRunError::Engine(
+                "kernel query engine not yet wired".into(),
+            ))
+        }
+    }
+
     // ── Kernel lifecycle wiring (D1b T8) ────────────────────────────────────────
     // Startup sweep: subprocess kernels from a prior run are gone — clear stale rows.
     sqlx::query("DELETE FROM kernels")
@@ -653,6 +674,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         api_url,
         notebook_kernels: egret_kernel::NotebookKernelStore::new(db.clone()),
         proxy: std::sync::Arc::new(egret_kernel::BackendWsProxy),
+        // The concrete engine-backed runner is wired in a later task; until then
+        // `POST /kernel/query` reports the engine as unavailable.
+        query_runner: std::sync::Arc::new(UnwiredQueryRunner),
     });
     // ── end kernel wiring ───────────────────────────────────────────────────────
 

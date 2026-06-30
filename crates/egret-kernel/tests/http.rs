@@ -131,6 +131,7 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         api_url: "http://localhost:3000".into(),
         notebook_kernels: egret_kernel::NotebookKernelStore::new(db.clone()),
         proxy: Arc::new(egret_kernel::BackendWsProxy),
+        query_runner: Arc::new(egret_kernel::query::FakeQueryRunner::default()),
     });
 
     Fixture {
@@ -170,6 +171,52 @@ async fn seed_notebook(db: &Db, ws: WorkspaceId, owner: UserId) -> Uuid {
     .fetch_one(&db.pool)
     .await
     .expect("seed notebook")
+}
+
+/// Seed a database (engine) row + enable it for notebooks; return its database id.
+async fn seed_enabled_engine(db: &Db, ws: WorkspaceId) -> Uuid {
+    let dbid: Uuid = sqlx::query_scalar(
+        "INSERT INTO databases (workspace_id, name, engine, host, port) \
+         VALUES ($1,'trino-dev','trino','localhost',8080) RETURNING id",
+    )
+    .bind(ws.0)
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed database");
+    sqlx::query("INSERT INTO notebook_engine_access (workspace_id, database_id) VALUES ($1,$2)")
+        .bind(ws.0)
+        .bind(dbid)
+        .execute(&db.pool)
+        .await
+        .expect("enable engine");
+    dbid
+}
+
+/// Mint a kernel token for (ws,user) directly via the registry; return the plaintext bearer.
+async fn mint_kernel_token(db: &Db, ws: WorkspaceId, user: UserId) -> String {
+    let reg = KernelRegistry::new(db.clone());
+    let key = egret_kernel::registry::KernelKey {
+        user_id: user.0,
+        workspace_id: ws.0,
+    };
+    reg.upsert(key, "http://127.0.0.1:1", Some(1), "ready")
+        .await
+        .unwrap();
+    let (plain, hash) = egret_kernel::kernel_token::mint();
+    reg.set_token(key, &hash, chrono::Utc::now() + chrono::Duration::hours(1))
+        .await
+        .unwrap();
+    plain
+}
+
+fn bearer_post(uri: &str, token: &str, body: serde_json::Value) -> HttpRequest<Body> {
+    HttpRequest::builder()
+        .method("POST")
+        .uri(uri)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
 }
 
 /// A fake Jupyter Kernel Gateway HTTP server (POST creates kernel "k1"; GET k1 → 200; else 404).
@@ -766,5 +813,82 @@ async fn channels_ready_upgrades_and_resolves_kernel(pool: sqlx::PgPool) {
         kid.as_deref(),
         Some("k1"),
         "channels must resolve+upsert the kernel id"
+    );
+}
+
+// ── kernel query callback tests ───────────────────────────────────────────────
+
+/// Valid token + enabled engine → 200 with columns/rows arrays.
+#[sqlx::test(migrations = "../../migrations")]
+async fn kernel_query_runs_for_valid_token_and_enabled_engine(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    let dbid = seed_enabled_engine(&f.db, f.ws).await;
+    let token = mint_kernel_token(&f.db, f.ws, f.owner).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(bearer_post(
+            "/kernel/query",
+            &token,
+            serde_json::json!({ "engine": dbid.to_string(), "sql": "SELECT 1" }),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "valid query → 200; body={json}");
+    assert!(
+        json["columns"].is_array() && json["rows"].is_array(),
+        "body={json}"
+    );
+}
+
+/// Bad/unknown token → 401.
+#[sqlx::test(migrations = "../../migrations")]
+async fn kernel_query_rejects_bad_token(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_enabled_engine(&f.db, f.ws).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(bearer_post(
+            "/kernel/query",
+            "egk_not_a_real_token",
+            serde_json::json!({ "engine": "trino-dev", "sql": "SELECT 1" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "bad token → 401");
+}
+
+/// Engine present but NOT enabled for notebooks → 403.
+#[sqlx::test(migrations = "../../migrations")]
+async fn kernel_query_rejects_disabled_engine(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    // A database NOT enabled for notebooks (no notebook_engine_access row).
+    let dbid: Uuid = sqlx::query_scalar(
+        "INSERT INTO databases (workspace_id, name, engine, host, port) \
+         VALUES ($1,'secret','trino','localhost',8080) RETURNING id",
+    )
+    .bind(f.ws.0)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    let token = mint_kernel_token(&f.db, f.ws, f.owner).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(bearer_post(
+            "/kernel/query",
+            &token,
+            serde_json::json!({ "engine": dbid.to_string(), "sql": "SELECT 1" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "disabled engine → 403"
     );
 }
