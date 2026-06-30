@@ -21,6 +21,7 @@ fn trino_spec() -> Option<ConnSpec> {
             ..Default::default()
         },
         secret: None,
+        session_user: None,
     })
 }
 

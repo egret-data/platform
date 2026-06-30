@@ -50,6 +50,7 @@ impl ConnectorFactory for FakeFactory {
         &self,
         _db: &Database,
         _secret: Option<String>,
+        _session_user: Option<String>,
     ) -> Result<Box<dyn Connector>, egret_engine::EngineError> {
         Ok(Box::new(FakeConnector {
             sleep_ms: self.sleep_ms,

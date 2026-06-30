@@ -20,17 +20,32 @@ pub struct ConnSpec {
     pub port: i32,
     pub options: ConnOptions,
     pub secret: Option<String>,
+    /// Stable per-user identity to impersonate (Trino `X-Trino-User`), when the
+    /// connection's `impersonate` flag is on. `None` = no end-user resolved.
+    pub session_user: Option<String>,
 }
 
 impl ConnSpec {
     /// Build from a resolved registry `Database` + its opened secret.
+    /// No end-user identity is attached (`session_user = None`).
     pub fn from_database(db: &Database, secret: Option<String>) -> Self {
+        Self::from_database_as(db, secret, None)
+    }
+
+    /// Like `from_database`, but attaches a stable per-user `session_user`
+    /// for Trino impersonation (used only when the connection opts in).
+    pub fn from_database_as(
+        db: &Database,
+        secret: Option<String>,
+        session_user: Option<String>,
+    ) -> Self {
         ConnSpec {
             engine: db.engine,
             host: db.host.clone(),
             port: db.port,
             options: db.options.clone(),
             secret,
+            session_user,
         }
     }
 }
@@ -88,6 +103,7 @@ pub trait ConnectorFactory: Send + Sync {
         &self,
         db: &Database,
         secret: Option<String>,
+        session_user: Option<String>,
     ) -> Result<Box<dyn Connector>, EngineError>;
 }
 
@@ -100,7 +116,12 @@ impl ConnectorFactory for DefaultConnectorFactory {
         &self,
         db: &Database,
         secret: Option<String>,
+        session_user: Option<String>,
     ) -> Result<Box<dyn Connector>, EngineError> {
-        Ok(build_connector(&ConnSpec::from_database(db, secret)))
+        Ok(build_connector(&ConnSpec::from_database_as(
+            db,
+            secret,
+            session_user,
+        )))
     }
 }

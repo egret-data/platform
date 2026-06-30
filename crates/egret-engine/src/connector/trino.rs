@@ -10,19 +10,43 @@ use crate::model::{Column, Limits, QueryResult};
 
 pub struct TrinoConnector {
     base_url: String,
-    user: String,
+    /// Trino basic-auth principal — always the connection's service user.
+    auth_user: String,
+    /// Identity sent as `X-Trino-User`. Equals `auth_user` unless the connection
+    /// opts into impersonation, in which case it's the resolved end-user.
+    session_user: String,
     secret: Option<String>,
 }
 
 impl TrinoConnector {
     pub fn new(spec: &ConnSpec) -> Self {
         let scheme = spec.options.http_scheme.as_deref().unwrap_or("http");
-        let user = spec.options.user.clone().unwrap_or_else(|| "egret".into());
+        let auth_user = spec.options.user.clone().unwrap_or_else(|| "egret".into());
+        // Impersonate only when the connection opts in AND we have an end-user.
+        // Otherwise X-Trino-User is byte-identical to the legacy service-user value.
+        let session_user = if spec.options.impersonate == Some(true) {
+            spec.session_user
+                .clone()
+                .unwrap_or_else(|| auth_user.clone())
+        } else {
+            auth_user.clone()
+        };
         TrinoConnector {
             base_url: format!("{scheme}://{}:{}", spec.host, spec.port),
-            user,
+            auth_user,
+            session_user,
             secret: spec.secret.clone(),
         }
+    }
+
+    /// The `X-Trino-User` identity (impersonated end-user, or the service user).
+    pub fn x_trino_user(&self) -> &str {
+        &self.session_user
+    }
+
+    /// The basic-auth principal (always the service user).
+    pub fn auth_user(&self) -> &str {
+        &self.auth_user
     }
 }
 
@@ -71,11 +95,11 @@ impl Connector for TrinoConnector {
         let session = format!("query_max_run_time={}s", limits.timeout.as_secs().max(1));
         let mut req = client
             .post(format!("{}/v1/statement", self.base_url))
-            .header("X-Trino-User", &self.user)
+            .header("X-Trino-User", self.x_trino_user())
             .header("X-Trino-Session", session)
             .body(sql.to_string());
         if let Some(s) = &self.secret {
-            req = req.basic_auth(&self.user, Some(s));
+            req = req.basic_auth(self.auth_user(), Some(s));
         }
 
         let cap = limits.max_rows;
@@ -119,7 +143,7 @@ impl Connector for TrinoConnector {
                 if let Some(uri) = &next {
                     let _ = client
                         .delete(uri)
-                        .header("X-Trino-User", &self.user)
+                        .header("X-Trino-User", self.x_trino_user())
                         .send()
                         .await;
                 }
@@ -129,7 +153,7 @@ impl Connector for TrinoConnector {
                 if let Some(uri) = &next {
                     let _ = client
                         .delete(uri)
-                        .header("X-Trino-User", &self.user)
+                        .header("X-Trino-User", self.x_trino_user())
                         .send()
                         .await;
                 }
@@ -138,9 +162,9 @@ impl Connector for TrinoConnector {
             match next {
                 None => break,
                 Some(uri) => {
-                    let mut g = client.get(&uri).header("X-Trino-User", &self.user);
+                    let mut g = client.get(&uri).header("X-Trino-User", self.x_trino_user());
                     if let Some(s) = &self.secret {
-                        g = g.basic_auth(&self.user, Some(s));
+                        g = g.basic_auth(self.auth_user(), Some(s));
                     }
                     resp = send(g).await?;
                 }
@@ -172,4 +196,42 @@ async fn send(req: reqwest::RequestBuilder) -> Result<TrinoResp, EngineError> {
     resp.json::<TrinoResp>()
         .await
         .map_err(|e| EngineError::Engine(format!("decode: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egret_database::model::{ConnOptions, Engine};
+
+    #[test]
+    fn xtrino_user_is_session_user_only_when_impersonating() {
+        let mut opts = ConnOptions {
+            user: Some("svc".into()),
+            ..Default::default()
+        };
+        // impersonate off → X-Trino-User = service user (even if session_user present)
+        let s0 = ConnSpec {
+            engine: Engine::Trino,
+            host: "h".into(),
+            port: 8080,
+            options: opts.clone(),
+            secret: None,
+            session_user: Some("alice".into()),
+        };
+        assert_eq!(TrinoConnector::new(&s0).x_trino_user(), "svc");
+
+        // impersonate on + session_user → X-Trino-User = alice; basic-auth stays svc
+        opts.impersonate = Some(true);
+        let s1 = ConnSpec {
+            engine: Engine::Trino,
+            host: "h".into(),
+            port: 8080,
+            options: opts,
+            secret: None,
+            session_user: Some("alice".into()),
+        };
+        let c = TrinoConnector::new(&s1);
+        assert_eq!(c.x_trino_user(), "alice");
+        assert_eq!(c.auth_user(), "svc");
+    }
 }
