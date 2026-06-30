@@ -126,9 +126,11 @@ async fn setup(sleep_ms: u64) -> Option<(JobManager, QueryStore, Uuid, Uuid, Arc
             .await
             .unwrap();
     let did: Uuid = sqlx::query_scalar(
-        "INSERT INTO databases (name,engine,host,port) VALUES ($1,'trino','h',8080) RETURNING id",
+        "INSERT INTO databases (name,engine,host,port,workspace_id) \
+         VALUES ($1,'trino','h',8080,$2) RETURNING id",
     )
     .bind(format!("db_{}", Uuid::new_v4().simple()))
+    .bind(wid)
     .fetch_one(&db.pool)
     .await
     .unwrap();
