@@ -582,6 +582,84 @@ impl NotebookStore {
         tx.commit().await?;
         Ok(())
     }
+
+    /// Replace BOTH the engine and catalog access sets for a workspace atomically.
+    ///
+    /// All ids are validated up front (engines against `databases`, catalogs
+    /// against `workspace_warehouses`) BEFORE any mutation: if either set
+    /// contains an id that does not belong to `ws`, this returns `InvalidInput`
+    /// (→ 400) and nothing is changed. On success, a single transaction replaces
+    /// both sets (DELETE+INSERT each), so a rejected PUT is a guaranteed no-op
+    /// and the two sets can never be left half-applied.
+    pub async fn set_notebook_access(
+        &self,
+        ws: Uuid,
+        engine_ids: &[Uuid],
+        catalog_ids: &[Uuid],
+    ) -> Result<(), NotebookApiError> {
+        // ── Validate everything before mutating anything ─────────────────────
+        if !engine_ids.is_empty() {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM databases WHERE id = ANY($1) AND workspace_id = $2",
+            )
+            .bind(engine_ids)
+            .bind(ws)
+            .fetch_one(&self.db.pool)
+            .await?;
+            if count as usize != engine_ids.len() {
+                return Err(egret_core::Error::InvalidInput(
+                    "one or more engine_ids do not belong to this workspace".into(),
+                )
+                .into());
+            }
+        }
+        if !catalog_ids.is_empty() {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM workspace_warehouses WHERE id = ANY($1) AND workspace_id = $2",
+            )
+            .bind(catalog_ids)
+            .bind(ws)
+            .fetch_one(&self.db.pool)
+            .await?;
+            if count as usize != catalog_ids.len() {
+                return Err(egret_core::Error::InvalidInput(
+                    "one or more catalog_ids do not belong to this workspace".into(),
+                )
+                .into());
+            }
+        }
+
+        // ── One transaction: replace both sets atomically ────────────────────
+        let mut tx = self.db.pool.begin().await?;
+        sqlx::query("DELETE FROM notebook_engine_access WHERE workspace_id = $1")
+            .bind(ws)
+            .execute(&mut *tx)
+            .await?;
+        for &db_id in engine_ids {
+            sqlx::query(
+                "INSERT INTO notebook_engine_access (workspace_id, database_id) VALUES ($1, $2)",
+            )
+            .bind(ws)
+            .bind(db_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query("DELETE FROM notebook_catalog_access WHERE workspace_id = $1")
+            .bind(ws)
+            .execute(&mut *tx)
+            .await?;
+        for &wh_id in catalog_ids {
+            sqlx::query(
+                "INSERT INTO notebook_catalog_access (workspace_id, warehouse_id) VALUES ($1, $2)",
+            )
+            .bind(ws)
+            .bind(wh_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

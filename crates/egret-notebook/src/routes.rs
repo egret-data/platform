@@ -405,11 +405,11 @@ async fn update_settings(
         .require_workspace(&ctx, MANAGE)
         .await
         .map_err(NotebookApiError::from)?;
+    // Atomic: both id sets are validated up front, then replaced in one
+    // transaction. A cross-tenant id in EITHER set rejects the whole PUT (400)
+    // with no partial mutation.
     st.store
-        .set_engine_access(ctx.workspace_id.0, &body.engine_ids)
-        .await?;
-    st.store
-        .set_catalog_access(ctx.workspace_id.0, &body.catalog_ids)
+        .set_notebook_access(ctx.workspace_id.0, &body.engine_ids, &body.catalog_ids)
         .await?;
     let settings = st.store.get_settings(ctx.workspace_id.0).await?;
     Ok(Json(settings))
