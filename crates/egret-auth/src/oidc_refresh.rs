@@ -29,13 +29,12 @@ impl OidcRefreshRepo {
 
     /// The vault secret id for `user_id`, if any.
     pub async fn get(&self, user_id: Uuid) -> Result<Option<Uuid>> {
-        let row: Option<Uuid> = sqlx::query_scalar(
-            "SELECT secret_id FROM oidc_refresh_tokens WHERE user_id = $1",
-        )
-        .bind(user_id)
-        .fetch_optional(&self.db.pool)
-        .await
-        .map_err(|e| Error::Internal(anyhow::anyhow!(e)))?;
+        let row: Option<Uuid> =
+            sqlx::query_scalar("SELECT secret_id FROM oidc_refresh_tokens WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_optional(&self.db.pool)
+                .await
+                .map_err(|e| Error::Internal(anyhow::anyhow!(e)))?;
         Ok(row)
     }
 }
