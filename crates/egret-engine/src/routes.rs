@@ -6,6 +6,7 @@ use axum::extract::{FromRef, Path, Query as AxQuery, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use egret_auth::session::SessionService;
+use egret_auth::users::UserRepo;
 use egret_core::Error;
 use egret_database::DatabaseRepo;
 use egret_storage::ObjectStore;
@@ -32,6 +33,7 @@ pub struct EngineState {
     pub sessions: SessionService,
     pub workspaces: WorkspaceRepo,
     pub authz: Authorizer,
+    pub users: UserRepo,
 }
 
 impl FromRef<EngineState> for SessionService {
@@ -87,12 +89,19 @@ async fn submit(
     Json(body): Json<SubmitQuery>,
 ) -> Result<(axum::http::StatusCode, Json<SubmitAck>), EngineApiError> {
     authorize(&st, &ctx, body.database_id).await?;
+    let session_user = Some(
+        st.users
+            .ensure_username(ctx.principal.user_id)
+            .await
+            .map_err(EngineApiError::from)?,
+    );
     let id = st
         .jobs
         .submit(
             ctx.workspace_id.0,
             body.database_id,
             Some(ctx.principal.user_id.0),
+            session_user,
             &body.sql,
             body.limit,
         )

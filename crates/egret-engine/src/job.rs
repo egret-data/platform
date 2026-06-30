@@ -57,6 +57,7 @@ impl JobManager {
         ws: Uuid,
         database_id: Uuid,
         user: Option<Uuid>,
+        session_user: Option<String>,
         sql: &str,
         limit: Option<usize>,
     ) -> Result<Uuid, EngineError> {
@@ -74,7 +75,8 @@ impl JobManager {
         let this = self.clone();
         let run_sql = effective_sql;
         tokio::spawn(async move {
-            this.run(id, database_id, run_sql, limits, token).await;
+            this.run(id, database_id, run_sql, limits, session_user, token)
+                .await;
             this.cancels.lock().unwrap().remove(&id);
         });
         Ok(id)
@@ -95,13 +97,17 @@ impl JobManager {
         database_id: Uuid,
         sql: String,
         limits: Limits,
+        session_user: Option<String>,
         token: CancellationToken,
     ) {
         if let Err(e) = self.store.set_running(id).await {
             tracing::warn!(%id, error=%e, "failed to mark query running");
             return;
         }
-        match self.execute(id, database_id, &sql, &limits, &token).await {
+        match self
+            .execute(id, database_id, &sql, &limits, session_user, &token)
+            .await
+        {
             Ok(()) => {} // finish() already persisted inside execute()
             Err(EngineError::Cancelled) => {
                 let _ = self.store.set_cancelled(id).await;
@@ -119,12 +125,12 @@ impl JobManager {
         database_id: Uuid,
         sql: &str,
         limits: &Limits,
+        session_user: Option<String>,
         token: &CancellationToken,
     ) -> Result<(), EngineError> {
         let db = self.databases.get(database_id).await?;
         let secret = self.databases.open_secret(database_id).await?;
-        // Task 4 threads the real end-user identity here; for now no impersonation.
-        let connector = self.factory.build(&db, secret, None).await?;
+        let connector = self.factory.build(&db, secret, session_user).await?;
 
         let fut = connector.execute(sql, limits, token.clone());
         let result = match tokio::time::timeout(limits.timeout, fut).await {

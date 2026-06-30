@@ -484,6 +484,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             sessions: sessions.clone(),
             workspaces: WorkspaceRepo::new(db.clone()),
             authz: Authorizer::new(db.clone()),
+            users: UserRepo::new(db.clone()),
         })
     };
 
