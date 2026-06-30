@@ -174,7 +174,15 @@ async fn oidc_callback(
     // IdP-issued case (e.g. `offline_access` scope) carries one; otherwise skip.
     // Reuse the existing secret row in place on re-login so we don't orphan rows.
     if let Some(rt) = login.refresh_token.as_deref() {
-        let existing = st.refresh_repo.get(user_id.0).await.ok().flatten();
+        // A transient DB error here must NOT be treated as "no existing row" —
+        // that would `put` a new secret and orphan the prior one. Propagate it.
+        let existing = match st.refresh_repo.get(user_id.0).await {
+            Ok(opt) => opt,
+            Err(e) => {
+                tracing::error!("oidc refresh persist (get): {e}");
+                return persist_failed(jar);
+            }
+        };
         let secret_id = match existing {
             Some(old_id) => match st.secrets.update(old_id, rt).await {
                 Ok(()) => old_id,

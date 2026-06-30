@@ -53,9 +53,10 @@ mod tests {
                 name: "lakehouse".to_string(),
                 enabled: true,
             }],
-            engine_jwt: "engine.jwt.token".to_string(),
-            engine_jwt_expires_at: chrono::DateTime::<chrono::Utc>::from_timestamp(4102444800, 0)
-                .unwrap(),
+            engine_jwt: Some("engine.jwt.token".to_string()),
+            engine_jwt_expires_at: Some(
+                chrono::DateTime::<chrono::Utc>::from_timestamp(4102444800, 0).unwrap(),
+            ),
         }
     }
 
