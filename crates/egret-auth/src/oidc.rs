@@ -14,6 +14,14 @@ pub struct OidcClaims {
     pub groups: Vec<String>,
 }
 
+/// Result of a completed login: normalized claims + the raw refresh token
+/// (present only if the IdP issued one — e.g. `offline_access` scope).
+#[derive(Debug, Clone)]
+pub struct OidcLogin {
+    pub claims: OidcClaims,
+    pub refresh_token: Option<String>,
+}
+
 /// JIT-provision the user (match by `sub`) and sync their OIDC group memberships.
 /// Returns the local user id. Roles resolve via the existing group→role path.
 pub async fn provision_and_sync(
@@ -55,8 +63,8 @@ use openidconnect::core::{
 use openidconnect::{
     AuthorizationCode, Client, ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields,
     EndpointMaybeSet, EndpointNotSet, EndpointSet, IdTokenClaims, IdTokenFields, IssuerUrl, Nonce,
-    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, StandardErrorResponse,
-    StandardTokenResponse, TokenResponse,
+    OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
+    StandardErrorResponse, StandardTokenResponse, TokenResponse,
 };
 use serde::{Deserialize, Serialize};
 
@@ -183,8 +191,9 @@ impl OidcService {
         }
     }
 
-    /// Exchange the code and validate the id_token; return normalized claims.
-    pub async fn finish(&self, code: &str, pkce_verifier: &str, nonce: &str) -> Result<OidcClaims> {
+    /// Exchange the code and validate the id_token; return normalized claims plus
+    /// the raw refresh token (if the IdP issued one).
+    pub async fn finish(&self, code: &str, pkce_verifier: &str, nonce: &str) -> Result<OidcLogin> {
         let token_response = self
             .client
             .exchange_code(AuthorizationCode::new(code.to_string()))
@@ -193,7 +202,14 @@ impl OidcService {
             .request_async(&self.http)
             .await
             .map_err(oidc_err)?;
-        self.verify_from_response(&token_response, nonce)
+        let claims = self.verify_from_response(&token_response, nonce)?;
+        let refresh_token = token_response
+            .refresh_token()
+            .map(|r| r.secret().to_string());
+        Ok(OidcLogin {
+            claims,
+            refresh_token,
+        })
     }
 
     /// Validate a raw id_token string (used by tests / non-auth-code flows such as

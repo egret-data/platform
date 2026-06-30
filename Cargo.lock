@@ -2368,6 +2368,7 @@ dependencies = [
  "egret-config",
  "egret-core",
  "egret-metastore",
+ "egret-secrets",
  "hex",
  "http-body-util",
  "openidconnect",

@@ -27,6 +27,8 @@ pub struct OidcRoutesState {
     pub sessions: SessionService,
     pub config: Config,
     pub cookie_key: Key,
+    pub secrets: egret_secrets::SecretStore,
+    pub refresh_repo: crate::oidc_refresh::OidcRefreshRepo,
 }
 
 impl FromRef<OidcRoutesState> for Key {
@@ -109,7 +111,7 @@ async fn oidc_callback(
             .into_response();
     }
 
-    let claims = match st
+    let login = match st
         .oidc
         .finish(&q.code, &state.pkce_verifier, &state.nonce)
         .await
@@ -123,7 +125,7 @@ async fn oidc_callback(
                 .into_response()
         }
     };
-    let user_id = match provision_and_sync(&st.users, &st.groups, &claims).await {
+    let user_id = match provision_and_sync(&st.users, &st.groups, &login.claims).await {
         Ok(id) => id,
         Err(egret_core::Error::Conflict(_)) => {
             return (
@@ -153,6 +155,34 @@ async fn oidc_callback(
                 .into_response()
         }
     };
+
+    // Persist the refresh token (encrypted) for the engine-token broker. Only the
+    // IdP-issued case (e.g. `offline_access` scope) carries one; otherwise skip.
+    if let Some(rt) = login.refresh_token.as_deref() {
+        let secret_id = match st.secrets.put("oidc_refresh", rt).await {
+            Ok(id) => id,
+            Err(_) => {
+                return (
+                    jar.remove(clear_state_cookie()),
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "refresh token persist failed",
+                    ),
+                )
+                    .into_response()
+            }
+        };
+        if st.refresh_repo.set(user_id.0, secret_id).await.is_err() {
+            return (
+                jar.remove(clear_state_cookie()),
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "refresh token persist failed",
+                ),
+            )
+                .into_response();
+        }
+    }
 
     let secure = st.config.session.secure;
     let max_age = st.config.session.absolute_ttl_hours as i64 * 3600;
