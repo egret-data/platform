@@ -129,6 +129,8 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         workspaces: workspaces.clone(),
         authz: Authorizer::new(db.clone()),
         api_url: "http://localhost:3000".into(),
+        notebook_kernels: egret_kernel::NotebookKernelStore::new(db.clone()),
+        proxy: Arc::new(egret_kernel::BackendWsProxy),
     });
 
     Fixture {
@@ -156,6 +158,42 @@ async fn seed_warehouse(db: &Db, ws_id: WorkspaceId) -> Uuid {
     .fetch_one(&db.pool)
     .await
     .expect("seed warehouse")
+}
+
+/// Seed a notebook owned by `owner` in `ws`. Returns its id.
+async fn seed_notebook(db: &Db, ws: WorkspaceId, owner: UserId) -> Uuid {
+    sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO notebooks (workspace_id, owner_user_id, name) VALUES ($1,$2,'nb') RETURNING id",
+    )
+    .bind(ws.0)
+    .bind(owner.0)
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed notebook")
+}
+
+/// A fake Jupyter Kernel Gateway HTTP server (POST creates kernel "k1"; GET k1 → 200; else 404).
+async fn spawn_fake_gateway() -> String {
+    use axum::routing::{get, post};
+    async fn create() -> axum::Json<serde_json::Value> {
+        axum::Json(serde_json::json!({ "id": "k1" }))
+    }
+    async fn get_one(axum::extract::Path(id): axum::extract::Path<String>) -> StatusCode {
+        if id == "k1" {
+            StatusCode::OK
+        } else {
+            StatusCode::NOT_FOUND
+        }
+    }
+    let app = axum::Router::new()
+        .route("/api/kernels", post(create))
+        .route("/api/kernels/{id}", get(get_one));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{addr}")
 }
 
 /// Insert a user, add as member of `workspace` with `role`, return `(user_id, token)`.
@@ -444,5 +482,147 @@ async fn per_user_keying_user_b_does_not_see_user_a_kernel(pool: sqlx::PgPool) {
         json["phase"].as_str(),
         Some("none"),
         "user B must see their own (none) kernel, not user A's; body={json}"
+    );
+}
+
+/// Ready gateway → connect creates a per-notebook kernel and upserts notebook_kernels.
+#[sqlx::test(migrations = "../../migrations")]
+async fn connect_ready_creates_kernel_and_upserts(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_warehouse(&f.db, f.ws).await;
+    let (uid, token) = add_member(&f, f.ws, "connector", "ws_editor").await;
+    let nb = seed_notebook(&f.db, f.ws, uid).await;
+
+    // Point the FakeLauncher (gateway url) at a real fake gateway HTTP server.
+    let gw = spawn_fake_gateway().await;
+    f.launcher.inner.lock().unwrap().url = Some(gw);
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/ws/{}/notebooks/{}/kernel/connect", f.slug, nb),
+            &token,
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "connect → 200; body={json}");
+    assert_eq!(
+        json["phase"].as_str(),
+        Some("ready"),
+        "phase ready; body={json}"
+    );
+    assert_eq!(
+        json["kernel_id"].as_str(),
+        Some("k1"),
+        "kernel_id k1; body={json}"
+    );
+
+    // notebook_kernels row must exist for (nb, uid).
+    let kid: Option<String> = sqlx::query_scalar(
+        "SELECT kernel_id FROM notebook_kernels WHERE notebook_id=$1 AND user_id=$2",
+    )
+    .bind(nb)
+    .bind(uid.0)
+    .fetch_optional(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        kid.as_deref(),
+        Some("k1"),
+        "notebook_kernels must be upserted"
+    );
+}
+
+/// Spawning gateway → connect returns {phase:"spawning"} and creates NO kernel.
+#[sqlx::test(migrations = "../../migrations")]
+async fn connect_spawning_returns_without_kernel(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_warehouse(&f.db, f.ws).await;
+    let (uid, token) = add_member(&f, f.ws, "spawning", "ws_editor").await;
+    let nb = seed_notebook(&f.db, f.ws, uid).await;
+    f.launcher.inner.lock().unwrap().phase = Some(egret_kernel::launcher::KernelPhase::Spawning);
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/ws/{}/notebooks/{}/kernel/connect", f.slug, nb),
+            &token,
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "connect spawning → 200; body={json}"
+    );
+    assert_eq!(
+        json["phase"].as_str(),
+        Some("spawning"),
+        "phase spawning; body={json}"
+    );
+    assert!(
+        json.get("kernel_id").is_none(),
+        "no kernel_id while spawning; body={json}"
+    );
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM notebook_kernels WHERE notebook_id=$1 AND user_id=$2",
+    )
+    .bind(nb)
+    .bind(uid.0)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 0, "no notebook_kernels row created while spawning");
+}
+
+/// Non-member → 403/404 on connect; gateway never provisioned.
+#[sqlx::test(migrations = "../../migrations")]
+async fn connect_non_member_rejected(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_warehouse(&f.db, f.ws).await;
+    // A notebook owned by the workspace owner.
+    let nb = seed_notebook(&f.db, f.ws, f.owner).await;
+    let outsider = f
+        .users
+        .insert_local(
+            &format!("out_{}@egret.test", Uuid::new_v4().simple()),
+            "Out",
+            "x",
+        )
+        .await
+        .unwrap();
+    let tok = f
+        .sessions
+        .create(outsider, "test", "127.0.0.1")
+        .await
+        .unwrap()
+        .token;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/ws/{}/notebooks/{}/kernel/connect", f.slug, nb),
+            &tok,
+        ))
+        .await
+        .unwrap();
+    let status = resp.status();
+    assert!(
+        status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
+        "non-member connect must be 403/404; got {status}"
+    );
+    assert_eq!(
+        f.launcher.inner.lock().unwrap().ensured.len(),
+        0,
+        "launcher must NOT be called for unauthorized connect"
     );
 }

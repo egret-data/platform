@@ -74,6 +74,7 @@ pub struct FakeState {
     pub ensured: Vec<(KernelKey, KernelEnv)>,
     pub stopped: Vec<KernelKey>,
     pub phase: Option<KernelPhase>,
+    pub url: Option<String>,
 }
 
 #[async_trait]
@@ -87,8 +88,12 @@ impl KernelLauncher for FakeLauncher {
         let mut g = self.inner.lock().unwrap();
         g.ensured.push((key, env.clone()));
         let phase = g.phase.unwrap_or(KernelPhase::Ready);
+        let url = g
+            .url
+            .clone()
+            .unwrap_or_else(|| format!("http://fake/{}", key.user_id));
         Ok(KernelHandle {
-            url: format!("http://fake/{}", key.user_id),
+            url,
             phase,
             pid: Some(1),
         })
