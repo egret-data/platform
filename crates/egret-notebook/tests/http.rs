@@ -640,3 +640,335 @@ async fn unknown_engine_and_cell_type_are_400() {
         "unknown cell_type must be rejected"
     );
 }
+
+/// List notebooks (optionally the trash bin) as `token` under workspace `slug`.
+async fn list_nbs(f: &Fixture, slug: &str, token: &str, trashed: bool) -> serde_json::Value {
+    let uri = if trashed {
+        format!("/ws/{slug}/notebooks?trashed=true")
+    } else {
+        format!("/ws/{slug}/notebooks")
+    };
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &uri, token, None))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list notebooks; body={json}");
+    json
+}
+
+#[tokio::test]
+async fn trash_hides_and_restore_reappears() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
+    let id = create_nb(&f, &f.slug_a, &owner_tok).await;
+
+    // Trash → 204; live list hides it, trash bin shows it.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/ws/{}/notebooks/{id}/trash", f.slug_a),
+            &owner_tok,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "trash → 204");
+
+    let live = list_nbs(&f, &f.slug_a, &owner_tok, false).await;
+    assert!(
+        !live.as_array().unwrap().iter().any(|n| n["id"] == id),
+        "trashed notebook hidden from default list"
+    );
+    let trash = list_nbs(&f, &f.slug_a, &owner_tok, true).await;
+    let trashed = trash
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == id)
+        .expect("trashed notebook in trash bin");
+    assert!(
+        trashed["deleted_at"].is_string(),
+        "trashed notebook carries deleted_at"
+    );
+
+    // Restore → 204; reappears in live list.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/ws/{}/notebooks/{id}/restore", f.slug_a),
+            &owner_tok,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "restore → 204");
+    let live = list_nbs(&f, &f.slug_a, &owner_tok, false).await;
+    assert!(
+        live.as_array().unwrap().iter().any(|n| n["id"] == id),
+        "restored notebook back in live list"
+    );
+}
+
+#[tokio::test]
+async fn non_owner_trash_is_403() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
+    let (_other_uid, other_tok) = add_member(&f, f.ws_a, "other", "ws_editor").await;
+    let id = create_nb(&f, &f.slug_a, &owner_tok).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/ws/{}/notebooks/{id}/trash", f.slug_a),
+            &other_tok,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "non-owner trash must be forbidden"
+    );
+}
+
+#[tokio::test]
+async fn bookmark_is_per_user_and_allowed_on_public() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
+    let (_other_uid, other_tok) = add_member(&f, f.ws_a, "other", "ws_editor").await;
+    let id = create_nb(&f, &f.slug_a, &owner_tok).await;
+    let uri = format!("/ws/{}/notebooks/{id}", f.slug_a);
+
+    // Owner bookmarks own notebook → 204.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &format!("{uri}/bookmark"), &owner_tok, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "owner bookmark → 204"
+    );
+
+    // Owner's list shows bookmarked=true for that notebook.
+    let owner_list = list_nbs(&f, &f.slug_a, &owner_tok, false).await;
+    let mine = owner_list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == id)
+        .expect("owner sees own notebook");
+    assert_eq!(
+        mine["bookmarked"],
+        serde_json::json!(true),
+        "owner sees bookmarked=true"
+    );
+
+    // Make it public so the other member can read + bookmark it.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &uri,
+            &owner_tok,
+            Some(serde_json::json!({ "is_public": true })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "publish");
+
+    // Other user's list shows bookmarked=false (per-user flag).
+    let other_list = list_nbs(&f, &f.slug_a, &other_tok, false).await;
+    let theirs = other_list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == id)
+        .expect("other sees the public notebook");
+    assert_eq!(
+        theirs["bookmarked"],
+        serde_json::json!(false),
+        "other user's view: not bookmarked"
+    );
+
+    // Non-owner CAN bookmark a PUBLIC notebook (read_scoped, not owner-only) → 204.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &format!("{uri}/bookmark"), &other_tok, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "non-owner may bookmark a public notebook"
+    );
+    let other_list = list_nbs(&f, &f.slug_a, &other_tok, false).await;
+    let theirs = other_list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == id)
+        .unwrap();
+    assert_eq!(
+        theirs["bookmarked"],
+        serde_json::json!(true),
+        "other user now sees their own bookmark"
+    );
+
+    // DELETE bookmark → 204, flag clears for that user.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &format!("{uri}/bookmark"), &other_tok, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "remove bookmark → 204"
+    );
+    let other_list = list_nbs(&f, &f.slug_a, &other_tok, false).await;
+    let theirs = other_list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == id)
+        .unwrap();
+    assert_eq!(theirs["bookmarked"], serde_json::json!(false));
+}
+
+/// Create a folder of `entity_type` under workspace `ws_id` directly in the DB.
+async fn create_folder(db: &Db, ws_id: WorkspaceId, entity_type: &str) -> Uuid {
+    sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO folders (workspace_id, entity_type, name) VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(ws_id.0)
+    .bind(entity_type)
+    .bind(format!("F-{}", Uuid::new_v4().simple()))
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert folder")
+}
+
+#[tokio::test]
+async fn set_folder_happy_path_and_guards() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    // We need a Db handle to seed folders; rebuild from DATABASE_URL.
+    let db = Db::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
+        .await
+        .unwrap();
+
+    let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
+    let id = create_nb(&f, &f.slug_a, &owner_tok).await;
+    let uri = format!("/ws/{}/notebooks/{id}/folder", f.slug_a);
+
+    // Happy path: a notebook folder in this workspace → 204, folder_id set.
+    let good = create_folder(&db, f.ws_a, "notebook").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &uri,
+            &owner_tok,
+            Some(serde_json::json!({ "folder_id": good })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "set_folder → 204");
+
+    let list = list_nbs(&f, &f.slug_a, &owner_tok, false).await;
+    let mine = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == id)
+        .unwrap();
+    assert_eq!(
+        mine["folder_id"].as_str(),
+        Some(good.to_string().as_str()),
+        "folder_id reflects the assignment"
+    );
+
+    // Wrong entity_type (a dashboard folder in the same ws) → 404.
+    let wrong_type = create_folder(&db, f.ws_a, "dashboard").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &uri,
+            &owner_tok,
+            Some(serde_json::json!({ "folder_id": wrong_type })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "folder of a different entity_type must be rejected"
+    );
+
+    // Folder belonging to a different workspace → 404.
+    let other_ws = create_folder(&db, f.ws_b, "notebook").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &uri,
+            &owner_tok,
+            Some(serde_json::json!({ "folder_id": other_ws })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "folder of a different workspace must be rejected"
+    );
+
+    // Clear the folder (null) → 204.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &uri,
+            &owner_tok,
+            Some(serde_json::json!({ "folder_id": null })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "clearing the folder → 204"
+    );
+}

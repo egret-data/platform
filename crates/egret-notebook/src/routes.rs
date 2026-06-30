@@ -9,9 +9,9 @@
 //!   - every cell route resolves its parent notebook and runs `write_scoped`
 //!     before mutating, and the store additionally scopes by `notebook_id`.
 
-use axum::extract::{FromRef, Path, State};
+use axum::extract::{FromRef, Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post, put};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use egret_auth::session::SessionService;
 use egret_core::{Error, WorkspaceContext};
@@ -23,7 +23,7 @@ use uuid::Uuid;
 use crate::error::NotebookApiError;
 use crate::model::{
     CellType, CreateCell, CreateNotebook, Engine, NotebookDetail, NotebookSummary, ReorderCells,
-    UpdateCell, UpdateNotebook,
+    SetFolder, UpdateCell, UpdateNotebook,
 };
 use crate::store::NotebookStore;
 
@@ -61,12 +61,26 @@ pub fn notebook_router() -> Router<NotebookState> {
             "/ws/{workspace}/notebooks/{id}",
             get(get_one).patch(update).delete(remove),
         )
+        .route("/ws/{workspace}/notebooks/{id}/trash", post(trash))
+        .route("/ws/{workspace}/notebooks/{id}/restore", post(restore))
+        .route("/ws/{workspace}/notebooks/{id}/folder", patch(set_folder))
+        .route(
+            "/ws/{workspace}/notebooks/{id}/bookmark",
+            post(bookmark_add).delete(bookmark_remove),
+        )
         .route("/ws/{workspace}/notebooks/{id}/cells", post(add_cell))
         .route("/ws/{workspace}/notebooks/{id}/cells/order", put(reorder))
         .route(
             "/ws/{workspace}/notebooks/{id}/cells/{cid}",
-            axum::routing::patch(update_cell).delete(delete_cell),
+            patch(update_cell).delete(delete_cell),
         )
+}
+
+/// `?trashed=true` selects the trash bin instead of the live list.
+#[derive(Debug, serde::Deserialize)]
+pub struct ListQuery {
+    #[serde(default)]
+    pub trashed: bool,
 }
 
 /// Read scope: resolve a notebook and assert the caller may *view* it.
@@ -116,6 +130,7 @@ async fn write_scoped(
 async fn list(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
+    Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<NotebookSummary>>, NotebookApiError> {
     st.authz
         .require_workspace(&ctx, READ)
@@ -123,7 +138,7 @@ async fn list(
         .map_err(NotebookApiError::from)?;
     let nbs = st
         .store
-        .list_visible(ctx.workspace_id.0, ctx.principal.user_id.0)
+        .list_visible(ctx.workspace_id.0, ctx.principal.user_id.0, q.trashed)
         .await?;
     Ok(Json(nbs))
 }
@@ -205,6 +220,92 @@ async fn remove(
         .map_err(NotebookApiError::from)?;
     write_scoped(&st, &ctx, id).await?;
     st.store.delete(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Soft-delete (move to trash). Owner only.
+async fn trash(
+    State(st): State<NotebookState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> Result<StatusCode, NotebookApiError> {
+    st.authz
+        .require_workspace(&ctx, WRITE)
+        .await
+        .map_err(NotebookApiError::from)?;
+    write_scoped(&st, &ctx, id).await?;
+    st.store.trash(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Restore from trash. Owner only.
+async fn restore(
+    State(st): State<NotebookState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> Result<StatusCode, NotebookApiError> {
+    st.authz
+        .require_workspace(&ctx, WRITE)
+        .await
+        .map_err(NotebookApiError::from)?;
+    write_scoped(&st, &ctx, id).await?;
+    st.store.restore(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Move into a folder (or back to Uncategorized with `folder_id: null`).
+/// Owner only; when a folder is given it must belong to this workspace and
+/// carry `entity_type='notebook'`, else 404 (don't leak foreign folders).
+async fn set_folder(
+    State(st): State<NotebookState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    Json(b): Json<SetFolder>,
+) -> Result<StatusCode, NotebookApiError> {
+    st.authz
+        .require_workspace(&ctx, WRITE)
+        .await
+        .map_err(NotebookApiError::from)?;
+    write_scoped(&st, &ctx, id).await?;
+    if let Some(fid) = b.folder_id {
+        match st.store.folder_kind(fid).await? {
+            Some((w, t)) if w == ctx.workspace_id.0 && t == "notebook" => {}
+            _ => return Err(Error::NotFound("folder".into()).into()),
+        }
+    }
+    st.store.set_folder(id, b.folder_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Bookmark a notebook for the calling user. Read scope (any readable notebook).
+async fn bookmark_add(
+    State(st): State<NotebookState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> Result<StatusCode, NotebookApiError> {
+    st.authz
+        .require_workspace(&ctx, READ)
+        .await
+        .map_err(NotebookApiError::from)?;
+    read_scoped(&st, &ctx, id).await?;
+    st.store.add_bookmark(ctx.principal.user_id.0, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Remove the calling user's bookmark. Read scope.
+async fn bookmark_remove(
+    State(st): State<NotebookState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> Result<StatusCode, NotebookApiError> {
+    st.authz
+        .require_workspace(&ctx, READ)
+        .await
+        .map_err(NotebookApiError::from)?;
+    read_scoped(&st, &ctx, id).await?;
+    st.store
+        .remove_bookmark(ctx.principal.user_id.0, id)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

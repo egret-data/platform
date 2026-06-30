@@ -70,6 +70,19 @@ pub struct NotebookSummary {
     pub owner_user_id: Uuid,
     pub is_owner: bool,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// Whether the requesting viewer has bookmarked this notebook.
+    pub bookmarked: bool,
+    /// Folder this notebook lives in; `None` = Uncategorized.
+    pub folder_id: Option<Uuid>,
+    /// Soft-delete marker; `None` = live, `Some(..)` = trashed.
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Body for `PATCH /notebooks/{id}/folder`: move a notebook into a folder
+/// (or back to Uncategorized with `folder_id: null`).
+#[derive(Debug, Deserialize)]
+pub struct SetFolder {
+    pub folder_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize)]
