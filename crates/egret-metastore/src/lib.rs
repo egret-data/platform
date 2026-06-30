@@ -59,3 +59,4 @@ mod tests {
 }
 
 // migration registry: 0033_databases_name_per_workspace
+// migration registry: 0039_notebook_resource_access

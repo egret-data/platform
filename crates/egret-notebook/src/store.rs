@@ -5,7 +5,10 @@ use egret_metastore::Db;
 use uuid::Uuid;
 
 use crate::error::NotebookApiError;
-use crate::model::{Cell, NotebookDetail, NotebookSummary, UpdateCell, UpdateNotebook};
+use crate::model::{
+    CatalogOption, Cell, EngineOption, NotebookDetail, NotebookSettings, NotebookSummary,
+    UpdateCell, UpdateNotebook,
+};
 
 // ── Row structs ──────────────────────────────────────────────────────────────
 
@@ -417,6 +420,168 @@ impl NotebookStore {
             .await?;
         Ok(())
     }
+
+    // ── Notebook settings: engine + catalog access ───────────────────────────
+
+    /// List all engine (DB connection) options for this workspace with enabled flag.
+    pub async fn list_engine_options(
+        &self,
+        ws: Uuid,
+    ) -> Result<Vec<EngineOption>, NotebookApiError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: Uuid,
+            name: String,
+            engine: String,
+            enabled: bool,
+        }
+        let rows = sqlx::query_as::<_, Row>(
+            "SELECT d.id, d.name, d.engine, \
+             (nea.database_id IS NOT NULL) AS enabled \
+             FROM databases d \
+             LEFT JOIN notebook_engine_access nea \
+                 ON nea.database_id = d.id AND nea.workspace_id = $1 \
+             WHERE d.workspace_id = $1 \
+             ORDER BY d.name",
+        )
+        .bind(ws)
+        .fetch_all(&self.db.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| EngineOption {
+                id: r.id,
+                name: r.name,
+                engine: r.engine,
+                enabled: r.enabled,
+            })
+            .collect())
+    }
+
+    /// List all catalog (workspace warehouse) options for this workspace with enabled flag.
+    pub async fn list_catalog_options(
+        &self,
+        ws: Uuid,
+    ) -> Result<Vec<CatalogOption>, NotebookApiError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: Uuid,
+            name: String,
+            enabled: bool,
+        }
+        let rows = sqlx::query_as::<_, Row>(
+            "SELECT ww.id, ww.name, \
+             (nca.warehouse_id IS NOT NULL) AS enabled \
+             FROM workspace_warehouses ww \
+             LEFT JOIN notebook_catalog_access nca \
+                 ON nca.warehouse_id = ww.id AND nca.workspace_id = $1 \
+             WHERE ww.workspace_id = $1 \
+             ORDER BY ww.name",
+        )
+        .bind(ws)
+        .fetch_all(&self.db.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| CatalogOption {
+                id: r.id,
+                name: r.name,
+                enabled: r.enabled,
+            })
+            .collect())
+    }
+
+    /// Get current notebook settings (engines + catalogs with enabled flags).
+    pub async fn get_settings(&self, ws: Uuid) -> Result<NotebookSettings, NotebookApiError> {
+        let engines = self.list_engine_options(ws).await?;
+        let catalogs = self.list_catalog_options(ws).await?;
+        Ok(NotebookSettings { engines, catalogs })
+    }
+
+    /// Replace the engine access set for a workspace.
+    ///
+    /// Validates that every id in `engine_ids` belongs to this workspace
+    /// (returns `InvalidInput` if any id is foreign/absent — no cross-tenant leakage).
+    /// Then atomically: DELETE existing rows for this workspace + INSERT the new set.
+    pub async fn set_engine_access(
+        &self,
+        ws: Uuid,
+        engine_ids: &[Uuid],
+    ) -> Result<(), NotebookApiError> {
+        if !engine_ids.is_empty() {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM databases WHERE id = ANY($1) AND workspace_id = $2",
+            )
+            .bind(engine_ids)
+            .bind(ws)
+            .fetch_one(&self.db.pool)
+            .await?;
+            if count as usize != engine_ids.len() {
+                return Err(egret_core::Error::InvalidInput(
+                    "one or more engine_ids do not belong to this workspace".into(),
+                )
+                .into());
+            }
+        }
+        let mut tx = self.db.pool.begin().await?;
+        sqlx::query("DELETE FROM notebook_engine_access WHERE workspace_id = $1")
+            .bind(ws)
+            .execute(&mut *tx)
+            .await?;
+        for &db_id in engine_ids {
+            sqlx::query(
+                "INSERT INTO notebook_engine_access (workspace_id, database_id) VALUES ($1, $2)",
+            )
+            .bind(ws)
+            .bind(db_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Replace the catalog (warehouse) access set for a workspace.
+    ///
+    /// Validates that every id in `catalog_ids` belongs to this workspace.
+    /// The `catalog_ids` in the API refer to `workspace_warehouses.id` rows.
+    pub async fn set_catalog_access(
+        &self,
+        ws: Uuid,
+        catalog_ids: &[Uuid],
+    ) -> Result<(), NotebookApiError> {
+        if !catalog_ids.is_empty() {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM workspace_warehouses WHERE id = ANY($1) AND workspace_id = $2",
+            )
+            .bind(catalog_ids)
+            .bind(ws)
+            .fetch_one(&self.db.pool)
+            .await?;
+            if count as usize != catalog_ids.len() {
+                return Err(egret_core::Error::InvalidInput(
+                    "one or more catalog_ids do not belong to this workspace".into(),
+                )
+                .into());
+            }
+        }
+        let mut tx = self.db.pool.begin().await?;
+        sqlx::query("DELETE FROM notebook_catalog_access WHERE workspace_id = $1")
+            .bind(ws)
+            .execute(&mut *tx)
+            .await?;
+        for &wh_id in catalog_ids {
+            sqlx::query(
+                "INSERT INTO notebook_catalog_access (workspace_id, warehouse_id) VALUES ($1, $2)",
+            )
+            .bind(ws)
+            .bind(wh_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -705,5 +870,198 @@ mod tests {
         assert_eq!(after.cells[0].cell_type, "sql");
         assert_eq!(after.cells[0].source, "SELECT 1");
         let _ = ws;
+    }
+
+    // ── Notebook settings tests ──────────────────────────────────────────────
+
+    /// Seed a database for this workspace in the DB. Returns the database id.
+    async fn seed_database(db: &Db, ws: Uuid) -> Uuid {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO databases (name, engine, host, port, workspace_id) \
+             VALUES ($1, 'trino', 'localhost', 8080, $2) RETURNING id",
+        )
+        .bind(format!("db-{}", uuid::Uuid::new_v4().simple()))
+        .bind(ws)
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert database")
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn engine_options_empty_by_default(pool: sqlx::PgPool) {
+        let db = Db { pool };
+        let store = NotebookStore::new(db.clone());
+        let (ws, _user) = seed(&db).await;
+
+        let opts = store.list_engine_options(ws).await.unwrap();
+        assert!(opts.is_empty(), "no databases seeded → empty list");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn engine_options_enabled_toggling(pool: sqlx::PgPool) {
+        let db = Db { pool };
+        let store = NotebookStore::new(db.clone());
+        let (ws, _user) = seed(&db).await;
+        let db_id = seed_database(&db, ws).await;
+
+        // Before enabling: enabled=false.
+        let opts = store.list_engine_options(ws).await.unwrap();
+        assert_eq!(opts.len(), 1);
+        assert!(!opts[0].enabled, "not enabled yet");
+
+        // Enable it.
+        store.set_engine_access(ws, &[db_id]).await.unwrap();
+        let opts = store.list_engine_options(ws).await.unwrap();
+        assert_eq!(opts.len(), 1);
+        assert!(opts[0].enabled, "should now be enabled");
+        assert_eq!(opts[0].id, db_id);
+
+        // Disable it (empty set).
+        store.set_engine_access(ws, &[]).await.unwrap();
+        let opts = store.list_engine_options(ws).await.unwrap();
+        assert!(!opts[0].enabled, "disabled after empty set");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn set_engine_access_replaces_set(pool: sqlx::PgPool) {
+        let db = Db { pool };
+        let store = NotebookStore::new(db.clone());
+        let (ws, _user) = seed(&db).await;
+        let db1 = seed_database(&db, ws).await;
+        let db2 = seed_database(&db, ws).await;
+
+        // Enable both.
+        store.set_engine_access(ws, &[db1, db2]).await.unwrap();
+        let opts = store.list_engine_options(ws).await.unwrap();
+        assert!(opts.iter().all(|o| o.enabled), "both enabled");
+
+        // Replace with just db2 — db1 should no longer be enabled.
+        store.set_engine_access(ws, &[db2]).await.unwrap();
+        let opts = store.list_engine_options(ws).await.unwrap();
+        let db1_opt = opts.iter().find(|o| o.id == db1).unwrap();
+        let db2_opt = opts.iter().find(|o| o.id == db2).unwrap();
+        assert!(!db1_opt.enabled, "db1 should no longer be enabled");
+        assert!(db2_opt.enabled, "db2 should still be enabled");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn set_engine_access_cross_workspace_rejected(pool: sqlx::PgPool) {
+        let db = Db { pool };
+        let store = NotebookStore::new(db.clone());
+        let (ws_a, _user_a) = seed(&db).await;
+        // seed a second workspace with a second user (needs unique email)
+        let user_b: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (provider, email, name) VALUES ('local','b@test.local','B') RETURNING id",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let ws_b: Uuid = sqlx::query_scalar(
+            "INSERT INTO workspaces (slug, name, created_by) VALUES ('ws-b','B',$1) RETURNING id",
+        )
+        .bind(user_b)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let db_b = seed_database(&db, ws_b).await;
+
+        // Trying to enable ws_b's database in ws_a → InvalidInput (400).
+        let result = store.set_engine_access(ws_a, &[db_b]).await;
+        assert!(result.is_err(), "cross-workspace id should be rejected");
+        // Access table for ws_a must be unchanged.
+        let opts = store.list_engine_options(ws_a).await.unwrap();
+        assert!(
+            opts.is_empty(),
+            "ws_a has no databases, access table unchanged"
+        );
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn get_settings_combines_engines_and_catalogs(pool: sqlx::PgPool) {
+        let db = Db { pool };
+        let store = NotebookStore::new(db.clone());
+        let (ws, _user) = seed(&db).await;
+        let db_id = seed_database(&db, ws).await;
+
+        // Enable the engine.
+        store.set_engine_access(ws, &[db_id]).await.unwrap();
+
+        let settings = store.get_settings(ws).await.unwrap();
+        assert_eq!(settings.engines.len(), 1);
+        assert!(settings.engines[0].enabled);
+        // No catalogs (workspace_warehouses) in this workspace.
+        assert!(settings.catalogs.is_empty());
+    }
+
+    /// Seed a workspace warehouse (notebook "catalog") for this workspace. Returns its id.
+    async fn seed_warehouse(db: &Db, ws: Uuid) -> Uuid {
+        sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO workspace_warehouses (workspace_id, warehouse_id, name) \
+             VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind(ws)
+        .bind(Uuid::new_v4())
+        .bind(format!("wh-{}", Uuid::new_v4().simple()))
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert warehouse")
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn catalog_options_enabled_toggling(pool: sqlx::PgPool) {
+        let db = Db { pool };
+        let store = NotebookStore::new(db.clone());
+        let (ws, _user) = seed(&db).await;
+        let wh = seed_warehouse(&db, ws).await;
+
+        // Before enabling: enabled=false.
+        let opts = store.list_catalog_options(ws).await.unwrap();
+        assert_eq!(opts.len(), 1);
+        assert!(!opts[0].enabled, "not enabled yet");
+        assert_eq!(opts[0].id, wh);
+
+        // Enable it.
+        store.set_catalog_access(ws, &[wh]).await.unwrap();
+        let opts = store.list_catalog_options(ws).await.unwrap();
+        assert!(opts[0].enabled, "should now be enabled");
+
+        // Replace with empty set → disabled again.
+        store.set_catalog_access(ws, &[]).await.unwrap();
+        let opts = store.list_catalog_options(ws).await.unwrap();
+        assert!(!opts[0].enabled, "disabled after empty set");
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn set_catalog_access_cross_workspace_rejected(pool: sqlx::PgPool) {
+        let db = Db { pool };
+        let store = NotebookStore::new(db.clone());
+        let (ws_a, _user_a) = seed(&db).await;
+        // Second workspace owned by a second user (unique email + slug).
+        let user_b: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (provider, email, name) VALUES ('local','bcat@test.local','B') RETURNING id",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let ws_b: Uuid = sqlx::query_scalar(
+            "INSERT INTO workspaces (slug, name, created_by) VALUES ('ws-bcat','BCat',$1) RETURNING id",
+        )
+        .bind(user_b)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let wh_b = seed_warehouse(&db, ws_b).await;
+
+        // Enabling ws_b's warehouse in ws_a → rejected, ws_a access table untouched.
+        let result = store.set_catalog_access(ws_a, &[wh_b]).await;
+        assert!(
+            result.is_err(),
+            "cross-workspace catalog id must be rejected"
+        );
+        let opts = store.list_catalog_options(ws_a).await.unwrap();
+        assert!(
+            opts.is_empty(),
+            "ws_a has no warehouses; access table unchanged"
+        );
     }
 }

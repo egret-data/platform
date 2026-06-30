@@ -22,13 +22,14 @@ use uuid::Uuid;
 
 use crate::error::NotebookApiError;
 use crate::model::{
-    CellType, CreateCell, CreateNotebook, NotebookDetail, NotebookSummary, ReorderCells, SetFolder,
-    UpdateCell, UpdateNotebook,
+    CellType, CreateCell, CreateNotebook, NotebookDetail, NotebookSettings, NotebookSummary,
+    ReorderCells, SetFolder, UpdateCell, UpdateNotebook, UpdateNotebookSettings,
 };
 use crate::store::NotebookStore;
 
 const READ: &str = "notebook:read";
 const WRITE: &str = "notebook:write";
+const MANAGE: &str = "workspace:manage_members";
 
 #[derive(Clone)]
 pub struct NotebookState {
@@ -73,6 +74,10 @@ pub fn notebook_router() -> Router<NotebookState> {
         .route(
             "/ws/{workspace}/notebooks/{id}/cells/{cid}",
             patch(update_cell).delete(delete_cell),
+        )
+        .route(
+            "/ws/{workspace}/notebook-settings",
+            get(get_settings).put(update_settings),
         )
 }
 
@@ -377,4 +382,35 @@ async fn reorder(
     write_scoped(&st, &ctx, id).await?;
     st.store.reorder(id, &b.order).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_settings(
+    State(st): State<NotebookState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<NotebookSettings>, NotebookApiError> {
+    st.authz
+        .require_workspace(&ctx, READ)
+        .await
+        .map_err(NotebookApiError::from)?;
+    let settings = st.store.get_settings(ctx.workspace_id.0).await?;
+    Ok(Json(settings))
+}
+
+async fn update_settings(
+    State(st): State<NotebookState>,
+    WsContext(ctx): WsContext,
+    Json(body): Json<UpdateNotebookSettings>,
+) -> Result<Json<NotebookSettings>, NotebookApiError> {
+    st.authz
+        .require_workspace(&ctx, MANAGE)
+        .await
+        .map_err(NotebookApiError::from)?;
+    st.store
+        .set_engine_access(ctx.workspace_id.0, &body.engine_ids)
+        .await?;
+    st.store
+        .set_catalog_access(ctx.workspace_id.0, &body.catalog_ids)
+        .await?;
+    let settings = st.store.get_settings(ctx.workspace_id.0).await?;
+    Ok(Json(settings))
 }

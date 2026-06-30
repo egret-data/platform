@@ -954,3 +954,244 @@ async fn set_folder_happy_path_and_guards() {
         "clearing the folder → 204"
     );
 }
+
+// ── Notebook settings HTTP tests ─────────────────────────────────────────────
+
+async fn seed_database_http(db: &Db, ws_id: WorkspaceId) -> Uuid {
+    sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO databases (name, engine, host, port, workspace_id) \
+         VALUES ($1, 'trino', 'localhost', 8080, $2) RETURNING id",
+    )
+    .bind(format!("httpdb-{}", Uuid::new_v4().simple()))
+    .bind(ws_id.0)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert database for http test")
+}
+
+#[tokio::test]
+async fn get_settings_returns_engines_with_enabled_flags() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
+        .await
+        .unwrap();
+    let (_uid, token) = add_member(&f, f.ws_a, "viewer", "ws_viewer").await;
+    let db_id = seed_database_http(&db, f.ws_a).await;
+
+    // GET settings → 200, engine present with enabled=false.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/ws/{}/notebook-settings", f.slug_a),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "GET settings; body={json}");
+    let engines = json["engines"].as_array().expect("engines array");
+    let found = engines.iter().find(|e| e["id"] == db_id.to_string());
+    assert!(found.is_some(), "seeded engine appears in settings");
+    assert_eq!(found.unwrap()["enabled"], serde_json::json!(false));
+    let _ = db_id;
+}
+
+#[tokio::test]
+async fn put_settings_enables_and_get_reflects() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
+        .await
+        .unwrap();
+    let (_uid, token) = add_member(&f, f.ws_a, "admin", "ws_admin").await;
+    let db_id = seed_database_http(&db, f.ws_a).await;
+
+    // PUT → 200 with engines[0].enabled=true.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/ws/{}/notebook-settings", f.slug_a),
+            &token,
+            Some(serde_json::json!({ "engine_ids": [db_id], "catalog_ids": [] })),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "PUT settings; body={json}");
+    let engines = json["engines"].as_array().unwrap();
+    let e = engines
+        .iter()
+        .find(|e| e["id"] == db_id.to_string())
+        .unwrap();
+    assert_eq!(
+        e["enabled"],
+        serde_json::json!(true),
+        "engine enabled after PUT"
+    );
+
+    // GET also shows it enabled.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/ws/{}/notebook-settings", f.slug_a),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "GET after PUT; body={json}");
+    let engines = json["engines"].as_array().unwrap();
+    let e = engines
+        .iter()
+        .find(|e| e["id"] == db_id.to_string())
+        .unwrap();
+    assert_eq!(e["enabled"], serde_json::json!(true));
+}
+
+#[tokio::test]
+async fn put_settings_removes_engine_on_second_put() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
+        .await
+        .unwrap();
+    let (_uid, token) = add_member(&f, f.ws_a, "admin2", "ws_admin").await;
+    let db_id = seed_database_http(&db, f.ws_a).await;
+
+    // Enable.
+    f.app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/ws/{}/notebook-settings", f.slug_a),
+            &token,
+            Some(serde_json::json!({ "engine_ids": [db_id], "catalog_ids": [] })),
+        ))
+        .await
+        .unwrap();
+
+    // Remove by sending empty engine_ids.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/ws/{}/notebook-settings", f.slug_a),
+            &token,
+            Some(serde_json::json!({ "engine_ids": [], "catalog_ids": [] })),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "PUT empty; body={json}");
+    let engines = json["engines"].as_array().unwrap();
+    if let Some(e) = engines.iter().find(|e| e["id"] == db_id.to_string()) {
+        assert_eq!(e["enabled"], serde_json::json!(false), "should be disabled");
+    }
+}
+
+#[tokio::test]
+async fn put_settings_cross_workspace_engine_rejected() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&std::env::var("DATABASE_URL").unwrap(), 5)
+        .await
+        .unwrap();
+    let (uid, token) = add_member(&f, f.ws_a, "adminx", "ws_admin").await;
+    // Also member of ws_b so WsContext works for both paths.
+    f.members
+        .add(f.ws_b, "user", uid.0, "ws_admin", f.owner)
+        .await
+        .expect("member of ws_b");
+    // Create a database in ws_b.
+    let db_b = seed_database_http(&db, f.ws_b).await;
+
+    // Try to enable ws_b's database in ws_a → 400.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/ws/{}/notebook-settings", f.slug_a),
+            &token,
+            Some(serde_json::json!({ "engine_ids": [db_b], "catalog_ids": [] })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "cross-workspace engine id must be rejected with 400"
+    );
+}
+
+#[tokio::test]
+async fn put_settings_requires_manage_perm() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    // ws_viewer role does NOT have workspace:manage_members.
+    let (_uid, viewer_tok) = add_member(&f, f.ws_a, "viewer2", "ws_viewer").await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/ws/{}/notebook-settings", f.slug_a),
+            &viewer_tok,
+            Some(serde_json::json!({ "engine_ids": [], "catalog_ids": [] })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "ws_viewer must not PUT notebook settings"
+    );
+}
+
+#[tokio::test]
+async fn get_settings_allowed_for_notebook_read_member() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    // ws_viewer has notebook:read (from role_permissions seed).
+    let (_uid, viewer_tok) = add_member(&f, f.ws_a, "viewer3", "ws_viewer").await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/ws/{}/notebook-settings", f.slug_a),
+            &viewer_tok,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "ws_viewer has notebook:read → GET notebook-settings must be 200"
+    );
+}
