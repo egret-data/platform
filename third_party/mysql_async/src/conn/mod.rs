@@ -188,6 +188,32 @@ pub struct Conn {
     inner: Box<ConnInner>,
 }
 
+/// StarRocks' OpenID Connect client auth-switch plugin name.
+const OPENID_CONNECT_CLIENT_PLUGIN: &[u8] = b"authentication_openid_connect_client";
+
+/// Frame a JWT as the StarRocks OpenID client auth response: `[0x01][lenenc(token)]`.
+///
+/// StarRocks' FE reads `readInt1()` then `readLenEncodedString()`, so we send one
+/// arbitrary leading byte followed by the length-encoded token. The bytes must reach
+/// the server verbatim (no trailing NUL), so callers write them via `write_bytes`
+/// rather than through `AuthPluginData::Clear` (which appends a NUL terminator).
+fn openid_auth_data(token: &str) -> Vec<u8> {
+    let t = token.as_bytes();
+    let mut out = vec![0x01u8];
+    let n = t.len() as u64;
+    if n < 0xfb {
+        out.push(n as u8);
+    } else if n < 0x1_0000 {
+        out.push(0xfc);
+        out.extend_from_slice(&(n as u16).to_le_bytes());
+    } else {
+        out.push(0xfd);
+        out.extend_from_slice(&(n as u32).to_le_bytes()[..3]);
+    }
+    out.extend_from_slice(t);
+    out
+}
+
 impl Conn {
     /// Returns connection identifier.
     pub fn id(&self) -> u32 {
@@ -609,6 +635,22 @@ impl Conn {
 
             self.inner.auth_plugin = auth_switch_request.auth_plugin().clone().into_owned();
 
+            // StarRocks OpenID Connect: the auth response is `[0x01][lenenc(JWT)]` and must
+            // reach the server verbatim, so bypass `AuthPluginData` (whose `Clear` variant
+            // appends a NUL terminator) and write the framed bytes directly.
+            if matches!(
+                &self.inner.auth_plugin,
+                AuthPlugin::Other(name) if name.as_ref() == OPENID_CONNECT_CLIENT_PLUGIN
+            ) {
+                let data = self.inner.opts.pass().map(openid_auth_data);
+                match data {
+                    Some(data) => self.write_bytes(&data).await?,
+                    None => self.write_packet(crate::buffer_pool().get()).await?,
+                }
+                self.continue_auth().await?;
+                return Ok(());
+            }
+
             let plugin_data = match &self.inner.auth_plugin {
                 x @ AuthPlugin::CachingSha2Password => {
                     x.gen_data(self.inner.opts.pass(), &self.inner.nonce)
@@ -667,6 +709,12 @@ impl Conn {
                     } else {
                         Err(DriverError::CleartextPluginDisabled.into())
                     }
+                }
+                AuthPlugin::Other(ref name) if name.as_ref() == OPENID_CONNECT_CLIENT_PLUGIN => {
+                    // StarRocks replies OK/ERR after the OpenID auth response; read it
+                    // like the cleartext plugin does.
+                    self.continue_mysql_native_password_auth().await?;
+                    Ok(())
                 }
                 AuthPlugin::Other(ref name) => Err(DriverError::UnknownAuthPlugin {
                     name: String::from_utf8_lossy(name.as_ref()).to_string(),
@@ -1291,6 +1339,15 @@ mod test {
         from_row, params, prelude::*, test_misc::get_opts, ChangeUserOpts, Conn, Error,
         OptsBuilder, Pool, ServerError, Value, WhiteListFsHandler,
     };
+
+    #[test]
+    fn openid_auth_data_frames_lenenc() {
+        assert_eq!(super::openid_auth_data("ab"), vec![0x01, 0x02, b'a', b'b']);
+        let big = "x".repeat(300);
+        let d = super::openid_auth_data(&big);
+        assert_eq!(&d[..4], &[0x01, 0xfc, 44, 1]); // 300 = 0x012c -> LE: 2c 01
+        assert_eq!(d.len(), 1 + 3 + 300);
+    }
 
     #[tokio::test]
     async fn should_return_found_rows_if_flag_is_set() -> super::Result<()> {
