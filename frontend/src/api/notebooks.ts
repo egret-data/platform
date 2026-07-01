@@ -143,10 +143,10 @@ export function useAddCell(ws: string, id: string) {
 export function useUpdateCell(ws: string, id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (a: { cid: string; cell_type?: CellType; source?: string }) =>
+    mutationFn: (a: { cid: string; cell_type?: CellType; source?: string; sql_target?: string }) =>
       apiFetch(
         `${base(ws)}/${id}/cells/${a.cid}`,
-        jsonBody("PATCH", { cell_type: a.cell_type, source: a.source }),
+        jsonBody("PATCH", { cell_type: a.cell_type, source: a.source, sql_target: a.sql_target }),
       ),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.detail(ws, id) }),
   });
@@ -169,5 +169,36 @@ export function useReorderCells(ws: string, id: string) {
     mutationFn: (order: string[]) =>
       apiFetch(`${base(ws)}/${id}/cells/order`, jsonBody("PUT", { order })),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.detail(ws, id) }),
+  });
+}
+
+export interface EngineOption {
+  id: string;
+  name: string;
+  engine: string;
+  enabled: boolean;
+}
+
+export interface NotebookRuntime {
+  username: string;
+  engines: EngineOption[];
+  engine_jwt: string | null;
+  engine_jwt_expires_at: string | null;
+}
+
+// GET /ws/{ws}/notebook-runtime → NotebookRuntime
+export function useNotebookRuntime(ws: string) {
+  return useQuery({
+    queryKey: ["notebook-runtime", ws],
+    queryFn: () => apiJson<NotebookRuntime>(`/ws/${encodeURIComponent(ws)}/notebook-runtime`),
+    staleTime: 60_000,
+  });
+}
+
+// GET /ws/{ws}/notebooks/{id}/kernel/active-executions → { running: string[] }
+export function useActiveExecutions(ws: string, id: string) {
+  return useQuery({
+    queryKey: ["active-executions", ws, id],
+    queryFn: () => apiJson<{ running: string[] }>(`${base(ws)}/${id}/kernel/active-executions`),
   });
 }

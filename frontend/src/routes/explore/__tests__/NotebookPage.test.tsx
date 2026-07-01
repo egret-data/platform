@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -27,6 +28,9 @@ const deleteCellMutation = vi.fn();
 const reorderCellsMutate = vi.fn();
 const reorderCellsMutation = vi.fn();
 
+const runtimeMock = vi.fn();
+const activeExecutionsMock = vi.fn();
+
 vi.mock("@/api/notebooks", () => ({
   useNotebook: () => notebookMock(),
   useUpdateNotebook: () => updateNotebookMutation(),
@@ -34,35 +38,53 @@ vi.mock("@/api/notebooks", () => ({
   useUpdateCell: () => updateCellMutation(),
   useDeleteCell: () => deleteCellMutation(),
   useReorderCells: () => reorderCellsMutation(),
+  useNotebookRuntime: () => runtimeMock(),
+  useActiveExecutions: () => activeExecutionsMock(),
 }));
 
 // ── Kernel mock (no real WebSocket in jsdom) ──────────────────────────────────
 const kernelConnect = vi.fn();
 const kernelExecute = vi.fn();
 const kernelDisconnect = vi.fn();
+const kernelInterrupt = vi.fn();
+const kernelRestart = vi.fn();
 
 vi.mock("@/lib/kernel/KernelConnection", () => ({
   KernelConnection: class {
     connect = kernelConnect;
     execute = kernelExecute;
     disconnect = kernelDisconnect;
+    interrupt = kernelInterrupt;
+    restart = kernelRestart;
   },
 }));
 
 import NotebookPage from "@/routes/explore/NotebookPage";
 
 // ── Render helper ─────────────────────────────────────────────────────────────
-function renderAt(id = "nb-1") {
+// `inForm` wraps the tree in a <form> so Radix Select renders its hidden native
+// <select>, which tests drive via fireEvent.change (portal is unreliable in jsdom).
+function renderAt(id = "nb-1", { inForm = false }: { inForm?: boolean } = {}) {
   const qc = new QueryClient();
-  return render(
+  const tree = (
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[`/explore/eng/notebooks/${id}`]}>
         <Routes>
           <Route path="/explore/:workspace/notebooks/:id" element={<NotebookPage />} />
         </Routes>
       </MemoryRouter>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  return render(inForm ? <form>{tree}</form> : tree);
+}
+
+// Drive the underlying Radix Select via its hidden native <select>.
+function selectOption(value: string) {
+  const native = Array.from(
+    document.querySelectorAll<HTMLSelectElement>("select"),
+  ).find((s) => Array.from(s.options).some((o) => o.value === value));
+  if (!native) throw new Error(`option ${value} not found`);
+  fireEvent.change(native, { target: { value } });
 }
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -104,6 +126,17 @@ beforeEach(() => {
   vi.useFakeTimers();
 
   notebookMock.mockReset();
+  activeExecutionsMock.mockReset();
+  activeExecutionsMock.mockReturnValue({ data: { running: [] } });
+  runtimeMock.mockReset();
+  runtimeMock.mockReturnValue({
+    data: {
+      username: "alice",
+      engines: [{ id: "e1", name: "trino", engine: "trino", enabled: true }],
+      engine_jwt: null,
+      engine_jwt_expires_at: null,
+    },
+  });
   updateNotebookMutation.mockReset();
   addCellMutation.mockReset();
   updateCellMutation.mockReset();
@@ -147,6 +180,10 @@ beforeEach(() => {
   kernelConnect.mockReset();
   kernelExecute.mockReset();
   kernelDisconnect.mockReset();
+  kernelInterrupt.mockReset();
+  kernelRestart.mockReset();
+  kernelInterrupt.mockResolvedValue(undefined);
+  kernelRestart.mockResolvedValue(undefined);
   kernelConnect.mockResolvedValue(undefined);
   kernelExecute.mockImplementation(
     (
@@ -255,7 +292,7 @@ describe("NotebookPage", () => {
 
   it("renders an ENABLED Run button for a code cell (no 'coming soon' title)", () => {
     renderAt();
-    const runButtons = screen.getAllByRole("button", { name: /run/i });
+    const runButtons = screen.getAllByRole("button", { name: /^run$/i });
     // First run button belongs to the code cell (cell_order 0) → enabled.
     expect(runButtons[0]).toBeEnabled();
     expect(runButtons[0]).not.toHaveAttribute("title", "Execution coming soon");
@@ -263,7 +300,7 @@ describe("NotebookPage", () => {
 
   it("clicking Run executes the cell and renders its output", async () => {
     renderAt();
-    const runButton = screen.getAllByRole("button", { name: /run/i })[0];
+    const runButton = screen.getAllByRole("button", { name: /^run$/i })[0];
 
     await act(async () => {
       fireEvent.click(runButton);
@@ -314,7 +351,7 @@ describe("NotebookPage", () => {
       error: null,
     });
     renderAt();
-    const runButton = screen.getAllByRole("button", { name: /run/i })[0];
+    const runButton = screen.getAllByRole("button", { name: /^run$/i })[0];
 
     await act(async () => {
       fireEvent.click(runButton);
@@ -325,6 +362,47 @@ describe("NotebookPage", () => {
       expect.stringMatching(/^%%egret_sql --target daft\n/),
       expect.any(Object),
     );
+  });
+
+  // ── SQL target dropdown ─────────────────────────────────────────────────────
+
+  function mockSqlNotebook() {
+    notebookMock.mockReturnValue({
+      data: {
+        ...mockNotebook,
+        cells: [
+          {
+            ...mockCodeCell,
+            cell_type: "sql" as const,
+            source: "select 1",
+            sql_target: null,
+          },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+  }
+
+  it("renders a SQL-target control defaulting to Daft for a null sql_target", () => {
+    mockSqlNotebook();
+    renderAt();
+    const target = screen.getByLabelText("SQL target");
+    expect(target).toBeInTheDocument();
+    expect(target).toHaveTextContent(/Daft/);
+  });
+
+  it("selecting an engine calls useUpdateCell with {cid, sql_target}", () => {
+    mockSqlNotebook();
+    renderAt("nb-1", { inForm: true });
+
+    selectOption("trino");
+
+    expect(updateCellMutate).toHaveBeenCalledWith({
+      cid: "cell-1",
+      sql_target: "trino",
+    });
   });
 
   // ── Loading state ─────────────────────────────────────────────────────────
@@ -351,5 +429,166 @@ describe("NotebookPage", () => {
     });
     renderAt();
     expect(screen.getByText(/not found/i)).toBeInTheDocument();
+  });
+
+  // ── Toolbar: Run all / Interrupt / Restart / Clear ──────────────────────────
+
+  it("clicking Run all executes each NON-markdown cell once and skips markdown", async () => {
+    // Fixture has a code cell (cell-1) and a markdown cell (cell-2).
+    renderAt();
+
+    const runAll = screen.getByRole("button", { name: /run all/i });
+    await act(async () => {
+      fireEvent.click(runAll);
+    });
+
+    // Only the code cell executes; the markdown cell is skipped.
+    expect(kernelExecute).toHaveBeenCalledTimes(1);
+    expect(kernelExecute).toHaveBeenCalledWith(
+      "cell-1",
+      expect.any(String),
+      expect.any(Object),
+    );
+  });
+
+  it("clicking Interrupt calls kernel.interrupt", () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /interrupt/i }));
+    expect(kernelInterrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it("clicking Restart calls kernel.restart", () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /restart/i }));
+    expect(kernelRestart).toHaveBeenCalledTimes(1);
+  });
+
+  it("clicking Clear outputs empties a cell's rendered outputs", () => {
+    notebookMock.mockReturnValue({
+      data: {
+        ...mockNotebook,
+        cells: [
+          {
+            ...mockCodeCell,
+            last_output: [{ type: "stream", name: "stdout", text: "keepme" }],
+          },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    renderAt();
+    expect(screen.getByText(/keepme/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /clear outputs/i }));
+
+    expect(screen.queryByText(/keepme/)).not.toBeInTheDocument();
+  });
+
+  it("shows a running indicator for a cell listed in active-executions on load", () => {
+    activeExecutionsMock.mockReturnValue({ data: { running: ["cell-1"] } });
+    notebookMock.mockReturnValue({
+      data: { ...mockNotebook, cells: [mockCodeCell] },
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    renderAt();
+    // The code cell's Run button is disabled (running) without any click.
+    const runButtons = screen.getAllByRole("button", { name: /^run$/i });
+    expect(runButtons[0]).toBeDisabled();
+  });
+
+  // ── Per-cell run above / run below ────────────────────────────────────────────
+
+  const cellA = {
+    id: "cell-a",
+    cell_type: "code" as const,
+    source: "a",
+    cell_order: 0,
+    execution_count: null,
+    last_output: null,
+    last_execution_time_ms: null,
+    sql_target: null,
+  };
+  const cellB = {
+    id: "cell-b",
+    cell_type: "code" as const,
+    source: "b",
+    cell_order: 1,
+    execution_count: null,
+    last_output: null,
+    last_execution_time_ms: null,
+    sql_target: null,
+  };
+  const cellC = {
+    id: "cell-c",
+    cell_type: "code" as const,
+    source: "c",
+    cell_order: 2,
+    execution_count: null,
+    last_output: null,
+    last_execution_time_ms: null,
+    sql_target: null,
+  };
+
+  function renderThreeCells() {
+    notebookMock.mockReturnValue({
+      data: { ...mockNotebook, cells: [cellA, cellB, cellC] },
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    // DropdownMenu portal uses findByText (async) which needs real timers.
+    vi.useRealTimers();
+    const user = userEvent.setup();
+    renderAt();
+    return { user };
+  }
+
+  it("'Run all above' executes only cells before the target", async () => {
+    const { user } = renderThreeCells();
+    // Three code cells → three "Run options" triggers
+    const triggers = screen.getAllByRole("button", { name: "Run options" });
+    // Open middle cell's (index 1 = cell-b) dropdown
+    await user.click(triggers[1]);
+    // Click the menu item
+    await user.click(await screen.findByText("Run all above"));
+    // Only cell-a should have been executed (the one above cell-b)
+    expect(kernelExecute).toHaveBeenCalledTimes(1);
+    expect(kernelExecute).toHaveBeenCalledWith("cell-a", expect.any(String), expect.any(Object));
+  });
+
+  it("'Run all below' executes only cells after the target", async () => {
+    const { user } = renderThreeCells();
+    const triggers = screen.getAllByRole("button", { name: "Run options" });
+    // Open middle cell's (index 1 = cell-b) dropdown
+    await user.click(triggers[1]);
+    // Click the menu item
+    await user.click(await screen.findByText("Run all below"));
+    // Only cell-c should have been executed (the one below cell-b)
+    expect(kernelExecute).toHaveBeenCalledTimes(1);
+    expect(kernelExecute).toHaveBeenCalledWith("cell-c", expect.any(String), expect.any(Object));
+  });
+
+  it("'Run all above' item is disabled for the first cell", async () => {
+    const { user } = renderThreeCells();
+    const triggers = screen.getAllByRole("button", { name: "Run options" });
+    // Open first cell's (index 0 = cell-a) dropdown
+    await user.click(triggers[0]);
+    const item = await screen.findByText("Run all above");
+    // Radix sets data-disabled on disabled DropdownMenuItems
+    expect(item).toHaveAttribute("data-disabled");
+  });
+
+  it("'Run all below' item is disabled for the last cell", async () => {
+    const { user } = renderThreeCells();
+    const triggers = screen.getAllByRole("button", { name: "Run options" });
+    // Open last cell's (index 2 = cell-c) dropdown
+    await user.click(triggers[2]);
+    const item = await screen.findByText("Run all below");
+    // Radix sets data-disabled on disabled DropdownMenuItems
+    expect(item).toHaveAttribute("data-disabled");
   });
 });

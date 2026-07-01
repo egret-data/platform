@@ -1,9 +1,9 @@
 import Editor from "@monaco-editor/react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowDown, ArrowUp, Loader2, Play, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, Loader2, Play, Trash2 } from "lucide-react";
 
-import type { Cell, CellType } from "@/api/notebooks";
+import type { Cell, CellType, EngineOption } from "@/api/notebooks";
 import { Button } from "@/components/ui/button";
 import { CellOutputRenderer } from "@/components/notebook/CellOutputRenderer";
 import type { CellOutput } from "@/lib/kernel/protocol";
@@ -14,29 +14,43 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 export interface CellEditorProps {
   cell: Cell;
   onChangeSource: (source: string) => void;
   onChangeType: (type: CellType) => void;
+  onChangeSqlTarget?: (target: string) => void;
+  engines?: EngineOption[];
   onDelete: () => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
   onRun?: () => void;
   running?: boolean;
   outputs?: CellOutput[];
+  onRunAbove?: () => void;
+  onRunBelow?: () => void;
 }
 
 export function CellEditor({
   cell,
   onChangeSource,
   onChangeType,
+  onChangeSqlTarget,
+  engines,
   onDelete,
   onMoveUp,
   onMoveDown,
   onRun,
   running,
   outputs,
+  onRunAbove,
+  onRunBelow,
 }: CellEditorProps) {
   const monacoLanguage = cell.cell_type === "sql" ? "sql" : "python";
 
@@ -57,6 +71,22 @@ export function CellEditor({
             <SelectItem value="sql">SQL</SelectItem>
           </SelectContent>
         </Select>
+
+        {cell.cell_type === "sql" && onChangeSqlTarget && (
+          <Select value={cell.sql_target || "daft"} onValueChange={onChangeSqlTarget}>
+            <SelectTrigger className="h-7 w-32 text-xs" aria-label="SQL target">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="daft">Daft (in-kernel)</SelectItem>
+              {(engines ?? []).map((e) => (
+                <SelectItem key={e.id} value={e.name}>
+                  {e.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
 
         <div className="ml-auto flex items-center gap-1">
           <Button
@@ -102,6 +132,28 @@ export function CellEditor({
             )}
             Run
           </Button>
+          {cell.cell_type !== "markdown" && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-7 w-7"
+                  aria-label="Run options"
+                >
+                  <ChevronDown className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem disabled={!onRunAbove} onClick={onRunAbove}>
+                  Run all above
+                </DropdownMenuItem>
+                <DropdownMenuItem disabled={!onRunBelow} onClick={onRunBelow}>
+                  Run all below
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
       </div>
 
