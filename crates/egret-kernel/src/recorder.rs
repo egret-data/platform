@@ -207,6 +207,18 @@ impl Recorder {
     }
 }
 
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        // On WS close (kernel crash / disconnect) clear any still-running cells
+        // from the shared registry so active-executions doesn't report them forever.
+        if let Ok(guard) = self.pending.lock() {
+            for p in guard.values() {
+                self.active.remove(self.nb, self.user, p.cell_id);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,6 +322,24 @@ mod tests {
                 serde_json::json!({"execution_state":"idle"}),
             ),
         );
+        assert!(reg.running(nb, user).is_empty());
+    }
+
+    #[tokio::test]
+    async fn drop_clears_stale_active_executions() {
+        let reg: ActiveExecutions = Default::default();
+        let (nb, user) = (Uuid::now_v7(), Uuid::now_v7());
+        let cid = Uuid::now_v7();
+        {
+            let rec = Recorder::new(
+                nb,
+                user,
+                std::sync::Arc::new(FakeSink::default()),
+                reg.clone(),
+            );
+            rec.on_frame(FrameDir::ClientToKernel, &exec_request("m1", cid)); // running, no idle
+            assert_eq!(reg.running(nb, user), vec![cid]);
+        } // rec dropped here (WS closed mid-run)
         assert!(reg.running(nb, user).is_empty());
     }
 
