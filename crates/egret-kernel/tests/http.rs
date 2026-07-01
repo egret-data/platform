@@ -278,9 +278,19 @@ async fn spawn_fake_gateway() -> String {
             StatusCode::NOT_FOUND
         }
     }
+    async fn interrupt_one(axum::extract::Path(_id): axum::extract::Path<String>) -> StatusCode {
+        StatusCode::NO_CONTENT
+    }
+    async fn restart_one(
+        axum::extract::Path(id): axum::extract::Path<String>,
+    ) -> axum::Json<serde_json::Value> {
+        axum::Json(serde_json::json!({ "id": id }))
+    }
     let app = axum::Router::new()
         .route("/api/kernels", post(create))
-        .route("/api/kernels/{id}", get(get_one));
+        .route("/api/kernels/{id}", get(get_one))
+        .route("/api/kernels/{id}/interrupt", post(interrupt_one))
+        .route("/api/kernels/{id}/restart", post(restart_one));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -754,6 +764,160 @@ async fn connect_non_member_rejected(pool: sqlx::PgPool) {
         f.launcher.inner.lock().unwrap().ensured.len(),
         0,
         "launcher must NOT be called for unauthorized connect"
+    );
+}
+
+// ── interrupt / restart tests ─────────────────────────────────────────────────
+
+/// Ready kernel → interrupt reaches the fake gateway → 204 No Content.
+#[sqlx::test(migrations = "../../migrations")]
+async fn interrupt_ready_kernel_returns_204(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_warehouse(&f.db, f.ws).await;
+    let (uid, token) = add_member(&f, f.ws, "interrupter", "ws_editor").await;
+    let nb = seed_notebook(&f.db, f.ws, uid).await;
+
+    // Point the launcher (gateway url) at a fake gateway, then connect (creates kernel k1).
+    let gw = spawn_fake_gateway().await;
+    f.launcher.inner.lock().unwrap().url = Some(gw);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/ws/{}/notebooks/{}/kernel/connect", f.slug, nb),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "connect → 200");
+
+    // Interrupt → 204 (reached the gateway with the resolved kernel id).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/ws/{}/notebooks/{}/kernel/interrupt", f.slug, nb),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "interrupt ready kernel → 204"
+    );
+}
+
+/// Ready kernel → restart reaches the fake gateway → 200 `{kernel_id:"k1"}`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn restart_ready_kernel_returns_kernel_id(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_warehouse(&f.db, f.ws).await;
+    let (uid, token) = add_member(&f, f.ws, "restarter", "ws_editor").await;
+    let nb = seed_notebook(&f.db, f.ws, uid).await;
+
+    let gw = spawn_fake_gateway().await;
+    f.launcher.inner.lock().unwrap().url = Some(gw);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/ws/{}/notebooks/{}/kernel/connect", f.slug, nb),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "connect → 200");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/ws/{}/notebooks/{}/kernel/restart", f.slug, nb),
+            &token,
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "restart → 200; body={json}");
+    assert_eq!(
+        json["kernel_id"].as_str(),
+        Some("k1"),
+        "restart returns the kernel id; body={json}"
+    );
+}
+
+/// No started kernel → interrupt is 409 Conflict (FE must connect first),
+/// never crashes / reaches the gateway.
+#[sqlx::test(migrations = "../../migrations")]
+async fn interrupt_without_started_kernel_conflict(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_warehouse(&f.db, f.ws).await;
+    let (uid, token) = add_member(&f, f.ws, "nointr", "ws_editor").await;
+    let nb = seed_notebook(&f.db, f.ws, uid).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/ws/{}/notebooks/{}/kernel/interrupt", f.slug, nb),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "interrupt with no started kernel → 409"
+    );
+}
+
+/// Non-member → interrupt is rejected (403/404) before any gateway work.
+#[sqlx::test(migrations = "../../migrations")]
+async fn interrupt_non_member_rejected(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_warehouse(&f.db, f.ws).await;
+    let nb = seed_notebook(&f.db, f.ws, f.owner).await;
+    let outsider = f
+        .users
+        .insert_local(
+            &format!("introut_{}@egret.test", Uuid::new_v4().simple()),
+            "Out",
+            "x",
+        )
+        .await
+        .unwrap();
+    let tok = f
+        .sessions
+        .create(outsider, "test", "127.0.0.1")
+        .await
+        .unwrap()
+        .token;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/ws/{}/notebooks/{}/kernel/interrupt", f.slug, nb),
+            &tok,
+        ))
+        .await
+        .unwrap();
+    let status = resp.status();
+    assert!(
+        status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
+        "non-member interrupt must be 403/404; got {status}"
+    );
+    assert_eq!(
+        f.launcher.inner.lock().unwrap().ensured.len(),
+        0,
+        "launcher must NOT be called for unauthorized interrupt"
     );
 }
 

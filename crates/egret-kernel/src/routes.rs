@@ -98,6 +98,14 @@ pub fn kernel_router() -> Router<KernelState> {
             "/ws/{workspace}/notebooks/{notebook}/kernel/channels",
             get(channels),
         )
+        .route(
+            "/ws/{workspace}/notebooks/{notebook}/kernel/interrupt",
+            post(kernel_interrupt),
+        )
+        .route(
+            "/ws/{workspace}/notebooks/{notebook}/kernel/restart",
+            post(kernel_restart),
+        )
 }
 
 /// Kernel-token bearer callback routes invoked by the kernel SUBPROCESS, not a
@@ -370,6 +378,99 @@ async fn channels(
     Ok(upgrade.on_upgrade(move |socket| async move {
         let _ = proxy.proxy_channels(socket, &url, &kid, on_activity).await;
     }))
+}
+
+/// Shared auth + IDOR + resolution for `interrupt`/`restart`. Mirrors `channels`:
+/// requires `notebook:read`, the notebook to belong to this workspace and be
+/// readable, and a Ready kernel with a resolved per-notebook kernel id. Returns
+/// `(gateway_url, kernel_id)`. 409 Conflict if no Ready kernel / no kernel id yet.
+async fn resolve_running_notebook_kernel(
+    st: &KernelState,
+    ctx: &egret_core::WorkspaceContext,
+    nb: Uuid,
+) -> Result<(String, String), KernelApiError> {
+    st.authz
+        .require_workspace(ctx, "notebook:read")
+        .await
+        .map_err(KernelApiError::from)?;
+
+    // Notebook must belong to this workspace AND be readable by the caller.
+    let (summary, nb_ws) = st
+        .notebook
+        .store
+        .get_summary(nb)
+        .await
+        .map_err(|e| KernelApiError(e.0))?
+        .ok_or_else(|| KernelApiError(egret_core::Error::NotFound("notebook not found".into())))?;
+    if nb_ws != ctx.workspace_id.0 {
+        return Err(KernelApiError(egret_core::Error::NotFound(
+            "notebook not found".into(),
+        )));
+    }
+    if !(summary.is_public || summary.owner_user_id == ctx.principal.user_id.0) {
+        return Err(KernelApiError(egret_core::Error::Forbidden));
+    }
+
+    let user = ctx.principal.user_id.0;
+    let key = KernelKey {
+        user_id: user,
+        workspace_id: ctx.workspace_id.0,
+    };
+
+    // The gateway must already be Ready (the FE calls `connect` first).
+    let status = st
+        .manager
+        .status(key)
+        .await
+        .map_err(KernelApiError::from)?
+        .filter(|s| s.phase == KernelPhase::Ready)
+        .ok_or_else(|| {
+            KernelApiError(egret_core::Error::Conflict(
+                "kernel not started; call connect first".into(),
+            ))
+        })?;
+
+    // The per-notebook kernel must already exist (created by connect/channels).
+    let kid = st
+        .notebook_kernels
+        .get(nb, user)
+        .await
+        .map_err(KernelApiError::from)?
+        .ok_or_else(|| {
+            KernelApiError(egret_core::Error::Conflict(
+                "no running kernel for this notebook; call connect first".into(),
+            ))
+        })?;
+
+    Ok((status.url, kid))
+}
+
+/// `POST /ws/{workspace}/notebooks/{notebook}/kernel/interrupt` — interrupt the
+/// per-notebook kernel via the Jupyter Kernel Gateway REST API. Returns 204.
+async fn kernel_interrupt(
+    State(st): State<KernelState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, nb)): Path<(String, Uuid)>,
+) -> Result<StatusCode, KernelApiError> {
+    let (gateway_url, kernel_id) = resolve_running_notebook_kernel(&st, &ctx, nb).await?;
+    crate::gateway::interrupt_kernel(&gateway_url, &kernel_id)
+        .await
+        .map_err(KernelApiError::from)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /ws/{workspace}/notebooks/{notebook}/kernel/restart` — restart the
+/// per-notebook kernel via the gateway REST API. Returns `{kernel_id}`.
+async fn kernel_restart(
+    State(st): State<KernelState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, nb)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, KernelApiError> {
+    let (gateway_url, kernel_id) = resolve_running_notebook_kernel(&st, &ctx, nb).await?;
+    let id = crate::gateway::restart_kernel(&gateway_url, &kernel_id)
+        .await
+        .map_err(KernelApiError::from)?;
+    Ok(Json(serde_json::json!({ "kernel_id": id })))
 }
 
 // ── kernel query callback ─────────────────────────────────────────────────────
