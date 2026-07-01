@@ -28,12 +28,14 @@ beforeEach(() => {
 });
 
 describe("notebook api hooks", () => {
-  it("useUpdateCell sends sql_target in the PATCH body", async () => {
+  it("useUpdateCell sends source in the PATCH body and no sql_target", async () => {
     const { result } = renderHook(() => useUpdateCell("w", "n1"), { wrapper });
-    result.current.mutate({ cid: "c1", sql_target: "trino" });
+    result.current.mutate({ cid: "c1", source: "print(1)" });
     await waitFor(() => expect(apiFetch).toHaveBeenCalled());
     const [, init] = apiFetch.mock.calls[0] as unknown as [string, RequestInit];
-    expect(JSON.parse(init.body as string)).toMatchObject({ sql_target: "trino" });
+    const body = JSON.parse(init.body as string);
+    expect(body).toMatchObject({ source: "print(1)" });
+    expect(body).not.toHaveProperty("sql_target");
   });
 
   it("useNotebookRuntime GETs /ws/{ws}/notebook-runtime", async () => {

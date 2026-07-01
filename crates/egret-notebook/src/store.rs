@@ -81,7 +81,6 @@ struct CellRow {
     execution_count: Option<i32>,
     last_output: Option<serde_json::Value>,
     last_execution_time_ms: Option<i32>,
-    sql_target: Option<String>,
 }
 
 impl CellRow {
@@ -94,7 +93,6 @@ impl CellRow {
             execution_count: self.execution_count,
             last_output: self.last_output,
             last_execution_time_ms: self.last_execution_time_ms,
-            sql_target: self.sql_target,
         }
     }
 }
@@ -205,7 +203,7 @@ impl NotebookStore {
         summary.is_owner = summary.owner_user_id == viewer;
         let cells = sqlx::query_as::<_, CellRow>(
             "SELECT id, cell_type, source, cell_order, execution_count, \
-             last_output, last_execution_time_ms, sql_target \
+             last_output, last_execution_time_ms \
              FROM notebook_cells \
              WHERE notebook_id=$1 \
              ORDER BY cell_order ASC, created_at ASC",
@@ -360,7 +358,6 @@ impl NotebookStore {
             "UPDATE notebook_cells SET \
              cell_type  = COALESCE($3, cell_type), \
              source     = COALESCE($4, source), \
-             sql_target = COALESCE($5, sql_target), \
              updated_at = now() \
              WHERE id=$1 AND notebook_id=$2",
         )
@@ -368,7 +365,6 @@ impl NotebookStore {
         .bind(nb)
         .bind(p.cell_type.as_deref())
         .bind(p.source.as_deref())
-        .bind(p.sql_target.as_deref())
         .execute(&self.db.pool)
         .await?;
         if result.rows_affected() == 0 {
@@ -972,7 +968,6 @@ mod tests {
                 &crate::model::UpdateCell {
                     cell_type: Some("sql".into()),
                     source: Some("SELECT 1".into()),
-                    sql_target: None,
                 },
             )
             .await
@@ -1141,34 +1136,6 @@ mod tests {
         store.set_catalog_access(ws, &[]).await.unwrap();
         let opts = store.list_catalog_options(ws).await.unwrap();
         assert!(!opts[0].enabled, "disabled after empty set");
-    }
-
-    #[sqlx::test(migrations = "../../migrations")]
-    async fn update_cell_sets_sql_target(pool: sqlx::PgPool) {
-        let db = Db { pool };
-        let store = NotebookStore::new(db.clone());
-        let (ws, user) = seed(&db).await;
-        let nb = store.create(ws, user, "nb").await.unwrap();
-        let cid = store.add_cell(nb, "sql", "", 1).await.unwrap();
-        store
-            .update_cell(
-                nb,
-                cid,
-                &UpdateCell {
-                    cell_type: None,
-                    source: None,
-                    sql_target: Some("trino".into()),
-                },
-            )
-            .await
-            .unwrap();
-        let target: Option<String> =
-            sqlx::query_scalar("SELECT sql_target FROM notebook_cells WHERE id=$1")
-                .bind(cid)
-                .fetch_one(&db.pool)
-                .await
-                .unwrap();
-        assert_eq!(target.as_deref(), Some("trino"));
     }
 
     #[sqlx::test(migrations = "../../migrations")]

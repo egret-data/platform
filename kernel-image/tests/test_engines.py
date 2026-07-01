@@ -1,7 +1,16 @@
+import base64
 import datetime as dt
 import json
 import pytest
 from egret_kernel_helpers import engines as E
+
+
+def _mk_jwt(preferred_username):
+    """Build a real-ish 3-part JWT whose payload carries preferred_username."""
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"preferred_username": preferred_username}).encode()
+    ).rstrip(b"=").decode()
+    return "h." + payload + ".sig"
 
 
 def _fake_http(responses):
@@ -70,7 +79,8 @@ def test_trino_builds_read_sql_with_jwt(monkeypatch):
 def test_trino_conn_factory_wires_jwt_and_url(monkeypatch):
     import sys
     env = {"EGRET_API_URL": "http://egret", "EGRET_KERNEL_TOKEN": "kt"}
-    cache = {"trino": {"jwt": "JWT", "expires_at": "2999-01-01T00:00:00Z",
+    jwt = _mk_jwt("tester")
+    cache = {"trino": {"jwt": jwt, "expires_at": "2999-01-01T00:00:00Z",
                        "kind": "trino", "host": "trino", "port": 8080}}
     captured = {}
     fake_daft = type("D", (), {"read_sql": staticmethod(
@@ -104,10 +114,133 @@ def test_trino_conn_factory_wires_jwt_and_url(monkeypatch):
     E.trino("SELECT 1", env=env, cache=cache)
     conn = captured["conn"]
     assert conn() == "CONN"
-    assert engine_calls["url"] == "trino://egret@trino:8080"
+    assert engine_calls["url"] == "trino://tester@trino:8080"
     assert engine_calls["connect_args"]["http_scheme"] == "https"
-    assert auth_calls["jwt"] == "JWT"
-    assert engine_calls["connect_args"]["auth"] == ("AUTH", "JWT")
+    assert auth_calls["jwt"] == jwt
+    assert engine_calls["connect_args"]["auth"] == ("AUTH", jwt)
+
+
+def test_lenenc_boundaries():
+    assert E._lenenc(250) == b"\xfa"
+    assert E._lenenc(251) == b"\xfc\xfb\x00"
+    assert E._lenenc(65535) == b"\xfc\xff\xff"
+    assert E._lenenc(65536) == b"\xfd\x00\x00\x01"
+    assert E._lenenc(16777216) == b"\xfe\x00\x00\x00\x01\x00\x00\x00\x00"
+
+
+def test_openid_handler_writes_jwt_frame():
+    written = {}
+
+    class _Reply:
+        def check_error(self):
+            pass
+
+    class _Con:
+        def write_packet(self, data):
+            written["data"] = data
+
+        def _read_packet(self):
+            return _Reply()
+
+    Handler = E._openid_handler("mytoken")
+    handler = Handler(_Con())
+    handler.authenticate(None)
+    assert written["data"] == b"\x01" + E._lenenc(len(b"mytoken")) + b"mytoken"
+
+
+def test_starrocks_builds_read_sql_with_jwt(monkeypatch):
+    import sys
+    env = {"EGRET_API_URL": "http://egret", "EGRET_KERNEL_TOKEN": "kt"}
+    cache = {"sr": {"jwt": "JWT", "expires_at": "2999-01-01T00:00:00Z",
+                    "kind": "starrocks", "host": "sr", "port": 9030}}
+    captured = {}
+    fake_daft = type("D", (), {"read_sql": staticmethod(
+        lambda sql, conn, **kw: captured.update(sql=sql, conn=conn) or "DF")})
+    monkeypatch.setitem(sys.modules, "daft", fake_daft)
+    out = E.starrocks("SELECT 1", engine="sr", env=env, cache=cache)
+    assert out == "DF"
+    assert captured["sql"] == "SELECT 1"
+    assert callable(captured["conn"])
+
+
+def test_jwt_username_extracts_preferred_username():
+    assert E._jwt_username(_mk_jwt("alice")) == "alice"
+    assert E._jwt_username("garbage") == "egret"
+
+
+def test_starrocks_conn_factory_uses_pymysql_openid(monkeypatch):
+    import sys
+    env = {"EGRET_API_URL": "http://egret", "EGRET_KERNEL_TOKEN": "kt"}
+    cache = {"sr": {"jwt": _mk_jwt("tester"), "expires_at": "2999-01-01T00:00:00Z",
+                    "kind": "starrocks", "host": "sr", "port": 9030}}
+    seen = {}
+    def fake_connect(**kw):
+        seen["connect_kwargs"] = kw
+        return "PYMYSQL_CONN"
+    fake_pymysql = type("P", (), {"connect": staticmethod(fake_connect)})
+    def fake_create_engine(url, **kw):
+        seen["url"] = url
+        seen["creator"] = kw.get("creator")
+        class _Eng:
+            def connect(self):
+                return kw["creator"]()
+        return _Eng()
+    fake_sa = type("SA", (), {"create_engine": staticmethod(fake_create_engine)})
+    # daft.read_sql returns the factory so the test can invoke it
+    fake_daft = type("D", (), {"read_sql": staticmethod(lambda sql, conn, **kw: conn)})
+    monkeypatch.setitem(sys.modules, "pymysql", fake_pymysql)
+    monkeypatch.setitem(sys.modules, "sqlalchemy", fake_sa)
+    monkeypatch.setitem(sys.modules, "daft", fake_daft)
+    factory = E.starrocks("SELECT 1", engine="sr", env=env, cache=cache)
+    conn = factory()                    # invoke the connection factory -> eng.connect() -> creator()
+    assert conn == "PYMYSQL_CONN"
+    assert seen["url"] == "mysql+pymysql://"
+    assert callable(seen["creator"])
+    kw = seen["connect_kwargs"]
+    assert kw["host"] == "sr" and kw["port"] == 9030 and kw["user"] == "tester"
+    assert "authentication_openid_connect_client" in kw["auth_plugin_map"]
+
+
+def test_trino_conn_factory_tls_verify(monkeypatch):
+    import sys
+    jwt = _mk_jwt("tester")
+    cache = {"trino": {"jwt": jwt, "expires_at": "2999-01-01T00:00:00Z",
+                       "kind": "trino", "host": "trino", "port": 8080}}
+
+    def _build(env):
+        captured = {}
+        fake_daft = type("D", (), {"read_sql": staticmethod(
+            lambda sql, conn, **kw: captured.update(conn=conn) or "DF")})
+        monkeypatch.setitem(sys.modules, "daft", fake_daft)
+        engine_calls = {}
+
+        class _Eng:
+            def connect(self):
+                return "CONN"
+
+        def _create_engine(url, connect_args=None):
+            engine_calls.update(url=url, connect_args=connect_args)
+            return _Eng()
+
+        fake_sqlalchemy = type("SA", (), {"create_engine": staticmethod(_create_engine)})
+        monkeypatch.setitem(sys.modules, "sqlalchemy", fake_sqlalchemy)
+        fake_trino = type("T", (), {})
+        fake_trino_auth = type("TA", (), {
+            "JWTAuthentication": staticmethod(lambda j: ("AUTH", j))})
+        monkeypatch.setitem(sys.modules, "trino", fake_trino)
+        monkeypatch.setitem(sys.modules, "trino.auth", fake_trino_auth)
+        E.trino("SELECT 1", env=env, cache=cache)
+        captured["conn"]()
+        return engine_calls
+
+    # Default (var unset) → verify=True (prod-correct).
+    secure = _build({"EGRET_API_URL": "http://egret", "EGRET_KERNEL_TOKEN": "kt"})
+    assert secure["connect_args"]["verify"] is True
+
+    # EGRET_ENGINE_TLS_INSECURE=1 → verify=False (dev self-signed cert).
+    insecure = _build({"EGRET_API_URL": "http://egret", "EGRET_KERNEL_TOKEN": "kt",
+                       "EGRET_ENGINE_TLS_INSECURE": "1"})
+    assert insecure["connect_args"]["verify"] is False
 
 
 def test_iceberg_reads_via_catalog(monkeypatch):

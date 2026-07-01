@@ -52,9 +52,6 @@ pub struct KernelState {
     pub api_url: String,
     pub notebook_kernels: NotebookKernelStore,
     pub proxy: Arc<dyn KernelProxy>,
-    /// Injected engine-execution seam for `POST /kernel/query`. The concrete
-    /// runner (egret-engine + egret-database) is wired in from egret-bin.
-    pub query_runner: Arc<dyn crate::query::NotebookQueryRunner>,
     /// Mints fresh per-user engine JWTs for `POST /ws/{ws}/notebook-runtime/token`.
     /// Shares the SAME `EngineTokenBroker` Arc as `NotebookState` (wired in egret-bin).
     pub engine_minter: std::sync::Arc<dyn egret_notebook::engine_token::EngineTokenMinter>,
@@ -126,7 +123,6 @@ pub fn kernel_router() -> Router<KernelState> {
 /// every request before `KernelIdentity` runs.
 pub fn kernel_callback_router() -> Router<KernelState> {
     Router::new()
-        .route("/kernel/query", post(kernel_query))
         .route("/kernel/engine-token", post(engine_token))
         .route(
             "/ws/{workspace}/notebook-runtime/token",
@@ -562,7 +558,7 @@ async fn active_executions(
     Ok(Json(serde_json::json!({ "running": running })))
 }
 
-// ── kernel query callback ─────────────────────────────────────────────────────
+// ── kernel-callback identity ──────────────────────────────────────────────────
 
 /// Identity resolved from an `EGRET_KERNEL_TOKEN` bearer (the kernel-callback plane).
 pub struct KernelIdentity {
@@ -595,72 +591,6 @@ impl FromRequestParts<KernelState> for KernelIdentity {
             workspace_id: key.workspace_id,
         })
     }
-}
-
-#[derive(serde::Deserialize)]
-struct QueryReq {
-    engine: String,
-    sql: String,
-    #[serde(default)]
-    max_rows: Option<usize>,
-}
-
-/// `POST /kernel/query` — run SQL on an enabled notebook engine as the
-/// token's user (Ranger `X-Trino-User`). Auth = `EGRET_KERNEL_TOKEN` bearer.
-async fn kernel_query(
-    State(st): State<KernelState>,
-    ident: KernelIdentity,
-    Json(req): Json<QueryReq>,
-) -> Result<Json<serde_json::Value>, KernelApiError> {
-    // Engine must be enabled for notebooks in the token's workspace.
-    let engines = st
-        .notebook
-        .store
-        .list_engine_options(ident.workspace_id)
-        .await
-        .map_err(|e| KernelApiError(e.0))?;
-    let eng = engines
-        .into_iter()
-        .find(|e| e.enabled && (e.id.to_string() == req.engine || e.name == req.engine))
-        .ok_or(KernelApiError(egret_core::Error::Forbidden))?;
-
-    let username = st
-        .notebook
-        .users
-        .ensure_username(egret_core::ids::UserId(ident.user_id))
-        .await
-        .map_err(KernelApiError::from)?;
-
-    let bearer = match st.engine_minter.mint(ident.user_id).await {
-        Ok(tok) => Some(tok.access_token),
-        Err(egret_notebook::engine_token::BrokerError::NoRefreshToken) => {
-            return Err(KernelApiError(egret_core::Error::Unauthorized));
-        }
-        Err(e) => {
-            return Err(KernelApiError(egret_core::Error::Internal(
-                anyhow::anyhow!(e),
-            )))
-        }
-    };
-    let max_rows = req.max_rows.unwrap_or(10_000).min(100_000);
-    let rows = st
-        .query_runner
-        .run(eng.id, username, bearer, req.sql, max_rows)
-        .await
-        .map_err(|e| match e {
-            crate::query::QueryRunError::NotFound(m) => {
-                KernelApiError(egret_core::Error::NotFound(m))
-            }
-            crate::query::QueryRunError::Engine(m) => {
-                KernelApiError(egret_core::Error::InvalidInput(m))
-            }
-        })?;
-
-    Ok(Json(serde_json::json!({
-        "columns": rows.columns,
-        "rows": rows.rows,
-        "truncated": rows.truncated,
-    })))
 }
 
 // ── engine-token callback ─────────────────────────────────────────────────────

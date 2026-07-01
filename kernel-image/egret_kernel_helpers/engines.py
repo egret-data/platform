@@ -1,7 +1,9 @@
-"""Dataframe-first engine helpers: iceberg(), trino() — direct Daft access as the logged-in user."""
+"""Dataframe-first engine helpers: iceberg(), trino(), starrocks() — direct Daft access as the logged-in user."""
+import base64
 import datetime as _dt
 import json
 import os
+import struct
 
 from .catalog import catalog
 
@@ -74,13 +76,88 @@ def trino(sql, *, engine="trino", env=None, cache=None):
         tok = _engine_token(engine, env=env, cache=cache)
         from sqlalchemy import create_engine
         from trino.auth import JWTAuthentication
+        # TLS verification is on by default (prod-correct); dev sets
+        # EGRET_ENGINE_TLS_INSECURE=1 to accept the self-signed Trino cert.
+        _env = env or os.environ
+        insecure = _env.get("EGRET_ENGINE_TLS_INSECURE", "").lower() in ("1", "true", "yes")
         eng = create_engine(
-            # The SQLAlchemy username ("egret") is cosmetic — identity comes from
-            # the JWT. http_scheme="https" is required: egret enforces Trino JWT
-            # auth over TLS.
-            f"trino://egret@{tok['host']}:{tok['port']}",
-            connect_args={"auth": JWTAuthentication(tok["jwt"]), "http_scheme": "https"},
+            # The username is the real user from the JWT (preferred_username) —
+            # Trino sends it as X-Trino-User for the governed path. http_scheme="https"
+            # is required: egret enforces Trino JWT auth over TLS.
+            f"trino://{_jwt_username(tok['jwt'])}@{tok['host']}:{tok['port']}",
+            connect_args={
+                "auth": JWTAuthentication(tok["jwt"]),
+                "http_scheme": "https",
+                "verify": not insecure,
+            },
         )
+        return eng.connect()
+
+    return daft.read_sql(sql, _conn)
+
+
+def _jwt_username(jwt):
+    """Extract the `preferred_username` claim from a JWT (the engine login user
+    must equal the JWT principal). Defensive: any failure falls back to "egret"."""
+    try:
+        p = jwt.split(".")[1]
+        p += "=" * (-len(p) % 4)
+        return json.loads(base64.urlsafe_b64decode(p)).get("preferred_username") or "egret"
+    except Exception:  # noqa: BLE001 — malformed/absent claim → safe fallback
+        return "egret"
+
+
+_OPENID_PLUGIN = "authentication_openid_connect_client"
+
+
+def _lenenc(n):
+    if n < 0xFB:
+        return bytes([n])
+    if n < 0x1_0000:
+        return b"\xfc" + struct.pack("<H", n)
+    if n < 0x100_0000:
+        return b"\xfd" + struct.pack("<I", n)[:3]
+    return b"\xfe" + struct.pack("<Q", n)
+
+
+def _openid_handler(jwt):
+    """PyMySQL custom auth-plugin for StarRocks' authentication_openid_connect_client:
+    replies to the auth-switch with [0x01][lenenc(JWT)][JWT] (no NUL). See spike §4."""
+    class _Handler:
+        def __init__(self, con):
+            self._con = con
+
+        def authenticate(self, pkt):
+            t = jwt.encode()
+            self._con.write_packet(b"\x01" + _lenenc(len(t)) + t)
+            reply = self._con._read_packet()
+            reply.check_error()
+            return reply
+
+    return _Handler
+
+
+def starrocks(sql, *, engine="starrocks", env=None, cache=None):
+    """Run SQL on the workspace StarRocks as you, returning a lazy Daft DataFrame
+    (pushdown). Authenticated with a fresh per-user JWT over the MySQL protocol via
+    a custom OpenID-Connect auth-plugin handler."""
+    import daft
+
+    def _conn():
+        import pymysql
+        from sqlalchemy import create_engine
+        tok = _engine_token(engine, env=env, cache=cache)
+
+        def _creator():
+            # StarRocks rejects a mismatched login: the connection user MUST equal
+            # the JWT principal (preferred_username); the JWT then carries auth.
+            return pymysql.connect(
+                host=tok["host"], port=tok["port"],
+                user=_jwt_username(tok["jwt"]), password="",
+                auth_plugin_map={_OPENID_PLUGIN: _openid_handler(tok["jwt"])},
+            )
+
+        eng = create_engine("mysql+pymysql://", creator=_creator)
         return eng.connect()
 
     return daft.read_sql(sql, _conn)
