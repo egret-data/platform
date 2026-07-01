@@ -187,7 +187,7 @@ async fn dropped_with_purge_is_reclaimed_by_gc_workers() {
         .await
         .expect("mint full-scope rw token");
 
-    let app = mount_catalog_engine(engine_state.clone(), store.clone(), None);
+    let app = mount_catalog_engine(engine_state.clone(), store.clone(), None, None);
 
     // --- 2. Create a real namespace + Iceberg table --------------------------
     let ns_name = format!("gc_{}", Uuid::now_v7().simple());

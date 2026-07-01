@@ -245,8 +245,9 @@ pub fn mount_catalog_engine(
     engine_state: ApiContext<EngineState>,
     store: egret_catalog::service::CatalogStore,
     catalog_jwt: Option<std::sync::Arc<crate::jwt_auth::CatalogJwtAuth>>,
+    catalog_public_url: Option<String>,
 ) -> axum::Router {
-    let front = crate::front_auth::FrontAuthState::new(store, catalog_jwt);
+    let front = crate::front_auth::FrontAuthState::new(store, catalog_jwt, catalog_public_url);
     catalog_engine_router(engine_state).layer(axum::middleware::from_fn_with_state(
         front,
         crate::front_auth::front_auth,
