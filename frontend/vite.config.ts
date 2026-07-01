@@ -14,6 +14,8 @@ export default defineConfig(({ mode }) => ({
     "process.env": "{}",
   },
   server: {
-    proxy: { "/api": { target: "http://localhost:8080", changeOrigin: true } },
+    // `ws: true` proxies WebSocket upgrades (the notebook kernel `/channels` WS)
+    // to the backend; without it, notebooks can't connect a kernel in dev.
+    proxy: { "/api": { target: "http://localhost:8080", changeOrigin: true, ws: true } },
   },
 }));
