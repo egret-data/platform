@@ -98,3 +98,36 @@ async fn starrocks_varchar_not_coerced_to_number() {
         .unwrap();
     assert_eq!(r2.rows[0][0], serde_json::json!(42));
 }
+
+// F2-P4b: StarRocks OIDC-JWT auth via the patched mysql_async openid plugin.
+// Gated on EGRET_TEST_STARROCKS_URL + EGRET_TEST_SR_JWT (a fresh Keycloak access token).
+#[tokio::test]
+async fn starrocks_jwt_auth_current_user() {
+    let Some((h, p)) = parse() else {
+        eprintln!("skip: no EGRET_TEST_STARROCKS_URL");
+        return;
+    };
+    let Ok(jwt) = std::env::var("EGRET_TEST_SR_JWT") else {
+        eprintln!("skip: no EGRET_TEST_SR_JWT");
+        return;
+    };
+    let mut s = spec(&h, p);
+    s.options.user = Some("tester".into());
+    s.session_user = Some("tester".into());
+    s.bearer_token = Some(jwt);
+    let c = build_connector(&s);
+    let limits = Limits {
+        max_rows: 10,
+        timeout: Duration::from_secs(30),
+    };
+    let r = c
+        .execute(
+            "SELECT current_user() AS u",
+            &limits,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("starrocks jwt auth + query");
+    eprintln!("current_user = {:?}", r.rows[0][0]);
+    assert_eq!(r.row_count, 1);
+}
