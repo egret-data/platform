@@ -173,6 +173,13 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         proxy: Arc::new(egret_kernel::BackendWsProxy),
         query_runner: fake_runner.clone(),
         engine_minter: Arc::new(StubMinter),
+        engine_conn: Arc::new(egret_kernel::engine_conn::FakeEngineConnResolver {
+            conn: Some(egret_kernel::engine_conn::EngineConn {
+                kind: "trino".into(),
+                host: "trino".into(),
+                port: 8080,
+            }),
+        }),
         active: Default::default(),
     };
     let app = kernel_router()
@@ -1321,6 +1328,61 @@ async fn kernel_query_returns_401_for_no_refresh_token(pool: sqlx::PgPool) {
         StatusCode::UNAUTHORIZED,
         "no refresh token → 401"
     );
+}
+
+// ── engine-token callback tests ───────────────────────────────────────────────
+
+/// Valid kernel token + enabled engine → 200 with a JWT and the engine coords.
+#[sqlx::test(migrations = "../../migrations")]
+async fn engine_token_returns_jwt_and_coords_for_enabled_engine(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    let engine_id = seed_enabled_engine(&f.db, f.ws).await;
+    let token = mint_kernel_token(&f.db, f.ws, f.owner).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(bearer_post(
+            "/kernel/engine-token",
+            &token,
+            serde_json::json!({ "engine": engine_id.to_string() }),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "engine-token → 200; body={json}");
+    assert_eq!(json["kind"].as_str(), Some("trino"), "body={json}");
+    assert_eq!(json["host"].as_str(), Some("trino"), "body={json}");
+    assert_eq!(json["port"].as_i64(), Some(8080), "body={json}");
+    assert!(
+        json["jwt"].as_str().map(|j| !j.is_empty()).unwrap_or(false),
+        "jwt must be non-empty; body={json}"
+    );
+    assert!(
+        json.get("expires_at").is_some(),
+        "expires_at must be present; body={json}"
+    );
+}
+
+/// Unknown/disabled engine id → 404.
+#[sqlx::test(migrations = "../../migrations")]
+async fn engine_token_unknown_engine_is_404(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    // Seed an enabled engine so the store isn't empty, but request a random id.
+    seed_enabled_engine(&f.db, f.ws).await;
+    let token = mint_kernel_token(&f.db, f.ws, f.owner).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(bearer_post(
+            "/kernel/engine-token",
+            &token,
+            serde_json::json!({ "engine": Uuid::new_v4().to_string() }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "unknown engine → 404");
 }
 
 /// Engine present but NOT enabled for notebooks → 403.
