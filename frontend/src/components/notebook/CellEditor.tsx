@@ -1,10 +1,12 @@
 import Editor from "@monaco-editor/react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowDown, ArrowUp, Play, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Loader2, Play, Trash2 } from "lucide-react";
 
 import type { Cell, CellType } from "@/api/notebooks";
 import { Button } from "@/components/ui/button";
+import { CellOutputRenderer } from "@/components/notebook/CellOutputRenderer";
+import type { CellOutput } from "@/lib/kernel/protocol";
 import {
   Select,
   SelectContent,
@@ -20,7 +22,10 @@ export interface CellEditorProps {
   onDelete: () => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
-  runDisabled: boolean;
+  runDisabled?: boolean;
+  onRun?: () => void;
+  running?: boolean;
+  outputs?: CellOutput[];
 }
 
 export function CellEditor({
@@ -30,7 +35,9 @@ export function CellEditor({
   onDelete,
   onMoveUp,
   onMoveDown,
-  runDisabled,
+  onRun,
+  running,
+  outputs,
 }: CellEditorProps) {
   const monacoLanguage = cell.cell_type === "sql" ? "sql" : "python";
 
@@ -84,11 +91,16 @@ export function CellEditor({
             variant="outline"
             size="sm"
             className="h-7 gap-1 text-xs"
-            disabled={runDisabled}
-            title="Execution coming soon"
+            disabled={!onRun || running}
+            title={running ? "Running…" : "Run"}
             aria-label="Run"
+            onClick={onRun}
           >
-            <Play className="h-3 w-3" />
+            {running ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <Play className="h-3 w-3" />
+            )}
             Run
           </Button>
         </div>
@@ -126,6 +138,9 @@ export function CellEditor({
           />
         </div>
       )}
+
+      {/* Outputs */}
+      {outputs && outputs.length > 0 && <CellOutputRenderer outputs={outputs} />}
     </div>
   );
 }

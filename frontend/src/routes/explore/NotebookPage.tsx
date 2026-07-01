@@ -14,6 +14,9 @@ import {
 } from "@/api/notebooks";
 import { CellEditor } from "@/components/notebook/CellEditor";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import type { KernelConnection } from "@/lib/kernel/KernelConnection";
+import type { CellOutput } from "@/lib/kernel/protocol";
+import { useKernel } from "@/lib/kernel/useKernel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -23,6 +26,7 @@ import { Switch } from "@/components/ui/switch";
 
 interface ManagedCellProps {
   cell: Cell;
+  kernel: KernelConnection;
   onChangeType: (cid: string, type: CellType) => void;
   onDelete: (cid: string) => void;
   onMoveUp: (cid: string) => void;
@@ -32,6 +36,7 @@ interface ManagedCellProps {
 
 function ManagedCell({
   cell,
+  kernel,
   onChangeType,
   onDelete,
   onMoveUp,
@@ -39,6 +44,11 @@ function ManagedCell({
   updateCellMutate,
 }: ManagedCellProps) {
   const [source, setSource] = useState(cell.source);
+  // Restore-on-load: seed outputs from the persisted last_output.
+  const [outputs, setOutputs] = useState<CellOutput[]>(() =>
+    Array.isArray(cell.last_output) ? (cell.last_output as CellOutput[]) : [],
+  );
+  const [running, setRunning] = useState(false);
   const timerRef = useRef<number | undefined>(undefined);
 
   // Sync source if the server data changes (e.g. after refetch)
@@ -65,6 +75,30 @@ function ManagedCell({
     return () => window.clearTimeout(timerRef.current);
   }, []);
 
+  async function handleRun() {
+    try {
+      await kernel.connect();
+      setOutputs([]);
+      setRunning(true);
+      const code =
+        cell.cell_type === "sql"
+          ? `%%egret_sql --target ${cell.sql_target || "daft"}\n${source}`
+          : source;
+      kernel.execute(cell.id, code, {
+        onOutput: (o) => setOutputs((prev) => [...prev, o]),
+        onStatus: (s) => {
+          if (s === "idle") setRunning(false);
+        },
+        onExecutionCount: () => {},
+      });
+    } catch (e) {
+      setOutputs([
+        { type: "error", ename: "KernelError", evalue: String(e), traceback: [] },
+      ]);
+      setRunning(false);
+    }
+  }
+
   return (
     <CellEditor
       cell={{ ...cell, source }}
@@ -73,7 +107,9 @@ function ManagedCell({
       onDelete={() => onDelete(cell.id)}
       onMoveUp={() => onMoveUp(cell.id)}
       onMoveDown={() => onMoveDown(cell.id)}
-      runDisabled
+      onRun={cell.cell_type === "markdown" ? undefined : handleRun}
+      running={running}
+      outputs={outputs}
     />
   );
 }
@@ -83,6 +119,7 @@ function ManagedCell({
 export default function NotebookPage() {
   const { workspace: ws, id } = useParams<{ workspace: string; id: string }>();
 
+  const kernel = useKernel(ws!, id!);
   const notebook = useNotebook(ws!, id ?? null);
   const updateNotebook = useUpdateNotebook(ws!, id!);
   const addCell = useAddCell(ws!, id!);
@@ -218,6 +255,7 @@ export default function NotebookPage() {
           <ManagedCell
             key={cell.id}
             cell={cell}
+            kernel={kernel}
             onChangeType={handleChangeType}
             onDelete={handleDeleteCell}
             onMoveUp={handleMoveUp}
