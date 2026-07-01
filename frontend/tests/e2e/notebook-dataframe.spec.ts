@@ -32,11 +32,15 @@ test("iceberg write -> read roundtrip via Daft", async ({ page }) => {
     page,
     [
       "import daft",
-      `df = daft.from_pydict({"who": ["${marker}"], "n": [42]})`,
+      `df = daft.from_pydict({"who": ["${marker}"], "n": [6 * 7]})`,
       'write_iceberg(df, "e2e_roundtrip", mode="overwrite")',
-      'iceberg("e2e_roundtrip").show()',
+      'row = iceberg("e2e_roundtrip").to_pydict()',
+      'print(row["who"][0], row["n"][0])',
     ].join("\n"),
   );
   await page.getByRole("button", { name: "Run", exact: true }).first().click();
-  await expect(page.getByText(marker)).toBeVisible({ timeout: 60_000 });
+  // `${marker} 42` appears ONLY in the printed roundtrip output — the source has
+  // the marker inside `from_pydict` and `6 * 7`, never the adjacent literal — so
+  // the assertion can't match the editor source (mirrors notebook.spec.ts).
+  await expect(page.getByText(`${marker} 42`)).toBeVisible({ timeout: 60_000 });
 });
