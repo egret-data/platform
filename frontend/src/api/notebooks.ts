@@ -11,6 +11,7 @@ export interface Cell {
   execution_count: number | null;
   last_output: unknown | null;
   last_execution_time_ms: number | null;
+  sql_target: string | null;
 }
 
 export interface NotebookSummary {

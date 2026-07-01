@@ -36,6 +36,19 @@ vi.mock("@/api/notebooks", () => ({
   useReorderCells: () => reorderCellsMutation(),
 }));
 
+// ── Kernel mock (no real WebSocket in jsdom) ──────────────────────────────────
+const kernelConnect = vi.fn();
+const kernelExecute = vi.fn();
+const kernelDisconnect = vi.fn();
+
+vi.mock("@/lib/kernel/KernelConnection", () => ({
+  KernelConnection: class {
+    connect = kernelConnect;
+    execute = kernelExecute;
+    disconnect = kernelDisconnect;
+  },
+}));
+
 import NotebookPage from "@/routes/explore/NotebookPage";
 
 // ── Render helper ─────────────────────────────────────────────────────────────
@@ -61,6 +74,7 @@ const mockCodeCell = {
   execution_count: null,
   last_output: null,
   last_execution_time_ms: null,
+  sql_target: null,
 };
 
 const mockMarkdownCell = {
@@ -71,6 +85,7 @@ const mockMarkdownCell = {
   execution_count: null,
   last_output: null,
   last_execution_time_ms: null,
+  sql_target: null,
 };
 
 const mockNotebook = {
@@ -128,6 +143,25 @@ beforeEach(() => {
     mutate: reorderCellsMutate,
     isPending: false,
   });
+
+  kernelConnect.mockReset();
+  kernelExecute.mockReset();
+  kernelDisconnect.mockReset();
+  kernelConnect.mockResolvedValue(undefined);
+  kernelExecute.mockImplementation(
+    (
+      _cellId: string,
+      _code: string,
+      h: {
+        onOutput: (o: unknown) => void;
+        onStatus: (s: "busy" | "idle") => void;
+        onExecutionCount: (n: number) => void;
+      },
+    ) => {
+      h.onOutput({ type: "stream", name: "stdout", text: "ran\n" });
+      h.onStatus("idle");
+    },
+  );
 
   updateNotebookMutate.mockResolvedValue(mockNotebook);
   addCellMutate.mockResolvedValue({ ...mockNotebook, cells: [...mockNotebook.cells] });
@@ -217,16 +251,80 @@ describe("NotebookPage", () => {
     expect(deleteCellMutate).toHaveBeenCalledWith("cell-1");
   });
 
-  // ── Run button disabled ───────────────────────────────────────────────────
+  // ── Run a cell ────────────────────────────────────────────────────────────
 
-  it("renders a Run button that is disabled with execution coming soon title", () => {
+  it("renders an ENABLED Run button for a code cell (no 'coming soon' title)", () => {
     renderAt();
     const runButtons = screen.getAllByRole("button", { name: /run/i });
-    // All run buttons should be disabled
-    runButtons.forEach((btn) => {
-      expect(btn).toBeDisabled();
+    // First run button belongs to the code cell (cell_order 0) → enabled.
+    expect(runButtons[0]).toBeEnabled();
+    expect(runButtons[0]).not.toHaveAttribute("title", "Execution coming soon");
+  });
+
+  it("clicking Run executes the cell and renders its output", async () => {
+    renderAt();
+    const runButton = screen.getAllByRole("button", { name: /run/i })[0];
+
+    await act(async () => {
+      fireEvent.click(runButton);
     });
-    expect(runButtons[0]).toHaveAttribute("title", "Execution coming soon");
+
+    expect(kernelExecute).toHaveBeenCalledWith(
+      "cell-1",
+      expect.any(String),
+      expect.objectContaining({ onOutput: expect.any(Function) }),
+    );
+    expect(screen.getByText(/ran/)).toBeInTheDocument();
+  });
+
+  it("restores persisted last_output on initial load (no click)", () => {
+    notebookMock.mockReturnValue({
+      data: {
+        ...mockNotebook,
+        cells: [
+          {
+            ...mockCodeCell,
+            last_output: [{ type: "stream", name: "stdout", text: "restored" }],
+          },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    renderAt();
+    expect(screen.getByText(/restored/)).toBeInTheDocument();
+  });
+
+  it("a SQL cell's Run passes the %%egret_sql magic prefix to execute", async () => {
+    notebookMock.mockReturnValue({
+      data: {
+        ...mockNotebook,
+        cells: [
+          {
+            ...mockCodeCell,
+            cell_type: "sql" as const,
+            source: "select 1",
+            sql_target: null,
+          },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    renderAt();
+    const runButton = screen.getAllByRole("button", { name: /run/i })[0];
+
+    await act(async () => {
+      fireEvent.click(runButton);
+    });
+
+    expect(kernelExecute).toHaveBeenCalledWith(
+      "cell-1",
+      expect.stringMatching(/^%%egret_sql --target daft\n/),
+      expect.any(Object),
+    );
   });
 
   // ── Loading state ─────────────────────────────────────────────────────────
