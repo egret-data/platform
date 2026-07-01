@@ -2,7 +2,7 @@
   "realm": "egret",
   "enabled": true,
   "sslRequired": "none",
-  "groups": [{ "name": "data-team" }],
+  "groups": [{ "name": "data-team" }, { "name": "platform-admins" }],
   "clients": [
     {
       "clientId": "egret",
@@ -80,6 +80,30 @@
       "firstName": "Test",
       "lastName": "User",
       "credentials": [{ "type": "password", "value": "pw", "temporary": false }],
+      "realmRoles": ["offline_access"],
+      "groups": ["/data-team"]
+    },
+    {
+      "id": "a5510000-0000-4000-8000-000000000001",
+      "username": "admin-sso",
+      "enabled": true,
+      "email": "admin-sso@egret.local",
+      "emailVerified": true,
+      "firstName": "Admin",
+      "lastName": "SSO",
+      "credentials": [{ "type": "password", "value": "Admin12345!", "temporary": false }],
+      "realmRoles": ["offline_access"],
+      "groups": ["/platform-admins"]
+    },
+    {
+      "id": "a5510000-0000-4000-8000-000000000002",
+      "username": "member-sso",
+      "enabled": true,
+      "email": "member-sso@egret.local",
+      "emailVerified": true,
+      "firstName": "Member",
+      "lastName": "SSO",
+      "credentials": [{ "type": "password", "value": "Member12345!", "temporary": false }],
       "realmRoles": ["offline_access"],
       "groups": ["/data-team"]
     }

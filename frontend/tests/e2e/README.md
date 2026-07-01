@@ -64,6 +64,27 @@ For this to work:
 SSO creds default to `tester@egret.local` / `pw` and can be overridden with
 `EGRET_E2E_OIDC_USER` / `EGRET_E2E_OIDC_PASSWORD`.
 
+### Seeded SSO test users
+
+The realm ships two extra fixed-identity users for manual/role testing:
+
+| User | Password | Group | Privilege |
+| --- | --- | --- | --- |
+| `admin-sso@egret.local` | `Admin12345!` | `platform-admins` | platform admin |
+| `member-sso@egret.local` | `Member12345!` | `data-team` | member |
+
+OIDC users JIT-provision as plain members. `admin-sso` becomes a platform admin
+because the `platform-admins` **group** is granted the `platform_admin` role —
+apply that one-time RBAC seed against the egret DB:
+
+```bash
+docker exec -i egret-dev-postgres-1 psql -U egret -d egret < deploy/seed-sso-test-rbac.sql
+```
+
+A fresh stack (`docker compose ... up`, first import) creates both realm users
+automatically; the seed SQL above wires the group→role grant on the egret side.
+`member-sso` reaches a workspace via the same `data-team` binding as `tester`.
+
 ## Run
 
 ```bash
