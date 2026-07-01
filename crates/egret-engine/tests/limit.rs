@@ -20,6 +20,7 @@ impl ConnectorFactory for TrinoFactory {
         _db: &egret_database::model::Database,
         _s: Option<String>,
         _session_user: Option<String>,
+        _bearer_token: Option<String>,
     ) -> Result<Box<dyn Connector>, egret_engine::EngineError> {
         Ok(egret_engine::connector::build_connector(
             &egret_engine::connector::ConnSpec {
@@ -33,6 +34,7 @@ impl ConnectorFactory for TrinoFactory {
                 },
                 secret: None,
                 session_user: None,
+                bearer_token: None,
             },
         ))
     }

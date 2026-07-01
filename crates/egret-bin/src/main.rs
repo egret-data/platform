@@ -285,6 +285,7 @@ impl egret_kernel::query::NotebookQueryRunner for EngineQueryRunner {
         &self,
         database_id: uuid::Uuid,
         session_user: String,
+        bearer: Option<String>,
         sql: String,
         max_rows: usize,
     ) -> Result<egret_kernel::query::QueryRows, egret_kernel::query::QueryRunError> {
@@ -301,7 +302,7 @@ impl egret_kernel::query::NotebookQueryRunner for EngineQueryRunner {
             .map_err(|e| QueryRunError::Engine(e.to_string()))?;
         let connector = self
             .factory
-            .build(&db, secret, Some(session_user))
+            .build(&db, secret, Some(session_user), bearer)
             .await
             .map_err(|e| QueryRunError::Engine(e.to_string()))?;
         let limits = egret_engine::model::Limits {

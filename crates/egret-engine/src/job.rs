@@ -130,7 +130,7 @@ impl JobManager {
     ) -> Result<(), EngineError> {
         let db = self.databases.get(database_id).await?;
         let secret = self.databases.open_secret(database_id).await?;
-        let connector = self.factory.build(&db, secret, session_user).await?;
+        let connector = self.factory.build(&db, secret, session_user, None).await?;
 
         let fut = connector.execute(sql, limits, token.clone());
         let result = match tokio::time::timeout(limits.timeout, fut).await {

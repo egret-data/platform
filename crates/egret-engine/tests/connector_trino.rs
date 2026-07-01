@@ -23,6 +23,7 @@ async fn trino_select_1() {
         },
         secret: None,
         session_user: None,
+        bearer_token: None,
     };
     let c = build_connector(&spec);
     let limits = Limits {
@@ -57,6 +58,7 @@ async fn trino_row_cap_truncates() {
         },
         secret: None,
         session_user: None,
+        bearer_token: None,
     };
     let c = build_connector(&spec);
     let limits = Limits {

@@ -16,15 +16,20 @@ pub struct TrinoConnector {
     /// opts into impersonation, in which case it's the resolved end-user.
     session_user: String,
     secret: Option<String>,
+    /// Per-user OIDC engine JWT. When set, sent as `Authorization: Bearer` and
+    /// takes precedence over `secret` (basic-auth).
+    bearer: Option<String>,
 }
 
 impl TrinoConnector {
     pub fn new(spec: &ConnSpec) -> Self {
         let scheme = spec.options.http_scheme.as_deref().unwrap_or("http");
         let auth_user = spec.options.user.clone().unwrap_or_else(|| "egret".into());
-        // Impersonate only when the connection opts in AND we have an end-user.
-        // Otherwise X-Trino-User is byte-identical to the legacy service-user value.
-        let session_user = if spec.options.impersonate == Some(true) {
+        // When a bearer JWT is set the token already authenticates the end user, so
+        // X-Trino-User is the resolved session_user (same as the impersonate path).
+        // For the basic-auth path, impersonate only when the connection opts in.
+        let session_user = if spec.bearer_token.is_some() || spec.options.impersonate == Some(true)
+        {
             spec.session_user
                 .clone()
                 .unwrap_or_else(|| auth_user.clone())
@@ -36,6 +41,7 @@ impl TrinoConnector {
             auth_user,
             session_user,
             secret: spec.secret.clone(),
+            bearer: spec.bearer_token.clone(),
         }
     }
 
@@ -47,6 +53,13 @@ impl TrinoConnector {
     /// The basic-auth principal (always the service user).
     pub fn auth_user(&self) -> &str {
         &self.auth_user
+    }
+
+    /// The per-user OIDC engine JWT, if set.
+    /// Used in tests and by the kernel query handler (Task 2) to verify plumbing.
+    #[allow(dead_code)]
+    pub fn bearer(&self) -> Option<&str> {
+        self.bearer.as_deref()
     }
 }
 
@@ -98,7 +111,9 @@ impl Connector for TrinoConnector {
             .header("X-Trino-User", self.x_trino_user())
             .header("X-Trino-Session", session)
             .body(sql.to_string());
-        if let Some(s) = &self.secret {
+        if let Some(jwt) = &self.bearer {
+            req = req.bearer_auth(jwt);
+        } else if let Some(s) = &self.secret {
             req = req.basic_auth(self.auth_user(), Some(s));
         }
 
@@ -141,21 +156,29 @@ impl Connector for TrinoConnector {
             let next = resp.next_uri.take();
             if cancel.is_cancelled() {
                 if let Some(uri) = &next {
-                    let _ = client
+                    let mut d = client
                         .delete(uri)
-                        .header("X-Trino-User", self.x_trino_user())
-                        .send()
-                        .await;
+                        .header("X-Trino-User", self.x_trino_user());
+                    if let Some(jwt) = &self.bearer {
+                        d = d.bearer_auth(jwt);
+                    } else if let Some(s) = &self.secret {
+                        d = d.basic_auth(self.auth_user(), Some(s));
+                    }
+                    let _ = d.send().await;
                 }
                 return Err(EngineError::Cancelled);
             }
             if rows.len() > cap {
                 if let Some(uri) = &next {
-                    let _ = client
+                    let mut d = client
                         .delete(uri)
-                        .header("X-Trino-User", self.x_trino_user())
-                        .send()
-                        .await;
+                        .header("X-Trino-User", self.x_trino_user());
+                    if let Some(jwt) = &self.bearer {
+                        d = d.bearer_auth(jwt);
+                    } else if let Some(s) = &self.secret {
+                        d = d.basic_auth(self.auth_user(), Some(s));
+                    }
+                    let _ = d.send().await;
                 }
                 break;
             }
@@ -163,7 +186,9 @@ impl Connector for TrinoConnector {
                 None => break,
                 Some(uri) => {
                     let mut g = client.get(&uri).header("X-Trino-User", self.x_trino_user());
-                    if let Some(s) = &self.secret {
+                    if let Some(jwt) = &self.bearer {
+                        g = g.bearer_auth(jwt);
+                    } else if let Some(s) = &self.secret {
                         g = g.basic_auth(self.auth_user(), Some(s));
                     }
                     resp = send(g).await?;
@@ -217,6 +242,7 @@ mod tests {
             options: opts.clone(),
             secret: None,
             session_user: Some("alice".into()),
+            bearer_token: None,
         };
         assert_eq!(TrinoConnector::new(&s0).x_trino_user(), "svc");
 
@@ -229,9 +255,43 @@ mod tests {
             options: opts,
             secret: None,
             session_user: Some("alice".into()),
+            bearer_token: None,
         };
         let c = TrinoConnector::new(&s1);
         assert_eq!(c.x_trino_user(), "alice");
         assert_eq!(c.auth_user(), "svc");
+    }
+
+    #[test]
+    fn bearer_token_takes_precedence_over_secret() {
+        let s = ConnSpec {
+            engine: Engine::Trino,
+            host: "h".into(),
+            port: 8080,
+            options: ConnOptions {
+                user: Some("svc".into()),
+                ..Default::default()
+            },
+            secret: Some("basic-pw".into()),
+            session_user: Some("alice".into()),
+            bearer_token: Some("eyJ.jwt.sig".into()),
+        };
+        let c = TrinoConnector::new(&s);
+        assert_eq!(c.bearer(), Some("eyJ.jwt.sig"));
+        assert_eq!(c.x_trino_user(), "alice");
+    }
+
+    #[test]
+    fn no_bearer_uses_basic_auth_path() {
+        let s = ConnSpec {
+            engine: Engine::Trino,
+            host: "h".into(),
+            port: 8080,
+            options: ConnOptions::default(),
+            secret: Some("pw".into()),
+            session_user: None,
+            bearer_token: None,
+        };
+        assert_eq!(TrinoConnector::new(&s).bearer(), None);
     }
 }

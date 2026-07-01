@@ -1,0 +1,6 @@
+{
+  "catalogs": [
+    { "group": "data-team", "allow": "all" },
+    { "user": ".*", "allow": "read-only" }
+  ]
+}

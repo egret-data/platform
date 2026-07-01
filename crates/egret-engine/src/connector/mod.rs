@@ -23,21 +23,26 @@ pub struct ConnSpec {
     /// Stable per-user identity to impersonate (Trino `X-Trino-User`), when the
     /// connection's `impersonate` flag is on. `None` = no end-user resolved.
     pub session_user: Option<String>,
+    /// Per-user OIDC engine JWT presented to the engine as `Authorization: Bearer`.
+    /// When set, it takes precedence over `secret` (basic-auth). `None` = legacy path.
+    pub bearer_token: Option<String>,
 }
 
 impl ConnSpec {
     /// Build from a resolved registry `Database` + its opened secret.
-    /// No end-user identity is attached (`session_user = None`).
+    /// No end-user identity is attached (`session_user = None`, `bearer_token = None`).
     pub fn from_database(db: &Database, secret: Option<String>) -> Self {
-        Self::from_database_as(db, secret, None)
+        Self::from_database_as(db, secret, None, None)
     }
 
     /// Like `from_database`, but attaches a stable per-user `session_user`
-    /// for Trino impersonation (used only when the connection opts in).
+    /// for Trino impersonation (used only when the connection opts in), and
+    /// optionally a per-user OIDC engine JWT.
     pub fn from_database_as(
         db: &Database,
         secret: Option<String>,
         session_user: Option<String>,
+        bearer_token: Option<String>,
     ) -> Self {
         ConnSpec {
             engine: db.engine,
@@ -46,6 +51,7 @@ impl ConnSpec {
             options: db.options.clone(),
             secret,
             session_user,
+            bearer_token,
         }
     }
 }
@@ -104,6 +110,7 @@ pub trait ConnectorFactory: Send + Sync {
         db: &Database,
         secret: Option<String>,
         session_user: Option<String>,
+        bearer_token: Option<String>,
     ) -> Result<Box<dyn Connector>, EngineError>;
 }
 
@@ -117,11 +124,13 @@ impl ConnectorFactory for DefaultConnectorFactory {
         db: &Database,
         secret: Option<String>,
         session_user: Option<String>,
+        bearer_token: Option<String>,
     ) -> Result<Box<dyn Connector>, EngineError> {
         Ok(build_connector(&ConnSpec::from_database_as(
             db,
             secret,
             session_user,
+            bearer_token,
         )))
     }
 }

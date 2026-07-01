@@ -16,6 +16,7 @@ fn trino_spec() -> Option<egret_engine::connector::ConnSpec> {
         },
         secret: None,
         session_user: None,
+        bearer_token: None,
     })
 }
 

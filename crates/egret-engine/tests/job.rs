@@ -67,6 +67,7 @@ impl ConnectorFactory for FakeFactory {
         _db: &Database,
         _secret: Option<String>,
         session_user: Option<String>,
+        _bearer_token: Option<String>,
     ) -> Result<Box<dyn Connector>, egret_engine::EngineError> {
         *self.last_session_user.lock().unwrap() = Some(session_user);
         Ok(Box::new(FakeConnector {

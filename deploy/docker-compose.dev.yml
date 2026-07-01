@@ -38,6 +38,12 @@ services:
       - "8090:8080"
     volumes:
       - ./trino/catalog:/etc/trino/catalog
+      # F2-P3: JWT auth + group ACL. Enforcement + exact property set validated
+      # in F2-P5; if Trino fails to boot with the overridden config.properties,
+      # P5 reconciles it against the image defaults.
+      - ./trino/etc/config.properties:/etc/trino/config.properties
+      - ./trino/etc/access-control.properties:/etc/trino/access-control.properties
+      - ./trino/etc/rules.json:/etc/trino/rules.json
 
   starrocks:
     image: starrocks/allin1-ubuntu:latest
