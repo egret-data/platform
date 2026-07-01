@@ -11,7 +11,6 @@ export interface Cell {
   execution_count: number | null;
   last_output: unknown | null;
   last_execution_time_ms: number | null;
-  sql_target: string | null;
 }
 
 export interface NotebookSummary {
@@ -143,10 +142,10 @@ export function useAddCell(ws: string, id: string) {
 export function useUpdateCell(ws: string, id: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (a: { cid: string; cell_type?: CellType; source?: string; sql_target?: string }) =>
+    mutationFn: (a: { cid: string; cell_type?: CellType; source?: string }) =>
       apiFetch(
         `${base(ws)}/${id}/cells/${a.cid}`,
-        jsonBody("PATCH", { cell_type: a.cell_type, source: a.source, sql_target: a.sql_target }),
+        jsonBody("PATCH", { cell_type: a.cell_type, source: a.source }),
       ),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.detail(ws, id) }),
   });

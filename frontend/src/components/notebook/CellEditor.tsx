@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowDown, ArrowUp, ChevronDown, Loader2, Play, Trash2 } from "lucide-react";
 
-import type { Cell, CellType, EngineOption } from "@/api/notebooks";
+import type { Cell, CellType } from "@/api/notebooks";
 import { Button } from "@/components/ui/button";
 import { CellOutputRenderer } from "@/components/notebook/CellOutputRenderer";
 import type { CellOutput } from "@/lib/kernel/protocol";
@@ -25,8 +25,6 @@ export interface CellEditorProps {
   cell: Cell;
   onChangeSource: (source: string) => void;
   onChangeType: (type: CellType) => void;
-  onChangeSqlTarget?: (target: string) => void;
-  engines?: EngineOption[];
   onDelete: () => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
@@ -41,8 +39,6 @@ export function CellEditor({
   cell,
   onChangeSource,
   onChangeType,
-  onChangeSqlTarget,
-  engines,
   onDelete,
   onMoveUp,
   onMoveDown,
@@ -52,7 +48,7 @@ export function CellEditor({
   onRunAbove,
   onRunBelow,
 }: CellEditorProps) {
-  const monacoLanguage = cell.cell_type === "sql" ? "sql" : "python";
+  const monacoLanguage = "python";
 
   return (
     <div className="rounded-lg border border-border bg-card shadow-sm">
@@ -68,25 +64,8 @@ export function CellEditor({
           <SelectContent>
             <SelectItem value="code">Code</SelectItem>
             <SelectItem value="markdown">Markdown</SelectItem>
-            <SelectItem value="sql">SQL</SelectItem>
           </SelectContent>
         </Select>
-
-        {cell.cell_type === "sql" && onChangeSqlTarget && (
-          <Select value={cell.sql_target || "daft"} onValueChange={onChangeSqlTarget}>
-            <SelectTrigger className="h-7 w-32 text-xs" aria-label="SQL target">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="daft">Daft (in-kernel)</SelectItem>
-              {(engines ?? []).map((e) => (
-                <SelectItem key={e.id} value={e.name}>
-                  {e.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        )}
 
         <div className="ml-auto flex items-center gap-1">
           <Button

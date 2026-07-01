@@ -78,15 +78,6 @@ function renderAt(id = "nb-1", { inForm = false }: { inForm?: boolean } = {}) {
   return render(inForm ? <form>{tree}</form> : tree);
 }
 
-// Drive the underlying Radix Select via its hidden native <select>.
-function selectOption(value: string) {
-  const native = Array.from(
-    document.querySelectorAll<HTMLSelectElement>("select"),
-  ).find((s) => Array.from(s.options).some((o) => o.value === value));
-  if (!native) throw new Error(`option ${value} not found`);
-  fireEvent.change(native, { target: { value } });
-}
-
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 const mockCodeCell = {
   id: "cell-1",
@@ -96,7 +87,6 @@ const mockCodeCell = {
   execution_count: null,
   last_output: null,
   last_execution_time_ms: null,
-  sql_target: null,
 };
 
 const mockMarkdownCell = {
@@ -107,7 +97,6 @@ const mockMarkdownCell = {
   execution_count: null,
   last_output: null,
   last_execution_time_ms: null,
-  sql_target: null,
 };
 
 const mockNotebook = {
@@ -333,23 +322,7 @@ describe("NotebookPage", () => {
     expect(screen.getByText(/restored/)).toBeInTheDocument();
   });
 
-  it("a SQL cell's Run passes the %%egret_sql magic prefix to execute", async () => {
-    notebookMock.mockReturnValue({
-      data: {
-        ...mockNotebook,
-        cells: [
-          {
-            ...mockCodeCell,
-            cell_type: "sql" as const,
-            source: "select 1",
-            sql_target: null,
-          },
-        ],
-      },
-      isLoading: false,
-      isError: false,
-      error: null,
-    });
+  it("Run sends the raw cell source (no %%egret_sql prefix — SQL lives in code cells)", async () => {
     renderAt();
     const runButton = screen.getAllByRole("button", { name: /^run$/i })[0];
 
@@ -357,52 +330,17 @@ describe("NotebookPage", () => {
       fireEvent.click(runButton);
     });
 
+    // cell-1 is the code cell with source "print(1)"; it is passed through unmodified.
     expect(kernelExecute).toHaveBeenCalledWith(
       "cell-1",
-      expect.stringMatching(/^%%egret_sql --target daft\n/),
+      "print(1)",
       expect.any(Object),
     );
   });
 
-  // ── SQL target dropdown ─────────────────────────────────────────────────────
-
-  function mockSqlNotebook() {
-    notebookMock.mockReturnValue({
-      data: {
-        ...mockNotebook,
-        cells: [
-          {
-            ...mockCodeCell,
-            cell_type: "sql" as const,
-            source: "select 1",
-            sql_target: null,
-          },
-        ],
-      },
-      isLoading: false,
-      isError: false,
-      error: null,
-    });
-  }
-
-  it("renders a SQL-target control defaulting to Daft for a null sql_target", () => {
-    mockSqlNotebook();
+  it("does not render a SQL target control", () => {
     renderAt();
-    const target = screen.getByLabelText("SQL target");
-    expect(target).toBeInTheDocument();
-    expect(target).toHaveTextContent(/Daft/);
-  });
-
-  it("selecting an engine calls useUpdateCell with {cid, sql_target}", () => {
-    mockSqlNotebook();
-    renderAt("nb-1", { inForm: true });
-
-    selectOption("trino");
-
-    expect(updateCellMutate).toHaveBeenCalledWith({
-      cid: "cell-1",
-      sql_target: "trino",
-    });
+    expect(screen.queryByLabelText("SQL target")).not.toBeInTheDocument();
   });
 
   // ── Loading state ─────────────────────────────────────────────────────────
@@ -510,7 +448,6 @@ describe("NotebookPage", () => {
     execution_count: null,
     last_output: null,
     last_execution_time_ms: null,
-    sql_target: null,
   };
   const cellB = {
     id: "cell-b",
@@ -520,7 +457,6 @@ describe("NotebookPage", () => {
     execution_count: null,
     last_output: null,
     last_execution_time_ms: null,
-    sql_target: null,
   };
   const cellC = {
     id: "cell-c",
@@ -530,7 +466,6 @@ describe("NotebookPage", () => {
     execution_count: null,
     last_output: null,
     last_execution_time_ms: null,
-    sql_target: null,
   };
 
   function renderThreeCells() {

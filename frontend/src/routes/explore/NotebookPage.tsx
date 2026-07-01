@@ -12,12 +12,10 @@ import { ArrowLeft, Eraser, Play, Plus, RotateCcw, Square } from "lucide-react";
 import {
   type Cell,
   type CellType,
-  type EngineOption,
   useActiveExecutions,
   useAddCell,
   useDeleteCell,
   useNotebook,
-  useNotebookRuntime,
   useReorderCells,
   useUpdateCell,
   useUpdateNotebook,
@@ -45,9 +43,7 @@ interface ManagedCellProps {
     cid: string;
     source?: string;
     cell_type?: CellType;
-    sql_target?: string;
   }) => void;
-  engines?: EngineOption[];
   /** Per-cell runner registry keyed by cell id; owned by the page toolbar. */
   runners: MutableRefObject<
     Record<string, { run: () => Promise<void>; clear: () => void }>
@@ -66,7 +62,6 @@ function ManagedCell({
   onMoveUp,
   onMoveDown,
   updateCellMutate,
-  engines,
   runners,
   initialRunning,
   onRunAbove,
@@ -109,11 +104,7 @@ function ManagedCell({
       await kernel.connect();
       setOutputs([]);
       setRunning(true);
-      const code =
-        cell.cell_type === "sql"
-          ? `%%egret_sql --target ${cell.sql_target || "daft"}\n${source}`
-          : source;
-      kernel.execute(cell.id, code, {
+      kernel.execute(cell.id, source, {
         onOutput: (o) => setOutputs((prev) => [...prev, o]),
         onStatus: (s) => {
           if (s === "idle") setRunning(false);
@@ -139,15 +130,13 @@ function ManagedCell({
       delete runners.current[cell.id];
     };
     // Re-register when the run closure's inputs change.
-  }, [cell.id, source, cell.sql_target, cell.cell_type, runners]);
+  }, [cell.id, source, cell.cell_type, runners]);
 
   return (
     <CellEditor
       cell={{ ...cell, source }}
       onChangeSource={handleChangeSource}
       onChangeType={(type) => onChangeType(cell.id, type)}
-      onChangeSqlTarget={(t) => updateCellMutate({ cid: cell.id, sql_target: t })}
-      engines={engines}
       onDelete={() => onDelete(cell.id)}
       onMoveUp={() => onMoveUp(cell.id)}
       onMoveDown={() => onMoveDown(cell.id)}
@@ -167,7 +156,6 @@ export default function NotebookPage() {
 
   const kernel = useKernel(ws!, id!);
   const notebook = useNotebook(ws!, id ?? null);
-  const runtime = useNotebookRuntime(ws!);
   const updateNotebook = useUpdateNotebook(ws!, id!);
   const addCell = useAddCell(ws!, id!);
   const updateCell = useUpdateCell(ws!, id!);
@@ -382,7 +370,6 @@ export default function NotebookPage() {
             onMoveUp={handleMoveUp}
             onMoveDown={handleMoveDown}
             updateCellMutate={updateCell.mutate}
-            engines={runtime.data?.engines}
             runners={runners}
             initialRunning={runningSet.has(cell.id)}
             onRunAbove={index > 0 ? () => runSlice(0, index) : undefined}
