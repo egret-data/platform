@@ -48,8 +48,9 @@ a workspace. A break-glass `loginLocalAdmin` (local admin form) is also in
 
 For this to work:
 
-1. **Run the backend with the OIDC env** from `.env.example`
-   (`EGRET_OIDC__ENABLED=true`,
+1. **Run the backend with the OIDC env** from `.env.example` — in addition to
+   the env already shown in Prerequisite step 3, the backend also needs the OIDC
+   vars (`EGRET_OIDC__ENABLED=true`,
    `EGRET_OIDC__REDIRECT_URL=http://localhost:5173/api/auth/oidc/callback`, plus
    the issuer / client id / secret vars) so `/api/auth/oidc/login` redirects to
    Keycloak and the callback resolves the user.
