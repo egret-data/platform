@@ -110,6 +110,54 @@ def test_trino_conn_factory_wires_jwt_and_url(monkeypatch):
     assert engine_calls["connect_args"]["auth"] == ("AUTH", "JWT")
 
 
+def test_starrocks_builds_read_sql_with_jwt(monkeypatch):
+    import sys
+    env = {"EGRET_API_URL": "http://egret", "EGRET_KERNEL_TOKEN": "kt"}
+    cache = {"sr": {"jwt": "JWT", "expires_at": "2999-01-01T00:00:00Z",
+                    "kind": "starrocks", "host": "sr", "port": 9030}}
+    captured = {}
+    fake_daft = type("D", (), {"read_sql": staticmethod(
+        lambda sql, conn, **kw: captured.update(sql=sql, conn=conn) or "DF")})
+    monkeypatch.setitem(sys.modules, "daft", fake_daft)
+    out = E.starrocks("SELECT 1", engine="sr", env=env, cache=cache)
+    assert out == "DF"
+    assert captured["sql"] == "SELECT 1"
+    assert callable(captured["conn"])
+
+
+def test_starrocks_conn_factory_uses_pymysql_openid(monkeypatch):
+    import sys
+    env = {"EGRET_API_URL": "http://egret", "EGRET_KERNEL_TOKEN": "kt"}
+    cache = {"sr": {"jwt": "JWT", "expires_at": "2999-01-01T00:00:00Z",
+                    "kind": "starrocks", "host": "sr", "port": 9030}}
+    seen = {}
+    def fake_connect(**kw):
+        seen["connect_kwargs"] = kw
+        return "PYMYSQL_CONN"
+    fake_pymysql = type("P", (), {"connect": staticmethod(fake_connect)})
+    def fake_create_engine(url, **kw):
+        seen["url"] = url
+        seen["creator"] = kw.get("creator")
+        class _Eng:
+            def connect(self):
+                return kw["creator"]()
+        return _Eng()
+    fake_sa = type("SA", (), {"create_engine": staticmethod(fake_create_engine)})
+    # daft.read_sql returns the factory so the test can invoke it
+    fake_daft = type("D", (), {"read_sql": staticmethod(lambda sql, conn, **kw: conn)})
+    monkeypatch.setitem(sys.modules, "pymysql", fake_pymysql)
+    monkeypatch.setitem(sys.modules, "sqlalchemy", fake_sa)
+    monkeypatch.setitem(sys.modules, "daft", fake_daft)
+    factory = E.starrocks("SELECT 1", engine="sr", env=env, cache=cache)
+    conn = factory()                    # invoke the connection factory -> eng.connect() -> creator()
+    assert conn == "PYMYSQL_CONN"
+    assert seen["url"] == "mysql+pymysql://"
+    assert callable(seen["creator"])
+    kw = seen["connect_kwargs"]
+    assert kw["host"] == "sr" and kw["port"] == 9030 and kw["user"] == "egret"
+    assert "authentication_openid_connect_client" in kw["auth_plugin_map"]
+
+
 def test_iceberg_reads_via_catalog(monkeypatch):
     import sys
     loaded = {}
