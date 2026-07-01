@@ -1,5 +1,7 @@
 # OIDC (Keycloak) as the default auth for dev + e2e — Design
 
+> Bilingual: English canonical; VI reference at `docs/vi/specs/2026-07-01-oidc-keycloak-default-dev-e2e-design.md`.
+
 - **Date:** 2026-07-01
 - **Status:** Approved (brainstorming) — ready for implementation plan
 - **Scope:** Make real OIDC (local Keycloak) the default sign-in path for the

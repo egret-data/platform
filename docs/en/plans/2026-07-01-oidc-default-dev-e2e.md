@@ -8,7 +8,9 @@
 
 **Tech Stack:** Rust (axum, sqlx, clap) backend; React 18 + Vite + Vitest frontend; Playwright e2e; Keycloak 26 (dev compose); Postgres.
 
-**Spec:** `docs/superpowers/specs/2026-07-01-oidc-keycloak-default-dev-e2e-design.md`
+> Bilingual: English canonical; VI reference at `docs/vi/plans/2026-07-01-oidc-default-dev-e2e.md`.
+
+**Spec:** `docs/en/specs/2026-07-01-oidc-keycloak-default-dev-e2e-design.md`
 
 ---
 
