@@ -84,7 +84,7 @@ pub async fn build_notebook_runtime(
         .await
         .map_err(NotebookApiError)?;
 
-    // 3. Resolve the workspace's warehouse row (pick first by name).
+    // 3. Resolve the workspace's notebook warehouse (prefer the one named "notebook", else first).
     let warehouses = st.catalog.list_warehouses(ws).await.map_err(|e| {
         use egret_catalog::CatalogError as C;
         let inner = match e {
@@ -166,12 +166,12 @@ pub async fn build_notebook_runtime(
 ///    2–6. Delegate to [`build_notebook_runtime`].
 ///
 /// **Warehouse selection:** we use the egret-side `workspace_warehouses` table
-/// (via `CatalogStore::list_warehouses`) and pick the first row ordered by
-/// name. The `catalog.warehouse` field in the response is set to that row's
-/// `name` field (the human-facing warehouse name, which mirrors the lakekeeper
-/// warehouse name used in catalog REST paths). If a workspace ever has multiple
-/// warehouses the admin can re-order them via rename to control which one the
-/// runtime picks; a future endpoint can expose the selection explicitly.
+/// (via `CatalogStore::list_warehouses`) and select the warehouse named
+/// `notebook` (the reserved read-write notebook catalog), falling back to the
+/// first row when none is named `notebook`. The `catalog.warehouse` field in the
+/// response is set to that row's `name` field (the human-facing warehouse name,
+/// which mirrors the lakekeeper warehouse name used in catalog REST paths). An
+/// admin designates the notebook catalog by naming a warehouse `notebook`.
 pub async fn runtime(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
