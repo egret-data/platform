@@ -774,6 +774,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         }),
         // Task 7: reuse the SAME broker Arc as NotebookState — one minter.
         engine_minter: engine_minter.clone(),
+        active: egret_kernel::recorder::ActiveExecutions::default(),
     });
     // ── end kernel wiring ───────────────────────────────────────────────────────
 

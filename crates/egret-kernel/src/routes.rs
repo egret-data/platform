@@ -58,6 +58,9 @@ pub struct KernelState {
     /// Mints fresh per-user engine JWTs for `POST /ws/{ws}/notebook-runtime/token`.
     /// Shares the SAME `EngineTokenBroker` Arc as `NotebookState` (wired in egret-bin).
     pub engine_minter: std::sync::Arc<dyn egret_notebook::engine_token::EngineTokenMinter>,
+    /// Shared registry of currently-running cells per (notebook, user), fed by the
+    /// output recorder in `channels` and read by the active-executions endpoint.
+    pub active: crate::recorder::ActiveExecutions,
 }
 
 impl FromRef<KernelState> for SessionService {
@@ -105,6 +108,10 @@ pub fn kernel_router() -> Router<KernelState> {
         .route(
             "/ws/{workspace}/notebooks/{notebook}/kernel/restart",
             post(kernel_restart),
+        )
+        .route(
+            "/ws/{workspace}/notebooks/{notebook}/kernel/active-executions",
+            get(active_executions),
         )
 }
 
@@ -281,10 +288,43 @@ async fn connect(
     ))
 }
 
+/// Persistence sink for the output recorder: wraps `NotebookStore::record_output`
+/// so the recorder owns output persistence (the FE never PATCHes outputs).
+struct StoreSink(egret_notebook::NotebookStore);
+#[async_trait::async_trait]
+impl crate::recorder::OutputSink for StoreSink {
+    async fn record(
+        &self,
+        nb: uuid::Uuid,
+        cid: uuid::Uuid,
+        outs: Vec<egret_notebook::output::CellOutput>,
+        ec: Option<i32>,
+        ms: Option<i32>,
+    ) {
+        if let Err(e) = self.0.record_output(nb, cid, &outs, ec, ms).await {
+            tracing::warn!("recorder persist failed: {e:?}");
+        }
+    }
+}
+
+/// Composite tap: on every forwarded frame it runs the throttled kernel-touch
+/// (D1c liveness) AND feeds the byte-verbatim frame to the output recorder.
+struct ChannelsTap {
+    rec: crate::recorder::Recorder,
+    touch: std::sync::Arc<dyn Fn() + Send + Sync>,
+}
+impl crate::recorder::ChannelTap for ChannelsTap {
+    fn on_frame(&self, dir: crate::recorder::FrameDir, bytes: &[u8]) {
+        (self.touch)();
+        self.rec.on_frame(dir, bytes);
+    }
+}
+
 /// `GET /ws/{workspace}/notebooks/{notebook}/kernel/channels` — authenticate via the
 /// session cookie + `notebook:read`, require a Ready kernel, resolve the per-notebook
 /// kernel id, then upgrade and proxy the Jupyter channels WS to the gateway. Touches
-/// the kernel (throttled) per message so the idle reaper keeps it alive.
+/// the kernel (throttled) per message so the idle reaper keeps it alive, and records
+/// kernel outputs to the DB (the recorder owns output persistence).
 async fn channels(
     State(st): State<KernelState>,
     WsContext(ctx): WsContext,
@@ -348,7 +388,7 @@ async fn channels(
 
     // Throttled touch: at most once per 15s, off the hot path.
     let last: Arc<std::sync::Mutex<Option<Instant>>> = Arc::new(std::sync::Mutex::new(None));
-    let on_activity: Arc<dyn Fn() + Send + Sync> = {
+    let touch: Arc<dyn Fn() + Send + Sync> = {
         let st = st.clone();
         let last = last.clone();
         Arc::new(move || {
@@ -373,22 +413,35 @@ async fn channels(
         })
     };
 
+    // Output recorder: correlates execute_request → iopub and persists on idle.
+    // Owns output persistence — the FE never PATCHes outputs. `nb` + `user` are
+    // already captured in scope (before the on_upgrade move closure).
+    let rec = crate::recorder::Recorder::new(
+        nb,
+        user,
+        std::sync::Arc::new(StoreSink(st.notebook.store.clone())),
+        st.active.clone(),
+    );
+    let tap: std::sync::Arc<dyn crate::recorder::ChannelTap> =
+        std::sync::Arc::new(ChannelsTap { rec, touch });
+
     let proxy = st.proxy.clone();
     let url = status.url.clone();
     Ok(upgrade.on_upgrade(move |socket| async move {
-        let _ = proxy.proxy_channels(socket, &url, &kid, on_activity).await;
+        let _ = proxy.proxy_channels(socket, &url, &kid, tap).await;
     }))
 }
 
-/// Shared auth + IDOR + resolution for `interrupt`/`restart`. Mirrors `channels`:
-/// requires `notebook:read`, the notebook to belong to this workspace and be
-/// readable, and a Ready kernel with a resolved per-notebook kernel id. Returns
-/// `(gateway_url, kernel_id)`. 409 Conflict if no Ready kernel / no kernel id yet.
-async fn resolve_running_notebook_kernel(
+/// Shared auth + IDOR gate for any notebook-scoped endpoint: requires
+/// `notebook:read`, the notebook to belong to this workspace, and the caller to
+/// be the owner or the notebook to be public.  Used by `resolve_running_notebook_kernel`,
+/// `active_executions`, and any future endpoint that needs the same check but
+/// does NOT need a Ready kernel.
+async fn authorize_notebook(
     st: &KernelState,
     ctx: &egret_core::WorkspaceContext,
     nb: Uuid,
-) -> Result<(String, String), KernelApiError> {
+) -> Result<(), KernelApiError> {
     st.authz
         .require_workspace(ctx, "notebook:read")
         .await
@@ -410,6 +463,19 @@ async fn resolve_running_notebook_kernel(
     if !(summary.is_public || summary.owner_user_id == ctx.principal.user_id.0) {
         return Err(KernelApiError(egret_core::Error::Forbidden));
     }
+    Ok(())
+}
+
+/// Shared auth + IDOR + resolution for `interrupt`/`restart`. Requires
+/// `notebook:read`, the notebook to belong to this workspace and be readable,
+/// and a Ready kernel with a resolved per-notebook kernel id. Returns
+/// `(gateway_url, kernel_id)`. 409 Conflict if no Ready kernel / no kernel id yet.
+async fn resolve_running_notebook_kernel(
+    st: &KernelState,
+    ctx: &egret_core::WorkspaceContext,
+    nb: Uuid,
+) -> Result<(String, String), KernelApiError> {
+    authorize_notebook(st, ctx, nb).await?;
 
     let user = ctx.principal.user_id.0;
     let key = KernelKey {
@@ -471,6 +537,25 @@ async fn kernel_restart(
         .await
         .map_err(KernelApiError::from)?;
     Ok(Json(serde_json::json!({ "kernel_id": id })))
+}
+
+/// `GET /ws/{workspace}/notebooks/{notebook}/kernel/active-executions` — returns
+/// the cell_ids currently executing for the caller's notebook from the in-memory
+/// `ActiveExecutions` registry, so the frontend can restore in-flight cells on
+/// reopen.
+///
+/// Gate: `notebook:read`; the notebook must belong to this workspace and be
+/// readable by the caller (owner or public). No kernel resolution needed — this
+/// is a pure registry lookup; even if the kernel has since died, the registry
+/// will be empty (the `Recorder` drop impl clears stale entries).
+async fn active_executions(
+    State(st): State<KernelState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, nb)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, KernelApiError> {
+    authorize_notebook(&st, &ctx, nb).await?;
+    let running = st.active.running(nb, ctx.principal.user_id.0);
+    Ok(Json(serde_json::json!({ "running": running })))
 }
 
 // ── kernel query callback ─────────────────────────────────────────────────────

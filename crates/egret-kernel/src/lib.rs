@@ -3,6 +3,7 @@
 pub mod env;
 pub mod error;
 pub mod gateway;
+pub mod jmsg;
 pub mod kernel_token;
 pub mod launcher;
 pub mod manager;
@@ -10,6 +11,7 @@ pub mod notebook_kernels;
 pub mod proxy;
 pub mod query;
 pub mod reaper;
+pub mod recorder;
 pub mod registry;
 pub mod routes;
 pub mod subprocess;
