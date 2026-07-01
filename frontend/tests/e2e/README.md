@@ -37,14 +37,63 @@ opt-in smoke of the notebook execution money-path (Notebook epic E).
    `http://localhost:9000`, bucket `warehouse`, access key `egret`, secret
    `egretsecret`) → **Catalog → Add warehouse** on that connection.
 
+## SSO login (Keycloak)
+
+The specs authenticate through the **real Keycloak** in
+`docker-compose.dev.yml` (`:8081`, realm `egret`, user `tester@egret.local` /
+`pw` in group `data-team`) — the `loginViaOidc` helper clicks **Sign in with
+SSO**, fills the Keycloak-hosted login form, and follows the callback back into
+a workspace. A break-glass `loginLocalAdmin` (local admin form) is also in
+`helpers.ts`.
+
+For this to work:
+
+1. **Run the backend with the OIDC env** from `.env.example` — in addition to
+   the env already shown in Prerequisite step 3, the backend also needs the OIDC
+   vars (`EGRET_OIDC__ENABLED=true`,
+   `EGRET_OIDC__REDIRECT_URL=http://localhost:5173/api/auth/oidc/callback`, plus
+   the issuer / client id / secret vars) so `/api/auth/oidc/login` redirects to
+   Keycloak and the callback resolves the user.
+2. **Bind the `data-team` group to a workspace that has a provisioned
+   warehouse** (the "admin grants access" step) so `tester` lands in a usable
+   workspace. Do this once:
+   ```bash
+   cargo run -p egret-bin -- workspace add-group --workspace <your-workspace-slug> --group data-team --role ws_editor
+   ```
+
+SSO creds default to `tester@egret.local` / `pw` and can be overridden with
+`EGRET_E2E_OIDC_USER` / `EGRET_E2E_OIDC_PASSWORD`.
+
+### Seeded SSO test users
+
+The realm ships two extra fixed-identity users for manual/role testing:
+
+| User | Password | Group | Privilege |
+| --- | --- | --- | --- |
+| `admin-sso@egret.local` | `Admin12345!` | `platform-admins` | platform admin |
+| `member-sso@egret.local` | `Member12345!` | `data-team` | member |
+
+OIDC users JIT-provision as plain members. `admin-sso` becomes a platform admin
+because the `platform-admins` **group** is granted the `platform_admin` role —
+apply that one-time RBAC seed against the egret DB:
+
+```bash
+docker exec -i egret-dev-postgres-1 psql -U egret -d egret < deploy/seed-sso-test-rbac.sql
+```
+
+A fresh stack (`docker compose ... up`, first import) creates both realm users
+automatically; the seed SQL above wires the group→role grant on the egret side.
+`member-sso` reaches a workspace via the same `data-team` binding as `tester`.
+
 ## Run
 
 ```bash
 npm run test:e2e
 ```
 
-Override the target / credentials via env: `EGRET_E2E_BASE_URL`,
-`EGRET_E2E_EMAIL`, `EGRET_E2E_PASSWORD`.
+Override the target / credentials via env: `EGRET_E2E_BASE_URL`, the SSO creds
+`EGRET_E2E_OIDC_USER` / `EGRET_E2E_OIDC_PASSWORD`, and the break-glass local
+admin `EGRET_E2E_EMAIL` / `EGRET_E2E_PASSWORD`.
 
 ## What's covered
 

@@ -27,6 +27,28 @@ pub enum Command {
         #[command(subcommand)]
         action: CatalogAction,
     },
+    /// Workspace administration (membership).
+    Workspace {
+        #[command(subcommand)]
+        action: WorkspaceAction,
+    },
+}
+
+/// Workspace membership operations.
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum WorkspaceAction {
+    /// Grant an IdP group a role in a workspace (idempotent).
+    AddGroup {
+        /// Workspace slug (e.g. "engineering").
+        #[arg(long)]
+        workspace: String,
+        /// IdP group name as it appears in the `groups` claim (e.g. "data-team").
+        #[arg(long)]
+        group: String,
+        /// Workspace role: ws_admin | ws_editor | ws_viewer.
+        #[arg(long, default_value = "ws_editor")]
+        role: String,
+    },
 }
 
 /// Catalog token operations.
@@ -269,6 +291,53 @@ mod tests {
             cli.command,
             Command::Catalog {
                 action: CatalogAction::RevokeToken { id }
+            }
+        );
+    }
+
+    #[test]
+    fn parses_workspace_add_group() {
+        // Default role (omitted) is ws_editor.
+        let cli = Cli::parse_from([
+            "egret",
+            "workspace",
+            "add-group",
+            "--workspace",
+            "engineering",
+            "--group",
+            "data-team",
+        ]);
+        assert_eq!(
+            cli.command,
+            Command::Workspace {
+                action: WorkspaceAction::AddGroup {
+                    workspace: "engineering".into(),
+                    group: "data-team".into(),
+                    role: "ws_editor".into(),
+                }
+            }
+        );
+
+        // Explicit --role is captured.
+        let cli = Cli::parse_from([
+            "egret",
+            "workspace",
+            "add-group",
+            "--workspace",
+            "engineering",
+            "--group",
+            "data-team",
+            "--role",
+            "ws_admin",
+        ]);
+        assert_eq!(
+            cli.command,
+            Command::Workspace {
+                action: WorkspaceAction::AddGroup {
+                    workspace: "engineering".into(),
+                    group: "data-team".into(),
+                    role: "ws_admin".into(),
+                }
             }
         );
     }

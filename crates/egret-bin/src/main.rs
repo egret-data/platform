@@ -5,7 +5,7 @@ mod cli;
 use anyhow::Context;
 use chrono::Duration;
 use clap::Parser;
-use cli::{parse_namespaces, CatalogAction, Cli, Command};
+use cli::{parse_namespaces, CatalogAction, Cli, Command, WorkspaceAction};
 use egret_auth::groups::GroupRepo;
 use egret_auth::password::hash_password;
 use egret_auth::ratelimit::RateLimiter;
@@ -34,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Migrate => migrate(config).await,
         Command::Init { force } => init(config, force).await,
         Command::Catalog { action } => catalog_cmd(config, action).await,
+        Command::Workspace { action } => workspace_cmd(config, action).await,
     }
 }
 
@@ -251,6 +252,28 @@ async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Workspace membership management
+// ---------------------------------------------------------------------------
+
+async fn workspace_cmd(config: Config, action: WorkspaceAction) -> anyhow::Result<()> {
+    let db = connect_db(&config).await?;
+    match action {
+        WorkspaceAction::AddGroup {
+            workspace,
+            group,
+            role,
+        } => {
+            let admin_email =
+                std::env::var("EGRET_ADMIN_EMAIL").unwrap_or_else(|_| "admin@egret.local".into());
+            egret_bin::grant_group_to_workspace(&db, &workspace, &group, &role, &admin_email)
+                .await?;
+            println!("Granted group '{group}' role '{role}' in workspace '{workspace}'");
+            Ok(())
+        }
+    }
 }
 
 /// Format a token's resource-grant scope for CLI display, e.g.

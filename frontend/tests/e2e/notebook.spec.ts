@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { loginViaOidc } from "./helpers";
 
 /**
  * Notebook execution e2e — the real money path (Notebook epic E):
@@ -6,18 +7,6 @@ import { test, expect, type Page } from "@playwright/test";
  * output render live → reload → the output restores from the persisted
  * `last_output` (E-P2 recorder). Requires the full stack (see playwright.config.ts).
  */
-
-const ADMIN_EMAIL = process.env.EGRET_E2E_EMAIL ?? "admin@egret.local";
-const ADMIN_PASSWORD = process.env.EGRET_E2E_PASSWORD ?? "Admin12345!";
-
-async function login(page: Page) {
-  await page.goto("/login");
-  await page.getByRole("textbox", { name: "Email" }).fill(ADMIN_EMAIL);
-  await page.getByRole("textbox", { name: "Password" }).fill(ADMIN_PASSWORD);
-  await page.getByRole("button", { name: "Sign in" }).click();
-  // Post-login lands inside a workspace (…/explore/{ws}/…).
-  await page.waitForURL(/\/explore\/[^/]+\//, { timeout: 20_000 });
-}
 
 /** Set a Monaco editor's value directly (typing into Monaco is unreliable in automation). */
 async function setFirstCellSource(page: Page, code: string) {
@@ -31,7 +20,7 @@ async function setFirstCellSource(page: Page, code: string) {
 }
 
 test("run a Python cell end-to-end and restore its output on reload", async ({ page }) => {
-  await login(page);
+  await loginViaOidc(page);
 
   // Go to Notebooks and create a fresh one.
   await page.getByRole("link", { name: "Notebooks" }).click();
@@ -58,7 +47,7 @@ test("run a Python cell end-to-end and restore its output on reload", async ({ p
 });
 
 test("the notebook toolbar exposes the full run controls", async ({ page }) => {
-  await login(page);
+  await loginViaOidc(page);
   await page.getByRole("link", { name: "Notebooks" }).click();
   await page.getByRole("button", { name: "+ Notebook" }).click();
   await page.getByRole("textbox", { name: "Name" }).fill(`e2e controls ${Date.now()}`);
