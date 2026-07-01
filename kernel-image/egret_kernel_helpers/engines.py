@@ -86,10 +86,10 @@ def trino(sql, *, engine="trino", env=None, cache=None):
     return daft.read_sql(sql, _conn)
 
 
-def iceberg(table, *, catalog_id=None):
+def iceberg(table):
     """Read an Iceberg table as a lazy Daft DataFrame (native, pushdown). `table`
     is "namespace.name", resolved in the workspace warehouse / your private
     `notebook_{username}` namespace."""
     import daft
-    tbl = catalog(catalog_id).load_table(table)
+    tbl = catalog().load_table(table)
     return daft.read_iceberg(tbl)
