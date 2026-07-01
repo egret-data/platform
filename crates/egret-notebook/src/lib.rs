@@ -2,6 +2,7 @@
 pub mod engine_token;
 pub mod error;
 pub mod model;
+pub mod output;
 pub mod provisioning;
 pub mod routes;
 pub mod runtime;
