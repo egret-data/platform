@@ -441,10 +441,21 @@ async fn kernel_query(
         .await
         .map_err(KernelApiError::from)?;
 
+    let bearer = match st.engine_minter.mint(ident.user_id).await {
+        Ok(tok) => Some(tok.access_token),
+        Err(egret_notebook::engine_token::BrokerError::NoRefreshToken) => {
+            return Err(KernelApiError(egret_core::Error::Unauthorized));
+        }
+        Err(e) => {
+            return Err(KernelApiError(egret_core::Error::Internal(
+                anyhow::anyhow!(e),
+            )))
+        }
+    };
     let max_rows = req.max_rows.unwrap_or(10_000).min(100_000);
     let rows = st
         .query_runner
-        .run(eng.id, username, req.sql, max_rows)
+        .run(eng.id, username, bearer, req.sql, max_rows)
         .await
         .map_err(|e| match e {
             crate::query::QueryRunError::NotFound(m) => {

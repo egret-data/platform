@@ -33,12 +33,14 @@ pub enum QueryRunError {
 
 #[async_trait]
 pub trait NotebookQueryRunner: Send + Sync {
-    /// Run `sql` against `database_id` as `session_user` (Trino `X-Trino-User`
-    /// when the connection opts into impersonation), capped at `max_rows`.
+    /// Run `sql` against `database_id` as `session_user` (Trino `X-Trino-User`),
+    /// presenting `bearer` as `Authorization: Bearer <token>` to the engine when
+    /// provided (OIDC JWT from the user's stored refresh token), capped at `max_rows`.
     async fn run(
         &self,
         database_id: Uuid,
         session_user: String,
+        bearer: Option<String>,
         sql: String,
         max_rows: usize,
     ) -> Result<QueryRows, QueryRunError>;
@@ -49,6 +51,8 @@ pub trait NotebookQueryRunner: Send + Sync {
 #[derive(Default)]
 pub struct FakeQueryRunner {
     pub last: std::sync::Mutex<Option<(Uuid, String, String, usize)>>,
+    /// Captures the `bearer` argument from the last `run` call for test assertions.
+    pub last_bearer: std::sync::Mutex<Option<Option<String>>>,
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -58,10 +62,12 @@ impl NotebookQueryRunner for FakeQueryRunner {
         &self,
         database_id: Uuid,
         session_user: String,
+        bearer: Option<String>,
         sql: String,
         max_rows: usize,
     ) -> Result<QueryRows, QueryRunError> {
         *self.last.lock().unwrap() = Some((database_id, session_user, sql, max_rows));
+        *self.last_bearer.lock().unwrap() = Some(bearer);
         Ok(QueryRows {
             columns: vec![QueryColumn {
                 name: "n".into(),
