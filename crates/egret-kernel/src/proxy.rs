@@ -14,14 +14,15 @@ type TgMessage = tokio_tungstenite::tungstenite::Message;
 #[async_trait]
 pub trait KernelProxy: Send + Sync {
     /// Proxy the upgraded client WebSocket to the gateway's kernel channels,
-    /// pumping both ways until either side closes. `on_activity` fires per
-    /// forwarded message so the caller can touch the kernel.
+    /// pumping both ways until either side closes. `tap.on_frame` fires per
+    /// forwarded frame (both directions) with the frame bytes, so the caller
+    /// can touch the kernel and record kernel outputs.
     async fn proxy_channels(
         &self,
         client: axum::extract::ws::WebSocket,
         gateway_url: &str,
         kernel_id: &str,
-        on_activity: Arc<dyn Fn() + Send + Sync>,
+        tap: Arc<dyn crate::recorder::ChannelTap>,
     ) -> Result<(), KernelError>;
 }
 
@@ -35,10 +36,10 @@ impl KernelProxy for BackendWsProxy {
         client: axum::extract::ws::WebSocket,
         gateway_url: &str,
         kernel_id: &str,
-        on_activity: Arc<dyn Fn() + Send + Sync>,
+        tap: Arc<dyn crate::recorder::ChannelTap>,
     ) -> Result<(), KernelError> {
         let (tx, rx) = client.split();
-        run_proxy(tx, rx, gateway_url, kernel_id, on_activity).await
+        run_proxy(tx, rx, gateway_url, kernel_id, tap).await
     }
 }
 
@@ -49,7 +50,7 @@ pub(crate) async fn run_proxy<CTx, CRx>(
     mut client_rx: CRx,
     gateway_url: &str,
     kernel_id: &str,
-    on_activity: Arc<dyn Fn() + Send + Sync>,
+    tap: Arc<dyn crate::recorder::ChannelTap>,
 ) -> Result<(), KernelError>
 where
     CTx: Sink<AxMessage> + Unpin,
@@ -72,7 +73,9 @@ where
         tokio::select! {
             c = client_rx.next() => match c {
                 Some(Ok(msg)) => {
-                    on_activity();
+                    if let Some(b) = ax_frame_bytes(&msg) {
+                        tap.on_frame(crate::recorder::FrameDir::ClientToKernel, b);
+                    }
                     if let Some(out) = ax_to_tung(msg) {
                         if gw_tx.send(out).await.is_err() { break; }
                     }
@@ -85,7 +88,9 @@ where
             },
             g = gw_rx.next() => match g {
                 Some(Ok(msg)) => {
-                    on_activity();
+                    if let Some(b) = tg_frame_bytes(&msg) {
+                        tap.on_frame(crate::recorder::FrameDir::KernelToClient, b);
+                    }
                     if let Some(out) = tung_to_ax(msg) {
                         if client_tx.send(out).await.is_err() { break; }
                     }
@@ -143,6 +148,29 @@ fn tung_to_ax(m: TgMessage) -> Option<AxMessage> {
     })
 }
 
+/// Borrow the raw payload bytes of an axum (client) message for the tap, without
+/// consuming the message (forwarding still gets the original verbatim). Only
+/// Text/Binary carry recordable Jupyter frames; control frames return None.
+fn ax_frame_bytes(m: &AxMessage) -> Option<&[u8]> {
+    use axum::extract::ws::Message as A;
+    match m {
+        A::Text(t) => Some(t.as_bytes()),
+        A::Binary(b) => Some(&b[..]),
+        _ => None,
+    }
+}
+
+/// Borrow the raw payload bytes of a tungstenite (gateway) message for the tap,
+/// without consuming it. Only Text/Binary carry recordable Jupyter frames.
+fn tg_frame_bytes(m: &TgMessage) -> Option<&[u8]> {
+    use tokio_tungstenite::tungstenite::Message as T;
+    match m {
+        T::Text(t) => Some(t.as_bytes()),
+        T::Binary(b) => Some(&b[..]),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +178,16 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     type AxMessage = axum::extract::ws::Message;
+
+    /// A `ChannelTap` that counts every forwarded frame (both directions).
+    struct CountTap {
+        count: std::sync::Arc<AtomicUsize>,
+    }
+    impl crate::recorder::ChannelTap for CountTap {
+        fn on_frame(&self, _dir: crate::recorder::FrameDir, _bytes: &[u8]) {
+            self.count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
     /// A WS echo server standing in for the gateway's channels endpoint.
     /// Accepts any path, echoes text/binary frames back, stops on Close.
@@ -183,13 +221,12 @@ mod tests {
         let (client_out_tx, mut client_out_rx) = futures_channel::mpsc::unbounded::<AxMessage>();
 
         let count = std::sync::Arc::new(AtomicUsize::new(0));
-        let c2 = count.clone();
-        let on_activity: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
-            c2.fetch_add(1, Ordering::SeqCst);
+        let tap: std::sync::Arc<dyn crate::recorder::ChannelTap> = std::sync::Arc::new(CountTap {
+            count: count.clone(),
         });
 
         let h = tokio::spawn(async move {
-            run_proxy(client_out_tx, client_in_rx, &gateway, "k1", on_activity).await
+            run_proxy(client_out_tx, client_in_rx, &gateway, "k1", tap).await
         });
 
         // Send a text + a binary frame "from the client".

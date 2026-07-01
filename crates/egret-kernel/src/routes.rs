@@ -58,6 +58,9 @@ pub struct KernelState {
     /// Mints fresh per-user engine JWTs for `POST /ws/{ws}/notebook-runtime/token`.
     /// Shares the SAME `EngineTokenBroker` Arc as `NotebookState` (wired in egret-bin).
     pub engine_minter: std::sync::Arc<dyn egret_notebook::engine_token::EngineTokenMinter>,
+    /// Shared registry of currently-running cells per (notebook, user), fed by the
+    /// output recorder in `channels` and read by the active-executions endpoint.
+    pub active: crate::recorder::ActiveExecutions,
 }
 
 impl FromRef<KernelState> for SessionService {
@@ -281,10 +284,43 @@ async fn connect(
     ))
 }
 
+/// Persistence sink for the output recorder: wraps `NotebookStore::record_output`
+/// so the recorder owns output persistence (the FE never PATCHes outputs).
+struct StoreSink(egret_notebook::NotebookStore);
+#[async_trait::async_trait]
+impl crate::recorder::OutputSink for StoreSink {
+    async fn record(
+        &self,
+        nb: uuid::Uuid,
+        cid: uuid::Uuid,
+        outs: Vec<egret_notebook::output::CellOutput>,
+        ec: Option<i32>,
+        ms: Option<i32>,
+    ) {
+        if let Err(e) = self.0.record_output(nb, cid, &outs, ec, ms).await {
+            tracing::warn!("recorder persist failed: {e:?}");
+        }
+    }
+}
+
+/// Composite tap: on every forwarded frame it runs the throttled kernel-touch
+/// (D1c liveness) AND feeds the byte-verbatim frame to the output recorder.
+struct ChannelsTap {
+    rec: crate::recorder::Recorder,
+    touch: std::sync::Arc<dyn Fn() + Send + Sync>,
+}
+impl crate::recorder::ChannelTap for ChannelsTap {
+    fn on_frame(&self, dir: crate::recorder::FrameDir, bytes: &[u8]) {
+        (self.touch)();
+        self.rec.on_frame(dir, bytes);
+    }
+}
+
 /// `GET /ws/{workspace}/notebooks/{notebook}/kernel/channels` — authenticate via the
 /// session cookie + `notebook:read`, require a Ready kernel, resolve the per-notebook
 /// kernel id, then upgrade and proxy the Jupyter channels WS to the gateway. Touches
-/// the kernel (throttled) per message so the idle reaper keeps it alive.
+/// the kernel (throttled) per message so the idle reaper keeps it alive, and records
+/// kernel outputs to the DB (the recorder owns output persistence).
 async fn channels(
     State(st): State<KernelState>,
     WsContext(ctx): WsContext,
@@ -348,7 +384,7 @@ async fn channels(
 
     // Throttled touch: at most once per 15s, off the hot path.
     let last: Arc<std::sync::Mutex<Option<Instant>>> = Arc::new(std::sync::Mutex::new(None));
-    let on_activity: Arc<dyn Fn() + Send + Sync> = {
+    let touch: Arc<dyn Fn() + Send + Sync> = {
         let st = st.clone();
         let last = last.clone();
         Arc::new(move || {
@@ -373,10 +409,22 @@ async fn channels(
         })
     };
 
+    // Output recorder: correlates execute_request → iopub and persists on idle.
+    // Owns output persistence — the FE never PATCHes outputs. `nb` + `user` are
+    // already captured in scope (before the on_upgrade move closure).
+    let rec = crate::recorder::Recorder::new(
+        nb,
+        user,
+        std::sync::Arc::new(StoreSink(st.notebook.store.clone())),
+        st.active.clone(),
+    );
+    let tap: std::sync::Arc<dyn crate::recorder::ChannelTap> =
+        std::sync::Arc::new(ChannelsTap { rec, touch });
+
     let proxy = st.proxy.clone();
     let url = status.url.clone();
     Ok(upgrade.on_upgrade(move |socket| async move {
-        let _ = proxy.proxy_channels(socket, &url, &kid, on_activity).await;
+        let _ = proxy.proxy_channels(socket, &url, &kid, tap).await;
     }))
 }
 

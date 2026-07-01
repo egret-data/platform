@@ -173,6 +173,7 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         proxy: Arc::new(egret_kernel::BackendWsProxy),
         query_runner: fake_runner.clone(),
         engine_minter: Arc::new(StubMinter),
+        active: Default::default(),
     };
     let app = kernel_router()
         .merge(egret_kernel::kernel_callback_router())

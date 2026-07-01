@@ -207,6 +207,17 @@ impl Recorder {
     }
 }
 
+/// The seam the proxy calls on every forwarded frame (both directions), with bytes.
+pub trait ChannelTap: Send + Sync {
+    fn on_frame(&self, dir: FrameDir, bytes: &[u8]);
+}
+
+impl ChannelTap for Recorder {
+    fn on_frame(&self, dir: FrameDir, bytes: &[u8]) {
+        Recorder::on_frame(self, dir, bytes)
+    }
+}
+
 impl Drop for Recorder {
     fn drop(&mut self) {
         // On WS close (kernel crash / disconnect) clear any still-running cells
@@ -226,9 +237,10 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use uuid::Uuid;
 
+    type RecordedCall = (Uuid, Vec<CellOutput>, Option<i32>);
     #[derive(Default)]
     struct FakeSink {
-        calls: StdMutex<Vec<(Uuid, Vec<CellOutput>, Option<i32>)>>,
+        calls: StdMutex<Vec<RecordedCall>>,
     }
     #[async_trait::async_trait]
     impl OutputSink for FakeSink {
