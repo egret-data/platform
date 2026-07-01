@@ -109,6 +109,10 @@ pub fn kernel_router() -> Router<KernelState> {
             "/ws/{workspace}/notebooks/{notebook}/kernel/restart",
             post(kernel_restart),
         )
+        .route(
+            "/ws/{workspace}/notebooks/{notebook}/kernel/active-executions",
+            get(active_executions),
+        )
 }
 
 /// Kernel-token bearer callback routes invoked by the kernel SUBPROCESS, not a
@@ -428,15 +432,16 @@ async fn channels(
     }))
 }
 
-/// Shared auth + IDOR + resolution for `interrupt`/`restart`. Mirrors `channels`:
-/// requires `notebook:read`, the notebook to belong to this workspace and be
-/// readable, and a Ready kernel with a resolved per-notebook kernel id. Returns
-/// `(gateway_url, kernel_id)`. 409 Conflict if no Ready kernel / no kernel id yet.
-async fn resolve_running_notebook_kernel(
+/// Shared auth + IDOR gate for any notebook-scoped endpoint: requires
+/// `notebook:read`, the notebook to belong to this workspace, and the caller to
+/// be the owner or the notebook to be public.  Used by `resolve_running_notebook_kernel`,
+/// `active_executions`, and any future endpoint that needs the same check but
+/// does NOT need a Ready kernel.
+async fn authorize_notebook(
     st: &KernelState,
     ctx: &egret_core::WorkspaceContext,
     nb: Uuid,
-) -> Result<(String, String), KernelApiError> {
+) -> Result<(), KernelApiError> {
     st.authz
         .require_workspace(ctx, "notebook:read")
         .await
@@ -458,6 +463,19 @@ async fn resolve_running_notebook_kernel(
     if !(summary.is_public || summary.owner_user_id == ctx.principal.user_id.0) {
         return Err(KernelApiError(egret_core::Error::Forbidden));
     }
+    Ok(())
+}
+
+/// Shared auth + IDOR + resolution for `interrupt`/`restart`. Requires
+/// `notebook:read`, the notebook to belong to this workspace and be readable,
+/// and a Ready kernel with a resolved per-notebook kernel id. Returns
+/// `(gateway_url, kernel_id)`. 409 Conflict if no Ready kernel / no kernel id yet.
+async fn resolve_running_notebook_kernel(
+    st: &KernelState,
+    ctx: &egret_core::WorkspaceContext,
+    nb: Uuid,
+) -> Result<(String, String), KernelApiError> {
+    authorize_notebook(st, ctx, nb).await?;
 
     let user = ctx.principal.user_id.0;
     let key = KernelKey {
@@ -519,6 +537,25 @@ async fn kernel_restart(
         .await
         .map_err(KernelApiError::from)?;
     Ok(Json(serde_json::json!({ "kernel_id": id })))
+}
+
+/// `GET /ws/{workspace}/notebooks/{notebook}/kernel/active-executions` — returns
+/// the cell_ids currently executing for the caller's notebook from the in-memory
+/// `ActiveExecutions` registry, so the frontend can restore in-flight cells on
+/// reopen.
+///
+/// Gate: `notebook:read`; the notebook must belong to this workspace and be
+/// readable by the caller (owner or public). No kernel resolution needed — this
+/// is a pure registry lookup; even if the kernel has since died, the registry
+/// will be empty (the `Recorder` drop impl clears stale entries).
+async fn active_executions(
+    State(st): State<KernelState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, nb)): Path<(String, Uuid)>,
+) -> Result<Json<serde_json::Value>, KernelApiError> {
+    authorize_notebook(&st, &ctx, nb).await?;
+    let running = st.active.running(nb, ctx.principal.user_id.0);
+    Ok(Json(serde_json::json!({ "running": running })))
 }
 
 // ── kernel query callback ─────────────────────────────────────────────────────

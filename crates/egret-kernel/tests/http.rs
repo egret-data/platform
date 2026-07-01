@@ -922,6 +922,94 @@ async fn interrupt_non_member_rejected(pool: sqlx::PgPool) {
     );
 }
 
+// ── active-executions tests ───────────────────────────────────────────────────
+
+/// Seeded running cell → GET active-executions returns it; proves the registry
+/// lookup is wired to the KernelState.active field.
+#[sqlx::test(migrations = "../../migrations")]
+async fn active_executions_returns_running_cells(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_warehouse(&f.db, f.ws).await;
+    let (uid, token) = add_member(&f, f.ws, "ae_member", "ws_editor").await;
+    let nb = seed_notebook(&f.db, f.ws, uid).await;
+    let cid = Uuid::now_v7();
+
+    // Seed: directly mark a cell as running in the shared registry.
+    // insert_running is a pub helper on ActiveExecutions (integration tests cannot
+    // see #[cfg(test)] items); the real path goes through Recorder::on_frame.
+    f.state.active.insert_running(nb, uid.0, cid);
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/ws/{}/notebooks/{}/kernel/active-executions", f.slug, nb),
+            &token,
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "active-executions → 200; body={json}"
+    );
+    let running = json["running"]
+        .as_array()
+        .expect("body must have a 'running' array");
+    assert_eq!(
+        running.len(),
+        1,
+        "must return the one seeded cell; body={json}"
+    );
+    let cid_str = cid.to_string();
+    assert_eq!(
+        running[0].as_str(),
+        Some(cid_str.as_str()),
+        "running[0] must be the seeded cell id; body={json}"
+    );
+}
+
+/// Non-member → active-executions is rejected (403/404) at the workspace gate.
+#[sqlx::test(migrations = "../../migrations")]
+async fn active_executions_non_member_rejected(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    seed_warehouse(&f.db, f.ws).await;
+    let nb = seed_notebook(&f.db, f.ws, f.owner).await;
+    let outsider = f
+        .users
+        .insert_local(
+            &format!("aeout_{}@egret.test", Uuid::new_v4().simple()),
+            "Out",
+            "x",
+        )
+        .await
+        .unwrap();
+    let tok = f
+        .sessions
+        .create(outsider, "test", "127.0.0.1")
+        .await
+        .unwrap()
+        .token;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/ws/{}/notebooks/{}/kernel/active-executions", f.slug, nb),
+            &tok,
+        ))
+        .await
+        .unwrap();
+    let status = resp.status();
+    assert!(
+        status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
+        "non-member active-executions must be 403/404; got {status}"
+    );
+}
+
 // ── channels (WS proxy) tests ─────────────────────────────────────────────────
 
 /// Non-member → rejected (403/404) before any upgrade.

@@ -43,6 +43,11 @@ impl ActiveExecutions {
             .cloned()
             .unwrap_or_default()
     }
+    /// Directly mark a cell as running. Integration tests use this to seed the
+    /// registry; the real path is via `Recorder::on_frame` (execute_request frame).
+    pub fn insert_running(&self, nb: Uuid, user: Uuid, cid: Uuid) {
+        self.add(nb, user, cid);
+    }
     fn add(&self, nb: Uuid, user: Uuid, cid: Uuid) {
         self.0
             .lock()
