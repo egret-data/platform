@@ -36,7 +36,7 @@ def _post(url, body, token):
         raise RuntimeError(f"egret: cannot reach the engine-token endpoint ({e})") from None
 
 
-# Module-level cache: {engine: {jwt, expires_at, expires_at_raw, kind, host, port}}.
+# Module-level cache: {engine: {jwt, expires_at, kind, host, port}}.
 _CACHE: dict = {}
 
 
@@ -46,7 +46,7 @@ def _engine_token(engine, *, env=None, http=None, cache=None):
     env = os.environ if env is None else env
     cache = _CACHE if cache is None else cache
     cached = cache.get(engine)
-    if cached is not None and _parse_expiry(cached["expires_at_raw"]) - _REFRESH_MARGIN > _now():
+    if cached is not None and _parse_expiry(cached["expires_at"]) - _REFRESH_MARGIN > _now():
         return cached
     api = env.get("EGRET_API_URL")
     token = env.get("EGRET_KERNEL_TOKEN")
@@ -56,6 +56,5 @@ def _engine_token(engine, *, env=None, http=None, cache=None):
         )
     body = json.dumps({"engine": engine}).encode()
     resp = (http or _post)(api.rstrip("/") + "/api/kernel/engine-token", body, token)
-    resp["expires_at_raw"] = resp["expires_at"]
     cache[engine] = resp
     return resp
