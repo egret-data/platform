@@ -47,6 +47,24 @@ pub struct NotebookRuntime {
     pub engine_jwt_expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// The reserved warehouse name that designates a workspace's notebook (read-write)
+/// Iceberg catalog. Other warehouses are "shared" (Trino/StarRocks).
+const NOTEBOOK_WAREHOUSE_NAME: &str = "notebook";
+
+/// Pick the notebook catalog warehouse: prefer the one named `notebook`, else the
+/// first (back-compat). Generic over the name accessor so it is unit-testable
+/// without constructing a full `Warehouse`.
+pub(crate) fn select_notebook_warehouse<W, F>(warehouses: Vec<W>, name_of: F) -> Option<W>
+where
+    F: Fn(&W) -> &str,
+{
+    let idx = warehouses
+        .iter()
+        .position(|w| name_of(w) == NOTEBOOK_WAREHOUSE_NAME)
+        .unwrap_or(0);
+    warehouses.into_iter().nth(idx)
+}
+
 /// Build the [`NotebookRuntime`] manifest for `(ws, user_id)` without performing
 /// any HTTP authorization check. Steps 2–6 of the `runtime` handler.
 ///
@@ -78,11 +96,12 @@ pub async fn build_notebook_runtime(
         NotebookApiError(inner)
     })?;
 
-    let warehouse = warehouses.into_iter().next().ok_or_else(|| {
-        NotebookApiError(egret_core::Error::NotFound(
-            "no warehouse configured for this workspace".into(),
-        ))
-    })?;
+    let warehouse =
+        select_notebook_warehouse(warehouses, |w| w.name.as_str()).ok_or_else(|| {
+            NotebookApiError(egret_core::Error::NotFound(
+                "no warehouse configured for this workspace".into(),
+            ))
+        })?;
 
     // 4. Provision private namespace + fresh 1-grant token.
     let prov = provision_notebook_access(
@@ -166,4 +185,27 @@ pub async fn runtime(
     let manifest = build_notebook_runtime(&st, ctx.workspace_id.0, ctx.principal.user_id).await?;
 
     Ok(Json(manifest))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefers_the_notebook_named_warehouse() {
+        let whs = vec!["shared", "notebook", "other"];
+        assert_eq!(select_notebook_warehouse(whs, |s| *s), Some("notebook"));
+    }
+
+    #[test]
+    fn falls_back_to_first_when_no_notebook_warehouse() {
+        let whs = vec!["shared", "other"];
+        assert_eq!(select_notebook_warehouse(whs, |s| *s), Some("shared"));
+    }
+
+    #[test]
+    fn none_when_empty() {
+        let whs: Vec<&str> = Vec::new();
+        assert_eq!(select_notebook_warehouse(whs, |s| *s), None);
+    }
 }
