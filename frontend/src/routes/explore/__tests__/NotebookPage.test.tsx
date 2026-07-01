@@ -27,6 +27,8 @@ const deleteCellMutation = vi.fn();
 const reorderCellsMutate = vi.fn();
 const reorderCellsMutation = vi.fn();
 
+const runtimeMock = vi.fn();
+
 vi.mock("@/api/notebooks", () => ({
   useNotebook: () => notebookMock(),
   useUpdateNotebook: () => updateNotebookMutation(),
@@ -34,6 +36,7 @@ vi.mock("@/api/notebooks", () => ({
   useUpdateCell: () => updateCellMutation(),
   useDeleteCell: () => deleteCellMutation(),
   useReorderCells: () => reorderCellsMutation(),
+  useNotebookRuntime: () => runtimeMock(),
 }));
 
 // ── Kernel mock (no real WebSocket in jsdom) ──────────────────────────────────
@@ -52,17 +55,29 @@ vi.mock("@/lib/kernel/KernelConnection", () => ({
 import NotebookPage from "@/routes/explore/NotebookPage";
 
 // ── Render helper ─────────────────────────────────────────────────────────────
-function renderAt(id = "nb-1") {
+// `inForm` wraps the tree in a <form> so Radix Select renders its hidden native
+// <select>, which tests drive via fireEvent.change (portal is unreliable in jsdom).
+function renderAt(id = "nb-1", { inForm = false }: { inForm?: boolean } = {}) {
   const qc = new QueryClient();
-  return render(
+  const tree = (
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[`/explore/eng/notebooks/${id}`]}>
         <Routes>
           <Route path="/explore/:workspace/notebooks/:id" element={<NotebookPage />} />
         </Routes>
       </MemoryRouter>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  return render(inForm ? <form>{tree}</form> : tree);
+}
+
+// Drive the underlying Radix Select via its hidden native <select>.
+function selectOption(value: string) {
+  const native = Array.from(
+    document.querySelectorAll<HTMLSelectElement>("select"),
+  ).find((s) => Array.from(s.options).some((o) => o.value === value));
+  if (!native) throw new Error(`option ${value} not found`);
+  fireEvent.change(native, { target: { value } });
 }
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -104,6 +119,15 @@ beforeEach(() => {
   vi.useFakeTimers();
 
   notebookMock.mockReset();
+  runtimeMock.mockReset();
+  runtimeMock.mockReturnValue({
+    data: {
+      username: "alice",
+      engines: [{ id: "e1", name: "trino", engine: "trino", enabled: true }],
+      engine_jwt: null,
+      engine_jwt_expires_at: null,
+    },
+  });
   updateNotebookMutation.mockReset();
   addCellMutation.mockReset();
   updateCellMutation.mockReset();
@@ -325,6 +349,47 @@ describe("NotebookPage", () => {
       expect.stringMatching(/^%%egret_sql --target daft\n/),
       expect.any(Object),
     );
+  });
+
+  // ── SQL target dropdown ─────────────────────────────────────────────────────
+
+  function mockSqlNotebook() {
+    notebookMock.mockReturnValue({
+      data: {
+        ...mockNotebook,
+        cells: [
+          {
+            ...mockCodeCell,
+            cell_type: "sql" as const,
+            source: "select 1",
+            sql_target: null,
+          },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+  }
+
+  it("renders a SQL-target control defaulting to Daft for a null sql_target", () => {
+    mockSqlNotebook();
+    renderAt();
+    const target = screen.getByLabelText("SQL target");
+    expect(target).toBeInTheDocument();
+    expect(target).toHaveTextContent(/Daft/);
+  });
+
+  it("selecting an engine calls useUpdateCell with {cid, sql_target}", () => {
+    mockSqlNotebook();
+    renderAt("nb-1", { inForm: true });
+
+    selectOption("trino");
+
+    expect(updateCellMutate).toHaveBeenCalledWith({
+      cid: "cell-1",
+      sql_target: "trino",
+    });
   });
 
   // ── Loading state ─────────────────────────────────────────────────────────

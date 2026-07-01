@@ -5,9 +5,11 @@ import { ArrowLeft, Plus } from "lucide-react";
 import {
   type Cell,
   type CellType,
+  type EngineOption,
   useAddCell,
   useDeleteCell,
   useNotebook,
+  useNotebookRuntime,
   useReorderCells,
   useUpdateCell,
   useUpdateNotebook,
@@ -31,7 +33,13 @@ interface ManagedCellProps {
   onDelete: (cid: string) => void;
   onMoveUp: (cid: string) => void;
   onMoveDown: (cid: string) => void;
-  updateCellMutate: (args: { cid: string; source?: string; cell_type?: CellType }) => void;
+  updateCellMutate: (args: {
+    cid: string;
+    source?: string;
+    cell_type?: CellType;
+    sql_target?: string;
+  }) => void;
+  engines?: EngineOption[];
 }
 
 function ManagedCell({
@@ -42,6 +50,7 @@ function ManagedCell({
   onMoveUp,
   onMoveDown,
   updateCellMutate,
+  engines,
 }: ManagedCellProps) {
   const [source, setSource] = useState(cell.source);
   // Restore-on-load: seed outputs from the persisted last_output.
@@ -104,6 +113,8 @@ function ManagedCell({
       cell={{ ...cell, source }}
       onChangeSource={handleChangeSource}
       onChangeType={(type) => onChangeType(cell.id, type)}
+      onChangeSqlTarget={(t) => updateCellMutate({ cid: cell.id, sql_target: t })}
+      engines={engines}
       onDelete={() => onDelete(cell.id)}
       onMoveUp={() => onMoveUp(cell.id)}
       onMoveDown={() => onMoveDown(cell.id)}
@@ -121,6 +132,7 @@ export default function NotebookPage() {
 
   const kernel = useKernel(ws!, id!);
   const notebook = useNotebook(ws!, id ?? null);
+  const runtime = useNotebookRuntime(ws!);
   const updateNotebook = useUpdateNotebook(ws!, id!);
   const addCell = useAddCell(ws!, id!);
   const updateCell = useUpdateCell(ws!, id!);
@@ -261,6 +273,7 @@ export default function NotebookPage() {
             onMoveUp={handleMoveUp}
             onMoveDown={handleMoveDown}
             updateCellMutate={updateCell.mutate}
+            engines={runtime.data?.engines}
           />
         ))}
       </div>
