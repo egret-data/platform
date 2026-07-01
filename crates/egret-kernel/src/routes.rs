@@ -58,6 +58,9 @@ pub struct KernelState {
     /// Mints fresh per-user engine JWTs for `POST /ws/{ws}/notebook-runtime/token`.
     /// Shares the SAME `EngineTokenBroker` Arc as `NotebookState` (wired in egret-bin).
     pub engine_minter: std::sync::Arc<dyn egret_notebook::engine_token::EngineTokenMinter>,
+    /// Resolves an engine's database id to its connection coordinates for
+    /// `POST /kernel/engine-token`. Concrete impl injected from egret-bin.
+    pub engine_conn: std::sync::Arc<dyn crate::engine_conn::EngineConnResolver>,
     /// Shared registry of currently-running cells per (notebook, user), fed by the
     /// output recorder in `channels` and read by the active-executions endpoint.
     pub active: crate::recorder::ActiveExecutions,
@@ -124,6 +127,7 @@ pub fn kernel_router() -> Router<KernelState> {
 pub fn kernel_callback_router() -> Router<KernelState> {
     Router::new()
         .route("/kernel/query", post(kernel_query))
+        .route("/kernel/engine-token", post(engine_token))
         .route(
             "/ws/{workspace}/notebook-runtime/token",
             post(notebook_runtime_token),
@@ -657,6 +661,80 @@ async fn kernel_query(
         "rows": rows.rows,
         "truncated": rows.truncated,
     })))
+}
+
+// ── engine-token callback ─────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct EngineTokenReq {
+    engine: String,
+}
+
+#[derive(serde::Serialize)]
+struct EngineTokenResp {
+    jwt: String,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    kind: String,
+    host: String,
+    port: i32,
+}
+
+/// `POST /kernel/engine-token` — mint a fresh per-user engine JWT and return the
+/// engine's connection coordinates so the Daft kernel can open a direct
+/// connection. Auth = `EGRET_KERNEL_TOKEN` bearer; identity + workspace come ONLY
+/// from `KernelIdentity`. The engine must be enabled for notebooks in the token's
+/// workspace; unknown/disabled engines → 404.
+async fn engine_token(
+    State(st): State<KernelState>,
+    id: KernelIdentity,
+    Json(req): Json<EngineTokenReq>,
+) -> Result<Json<EngineTokenResp>, KernelApiError> {
+    let engines = st
+        .notebook
+        .store
+        .list_engine_options(id.workspace_id)
+        .await
+        .map_err(|e| KernelApiError(e.0))?;
+    let engine = engines
+        .into_iter()
+        .filter(|e| e.enabled)
+        .find(|e| e.id.to_string() == req.engine || e.name == req.engine)
+        .ok_or_else(|| {
+            KernelApiError(egret_core::Error::NotFound(format!(
+                "engine not enabled for notebooks: {}",
+                req.engine
+            )))
+        })?;
+    let conn = st
+        .engine_conn
+        .resolve(engine.id)
+        .await
+        .map_err(|e| match e {
+            crate::engine_conn::EngineConnError::NotFound(m) => {
+                KernelApiError(egret_core::Error::NotFound(m))
+            }
+            crate::engine_conn::EngineConnError::Other(m) => {
+                KernelApiError(egret_core::Error::Internal(anyhow::anyhow!(m)))
+            }
+        })?;
+    let tok = match st.engine_minter.mint(id.user_id).await {
+        Ok(tok) => tok,
+        Err(egret_notebook::engine_token::BrokerError::NoRefreshToken) => {
+            return Err(KernelApiError(egret_core::Error::Unauthorized));
+        }
+        Err(e) => {
+            return Err(KernelApiError(egret_core::Error::Internal(
+                anyhow::anyhow!(e),
+            )));
+        }
+    };
+    Ok(Json(EngineTokenResp {
+        jwt: tok.access_token,
+        expires_at: tok.expires_at,
+        kind: conn.kind,
+        host: conn.host,
+        port: conn.port,
+    }))
 }
 
 // ── notebook-runtime token refresh ────────────────────────────────────────────

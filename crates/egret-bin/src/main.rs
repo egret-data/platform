@@ -352,6 +352,36 @@ impl egret_kernel::query::NotebookQueryRunner for EngineQueryRunner {
     }
 }
 
+/// Engine-connection resolver wired into `KernelState` (T4).
+///
+/// Resolves a `database_id` to the coordinates a kernel needs to open a direct
+/// Daft connection. Backed by the same `DatabaseRepo` registry the query runner
+/// uses; the engine label matches `EngineOption.engine` via `Engine::as_str`.
+struct EngineConnResolverImpl {
+    databases: egret_database::DatabaseRepo,
+}
+
+#[async_trait::async_trait]
+impl egret_kernel::engine_conn::EngineConnResolver for EngineConnResolverImpl {
+    async fn resolve(
+        &self,
+        database_id: uuid::Uuid,
+    ) -> Result<egret_kernel::engine_conn::EngineConn, egret_kernel::engine_conn::EngineConnError>
+    {
+        use egret_kernel::engine_conn::{EngineConn, EngineConnError};
+        let db = self
+            .databases
+            .get(database_id)
+            .await
+            .map_err(|e| EngineConnError::NotFound(e.to_string()))?;
+        Ok(EngineConn {
+            kind: db.engine.as_str().to_string(),
+            host: db.host,
+            port: db.port,
+        })
+    }
+}
+
 async fn serve(config: Config) -> anyhow::Result<()> {
     let db = Db::connect(&config.database.url, config.database.max_connections)
         .await
@@ -794,6 +824,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         query_runner: std::sync::Arc::new(EngineQueryRunner {
             databases: databases.clone(),
             factory: std::sync::Arc::new(egret_engine::connector::DefaultConnectorFactory),
+        }),
+        engine_conn: std::sync::Arc::new(EngineConnResolverImpl {
+            databases: databases.clone(),
         }),
         // Task 7: reuse the SAME broker Arc as NotebookState — one minter.
         engine_minter: engine_minter.clone(),
