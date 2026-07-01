@@ -15,6 +15,7 @@
       "redirectUris": ["http://localhost:8080/*", "http://localhost/*", "*"],
       "attributes": { "pkce.code.challenge.method": "S256" },
       "defaultClientScopes": [
+        "basic",
         "web-origins",
         "acr",
         "profile",

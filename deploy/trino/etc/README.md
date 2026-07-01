@@ -4,6 +4,21 @@ This directory contains dev-only Trino configuration files for F2-P3.
 Enforcement and property reconciliation happen in **F2-P5** when the full
 Keycloak + Trino stack is brought up.
 
+## ⚠️ F2-P5 FINDING — plain HTTP does NOT enforce JWT auth (TLS required)
+
+Verified live (2026-07-01): with this config over **plain HTTP**, Trino
+**accepts** a valid Keycloak JWT (identity resolves, query runs as the user) —
+but it does **NOT require** one. A request carrying only `X-Trino-User: <name>`
+and **no `Authorization` header** still runs queries (returns data). This is
+Trino's documented behaviour: JWT authentication is only truly **enforced over
+HTTPS**; `allow-insecure-over-http=true` permits auth over HTTP but leaves the
+insecure (trust-`X-Trino-User`) path open. **For real per-user enforcement Trino
+must run with TLS** (`http-server.https.enabled=true` + a keystore) and
+`allow-insecure-over-http` removed. The egret→Trino connector already sends the
+Bearer JWT (F2-P3); the gap is transport-level enforcement on the Trino side.
+Iceberg-catalog (egret-catalog, F2-P2) enforces in-process regardless of
+transport, so this caveat is Trino-specific.
+
 ## How identity is derived
 
 Trino derives the **user principal** from the JWT field named in
