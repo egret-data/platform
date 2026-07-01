@@ -262,12 +262,12 @@ def test_iceberg_reads_via_catalog(monkeypatch):
 
 
 def _fake_df(schema="ARROW_SCHEMA"):
-    class _Arrow:
-        pass
-    _Arrow.schema = schema
+    class _Schema:
+        def to_pyarrow_schema(self):
+            return schema
     class _DF:
-        def to_arrow(self):
-            return _Arrow()
+        def schema(self):
+            return _Schema()
         def write_iceberg(self, tbl, mode="append"):
             _DF.last = {"tbl": tbl, "mode": mode}
             return "WRITE_RESULT"

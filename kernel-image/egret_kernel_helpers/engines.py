@@ -195,5 +195,5 @@ def write_iceberg(df, table, *, mode="append", env=None):
     try:
         tbl = cat.load_table(ident)
     except NoSuchTableError:
-        tbl = cat.create_table(ident, df.to_arrow().schema)
+        tbl = cat.create_table(ident, df.schema().to_pyarrow_schema())
     return df.write_iceberg(tbl, mode=mode)
