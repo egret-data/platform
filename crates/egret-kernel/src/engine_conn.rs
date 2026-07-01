@@ -11,13 +11,17 @@ use uuid::Uuid;
 pub struct EngineConn {
     /// "trino" | "starrocks".
     pub kind: String,
+    /// Engine host.
     pub host: String,
+    /// Engine port.
     pub port: i32,
 }
 
 #[derive(Debug)]
 pub enum EngineConnError {
+    /// The database/engine could not be resolved.
     NotFound(String),
+    /// An unexpected error resolving the connection.
     Other(String),
 }
 
@@ -27,6 +31,7 @@ pub trait EngineConnResolver: Send + Sync {
     async fn resolve(&self, database_id: Uuid) -> Result<EngineConn, EngineConnError>;
 }
 
+/// Test double: returns the configured conn, or `NotFound` when unset.
 #[cfg(any(test, feature = "test-util"))]
 #[derive(Default)]
 pub struct FakeEngineConnResolver {
@@ -65,5 +70,12 @@ mod tests {
                 port: 8080
             }
         );
+    }
+
+    #[tokio::test]
+    async fn fake_resolver_defaults_to_not_found() {
+        let r = FakeEngineConnResolver::default();
+        let err = r.resolve(Uuid::nil()).await.unwrap_err();
+        assert!(matches!(err, EngineConnError::NotFound(_)));
     }
 }
