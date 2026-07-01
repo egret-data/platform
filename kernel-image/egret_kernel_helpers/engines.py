@@ -76,12 +76,20 @@ def trino(sql, *, engine="trino", env=None, cache=None):
         tok = _engine_token(engine, env=env, cache=cache)
         from sqlalchemy import create_engine
         from trino.auth import JWTAuthentication
+        # TLS verification is on by default (prod-correct); dev sets
+        # EGRET_ENGINE_TLS_INSECURE=1 to accept the self-signed Trino cert.
+        _env = env or os.environ
+        insecure = _env.get("EGRET_ENGINE_TLS_INSECURE", "").lower() in ("1", "true", "yes")
         eng = create_engine(
             # The username is the real user from the JWT (preferred_username) —
             # Trino sends it as X-Trino-User for the governed path. http_scheme="https"
             # is required: egret enforces Trino JWT auth over TLS.
             f"trino://{_jwt_username(tok['jwt'])}@{tok['host']}:{tok['port']}",
-            connect_args={"auth": JWTAuthentication(tok["jwt"]), "http_scheme": "https"},
+            connect_args={
+                "auth": JWTAuthentication(tok["jwt"]),
+                "http_scheme": "https",
+                "verify": not insecure,
+            },
         )
         return eng.connect()
 
