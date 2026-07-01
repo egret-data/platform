@@ -21,13 +21,23 @@ impl StarRocksConnector {
             .tcp_port(u16::try_from(spec.port).unwrap_or(9030))
             .user(Some(user))
             .prefer_socket(false);
-        if let Some(s) = &spec.secret {
+        if let Some(jwt) = &spec.bearer_token {
+            // StarRocks `authentication_jwt`: present the OIDC JWT as the cleartext
+            // "password" via the mysql_clear_password client plugin. mysql_async sends
+            // it verbatim (unhashed) when the server requests that plugin.
+            b = b.pass(Some(jwt.clone())).enable_cleartext_plugin(true);
+        } else if let Some(s) = &spec.secret {
             b = b.pass(Some(s.clone()));
         }
         if let Some(db) = &spec.options.database {
             b = b.db_name(Some(db.clone()));
         }
         StarRocksConnector { opts: b.into() }
+    }
+
+    #[cfg(test)]
+    pub fn opts(&self) -> &mysql_async::Opts {
+        &self.opts
     }
 }
 
@@ -210,5 +220,42 @@ fn coltype_name(ty: mysql_async::consts::ColumnType) -> &'static str {
         MYSQL_TYPE_JSON => "json",
         MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING | MYSQL_TYPE_STRING => "varchar",
         _ => "string",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StarRocksConnector;
+    use crate::connector::ConnSpec;
+    use egret_database::model::{ConnOptions, Engine};
+
+    fn spec(bearer: Option<String>, secret: Option<String>) -> ConnSpec {
+        ConnSpec {
+            engine: Engine::StarRocks,
+            host: "h".into(),
+            port: 9030,
+            options: ConnOptions {
+                user: Some("alice".into()),
+                ..Default::default()
+            },
+            secret,
+            session_user: Some("alice".into()),
+            bearer_token: bearer,
+        }
+    }
+
+    #[test]
+    fn bearer_uses_cleartext_plugin_with_jwt_as_password() {
+        let c =
+            StarRocksConnector::new(&spec(Some("eyJ.jwt.sig".into()), Some("native-pw".into())));
+        assert!(c.opts().enable_cleartext_plugin());
+        assert_eq!(c.opts().pass(), Some("eyJ.jwt.sig"));
+    }
+
+    #[test]
+    fn no_bearer_keeps_native_password_no_cleartext() {
+        let c = StarRocksConnector::new(&spec(None, Some("native-pw".into())));
+        assert!(!c.opts().enable_cleartext_plugin());
+        assert_eq!(c.opts().pass(), Some("native-pw"));
     }
 }
