@@ -3,15 +3,16 @@
 pub mod engine_broker;
 
 use anyhow::Context;
+use egret_auth::groups::GroupRepo;
 use egret_auth::users::UserRepo;
 use egret_metastore::Db;
 use egret_workspace::members::MemberRepo;
 use egret_workspace::workspaces::WorkspaceRepo;
-use uuid::Uuid;
 
-/// Grant an IdP (OIDC) group access to a workspace, idempotently. Upserts the
-/// group by name, resolves the workspace by slug and the `added_by` admin by
-/// email, then records a group workspace-membership with `role`.
+/// Grant an IdP (OIDC) group access to a workspace, idempotently. Resolves the
+/// workspace by slug and the `added_by` admin by email (erroring if either is
+/// missing, before any write), upserts the group by name, then records a group
+/// workspace-membership with `role`.
 pub async fn grant_group_to_workspace(
     db: &Db,
     workspace_slug: &str,
@@ -19,15 +20,6 @@ pub async fn grant_group_to_workspace(
     role: &str,
     admin_email: &str,
 ) -> anyhow::Result<()> {
-    let group_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO groups (name, source) VALUES ($1, 'oidc') \
-         ON CONFLICT (name) DO UPDATE SET name = groups.name RETURNING id",
-    )
-    .bind(group_name)
-    .fetch_one(&db.pool)
-    .await
-    .context("upserting group")?;
-
     let ws = WorkspaceRepo::new(db.clone())
         .get_by_slug(workspace_slug)
         .await
@@ -39,6 +31,11 @@ pub async fn grant_group_to_workspace(
         .await
         .context("looking up admin")?
         .ok_or_else(|| anyhow::anyhow!("admin user not found: {admin_email}"))?;
+
+    let group_id = GroupRepo::new(db.clone())
+        .upsert_oidc_group(group_name)
+        .await
+        .context("upserting group")?;
 
     MemberRepo::new(db.clone())
         .add(ws.id, "group", group_id, role, admin.id)
