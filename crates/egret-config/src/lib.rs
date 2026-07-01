@@ -368,6 +368,22 @@ mod tests {
     }
 
     #[test]
+    fn validate_ok_for_dev_oidc_config() {
+        // Mirrors the dev `.env` / `.env.example`: OIDC on against local Keycloak,
+        // with a dev secret_key (base64 of 64 random bytes). Must match .env.example.
+        let mut cfg = Config::default();
+        cfg.oidc.enabled = true;
+        cfg.oidc.issuer_url = "http://localhost:8081/realms/egret".into();
+        cfg.oidc.client_id = "egret".into();
+        cfg.oidc.client_secret = "egret-secret".into();
+        cfg.oidc.redirect_url = "http://localhost:5173/api/auth/oidc/callback".into();
+        cfg.security.secret_key =
+            "Vi2XPRkbfyTLbSzhWv0VBYeOozGGoUnVSL3pIx2Oy1kbBphJyL0CXpomCNKdrYndzYnOX8MH0oaxhcY6Bt/x8g=="
+                .into();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
     fn catalog_disabled_by_default_validates() {
         let cfg = Config::default();
         assert!(!cfg.catalog.enabled);
