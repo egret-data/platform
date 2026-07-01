@@ -717,12 +717,17 @@ async fn engine_token(
                 KernelApiError(egret_core::Error::Internal(anyhow::anyhow!(m)))
             }
         })?;
-    let tok = st
-        .notebook
-        .engine_minter
-        .mint(id.user_id)
-        .await
-        .map_err(|e| KernelApiError(egret_core::Error::Internal(anyhow::anyhow!(e.to_string()))))?;
+    let tok = match st.engine_minter.mint(id.user_id).await {
+        Ok(tok) => tok,
+        Err(egret_notebook::engine_token::BrokerError::NoRefreshToken) => {
+            return Err(KernelApiError(egret_core::Error::Unauthorized));
+        }
+        Err(e) => {
+            return Err(KernelApiError(egret_core::Error::Internal(
+                anyhow::anyhow!(e),
+            )));
+        }
+    };
     Ok(Json(EngineTokenResp {
         jwt: tok.access_token,
         expires_at: tok.expires_at,

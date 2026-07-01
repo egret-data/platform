@@ -1385,6 +1385,39 @@ async fn engine_token_unknown_engine_is_404(pool: sqlx::PgPool) {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND, "unknown engine → 404");
 }
 
+/// Engine present but NOT enabled for notebooks → 404 (the `.filter(enabled)` gate).
+#[sqlx::test(migrations = "../../migrations")]
+async fn engine_token_disabled_engine_is_404(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    // A database present in the workspace but with NO notebook_engine_access row,
+    // so `list_engine_options` reports it with enabled=false.
+    let dbid: Uuid = sqlx::query_scalar(
+        "INSERT INTO databases (workspace_id, name, engine, host, port) \
+         VALUES ($1,'secret','trino','localhost',8080) RETURNING id",
+    )
+    .bind(f.ws.0)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    let token = mint_kernel_token(&f.db, f.ws, f.owner).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(bearer_post(
+            "/kernel/engine-token",
+            &token,
+            serde_json::json!({ "engine": dbid.to_string() }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "disabled engine → 404"
+    );
+}
+
 /// Engine present but NOT enabled for notebooks → 403.
 #[sqlx::test(migrations = "../../migrations")]
 async fn kernel_query_rejects_disabled_engine(pool: sqlx::PgPool) {
