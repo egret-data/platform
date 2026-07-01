@@ -296,6 +296,53 @@ mod tests {
     }
 
     #[test]
+    fn parses_workspace_add_group() {
+        // Default role (omitted) is ws_editor.
+        let cli = Cli::parse_from([
+            "egret",
+            "workspace",
+            "add-group",
+            "--workspace",
+            "engineering",
+            "--group",
+            "data-team",
+        ]);
+        assert_eq!(
+            cli.command,
+            Command::Workspace {
+                action: WorkspaceAction::AddGroup {
+                    workspace: "engineering".into(),
+                    group: "data-team".into(),
+                    role: "ws_editor".into(),
+                }
+            }
+        );
+
+        // Explicit --role is captured.
+        let cli = Cli::parse_from([
+            "egret",
+            "workspace",
+            "add-group",
+            "--workspace",
+            "engineering",
+            "--group",
+            "data-team",
+            "--role",
+            "ws_admin",
+        ]);
+        assert_eq!(
+            cli.command,
+            Command::Workspace {
+                action: WorkspaceAction::AddGroup {
+                    workspace: "engineering".into(),
+                    group: "data-team".into(),
+                    role: "ws_admin".into(),
+                }
+            }
+        );
+    }
+
+    #[test]
     fn parses_catalog_list_tokens() {
         let cli = Cli::parse_from(["egret", "catalog", "list-tokens", "--workspace", "eng"]);
         assert_eq!(
