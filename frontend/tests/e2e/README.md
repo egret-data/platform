@@ -103,3 +103,25 @@ admin `EGRET_E2E_EMAIL` / `EGRET_E2E_PASSWORD`.
     **restores** from the persisted `last_output` (E-P2 recorder + E-P3 restore).
   - **toolbar controls** — Run all / Interrupt / Restart / Clear outputs + the
     per-cell Run + Run options are present (E-P4).
+
+## Dataframe-first spec (`notebook-dataframe.spec.ts`)
+
+Opt-in, exactly like `notebook.spec.ts` (a live-stack money-path smoke, **not**
+in CI). It exercises the dataframe-first helpers auto-loaded in the kernel:
+`write_iceberg(df, table, mode=…)` writes a Daft DataFrame to the notebook's
+read-write Iceberg catalog (auto-creating the table), `iceberg(table)` reads it
+back, and `trino(sql)` / `starrocks(sql)` read the governed engines. The one
+test does an Iceberg **write→read roundtrip** and asserts the round-tripped
+marker renders.
+
+In addition to the prerequisites above, the target workspace needs:
+
+1. **A warehouse named `notebook`** — the notebook read-write Iceberg catalog
+   (catalog B), backed by a provisioned **Storage** connection, so
+   `write_iceberg` / `iceberg` have a read-write catalog to land in. Provision
+   it via **Storage → Add connection** (MinIO defaults as above) → **Catalog →
+   Add warehouse** with the warehouse name `notebook`.
+2. *(Optional, for a governed-engine read via `trino(…)` / `starrocks(…)`)* at
+   least one **registered + enabled engine** for the workspace.
+
+Without (1), Run reports no read-write catalog and the roundtrip fails.
