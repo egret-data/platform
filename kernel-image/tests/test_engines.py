@@ -1,7 +1,16 @@
+import base64
 import datetime as dt
 import json
 import pytest
 from egret_kernel_helpers import engines as E
+
+
+def _mk_jwt(preferred_username):
+    """Build a real-ish 3-part JWT whose payload carries preferred_username."""
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"preferred_username": preferred_username}).encode()
+    ).rstrip(b"=").decode()
+    return "h." + payload + ".sig"
 
 
 def _fake_http(responses):
@@ -70,7 +79,8 @@ def test_trino_builds_read_sql_with_jwt(monkeypatch):
 def test_trino_conn_factory_wires_jwt_and_url(monkeypatch):
     import sys
     env = {"EGRET_API_URL": "http://egret", "EGRET_KERNEL_TOKEN": "kt"}
-    cache = {"trino": {"jwt": "JWT", "expires_at": "2999-01-01T00:00:00Z",
+    jwt = _mk_jwt("tester")
+    cache = {"trino": {"jwt": jwt, "expires_at": "2999-01-01T00:00:00Z",
                        "kind": "trino", "host": "trino", "port": 8080}}
     captured = {}
     fake_daft = type("D", (), {"read_sql": staticmethod(
@@ -104,10 +114,10 @@ def test_trino_conn_factory_wires_jwt_and_url(monkeypatch):
     E.trino("SELECT 1", env=env, cache=cache)
     conn = captured["conn"]
     assert conn() == "CONN"
-    assert engine_calls["url"] == "trino://egret@trino:8080"
+    assert engine_calls["url"] == "trino://tester@trino:8080"
     assert engine_calls["connect_args"]["http_scheme"] == "https"
-    assert auth_calls["jwt"] == "JWT"
-    assert engine_calls["connect_args"]["auth"] == ("AUTH", "JWT")
+    assert auth_calls["jwt"] == jwt
+    assert engine_calls["connect_args"]["auth"] == ("AUTH", jwt)
 
 
 def test_lenenc_boundaries():
@@ -153,10 +163,15 @@ def test_starrocks_builds_read_sql_with_jwt(monkeypatch):
     assert callable(captured["conn"])
 
 
+def test_jwt_username_extracts_preferred_username():
+    assert E._jwt_username(_mk_jwt("alice")) == "alice"
+    assert E._jwt_username("garbage") == "egret"
+
+
 def test_starrocks_conn_factory_uses_pymysql_openid(monkeypatch):
     import sys
     env = {"EGRET_API_URL": "http://egret", "EGRET_KERNEL_TOKEN": "kt"}
-    cache = {"sr": {"jwt": "JWT", "expires_at": "2999-01-01T00:00:00Z",
+    cache = {"sr": {"jwt": _mk_jwt("tester"), "expires_at": "2999-01-01T00:00:00Z",
                     "kind": "starrocks", "host": "sr", "port": 9030}}
     seen = {}
     def fake_connect(**kw):
@@ -182,7 +197,7 @@ def test_starrocks_conn_factory_uses_pymysql_openid(monkeypatch):
     assert seen["url"] == "mysql+pymysql://"
     assert callable(seen["creator"])
     kw = seen["connect_kwargs"]
-    assert kw["host"] == "sr" and kw["port"] == 9030 and kw["user"] == "egret"
+    assert kw["host"] == "sr" and kw["port"] == 9030 and kw["user"] == "tester"
     assert "authentication_openid_connect_client" in kw["auth_plugin_map"]
 
 
