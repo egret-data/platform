@@ -259,3 +259,63 @@ def test_iceberg_reads_via_catalog(monkeypatch):
     assert out == "DF"
     assert loaded["name"] == "sales.orders"
     assert captured["tbl"] == "TBL:sales.orders"
+
+
+def _fake_df(schema="ARROW_SCHEMA"):
+    class _Arrow:
+        pass
+    _Arrow.schema = schema
+    class _DF:
+        def to_arrow(self):
+            return _Arrow()
+        def write_iceberg(self, tbl, mode="append"):
+            _DF.last = {"tbl": tbl, "mode": mode}
+            return "WRITE_RESULT"
+    return _DF()
+
+
+def _install_fake_pyiceberg_exc(monkeypatch):
+    import sys, types
+    exc_mod = types.ModuleType("pyiceberg.exceptions")
+    class NoSuchTableError(Exception):
+        pass
+    exc_mod.NoSuchTableError = NoSuchTableError
+    pkg = types.ModuleType("pyiceberg")
+    monkeypatch.setitem(sys.modules, "pyiceberg", pkg)
+    monkeypatch.setitem(sys.modules, "pyiceberg.exceptions", exc_mod)
+    return NoSuchTableError
+
+
+def test_write_iceberg_creates_missing_table_then_writes(monkeypatch):
+    NoSuchTableError = _install_fake_pyiceberg_exc(monkeypatch)
+    calls = {}
+    class FakeCat:
+        def load_table(self, ident):
+            calls["load"] = ident
+            raise NoSuchTableError("nope")
+        def create_table(self, ident, schema):
+            calls["create"] = (ident, schema)
+            return "NEW_TBL"
+    monkeypatch.setattr(E, "catalog", lambda *a, **k: FakeCat())
+    monkeypatch.setattr(E, "load_runtime", lambda env=None: type("R", (), {
+        "catalog": type("C", (), {"namespace": "notebook_alice"})()})())
+    df = _fake_df()
+    out = E.write_iceberg(df, "sales", mode="overwrite")
+    assert out == "WRITE_RESULT"
+    assert calls["load"] == "notebook_alice.sales"
+    assert calls["create"] == ("notebook_alice.sales", "ARROW_SCHEMA")
+    assert df.__class__.last == {"tbl": "NEW_TBL", "mode": "overwrite"}
+
+
+def test_write_iceberg_uses_existing_table(monkeypatch):
+    _install_fake_pyiceberg_exc(monkeypatch)
+    class FakeCat:
+        def load_table(self, ident):
+            return "EXISTING_TBL"
+        def create_table(self, *a):
+            raise AssertionError("should not create when table exists")
+    monkeypatch.setattr(E, "catalog", lambda *a, **k: FakeCat())
+    df = _fake_df()
+    out = E.write_iceberg(df, "notebook_bob.orders")
+    assert out == "WRITE_RESULT"
+    assert df.__class__.last == {"tbl": "EXISTING_TBL", "mode": "append"}
