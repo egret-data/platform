@@ -380,6 +380,35 @@ impl NotebookStore {
         Ok(())
     }
 
+    /// Persist a cell's captured outputs (capped), execution count, and elapsed ms.
+    /// Called by the E-P2 recorder; `AND notebook_id=$2` guards cross-notebook writes.
+    pub async fn record_output(
+        &self,
+        nb: Uuid,
+        cid: Uuid,
+        outputs: &[crate::output::CellOutput],
+        execution_count: Option<i32>,
+        elapsed_ms: Option<i32>,
+    ) -> Result<(), NotebookApiError> {
+        let capped = crate::output::cap_outputs(outputs.to_vec());
+        let json = serde_json::to_value(&capped)
+            .map_err(|e| NotebookApiError::from(egret_core::Error::Internal(anyhow::anyhow!(e))))?;
+        sqlx::query(
+            "UPDATE notebook_cells SET \
+             last_output = $3, execution_count = $4, last_execution_time_ms = $5, \
+             updated_at = now() \
+             WHERE id=$1 AND notebook_id=$2",
+        )
+        .bind(cid)
+        .bind(nb)
+        .bind(json)
+        .bind(execution_count)
+        .bind(elapsed_ms)
+        .execute(&self.db.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Delete a cell. Includes `AND notebook_id=$2` (cross-notebook IDOR defense);
     /// a row that doesn't belong to `nb` matches nothing → `NotFound` (404).
     pub async fn delete_cell(&self, nb: Uuid, cid: Uuid) -> Result<(), NotebookApiError> {
@@ -1140,6 +1169,35 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(target.as_deref(), Some("trino"));
+    }
+
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn record_output_persists_capped_outputs(pool: sqlx::PgPool) {
+        use crate::output::CellOutput;
+        let db = Db { pool };
+        let store = NotebookStore::new(db.clone());
+        let (ws, user) = seed(&db).await;
+        let nb = store.create(ws, user, "nb").await.unwrap();
+        let cid = store.add_cell(nb, "code", "", 1).await.unwrap();
+        let outs = vec![CellOutput::Stream {
+            name: "stdout".into(),
+            text: "hi".into(),
+        }];
+        store
+            .record_output(nb, cid, &outs, Some(3), Some(42))
+            .await
+            .unwrap();
+        let (lo, ec, ms): (Option<serde_json::Value>, Option<i32>, Option<i32>) = sqlx::query_as(
+            "SELECT last_output, execution_count, last_execution_time_ms \
+             FROM notebook_cells WHERE id=$1",
+        )
+        .bind(cid)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(ec, Some(3));
+        assert_eq!(ms, Some(42));
+        assert_eq!(lo.unwrap()[0]["type"], "stream");
     }
 
     #[sqlx::test(migrations = "../../migrations")]
