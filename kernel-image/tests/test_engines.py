@@ -49,3 +49,19 @@ def test_engine_token_refetches_when_near_expiry(monkeypatch):
 def test_engine_token_missing_env_raises():
     with pytest.raises(RuntimeError, match="not configured"):
         E._engine_token("trino", env={}, http=_fake_http([]), cache={})
+
+
+def test_trino_builds_read_sql_with_jwt(monkeypatch):
+    import sys
+    env = {"EGRET_API_URL": "http://egret", "EGRET_KERNEL_TOKEN": "kt"}
+    # seed the cache so _engine_token doesn't hit http (far-future expiry)
+    cache = {"trino": {"jwt": "JWT", "expires_at": "2999-01-01T00:00:00Z",
+                       "kind": "trino", "host": "trino", "port": 8080}}
+    captured = {}
+    fake_daft = type("D", (), {"read_sql": staticmethod(
+        lambda sql, conn, **kw: captured.update(sql=sql, conn=conn) or "DF")})
+    monkeypatch.setitem(sys.modules, "daft", fake_daft)
+    out = E.trino("SELECT 1", env=env, cache=cache)
+    assert out == "DF"
+    assert captured["sql"] == "SELECT 1"
+    assert callable(captured["conn"])   # a connection factory, not a string

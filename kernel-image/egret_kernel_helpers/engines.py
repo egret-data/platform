@@ -58,3 +58,21 @@ def _engine_token(engine, *, env=None, http=None, cache=None):
     resp = (http or _post)(api.rstrip("/") + "/api/kernel/engine-token", body, token)
     cache[engine] = resp
     return resp
+
+
+def trino(sql, *, engine="trino", env=None, cache=None):
+    """Run SQL on the workspace Trino as you, returning a lazy Daft DataFrame
+    (pushdown). Authenticated with a fresh per-user JWT."""
+    import daft
+    tok = _engine_token(engine, env=env, cache=cache)
+
+    def _conn():
+        from sqlalchemy import create_engine
+        from trino.auth import JWTAuthentication
+        eng = create_engine(
+            f"trino://egret@{tok['host']}:{tok['port']}",
+            connect_args={"auth": JWTAuthentication(tok["jwt"]), "http_scheme": "https"},
+        )
+        return eng.connect()
+
+    return daft.read_sql(sql, _conn)
