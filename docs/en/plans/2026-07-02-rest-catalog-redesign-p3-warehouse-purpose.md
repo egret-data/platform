@@ -1,5 +1,7 @@
 # REST Catalog Redesign — Plan 3: explicit warehouse purpose Implementation Plan
 
+> ⛔ **SUPERSEDED (2026-07-02):** the single-catalog pivot removed the notebook-vs-shared warehouse split (one shared catalog; the notebook writes through the engine), so the `purpose` distinction is no longer needed. See the revised spec `docs/en/specs/2026-07-01-rest-catalog-redesign-design.md`. Do NOT implement. Kept for history.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 > Spec: `docs/en/specs/2026-07-01-rest-catalog-redesign-design.md` (Workstream **E**). Plan 3 of 6 (A → B → D → **E** → C → F). Self-contained and testable.
 > VI reference: `docs/vi/plans/2026-07-02-rest-catalog-redesign-p3-warehouse-purpose.md`.

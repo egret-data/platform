@@ -1,5 +1,7 @@
 # Redesign REST Catalog — Plan 2: vended STS + xoá signer (bản tham chiếu)
 
+> ⛔ **SUPERSEDED (2026-07-02):** pivot single-catalog + ghi-qua-engine đã BỎ workstream này (notebook không truy cập S3/catalog trực tiếp → không có credential kernel để vend). Xem spec đã sửa. KHÔNG triển khai. Giữ để lịch sử.
+
 > Bản chuẩn: `docs/en/plans/2026-07-02-rest-catalog-redesign-p2-vended-sts.md` (code/step đầy đủ ở đó).
 > Spec: `docs/en/specs/2026-07-01-rest-catalog-redesign-design.md` (Workstream **D**). Plan 2/6. Thực thi qua subagent-driven-development.
 

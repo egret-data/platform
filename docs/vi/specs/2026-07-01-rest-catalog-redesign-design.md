@@ -1,82 +1,70 @@
 # Thiết kế lại REST Catalog — Thiết kế (bản tham chiếu)
 
 > Bản chuẩn: `docs/en/specs/2026-07-01-rest-catalog-redesign-design.md`. File này rút gọn.
-> Trạng thái: đã duyệt (brainstorming) · 2026-07-01.
+> Ngày 2026-07-01 · **Sửa 2026-07-02 (pivot single-catalog + ghi-qua-engine)** · Trạng thái: đã duyệt, write path **spike-validated (1a/1b)**.
 
 ## Mục tiêu
-Thiết kế lại tích hợp Iceberg REST catalog của egret để **fix tận gốc 5 vấn đề plumbing** (PR #114 chỉ vá tạm) VÀ thiết lập **model governance** giữ phân quyền nhất quán trên mọi đường đọc. Hợp nhất auth notebook về **JWT delegation**, dùng **vended STS creds**, tách config overload, sửa **base_url tại nguồn**, chọn warehouse theo **purpose**, dọn catalog hand-rolled, và enforce "**governed data chỉ đọc qua engine**" bằng **tách credential**.
+Rút gọn về **MỘT catalog Iceberg duy nhất, engine-facing**, và cho notebook **ghi qua query engine** (Daft `write_sql`) — notebook **không chạm** REST catalog trực tiếp. Bỏ hẳn thiết kế 2-catalog / per-user-JWT / vended-STS: catalog chỉ cần auth **opaque, table-level**; phân quyền dữ liệu enforce **một lần** ở engine (Ranger/ACL) cho cả đọc + ghi. Đồng thời fix nốt bug plumbing (base_url, config overload) + dọn catalog cũ.
 
 ## Hiện trạng
-- Catalog thật = **lakekeeper nhúng** (pin `0.12.3` rev `79165057`) tại `/catalog/v1`, đứng trước là `front_auth`. `egret-catalog` = identity (opaque `catalog_tokens` + map warehouse). REST hand-rolled cũ (`egret-catalog::api`, `egret-iceberg-ext`) = di sản.
-- `front_auth` **hybrid**: bearer là JWT (3 đoạn) → `CatalogJwtAuth` (`aud=egret-catalog`, như Trino/StarRocks); còn lại → opaque `catalog_tokens`. Notebook đang dùng **opaque** (mint-and-revoke).
+- lakekeeper nhúng tại `/catalog/v1`, `front_auth` hybrid (JWT `aud=egret-catalog` / opaque token). `egret-catalog` = identity. REST hand-rolled cũ (`egret-catalog::api`, `egret-iceberg-ext`) = di sản.
+- Trước pivot: notebook đọc qua `trino()`/`starrocks()` nhưng **ghi** bằng Daft-direct Iceberg → cần giữ credential catalog + storage → nguồn của toàn bộ độ phức tạp.
 
-### 5 vấn đề plumbing
-1. **base_url `:8181`** — hardcode trong `RequestMetadata`, không setter; `/config` `overrides.uri` + `s3.signer.uri` trỏ `:8181` → client không tới được. #114 rewrite = band-aid.
-2. **`catalog.public_url` overload** cả kernel `api_url` → set đúng catalog thì hỏng callback engine.
-3. **mint-and-revoke → 401 flaky** — token kernel đang chạy bị revoke khi manifest fetch lại.
-4. **Remote signing thừa** — `/signer/...` (round-trip + nguồn bug ownership #114).
-5. **Di sản kép** — REST hand-rolled cũ song song lakekeeper.
-- Kèm: chọn catalog notebook theo **tên + fallback-first** = dễ sai.
+### Bug plumbing còn fix
+1. **base_url `:8181`** rò rỉ trong `/config` `overrides.uri` — **Trino Iceberg REST connector cũng follow** → vẫn phải fix.
+2. **`catalog.public_url` overload** cả kernel `api_url`.
+3. **Di sản kép** hand-rolled.
 
-## Governance model (kim chỉ nam)
-Mục tiêu: **phân quyền một lần — đọc engine nào cũng cùng kết quả.** Ràng buộc: **column/row-level chỉ enforce được qua query engine** (Trino/StarRocks + Ranger viết lại query); reader đọc-file-trực-tiếp (Daft) + vended STS chỉ tới **table/prefix-level**; catalog REST (lakekeeper) chỉ **table-level**.
+## Pivot — 1 catalog, ghi qua engine
+**Chốt (2026-07-02):** notebook đọc qua `trino()`/`starrocks()`, **ghi** qua helper **`write_table`** (bọc `df.write_sql` trên cùng conn engine per-user JWT). **Một catalog chung**; notebook chỉ là client engine.
+**Vì sao:** xoá phần phức tạp nhất (catalog JWT, STS, catalog notebook riêng, credential-separation); và vì ghi cũng qua engine → **governance đồng nhất**: một policy Ranger/ACL cho cả read+write, không còn đường Daft-direct để lệch.
+**Đã validate (spike live):** 1a `write_sql`→Trino `memory`; 1b `write_sql`→Trino→**Iceberg REST→lakekeeper→MinIO**→read back.
+**Đánh đổi:** `write_sql` = `pandas.to_sql` per-partition → hợp EDA-scale (summary, feature table), không phải bulk; `write_sql` "early dev".
 
-### Hướng A — governed data engine-only (CHỐT)
-Bỏ đường đọc thứ hai cho governed data; **một điểm enforce = Ranger qua engine.** Hai catalog, **cả hai đăng ký trong Trino/StarRocks**:
+## Governance
+- **Một điểm enforce = engine** (Trino/StarRocks + Ranger/ACL) cho mọi read/write. Notebook không lách được vì không có đường catalog/storage trực tiếp.
+- **REST catalog không phải governance surface cho user** — chỉ auth **service credential** (opaque, table-level) + admin.
+- **Hướng C (catalog FGAC, Polaris #137)** chỉ là future note — không còn gap cần đóng.
 
-| | `lakehouse` (governed) | `notebook` (EDA outputs) |
-|---|---|---|
-| **Daft-direct** | ❌ credential không có grant | ✅ rw namespace của mình |
-| **Qua Trino/StarRocks** | ✅ đọc, Ranger row/column | ✅ đọc (chia sẻ), Ranger áp |
-| **Pipeline/BI qua engine** | ✅ đọc-ghi | ✅ đọc output notebook |
-
-**Enforce bằng TÁCH CREDENTIAL, không phải quy ước:** JWT catalog của kernel (`aud=egret-catalog`) chỉ có quyền trên warehouse **`notebook`**, không có grant trên warehouse governed → `iceberg("lakehouse.t")` bị catalog **từ chối (403)**. Đường duy nhất tới `lakehouse` = `trino()`/`starrocks()` (JWT `aud=trino/starrocks` + Ranger). Một policy Ranger, mọi read governed đi qua đó → nhất quán by-construction.
-**Đánh đổi:** notebook mất tốc độ Daft-direct trên lakehouse (đọc governed qua engine); dữ liệu của mình (`notebook`) vẫn full Daft-direct; đọc chéo output notebook governed chỉ khi qua engine.
-
-### Hướng C — catalog-native FGAC (future, KHÔNG phụ thuộc)
-Lật nguồn-sự-thật về **catalog**: catalog giữ policy row/column, trả **scan đã governed** qua REST scan-planning (`planTable`/`fetchScanTasks`) → mọi reader (kể cả Daft-direct) nhất quán từ 1 policy catalog. Đây là hướng ngành ([Polaris #137](https://github.com/apache/polaris/issues/137) — **open, chưa PR, chưa ship**; lakekeeper cũng chưa có) + cần Daft biết honor filter/mask (chưa có). **Không cược thiết kế vào nó, không đổi catalog.** Giữ abstraction catalog sạch + tách rõ đường governed-read để sau này adopt C không phải đập lại.
-
-## Credential model (3 mặt phẳng, 1 identity)
-Cả 3 là JWT per-user từ 1 identity Keycloak, mint bởi `EngineTokenMinter` (token-exchange), khác nhau `aud`, refresh cùng cơ chế:
-
-| Mặt phẳng | Credential | Verify bởi | Scope |
+## Credential model
+| Mặt phẳng | Credential | Verify | Scope |
 |---|---|---|---|
-| Catalog (Daft-direct) | JWT `aud=egret-catalog` | egret `front_auth` | rw namespace của mình trong warehouse `notebook` |
-| Trino | JWT `aud=trino` | Trino (JWKS) + Ranger | đọc governed (lakehouse+notebook) |
-| StarRocks | JWT `aud=starrocks` | StarRocks (JWKS) + Ranger | đọc governed |
+| Notebook read | JWT `aud=trino`/`starrocks` | engine + Ranger/ACL | governed reads |
+| Notebook write (`write_table`) | **cùng** JWT engine | engine + Ranger/ACL | governed writes |
+| Engine→catalog (service) | **opaque token table-level** | egret `front_auth` | warehouse chung |
+| Admin/warehouse-mgmt | opaque token | `front_auth` | per warehouse |
+Notebook **không dùng** JWT `aud=egret-catalog` nữa.
 
-**Opaque token** chỉ giữ cho admin/warehouse-mgmt/non-OIDC — chỉ nói chuyện với catalog REST của egret, **không** dùng được cho Trino/StarRocks (chúng chỉ nhận JWT Keycloak).
+## Kiến trúc (đã sửa)
+- **A. base_url tại nguồn** (fork lakekeeper + `LAKEKEEPER__BASE_URI`, xoá rewrite #114) — **GIỮ** (Trino follow `overrides.uri`). Xem Plan 1.
+- **B. Tách config** (`catalog.public_url` ≠ `server.public_url`/kernel api_url) — **GIỮ**. Plan 1.
+- **W. Write path** (`kernel-image`) — **XONG**: `write_table(df,"catalog.schema.table",engine=,mode=)` bọc `write_sql`; parse tên → default catalog/schema + `CREATE SCHEMA IF NOT EXISTS`; thêm `pandas`+`trino` vào image. Đã commit + spike-validate. StarRocks chưa validate.
+- **R. Xoá Daft-direct**: bỏ `iceberg()`/`write_iceberg()`/`catalog()`/`_resolve_identifier` (+ export/startup/test); `build_notebook_runtime`/`provision_notebook_access` **bỏ provision token+namespace catalog**; rewrite e2e sang `trino()`+`write_table`.
+- **C. Một catalog chung**: bỏ khái niệm notebook-purpose warehouse; `front_auth` giữ path opaque (service+admin); path JWT-catalog per-user notebook không dùng.
+- **F. Dọn di sản** (`egret-catalog::api`, `egret-iceberg-ext` thừa; verify `codegraph_impact`).
+- **Prerequisite (ops)**: đăng ký catalog Iceberg trong Trino/StarRocks (REST + opaque service token + S3/MinIO); **Trino JWT→group provider** (dev ACL từ chối ghi vì không biết group của user — bắt buộc cho governed write).
 
-## Kiến trúc (6 workstream)
-- **A. base_url tại nguồn** (`egret-catalog-engine` + fork): thêm `with_base_url` vào `RequestMetadata`; set `LAKEKEEPER__BASE_URI` + 3 chỗ dựng metadata trong `front_auth` dùng public URL; **xoá `rewrite_lakekeeper_base`** + buffering. *Dự phòng: 1 lớp rewrite config-driven.*
-- **B. Tách config** (`egret-config`, `egret-bin`): `config.catalog.public_url` (chỉ catalog) ≠ `config.server.public_url` (kernel `api_url`, default `http://127.0.0.1:{port}`).
-- **C. Notebook → JWT + authz Hướng A** (`egret-kernel`, `egret-notebook`, helper, `egret-catalog-engine`): kernel lấy JWT `aud=egret-catalog` từ minter (extend `/kernel/engine-token` hoặc `/kernel/catalog-token`), cache+refresh; `catalog()` dùng JWT; **authz** = rule "subject rw `notebook_{preferred_username}` **chỉ trong warehouse `notebook`**, không có gì trên warehouse `shared`" → đây là chỗ chặn `iceberg("lakehouse..")` = 403; `provision_notebook_access` **bỏ mint+revoke opaque**, manifest chỉ mang `{url,warehouse,namespace}`.
-- **D. Vended STS** (`egret-bin`, `egret-catalog-engine`, helper): storage-profile warehouse `notebook` bật vending + `remote-signing-enabled=false`; `/config`/loadTable vend STS scoped; **xoá nhánh signer** (`warehouse_prefix` về first-segment); kernel bỏ `AWS_*` env.
-- **E. Warehouse purpose** (migration, `egret-notebook`, admin API/UI): cột `purpose` (`shared`|`notebook`, default `shared`); ≤1 `notebook`/workspace; `build_notebook_runtime` chọn theo purpose (không có → lỗi rõ, không fallback thầm); UI "Add warehouse" chọn purpose; backfill `name=="notebook"`. **Cả 2 catalog đăng ký trong engine** (ops-level, document).
-- **F. Dọn di sản** (`egret-catalog`, `egret-iceberg-ext`): giữ identity layer; xoá REST hand-rolled + type không dùng (verify `codegraph_impact`).
-
-## Data flow (phiên EDA)
-1. Đọc governed: `trino("... FROM lakehouse.sales")` → JWT `aud=trino` → Ranger mask/filter → Daft DF. (`iceberg("lakehouse..")` = 403.)
-2. Ghi output: `write_iceberg(df,"t")` → JWT `aud=egret-catalog` → `/config` (base_uri đúng + STS) → commit namespace của mình trong `notebook` → file S3 trực tiếp bằng STS (không signer).
-3. Chia sẻ: user khác `trino("... FROM notebook.<user>.t")` → engine + Ranger.
-4. Refresh: JWT/STS hết hạn → refresh → retry (mở lại notebook + re-run luôn chạy).
-
-## Xử lý lỗi
-JWT/STS hết hạn → refresh+retry; Daft-direct vào governed → 403 rõ ("đọc qua trino()/starrocks()"); không có warehouse notebook → lỗi rõ (không ghi thầm); OIDC tắt → path JWT notebook báo rõ, opaque admin không ảnh hưởng.
+## Data flow
+1. Đọc: `trino("...FROM lakehouse.sales")` → JWT `aud=trino` → Ranger/ACL → Daft DF.
+2. Ghi: `write_table(df,"lakehouse.analytics.summary")` → CREATE SCHEMA → `write_sql` qua Trino → CREATE TABLE+INSERT vào Iceberg (lakekeeper) → file S3 — governed như read.
+3. Chia sẻ: user khác `trino("...FROM lakehouse.analytics.summary")`.
 
 ## Test
-- **Unit:** config tách; `with_base_url` (metadata/`s3_signer_uri` đúng URL); rule authz rw `notebook_{self}` chỉ warehouse notebook + **deny warehouse `shared`** (biên Hướng A); `build_notebook_runtime` theo purpose (không có → lỗi).
-- **Integration (DB-gated):** `front_auth` JWT e2e; JWT notebook 403 trên warehouse shared, 200 namespace mình; `/config` base_uri đúng + shape STS; hết signer.
-- **e2e (opt-in):** roundtrip qua JWT+STS; **regression #3** mở lại+re-run không 401; **guard Hướng A** `iceberg(governed.t)` lỗi rõ còn `trino(...governed.t)` chạy.
-- **Xoá:** test `rewrite_lakekeeper_base` + signer-path của #114.
+- Unit kernel (xong): `write_table` qualify tên/bare-name/CREATE SCHEMA/dispatch/reject non-3-part.
+- Unit backend: config split; `with_base_url`.
+- e2e opt-in: rewrite `notebook-dataframe.spec.ts` sang `write_table`+`trino()`; giữ guard reopen+rerun (giờ xanh hiển nhiên — không còn token catalog per-kernel để revoke).
+- Xoá: test Daft-direct + test rewrite #114 (theo Plan 1).
+
+## Deps
+Kernel image: thêm `pandas` (`write_sql`→`to_sql`) + `trino` (dialect + `JWTAuthentication`; trước bị thiếu).
 
 ## Ngoài phạm vi
-Hiện thực Hướng C; cấu hình Ranger policy + đăng ký connector Iceberg cho engine (ops, document); Daft-direct đọc governed (cấm by-design); multi-region; schema evolution/partition khi ghi; auto-provision warehouse notebook.
+Hướng C; ghi bulk/lớn từ notebook; cấu hình đăng ký catalog + Ranger/group-provider (ops).
 
 ## Rủi ro
-- Fork lakekeeper theo rev pin; bump phải re-verify. Dự phòng: rewrite config-driven.
-- Vended STS cần MinIO/S3 bật STS + storage-profile vending; store không hỗ trợ → fallback signing warehouse đó.
-- `preferred_username` phải ổn định/không đụng nhau.
-- Đăng ký catalog `notebook` trong engine là điều kiện để chia sẻ chéo; không đăng ký → chỉ Daft-direct own-namespace. (ops requirement.)
-- **Thứ tự:** A → B → D → E → C (lớn nhất, mang biên governance) → F. A–B–D–E độc lập/correctness; C phụ thuộc B+D; F cuối.
-- Back-compat: backfill purpose; flow opaque-token admin giữ nguyên.
+- `write_sql` early-dev; pin theo Daft cài, re-verify khi bump.
+- Trần EDA-scale (`to_sql` per-partition).
+- **base_url vẫn bắt buộc** (Trino follow `overrides.uri`) — Plan 1 (A) không optional.
+- **Trino group-mapping** bắt buộc cho governed write (dev thiếu; spike nới ACL tạm).
+- StarRocks write chưa validate — ưu tiên `engine="trino"`.
+- **Thứ tự (sửa):** W (xong) → A+B → R (xoá Daft-direct + rewrite e2e) → C (dọn single-catalog) → F. **Bỏ P2 (STS) + P4 (notebook-JWT); P3 (purpose) bị supersede bởi C.**

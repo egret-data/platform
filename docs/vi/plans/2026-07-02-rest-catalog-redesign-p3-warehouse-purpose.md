@@ -1,5 +1,7 @@
 # Redesign REST Catalog — Plan 3: warehouse purpose (bản tham chiếu)
 
+> ⛔ **SUPERSEDED (2026-07-02):** pivot single-catalog bỏ tách warehouse notebook-vs-shared (một catalog chung; notebook ghi qua engine) → không cần `purpose` nữa. Xem spec đã sửa. KHÔNG triển khai. Giữ để lịch sử.
+
 > Bản chuẩn: `docs/en/plans/2026-07-02-rest-catalog-redesign-p3-warehouse-purpose.md` (code/step đầy đủ).
 > Spec: `docs/en/specs/2026-07-01-rest-catalog-redesign-design.md` (Workstream **E**). Plan 3/6. Thực thi qua subagent-driven-development.
 

@@ -1,5 +1,7 @@
 # REST Catalog Redesign — Plan 2: vended STS credentials + remove signer Implementation Plan
 
+> ⛔ **SUPERSEDED (2026-07-02):** the single-catalog + engine-write pivot dropped this workstream (the notebook no longer accesses S3/the catalog directly, so there is no kernel credential to vend). See the revised spec `docs/en/specs/2026-07-01-rest-catalog-redesign-design.md`. Do NOT implement. Kept for history.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 > Spec: `docs/en/specs/2026-07-01-rest-catalog-redesign-design.md` (Workstream **D**). Plan 2 of 6 (A → B → **D** → E → C → F). Depends on nothing in Plan 1 to compile, but is sequenced after B. Self-contained and testable.
 > VI reference: `docs/vi/plans/2026-07-02-rest-catalog-redesign-p2-vended-sts.md`.
