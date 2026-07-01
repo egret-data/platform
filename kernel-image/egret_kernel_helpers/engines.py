@@ -1,4 +1,4 @@
-"""Dataframe-first engine helpers: iceberg(), trino() — direct Daft as-you."""
+"""Dataframe-first engine helpers: iceberg(), trino() — direct Daft access as the logged-in user."""
 import datetime as _dt
 import json
 import os
@@ -64,12 +64,18 @@ def trino(sql, *, engine="trino", env=None, cache=None):
     """Run SQL on the workspace Trino as you, returning a lazy Daft DataFrame
     (pushdown). Authenticated with a fresh per-user JWT."""
     import daft
-    tok = _engine_token(engine, env=env, cache=cache)
 
     def _conn():
+        # Fetch the token per-connection: Daft may open connections later and
+        # across partitions, so each picks up a cache-refreshed JWT rather than
+        # one frozen at trino() call time.
+        tok = _engine_token(engine, env=env, cache=cache)
         from sqlalchemy import create_engine
         from trino.auth import JWTAuthentication
         eng = create_engine(
+            # The SQLAlchemy username ("egret") is cosmetic — identity comes from
+            # the JWT. http_scheme="https" is required: egret enforces Trino JWT
+            # auth over TLS.
             f"trino://egret@{tok['host']}:{tok['port']}",
             connect_args={"auth": JWTAuthentication(tok["jwt"]), "http_scheme": "https"},
         )

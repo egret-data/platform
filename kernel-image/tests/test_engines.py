@@ -65,3 +65,46 @@ def test_trino_builds_read_sql_with_jwt(monkeypatch):
     assert out == "DF"
     assert captured["sql"] == "SELECT 1"
     assert callable(captured["conn"])   # a connection factory, not a string
+
+
+def test_trino_conn_factory_wires_jwt_and_url(monkeypatch):
+    import sys
+    env = {"EGRET_API_URL": "http://egret", "EGRET_KERNEL_TOKEN": "kt"}
+    cache = {"trino": {"jwt": "JWT", "expires_at": "2999-01-01T00:00:00Z",
+                       "kind": "trino", "host": "trino", "port": 8080}}
+    captured = {}
+    fake_daft = type("D", (), {"read_sql": staticmethod(
+        lambda sql, conn, **kw: captured.update(conn=conn) or "DF")})
+    monkeypatch.setitem(sys.modules, "daft", fake_daft)
+
+    engine_calls = {}
+
+    class _Eng:
+        def connect(self):
+            return "CONN"
+
+    def _create_engine(url, connect_args=None):
+        engine_calls.update(url=url, connect_args=connect_args)
+        return _Eng()
+
+    fake_sqlalchemy = type("SA", (), {"create_engine": staticmethod(_create_engine)})
+    monkeypatch.setitem(sys.modules, "sqlalchemy", fake_sqlalchemy)
+
+    auth_calls = {}
+
+    def _JWTAuthentication(jwt):
+        auth_calls["jwt"] = jwt
+        return ("AUTH", jwt)
+
+    fake_trino = type("T", (), {})
+    fake_trino_auth = type("TA", (), {"JWTAuthentication": staticmethod(_JWTAuthentication)})
+    monkeypatch.setitem(sys.modules, "trino", fake_trino)
+    monkeypatch.setitem(sys.modules, "trino.auth", fake_trino_auth)
+
+    E.trino("SELECT 1", env=env, cache=cache)
+    conn = captured["conn"]
+    assert conn() == "CONN"
+    assert engine_calls["url"] == "trino://egret@trino:8080"
+    assert engine_calls["connect_args"]["http_scheme"] == "https"
+    assert auth_calls["jwt"] == "JWT"
+    assert engine_calls["connect_args"]["auth"] == ("AUTH", "JWT")
