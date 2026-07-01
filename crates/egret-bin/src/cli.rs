@@ -27,6 +27,28 @@ pub enum Command {
         #[command(subcommand)]
         action: CatalogAction,
     },
+    /// Workspace administration (membership).
+    Workspace {
+        #[command(subcommand)]
+        action: WorkspaceAction,
+    },
+}
+
+/// Workspace membership operations.
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum WorkspaceAction {
+    /// Grant an IdP group a role in a workspace (idempotent).
+    AddGroup {
+        /// Workspace slug (e.g. "engineering").
+        #[arg(long)]
+        workspace: String,
+        /// IdP group name as it appears in the `groups` claim (e.g. "data-team").
+        #[arg(long)]
+        group: String,
+        /// Workspace role: ws_admin | ws_editor | ws_viewer.
+        #[arg(long, default_value = "ws_editor")]
+        role: String,
+    },
 }
 
 /// Catalog token operations.
