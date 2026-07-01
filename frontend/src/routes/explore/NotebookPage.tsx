@@ -1,11 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  type MutableRefObject,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowLeft, Plus } from "lucide-react";
+import { ArrowLeft, Eraser, Play, Plus, RotateCcw, Square } from "lucide-react";
 
 import {
   type Cell,
   type CellType,
   type EngineOption,
+  useActiveExecutions,
   useAddCell,
   useDeleteCell,
   useNotebook,
@@ -40,6 +48,12 @@ interface ManagedCellProps {
     sql_target?: string;
   }) => void;
   engines?: EngineOption[];
+  /** Per-cell runner registry keyed by cell id; owned by the page toolbar. */
+  runners: MutableRefObject<
+    Record<string, { run: () => Promise<void>; clear: () => void }>
+  >;
+  /** Best-effort seed from the active-executions registry at mount. */
+  initialRunning?: boolean;
 }
 
 function ManagedCell({
@@ -51,13 +65,15 @@ function ManagedCell({
   onMoveDown,
   updateCellMutate,
   engines,
+  runners,
+  initialRunning,
 }: ManagedCellProps) {
   const [source, setSource] = useState(cell.source);
   // Restore-on-load: seed outputs from the persisted last_output.
   const [outputs, setOutputs] = useState<CellOutput[]>(() =>
     Array.isArray(cell.last_output) ? (cell.last_output as CellOutput[]) : [],
   );
-  const [running, setRunning] = useState(false);
+  const [running, setRunning] = useState(initialRunning ?? false);
   const timerRef = useRef<number | undefined>(undefined);
 
   // Sync source if the server data changes (e.g. after refetch)
@@ -108,6 +124,19 @@ function ManagedCell({
     }
   }
 
+  // Register this cell's runner so the page toolbar can drive it. Markdown
+  // cells register a no-op run (they don't execute) but a real clear.
+  useEffect(() => {
+    runners.current[cell.id] = {
+      run: cell.cell_type === "markdown" ? async () => {} : handleRun,
+      clear: () => setOutputs([]),
+    };
+    return () => {
+      delete runners.current[cell.id];
+    };
+    // Re-register when the run closure's inputs change.
+  }, [cell.id, source, cell.sql_target, cell.cell_type, runners]);
+
   return (
     <CellEditor
       cell={{ ...cell, source }}
@@ -138,6 +167,20 @@ export default function NotebookPage() {
   const updateCell = useUpdateCell(ws!, id!);
   const deleteCell = useDeleteCell(ws!, id!);
   const reorderCells = useReorderCells(ws!, id!);
+  const active = useActiveExecutions(ws!, id!);
+
+  // Per-cell runner registry: each ManagedCell registers { run, clear } under
+  // its cell id on mount; the toolbar iterates and drives them.
+  const runners = useRef<
+    Record<string, { run: () => Promise<void>; clear: () => void }>
+  >({});
+  const [runningAll, setRunningAll] = useState(false);
+
+  // Cells the recorder still lists as in-flight → seed a spinner on load.
+  const runningSet = useMemo(
+    () => new Set(active.data?.running ?? []),
+    [active.data],
+  );
 
   // Local name state for rename-on-blur
   const [localName, setLocalName] = useState("");
@@ -224,6 +267,26 @@ export default function NotebookPage() {
   const nb = notebook.data;
   const sortedCells = [...nb.cells].sort((a, b) => a.cell_order - b.cell_order);
 
+  // Run-all uses the Jupyter upfront-queue model: fire every non-markdown
+  // cell's execute_request in order (each run() awaits the memoized connect,
+  // then fires execute and returns). The kernel sequences them and honors
+  // stop_on_error — so we do NOT await idle between cells.
+  async function runAll() {
+    setRunningAll(true);
+    try {
+      const runnable = sortedCells.filter((c) => c.cell_type !== "markdown");
+      for (const c of runnable) {
+        await runners.current[c.id]?.run();
+      }
+    } finally {
+      setRunningAll(false);
+    }
+  }
+
+  function clearAll() {
+    sortedCells.forEach((c) => runners.current[c.id]?.clear());
+  }
+
   return (
     <section className="flex flex-col gap-4 p-4">
       {/* Header */}
@@ -258,6 +321,39 @@ export default function NotebookPage() {
               Public
             </Label>
           </div>
+
+          {/* Notebook run controls */}
+          <div className="flex items-center gap-1">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={runAll}
+              disabled={runningAll}
+            >
+              <Play className="h-3.5 w-3.5" />
+              Run all
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => kernel.interrupt().catch(() => {})}
+            >
+              <Square className="h-3.5 w-3.5" />
+              Interrupt
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => kernel.restart().catch(() => {})}
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              Restart
+            </Button>
+            <Button size="sm" variant="ghost" onClick={clearAll}>
+              <Eraser className="h-3.5 w-3.5" />
+              Clear outputs
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -274,6 +370,8 @@ export default function NotebookPage() {
             onMoveDown={handleMoveDown}
             updateCellMutate={updateCell.mutate}
             engines={runtime.data?.engines}
+            runners={runners}
+            initialRunning={runningSet.has(cell.id)}
           />
         ))}
       </div>

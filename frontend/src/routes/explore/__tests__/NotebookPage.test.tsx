@@ -28,6 +28,7 @@ const reorderCellsMutate = vi.fn();
 const reorderCellsMutation = vi.fn();
 
 const runtimeMock = vi.fn();
+const activeExecutionsMock = vi.fn();
 
 vi.mock("@/api/notebooks", () => ({
   useNotebook: () => notebookMock(),
@@ -37,18 +38,23 @@ vi.mock("@/api/notebooks", () => ({
   useDeleteCell: () => deleteCellMutation(),
   useReorderCells: () => reorderCellsMutation(),
   useNotebookRuntime: () => runtimeMock(),
+  useActiveExecutions: () => activeExecutionsMock(),
 }));
 
 // ── Kernel mock (no real WebSocket in jsdom) ──────────────────────────────────
 const kernelConnect = vi.fn();
 const kernelExecute = vi.fn();
 const kernelDisconnect = vi.fn();
+const kernelInterrupt = vi.fn();
+const kernelRestart = vi.fn();
 
 vi.mock("@/lib/kernel/KernelConnection", () => ({
   KernelConnection: class {
     connect = kernelConnect;
     execute = kernelExecute;
     disconnect = kernelDisconnect;
+    interrupt = kernelInterrupt;
+    restart = kernelRestart;
   },
 }));
 
@@ -119,6 +125,8 @@ beforeEach(() => {
   vi.useFakeTimers();
 
   notebookMock.mockReset();
+  activeExecutionsMock.mockReset();
+  activeExecutionsMock.mockReturnValue({ data: { running: [] } });
   runtimeMock.mockReset();
   runtimeMock.mockReturnValue({
     data: {
@@ -171,6 +179,10 @@ beforeEach(() => {
   kernelConnect.mockReset();
   kernelExecute.mockReset();
   kernelDisconnect.mockReset();
+  kernelInterrupt.mockReset();
+  kernelRestart.mockReset();
+  kernelInterrupt.mockResolvedValue(undefined);
+  kernelRestart.mockResolvedValue(undefined);
   kernelConnect.mockResolvedValue(undefined);
   kernelExecute.mockImplementation(
     (
@@ -279,7 +291,7 @@ describe("NotebookPage", () => {
 
   it("renders an ENABLED Run button for a code cell (no 'coming soon' title)", () => {
     renderAt();
-    const runButtons = screen.getAllByRole("button", { name: /run/i });
+    const runButtons = screen.getAllByRole("button", { name: /^run$/i });
     // First run button belongs to the code cell (cell_order 0) → enabled.
     expect(runButtons[0]).toBeEnabled();
     expect(runButtons[0]).not.toHaveAttribute("title", "Execution coming soon");
@@ -287,7 +299,7 @@ describe("NotebookPage", () => {
 
   it("clicking Run executes the cell and renders its output", async () => {
     renderAt();
-    const runButton = screen.getAllByRole("button", { name: /run/i })[0];
+    const runButton = screen.getAllByRole("button", { name: /^run$/i })[0];
 
     await act(async () => {
       fireEvent.click(runButton);
@@ -338,7 +350,7 @@ describe("NotebookPage", () => {
       error: null,
     });
     renderAt();
-    const runButton = screen.getAllByRole("button", { name: /run/i })[0];
+    const runButton = screen.getAllByRole("button", { name: /^run$/i })[0];
 
     await act(async () => {
       fireEvent.click(runButton);
@@ -416,5 +428,74 @@ describe("NotebookPage", () => {
     });
     renderAt();
     expect(screen.getByText(/not found/i)).toBeInTheDocument();
+  });
+
+  // ── Toolbar: Run all / Interrupt / Restart / Clear ──────────────────────────
+
+  it("clicking Run all executes each NON-markdown cell once and skips markdown", async () => {
+    // Fixture has a code cell (cell-1) and a markdown cell (cell-2).
+    renderAt();
+
+    const runAll = screen.getByRole("button", { name: /run all/i });
+    await act(async () => {
+      fireEvent.click(runAll);
+    });
+
+    // Only the code cell executes; the markdown cell is skipped.
+    expect(kernelExecute).toHaveBeenCalledTimes(1);
+    expect(kernelExecute).toHaveBeenCalledWith(
+      "cell-1",
+      expect.any(String),
+      expect.any(Object),
+    );
+  });
+
+  it("clicking Interrupt calls kernel.interrupt", () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /interrupt/i }));
+    expect(kernelInterrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it("clicking Restart calls kernel.restart", () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /restart/i }));
+    expect(kernelRestart).toHaveBeenCalledTimes(1);
+  });
+
+  it("clicking Clear outputs empties a cell's rendered outputs", () => {
+    notebookMock.mockReturnValue({
+      data: {
+        ...mockNotebook,
+        cells: [
+          {
+            ...mockCodeCell,
+            last_output: [{ type: "stream", name: "stdout", text: "keepme" }],
+          },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    renderAt();
+    expect(screen.getByText(/keepme/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /clear outputs/i }));
+
+    expect(screen.queryByText(/keepme/)).not.toBeInTheDocument();
+  });
+
+  it("shows a running indicator for a cell listed in active-executions on load", () => {
+    activeExecutionsMock.mockReturnValue({ data: { running: ["cell-1"] } });
+    notebookMock.mockReturnValue({
+      data: { ...mockNotebook, cells: [mockCodeCell] },
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    renderAt();
+    // The code cell's Run button is disabled (running) without any click.
+    const runButtons = screen.getAllByRole("button", { name: /^run$/i });
+    expect(runButtons[0]).toBeDisabled();
   });
 });
