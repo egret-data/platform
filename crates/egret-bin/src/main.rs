@@ -301,7 +301,7 @@ impl egret_kernel::query::NotebookQueryRunner for EngineQueryRunner {
             .map_err(|e| QueryRunError::Engine(e.to_string()))?;
         let connector = self
             .factory
-            .build(&db, secret, Some(session_user))
+            .build(&db, secret, Some(session_user), None)
             .await
             .map_err(|e| QueryRunError::Engine(e.to_string()))?;
         let limits = egret_engine::model::Limits {

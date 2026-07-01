@@ -26,6 +26,7 @@ async fn trino_describe_returns_typed_columns() {
         },
         secret: None,
         session_user: None,
+        bearer_token: None,
     };
     let conn = build_connector(&spec);
     let sql = "SELECT CAST(1 AS bigint) AS n, CAST('x' AS varchar) AS s";
@@ -68,6 +69,7 @@ fn starrocks_spec(host: &str, port: i32) -> ConnSpec {
         },
         secret: None,
         session_user: None,
+        bearer_token: None,
     }
 }
 

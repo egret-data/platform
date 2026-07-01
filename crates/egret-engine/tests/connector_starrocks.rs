@@ -16,6 +16,7 @@ fn spec(host: &str, port: i32) -> ConnSpec {
         },
         secret: None,
         session_user: None,
+        bearer_token: None,
     }
 }
 

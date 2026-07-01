@@ -22,6 +22,7 @@ fn trino_spec() -> Option<ConnSpec> {
         },
         secret: None,
         session_user: None,
+        bearer_token: None,
     })
 }
 
