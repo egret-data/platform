@@ -1,0 +1,136 @@
+[package]
+authors = ["blackbeam <aikorsky@gmail.com>"]
+description = "Tokio based asynchronous MySql client library."
+documentation = "https://docs.rs/mysql_async"
+keywords = ["mysql", "database", "asynchronous", "async"]
+license = "MIT/Apache-2.0"
+name = "mysql_async"
+readme = "README.md"
+repository = "https://github.com/blackbeam/mysql_async"
+version = "0.34.2"
+exclude = ["test/*"]
+edition = "2021"
+categories = ["asynchronous", "database"]
+
+[dependencies]
+bytes = "1.4"
+crossbeam = "0.8.1"
+flate2 = { version = "1.0", default-features = false }
+futures-core = "0.3"
+futures-util = "0.3"
+futures-sink = "0.3"
+keyed_priority_queue = "0.4"
+lru = "0.12.0"
+mysql_common = { version = "0.32", default-features = false }
+pem = "3.0"
+percent-encoding = "2.1.0"
+pin-project = "1.0.2"
+rand = "0.8.5"
+serde = "1"
+serde_json = "1"
+socket2 = "0.5.2"
+thiserror = "1.0.4"
+tokio = { version = "1.0", features = ["io-util", "fs", "net", "time", "rt"] }
+tokio-util = { version = "0.7.2", features = ["codec", "io"] }
+tracing = { version = "0.1.37", default-features = false, features = [
+    "attributes",
+], optional = true }
+twox-hash = "1"
+url = "2.1"
+
+[dependencies.tokio-rustls]
+version = "0.26"
+optional = true
+
+[dependencies.tokio-native-tls]
+version = "0.3.0"
+optional = true
+
+[dependencies.native-tls]
+version = "0.2"
+optional = true
+
+[dependencies.rustls]
+version = "0.23"
+features = []
+optional = true
+
+[dependencies.rustls-pemfile]
+version = "2.1.0"
+optional = true
+
+[dependencies.webpki]
+version = ">=0.22.1"
+features = ["std"]
+optional = true
+
+[dependencies.webpki-roots]
+version = "0.26.1"
+optional = true
+
+[dev-dependencies]
+waker-fn = "1"
+tempfile = "3.1.0"
+socket2 = { version = "0.5.2", features = ["all"] }
+tokio = { version = "1.0", features = ["macros", "rt", "rt-multi-thread"] }
+
+[features]
+default = [
+    "flate2/zlib",
+    "bigdecimal",
+    "rust_decimal",
+    "time",
+    "frunk",
+    "derive",
+    "native-tls-tls",
+    "binlog",
+]
+
+default-rustls = [
+    "flate2/rust_backend",
+    "bigdecimal",
+    "rust_decimal",
+    "time",
+    "frunk",
+    "derive",
+    "rustls-tls",
+    "binlog",
+]
+
+# minimal feature set with system flate2 impl
+minimal = ["flate2/zlib"]
+# minimal feature set with rust flate2 impl
+minimal-rust = ["flate2/rust_backend"]
+
+# native-tls based TLS support
+native-tls-tls = ["native-tls", "tokio-native-tls"]
+
+# rustls based TLS support
+rustls-tls = [
+    "rustls",
+    "tokio-rustls",
+    "webpki",
+    "webpki-roots",
+    "rustls-pemfile",
+]
+
+binlog = ["mysql_common/binlog"]
+
+# mysql_common features
+derive = ["mysql_common/derive"]
+chrono = ["mysql_common/chrono"]
+time = ["mysql_common/time"]
+bigdecimal = ["mysql_common/bigdecimal"]
+rust_decimal = ["mysql_common/rust_decimal"]
+frunk = ["mysql_common/frunk"]
+
+# other features
+tracing = ["dep:tracing"]
+nightly = []
+
+[lib]
+name = "mysql_async"
+path = "src/lib.rs"
+
+[profile.bench]
+debug = true

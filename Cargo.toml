@@ -71,6 +71,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 mysql_async = { version = "0.34", default-features = false, features = ["default-rustls"] }
 testcontainers = "0.23"
 
+# Vendored mysql_async: patched to support StarRocks' JWT/OIDC auth-switch
+# (`authentication_openid_connect_client`). See third_party/mysql_async.
+[patch.crates-io]
+mysql_async = { path = "third_party/mysql_async" }
+
 [profile.dev]
 opt-level = 0
 # Slim debuginfo so linking the workspace's many test binaries doesn't exhaust the
