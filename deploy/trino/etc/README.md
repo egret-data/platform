@@ -4,20 +4,33 @@ This directory contains dev-only Trino configuration files for F2-P3.
 Enforcement and property reconciliation happen in **F2-P5** when the full
 Keycloak + Trino stack is brought up.
 
-## ⚠️ F2-P5 FINDING — plain HTTP does NOT enforce JWT auth (TLS required)
+## ✅ F2-P5 — verified live (2026-07-01): JWT auth ENFORCED over TLS
 
-Verified live (2026-07-01): with this config over **plain HTTP**, Trino
-**accepts** a valid Keycloak JWT (identity resolves, query runs as the user) —
-but it does **NOT require** one. A request carrying only `X-Trino-User: <name>`
-and **no `Authorization` header** still runs queries (returns data). This is
-Trino's documented behaviour: JWT authentication is only truly **enforced over
-HTTPS**; `allow-insecure-over-http=true` permits auth over HTTP but leaves the
-insecure (trust-`X-Trino-User`) path open. **For real per-user enforcement Trino
-must run with TLS** (`http-server.https.enabled=true` + a keystore) and
-`allow-insecure-over-http` removed. The egret→Trino connector already sends the
-Bearer JWT (F2-P3); the gap is transport-level enforcement on the Trino side.
-Iceberg-catalog (egret-catalog, F2-P2) enforces in-process regardless of
-transport, so this caveat is Trino-specific.
+Three things were found and fixed while validating against the real
+Keycloak + Trino stack:
+
+1. **TLS is required for enforcement.** Over plain HTTP, Trino *accepts* a valid
+   JWT but does **not require** one — a request with only `X-Trino-User` and no
+   `Authorization` header still ran queries. TLS closes this: enable
+   `http-server.https.enabled` + a keystore and drop `allow-insecure-over-http`.
+   Now verified: no-auth → **401**, bad token → **401**, valid JWT → **200** and
+   runs as the user. Run `./gen-certs.sh` to make the dev keystore
+   (`trino-keystore.p12`, gitignored) and connect on the HTTPS port (8443,
+   host-mapped 8453).
+2. **`principal-field=preferred_username`** (not `sub`) — so the Trino user is
+   the human username from the token (`tester`), not the subject UUID.
+3. **The egret→Trino connector must NOT send `X-Trino-User` with a JWT** — the
+   token *is* the identity; sending `X-Trino-User` too made Trino reject it as
+   impersonation (`User <sub> cannot impersonate user tester`). Fixed in the
+   connector (`egret-engine` `TrinoConnector::auth`): bearer → JWT only.
+
+Iceberg-catalog (egret-catalog, F2-P2) enforces in-process via limes regardless
+of transport, so the TLS caveat is Trino-specific.
+
+> Note (deployment): the egret connector talks to Trino over HTTPS — for a
+> self-signed dev cert the connector must trust it (real cert in prod). The
+> Keycloak realm also needs the `basic` client scope so access tokens carry
+> `sub` (used by egret-catalog); fixed in `deploy/keycloak/egret-realm.json`.
 
 ## How identity is derived
 

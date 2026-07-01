@@ -1,0 +1,2 @@
+# dev TLS keystore — generate with gen-certs.sh, never commit the private key
+trino-keystore.p12
