@@ -156,21 +156,29 @@ impl Connector for TrinoConnector {
             let next = resp.next_uri.take();
             if cancel.is_cancelled() {
                 if let Some(uri) = &next {
-                    let _ = client
+                    let mut d = client
                         .delete(uri)
-                        .header("X-Trino-User", self.x_trino_user())
-                        .send()
-                        .await;
+                        .header("X-Trino-User", self.x_trino_user());
+                    if let Some(jwt) = &self.bearer {
+                        d = d.bearer_auth(jwt);
+                    } else if let Some(s) = &self.secret {
+                        d = d.basic_auth(self.auth_user(), Some(s));
+                    }
+                    let _ = d.send().await;
                 }
                 return Err(EngineError::Cancelled);
             }
             if rows.len() > cap {
                 if let Some(uri) = &next {
-                    let _ = client
+                    let mut d = client
                         .delete(uri)
-                        .header("X-Trino-User", self.x_trino_user())
-                        .send()
-                        .await;
+                        .header("X-Trino-User", self.x_trino_user());
+                    if let Some(jwt) = &self.bearer {
+                        d = d.bearer_auth(jwt);
+                    } else if let Some(s) = &self.secret {
+                        d = d.basic_auth(self.auth_user(), Some(s));
+                    }
+                    let _ = d.send().await;
                 }
                 break;
             }
