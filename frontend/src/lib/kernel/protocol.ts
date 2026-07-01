@@ -25,7 +25,9 @@ export function newMsg(msgType: string, session: string, content: Record<string,
   };
 }
 
-/** Map an iopub message to a CellOutput, or null if it isn't output. */
+/** Map an iopub message to a CellOutput, or null if it isn't output.
+ *  Note: the `"truncated"` CellOutput variant is a recorder-side synthetic
+ *  (E-P2) — it is never emitted as a live iopub message, so it is not mapped here. */
 export function iopubToOutput(msgType: string, content: Record<string, any>): CellOutput | null {
   switch (msgType) {
     case "stream": return { type: "stream", name: content.name ?? "stdout", text: content.text ?? "" };

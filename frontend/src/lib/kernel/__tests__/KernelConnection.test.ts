@@ -51,4 +51,19 @@ describe("KernelConnection", () => {
     ws.onmessage!({ data: JSON.stringify({ header: { msg_type: "stream" }, parent_header: { msg_id: "other" }, content: { text: "leak" } }) });
     expect(outputs).toEqual([]);
   });
+
+  it("throws if execute() is called before connect()", () => {
+    const kc = new KernelConnection("ws1", "nb1");
+    expect(() => kc.execute("cellA", "x", { onOutput: () => {}, onStatus: () => {}, onExecutionCount: () => {} })).toThrow(/not connected/);
+  });
+
+  it("ignores non-JSON iopub frames without throwing", async () => {
+    const kc = new KernelConnection("ws1", "nb1");
+    await kc.connect();
+    const outputs: any[] = [];
+    kc.execute("cellA", "x", { onOutput: (o) => outputs.push(o), onStatus: () => {}, onExecutionCount: () => {} });
+    const ws = MockWS.last!;
+    expect(() => ws.onmessage!({ data: "not json {{{" })).not.toThrow();
+    expect(outputs).toEqual([]);
+  });
 });

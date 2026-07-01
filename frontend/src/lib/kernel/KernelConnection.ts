@@ -23,14 +23,21 @@ export class KernelConnection {
   async connect(): Promise<void> {
     if (this.ready) return this.ready;
     this.ready = (async () => {
-      // ensure the kernel (retries while spawning)
-      for (let i = 0; i < 30; i++) {
-        const r = await apiFetch(this.path("/connect"), { method: "POST" });
-        const body = await r.json().catch(() => ({}));
-        if (body.phase === "ready" || body.phase === undefined) break;
-        await new Promise((res) => setTimeout(res, 1000));
+      try {
+        // ensure the kernel (retries while spawning)
+        let ready = false;
+        for (let i = 0; i < 30; i++) {
+          const r = await apiFetch(this.path("/connect"), { method: "POST" });
+          const body = await r.json().catch(() => ({}));
+          if (body.phase === "ready" || body.phase === undefined) { ready = true; break; }
+          await new Promise((res) => setTimeout(res, 1000));
+        }
+        if (!ready) throw new Error("kernel did not become ready after 30 s");
+        await this.openSocket();
+      } catch (e) {
+        this.ready = null; // allow a later retry to re-attempt
+        throw e;
       }
-      await this.openSocket();
     })();
     return this.ready;
   }
@@ -69,5 +76,5 @@ export class KernelConnection {
     this.ws.send(JSON.stringify(msg));
   }
 
-  disconnect(): void { this.ws?.close(); this.ws = null; this.ready = null; }
+  disconnect(): void { this.ws?.close(); this.ws = null; this.ready = null; this.pending.clear(); }
 }
