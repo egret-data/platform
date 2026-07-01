@@ -164,12 +164,12 @@ def starrocks(sql, *, engine="starrocks", env=None, cache=None):
     return daft.read_sql(sql, _conn)
 
 
-def iceberg(table):
-    """Read an Iceberg table as a lazy Daft DataFrame (native, pushdown). `table`
-    is "namespace.name", resolved in the workspace warehouse / your private
-    `notebook_{username}` namespace."""
+def iceberg(table, *, env=None):
+    """Read an Iceberg table from your notebook catalog as a lazy Daft DataFrame
+    (native, pushdown). `table` is "namespace.name" (a bare name defaults to your
+    private `notebook_{username}` namespace)."""
     import daft
-    tbl = catalog().load_table(table)
+    tbl = catalog().load_table(_resolve_identifier(table, env=env))
     return daft.read_iceberg(tbl)
 
 

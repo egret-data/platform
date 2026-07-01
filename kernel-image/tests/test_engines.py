@@ -261,6 +261,23 @@ def test_iceberg_reads_via_catalog(monkeypatch):
     assert captured["tbl"] == "TBL:sales.orders"
 
 
+def test_iceberg_defaults_to_private_namespace(monkeypatch):
+    import sys
+    loaded = {}
+    class FakeCat:
+        def load_table(self, name):
+            loaded["name"] = name
+            return f"TBL:{name}"
+    monkeypatch.setattr(E, "catalog", lambda *a, **k: FakeCat())
+    monkeypatch.setattr(E, "load_runtime", lambda env=None: type("R", (), {
+        "catalog": type("C", (), {"namespace": "notebook_alice"})()})())
+    fake_daft = type("D", (), {"read_iceberg": staticmethod(lambda t, **kw: "DF")})
+    monkeypatch.setitem(sys.modules, "daft", fake_daft)
+    out = E.iceberg("sales")
+    assert out == "DF"
+    assert loaded["name"] == "notebook_alice.sales"
+
+
 def _fake_df(schema="ARROW_SCHEMA"):
     class _Schema:
         def to_pyarrow_schema(self):
