@@ -2,3 +2,9 @@ node_modules
 dist
 *.local
 *.tsbuildinfo
+
+# Playwright e2e
+playwright-report
+test-results
+.playwright-mcp
+notebook-e2e-success.png
