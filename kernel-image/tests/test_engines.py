@@ -108,3 +108,21 @@ def test_trino_conn_factory_wires_jwt_and_url(monkeypatch):
     assert engine_calls["connect_args"]["http_scheme"] == "https"
     assert auth_calls["jwt"] == "JWT"
     assert engine_calls["connect_args"]["auth"] == ("AUTH", "JWT")
+
+
+def test_iceberg_reads_via_catalog(monkeypatch):
+    import sys
+    loaded = {}
+    class FakeCat:
+        def load_table(self, name):
+            loaded["name"] = name
+            return f"TBL:{name}"
+    monkeypatch.setattr(E, "catalog", lambda *a, **k: FakeCat())
+    captured = {}
+    fake_daft = type("D", (), {"read_iceberg": staticmethod(
+        lambda t, **kw: captured.update(tbl=t) or "DF")})
+    monkeypatch.setitem(sys.modules, "daft", fake_daft)
+    out = E.iceberg("sales.orders")
+    assert out == "DF"
+    assert loaded["name"] == "sales.orders"
+    assert captured["tbl"] == "TBL:sales.orders"

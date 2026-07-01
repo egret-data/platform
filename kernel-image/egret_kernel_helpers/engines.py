@@ -3,6 +3,8 @@ import datetime as _dt
 import json
 import os
 
+from .catalog import catalog
+
 _REFRESH_MARGIN = _dt.timedelta(seconds=30)
 
 
@@ -82,3 +84,12 @@ def trino(sql, *, engine="trino", env=None, cache=None):
         return eng.connect()
 
     return daft.read_sql(sql, _conn)
+
+
+def iceberg(table, *, catalog_id=None):
+    """Read an Iceberg table as a lazy Daft DataFrame (native, pushdown). `table`
+    is "namespace.name", resolved in the workspace warehouse / your private
+    `notebook_{username}` namespace."""
+    import daft
+    tbl = catalog(catalog_id).load_table(table)
+    return daft.read_iceberg(tbl)
