@@ -57,6 +57,27 @@ describe("KernelConnection", () => {
     expect(() => kc.execute("cellA", "x", { onOutput: () => {}, onStatus: () => {}, onExecutionCount: () => {} })).toThrow(/not connected/);
   });
 
+  it("flushes pending handlers on unexpected WS close (no stuck-running)", async () => {
+    const kc = new KernelConnection("ws1", "nb1");
+    await kc.connect();
+    const outputs: any[] = [];
+    const statuses: string[] = [];
+    kc.execute("cellA", "print(1)", {
+      onOutput: (o) => outputs.push(o),
+      onStatus: (s) => statuses.push(s),
+      onExecutionCount: () => {},
+    });
+    const ws = MockWS.last!;
+    // Simulate the socket dropping while the cell is still running.
+    ws.close();
+    // The handler must be told it went idle so `running` resets…
+    expect(statuses).toContain("idle");
+    // …and see an error output explaining why.
+    expect(outputs).toEqual([
+      { type: "error", ename: "KernelError", evalue: "kernel connection closed", traceback: [] },
+    ]);
+  });
+
   it("ignores non-JSON iopub frames without throwing", async () => {
     const kc = new KernelConnection("ws1", "nb1");
     await kc.connect();

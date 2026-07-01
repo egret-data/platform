@@ -22,7 +22,6 @@ export interface CellEditorProps {
   onDelete: () => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
-  runDisabled?: boolean;
   onRun?: () => void;
   running?: boolean;
   outputs?: CellOutput[];

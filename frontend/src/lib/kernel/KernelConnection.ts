@@ -49,7 +49,15 @@ export class KernelConnection {
       const ws = new WebSocket(url);
       this.ws = ws;
       ws.onopen = () => resolve();
-      ws.onclose = () => { this.ws = null; };
+      ws.onclose = () => {
+        this.ws = null;
+        // Unexpected close: flush pending handlers so no cell stays stuck-running.
+        this.pending.forEach((h) => {
+          h.onOutput({ type: "error", ename: "KernelError", evalue: "kernel connection closed", traceback: [] });
+          h.onStatus("idle"); // resets the cell's running state
+        });
+        this.pending.clear();
+      };
       ws.onerror = () => reject(new Error("kernel WS error"));
       ws.onmessage = (e) => this.onMessage(String((e as MessageEvent).data));
     });
