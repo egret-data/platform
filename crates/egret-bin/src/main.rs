@@ -383,6 +383,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // `egret_catalog_engine::ensure_namespace` in-process, with the same system
     // principal the browse API uses.
     type CatalogEngineCtx = egret_catalog_engine::ApiContext<egret_catalog_engine::EngineState>;
+    // Externally-reachable catalog base URL. Used both as the notebook manifest's
+    // catalog URL (what pyiceberg/Daft hit) and to rewrite lakekeeper's `/config`
+    // `overrides.uri` (which otherwise reports lakekeeper's internal :8181 bind).
+    let catalog_base_url = config
+        .catalog
+        .public_url
+        .clone()
+        .unwrap_or_else(|| "http://localhost:8080".into());
     let (catalog_engine, catalog_browse, catalog_engine_ctx): (
         Option<axum::Router>,
         Option<axum::Router>,
@@ -437,6 +445,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             engine_state.clone(),
             engine_store.clone(),
             catalog_jwt,
+            Some(catalog_base_url.clone()),
         );
 
         // CE-2 T6: the session-authed browse API (for the UI) reads the embedded
@@ -665,12 +674,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             }),
             None => std::sync::Arc::new(NoopNamespaceProvisioner),
         };
-
-    let catalog_base_url = config
-        .catalog
-        .public_url
-        .clone()
-        .unwrap_or_else(|| "http://localhost:8080".into());
 
     // F2-P1 T6: one shared engine-token broker (Keycloak refresh-grant) mints the
     // short-lived per-user engine JWT carried in the notebook-runtime manifest.

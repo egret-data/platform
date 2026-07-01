@@ -88,17 +88,61 @@ pub struct FrontAuthState {
     /// OIDC is disabled (or its verifier failed to initialise at boot): JWTs are
     /// then rejected and only opaque tokens are accepted.
     pub jwt: Option<Arc<crate::jwt_auth::CatalogJwtAuth>>,
+    /// The externally-reachable catalog base URL (e.g. `http://localhost:8080/catalog`).
+    /// The embedded lakekeeper reports its own internal bind address
+    /// (`http://localhost:8181/catalog`) in the `/config` response's
+    /// `overrides.uri` — which clients then follow for table operations and cannot
+    /// reach (lakekeeper is only exposed through egret's `/catalog` proxy). When
+    /// set, we rewrite that field on the `/config` response to this public URL so
+    /// Iceberg clients (pyiceberg/Daft) talk to the proxy. `None` leaves the
+    /// response untouched.
+    pub catalog_public_url: Option<String>,
 }
 
 impl FrontAuthState {
     /// Build the front-auth state over an egret-side [`CatalogStore`], optionally
-    /// with an OIDC-JWT authenticator for the hybrid (JWT-or-opaque) path.
-    pub fn new(store: CatalogStore, jwt: Option<Arc<crate::jwt_auth::CatalogJwtAuth>>) -> Self {
+    /// with an OIDC-JWT authenticator for the hybrid (JWT-or-opaque) path and the
+    /// public catalog URL used to rewrite lakekeeper's `/config` `overrides.uri`.
+    pub fn new(
+        store: CatalogStore,
+        jwt: Option<Arc<crate::jwt_auth::CatalogJwtAuth>>,
+        catalog_public_url: Option<String>,
+    ) -> Self {
         Self {
             store: Arc::new(store),
             jwt,
+            catalog_public_url,
         }
     }
+}
+
+/// The base URL the embedded lakekeeper reports for itself in self-referential
+/// response fields (`overrides.uri` in `/config`, `s3.signer.uri` in loadTable,
+/// etc.). It comes from `RequestMetadata`'s hardcoded default at this lakekeeper
+/// rev (`new_lakekeeper_internal` → `base_url = "http://localhost:8181"`, then
+/// `+ "/catalog"`), and there is no public setter to correct it. Clients follow
+/// these URLs and cannot reach `:8181` (lakekeeper is only exposed through
+/// egret's `/catalog` proxy), so we rewrite this prefix to the public catalog
+/// base on the way out.
+const LAKEKEEPER_INTERNAL_CATALOG_BASE: &str = "http://localhost:8181/catalog";
+
+/// Rewrite every occurrence of lakekeeper's internal catalog base
+/// ([`LAKEKEEPER_INTERNAL_CATALOG_BASE`]) to `public_catalog_base` (the
+/// externally-reachable catalog URL, e.g. `http://localhost:8080/catalog`) in a
+/// catalog response body. Covers `overrides.uri` (`/config`) and the per-table
+/// `s3.signer.uri` (loadTable) with one prefix swap. Returns `None` when the body
+/// contains no occurrence, so callers pass the original body through unchanged.
+pub(crate) fn rewrite_lakekeeper_base(body: &[u8], public_catalog_base: &str) -> Option<Vec<u8>> {
+    let needle = LAKEKEEPER_INTERNAL_CATALOG_BASE.as_bytes();
+    if !body.windows(needle.len()).any(|w| w == needle) {
+        return None;
+    }
+    let public = public_catalog_base.trim_end_matches('/');
+    let text = std::str::from_utf8(body).ok()?;
+    Some(
+        text.replace(LAKEKEEPER_INTERNAL_CATALOG_BASE, public)
+            .into_bytes(),
+    )
 }
 
 /// IdP id for the synthetic per-token lakekeeper principal. Mirrors the system
@@ -237,12 +281,10 @@ pub async fn front_auth(
     let auth = if looks_like_jwt {
         match &state.jwt {
             Some(j) => {
-                let prefix = first_path_segment(&path).ok_or(StatusCode::UNAUTHORIZED)?;
-                if prefix == "config" {
-                    // `/config` carries no warehouse prefix to resolve the JWT's
-                    // grant against; opaque tokens handle discovery.
-                    return Err(StatusCode::UNAUTHORIZED);
-                }
+                // The warehouse UUID to resolve the JWT's grant against: the path
+                // prefix (or the signer path's second segment). `/config` has none
+                // (→ None) and opaque tokens handle discovery.
+                let prefix = warehouse_prefix(&path).ok_or(StatusCode::UNAUTHORIZED)?;
                 let wh = Uuid::parse_str(prefix).map_err(|_| StatusCode::UNAUTHORIZED)?;
                 j.authenticate(token, wh).await.map_err(|e| match e {
                     crate::jwt_auth::JwtAuthError::Unauthenticated => StatusCode::UNAUTHORIZED,
@@ -262,24 +304,23 @@ pub async fn front_auth(
             .map_err(|_| StatusCode::UNAUTHORIZED)?
     };
 
-    // --- AUTHZ (ownership): enforce {prefix} (warehouse UUID) belongs to -------
-    // --- the caller's workspace, unless this is the prefix-less /config call. --
-    if let Some(prefix) = first_path_segment(&path) {
-        if prefix != "config" {
-            // The `{prefix}` segment is the warehouse UUID per lakekeeper's
-            // default `prefix_template = "{warehouse_id}"`.
-            let requested_wh = Uuid::parse_str(prefix).map_err(|_| StatusCode::FORBIDDEN)?;
-            // Resolve the lakekeeper UUID of the warehouse this token was minted
-            // for (workspace-scoped, so a token can never name another tenant's
-            // warehouse row). A missing/cross-workspace row → 403.
-            let expected_wh = state
-                .store
-                .lakekeeper_id(auth.workspace_id, auth.warehouse_id)
-                .await
-                .map_err(|_| StatusCode::FORBIDDEN)?;
-            if requested_wh != expected_wh {
-                return Err(StatusCode::FORBIDDEN);
-            }
+    // --- AUTHZ (ownership): enforce the warehouse UUID in the path belongs to ---
+    // --- the caller's workspace (skipped for the prefix-less /config call). ----
+    if let Some(prefix) = warehouse_prefix(&path) {
+        // The warehouse UUID is the first path segment per lakekeeper's default
+        // `prefix_template = "{warehouse_id}"`, or the second on S3-signer paths
+        // (`signer/{warehouse_id}/...`) — `warehouse_prefix` returns the right one.
+        let requested_wh = Uuid::parse_str(prefix).map_err(|_| StatusCode::FORBIDDEN)?;
+        // Resolve the lakekeeper UUID of the warehouse this token was minted for
+        // (workspace-scoped, so a token can never name another tenant's warehouse
+        // row). A missing/cross-workspace row → 403.
+        let expected_wh = state
+            .store
+            .lakekeeper_id(auth.workspace_id, auth.warehouse_id)
+            .await
+            .map_err(|_| StatusCode::FORBIDDEN)?;
+        if requested_wh != expected_wh {
+            return Err(StatusCode::FORBIDDEN);
         }
     }
 
@@ -299,15 +340,55 @@ pub async fn front_auth(
     // depth, and the sole enforcer of the per-grant namespace/table boundary).
     req.extensions_mut().insert(token_request_metadata(&auth));
 
-    Ok(next.run(req).await)
+    let resp = next.run(req).await;
+
+    // Rewrite lakekeeper's internal self-URLs (`:8181`) → the public catalog base
+    // in JSON responses, so Iceberg clients follow the reachable egret proxy for
+    // discovery (`/config` `overrides.uri`) and per-table S3 signing
+    // (`s3.signer.uri`). Catalog responses are small JSON, so buffering is cheap;
+    // only JSON is touched, and a body with no occurrence passes through unchanged.
+    let Some(public) = state.catalog_public_url.as_deref() else {
+        return Ok(resp);
+    };
+    let is_json = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("application/json"));
+    if !is_json {
+        return Ok(resp);
+    }
+    let (mut parts, body) = resp.into_parts();
+    let bytes = axum::body::to_bytes(body, 4 * 1024 * 1024)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match rewrite_lakekeeper_base(&bytes, public) {
+        Some(out) => {
+            parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+            Ok(Response::from_parts(parts, Body::from(out)))
+        }
+        None => Ok(Response::from_parts(parts, Body::from(bytes))),
+    }
 }
 
-/// Return the first non-empty path segment of `path` (the lakekeeper `{prefix}`
-/// or the literal `config`), or `None` for the router root.
-fn first_path_segment(path: &str) -> Option<&str> {
-    path.trim_start_matches('/')
+/// The warehouse-UUID segment of a lakekeeper-relative `path` to enforce
+/// ownership against, or `None` when the path carries no warehouse (the
+/// prefix-less `config` discovery endpoint, or the router root).
+///
+/// The warehouse UUID is normally the first path segment (lakekeeper's default
+/// `prefix_template = "{warehouse_id}"`), but S3 remote-signing paths are
+/// `signer/{warehouse_id}/tabular-id/.../aws/s3/sign` — there the UUID is the
+/// second segment. Both shapes resolve here.
+fn warehouse_prefix(path: &str) -> Option<&str> {
+    let mut segs = path
+        .trim_start_matches('/')
         .split('/')
-        .find(|s| !s.is_empty())
+        .filter(|s| !s.is_empty());
+    match segs.next()? {
+        "config" => None,
+        "signer" => segs.next(),
+        wh => Some(wh),
+    }
 }
 
 #[cfg(test)]
@@ -315,15 +396,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn first_path_segment_extracts_prefix() {
-        assert_eq!(first_path_segment("/config"), Some("config"));
-        assert_eq!(first_path_segment("/0190abcd/namespaces"), Some("0190abcd"));
+    fn warehouse_prefix_extracts_the_warehouse_uuid() {
+        // Prefix-less discovery endpoint and root → no warehouse.
+        assert_eq!(warehouse_prefix("/config"), None);
+        assert_eq!(warehouse_prefix("/"), None);
+        assert_eq!(warehouse_prefix(""), None);
+        // Normal catalog paths: warehouse is the first segment.
+        assert_eq!(warehouse_prefix("/0190abcd/namespaces"), Some("0190abcd"));
         assert_eq!(
-            first_path_segment("/0190abcd/namespaces/ns/tables/t"),
+            warehouse_prefix("/0190abcd/namespaces/ns/tables/t"),
             Some("0190abcd")
         );
-        assert_eq!(first_path_segment("/"), None);
-        assert_eq!(first_path_segment(""), None);
+        // S3-signer paths: warehouse is the second segment.
+        assert_eq!(
+            warehouse_prefix("/signer/0190abcd/tabular-id/019f/v1/aws/s3/sign"),
+            Some("0190abcd")
+        );
+        // Malformed signer path with no warehouse → None (→ 403 upstream).
+        assert_eq!(warehouse_prefix("/signer"), None);
+    }
+
+    #[test]
+    fn rewrites_config_overrides_uri() {
+        let body = br#"{"overrides":{"uri":"http://localhost:8181/catalog","k":"v"},"defaults":{"prefix":"p"}}"#;
+        let out = rewrite_lakekeeper_base(body, "http://localhost:8080/catalog").unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["overrides"]["uri"], "http://localhost:8080/catalog");
+        assert_eq!(v["overrides"]["k"], "v"); // sibling field preserved
+        assert_eq!(v["defaults"]["prefix"], "p"); // defaults untouched
+    }
+
+    #[test]
+    fn rewrites_s3_signer_uri_in_loadtable_response() {
+        // A per-table signer URL (loadTable) shares the same internal-base prefix.
+        let body = br#"{"config":{"s3.signer.uri":"http://localhost:8181/catalog/v1/signer/wh/tabular-id/t"}}"#;
+        let out = rewrite_lakekeeper_base(body, "http://localhost:8080/catalog/").unwrap(); // trailing slash trimmed
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            v["config"]["s3.signer.uri"],
+            "http://localhost:8080/catalog/v1/signer/wh/tabular-id/t"
+        );
+    }
+
+    #[test]
+    fn rewrite_returns_none_when_no_internal_base_present() {
+        assert!(rewrite_lakekeeper_base(b"not json but also no needle", "http://x").is_none());
+        assert!(rewrite_lakekeeper_base(br#"{"defaults":{"prefix":"p"}}"#, "http://x").is_none());
     }
 
     #[test]
