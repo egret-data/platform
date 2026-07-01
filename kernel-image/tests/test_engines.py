@@ -338,41 +338,68 @@ def test_write_iceberg_uses_existing_table(monkeypatch):
     assert df.__class__.last == {"tbl": "EXISTING_TBL", "mode": "append"}
 
 
-def test_write_table_trino_wires_write_sql_with_conn_and_mode():
-    # write_table goes THROUGH the engine (df.write_sql), reusing the same
-    # governed Trino connection factory as trino() — no direct catalog access.
-    env = {"EGRET_API_URL": "http://egret", "EGRET_KERNEL_TOKEN": "kt"}
-    cache = {"trino": {"jwt": _mk_jwt("tester"), "expires_at": "2999-01-01T00:00:00Z",
-                       "kind": "trino", "host": "trino", "port": 8443}}
+def test_write_table_trino_qualifies_name_and_creates_schema(monkeypatch):
+    # write_table goes THROUGH the engine (df.write_sql). SQLDataSink hands the
+    # bare table name to pandas.to_sql, so the catalog+schema are the connection's
+    # defaults, and the schema is CREATE-SCHEMA-ensured first.
+    ddl_sql = []
+    factories = []
+
+    class _DDLConn:
+        def execute(self, stmt):
+            ddl_sql.append(str(stmt))
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    def _fake_trino_conn(engine="trino", *, env=None, cache=None, catalog=None, schema=None):
+        factories.append((catalog, schema))
+        return lambda: _DDLConn()
+
+    monkeypatch.setattr(E, "_trino_conn", _fake_trino_conn)
     captured = {}
 
     class _DF:
-        def write_sql(self, table, conn, write_mode="append", column_types=None):
-            captured.update(table=table, conn=conn, mode=write_mode, column_types=column_types)
+        def write_sql(self, name, conn, write_mode="append", column_types=None):
+            captured.update(name=name, conn=conn, mode=write_mode)
             return "METRICS"
 
-    out = E.write_table(_DF(), "lakehouse.s.t", engine="trino",
-                        mode="overwrite", env=env, cache=cache)
+    out = E.write_table(_DF(), "lakehouse.analytics.summary",
+                        engine="trino", mode="overwrite")
     assert out == "METRICS"
-    assert captured["table"] == "lakehouse.s.t"
+    assert captured["name"] == "summary"          # BARE table name to write_sql
     assert captured["mode"] == "overwrite"
-    assert callable(captured["conn"])  # a connection factory, not a live conn
+    assert callable(captured["conn"])             # a connection factory
+    # a catalog-only DDL factory + a catalog+schema write factory were built
+    assert ("lakehouse", None) in factories
+    assert ("lakehouse", "analytics") in factories
+    assert any("CREATE SCHEMA" in s and "lakehouse.analytics" in s for s in ddl_sql)
 
 
 def test_write_table_dispatches_to_starrocks_conn(monkeypatch):
     seen = {}
 
-    def _fake_sr_conn(engine="starrocks", *, env=None, cache=None):
-        seen["engine"] = engine
+    def _fake_sr_conn(engine="starrocks", *, env=None, cache=None, catalog=None, schema=None):
+        seen["dispatch"] = (engine, catalog, schema)
         return lambda: "SR_CONN"
 
     monkeypatch.setattr(E, "_starrocks_conn", _fake_sr_conn)
 
     class _DF:
-        def write_sql(self, table, conn, write_mode="append", column_types=None):
-            seen["conn"] = conn()
+        def write_sql(self, name, conn, write_mode="append", column_types=None):
+            seen.update(name=name, conn=conn())
             return "M"
 
     E.write_table(_DF(), "lakehouse.s.t", engine="starrocks")
-    assert seen["engine"] == "starrocks"
+    assert seen["dispatch"] == ("starrocks", "lakehouse", "s")
+    assert seen["name"] == "t"                    # bare table name
     assert seen["conn"] == "SR_CONN"
+
+
+def test_write_table_requires_fully_qualified_name():
+    for bad in ("justatable", "schema.table"):
+        with pytest.raises(ValueError):
+            E.write_table(object(), bad)

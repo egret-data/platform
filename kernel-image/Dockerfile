@@ -8,8 +8,10 @@ WORKDIR /opt/egret-kernel
 # Runtime deps. Daft + pyiceberg are the engine/catalog libraries; the gateway
 # is the kernel front door D1b/D1c talk to; ipykernel provides the python3
 # kernelspec the gateway launches (and pulls IPython, which display() uses).
-# sqlglot is required by daft.read_sql; sqlalchemy + pymysql back the trino/starrocks connection factories.
-RUN pip install --no-cache-dir jupyter_kernel_gateway ipykernel daft "pyiceberg[s3fs]" pymysql sqlglot sqlalchemy
+# sqlglot is required by daft.read_sql; sqlalchemy + pymysql + trino back the
+# trino/starrocks connection factories (trino provides the SQLAlchemy dialect +
+# JWTAuthentication); pandas backs write_table (Daft's write_sql → pandas.to_sql).
+RUN pip install --no-cache-dir jupyter_kernel_gateway ipykernel daft "pyiceberg[s3fs]" pymysql sqlglot sqlalchemy trino pandas
 
 # Install the helper package.
 COPY pyproject.toml ./
