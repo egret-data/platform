@@ -1,5 +1,6 @@
 //! `egret-kernel` — per-(user×workspace) Jupyter Kernel Gateway lifecycle.
 
+pub mod engine_conn;
 pub mod env;
 pub mod error;
 pub mod gateway;
@@ -16,6 +17,7 @@ pub mod registry;
 pub mod routes;
 pub mod subprocess;
 
+pub use engine_conn::{EngineConn, EngineConnError, EngineConnResolver};
 pub use launcher::KernelLauncher;
 pub use manager::{KernelManager, KernelStatus};
 pub use notebook_kernels::NotebookKernelStore;
