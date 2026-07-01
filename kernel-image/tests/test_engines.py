@@ -110,6 +110,34 @@ def test_trino_conn_factory_wires_jwt_and_url(monkeypatch):
     assert engine_calls["connect_args"]["auth"] == ("AUTH", "JWT")
 
 
+def test_lenenc_boundaries():
+    assert E._lenenc(250) == b"\xfa"
+    assert E._lenenc(251) == b"\xfc\xfb\x00"
+    assert E._lenenc(65535) == b"\xfc\xff\xff"
+    assert E._lenenc(65536) == b"\xfd\x00\x00\x01"
+    assert E._lenenc(16777216) == b"\xfe\x00\x00\x00\x01\x00\x00\x00\x00"
+
+
+def test_openid_handler_writes_jwt_frame():
+    written = {}
+
+    class _Reply:
+        def check_error(self):
+            pass
+
+    class _Con:
+        def write_packet(self, data):
+            written["data"] = data
+
+        def _read_packet(self):
+            return _Reply()
+
+    Handler = E._openid_handler("mytoken")
+    handler = Handler(_Con())
+    handler.authenticate(None)
+    assert written["data"] == b"\x01" + E._lenenc(len(b"mytoken")) + b"mytoken"
+
+
 def test_starrocks_builds_read_sql_with_jwt(monkeypatch):
     import sys
     env = {"EGRET_API_URL": "http://egret", "EGRET_KERNEL_TOKEN": "kt"}
