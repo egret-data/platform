@@ -1,7 +1,7 @@
 import Editor from "@monaco-editor/react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ArrowDown, ArrowUp, Loader2, Play, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, Loader2, Play, Trash2 } from "lucide-react";
 
 import type { Cell, CellType, EngineOption } from "@/api/notebooks";
 import { Button } from "@/components/ui/button";
@@ -14,6 +14,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 export interface CellEditorProps {
   cell: Cell;
@@ -27,6 +33,8 @@ export interface CellEditorProps {
   onRun?: () => void;
   running?: boolean;
   outputs?: CellOutput[];
+  onRunAbove?: () => void;
+  onRunBelow?: () => void;
 }
 
 export function CellEditor({
@@ -41,6 +49,8 @@ export function CellEditor({
   onRun,
   running,
   outputs,
+  onRunAbove,
+  onRunBelow,
 }: CellEditorProps) {
   const monacoLanguage = cell.cell_type === "sql" ? "sql" : "python";
 
@@ -122,6 +132,28 @@ export function CellEditor({
             )}
             Run
           </Button>
+          {cell.cell_type !== "markdown" && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-7 w-7"
+                  aria-label="Run options"
+                >
+                  <ChevronDown className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem disabled={!onRunAbove} onClick={onRunAbove}>
+                  Run all above
+                </DropdownMenuItem>
+                <DropdownMenuItem disabled={!onRunBelow} onClick={onRunBelow}>
+                  Run all below
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
       </div>
 

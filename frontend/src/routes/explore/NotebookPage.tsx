@@ -54,6 +54,8 @@ interface ManagedCellProps {
   >;
   /** Best-effort seed from the active-executions registry at mount. */
   initialRunning?: boolean;
+  onRunAbove?: () => void;
+  onRunBelow?: () => void;
 }
 
 function ManagedCell({
@@ -67,6 +69,8 @@ function ManagedCell({
   engines,
   runners,
   initialRunning,
+  onRunAbove,
+  onRunBelow,
 }: ManagedCellProps) {
   const [source, setSource] = useState(cell.source);
   // Restore-on-load: seed outputs from the persisted last_output.
@@ -150,6 +154,8 @@ function ManagedCell({
       onRun={cell.cell_type === "markdown" ? undefined : handleRun}
       running={running}
       outputs={outputs}
+      onRunAbove={onRunAbove}
+      onRunBelow={onRunBelow}
     />
   );
 }
@@ -283,6 +289,13 @@ export default function NotebookPage() {
     }
   }
 
+  async function runSlice(from: number, to: number) {
+    const slice = sortedCells.slice(from, to).filter((c) => c.cell_type !== "markdown");
+    for (const c of slice) {
+      await runners.current[c.id]?.run();
+    }
+  }
+
   function clearAll() {
     sortedCells.forEach((c) => runners.current[c.id]?.clear());
   }
@@ -359,7 +372,7 @@ export default function NotebookPage() {
 
       {/* Cells */}
       <div className="flex flex-col gap-3">
-        {sortedCells.map((cell) => (
+        {sortedCells.map((cell, index) => (
           <ManagedCell
             key={cell.id}
             cell={cell}
@@ -372,6 +385,8 @@ export default function NotebookPage() {
             engines={runtime.data?.engines}
             runners={runners}
             initialRunning={runningSet.has(cell.id)}
+            onRunAbove={index > 0 ? () => runSlice(0, index) : undefined}
+            onRunBelow={index < sortedCells.length - 1 ? () => runSlice(index + 1, sortedCells.length) : undefined}
           />
         ))}
       </div>

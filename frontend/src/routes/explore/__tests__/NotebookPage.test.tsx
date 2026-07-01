@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -497,5 +498,97 @@ describe("NotebookPage", () => {
     // The code cell's Run button is disabled (running) without any click.
     const runButtons = screen.getAllByRole("button", { name: /^run$/i });
     expect(runButtons[0]).toBeDisabled();
+  });
+
+  // ── Per-cell run above / run below ────────────────────────────────────────────
+
+  const cellA = {
+    id: "cell-a",
+    cell_type: "code" as const,
+    source: "a",
+    cell_order: 0,
+    execution_count: null,
+    last_output: null,
+    last_execution_time_ms: null,
+    sql_target: null,
+  };
+  const cellB = {
+    id: "cell-b",
+    cell_type: "code" as const,
+    source: "b",
+    cell_order: 1,
+    execution_count: null,
+    last_output: null,
+    last_execution_time_ms: null,
+    sql_target: null,
+  };
+  const cellC = {
+    id: "cell-c",
+    cell_type: "code" as const,
+    source: "c",
+    cell_order: 2,
+    execution_count: null,
+    last_output: null,
+    last_execution_time_ms: null,
+    sql_target: null,
+  };
+
+  function renderThreeCells() {
+    notebookMock.mockReturnValue({
+      data: { ...mockNotebook, cells: [cellA, cellB, cellC] },
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    // DropdownMenu portal uses findByText (async) which needs real timers.
+    vi.useRealTimers();
+    const user = userEvent.setup();
+    renderAt();
+    return { user };
+  }
+
+  it("'Run all above' executes only cells before the target", async () => {
+    const { user } = renderThreeCells();
+    // Three code cells → three "Run options" triggers
+    const triggers = screen.getAllByRole("button", { name: "Run options" });
+    // Open middle cell's (index 1 = cell-b) dropdown
+    await user.click(triggers[1]);
+    // Click the menu item
+    await user.click(await screen.findByText("Run all above"));
+    // Only cell-a should have been executed (the one above cell-b)
+    expect(kernelExecute).toHaveBeenCalledTimes(1);
+    expect(kernelExecute).toHaveBeenCalledWith("cell-a", expect.any(String), expect.any(Object));
+  });
+
+  it("'Run all below' executes only cells after the target", async () => {
+    const { user } = renderThreeCells();
+    const triggers = screen.getAllByRole("button", { name: "Run options" });
+    // Open middle cell's (index 1 = cell-b) dropdown
+    await user.click(triggers[1]);
+    // Click the menu item
+    await user.click(await screen.findByText("Run all below"));
+    // Only cell-c should have been executed (the one below cell-b)
+    expect(kernelExecute).toHaveBeenCalledTimes(1);
+    expect(kernelExecute).toHaveBeenCalledWith("cell-c", expect.any(String), expect.any(Object));
+  });
+
+  it("'Run all above' item is disabled for the first cell", async () => {
+    const { user } = renderThreeCells();
+    const triggers = screen.getAllByRole("button", { name: "Run options" });
+    // Open first cell's (index 0 = cell-a) dropdown
+    await user.click(triggers[0]);
+    const item = await screen.findByText("Run all above");
+    // Radix sets data-disabled on disabled DropdownMenuItems
+    expect(item).toHaveAttribute("data-disabled");
+  });
+
+  it("'Run all below' item is disabled for the last cell", async () => {
+    const { user } = renderThreeCells();
+    const triggers = screen.getAllByRole("button", { name: "Run options" });
+    // Open last cell's (index 2 = cell-c) dropdown
+    await user.click(triggers[2]);
+    const item = await screen.findByText("Run all below");
+    // Radix sets data-disabled on disabled DropdownMenuItems
+    expect(item).toHaveAttribute("data-disabled");
   });
 });
