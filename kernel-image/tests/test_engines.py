@@ -336,3 +336,43 @@ def test_write_iceberg_uses_existing_table(monkeypatch):
     out = E.write_iceberg(df, "notebook_bob.orders")
     assert out == "WRITE_RESULT"
     assert df.__class__.last == {"tbl": "EXISTING_TBL", "mode": "append"}
+
+
+def test_write_table_trino_wires_write_sql_with_conn_and_mode():
+    # write_table goes THROUGH the engine (df.write_sql), reusing the same
+    # governed Trino connection factory as trino() — no direct catalog access.
+    env = {"EGRET_API_URL": "http://egret", "EGRET_KERNEL_TOKEN": "kt"}
+    cache = {"trino": {"jwt": _mk_jwt("tester"), "expires_at": "2999-01-01T00:00:00Z",
+                       "kind": "trino", "host": "trino", "port": 8443}}
+    captured = {}
+
+    class _DF:
+        def write_sql(self, table, conn, write_mode="append", column_types=None):
+            captured.update(table=table, conn=conn, mode=write_mode, column_types=column_types)
+            return "METRICS"
+
+    out = E.write_table(_DF(), "lakehouse.s.t", engine="trino",
+                        mode="overwrite", env=env, cache=cache)
+    assert out == "METRICS"
+    assert captured["table"] == "lakehouse.s.t"
+    assert captured["mode"] == "overwrite"
+    assert callable(captured["conn"])  # a connection factory, not a live conn
+
+
+def test_write_table_dispatches_to_starrocks_conn(monkeypatch):
+    seen = {}
+
+    def _fake_sr_conn(engine="starrocks", *, env=None, cache=None):
+        seen["engine"] = engine
+        return lambda: "SR_CONN"
+
+    monkeypatch.setattr(E, "_starrocks_conn", _fake_sr_conn)
+
+    class _DF:
+        def write_sql(self, table, conn, write_mode="append", column_types=None):
+            seen["conn"] = conn()
+            return "M"
+
+    E.write_table(_DF(), "lakehouse.s.t", engine="starrocks")
+    assert seen["engine"] == "starrocks"
+    assert seen["conn"] == "SR_CONN"

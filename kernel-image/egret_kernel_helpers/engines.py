@@ -65,15 +65,15 @@ def _engine_token(engine, *, env=None, http=None, cache=None):
     return resp
 
 
-def trino(sql, *, engine="trino", env=None, cache=None):
-    """Run SQL on the workspace Trino as you, returning a lazy Daft DataFrame
-    (pushdown). Authenticated with a fresh per-user JWT."""
-    import daft
+def _trino_conn(engine="trino", *, env=None, cache=None):
+    """Build a per-connection SQLAlchemy factory for the workspace Trino,
+    authenticated with a fresh per-user JWT over TLS. Shared by ``trino()`` (read)
+    and ``write_table()`` (write) so both go through the same governed engine."""
 
     def _conn():
         # Fetch the token per-connection: Daft may open connections later and
         # across partitions, so each picks up a cache-refreshed JWT rather than
-        # one frozen at trino() call time.
+        # one frozen at call time.
         tok = _engine_token(engine, env=env, cache=cache)
         from sqlalchemy import create_engine
         from trino.auth import JWTAuthentication
@@ -94,7 +94,15 @@ def trino(sql, *, engine="trino", env=None, cache=None):
         )
         return eng.connect()
 
-    return daft.read_sql(sql, _conn)
+    return _conn
+
+
+def trino(sql, *, engine="trino", env=None, cache=None):
+    """Run SQL on the workspace Trino as you, returning a lazy Daft DataFrame
+    (pushdown). Authenticated with a fresh per-user JWT."""
+    import daft
+
+    return daft.read_sql(sql, _trino_conn(engine, env=env, cache=cache))
 
 
 def _jwt_username(jwt):
@@ -138,11 +146,11 @@ def _openid_handler(jwt):
     return _Handler
 
 
-def starrocks(sql, *, engine="starrocks", env=None, cache=None):
-    """Run SQL on the workspace StarRocks as you, returning a lazy Daft DataFrame
-    (pushdown). Authenticated with a fresh per-user JWT over the MySQL protocol via
-    a custom OpenID-Connect auth-plugin handler."""
-    import daft
+def _starrocks_conn(engine="starrocks", *, env=None, cache=None):
+    """Build a per-connection SQLAlchemy factory for the workspace StarRocks,
+    authenticated with a fresh per-user JWT over the MySQL protocol via a custom
+    OpenID-Connect auth-plugin handler. Shared by ``starrocks()`` and
+    ``write_table()``."""
 
     def _conn():
         import pymysql
@@ -161,7 +169,46 @@ def starrocks(sql, *, engine="starrocks", env=None, cache=None):
         eng = create_engine("mysql+pymysql://", creator=_creator)
         return eng.connect()
 
-    return daft.read_sql(sql, _conn)
+    return _conn
+
+
+def starrocks(sql, *, engine="starrocks", env=None, cache=None):
+    """Run SQL on the workspace StarRocks as you, returning a lazy Daft DataFrame
+    (pushdown). Authenticated with a fresh per-user JWT over the MySQL protocol via
+    a custom OpenID-Connect auth-plugin handler."""
+    import daft
+
+    return daft.read_sql(sql, _starrocks_conn(engine, env=env, cache=cache))
+
+
+def write_table(df, table, *, engine="trino", mode="overwrite",
+                column_types=None, env=None, cache=None):
+    """Write a Daft DataFrame back to the shared catalog THROUGH the query engine,
+    so the write is governed by the SAME Ranger policies as your reads — one
+    authorization plane for read and write.
+
+    The notebook never touches the Iceberg REST catalog directly: the engine
+    (Trino/StarRocks) performs the INSERT into the governed catalog, and Ranger
+    enforces column/row/table policy on the write exactly as on a read.
+
+    Args:
+        df:      a Daft DataFrame to persist.
+        table:   the engine-qualified target, e.g. ``"lakehouse.analytics.summary"``.
+        engine:  ``"trino"`` (default) or ``"starrocks"``.
+        mode:    ``"append"`` | ``"overwrite"`` | ``"fail"`` (default ``"overwrite"``).
+        column_types: optional {column: SQLAlchemy type} overrides for table creation.
+
+    Returns Daft's single-row write-metrics DataFrame (rows/bytes written).
+
+    Note: `write_table` materializes each partition via pandas → `to_sql`; it is
+    intended for EDA-scale outputs (summaries, feature tables), not bulk loads.
+    """
+    conn = (
+        _trino_conn(engine, env=env, cache=cache)
+        if engine == "trino"
+        else _starrocks_conn(engine, env=env, cache=cache)
+    )
+    return df.write_sql(table, conn, write_mode=mode, column_types=column_types)
 
 
 def iceberg(table, *, env=None):
