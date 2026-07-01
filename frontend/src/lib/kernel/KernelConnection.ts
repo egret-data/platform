@@ -84,5 +84,15 @@ export class KernelConnection {
     this.ws.send(JSON.stringify(msg));
   }
 
+  /** Interrupt the running kernel (best-effort; requires a connected kernel). */
+  async interrupt(): Promise<void> {
+    await apiFetch(this.path("/interrupt"), { method: "POST" });
+  }
+
+  /** Restart the kernel. The channels WS drops → onclose flushes pending (clears running). */
+  async restart(): Promise<void> {
+    await apiFetch(this.path("/restart"), { method: "POST" });
+  }
+
   disconnect(): void { this.ws?.close(); this.ws = null; this.ready = null; this.pending.clear(); }
 }

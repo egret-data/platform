@@ -87,4 +87,17 @@ describe("KernelConnection", () => {
     expect(() => ws.onmessage!({ data: "not json {{{" })).not.toThrow();
     expect(outputs).toEqual([]);
   });
+
+  it("interrupt and restart POST the kernel endpoints", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init: any) => {
+      calls.push(`${init?.method ?? "GET"} ${url}`);
+      return new Response("{}", { status: 200 });
+    }));
+    const kc = new KernelConnection("ws1", "nb1");
+    await kc.interrupt();
+    await kc.restart();
+    expect(calls.some((c) => c.startsWith("POST") && c.includes("/kernel/interrupt"))).toBe(true);
+    expect(calls.some((c) => c.startsWith("POST") && c.includes("/kernel/restart"))).toBe(true);
+  });
 });
