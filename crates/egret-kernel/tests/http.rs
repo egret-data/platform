@@ -57,9 +57,6 @@ impl NamespaceProvisioner for FakeProvisioner {
 /// Returns a canned engine token regardless of user.
 struct StubMinter;
 
-/// Always returns `BrokerError::NoRefreshToken` — simulates a non-OIDC user.
-struct NoTokenMinter;
-
 #[async_trait::async_trait]
 impl egret_notebook::engine_token::EngineTokenMinter for StubMinter {
     async fn mint(
@@ -71,17 +68,6 @@ impl egret_notebook::engine_token::EngineTokenMinter for StubMinter {
             access_token: "stub.jwt".into(),
             expires_at: chrono::DateTime::<chrono::Utc>::from_timestamp(4102444800, 0).unwrap(),
         })
-    }
-}
-
-#[async_trait::async_trait]
-impl egret_notebook::engine_token::EngineTokenMinter for NoTokenMinter {
-    async fn mint(
-        &self,
-        _u: uuid::Uuid,
-    ) -> Result<egret_notebook::engine_token::EngineToken, egret_notebook::engine_token::BrokerError>
-    {
-        Err(egret_notebook::engine_token::BrokerError::NoRefreshToken)
     }
 }
 
@@ -100,8 +86,6 @@ struct Fixture {
     owner: UserId,
     db: Db,
     launcher: Arc<FakeLauncher>,
-    /// Typed reference to the fake runner so tests can inspect captured arguments.
-    fake_runner: Arc<egret_kernel::query::FakeQueryRunner>,
 }
 
 async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
@@ -161,7 +145,6 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         engine_minter: Arc::new(StubMinter),
     };
 
-    let fake_runner = Arc::new(egret_kernel::query::FakeQueryRunner::default());
     let state = KernelState {
         manager,
         notebook: notebook_state,
@@ -171,7 +154,6 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         api_url: "http://localhost:3000".into(),
         notebook_kernels: egret_kernel::NotebookKernelStore::new(db.clone()),
         proxy: Arc::new(egret_kernel::BackendWsProxy),
-        query_runner: fake_runner.clone(),
         engine_minter: Arc::new(StubMinter),
         engine_conn: Arc::new(egret_kernel::engine_conn::FakeEngineConnResolver {
             conn: Some(egret_kernel::engine_conn::EngineConn {
@@ -197,7 +179,6 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         owner,
         db,
         launcher,
-        fake_runner,
     }
 }
 
@@ -1122,51 +1103,6 @@ async fn channels_ready_upgrades_and_resolves_kernel(pool: sqlx::PgPool) {
     );
 }
 
-// ── kernel query callback tests ───────────────────────────────────────────────
-
-/// Valid token + enabled engine → 200 with columns/rows arrays.
-#[sqlx::test(migrations = "../../migrations")]
-async fn kernel_query_runs_for_valid_token_and_enabled_engine(pool: sqlx::PgPool) {
-    let f = setup(pool).await;
-    let dbid = seed_enabled_engine(&f.db, f.ws).await;
-    let token = mint_kernel_token(&f.db, f.ws, f.owner).await;
-
-    let resp = f
-        .app
-        .clone()
-        .oneshot(bearer_post(
-            "/kernel/query",
-            &token,
-            serde_json::json!({ "engine": dbid.to_string(), "sql": "SELECT 1" }),
-        ))
-        .await
-        .unwrap();
-    let (status, json) = into_json(resp).await;
-    assert_eq!(status, StatusCode::OK, "valid query → 200; body={json}");
-    assert!(
-        json["columns"].is_array() && json["rows"].is_array(),
-        "body={json}"
-    );
-}
-
-/// Bad/unknown token → 401.
-#[sqlx::test(migrations = "../../migrations")]
-async fn kernel_query_rejects_bad_token(pool: sqlx::PgPool) {
-    let f = setup(pool).await;
-    seed_enabled_engine(&f.db, f.ws).await;
-    let resp = f
-        .app
-        .clone()
-        .oneshot(bearer_post(
-            "/kernel/query",
-            "egk_not_a_real_token",
-            serde_json::json!({ "engine": "trino-dev", "sql": "SELECT 1" }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "bad token → 401");
-}
-
 // ── notebook-runtime token refresh tests ──────────────────────────────────────
 
 /// Valid kernel token → 200 with the minted engine token body.
@@ -1271,65 +1207,6 @@ async fn callback_routes_are_csrf_exempt_but_session_routes_are_not(pool: sqlx::
     );
 }
 
-/// Valid token → handler mints the engine JWT and passes it to the runner.
-/// The FakeQueryRunner must capture `bearer == Some("stub.jwt")`.
-#[sqlx::test(migrations = "../../migrations")]
-async fn kernel_query_passes_bearer_to_runner(pool: sqlx::PgPool) {
-    let f = setup(pool).await;
-    let dbid = seed_enabled_engine(&f.db, f.ws).await;
-    let token = mint_kernel_token(&f.db, f.ws, f.owner).await;
-
-    let resp = f
-        .app
-        .clone()
-        .oneshot(bearer_post(
-            "/kernel/query",
-            &token,
-            serde_json::json!({ "engine": dbid.to_string(), "sql": "SELECT 1" }),
-        ))
-        .await
-        .unwrap();
-    let (status, json) = into_json(resp).await;
-    assert_eq!(status, StatusCode::OK, "valid query → 200; body={json}");
-
-    // The StubMinter always returns "stub.jwt"; the runner must have received it.
-    let captured = f.fake_runner.last_bearer.lock().unwrap().clone();
-    assert_eq!(
-        captured,
-        Some(Some("stub.jwt".to_string())),
-        "FakeQueryRunner must capture bearer=Some(\"stub.jwt\"); got {captured:?}"
-    );
-}
-
-/// User with no stored OIDC refresh token → kernel_query returns 401.
-#[sqlx::test(migrations = "../../migrations")]
-async fn kernel_query_returns_401_for_no_refresh_token(pool: sqlx::PgPool) {
-    let f = setup(pool).await;
-    let dbid = seed_enabled_engine(&f.db, f.ws).await;
-    let token = mint_kernel_token(&f.db, f.ws, f.owner).await;
-
-    // Build a state with a minter that always returns NoRefreshToken.
-    let mut state = f.state.clone();
-    state.engine_minter = Arc::new(NoTokenMinter);
-    let app = kernel_router()
-        .merge(egret_kernel::kernel_callback_router())
-        .with_state(state);
-
-    let resp = app
-        .oneshot(bearer_post(
-            "/kernel/query",
-            &token,
-            serde_json::json!({ "engine": dbid.to_string(), "sql": "SELECT 1" }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::UNAUTHORIZED,
-        "no refresh token → 401"
-    );
-}
-
 // ── engine-token callback tests ───────────────────────────────────────────────
 
 /// Valid kernel token + enabled engine → 200 with a JWT and the engine coords.
@@ -1415,37 +1292,5 @@ async fn engine_token_disabled_engine_is_404(pool: sqlx::PgPool) {
         resp.status(),
         StatusCode::NOT_FOUND,
         "disabled engine → 404"
-    );
-}
-
-/// Engine present but NOT enabled for notebooks → 403.
-#[sqlx::test(migrations = "../../migrations")]
-async fn kernel_query_rejects_disabled_engine(pool: sqlx::PgPool) {
-    let f = setup(pool).await;
-    // A database NOT enabled for notebooks (no notebook_engine_access row).
-    let dbid: Uuid = sqlx::query_scalar(
-        "INSERT INTO databases (workspace_id, name, engine, host, port) \
-         VALUES ($1,'secret','trino','localhost',8080) RETURNING id",
-    )
-    .bind(f.ws.0)
-    .fetch_one(&f.db.pool)
-    .await
-    .unwrap();
-    let token = mint_kernel_token(&f.db, f.ws, f.owner).await;
-
-    let resp = f
-        .app
-        .clone()
-        .oneshot(bearer_post(
-            "/kernel/query",
-            &token,
-            serde_json::json!({ "engine": dbid.to_string(), "sql": "SELECT 1" }),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::FORBIDDEN,
-        "disabled engine → 403"
     );
 }

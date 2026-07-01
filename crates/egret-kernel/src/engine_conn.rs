@@ -1,7 +1,6 @@
 //! The engine-connection seam: resolve a database_id to the coordinates a kernel
 //! needs to open a direct Daft connection. Concrete impl injected from egret-bin
-//! (keeps this crate free of an egret-database dependency), mirroring
-//! `NotebookQueryRunner`.
+//! (keeps this crate free of an egret-database dependency).
 
 use async_trait::async_trait;
 use uuid::Uuid;
