@@ -1,12 +1,9 @@
-"""Dataframe-first engine helpers: iceberg(), trino(), starrocks() — direct Daft access as the logged-in user."""
+"""Dataframe-first engine helpers: trino(), starrocks() — direct Daft access as the logged-in user."""
 import base64
 import datetime as _dt
 import json
 import os
 import struct
-
-from .catalog import catalog
-from .runtime import load_runtime
 
 _REFRESH_MARGIN = _dt.timedelta(seconds=30)
 
@@ -65,15 +62,19 @@ def _engine_token(engine, *, env=None, http=None, cache=None):
     return resp
 
 
-def trino(sql, *, engine="trino", env=None, cache=None):
-    """Run SQL on the workspace Trino as you, returning a lazy Daft DataFrame
-    (pushdown). Authenticated with a fresh per-user JWT."""
-    import daft
+def _trino_conn(engine="trino", *, env=None, cache=None, catalog=None, schema=None):
+    """Build a per-connection SQLAlchemy factory for the workspace Trino,
+    authenticated with a fresh per-user JWT over TLS. Shared by ``trino()`` (read)
+    and ``write_table()`` (write) so both go through the same governed engine.
+
+    When ``catalog``/``schema`` are given they become the connection's default
+    catalog/schema (``trino://…/catalog/schema``) — required by ``write_table``
+    because Daft's SQL writer passes the bare table name to ``pandas.to_sql``."""
 
     def _conn():
         # Fetch the token per-connection: Daft may open connections later and
         # across partitions, so each picks up a cache-refreshed JWT rather than
-        # one frozen at trino() call time.
+        # one frozen at call time.
         tok = _engine_token(engine, env=env, cache=cache)
         from sqlalchemy import create_engine
         from trino.auth import JWTAuthentication
@@ -81,11 +82,16 @@ def trino(sql, *, engine="trino", env=None, cache=None):
         # EGRET_ENGINE_TLS_INSECURE=1 to accept the self-signed Trino cert.
         _env = env or os.environ
         insecure = _env.get("EGRET_ENGINE_TLS_INSECURE", "").lower() in ("1", "true", "yes")
+        # The username is the real user from the JWT (preferred_username) —
+        # Trino sends it as X-Trino-User for the governed path. http_scheme="https"
+        # is required: egret enforces Trino JWT auth over TLS.
+        url = f"trino://{_jwt_username(tok['jwt'])}@{tok['host']}:{tok['port']}"
+        if catalog and schema:
+            url += f"/{catalog}/{schema}"
+        elif catalog:
+            url += f"/{catalog}"
         eng = create_engine(
-            # The username is the real user from the JWT (preferred_username) —
-            # Trino sends it as X-Trino-User for the governed path. http_scheme="https"
-            # is required: egret enforces Trino JWT auth over TLS.
-            f"trino://{_jwt_username(tok['jwt'])}@{tok['host']}:{tok['port']}",
+            url,
             connect_args={
                 "auth": JWTAuthentication(tok["jwt"]),
                 "http_scheme": "https",
@@ -94,7 +100,15 @@ def trino(sql, *, engine="trino", env=None, cache=None):
         )
         return eng.connect()
 
-    return daft.read_sql(sql, _conn)
+    return _conn
+
+
+def trino(sql, *, engine="trino", env=None, cache=None):
+    """Run SQL on the workspace Trino as you, returning a lazy Daft DataFrame
+    (pushdown). Authenticated with a fresh per-user JWT."""
+    import daft
+
+    return daft.read_sql(sql, _trino_conn(engine, env=env, cache=cache))
 
 
 def _jwt_username(jwt):
@@ -138,11 +152,13 @@ def _openid_handler(jwt):
     return _Handler
 
 
-def starrocks(sql, *, engine="starrocks", env=None, cache=None):
-    """Run SQL on the workspace StarRocks as you, returning a lazy Daft DataFrame
-    (pushdown). Authenticated with a fresh per-user JWT over the MySQL protocol via
-    a custom OpenID-Connect auth-plugin handler."""
-    import daft
+def _starrocks_conn(engine="starrocks", *, env=None, cache=None, catalog=None, schema=None):
+    """Build a per-connection SQLAlchemy factory for the workspace StarRocks,
+    authenticated with a fresh per-user JWT over the MySQL protocol via a custom
+    OpenID-Connect auth-plugin handler. Shared by ``starrocks()`` and
+    ``write_table()``. ``schema`` (when given) is the default database; StarRocks
+    external-catalog selection (``catalog``) is left to the caller's fully-qualified
+    names / ``SET CATALOG`` (see note in ``write_table``)."""
 
     def _conn():
         import pymysql
@@ -152,48 +168,91 @@ def starrocks(sql, *, engine="starrocks", env=None, cache=None):
         def _creator():
             # StarRocks rejects a mismatched login: the connection user MUST equal
             # the JWT principal (preferred_username); the JWT then carries auth.
-            return pymysql.connect(
+            kwargs = dict(
                 host=tok["host"], port=tok["port"],
                 user=_jwt_username(tok["jwt"]), password="",
                 auth_plugin_map={_OPENID_PLUGIN: _openid_handler(tok["jwt"])},
             )
+            if schema:
+                kwargs["database"] = schema
+            return pymysql.connect(**kwargs)
 
         eng = create_engine("mysql+pymysql://", creator=_creator)
         return eng.connect()
 
-    return daft.read_sql(sql, _conn)
+    return _conn
 
 
-def iceberg(table, *, env=None):
-    """Read an Iceberg table from your notebook catalog as a lazy Daft DataFrame
-    (native, pushdown). `table` is "namespace.name" (a bare name defaults to your
-    private `notebook_{username}` namespace)."""
+def starrocks(sql, *, engine="starrocks", env=None, cache=None):
+    """Run SQL on the workspace StarRocks as you, returning a lazy Daft DataFrame
+    (pushdown). Authenticated with a fresh per-user JWT over the MySQL protocol via
+    a custom OpenID-Connect auth-plugin handler."""
     import daft
-    tbl = catalog().load_table(_resolve_identifier(table, env=env))
-    return daft.read_iceberg(tbl)
+
+    return daft.read_sql(sql, _starrocks_conn(engine, env=env, cache=cache))
 
 
-def _resolve_identifier(table, *, env=None):
-    """Resolve a table ref to "namespace.name". A bare name defaults to your
-    private notebook namespace (`notebook_{username}`)."""
-    if "." in table:
-        return table
-    rt = load_runtime(os.environ if env is None else env)
-    ns = rt.catalog.namespace if rt is not None else "default"
-    return f"{ns}.{table}"
+def _split_qualified(table):
+    """Split a fully-qualified ``catalog.schema.table`` into its three parts.
+
+    write_table requires the 3-part form because the engine INSERT needs an
+    explicit catalog + schema (Daft's SQL writer carries no catalog context)."""
+    parts = table.split(".")
+    if len(parts) != 3:
+        raise ValueError(
+            "egret: write_table expects a fully-qualified 'catalog.schema.table' "
+            f"name, got {table!r} "
+            "(e.g. write_table(df, 'lakehouse.analytics.summary'))."
+        )
+    return parts[0], parts[1], parts[2]
 
 
-def write_iceberg(df, table, *, mode="append", env=None):
-    """Write a Daft DataFrame to your notebook Iceberg catalog (read-write).
-    `table` is "namespace.name" (a bare name defaults to your private
-    `notebook_{username}` namespace). Auto-creates the table from df's schema if
-    it doesn't exist. mode="append" (default) | "overwrite". Returns the Daft
-    write result."""
-    from pyiceberg.exceptions import NoSuchTableError
-    cat = catalog()
-    ident = _resolve_identifier(table, env=env)
-    try:
-        tbl = cat.load_table(ident)
-    except NoSuchTableError:
-        tbl = cat.create_table(ident, df.schema().to_pyarrow_schema())
-    return df.write_iceberg(tbl, mode=mode)
+def write_table(df, table, *, engine="trino", mode="overwrite",
+                column_types=None, env=None, cache=None):
+    """Write a Daft DataFrame back to the shared catalog THROUGH the query engine,
+    so the write is governed by the SAME policies as your reads — one authorization
+    plane for read and write.
+
+    The notebook never touches the Iceberg REST catalog directly: the engine
+    (Trino/StarRocks) performs the INSERT into the governed catalog, and policy is
+    enforced on the write exactly as on a read.
+
+    Args:
+        df:      a Daft DataFrame to persist.
+        table:   the fully-qualified target ``"catalog.schema.table"``,
+                 e.g. ``"lakehouse.analytics.summary"``.
+        engine:  ``"trino"`` (default, spike-validated) or ``"starrocks"``.
+        mode:    ``"append"`` | ``"overwrite"`` | ``"fail"`` (default ``"overwrite"``).
+        column_types: optional {column: SQLAlchemy type} overrides for table creation.
+
+    Returns Daft's single-row write-metrics DataFrame (rows/bytes written).
+
+    Notes:
+        * Daft's SQL writer passes the bare table name to ``pandas.to_sql``, so the
+          catalog + schema are set as the connection's defaults (``…/catalog/schema``).
+        * ``write_sql`` creates the table but NOT the schema; for Trino we first
+          ``CREATE SCHEMA IF NOT EXISTS``. StarRocks' external-catalog write is not
+          yet spike-validated — prefer ``engine="trino"``.
+        * Each partition is materialized via pandas → ``to_sql``; intended for
+          EDA-scale outputs (summaries, feature tables), not bulk loads.
+    """
+    catalog, schema, name = _split_qualified(table)
+    conn_for = _trino_conn if engine == "trino" else _starrocks_conn
+
+    if engine == "trino":
+        # write_sql creates the table but not the namespace — ensure it exists.
+        from sqlalchemy import text
+        ddl = conn_for(engine, env=env, cache=cache, catalog=catalog)()
+        try:
+            ddl.execute(text(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}"))
+            try:
+                ddl.commit()
+            except Exception:
+                pass
+        finally:
+            ddl.close()
+
+    # The connection carries the default catalog+schema; write_sql receives the
+    # BARE table name (SQLDataSink hands it straight to pandas.to_sql).
+    conn = conn_for(engine, env=env, cache=cache, catalog=catalog, schema=schema)
+    return df.write_sql(name, conn, write_mode=mode, column_types=column_types)

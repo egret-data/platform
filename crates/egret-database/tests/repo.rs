@@ -83,7 +83,7 @@ async fn register_list_get_delete() {
     };
     let name = uniq("db");
     let secret_id = ws
-        .create(wid, &uniq("sec"), None, "pw")
+        .create(Some(wid), &uniq("sec"), None, "pw")
         .await
         .expect("create named secret");
     let db = r
@@ -137,7 +137,7 @@ async fn update_rebinds_secret() {
     };
     let name = uniq("db");
     let old = ws
-        .create(wid, &uniq("sec"), None, "old")
+        .create(Some(wid), &uniq("sec"), None, "old")
         .await
         .expect("old secret");
     let db = r
@@ -148,7 +148,7 @@ async fn update_rebinds_secret() {
 
     // Rebind to a freshly-rotated named secret.
     let new = ws
-        .create(wid, &uniq("sec"), None, "new")
+        .create(Some(wid), &uniq("sec"), None, "new")
         .await
         .expect("new secret");
     let updated = r
@@ -167,7 +167,10 @@ async fn open_secret_without_key_errors() {
         return;
     };
     // With no master key, creating the named secret itself fails (NotConfigured).
-    let err = ws.create(wid, &uniq("sec"), None, "pw").await.unwrap_err();
+    let err = ws
+        .create(Some(wid), &uniq("sec"), None, "pw")
+        .await
+        .unwrap_err();
     assert!(matches!(err, egret_secrets::SecretsError::NotConfigured));
 }
 
@@ -179,7 +182,7 @@ async fn update_without_secret_preserves_old() {
     };
     let name = uniq("db");
     let secret_id = ws
-        .create(wid, &uniq("sec"), None, "keepme")
+        .create(Some(wid), &uniq("sec"), None, "keepme")
         .await
         .expect("named secret");
     let db = r
@@ -213,7 +216,7 @@ async fn delete_leaves_named_secret() {
         return;
     };
     let secret_id = ws
-        .create(wid, &uniq("sec"), None, "pw")
+        .create(Some(wid), &uniq("sec"), None, "pw")
         .await
         .expect("named secret");
     let database = r
@@ -223,7 +226,10 @@ async fn delete_leaves_named_secret() {
     r.delete_in_workspace(wid, database.id).await.unwrap();
     // Epic B: deleting a connection drops only the reference; the shared named
     // secret (and its backing vault row) survives, with used_by back to 0.
-    let meta = ws.get_meta(wid, secret_id).await.expect("secret survives");
+    let meta = ws
+        .get_meta(Some(wid), secret_id)
+        .await
+        .expect("secret survives");
     assert_eq!(meta.used_by, 0, "reference dropped");
     let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM workspace_secrets WHERE id = $1")
         .bind(secret_id)

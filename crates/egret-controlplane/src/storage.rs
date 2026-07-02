@@ -1,0 +1,189 @@
+//! Control-plane Storage router (`/storage`), nested under `/api/control-plane`.
+//!
+//! Storage connections are GLOBAL (platform-admin only) after migration 0050;
+//! every handler gates on `require_platform_admin` and calls the global
+//! `StorageConn` CRUD on `CatalogStore`. A `new_secret` in the create/update
+//! body mints a GLOBAL named secret (`secrets.create(None, ..)`) and uses its
+//! id as the connection's `secret_ref`.
+
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::routing::get;
+use axum::{Json, Router};
+use chrono::{DateTime, Utc};
+use egret_auth::principal::Auth;
+use egret_catalog::{StorageConn, StorageConnInput};
+use egret_secrets::NewSecret;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::auth::require_platform_admin;
+use crate::error::CpError;
+use crate::CpState;
+
+/// Request body for creating/updating a global storage connection. A `new_secret`
+/// takes precedence over a provided `secret_ref`: it mints a new global named
+/// secret and binds the connection to it.
+#[derive(Debug, Deserialize)]
+pub struct StorageInput {
+    pub name: String,
+    #[serde(default)]
+    pub purpose: Option<String>,
+    pub provider: String,
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    pub region: String,
+    pub bucket: String,
+    #[serde(default)]
+    pub key_prefix: Option<String>,
+    pub access_key: String,
+    #[serde(default)]
+    pub secret_ref: Option<Uuid>,
+    #[serde(default)]
+    pub path_style: bool,
+    /// Mint a new global named secret inline and use it as `secret_ref`.
+    #[serde(default)]
+    pub new_secret: Option<NewSecret>,
+}
+
+/// Response DTO for a storage connection.
+#[derive(Debug, Serialize)]
+pub struct StorageDto {
+    pub id: Uuid,
+    pub name: String,
+    pub purpose: Option<String>,
+    pub provider: String,
+    pub endpoint: Option<String>,
+    pub region: String,
+    pub bucket: String,
+    pub key_prefix: Option<String>,
+    pub access_key: String,
+    pub path_style: bool,
+    pub secret_ref: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<StorageConn> for StorageDto {
+    fn from(c: StorageConn) -> Self {
+        StorageDto {
+            id: c.id,
+            name: c.name,
+            purpose: c.purpose,
+            provider: c.provider,
+            endpoint: c.endpoint,
+            region: c.region,
+            bucket: c.bucket,
+            key_prefix: c.key_prefix,
+            access_key: c.access_key,
+            path_style: c.path_style,
+            secret_ref: c.secret_ref,
+            created_at: c.created_at,
+        }
+    }
+}
+
+pub fn router() -> Router<CpState> {
+    Router::new()
+        .route("/storage", get(list).post(create))
+        .route("/storage/{id}", get(detail).put(update).delete(remove))
+}
+
+/// Resolve the connection's `secret_ref`: a `new_secret` mints a new GLOBAL
+/// named secret (workspace scope `None`) and wins; otherwise the provided
+/// `secret_ref` is used as-is.
+async fn resolve_secret_ref(st: &CpState, body: &StorageInput) -> Result<Option<Uuid>, CpError> {
+    match &body.new_secret {
+        Some(ns) => {
+            let id = st.secrets.create(None, &ns.name, None, &ns.value).await?;
+            Ok(Some(id))
+        }
+        None => Ok(body.secret_ref),
+    }
+}
+
+fn to_input(body: &StorageInput, secret_ref: Option<Uuid>) -> StorageConnInput {
+    StorageConnInput {
+        name: body.name.clone(),
+        purpose: body.purpose.clone(),
+        provider: body.provider.clone(),
+        endpoint: body.endpoint.clone(),
+        region: body.region.clone(),
+        bucket: body.bucket.clone(),
+        key_prefix: body.key_prefix.clone(),
+        access_key: body.access_key.clone(),
+        secret_ref,
+        path_style: body.path_style,
+    }
+}
+
+async fn list(
+    State(st): State<CpState>,
+    Auth(principal): Auth,
+) -> Result<Json<Vec<StorageDto>>, CpError> {
+    require_platform_admin(&principal)?;
+    let conns = st.storage.list_storage_conns().await?;
+    Ok(Json(conns.into_iter().map(Into::into).collect()))
+}
+
+async fn create(
+    State(st): State<CpState>,
+    Auth(principal): Auth,
+    Json(body): Json<StorageInput>,
+) -> Result<(StatusCode, Json<StorageDto>), CpError> {
+    require_platform_admin(&principal)?;
+    let secret_ref = resolve_secret_ref(&st, &body).await?;
+    let conn = st
+        .storage
+        .create_storage_conn(&to_input(&body, secret_ref))
+        .await?;
+    Ok((StatusCode::CREATED, Json(conn.into())))
+}
+
+async fn detail(
+    State(st): State<CpState>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<StorageDto>, CpError> {
+    require_platform_admin(&principal)?;
+    let conn = st
+        .storage
+        .get_storage_conn(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    Ok(Json(conn.into()))
+}
+
+async fn update(
+    State(st): State<CpState>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    Json(body): Json<StorageInput>,
+) -> Result<Json<StorageDto>, CpError> {
+    require_platform_admin(&principal)?;
+    let secret_ref = resolve_secret_ref(&st, &body).await?;
+    let updated = st
+        .storage
+        .update_storage_conn(id, &to_input(&body, secret_ref))
+        .await?;
+    if !updated {
+        return Err(CpError::NotFound);
+    }
+    let conn = st
+        .storage
+        .get_storage_conn(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    Ok(Json(conn.into()))
+}
+
+async fn remove(
+    State(st): State<CpState>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, CpError> {
+    require_platform_admin(&principal)?;
+    if !st.storage.delete_storage_conn(id).await? {
+        return Err(CpError::NotFound);
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}

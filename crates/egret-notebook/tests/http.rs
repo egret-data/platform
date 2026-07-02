@@ -24,33 +24,15 @@ use axum::http::{Request as HttpRequest, StatusCode};
 use axum::response::Response;
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
-use egret_catalog::service::CatalogStore;
 use egret_core::ids::{UserId, WorkspaceId};
 use egret_metastore::Db;
-use egret_notebook::error::NotebookApiError;
-use egret_notebook::{notebook_router, NamespaceProvisioner, NotebookState, NotebookStore};
+use egret_notebook::{notebook_router, NotebookState, NotebookStore};
 use egret_workspace::members::MemberRepo;
 use egret_workspace::rbac::Authorizer;
 use egret_workspace::workspaces::WorkspaceRepo;
 use http_body_util::BodyExt;
 use tower::ServiceExt; // oneshot
 use uuid::Uuid;
-
-// ── Fake NamespaceProvisioner ────────────────────────────────────────────────
-
-/// Always succeeds (no lakekeeper in unit tests).
-struct FakeProvisioner;
-
-#[async_trait::async_trait]
-impl NamespaceProvisioner for FakeProvisioner {
-    async fn ensure_namespace(
-        &self,
-        _warehouse_id: Uuid,
-        _namespace: &str,
-    ) -> Result<(), NotebookApiError> {
-        Ok(())
-    }
-}
 
 // ── Fake EngineTokenMinter ───────────────────────────────────────────────────
 
@@ -127,8 +109,6 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         sessions: sessions.clone(),
         workspaces,
         authz: Authorizer::new(db.clone()),
-        catalog: CatalogStore::new(db.clone()),
-        provisioner: Arc::new(FakeProvisioner),
         users: UserRepo::new(db.clone()),
         catalog_base_url: "http://localhost:8181".into(),
         engine_minter: Arc::new(FakeEngineMinter),
@@ -1013,7 +993,7 @@ async fn put_settings_enables_and_get_reflects(pool: sqlx::PgPool) {
             "PUT",
             &format!("/ws/{}/notebook-settings", f.slug_a),
             &token,
-            Some(serde_json::json!({ "engine_ids": [db_id], "catalog_ids": [] })),
+            Some(serde_json::json!({ "engine_ids": [db_id] })),
         ))
         .await
         .unwrap();
@@ -1065,7 +1045,7 @@ async fn put_settings_removes_engine_on_second_put(pool: sqlx::PgPool) {
             "PUT",
             &format!("/ws/{}/notebook-settings", f.slug_a),
             &token,
-            Some(serde_json::json!({ "engine_ids": [db_id], "catalog_ids": [] })),
+            Some(serde_json::json!({ "engine_ids": [db_id] })),
         ))
         .await
         .unwrap();
@@ -1078,7 +1058,7 @@ async fn put_settings_removes_engine_on_second_put(pool: sqlx::PgPool) {
             "PUT",
             &format!("/ws/{}/notebook-settings", f.slug_a),
             &token,
-            Some(serde_json::json!({ "engine_ids": [], "catalog_ids": [] })),
+            Some(serde_json::json!({ "engine_ids": [] })),
         ))
         .await
         .unwrap();
@@ -1110,7 +1090,7 @@ async fn put_settings_cross_workspace_engine_rejected(pool: sqlx::PgPool) {
             "PUT",
             &format!("/ws/{}/notebook-settings", f.slug_a),
             &token,
-            Some(serde_json::json!({ "engine_ids": [db_b], "catalog_ids": [] })),
+            Some(serde_json::json!({ "engine_ids": [db_b] })),
         ))
         .await
         .unwrap();
@@ -1118,83 +1098,6 @@ async fn put_settings_cross_workspace_engine_rejected(pool: sqlx::PgPool) {
         resp.status(),
         StatusCode::BAD_REQUEST,
         "cross-workspace engine id must be rejected with 400"
-    );
-}
-
-/// Seed a workspace warehouse ("catalog") for `ws_id`. Returns its id.
-async fn seed_warehouse_http(db: &Db, ws_id: WorkspaceId) -> Uuid {
-    sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO workspace_warehouses (workspace_id, warehouse_id, name) \
-         VALUES ($1, $2, $3) RETURNING id",
-    )
-    .bind(ws_id.0)
-    .bind(Uuid::new_v4())
-    .bind(format!("httpwh-{}", Uuid::new_v4().simple()))
-    .fetch_one(&db.pool)
-    .await
-    .expect("insert warehouse for http test")
-}
-
-#[sqlx::test(migrations = "../../migrations")]
-async fn put_settings_cross_workspace_catalog_rejected(pool: sqlx::PgPool) {
-    let f = setup(pool).await;
-    let (uid, token) = add_member(&f, f.ws_a, "adminc", "ws_admin").await;
-    // Also a member of ws_b so WsContext passes — but the PUT targets ws_a.
-    f.members
-        .add(f.ws_b, "user", uid.0, "ws_admin", f.owner)
-        .await
-        .expect("member of ws_b");
-
-    // A VALID engine in ws_a, plus a FOREIGN catalog (warehouse) from ws_b.
-    let db_a = seed_database_http(&f.db, f.ws_a).await;
-    let wh_b = seed_warehouse_http(&f.db, f.ws_b).await;
-
-    // PUT with valid engine_ids but a cross-tenant catalog_id → whole PUT 400.
-    let resp = f
-        .app
-        .clone()
-        .oneshot(req(
-            "PUT",
-            &format!("/ws/{}/notebook-settings", f.slug_a),
-            &token,
-            Some(serde_json::json!({ "engine_ids": [db_a], "catalog_ids": [wh_b] })),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::BAD_REQUEST,
-        "cross-workspace catalog id must reject the whole PUT with 400"
-    );
-
-    // Atomicity: the valid engine_ids must NOT have been applied, because the
-    // PUT was rejected as a whole. GET shows the engine still disabled.
-    let resp = f
-        .app
-        .clone()
-        .oneshot(req(
-            "GET",
-            &format!("/ws/{}/notebook-settings", f.slug_a),
-            &token,
-            None,
-        ))
-        .await
-        .unwrap();
-    let (status, json) = into_json(resp).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "GET after rejected PUT; body={json}"
-    );
-    let engines = json["engines"].as_array().unwrap();
-    let e = engines
-        .iter()
-        .find(|e| e["id"] == db_a.to_string())
-        .expect("the ws_a engine still appears in settings");
-    assert_eq!(
-        e["enabled"],
-        serde_json::json!(false),
-        "rejected PUT must be a no-op: the valid engine_ids were NOT applied"
     );
 }
 
@@ -1211,7 +1114,7 @@ async fn put_settings_requires_manage_perm(pool: sqlx::PgPool) {
             "PUT",
             &format!("/ws/{}/notebook-settings", f.slug_a),
             &viewer_tok,
-            Some(serde_json::json!({ "engine_ids": [], "catalog_ids": [] })),
+            Some(serde_json::json!({ "engine_ids": [] })),
         ))
         .await
         .unwrap();
@@ -1248,20 +1151,6 @@ async fn get_settings_allowed_for_notebook_read_member(pool: sqlx::PgPool) {
 
 // ── Runtime endpoint tests ───────────────────────────────────────────────────
 
-/// Seed a warehouse row and return its egret-side id.
-async fn seed_warehouse_runtime(db: &Db, ws_id: WorkspaceId) -> Uuid {
-    sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO workspace_warehouses (workspace_id, warehouse_id, name) \
-         VALUES ($1, $2, $3) RETURNING id",
-    )
-    .bind(ws_id.0)
-    .bind(Uuid::new_v4())
-    .bind(format!("rt-wh-{}", Uuid::new_v4().simple()))
-    .fetch_one(&db.pool)
-    .await
-    .expect("insert warehouse for runtime test")
-}
-
 /// Seed a database (engine) row and return its id.
 async fn seed_engine_runtime(db: &Db, ws_id: WorkspaceId) -> Uuid {
     sqlx::query_scalar::<_, Uuid>(
@@ -1282,9 +1171,6 @@ async fn get_runtime_returns_manifest_with_enabled_engines_only(pool: sqlx::PgPo
     // Seed a member with notebook:read (ws_viewer has this via role_permissions seed).
     let (_uid, token) = add_member(&f, f.ws_a, "rtviewer", "ws_viewer").await;
 
-    // Seed a warehouse (required for provisioning).
-    let _wh_id = seed_warehouse_runtime(&f.db, f.ws_a).await;
-
     // Seed TWO engines, enable only ONE via the settings PUT.
     let eng_enabled = seed_engine_runtime(&f.db, f.ws_a).await;
     let eng_disabled = seed_engine_runtime(&f.db, f.ws_a).await;
@@ -1303,8 +1189,7 @@ async fn get_runtime_returns_manifest_with_enabled_engines_only(pool: sqlx::PgPo
                 admin_tok
             },
             Some(serde_json::json!({
-                "engine_ids": [eng_enabled],
-                "catalog_ids": []
+                "engine_ids": [eng_enabled]
             })),
         ))
         .await
@@ -1334,27 +1219,6 @@ async fn get_runtime_returns_manifest_with_enabled_engines_only(pool: sqlx::PgPo
     let username = json["username"].as_str().expect("username in response");
     assert!(!username.is_empty(), "username must be non-empty");
 
-    // catalog.namespace must be `notebook_<username>`.
-    let ns = json["catalog"]["namespace"]
-        .as_str()
-        .expect("catalog.namespace");
-    assert_eq!(
-        ns,
-        format!("notebook_{username}"),
-        "namespace = notebook_<username>"
-    );
-
-    // catalog.token must be non-empty.
-    let tok = json["catalog"]["token"].as_str().expect("catalog.token");
-    assert!(!tok.is_empty(), "catalog.token must be non-empty");
-
-    // catalog.url must be the base URL we configured.
-    assert_eq!(
-        json["catalog"]["url"].as_str().unwrap(),
-        "http://localhost:8181",
-        "catalog.url matches configured base url"
-    );
-
     // engines: must contain ONLY the enabled one (not the disabled one).
     let engines = json["engines"].as_array().expect("engines array");
     let ids: Vec<&str> = engines.iter().map(|e| e["id"].as_str().unwrap()).collect();
@@ -1372,9 +1236,6 @@ async fn get_runtime_returns_manifest_with_enabled_engines_only(pool: sqlx::PgPo
 #[sqlx::test(migrations = "../../migrations")]
 async fn get_runtime_non_member_is_403_or_404(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-
-    // Seed a warehouse so the endpoint would succeed for a real member.
-    let _wh_id = seed_warehouse_runtime(&f.db, f.ws_a).await;
 
     // A user with NO membership in ws_a.
     let outsider = f

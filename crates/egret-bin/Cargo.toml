@@ -20,12 +20,8 @@ egret-server.workspace = true
 egret-auth.workspace = true
 egret-workspace.workspace = true
 egret-catalog.workspace = true
+egret-controlplane.workspace = true
 # Composition root for the embedded lakekeeper catalog engine (CE-2 T5): builds
-# the engine `ApiContext` (migrate + bootstrap + `build_state`), the front-auth
-# router (`mount_catalog_engine`), and the concrete `WarehouseProvisioner` impl.
-# Only `egret-bin` (and the engine's own tests) depend on this crate, keeping the
-# lakekeeper graph + its second `sqlx` major out of `egret-server`/`egret-workspace`.
-egret-catalog-engine.workspace = true
 egret-storage.workspace = true
 egret-authz.workspace = true
 egret-ranger.workspace = true

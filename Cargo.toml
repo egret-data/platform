@@ -15,9 +15,8 @@ egret-server = { path = "crates/egret-server" }
 egret-auth = { path = "crates/egret-auth" }
 egret-workspace = { path = "crates/egret-workspace" }
 egret-storage = { path = "crates/egret-storage" }
-egret-iceberg-ext = { path = "crates/egret-iceberg-ext" }
 egret-catalog = { path = "crates/egret-catalog" }
-egret-catalog-engine = { path = "crates/egret-catalog-engine" }
+egret-controlplane = { path = "crates/egret-controlplane" }
 egret-authz = { path = "crates/egret-authz" }
 egret-ranger = { path = "crates/egret-ranger" }
 egret-secrets = { path = "crates/egret-secrets" }
@@ -26,6 +25,7 @@ egret-engine = { path = "crates/egret-engine" }
 egret-bi = { path = "crates/egret-bi" }
 egret-notebook = { path = "crates/egret-notebook" }
 egret-kernel = { path = "crates/egret-kernel" }
+egret-polaris = { path = "crates/egret-polaris" }
 
 # Iceberg model — pin the lakekeeper fork/rev so the TableMetadataBuilder /
 # TableUpdate::apply / TableRequirement::check API matches the reference exactly.

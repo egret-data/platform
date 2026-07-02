@@ -47,10 +47,6 @@ const mockSettings = {
     { id: "eng-1", name: "prod-trino", engine: "trino", enabled: true },
     { id: "eng-2", name: "analytics-sr", engine: "starrocks", enabled: false },
   ],
-  catalogs: [
-    { id: "wh-1", name: "Iceberg Prod", enabled: true },
-    { id: "wh-2", name: "Iceberg Dev", enabled: false },
-  ],
 };
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
@@ -82,12 +78,6 @@ describe("NotebookSettings page", () => {
     expect(screen.getByText("starrocks")).toBeInTheDocument();
   });
 
-  it("renders catalog rows with correct names", () => {
-    renderAt();
-    expect(screen.getByText("Iceberg Prod")).toBeInTheDocument();
-    expect(screen.getByText("Iceberg Dev")).toBeInTheDocument();
-  });
-
   it("seeds engine checkboxes from enabled field", () => {
     renderAt();
     const enableEngine1 = screen.getByRole("checkbox", {
@@ -100,18 +90,6 @@ describe("NotebookSettings page", () => {
     expect(enableEngine2).not.toBeChecked();
   });
 
-  it("seeds catalog checkboxes from enabled field", () => {
-    renderAt();
-    const cat1 = screen.getByRole("checkbox", {
-      name: /enable catalog iceberg prod/i,
-    });
-    const cat2 = screen.getByRole("checkbox", {
-      name: /enable catalog iceberg dev/i,
-    });
-    expect(cat1).toBeChecked();
-    expect(cat2).not.toBeChecked();
-  });
-
   it("toggling a checkbox then saving calls useSaveNotebookSettings with expected ids", async () => {
     const user = userEvent.setup();
     renderAt();
@@ -122,18 +100,11 @@ describe("NotebookSettings page", () => {
     });
     await user.click(engine2Checkbox);
 
-    // Toggle wh-2 on (was false).
-    const cat2Checkbox = screen.getByRole("checkbox", {
-      name: /enable catalog iceberg dev/i,
-    });
-    await user.click(cat2Checkbox);
-
     await user.click(screen.getByRole("button", { name: /save/i }));
 
     await waitFor(() => {
       expect(saveMutateAsync).toHaveBeenCalledWith({
         engine_ids: expect.arrayContaining(["eng-1", "eng-2"]),
-        catalog_ids: expect.arrayContaining(["wh-1", "wh-2"]),
       });
     });
     expect(saveMutateAsync).toHaveBeenCalledTimes(1);
@@ -154,7 +125,6 @@ describe("NotebookSettings page", () => {
     await waitFor(() => {
       expect(saveMutateAsync).toHaveBeenCalledWith({
         engine_ids: [],
-        catalog_ids: ["wh-1"],
       });
     });
   });
@@ -192,7 +162,7 @@ describe("NotebookSettings page", () => {
 
   it("shows empty state when workspace has no engines", () => {
     settingsMock.mockReturnValue({
-      data: { engines: [], catalogs: mockSettings.catalogs },
+      data: { engines: [] },
       isLoading: false,
       isError: false,
       error: null,
@@ -200,19 +170,6 @@ describe("NotebookSettings page", () => {
     renderAt();
     expect(
       screen.getByText("No engines configured for this workspace yet."),
-    ).toBeInTheDocument();
-  });
-
-  it("shows empty state when workspace has no catalogs", () => {
-    settingsMock.mockReturnValue({
-      data: { engines: mockSettings.engines, catalogs: [] },
-      isLoading: false,
-      isError: false,
-      error: null,
-    });
-    renderAt();
-    expect(
-      screen.getByText("No catalogs configured for this workspace yet."),
     ).toBeInTheDocument();
   });
 });

@@ -23,22 +23,6 @@ pub struct AppState {
     pub workspace: Option<WorkspaceState>,
     /// Present when `config.oidc.enabled`; `None` otherwise (or in unit tests).
     pub oidc: Option<OidcRoutesState>,
-    /// The LIVE embedded lakekeeper Iceberg REST engine router, fully assembled
-    /// in the composition root (`egret-bin`): the lakekeeper catalog router
-    /// fronted by egret's per-workspace token-ownership middleware (CE-2 T5).
-    /// Carried as a pre-built `axum::Router` so `egret-server` stays free of the
-    /// lakekeeper engine graph (the engine pulls in a second `sqlx` major). Nested
-    /// at `/catalog/v1`. `Some` once `config.catalog.enabled` wires the engine;
-    /// `None` otherwise (or in unit tests).
-    pub catalog_engine: Option<axum::Router>,
-    /// Session-authenticated internal catalog browse API (for the UI), reading
-    /// the embedded lakekeeper catalog (CE-2 T6). Like `catalog_engine`, it is
-    /// assembled in the composition root (`egret-bin`) and carried as a pre-built
-    /// `axum::Router` so `egret-server` stays free of the lakekeeper engine graph
-    /// (the engine pulls in a second `sqlx` major). Nested at `/api`, fronted by
-    /// the CSRF layer. `Some` once a database + the engine are wired; `None`
-    /// otherwise (or in unit tests).
-    pub catalog_browse: Option<axum::Router>,
     /// Present when `config.ranger.enabled`; `None` otherwise (or in unit tests).
     pub ranger: Option<egret_ranger::RangerState>,
     /// Present once a database is wired (in `egret-bin`); `None` in pure health unit tests.
@@ -51,6 +35,8 @@ pub struct AppState {
     pub notebook: Option<egret_notebook::NotebookState>,
     /// Present once the kernel layer is wired (in `egret-bin`); `None` in unit tests.
     pub kernel: Option<egret_kernel::KernelState>,
+    /// Present once the control plane is wired (in `egret-bin`); `None` in unit tests.
+    pub control_plane: Option<egret_controlplane::CpState>,
 }
 
 impl AppState {
@@ -61,14 +47,13 @@ impl AppState {
             auth: None,
             workspace: None,
             oidc: None,
-            catalog_engine: None,
-            catalog_browse: None,
             ranger: None,
             database: None,
             engine: None,
             bi: None,
             notebook: None,
             kernel: None,
+            control_plane: None,
         }
     }
 }
@@ -106,32 +91,6 @@ pub fn build_router(state: AppState) -> Router {
                 .nest("/api/auth/oidc", oidc_router())
                 .with_state(oidc),
         );
-    }
-
-    // CE-2 cutover: the live catalog surface is the embedded lakekeeper Iceberg
-    // REST engine (`state.catalog_engine`), assembled in `egret-bin` with egret's
-    // per-workspace token-ownership middleware in front (A-3), nested at
-    // `/catalog/v1` so the front middleware sees lakekeeper-relative paths
-    // (`/{prefix}/...` and `/config`).
-    if let Some(catalog_engine) = state.catalog_engine.clone() {
-        router = router.merge(
-            Router::new()
-                .nest("/catalog/v1", catalog_engine)
-                .with_state(()),
-        );
-    }
-
-    // CE-2 T6: the browse API now reads the embedded lakekeeper catalog (not
-    // egret's stale `catalog_*` tables). It is assembled in `egret-bin`
-    // (`egret_catalog_engine::browse_router` with its `BrowseState`) and carried
-    // here as a pre-built `axum::Router` so this crate stays off the engine graph.
-    // Mounted at `/api`, fronted by the CSRF layer (same as before).
-    if let Some(browse) = state.catalog_browse.clone() {
-        let group = Router::new()
-            .nest("/api", browse)
-            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
-            .with_state(());
-        router = router.merge(group);
     }
 
     if let Some(ranger) = state.ranger.clone() {
@@ -193,6 +152,19 @@ pub fn build_router(state: AppState) -> Router {
             .nest("/api", egret_kernel::kernel_callback_router())
             .with_state(kernel);
         router = router.merge(callback_group);
+    }
+
+    if let Some(cp) = state.control_plane.clone() {
+        // Global platform-admin Storage + Secrets: CSRF-protected like the other
+        // mutating APIs.
+        let group = Router::new()
+            .nest(
+                "/api/control-plane",
+                egret_controlplane::control_plane_router(),
+            )
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(cp);
+        router = router.merge(group);
     }
 
     router.with_state(state)

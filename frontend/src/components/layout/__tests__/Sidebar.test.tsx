@@ -57,7 +57,6 @@ describe("Sidebar – workspace zones", () => {
       "Alerts",
       "Policies",
       "Data Lineage",
-      "Catalog",
       "Engines",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
@@ -106,7 +105,7 @@ describe("Sidebar – workspace zones", () => {
 });
 
 describe("Sidebar – Control Plane group", () => {
-  test("renders the trimmed Control Plane items (Workspaces, Engines, Users)", () => {
+  test("renders the Control Plane items (Workspaces, Engines, Storage, Secrets, Users)", () => {
     renderSidebar("/control-plane/workspaces");
     expect(screen.getByText("Control Plane")).toBeInTheDocument();
 
@@ -118,12 +117,28 @@ describe("Sidebar – Control Plane group", () => {
       "href",
       "/control-plane/engines",
     );
+    expect(screen.getByRole("link", { name: "Catalog" })).toHaveAttribute(
+      "href",
+      "/control-plane/catalog",
+    );
+    expect(screen.getByRole("link", { name: "RBAC" })).toHaveAttribute(
+      "href",
+      "/control-plane/rbac",
+    );
+    expect(screen.getByRole("link", { name: "Storage" })).toHaveAttribute(
+      "href",
+      "/control-plane/storage",
+    );
+    expect(screen.getByRole("link", { name: "Secrets" })).toHaveAttribute(
+      "href",
+      "/control-plane/secrets",
+    );
     expect(screen.getByRole("link", { name: "Users" })).toHaveAttribute(
       "href",
       "/control-plane/users",
     );
     // Dropped from the Control Plane.
-    for (const gone of ["Resources", "Monitoring", "Platform Policies", "Catalog"]) {
+    for (const gone of ["Resources", "Monitoring", "Platform Policies"]) {
       expect(screen.queryByRole("link", { name: gone })).not.toBeInTheDocument();
     }
   });

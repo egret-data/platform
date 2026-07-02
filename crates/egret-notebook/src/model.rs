@@ -112,27 +112,16 @@ pub struct EngineOption {
     pub enabled: bool,
 }
 
-/// An Iceberg catalog (workspace warehouse) option shown in notebook settings.
-#[derive(Debug, Clone, Serialize)]
-pub struct CatalogOption {
-    pub id: Uuid,
-    pub name: String,
-    /// Whether this catalog is currently enabled for notebooks in this workspace.
-    pub enabled: bool,
-}
-
 /// Response DTO for GET /ws/{workspace}/notebook-settings.
 #[derive(Debug, Clone, Serialize)]
 pub struct NotebookSettings {
     pub engines: Vec<EngineOption>,
-    pub catalogs: Vec<CatalogOption>,
 }
 
 /// Request body for PUT /ws/{workspace}/notebook-settings.
 #[derive(Debug, Deserialize)]
 pub struct UpdateNotebookSettings {
     pub engine_ids: Vec<Uuid>,
-    pub catalog_ids: Vec<Uuid>,
 }
 
 #[cfg(test)]

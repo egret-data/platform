@@ -1,0 +1,87 @@
+//! Control-plane HTTP error type.
+//!
+//! Maps the platform-admin guard failure plus the underlying `CatalogError` /
+//! `SecretsError` domain errors onto HTTP status codes.
+
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use egret_catalog::CatalogError;
+use egret_polaris::PolarisError;
+use egret_secrets::SecretsError;
+
+#[derive(Debug, thiserror::Error)]
+pub enum CpError {
+    /// Caller is authenticated but lacks the `platform_admin` role.
+    #[error("forbidden")]
+    Forbidden,
+    #[error("not found")]
+    NotFound,
+    #[error("already exists: {0}")]
+    AlreadyExists(String),
+    #[error("bad request: {0}")]
+    BadRequest(String),
+    /// A named secret is still referenced and cannot be deleted.
+    #[error("secret is in use by {0} connection(s)")]
+    InUse(i64),
+    #[error("internal error")]
+    Internal,
+}
+
+impl From<CatalogError> for CpError {
+    fn from(e: CatalogError) -> Self {
+        match e {
+            CatalogError::NotFound(_) => CpError::NotFound,
+            CatalogError::AlreadyExists(s) => CpError::AlreadyExists(s),
+            CatalogError::BadRequest(s) => CpError::BadRequest(s),
+            CatalogError::Db(_) => CpError::Internal,
+        }
+    }
+}
+
+impl From<SecretsError> for CpError {
+    fn from(e: SecretsError) -> Self {
+        match e {
+            SecretsError::NotFound => CpError::NotFound,
+            SecretsError::AlreadyExists(s) => CpError::AlreadyExists(s),
+            SecretsError::InUse(n) => CpError::InUse(n),
+            SecretsError::NotConfigured => {
+                CpError::BadRequest("secrets master_key is not configured".to_string())
+            }
+            SecretsError::Crypto(_) | SecretsError::Db(_) => CpError::Internal,
+        }
+    }
+}
+
+impl From<PolarisError> for CpError {
+    fn from(e: PolarisError) -> Self {
+        match e {
+            PolarisError::Forbidden => CpError::Forbidden,
+            PolarisError::NotFound => CpError::NotFound,
+            PolarisError::Conflict => CpError::AlreadyExists("polaris conflict".to_string()),
+            // A 400 means Polaris rejected the request we sent — surface its message
+            // (e.g. a missing required property) rather than a generic 500.
+            PolarisError::Status(400, msg) => CpError::BadRequest(format!("polaris: {msg}")),
+            PolarisError::Status(_, _) | PolarisError::Http(_) | PolarisError::Decode(_) => {
+                CpError::Internal
+            }
+        }
+    }
+}
+
+impl IntoResponse for CpError {
+    fn into_response(self) -> Response {
+        let (status, msg) = match &self {
+            CpError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
+            CpError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
+            CpError::AlreadyExists(_) => (StatusCode::CONFLICT, self.to_string()),
+            CpError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            CpError::InUse(_) => (StatusCode::CONFLICT, self.to_string()),
+            CpError::Internal => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error".to_string(),
+            ),
+        };
+        (status, Json(serde_json::json!({ "error": msg }))).into_response()
+    }
+}

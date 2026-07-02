@@ -68,6 +68,39 @@ services:
     volumes:
       - ./keycloak:/opt/keycloak/data/import:ro
 
+  # Apache Polaris — external Iceberg REST catalog, driven by egret's control plane.
+  # Dev config: INTERNAL auth (bootstrap root principal via Polaris's own OAuth2
+  # client_credentials endpoint). The MIXED/Keycloak-OIDC target is the prod design
+  # (see the control-plane-polaris spec); dev uses Polaris-internal tokens so the
+  # egret-polaris client (any OAuth2 client_credentials source) points at Polaris itself.
+  polaris:
+    image: apache/polaris:latest
+    depends_on:
+      - minio
+    ports:
+      - "8181:8181"   # Iceberg REST + management API
+      - "8182:8182"   # Quarkus management (health)
+    environment:
+      # Storage: MinIO (S3-compatible). AWS SDK honors AWS_ENDPOINT_URL_S3 + path-style.
+      AWS_ACCESS_KEY_ID: egret
+      AWS_SECRET_ACCESS_KEY: egretsecret
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL_S3: http://minio:9000
+      AWS_ENDPOINT_URL: http://minio:9000
+      # Bootstrap realm POLARIS with a root principal (clientId=root, secret=s3cr3t).
+      POLARIS_BOOTSTRAP_CREDENTIALS: POLARIS,root,s3cr3t
+      polaris.realm-context.realms: POLARIS
+      polaris.features."ALLOW_INSECURE_STORAGE_TYPES": "true"
+      polaris.features."SUPPORTED_CATALOG_STORAGE_TYPES": "[\"FILE\",\"S3\"]"
+      polaris.readiness.ignore-severe-issues: "true"
+      quarkus.otel.sdk.disabled: "true"
+      quarkus.log.file.enabled: "false"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8182/q/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
   # Optional: serve the production-built frontend via nginx.
   # Primary dev path is `npm run dev` (Vite) + `cargo run -p egret-bin -- serve`.
   # Note: the Egret backend is not containerized in this compose yet, so /api

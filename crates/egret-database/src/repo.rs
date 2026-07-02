@@ -148,7 +148,7 @@ impl DatabaseRepo {
         match row {
             Some((Some(secret_id), workspace_id)) => Ok(Some(
                 self.workspace_secrets
-                    .resolve_plaintext(workspace_id, secret_id)
+                    .resolve_plaintext(Some(workspace_id), secret_id)
                     .await?,
             )),
             _ => Ok(None),

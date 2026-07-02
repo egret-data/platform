@@ -87,7 +87,7 @@ async fn resolve_secret_id(
         (Some(n), _) => {
             let id = st
                 .workspace_secrets
-                .create(workspace_id, &n.name, None, &n.value)
+                .create(Some(workspace_id), &n.name, None, &n.value)
                 .await
                 .map_err(DatabaseError::from)?;
             Ok(Some(id))
@@ -95,7 +95,7 @@ async fn resolve_secret_id(
         (None, Some(id)) => {
             // Validate the named secret belongs to this workspace (404 otherwise).
             st.workspace_secrets
-                .get_meta(workspace_id, id)
+                .get_meta(Some(workspace_id), id)
                 .await
                 .map_err(DatabaseError::from)?;
             Ok(Some(id))

@@ -339,7 +339,7 @@ async fn create_with_new_secret_mints_named_secret() {
     // The named secret exists in the workspace with used_by = 1.
     let secrets = f
         .workspace_secrets
-        .list(f.ws_a.0)
+        .list(Some(f.ws_a.0))
         .await
         .expect("list secrets");
     let meta = secrets
@@ -361,7 +361,7 @@ async fn create_with_secret_id_references_existing_named_secret() {
     // Pre-create a named secret, then reference it by id.
     let secret_id = f
         .workspace_secrets
-        .create(f.ws_a.0, "shared-db-creds", None, "pre-made")
+        .create(Some(f.ws_a.0), "shared-db-creds", None, "pre-made")
         .await
         .expect("pre-create secret");
 
@@ -387,7 +387,7 @@ async fn create_with_secret_id_references_existing_named_secret() {
     );
     let meta = f
         .workspace_secrets
-        .get_meta(f.ws_a.0, secret_id)
+        .get_meta(Some(f.ws_a.0), secret_id)
         .await
         .expect("get_meta");
     assert_eq!(meta.used_by, 1, "the connection now references the secret");

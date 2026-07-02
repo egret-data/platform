@@ -1,0 +1,27 @@
+[package]
+name = "egret-controlplane"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+egret-core.workspace = true
+egret-auth.workspace = true
+egret-catalog.workspace = true
+egret-secrets.workspace = true
+egret-metastore.workspace = true
+egret-polaris.workspace = true
+reqwest.workspace = true
+sqlx.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+egret-workspace.workspace = true
+tower.workspace = true
+http-body-util = "0.1"

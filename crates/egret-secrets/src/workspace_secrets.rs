@@ -49,8 +49,11 @@ impl From<MetaRow> for WorkspaceSecretMeta {
     }
 }
 
-/// Workspace-scoped store for named secrets. Every method is scoped by
-/// `workspace_id`; an id belonging to another workspace resolves to `NotFound`.
+/// Scoped store for named secrets. Every method is scoped by an optional
+/// `workspace_id`: `Some(ws)` targets that workspace's secrets, while `None`
+/// targets global / control-plane secrets (rows with a NULL `workspace_id`).
+/// The scope filter is NULL-safe (`IS NOT DISTINCT FROM`), so an id belonging
+/// to another scope resolves to `NotFound`.
 #[derive(Clone)]
 pub struct WorkspaceSecretStore {
     db: Db,
@@ -66,7 +69,7 @@ impl WorkspaceSecretStore {
     /// On a duplicate name the vault row is rolled back and `AlreadyExists` returned.
     pub async fn create(
         &self,
-        workspace_id: Uuid,
+        workspace_id: Option<Uuid>,
         name: &str,
         description: Option<&str>,
         plaintext: &str,
@@ -97,13 +100,16 @@ impl WorkspaceSecretStore {
     }
 
     /// List a workspace's named secrets with reference counts, ordered by name.
-    pub async fn list(&self, workspace_id: Uuid) -> Result<Vec<WorkspaceSecretMeta>, SecretsError> {
+    pub async fn list(
+        &self,
+        workspace_id: Option<Uuid>,
+    ) -> Result<Vec<WorkspaceSecretMeta>, SecretsError> {
         let rows: Vec<MetaRow> = sqlx::query_as(
             "SELECT ws.id, ws.name, ws.description, ws.created_at, \
-             (SELECT count(*) FROM workspace_storages WHERE secret_ref = ws.id) \
+             (SELECT count(*) FROM storage_connections WHERE secret_ref = ws.id) \
              + (SELECT count(*) FROM databases WHERE secret_id = ws.id) AS used_by \
              FROM workspace_secrets ws \
-             WHERE ws.workspace_id = $1 \
+             WHERE ws.workspace_id IS NOT DISTINCT FROM $1 \
              ORDER BY ws.name",
         )
         .bind(workspace_id)
@@ -115,15 +121,15 @@ impl WorkspaceSecretStore {
     /// Fetch metadata for a single named secret in the workspace (404 if absent).
     pub async fn get_meta(
         &self,
-        workspace_id: Uuid,
+        workspace_id: Option<Uuid>,
         id: Uuid,
     ) -> Result<WorkspaceSecretMeta, SecretsError> {
         let row: Option<MetaRow> = sqlx::query_as(
             "SELECT ws.id, ws.name, ws.description, ws.created_at, \
-             (SELECT count(*) FROM workspace_storages WHERE secret_ref = ws.id) \
+             (SELECT count(*) FROM storage_connections WHERE secret_ref = ws.id) \
              + (SELECT count(*) FROM databases WHERE secret_id = ws.id) AS used_by \
              FROM workspace_secrets ws \
-             WHERE ws.id = $1 AND ws.workspace_id = $2",
+             WHERE ws.id = $1 AND ws.workspace_id IS NOT DISTINCT FROM $2",
         )
         .bind(id)
         .bind(workspace_id)
@@ -135,7 +141,7 @@ impl WorkspaceSecretStore {
     /// Rotate the underlying value (re-seal the vault row); the named id is unchanged.
     pub async fn update_value(
         &self,
-        workspace_id: Uuid,
+        workspace_id: Option<Uuid>,
         id: Uuid,
         plaintext: &str,
     ) -> Result<(), SecretsError> {
@@ -146,14 +152,14 @@ impl WorkspaceSecretStore {
     /// Rename / re-describe a named secret (does not touch the value).
     pub async fn rename(
         &self,
-        workspace_id: Uuid,
+        workspace_id: Option<Uuid>,
         id: Uuid,
         name: &str,
         description: Option<&str>,
     ) -> Result<(), SecretsError> {
         let res = sqlx::query(
             "UPDATE workspace_secrets SET name = $3, description = $4 \
-             WHERE id = $1 AND workspace_id = $2",
+             WHERE id = $1 AND workspace_id IS NOT DISTINCT FROM $2",
         )
         .bind(id)
         .bind(workspace_id)
@@ -171,24 +177,26 @@ impl WorkspaceSecretStore {
 
     /// Delete a named secret and its vault row. Blocked with `InUse` if any
     /// connection still references it.
-    pub async fn delete(&self, workspace_id: Uuid, id: Uuid) -> Result<(), SecretsError> {
+    pub async fn delete(&self, workspace_id: Option<Uuid>, id: Uuid) -> Result<(), SecretsError> {
         let meta = self.get_meta(workspace_id, id).await?;
         if meta.used_by > 0 {
             return Err(SecretsError::InUse(meta.used_by));
         }
         let secret_ref = self.secret_ref(workspace_id, id).await?;
-        sqlx::query("DELETE FROM workspace_secrets WHERE id = $1 AND workspace_id = $2")
-            .bind(id)
-            .bind(workspace_id)
-            .execute(&self.db.pool)
-            .await?;
+        sqlx::query(
+            "DELETE FROM workspace_secrets WHERE id = $1 AND workspace_id IS NOT DISTINCT FROM $2",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .execute(&self.db.pool)
+        .await?;
         self.secrets.delete(secret_ref).await
     }
 
     /// Decrypt and return the plaintext for a named secret (workspace-scoped).
     pub async fn resolve_plaintext(
         &self,
-        workspace_id: Uuid,
+        workspace_id: Option<Uuid>,
         id: Uuid,
     ) -> Result<String, SecretsError> {
         let secret_ref = self.secret_ref(workspace_id, id).await?;
@@ -196,9 +204,10 @@ impl WorkspaceSecretStore {
     }
 
     /// Resolve the vault `secret_ref` for a workspace-scoped named secret (404 if absent).
-    async fn secret_ref(&self, workspace_id: Uuid, id: Uuid) -> Result<Uuid, SecretsError> {
+    async fn secret_ref(&self, workspace_id: Option<Uuid>, id: Uuid) -> Result<Uuid, SecretsError> {
         let row: Option<Uuid> = sqlx::query_scalar(
-            "SELECT secret_ref FROM workspace_secrets WHERE id = $1 AND workspace_id = $2",
+            "SELECT secret_ref FROM workspace_secrets \
+             WHERE id = $1 AND workspace_id IS NOT DISTINCT FROM $2",
         )
         .bind(id)
         .bind(workspace_id)

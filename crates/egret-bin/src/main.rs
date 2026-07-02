@@ -5,14 +5,13 @@ mod cli;
 use anyhow::Context;
 use chrono::Duration;
 use clap::Parser;
-use cli::{parse_namespaces, CatalogAction, Cli, Command, WorkspaceAction};
+use cli::{Cli, Command, WorkspaceAction};
 use egret_auth::groups::GroupRepo;
 use egret_auth::password::hash_password;
 use egret_auth::ratelimit::RateLimiter;
 use egret_auth::routes::AuthState;
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
-use egret_catalog::service::CatalogStore;
 use egret_config::Config;
 use egret_metastore::Db;
 use egret_server::{build_router, AppState};
@@ -33,7 +32,6 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve => serve(config).await,
         Command::Migrate => migrate(config).await,
         Command::Init { force } => init(config, force).await,
-        Command::Catalog { action } => catalog_cmd(config, action).await,
         Command::Workspace { action } => workspace_cmd(config, action).await,
     }
 }
@@ -113,147 +111,6 @@ async fn connect_db(config: &Config) -> anyhow::Result<Db> {
     Ok(db)
 }
 
-async fn catalog_cmd(config: Config, action: CatalogAction) -> anyhow::Result<()> {
-    let db = connect_db(&config).await?;
-    let store = CatalogStore::new(db.clone());
-    let workspaces = WorkspaceRepo::new(db.clone());
-
-    match action {
-        CatalogAction::MintToken {
-            workspace,
-            warehouse,
-            label,
-            perms,
-            namespaces,
-        } => {
-            // Parse --perms: comma-separated "read" and/or "write" tokens.
-            let permissions: Vec<String> = perms
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .map(|s| match s.as_str() {
-                    "read" => Ok("catalog:read".to_string()),
-                    "write" => Ok("catalog:write".to_string()),
-                    other => Err(anyhow::anyhow!(
-                        "invalid permission '{other}': must be 'read' or 'write'"
-                    )),
-                })
-                .collect::<anyhow::Result<Vec<String>>>()?;
-
-            if permissions.is_empty() {
-                anyhow::bail!("--perms must not be empty; use 'read', 'write', or 'read,write'");
-            }
-
-            // Parse --namespaces: comma-separated namespace names; empty = all.
-            let namespace_scope = parse_namespaces(&namespaces);
-
-            // Resolve workspace slug → workspace_id.
-            let ws = workspaces
-                .get_by_slug(&workspace)
-                .await
-                .context("looking up workspace")?
-                .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace}"))?;
-
-            // Resolve the named warehouse within the workspace (a token is now
-            // minted FOR a specific warehouse).
-            let wh = store
-                .get_warehouse_by_name(ws.id.0, &warehouse)
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!("warehouse '{warehouse}' not found in workspace '{workspace}'")
-                })?;
-
-            // Token scope v2: the CLI mints a single resource grant. Each
-            // namespace from `--namespaces` (or the `"*"` all-namespaces sentinel
-            // when none are given) becomes a whole-namespace grant carrying the
-            // requested permissions, preserving the prior CLI behaviour.
-            let scope: Vec<egret_catalog::service::tokens::Grant> = if namespace_scope.is_empty() {
-                vec![egret_catalog::service::tokens::Grant {
-                    namespace: "*".to_string(),
-                    table: None,
-                    permissions: permissions.clone(),
-                }]
-            } else {
-                namespace_scope
-                    .iter()
-                    .map(|ns| egret_catalog::service::tokens::Grant {
-                        namespace: ns.clone(),
-                        table: None,
-                        permissions: permissions.clone(),
-                    })
-                    .collect()
-            };
-
-            let (token_row, raw) = store
-                .create_token(ws.id.0, wh.id, &label, &scope)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-            println!("Token id      : {}", token_row.id);
-            println!("Workspace     : {} ({})", workspace, ws.id.0);
-            println!("Warehouse     : {} ({})", warehouse, wh.id);
-            println!("Label         : {}", token_row.label);
-            println!("Scope         : {}", fmt_scope(&token_row.scope));
-            println!("Created at    : {}", token_row.created_at.to_rfc3339());
-            println!();
-            println!("Raw token (store this now — it will NOT be shown again):");
-            println!("{raw}");
-        }
-
-        CatalogAction::RevokeToken { id } => {
-            store
-                .revoke_token(id)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            println!("Token {id} revoked.");
-        }
-
-        CatalogAction::ListTokens {
-            workspace,
-            warehouse,
-        } => {
-            let ws = workspaces
-                .get_by_slug(&workspace)
-                .await
-                .context("looking up workspace")?
-                .ok_or_else(|| anyhow::anyhow!("workspace not found: {workspace}"))?;
-
-            let wh = store
-                .get_warehouse_by_name(ws.id.0, &warehouse)
-                .await
-                .map_err(|_| {
-                    anyhow::anyhow!("warehouse '{warehouse}' not found in workspace '{workspace}'")
-                })?;
-
-            let tokens = store
-                .list_tokens_for_warehouse(ws.id.0, wh.id)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-            if tokens.is_empty() {
-                println!("No active tokens for workspace '{workspace}'.");
-            } else {
-                println!(
-                    "{:<38}  {:<20}  {:<40}  CREATED AT",
-                    "TOKEN ID", "LABEL", "SCOPE (grants)"
-                );
-                println!("{}", "-".repeat(120));
-                for t in tokens {
-                    println!(
-                        "{:<38}  {:<20}  {:<40}  {}",
-                        t.id,
-                        t.label,
-                        fmt_scope(&t.scope),
-                        t.created_at.to_rfc3339()
-                    );
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Workspace membership management
 // ---------------------------------------------------------------------------
@@ -274,22 +131,6 @@ async fn workspace_cmd(config: Config, action: WorkspaceAction) -> anyhow::Resul
             Ok(())
         }
     }
-}
-
-/// Format a token's resource-grant scope for CLI display, e.g.
-/// `* (catalog:read)`, `sale (catalog:read)`, `marketing.campaigns (catalog:read,catalog:write)`.
-fn fmt_scope(scope: &[egret_catalog::service::tokens::Grant]) -> String {
-    scope
-        .iter()
-        .map(|g| {
-            let resource = match &g.table {
-                Some(t) => format!("{}.{t}", g.namespace),
-                None => g.namespace.clone(),
-            };
-            format!("{resource} ({})", g.permissions.join(","))
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
 }
 
 /// Engine-connection resolver wired into `KernelState` (T4).
@@ -346,20 +187,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         rate_limiter,
     };
 
-    // --- Embedded lakekeeper catalog engine (CE-2 T5) ------------------------
-    // When the catalog surface is enabled, build the LIVE engine at startup:
-    //   1. migrate lakekeeper's catalog into its isolated `lakekeeper` schema,
-    //   2. bootstrap the default project under the stable system principal,
-    //   3. build the engine `ApiContext` (`build_state`),
-    //   4. assemble the engine router fronted by egret's per-workspace
-    //      token-ownership middleware (`mount_catalog_engine`, A-3).
-    // Workspace creation no longer auto-provisions a warehouse; warehouses are
-    // now created on demand via the per-warehouse management API.
-    // This is the single composition point that makes the engine live; the
-    // lakekeeper graph (and its second `sqlx` major) stays contained here.
-    // Hoisted so BOTH the engine block (per-workspace storage secrets, CE-5) and
-    // the database block (database-connection secrets) share one secret store
-    // built from the same `db` + master key. `SecretStore` is cheap + `Clone`.
+    // Shared secret store: one `SecretStore` built from `db` + the master key,
+    // reused by the per-workspace storage layer and the database-connection
+    // secrets. `SecretStore` is cheap + `Clone`.
     let secrets = {
         use base64::Engine as _;
         let crypto = if config.secrets.master_key.is_empty() {
@@ -378,107 +208,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // and database connections reference named secrets.
     let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
 
-    // The embedded lakekeeper engine `ApiContext` is also hoisted out of this
-    // block so the notebook-runtime namespace provisioner (below) can drive
-    // `egret_catalog_engine::ensure_namespace` in-process, with the same system
-    // principal the browse API uses.
-    type CatalogEngineCtx = egret_catalog_engine::ApiContext<egret_catalog_engine::EngineState>;
-    // Externally-reachable catalog base URL. Used both as the notebook manifest's
-    // catalog URL (what pyiceberg/Daft hit) and to rewrite lakekeeper's `/config`
-    // `overrides.uri` (which otherwise reports lakekeeper's internal :8181 bind).
+    // Externally-reachable catalog base URL, forwarded to the notebook-runtime
+    // manifest as the catalog URL (what pyiceberg/Daft hit).
     let catalog_base_url = config
         .catalog
         .public_url
         .clone()
         .unwrap_or_else(|| "http://localhost:8080".into());
-    let (catalog_engine, catalog_browse, catalog_engine_ctx): (
-        Option<axum::Router>,
-        Option<axum::Router>,
-        Option<CatalogEngineCtx>,
-    ) = if config.catalog.enabled {
-        let dsn = &config.database.url;
-        egret_catalog_engine::run_lakekeeper_migrations(dsn)
-            .await
-            .context("running lakekeeper catalog migrations on boot")?;
-        let (engine_state, gc_registry) =
-            egret_catalog_engine::build_state(dsn, &config.catalog.system_user)
-                .await
-                .context("building lakekeeper engine state")?;
-        egret_catalog_engine::ensure_bootstrapped(
-            engine_state.clone(),
-            &config.catalog.system_user,
-        )
-        .await
-        .context("bootstrapping lakekeeper default project")?;
-
-        let engine_store = egret_catalog::service::CatalogStore::new(db.clone());
-
-        // F2-P2: hybrid catalog auth — when OIDC is enabled, also accept a
-        // Keycloak access-token JWT (alongside opaque catalog_tokens). The limes
-        // verifier does network OIDC discovery at construction; if Keycloak is
-        // unreachable at boot we DO NOT crash — log a warning and fall back to
-        // `None` (opaque tokens keep working).
-        let catalog_jwt = if config.oidc.enabled {
-            match egret_catalog_engine::jwt_auth::LimesVerifier::new(
-                &config.oidc.issuer_url,
-                config.oidc.catalog_audience.clone(),
-            )
-            .await
-            {
-                Ok(v) => Some(std::sync::Arc::new(
-                    egret_catalog_engine::jwt_auth::CatalogJwtAuth::new(
-                        std::sync::Arc::new(v),
-                        std::sync::Arc::new(egret_catalog::service::CatalogStore::new(db.clone())),
-                        db.clone(),
-                    ),
-                )),
-                Err(e) => {
-                    tracing::warn!("catalog JWT auth disabled (verifier init failed): {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        let router = egret_catalog_engine::mount_catalog_engine(
-            engine_state.clone(),
-            engine_store.clone(),
-            catalog_jwt,
-            Some(catalog_base_url.clone()),
-        );
-
-        // CE-2 T6: the session-authed browse API (for the UI) reads the embedded
-        // lakekeeper catalog via the engine `ApiContext`. Built here (in the
-        // composition root) so the lakekeeper graph stays contained, then carried
-        // into `AppState` as a pre-built router (like `catalog_engine`).
-        let browse_router =
-            egret_catalog_engine::browse_router().with_state(egret_catalog_engine::BrowseState {
-                engine: engine_state.clone(),
-                store: egret_catalog::service::CatalogStore::new(db.clone()),
-                workspace_secrets: workspace_secrets.clone(),
-                system_user: config.catalog.system_user.clone().into(),
-                sessions: sessions.clone(),
-                workspaces: WorkspaceRepo::new(db.clone()),
-                authz: Authorizer::new(db.clone()),
-            });
-
-        let gc_cancel = egret_catalog_engine::CancellationToken::new();
-        egret_catalog_engine::spawn_gc_workers(gc_registry, gc_cancel.clone());
-        tracing::info!("catalog GC workers started");
-        {
-            let gc_cancel = gc_cancel.clone();
-            tokio::spawn(async move {
-                let _ = tokio::signal::ctrl_c().await;
-                tracing::info!("SIGINT received, stopping catalog GC workers");
-                gc_cancel.cancel();
-            });
-        }
-
-        (Some(router), Some(browse_router), Some(engine_state))
-    } else {
-        (None, None, None)
-    };
 
     let workspace = WorkspaceState {
         workspaces: WorkspaceRepo::new(db.clone()),
@@ -528,14 +264,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         None
     };
 
-    // CE-2 T6: the browse API (`catalog_browse`) is built above alongside the
-    // embedded lakekeeper engine — it reads lakekeeper, so it requires the engine
-    // `ApiContext` and is therefore gated on `config.catalog.enabled` (when the
-    // catalog surface is off there is no warehouse to browse).
-
-    // `secrets` (the SecretStore) was hoisted above the engine block so the
-    // per-workspace storage provisioner shares it; the database block reuses the
-    // same instance for database-connection secrets.
+    // `secrets` (the SecretStore) is shared: the per-workspace storage layer and
+    // the database block reuse the same instance for their secrets.
     let databases =
         egret_database::DatabaseRepo::new(db.clone(), secrets.clone(), workspace_secrets.clone());
 
@@ -602,79 +332,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         folders: egret_bi::folder::FolderRepo::new(db.clone()),
     });
 
-    // T7: the real lakekeeper-backed namespace provisioner for the notebook
-    // runtime. It resolves the egret warehouse-row id to its lakekeeper UUID
-    // (via `CatalogStore::lakekeeper_id_by_row`) and drives the catalog engine's
-    // in-process `ensure_namespace` (= `NamespaceService::create_namespace`,
-    // already-exists → Ok) under the configured system principal. Wired only
-    // when the catalog engine is enabled; when it is not, namespace creation has
-    // no backing engine, so we fall back to a no-op (the notebook runtime cannot
-    // mint a usable catalog token without a warehouse anyway).
-    struct RealNamespaceProvisioner {
-        engine: CatalogEngineCtx,
-        catalog: CatalogStore,
-        system_user: String,
-    }
-
-    #[async_trait::async_trait]
-    impl egret_notebook::NamespaceProvisioner for RealNamespaceProvisioner {
-        async fn ensure_namespace(
-            &self,
-            warehouse_id: uuid::Uuid,
-            namespace: &str,
-        ) -> Result<(), egret_notebook::error::NotebookApiError> {
-            use egret_notebook::error::NotebookApiError;
-            // egret warehouse-row id → lakekeeper warehouse UUID.
-            let lakekeeper_id = self
-                .catalog
-                .lakekeeper_id_by_row(warehouse_id)
-                .await
-                .map_err(|e| match e {
-                    egret_catalog::CatalogError::NotFound(m) => {
-                        NotebookApiError(egret_core::Error::NotFound(m))
-                    }
-                    other => NotebookApiError(egret_core::Error::Internal(anyhow::anyhow!(other))),
-                })?;
-            // Idempotent in-process create (already-exists = Ok).
-            egret_catalog_engine::ensure_namespace(
-                &self.engine,
-                &self.system_user,
-                lakekeeper_id,
-                namespace,
-            )
-            .await
-            .map_err(|e| NotebookApiError(egret_core::Error::Internal(e)))
-        }
-    }
-
-    /// No-op provisioner used when the catalog engine is disabled (no embedded
-    /// lakekeeper to create namespaces in). The notebook runtime endpoint also
-    /// has no warehouse to mint a token against in that mode, so this is never
-    /// reached on a real provisioning path; it only keeps `NotebookState`
-    /// constructible.
-    struct NoopNamespaceProvisioner;
-
-    #[async_trait::async_trait]
-    impl egret_notebook::NamespaceProvisioner for NoopNamespaceProvisioner {
-        async fn ensure_namespace(
-            &self,
-            _warehouse_id: uuid::Uuid,
-            _namespace: &str,
-        ) -> Result<(), egret_notebook::error::NotebookApiError> {
-            Ok(())
-        }
-    }
-
-    let provisioner: std::sync::Arc<dyn egret_notebook::NamespaceProvisioner> =
-        match catalog_engine_ctx {
-            Some(engine) => std::sync::Arc::new(RealNamespaceProvisioner {
-                engine,
-                catalog: CatalogStore::new(db.clone()),
-                system_user: config.catalog.system_user.clone(),
-            }),
-            None => std::sync::Arc::new(NoopNamespaceProvisioner),
-        };
-
     // F2-P1 T6: one shared engine-token broker (Keycloak refresh-grant) mints the
     // short-lived per-user engine JWT carried in the notebook-runtime manifest.
     // When OIDC is disabled the deps are empty strings, so this still constructs
@@ -701,8 +358,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
-        catalog: CatalogStore::new(db.clone()),
-        provisioner,
         users: UserRepo::new(db.clone()),
         catalog_base_url: catalog_base_url.clone(),
         engine_minter: engine_minter.clone(),
@@ -773,19 +428,28 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     });
     // ── end kernel wiring ───────────────────────────────────────────────────────
 
+    // Control plane: global platform-admin Storage + Secrets. Reuses the shared
+    // `workspace_secrets` (in GLOBAL scope) and a `CatalogStore` over the same db.
+    let control_plane = Some(egret_controlplane::CpState {
+        storage: egret_catalog::CatalogStore::new(db.clone()),
+        secrets: workspace_secrets.clone(),
+        sessions: sessions.clone(),
+        polaris_conn: egret_controlplane::PolarisConnStore::new(db.clone()),
+        assignments: egret_controlplane::AssignmentStore::new(db.clone()),
+    });
+
     let app = build_router(AppState {
         db: Some(db),
         auth: Some(auth),
         workspace: Some(workspace),
         oidc,
-        catalog_engine,
-        catalog_browse,
         ranger,
         database,
         engine,
         bi,
         notebook,
         kernel,
+        control_plane,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)
