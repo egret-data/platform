@@ -69,6 +69,9 @@ hex = "0.4"
 axum-extra = { version = "0.10", features = ["cookie"] }
 async-trait = "0.1"
 openidconnect = "4"
+jsonwebtoken = "9"
+rsa = { version = "0.9", features = ["sha2"] }
+egret-machine-idp = { path = "crates/egret-machine-idp" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies"] }
 mysql_async = { version = "0.34", default-features = false, features = ["default-rustls"] }
 testcontainers = "0.23"
