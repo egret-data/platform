@@ -3,12 +3,10 @@ pub mod engine_token;
 pub mod error;
 pub mod model;
 pub mod output;
-pub mod provisioning;
 pub mod routes;
 pub mod runtime;
 pub mod store;
 
-pub use provisioning::{provision_notebook_access, NamespaceProvisioner, Provisioned};
 pub use routes::{notebook_router, NotebookState};
-pub use runtime::{build_notebook_runtime, NotebookRuntime, RuntimeCatalog};
+pub use runtime::{build_notebook_runtime, NotebookRuntime};
 pub use store::NotebookStore;

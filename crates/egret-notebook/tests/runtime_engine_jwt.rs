@@ -5,28 +5,12 @@ use std::sync::Arc;
 
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
-use egret_catalog::service::CatalogStore;
 use egret_core::ids::WorkspaceId;
 use egret_metastore::Db;
-use egret_notebook::error::NotebookApiError;
-use egret_notebook::{build_notebook_runtime, NamespaceProvisioner, NotebookState, NotebookStore};
+use egret_notebook::{build_notebook_runtime, NotebookState, NotebookStore};
 use egret_workspace::rbac::Authorizer;
 use egret_workspace::workspaces::WorkspaceRepo;
 use uuid::Uuid;
-
-/// No lakekeeper in unit tests — always succeeds.
-struct FakeProvisioner;
-
-#[async_trait::async_trait]
-impl NamespaceProvisioner for FakeProvisioner {
-    async fn ensure_namespace(
-        &self,
-        _warehouse_id: Uuid,
-        _namespace: &str,
-    ) -> Result<(), NotebookApiError> {
-        Ok(())
-    }
-}
 
 /// Local fake minter — returns a canned engine JWT with a far-future expiry.
 struct StubMinter;
@@ -77,17 +61,6 @@ async fn runtime_manifest_carries_engine_jwt(pool: sqlx::PgPool) {
         .expect("seed ws");
     let ws_id: WorkspaceId = ws.id;
 
-    // A warehouse is required for provisioning the private namespace.
-    sqlx::query(
-        "INSERT INTO workspace_warehouses (workspace_id, warehouse_id, name) VALUES ($1, $2, $3)",
-    )
-    .bind(ws_id.0)
-    .bind(Uuid::new_v4())
-    .bind(format!("rtjwt-wh-{}", Uuid::new_v4().simple()))
-    .execute(&db.pool)
-    .await
-    .expect("seed warehouse");
-
     let state = NotebookState {
         store: NotebookStore::new(db.clone()),
         sessions: SessionService::new(
@@ -97,8 +70,6 @@ async fn runtime_manifest_carries_engine_jwt(pool: sqlx::PgPool) {
         ),
         workspaces,
         authz: Authorizer::new(db.clone()),
-        catalog: CatalogStore::new(db.clone()),
-        provisioner: Arc::new(FakeProvisioner),
         users: UserRepo::new(db.clone()),
         catalog_base_url: "http://localhost:8181".into(),
         engine_minter: Arc::new(StubMinter),
@@ -133,17 +104,6 @@ async fn runtime_manifest_no_refresh_token_is_ok(pool: sqlx::PgPool) {
         .expect("seed ws");
     let ws_id: WorkspaceId = ws.id;
 
-    // A warehouse is required for provisioning the private namespace.
-    sqlx::query(
-        "INSERT INTO workspace_warehouses (workspace_id, warehouse_id, name) VALUES ($1, $2, $3)",
-    )
-    .bind(ws_id.0)
-    .bind(Uuid::new_v4())
-    .bind(format!("rtnort-wh-{}", Uuid::new_v4().simple()))
-    .execute(&db.pool)
-    .await
-    .expect("seed warehouse");
-
     let state = NotebookState {
         store: NotebookStore::new(db.clone()),
         sessions: SessionService::new(
@@ -153,8 +113,6 @@ async fn runtime_manifest_no_refresh_token_is_ok(pool: sqlx::PgPool) {
         ),
         workspaces,
         authz: Authorizer::new(db.clone()),
-        catalog: CatalogStore::new(db.clone()),
-        provisioner: Arc::new(FakeProvisioner),
         users: UserRepo::new(db.clone()),
         catalog_base_url: "http://localhost:8181".into(),
         engine_minter: Arc::new(NoRefreshMinter),

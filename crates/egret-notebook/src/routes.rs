@@ -9,15 +9,12 @@
 //!   - every cell route resolves its parent notebook and runs `write_scoped`
 //!     before mutating, and the store additionally scopes by `notebook_id`.
 
-use std::sync::Arc;
-
 use axum::extract::{FromRef, Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
-use egret_catalog::service::CatalogStore;
 use egret_core::{Error, WorkspaceContext};
 use egret_workspace::context::WsContext;
 use egret_workspace::rbac::Authorizer;
@@ -29,7 +26,6 @@ use crate::model::{
     CellType, CreateCell, CreateNotebook, NotebookDetail, NotebookSettings, NotebookSummary,
     ReorderCells, SetFolder, UpdateCell, UpdateNotebook, UpdateNotebookSettings,
 };
-use crate::provisioning::NamespaceProvisioner;
 use crate::runtime::runtime;
 use crate::store::NotebookStore;
 
@@ -43,10 +39,6 @@ pub struct NotebookState {
     pub sessions: SessionService,
     pub workspaces: WorkspaceRepo,
     pub authz: Authorizer,
-    /// Catalog store for warehouse lookups + token mint/revoke.
-    pub catalog: CatalogStore,
-    /// Namespace provisioner (lakekeeper-backed in production, fake in tests).
-    pub provisioner: Arc<dyn NamespaceProvisioner>,
     /// UserRepo for `ensure_username`.
     pub users: UserRepo,
     /// Base URL of the Iceberg REST catalog (e.g. `http://localhost:8181`).
