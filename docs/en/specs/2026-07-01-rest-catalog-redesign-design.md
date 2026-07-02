@@ -1,5 +1,7 @@
 # REST Catalog Redesign — Design
 
+> ⛔ **SUPERSEDED (2026-07-02):** replaced by the control-plane Polaris direction — see `docs/en/specs/2026-07-02-control-plane-polaris-catalog-design.md`. The embedded-lakekeeper approach here is dropped (Plans 1 & 4 void; the `write_table` helper is kept). Retained for history.
+
 > Bilingual: English canonical; VI reference at `docs/vi/specs/2026-07-01-rest-catalog-redesign-design.md`.
 
 - **Date:** 2026-07-01 · **Revised:** 2026-07-02 (single-catalog + engine-write pivot)

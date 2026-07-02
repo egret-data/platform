@@ -1,5 +1,7 @@
 # Thiết kế lại REST Catalog — Thiết kế (bản tham chiếu)
 
+> ⛔ **SUPERSEDED (2026-07-02):** thay bằng hướng control-plane Polaris — xem `docs/en/specs/2026-07-02-control-plane-polaris-catalog-design.md`. Bỏ hướng embedded-lakekeeper (Plan 1 & 4 vô hiệu; giữ helper `write_table`). Giữ để lịch sử.
+
 > Bản chuẩn: `docs/en/specs/2026-07-01-rest-catalog-redesign-design.md`. File này rút gọn.
 > Ngày 2026-07-01 · **Sửa 2026-07-02 (pivot single-catalog + ghi-qua-engine)** · Trạng thái: đã duyệt, write path **spike-validated (1a/1b)**.
 

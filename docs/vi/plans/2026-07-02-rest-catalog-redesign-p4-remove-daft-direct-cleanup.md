@@ -1,5 +1,7 @@
 # Redesign REST Catalog — Plan 4: hoàn tất pivot (xoá Daft-direct + dọn) (bản tham chiếu)
 
+> ⛔ **SUPERSEDED (2026-07-02):** thay bằng hướng control-plane Polaris — xem `docs/en/specs/2026-07-02-control-plane-polaris-catalog-design.md`. Bỏ hướng embedded-lakekeeper (Plan 1 & 4 vô hiệu; giữ helper `write_table`). Giữ để lịch sử.
+
 > Bản chuẩn: `docs/en/plans/2026-07-02-rest-catalog-redesign-p4-remove-daft-direct-cleanup.md` (code/step đầy đủ).
 > Spec: `docs/en/specs/2026-07-01-rest-catalog-redesign-design.md` (đã sửa single-catalog). Plan gộp cho **R** (xoá Daft-direct) + **C** (dọn single-catalog) + **F** (dọn di sản). **A+B ở Plan 1**; **W (write_table) đã xong**. Plan 2 & 3 SUPERSEDED. Thực thi qua subagent-driven-development.
 

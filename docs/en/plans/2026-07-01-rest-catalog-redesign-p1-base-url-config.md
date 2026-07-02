@@ -1,5 +1,7 @@
 # REST Catalog Redesign — Plan 1: base_url root-fix + config split Implementation Plan
 
+> ⛔ **SUPERSEDED (2026-07-02):** replaced by the control-plane Polaris direction — see `docs/en/specs/2026-07-02-control-plane-polaris-catalog-design.md`. The embedded-lakekeeper approach here is dropped (Plans 1 & 4 void; the `write_table` helper is kept). Retained for history.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 > Spec: `docs/en/specs/2026-07-01-rest-catalog-redesign-design.md` (Workstreams **A** and **B**). This is the first of six sequenced plans (A → B → D → E → C → F); it is self-contained and testable on its own.
 > VI reference: `docs/vi/plans/2026-07-01-rest-catalog-redesign-p1-base-url-config.md`.

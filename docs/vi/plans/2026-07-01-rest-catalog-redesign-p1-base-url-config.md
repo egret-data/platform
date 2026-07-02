@@ -1,5 +1,7 @@
 # Redesign REST Catalog — Plan 1: base_url + tách config (bản tham chiếu)
 
+> ⛔ **SUPERSEDED (2026-07-02):** thay bằng hướng control-plane Polaris — xem `docs/en/specs/2026-07-02-control-plane-polaris-catalog-design.md`. Bỏ hướng embedded-lakekeeper (Plan 1 & 4 vô hiệu; giữ helper `write_table`). Giữ để lịch sử.
+
 > Bản chuẩn: `docs/en/plans/2026-07-01-rest-catalog-redesign-p1-base-url-config.md` (code/step đầy đủ ở đó).
 > Spec: `docs/en/specs/2026-07-01-rest-catalog-redesign-design.md` (Workstream **A** + **B**). Thực thi qua subagent-driven-development.
 

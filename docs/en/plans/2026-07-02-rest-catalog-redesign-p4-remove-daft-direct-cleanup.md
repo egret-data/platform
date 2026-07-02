@@ -1,5 +1,7 @@
 # REST Catalog Redesign — Plan 4: complete the pivot (remove Daft-direct + cleanup) Implementation Plan
 
+> ⛔ **SUPERSEDED (2026-07-02):** replaced by the control-plane Polaris direction — see `docs/en/specs/2026-07-02-control-plane-polaris-catalog-design.md`. The embedded-lakekeeper approach here is dropped (Plans 1 & 4 void; the `write_table` helper is kept). Retained for history.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 > Spec: `docs/en/specs/2026-07-01-rest-catalog-redesign-design.md` (revised single-catalog pivot). This is the consolidated plan for the remaining code work — Workstreams **R** (remove Daft-direct), **C** (single-catalog cleanup), **F** (legacy removal). **A + B (base_url + config split) are in Plan 1** (`…-p1-base-url-config.md`); the write helper (**W**) is already done + committed. Plans 2 & 3 are SUPERSEDED.
 > VI reference: `docs/vi/plans/2026-07-02-rest-catalog-redesign-p4-remove-daft-direct-cleanup.md`.
