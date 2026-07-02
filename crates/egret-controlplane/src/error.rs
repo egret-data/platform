@@ -59,6 +59,9 @@ impl From<PolarisError> for CpError {
             PolarisError::Forbidden => CpError::Forbidden,
             PolarisError::NotFound => CpError::NotFound,
             PolarisError::Conflict => CpError::AlreadyExists("polaris conflict".to_string()),
+            // A 400 means Polaris rejected the request we sent — surface its message
+            // (e.g. a missing required property) rather than a generic 500.
+            PolarisError::Status(400, msg) => CpError::BadRequest(format!("polaris: {msg}")),
             PolarisError::Status(_, _) | PolarisError::Http(_) | PolarisError::Decode(_) => {
                 CpError::Internal
             }

@@ -46,20 +46,34 @@ impl From<egret_polaris::Catalog> for CatalogDto {
     }
 }
 
-/// The allowed storage location for a catalog: `s3://{bucket}/{name}/`.
+/// The base storage location for a catalog: `s3://{bucket}/{name}`.
 ///
 /// Pure (no I/O) so the storage-connection → Polaris mapping can be asserted
 /// directly in unit tests without a live catalog or mocked transport.
+fn catalog_base_location(bucket: &str, name: &str) -> String {
+    format!("s3://{bucket}/{name}")
+}
+
+/// The allowed storage location for a catalog: `s3://{bucket}/{name}/`.
 fn catalog_allowed_location(bucket: &str, name: &str) -> String {
-    format!("s3://{bucket}/{name}/")
+    format!("{}/", catalog_base_location(bucket, name))
 }
 
 /// Build the [`egret_polaris::NewCatalog`] for `name` from a storage connection:
 /// an INTERNAL catalog whose single allowed S3 location is
 /// `s3://{bucket}/{name}/` and whose region is carried from the connection.
 ///
+/// Polaris REQUIRES a `default-base-location` property on catalog creation
+/// (a catalog with only `allowedLocations` is rejected with HTTP 400), so it is
+/// set to `s3://{bucket}/{name}`.
+///
 /// Pure (no I/O) so the mapping can be unit-tested directly.
 fn new_catalog_from(sc: &StorageConn, name: &str) -> egret_polaris::NewCatalog {
+    let mut properties = std::collections::HashMap::new();
+    properties.insert(
+        "default-base-location".to_string(),
+        catalog_base_location(&sc.bucket, name),
+    );
     egret_polaris::NewCatalog {
         name: name.to_string(),
         catalog_type: egret_polaris::CatalogType::Internal,
@@ -68,7 +82,7 @@ fn new_catalog_from(sc: &StorageConn, name: &str) -> egret_polaris::NewCatalog {
             role_arn: None,
             region: Some(sc.region.clone()),
         },
-        properties: Default::default(),
+        properties,
     }
 }
 
@@ -178,6 +192,12 @@ mod tests {
             }
             other => panic!("expected S3 storage config, got {other:?}"),
         }
-        assert!(nc.properties.is_empty());
+        // Polaris requires default-base-location; without it, create is HTTP 400.
+        assert_eq!(
+            nc.properties
+                .get("default-base-location")
+                .map(String::as_str),
+            Some("s3://egret-lake/lakehouse")
+        );
     }
 }
