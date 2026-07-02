@@ -8,20 +8,12 @@ export interface EngineOption {
   enabled: boolean;
 }
 
-export interface CatalogOption {
-  id: string; // warehouse id
-  name: string;
-  enabled: boolean;
-}
-
 export interface NotebookSettings {
   engines: EngineOption[];
-  catalogs: CatalogOption[];
 }
 
 export interface SaveNotebookSettingsInput {
   engine_ids: string[];
-  catalog_ids: string[];
 }
 
 export const notebookSettingsKeys = {

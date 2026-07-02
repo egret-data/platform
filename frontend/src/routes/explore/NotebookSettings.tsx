@@ -5,7 +5,6 @@ import { toast } from "sonner";
 
 import {
   type EngineOption,
-  type CatalogOption,
   useNotebookSettings,
   useSaveNotebookSettings,
 } from "@/api/notebookSettings";
@@ -22,14 +21,12 @@ export default function NotebookSettings() {
   const saveMutation = useSaveNotebookSettings(ws);
 
   const [engineIds, setEngineIds] = useState<Set<string>>(new Set());
-  const [catalogIds, setCatalogIds] = useState<Set<string>>(new Set());
   const [saveError, setSaveError] = useState<string | null>(null);
 
   // Seed checked state from server data whenever it loads/changes.
   useEffect(() => {
     if (data) {
       setEngineIds(new Set(data.engines.filter((e) => e.enabled).map((e) => e.id)));
-      setCatalogIds(new Set(data.catalogs.filter((c) => c.enabled).map((c) => c.id)));
     }
   }, [data]);
 
@@ -42,21 +39,11 @@ export default function NotebookSettings() {
     });
   }
 
-  function toggleCatalog(id: string) {
-    setCatalogIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
   async function handleSave() {
     setSaveError(null);
     try {
       await saveMutation.mutateAsync({
         engine_ids: Array.from(engineIds),
-        catalog_ids: Array.from(catalogIds),
       });
       toast.success("Notebook settings saved.");
     } catch (err) {
@@ -95,7 +82,6 @@ export default function NotebookSettings() {
   }
 
   const engines = data?.engines ?? [];
-  const catalogs = data?.catalogs ?? [];
 
   return (
     <section className="p-4">
@@ -117,28 +103,6 @@ export default function NotebookSettings() {
                 engine={engine}
                 checked={engineIds.has(engine.id)}
                 onToggle={() => toggleEngine(engine.id)}
-              />
-            ))}
-          </OptionList>
-        )}
-      </div>
-
-      {/* Catalogs section */}
-      <div className="mt-6">
-        <h2 className="text-sm font-semibold">Catalogs</h2>
-        <p className="mb-3 text-sm text-muted-foreground">
-          Iceberg catalogs notebooks in this workspace can access.
-        </p>
-        {catalogs.length === 0 ? (
-          <EmptyState message="No catalogs configured for this workspace yet." />
-        ) : (
-          <OptionList>
-            {catalogs.map((catalog) => (
-              <CatalogRow
-                key={catalog.id}
-                catalog={catalog}
-                checked={catalogIds.has(catalog.id)}
-                onToggle={() => toggleCatalog(catalog.id)}
               />
             ))}
           </OptionList>
@@ -168,7 +132,7 @@ function PageHeader() {
     <div>
       <h1 className="text-lg font-semibold">Notebook settings</h1>
       <p className="text-sm text-muted-foreground">
-        Choose which engines and catalogs notebooks in this workspace can use.
+        Choose which engines notebooks in this workspace can use.
       </p>
     </div>
   );
@@ -200,27 +164,6 @@ function EngineRow({
       />
       <span className="flex-1 text-sm font-medium">{engine.name}</span>
       <Badge variant="secondary">{engine.engine}</Badge>
-    </label>
-  );
-}
-
-function CatalogRow({
-  catalog,
-  checked,
-  onToggle,
-}: {
-  catalog: CatalogOption;
-  checked: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <label className="flex cursor-pointer items-center gap-3 px-4 py-3 hover:bg-accent">
-      <Checkbox
-        checked={checked}
-        onCheckedChange={onToggle}
-        aria-label={`Enable catalog ${catalog.name}`}
-      />
-      <span className="flex-1 text-sm font-medium">{catalog.name}</span>
     </label>
   );
 }

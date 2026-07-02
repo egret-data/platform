@@ -15,7 +15,6 @@ class Runtime:
     def __init__(self, d):
         self.username = d["username"]
         self.engines = [Engine(e) for e in d.get("engines", [])]
-        self.catalogs = d.get("catalogs", [])
 
 
 def load_runtime(env=None):

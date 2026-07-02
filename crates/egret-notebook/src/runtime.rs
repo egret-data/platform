@@ -1,14 +1,14 @@
 //! `GET /ws/{workspace}/notebook-runtime` — per-user kernel manifest (F1→D1).
 //!
 //! Returns the caller's stable username and the workspace's enabled
-//! engines/catalogs so the Daft kernel can wire itself up in one round-trip.
+//! engines so the Daft kernel can wire itself up in one round-trip.
 
 use axum::extract::State;
 use axum::Json;
 use egret_workspace::context::WsContext;
 
 use crate::error::NotebookApiError;
-use crate::model::{CatalogOption, EngineOption};
+use crate::model::EngineOption;
 use crate::routes::NotebookState;
 
 /// Full kernel manifest returned by `GET /ws/{workspace}/notebook-runtime`.
@@ -18,8 +18,6 @@ pub struct NotebookRuntime {
     pub username: String,
     /// Workspace engines (DB connections) enabled for notebooks.
     pub engines: Vec<EngineOption>,
-    /// Workspace catalogs (warehouses) enabled for notebooks.
-    pub catalogs: Vec<CatalogOption>,
     /// Short-lived per-user engine JWT the kernel presents to query engines.
     /// `None` when the caller has no stored refresh token (e.g. password/local
     /// users or OIDC logins without an offline token) — minting is best-effort
@@ -49,21 +47,13 @@ pub async fn build_notebook_runtime(
         .await
         .map_err(NotebookApiError)?;
 
-    // 5. Load enabled engines and catalogs (filter to enabled==true).
+    // 5. Load enabled engines (filter to enabled==true).
     let engines: Vec<EngineOption> = st
         .store
         .list_engine_options(ws)
         .await?
         .into_iter()
         .filter(|e| e.enabled)
-        .collect();
-
-    let catalogs: Vec<CatalogOption> = st
-        .store
-        .list_catalog_options(ws)
-        .await?
-        .into_iter()
-        .filter(|c| c.enabled)
         .collect();
 
     // 5b. Best-effort mint of a short-lived per-user engine JWT for the kernel.
@@ -82,7 +72,6 @@ pub async fn build_notebook_runtime(
     Ok(NotebookRuntime {
         username,
         engines,
-        catalogs,
         engine_jwt,
         engine_jwt_expires_at,
     })

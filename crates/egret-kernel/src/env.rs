@@ -29,28 +29,17 @@ pub fn manifest_to_env(m: &NotebookRuntime, api_url: &str, kernel_token: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egret_notebook::model::{CatalogOption, EngineOption};
-    use egret_notebook::{NotebookRuntime, RuntimeCatalog};
+    use egret_notebook::model::EngineOption;
+    use egret_notebook::NotebookRuntime;
     use uuid::Uuid;
 
     fn make_runtime() -> NotebookRuntime {
         NotebookRuntime {
             username: "alice".to_string(),
-            catalog: RuntimeCatalog {
-                url: "http://catalog:8181".to_string(),
-                warehouse: "main".to_string(),
-                namespace: "notebook_alice".to_string(),
-                token: "tok-abc".to_string(),
-            },
             engines: vec![EngineOption {
                 id: Uuid::nil(),
                 name: "trino-dev".to_string(),
                 engine: "trino".to_string(),
-                enabled: true,
-            }],
-            catalogs: vec![CatalogOption {
-                id: Uuid::nil(),
-                name: "lakehouse".to_string(),
                 enabled: true,
             }],
             engine_jwt: Some("engine.jwt.token".to_string()),
@@ -74,7 +63,7 @@ mod tests {
         // EGRET_KERNEL_TOKEN (placeholder empty)
         assert_eq!(env.get("EGRET_KERNEL_TOKEN").map(String::as_str), Some(""));
 
-        // EGRET_NOTEBOOK_RUNTIME: must be valid JSON with username + catalog.namespace
+        // EGRET_NOTEBOOK_RUNTIME: must be valid JSON with username
         let raw = env
             .get("EGRET_NOTEBOOK_RUNTIME")
             .expect("EGRET_NOTEBOOK_RUNTIME key must be present");
@@ -86,11 +75,6 @@ mod tests {
             v["username"].as_str(),
             Some("alice"),
             "username must round-trip"
-        );
-        assert_eq!(
-            v["catalog"]["namespace"].as_str(),
-            Some("notebook_alice"),
-            "catalog.namespace must round-trip"
         );
     }
 }
