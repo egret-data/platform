@@ -17,14 +17,18 @@ pub fn sign_claims(km: &KeyMaterial, claims: &serde_json::Value) -> Result<Strin
 /// Verify `token`'s signature against a public JWK (`n`/`e`) and return its
 /// claims. Audience + expiry validation are disabled — this is a
 /// signature/round-trip check (Polaris/lakekeeper enforce aud/exp themselves).
-pub fn verify_with_jwk(token: &str, jwk: &serde_json::Value) -> Result<serde_json::Value, IdpError> {
+pub fn verify_with_jwk(
+    token: &str,
+    jwk: &serde_json::Value,
+) -> Result<serde_json::Value, IdpError> {
     let n = jwk["n"]
         .as_str()
         .ok_or_else(|| IdpError::Crypto("jwk missing n".into()))?;
     let e = jwk["e"]
         .as_str()
         .ok_or_else(|| IdpError::Crypto("jwk missing e".into()))?;
-    let key = DecodingKey::from_rsa_components(n, e).map_err(|e| IdpError::Crypto(e.to_string()))?;
+    let key =
+        DecodingKey::from_rsa_components(n, e).map_err(|e| IdpError::Crypto(e.to_string()))?;
     let mut validation = Validation::new(Algorithm::RS256);
     validation.validate_aud = false;
     validation.validate_exp = false;

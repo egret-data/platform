@@ -10,7 +10,6 @@ egret-auth.workspace = true
 egret-catalog.workspace = true
 egret-secrets.workspace = true
 egret-metastore.workspace = true
-egret-polaris.workspace = true
 reqwest.workspace = true
 sqlx.workspace = true
 axum.workspace = true

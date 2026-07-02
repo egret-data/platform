@@ -9,19 +9,14 @@
 //! The router is nested at `/api/control-plane` in `egret-server`, behind the
 //! same CSRF layer as the other mutating APIs.
 
-mod assignment;
 mod auth;
-mod catalogs;
 mod error;
-mod polaris_conn;
-mod rbac;
 mod secrets;
 mod storage;
+mod warehouses;
 
-pub use assignment::{Assignment, AssignmentStore};
 pub use auth::require_platform_admin;
 pub use error::CpError;
-pub use polaris_conn::{polaris_client, PolarisConn, PolarisConnInput, PolarisConnStore};
 
 use axum::extract::FromRef;
 use axum::Router;
@@ -38,10 +33,6 @@ pub struct CpState {
     pub secrets: WorkspaceSecretStore,
     /// Session service backing the `Auth` extractor.
     pub sessions: SessionService,
-    /// Singleton Polaris connection registry (`polaris_connection`).
-    pub polaris_conn: PolarisConnStore,
-    /// Workspace↔catalog assignment registry (`workspace_catalog_assignments`).
-    pub assignments: AssignmentStore,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.
@@ -57,8 +48,5 @@ pub fn control_plane_router() -> Router<CpState> {
     Router::new()
         .merge(storage::router())
         .merge(secrets::router())
-        .merge(polaris_conn::router())
-        .merge(catalogs::router())
-        .merge(rbac::router())
-        .merge(assignment::router())
+        .merge(warehouses::router())
 }

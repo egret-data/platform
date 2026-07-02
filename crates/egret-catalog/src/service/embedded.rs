@@ -168,7 +168,9 @@ impl CatalogStore {
         .fetch_one(self.pool())
         .await
         .map_err(|e| match &e {
-            sqlx::Error::Database(d) if d.constraint() == Some("catalog_roles_warehouse_id_name_key") => {
+            sqlx::Error::Database(d)
+                if d.constraint() == Some("catalog_roles_warehouse_id_name_key") =>
+            {
                 CatalogError::AlreadyExists(name.to_string())
             }
             _ => CatalogError::Db(e),
@@ -250,10 +252,18 @@ impl CatalogStore {
     /// Create a Catalog Client: generate a `client_id` + secret (argon2-hashed at
     /// rest), returning the plaintext secret ONCE.
     pub async fn create_client(&self, c: &NewClient) -> Result<CreatedClient, CatalogError> {
-        let mut rng = rand::thread_rng();
-        let client_id = format!("egret_{}", hex::encode(rng.gen::<[u8; 8]>()));
-        let secret_bytes: [u8; 32] = rng.gen();
-        let client_secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret_bytes);
+        // Generate all random material in a block so the `!Send` ThreadRng is
+        // dropped BEFORE the sqlx await (otherwise the future is !Send and can't
+        // be used as an axum handler).
+        let (client_id, client_secret) = {
+            let mut rng = rand::thread_rng();
+            let client_id = format!("egret_{}", hex::encode(rng.gen::<[u8; 8]>()));
+            let secret_bytes: [u8; 32] = rng.gen();
+            (
+                client_id,
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret_bytes),
+            )
+        };
         let salt = SaltString::generate(&mut OsRng);
         let hash = Argon2::default()
             .hash_password(client_secret.as_bytes(), &salt)
