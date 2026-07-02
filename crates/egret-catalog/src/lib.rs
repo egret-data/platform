@@ -1,10 +1,9 @@
-//! Egret catalog identity layer: the Postgres-backed `CatalogStore` providing
-//! per-workspace catalog tokens and the workspace → warehouse mapping.
+//! Egret catalog storage layer: the Postgres-backed `CatalogStore` providing
+//! the per-workspace storage-connection registry (`workspace_storages`).
 //!
-//! The Iceberg REST catalog itself is served by the embedded lakekeeper engine
-//! (`egret-catalog-engine`); this crate now only owns the reusable A-3 identity
-//! bits that the engine front-auth, the browse API, warehouse provisioning, and
-//! the `egret catalog mint-token` CLI depend on.
+//! The catalog-token and warehouse-mapping modules were removed as part of the
+//! REST-catalog redesign; a later plan moves the storage-connection code to the
+//! control plane and reuses it.
 pub mod error;
 pub mod service;
 
