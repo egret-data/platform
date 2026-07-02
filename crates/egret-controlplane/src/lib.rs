@@ -10,6 +10,7 @@
 //! same CSRF layer as the other mutating APIs.
 
 mod auth;
+mod catalogs;
 mod error;
 mod polaris_conn;
 mod secrets;
@@ -52,4 +53,5 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(storage::router())
         .merge(secrets::router())
         .merge(polaris_conn::router())
+        .merge(catalogs::router())
 }

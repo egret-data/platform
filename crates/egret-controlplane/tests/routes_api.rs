@@ -147,6 +147,19 @@ async fn non_admin_is_forbidden() {
         StatusCode::FORBIDDEN,
         "a non platform-admin must not create secrets"
     );
+
+    // GET /polaris/catalogs → 403 (gate runs before any Polaris client is built).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/polaris/catalogs", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a non platform-admin must not list catalogs"
+    );
 }
 
 #[tokio::test]
