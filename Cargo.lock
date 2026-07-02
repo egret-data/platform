@@ -2474,7 +2474,11 @@ dependencies = [
 name = "egret-catalog"
 version = "0.1.0"
 dependencies = [
+ "argon2",
+ "async-trait",
+ "base64 0.22.1",
  "chrono",
+ "egret-machine-idp",
  "egret-metastore",
  "hex",
  "rand 0.8.6",

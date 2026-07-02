@@ -460,10 +460,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         None
     };
 
-    // egret mini machine-IdP (EB-2): mints Catalog Client tokens (/oauth/token +
-    // JWKS). The real ClientVerifier (CatalogClientStore) is wired in EB-3; until
-    // then a RejectAll placeholder (no clients exist yet). `issuer` is egret's
-    // public root URL (the JWT `iss` + OIDC issuer lakekeeper will trust in EB-3).
+    // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).
+    // EB-3: the real ClientVerifier is the Catalog Client registry (CatalogStore).
+    // `issuer` is egret's public root URL (the JWT `iss` + OIDC issuer lakekeeper
+    // will trust in EB-3's Authorizer integration).
     let idp = Some(egret_machine_idp::IdpState {
         keys: std::sync::Arc::new(egret_machine_idp::PgSigningKeyStore::new(db.clone())),
         issuer: config
@@ -471,7 +471,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             .public_url
             .clone()
             .unwrap_or_else(|| "http://localhost:8080".to_string()),
-        clients: std::sync::Arc::new(egret_machine_idp::RejectAllVerifier),
+        clients: std::sync::Arc::new(egret_catalog::CatalogStore::new(db.clone())),
     });
 
     let app = build_router(AppState {
