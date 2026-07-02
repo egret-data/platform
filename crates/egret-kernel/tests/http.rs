@@ -19,7 +19,6 @@ use axum::http::{Request as HttpRequest, StatusCode};
 use axum::response::Response;
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
-use egret_catalog::service::CatalogStore;
 use egret_core::ids::{UserId, WorkspaceId};
 use egret_kernel::kernel_router;
 use egret_kernel::launcher::FakeLauncher;
@@ -27,30 +26,13 @@ use egret_kernel::manager::KernelManager;
 use egret_kernel::registry::KernelRegistry;
 use egret_kernel::routes::KernelState;
 use egret_metastore::Db;
-use egret_notebook::error::NotebookApiError;
-use egret_notebook::{NamespaceProvisioner, NotebookState, NotebookStore};
+use egret_notebook::{NotebookState, NotebookStore};
 use egret_workspace::members::MemberRepo;
 use egret_workspace::rbac::Authorizer;
 use egret_workspace::workspaces::WorkspaceRepo;
 use http_body_util::BodyExt;
 use tower::ServiceExt; // oneshot
 use uuid::Uuid;
-
-// ── Fake NamespaceProvisioner ────────────────────────────────────────────────
-
-/// Always succeeds; no lakekeeper in unit tests.
-struct FakeProvisioner;
-
-#[async_trait::async_trait]
-impl NamespaceProvisioner for FakeProvisioner {
-    async fn ensure_namespace(
-        &self,
-        _warehouse_id: Uuid,
-        _namespace: &str,
-    ) -> Result<(), NotebookApiError> {
-        Ok(())
-    }
-}
 
 // ── Stub EngineTokenMinter ────────────────────────────────────────────────────
 
@@ -138,8 +120,6 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         sessions: sessions.clone(),
         workspaces: workspaces.clone(),
         authz: Authorizer::new(db.clone()),
-        catalog: CatalogStore::new(db.clone()),
-        provisioner: Arc::new(FakeProvisioner),
         users: UserRepo::new(db.clone()),
         catalog_base_url: "http://localhost:8181".into(),
         engine_minter: Arc::new(StubMinter),
