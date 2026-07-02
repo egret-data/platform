@@ -460,6 +460,20 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         None
     };
 
+    // egret mini machine-IdP (EB-2): mints Catalog Client tokens (/oauth/token +
+    // JWKS). The real ClientVerifier (CatalogClientStore) is wired in EB-3; until
+    // then a RejectAll placeholder (no clients exist yet). `issuer` is egret's
+    // public root URL (the JWT `iss` + OIDC issuer lakekeeper will trust in EB-3).
+    let idp = Some(egret_machine_idp::IdpState {
+        keys: std::sync::Arc::new(egret_machine_idp::PgSigningKeyStore::new(db.clone())),
+        issuer: config
+            .catalog
+            .public_url
+            .clone()
+            .unwrap_or_else(|| "http://localhost:8080".to_string()),
+        clients: std::sync::Arc::new(egret_machine_idp::RejectAllVerifier),
+    });
+
     let app = build_router(AppState {
         db: Some(db),
         auth: Some(auth),
@@ -473,6 +487,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         kernel,
         control_plane,
         catalog_engine,
+        idp,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)

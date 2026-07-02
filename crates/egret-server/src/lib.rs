@@ -40,6 +40,8 @@ pub struct AppState {
     /// Embedded lakekeeper Iceberg REST catalog router, mounted at `/catalog/v1`
     /// when `config.catalog.enabled` (in `egret-bin`); `None` otherwise.
     pub catalog_engine: Option<axum::Router>,
+    /// egret mini machine-IdP (mints Catalog Client tokens); `None` in unit tests.
+    pub idp: Option<egret_machine_idp::IdpState>,
 }
 
 impl AppState {
@@ -58,6 +60,7 @@ impl AppState {
             kernel: None,
             control_plane: None,
             catalog_engine: None,
+            idp: None,
         }
     }
 }
@@ -176,6 +179,12 @@ pub fn build_router(state: AppState) -> Router {
         // API — no CSRF/session auth here (EB-1: AllowAll; EB-3 adds JWT authN +
         // the egret Authorizer). The router is lakekeeper-relative (/config, /{prefix}/…).
         router = router.nest_service("/catalog/v1", catalog_engine);
+    }
+
+    if let Some(idp) = state.idp.clone() {
+        // egret mini machine-IdP: /oauth/token + /.well-known/*. Public machine
+        // endpoints — no CSRF, no session auth.
+        router = router.merge(egret_machine_idp::idp_router().with_state(idp));
     }
 
     router.with_state(state)
