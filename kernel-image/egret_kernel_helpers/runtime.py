@@ -3,14 +3,6 @@ import json
 import os
 
 
-class RuntimeCatalog:
-    def __init__(self, d):
-        self.url = d["url"]
-        self.warehouse = d["warehouse"]
-        self.namespace = d["namespace"]
-        self.token = d["token"]
-
-
 class Engine:
     def __init__(self, d):
         self.id = d["id"]
@@ -22,7 +14,6 @@ class Engine:
 class Runtime:
     def __init__(self, d):
         self.username = d["username"]
-        self.catalog = RuntimeCatalog(d["catalog"])
         self.engines = [Engine(e) for e in d.get("engines", [])]
         self.catalogs = d.get("catalogs", [])
 

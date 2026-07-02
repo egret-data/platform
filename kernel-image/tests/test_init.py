@@ -2,7 +2,7 @@ import json
 import egret_kernel_helpers as ek
 
 def test_exports_present():
-    for name in ("catalog", "display", "load_runtime", "iceberg", "trino", "starrocks", "write_iceberg"):
+    for name in ("display", "load_runtime", "trino", "starrocks", "write_table"):
         assert hasattr(ek, name), f"missing export {name}"
 
 def test_me_reads_username(monkeypatch):

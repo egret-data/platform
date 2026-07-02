@@ -1,12 +1,9 @@
-"""Dataframe-first engine helpers: iceberg(), trino(), starrocks() — direct Daft access as the logged-in user."""
+"""Dataframe-first engine helpers: trino(), starrocks() — direct Daft access as the logged-in user."""
 import base64
 import datetime as _dt
 import json
 import os
 import struct
-
-from .catalog import catalog
-from .runtime import load_runtime
 
 _REFRESH_MARGIN = _dt.timedelta(seconds=30)
 
@@ -259,38 +256,3 @@ def write_table(df, table, *, engine="trino", mode="overwrite",
     # BARE table name (SQLDataSink hands it straight to pandas.to_sql).
     conn = conn_for(engine, env=env, cache=cache, catalog=catalog, schema=schema)
     return df.write_sql(name, conn, write_mode=mode, column_types=column_types)
-
-
-def iceberg(table, *, env=None):
-    """Read an Iceberg table from your notebook catalog as a lazy Daft DataFrame
-    (native, pushdown). `table` is "namespace.name" (a bare name defaults to your
-    private `notebook_{username}` namespace)."""
-    import daft
-    tbl = catalog().load_table(_resolve_identifier(table, env=env))
-    return daft.read_iceberg(tbl)
-
-
-def _resolve_identifier(table, *, env=None):
-    """Resolve a table ref to "namespace.name". A bare name defaults to your
-    private notebook namespace (`notebook_{username}`)."""
-    if "." in table:
-        return table
-    rt = load_runtime(os.environ if env is None else env)
-    ns = rt.catalog.namespace if rt is not None else "default"
-    return f"{ns}.{table}"
-
-
-def write_iceberg(df, table, *, mode="append", env=None):
-    """Write a Daft DataFrame to your notebook Iceberg catalog (read-write).
-    `table` is "namespace.name" (a bare name defaults to your private
-    `notebook_{username}` namespace). Auto-creates the table from df's schema if
-    it doesn't exist. mode="append" (default) | "overwrite". Returns the Daft
-    write result."""
-    from pyiceberg.exceptions import NoSuchTableError
-    cat = catalog()
-    ident = _resolve_identifier(table, env=env)
-    try:
-        tbl = cat.load_table(ident)
-    except NoSuchTableError:
-        tbl = cat.create_table(ident, df.schema().to_pyarrow_schema())
-    return df.write_iceberg(tbl, mode=mode)
