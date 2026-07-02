@@ -2445,6 +2445,7 @@ dependencies = [
  "egret-authz",
  "egret-bi",
  "egret-catalog",
+ "egret-catalog-engine",
  "egret-config",
  "egret-controlplane",
  "egret-core",

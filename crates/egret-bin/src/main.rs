@@ -438,6 +438,28 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         assignments: egret_controlplane::AssignmentStore::new(db.clone()),
     });
 
+    // Embedded catalog (EB-1): mount lakekeeper in-process at /catalog/v1 with
+    // lakekeeper's AllowAll authorizer. The real egret Authorizer + JWT authN
+    // come in EB-3; here it just serves the Iceberg REST catalog.
+    let catalog_engine: Option<axum::Router> = if config.catalog.enabled {
+        let dsn = config.database.url.as_str();
+        egret_catalog_engine::run_lakekeeper_migrations(dsn)
+            .await
+            .context("lakekeeper migrations")?;
+        let (engine_state, gc_registry) =
+            egret_catalog_engine::build_state(dsn, &config.catalog.system_user)
+                .await
+                .context("building catalog engine state")?;
+        egret_catalog_engine::ensure_bootstrapped(engine_state.clone(), &config.catalog.system_user)
+            .await
+            .context("bootstrapping catalog engine")?;
+        let gc_cancel = egret_catalog_engine::CancellationToken::new();
+        egret_catalog_engine::spawn_gc_workers(gc_registry, gc_cancel);
+        Some(egret_catalog_engine::mount_catalog_engine(engine_state))
+    } else {
+        None
+    };
+
     let app = build_router(AppState {
         db: Some(db),
         auth: Some(auth),
@@ -450,6 +472,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         notebook,
         kernel,
         control_plane,
+        catalog_engine,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)
