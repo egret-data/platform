@@ -57,25 +57,25 @@ use lakekeeper::api::ApiContext;
 use lakekeeper::server::CatalogServer;
 use lakekeeper::service::contract_verification::ContractVerifiers;
 use lakekeeper::service::events::EventDispatcher;
+use lakekeeper::service::authz::AllowAllAuthorizer;
 use lakekeeper::service::tasks::TaskQueueRegistry;
 use lakekeeper::service::{CatalogStore, State};
 use lakekeeper_storage_postgres::{CatalogState, PostgresBackend, SecretsState};
 
-use crate::authorizer::EgretAuthorizer;
 use crate::pool::build_isolated_pool;
 
 /// The concrete state type lakekeeper's router is generic over.
 ///
-/// `A = EgretAuthorizer` (CE-4: enforces the per-token egret scope claim on data
-/// actions), `C = PostgresBackend`, `S = SecretsState`.
-/// `ApiContext<EngineState>` is what `new_v1_full_router` returns a
-/// `Router<_>` for, and the value Task 4 will `.with_state(...)`.
-pub type EngineState = State<EgretAuthorizer, PostgresBackend, SecretsState>;
+/// `A = AllowAllAuthorizer` (EB-1: lakekeeper's permissive built-in authorizer;
+/// EB-3 swaps in the real egret authorizer), `C = PostgresBackend`,
+/// `S = SecretsState`. `ApiContext<EngineState>` is what `new_v1_full_router`
+/// returns a `Router<_>` for, and the value callers `.with_state(...)`.
+pub type EngineState = State<AllowAllAuthorizer, PostgresBackend, SecretsState>;
 
 /// The concrete service implementation that satisfies the iceberg endpoint
 /// traits the router requires (`config`/`namespace`/`tables`/`metrics`/
 /// `s3_signer`/`views` `Service`s). Upstream blanket-implements all of them.
-pub type EngineServer = CatalogServer<PostgresBackend, EgretAuthorizer, SecretsState>;
+pub type EngineServer = CatalogServer<PostgresBackend, AllowAllAuthorizer, SecretsState>;
 
 /// Build the lakekeeper [`ApiContext`] over isolated `lakekeeper`-schema pools,
 /// and return the populated [`TaskQueueRegistry`] for the caller to spawn workers.
@@ -90,10 +90,10 @@ pub type EngineServer = CatalogServer<PostgresBackend, EgretAuthorizer, SecretsS
 /// `from_pools` constructors expect (we point both at the same DSN — the spike
 /// has no read replica).
 ///
-/// `system_user` is the configured `catalog.system_user`; it derives the stable
-/// [`crate::bootstrap::system_user_id`] principal that [`EgretAuthorizer`]
-/// bypasses (so bootstrap, provisioning, and the in-process browse API are never
-/// blocked by per-token scope claims).
+/// `system_user` (the configured `catalog.system_user`) is accepted for a stable
+/// public signature; EB-1's [`AllowAllAuthorizer`] needs no per-principal bypass,
+/// so it is unused here. [`crate::bootstrap::ensure_bootstrapped`] still consumes
+/// it to derive the stable admin principal.
 ///
 /// The returned [`TaskQueueRegistry`] has the 3 built-in GC queues registered
 /// (tabular expiry + purge + task-log cleanup). The binary passes it to
@@ -139,7 +139,7 @@ pub async fn build_state_with_gc_poll(
 /// prod path keeps its no-argument `poll` baked in.
 async fn build_state_with_gc_poll_inner(
     dsn: &str,
-    system_user: &str,
+    _system_user: &str,
     poll: std::time::Duration,
 ) -> anyhow::Result<(ApiContext<EngineState>, TaskQueueRegistry)> {
     // Two isolated pools (read + write). Both pin search_path = lakekeeper,public.
@@ -159,12 +159,9 @@ async fn build_state_with_gc_poll_inner(
         .await
         .context("reading lakekeeper server info (catalog must be migrated first)")?
         .server_id();
-    // CE-4: the EgretAuthorizer gates data actions by the per-token egret scope
-    // claim, bypassing only the stable system principal (bootstrap/browse).
-    let authz = EgretAuthorizer {
-        server_id,
-        system_principal: crate::bootstrap::system_user_id(system_user)?,
-    };
+    // EB-1: lakekeeper's permissive built-in authorizer. EB-3 replaces it with
+    // the real egret authorizer that gates data actions per-token.
+    let authz = AllowAllAuthorizer { server_id };
 
     // Register the 3 built-in GC queues (tabular expiry + purge + task-log
     // cleanup). We clone catalog/secrets/authz here so the originals still move
@@ -172,7 +169,7 @@ async fn build_state_with_gc_poll_inner(
     // spawn_gc_workers with the returned registry (CE-6).
     let registry = TaskQueueRegistry::new();
     registry
-        .register_built_in_queues::<PostgresBackend, SecretsState, EgretAuthorizer>(
+        .register_built_in_queues::<PostgresBackend, SecretsState, AllowAllAuthorizer>(
             catalog.clone(),
             secrets.clone(),
             authz.clone(),
@@ -222,34 +219,20 @@ pub fn catalog_engine_router(state: ApiContext<EngineState>) -> axum::Router {
     new_v1_full_router::<EngineServer, EngineState>().with_state(state)
 }
 
-/// Assemble the LIVE catalog engine router: the lakekeeper Iceberg REST router
-/// (built by [`catalog_engine_router`]) fronted by egret's per-workspace token
-/// ownership middleware ([`crate::front_auth::front_auth`], CE-2 T5 / A-3).
+/// Assemble the catalog engine router: the lakekeeper Iceberg REST router built
+/// by [`catalog_engine_router`].
+///
+/// EB-1 mounts the bare engine — the router carries lakekeeper's own
+/// [`AllowAllAuthorizer`], with no egret front-of-router auth / token-ownership
+/// middleware (that legacy glue depended on egret-catalog's deleted warehouse +
+/// token store). EB-3 reintroduces egret's authn/authz layer here.
 ///
 /// The returned router is lakekeeper-relative — its routes are `/{prefix}/...`
 /// (catalog ops) and `/config` (warehouse discovery). The composition root nests
-/// it under `/catalog/v1` so the middleware sees those relative paths when it
-/// extracts the `{prefix}` warehouse UUID. This is the single wiring point shared
-/// by `egret-bin` (prod startup) and the CE-2 integration test, so both exercise
-/// identical authn/ownership behaviour.
+/// it under `/catalog/v1`.
 ///
 /// * `engine_state` — the lakekeeper [`ApiContext`] from [`build_state`]
 ///   (migrated + bootstrapped).
-/// * `store` — egret-side [`egret_catalog::service::CatalogStore`] resolving
-///   `token → workspace → warehouse`.
-/// * `catalog_jwt` — optional OIDC-JWT authenticator (F2-P2) for the hybrid
-///   JWT-or-opaque path. `None` disables the JWT path (opaque tokens only). The
-///   verifier is built IdP-aware in `egret-bin` and passed in, so this module
-///   stays IdP-agnostic.
-pub fn mount_catalog_engine(
-    engine_state: ApiContext<EngineState>,
-    store: egret_catalog::service::CatalogStore,
-    catalog_jwt: Option<std::sync::Arc<crate::jwt_auth::CatalogJwtAuth>>,
-    catalog_public_url: Option<String>,
-) -> axum::Router {
-    let front = crate::front_auth::FrontAuthState::new(store, catalog_jwt, catalog_public_url);
-    catalog_engine_router(engine_state).layer(axum::middleware::from_fn_with_state(
-        front,
-        crate::front_auth::front_auth,
-    ))
+pub fn mount_catalog_engine(engine_state: ApiContext<EngineState>) -> axum::Router {
+    catalog_engine_router(engine_state)
 }

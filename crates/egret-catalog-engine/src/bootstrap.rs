@@ -1,19 +1,16 @@
 //! Production bootstrap of lakekeeper's default project at egret startup.
 //!
-//! This is the prod, non-`test-utils` counterpart to the CE-1 spike's
-//! [`crate::provision`] module. The spike minted its bootstrap principal via
-//! `RequestMetadata::test_user` (only available under lakekeeper's `test-utils`
-//! feature); this module reaches the same outcome through **public, non-test**
-//! lakekeeper APIs only, so the prod build never references `test_user`.
+//! It builds its bootstrap principal through **public, non-test** lakekeeper
+//! APIs only (no `RequestMetadata::test_user`, which is `test-utils`-gated), so
+//! the prod build never references `test_user`.
 //!
 //! ## What lakekeeper's `bootstrap` actually requires (CE-2 T3 discovery)
 //!
 //! `server::Service::bootstrap` (the static method on
 //! `ApiServer<C, A, S>`) does three things relevant here:
 //!
-//! 1. **Authz**: `authorizer.can_bootstrap(&request_metadata)`. Under egret's
-//!    [`EgretAuthorizer`] (which keeps control-plane actions permissive) this
-//!    always passes.
+//! 1. **Authz**: `authorizer.can_bootstrap(&request_metadata)`. Under
+//!    lakekeeper's `AllowAllAuthorizer` (EB-1) this always passes.
 //! 2. **Seeds the default project**: when `DEFAULT_PROJECT_ID` is set (the OSS
 //!    default → nil UUID), `bootstrap` creates the "Default Project" if absent.
 //!    This is the outcome egret needs.
@@ -75,16 +72,16 @@ use lakekeeper::api::management::v1::ApiServer;
 use lakekeeper::api::ApiContext;
 use lakekeeper::api::RequestMetadata;
 use lakekeeper::limes::Authentication;
+use lakekeeper::service::authz::AllowAllAuthorizer;
 use lakekeeper::service::{Actor, UserId};
 use lakekeeper_storage_postgres::{PostgresBackend, SecretsState};
 use uuid::Uuid;
 
-use crate::authorizer::EgretAuthorizer;
 use crate::mount::EngineState;
 
 /// `ApiServer` specialized to egret's concrete backends — the type whose
 /// `Service` trait impls carry `bootstrap`.
-type EngineApiServer = ApiServer<PostgresBackend, EgretAuthorizer, SecretsState>;
+type EngineApiServer = ApiServer<PostgresBackend, AllowAllAuthorizer, SecretsState>;
 
 /// IdP id used for the synthetic egret-system principal. lakekeeper `UserId`s
 /// are `<idp_id>~<subject_in_idp>`; `oidc` is lakekeeper's canonical OIDC IdP id.
@@ -93,8 +90,7 @@ const SYSTEM_USER_IDP: &str = "oidc";
 /// Fixed namespace UUID for deriving the system principal's subject from
 /// `catalog.system_user` (UUIDv5).
 ///
-/// Generated ONCE for egret (RFC-4122 random v4), verified distinct from
-/// `EGRET_TOKEN_USER_NAMESPACE` (in [`crate::front_auth`]). It MUST NEVER change
+/// Generated ONCE for egret (RFC-4122 random v4). It MUST NEVER change
 /// after first deployment: changing it re-derives every system `UserId`, so
 /// `bootstrap` would no longer find the admin user it previously registered —
 /// breaking bootstrap idempotency.
@@ -118,11 +114,7 @@ pub(crate) fn system_user_id(system_user: &str) -> anyhow::Result<UserId> {
 
 /// Build a prod (non-test-utils) [`RequestMetadata`] carrying the stable
 /// system-admin principal, using only public lakekeeper/limes APIs.
-///
-/// Shared with [`crate::provision_ws`]: warehouse provisioning is a
-/// control-plane mutation that must be authorized by the same stable system
-/// principal that `bootstrap` registered as the catalog's global admin.
-pub(crate) fn system_request_metadata(system_user: &str) -> anyhow::Result<RequestMetadata> {
+fn system_request_metadata(system_user: &str) -> anyhow::Result<RequestMetadata> {
     let user_id = system_user_id(system_user)?;
 
     // Minimal authentication record describing the same principal. `bootstrap`
