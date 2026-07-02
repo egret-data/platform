@@ -35,6 +35,8 @@ pub struct AppState {
     pub notebook: Option<egret_notebook::NotebookState>,
     /// Present once the kernel layer is wired (in `egret-bin`); `None` in unit tests.
     pub kernel: Option<egret_kernel::KernelState>,
+    /// Present once the control plane is wired (in `egret-bin`); `None` in unit tests.
+    pub control_plane: Option<egret_controlplane::CpState>,
 }
 
 impl AppState {
@@ -51,6 +53,7 @@ impl AppState {
             bi: None,
             notebook: None,
             kernel: None,
+            control_plane: None,
         }
     }
 }
@@ -149,6 +152,19 @@ pub fn build_router(state: AppState) -> Router {
             .nest("/api", egret_kernel::kernel_callback_router())
             .with_state(kernel);
         router = router.merge(callback_group);
+    }
+
+    if let Some(cp) = state.control_plane.clone() {
+        // Global platform-admin Storage + Secrets: CSRF-protected like the other
+        // mutating APIs.
+        let group = Router::new()
+            .nest(
+                "/api/control-plane",
+                egret_controlplane::control_plane_router(),
+            )
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(cp);
+        router = router.merge(group);
     }
 
     router.with_state(state)

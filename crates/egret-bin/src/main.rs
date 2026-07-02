@@ -428,6 +428,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     });
     // ── end kernel wiring ───────────────────────────────────────────────────────
 
+    // Control plane: global platform-admin Storage + Secrets. Reuses the shared
+    // `workspace_secrets` (in GLOBAL scope) and a `CatalogStore` over the same db.
+    let control_plane = Some(egret_controlplane::CpState {
+        storage: egret_catalog::CatalogStore::new(db.clone()),
+        secrets: workspace_secrets.clone(),
+        sessions: sessions.clone(),
+    });
+
     let app = build_router(AppState {
         db: Some(db),
         auth: Some(auth),
@@ -439,6 +447,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         bi,
         notebook,
         kernel,
+        control_plane,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)

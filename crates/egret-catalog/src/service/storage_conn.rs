@@ -108,9 +108,7 @@ impl CatalogStore {
         .fetch_one(self.pool())
         .await
         .map_err(|e| match &e {
-            sqlx::Error::Database(d)
-                if d.constraint() == Some("storage_connections_name_key") =>
-            {
+            sqlx::Error::Database(d) if d.constraint() == Some("storage_connections_name_key") => {
                 CatalogError::AlreadyExists(input.name.clone())
             }
             _ => CatalogError::Db(e),

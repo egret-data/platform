@@ -1,0 +1,213 @@
+//! Control-plane Storage + Secrets HTTP route tests (platform-admin gate).
+//! DB-gated; self-skips without `DATABASE_URL`.
+//!
+//! Proves `egret_controlplane::control_plane_router`:
+//!   - a non-platform-admin session is Forbidden (403) on the global routes,
+//!   - a `platform_admin` session can list storage (200), create a global named
+//!     secret (201) and create a global storage connection (201).
+//!
+//! Run with:
+//!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret
+//!   cargo test -p egret-controlplane
+
+use axum::body::Body;
+use axum::http::{Request as HttpRequest, StatusCode};
+use axum::response::Response;
+use egret_auth::session::SessionService;
+use egret_auth::users::UserRepo;
+use egret_controlplane::{control_plane_router, CpState};
+use egret_metastore::Db;
+use http_body_util::BodyExt;
+use tower::ServiceExt; // oneshot
+use uuid::Uuid;
+
+struct Fixture {
+    app: axum::Router,
+    users: UserRepo,
+    sessions: SessionService,
+    db: Db,
+}
+
+async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json = serde_json::from_slice(&bytes).unwrap_or_else(
+        |_| serde_json::json!({ "_raw": String::from_utf8_lossy(&bytes).to_string() }),
+    );
+    (status, json)
+}
+
+async fn setup() -> Option<Fixture> {
+    let dsn = std::env::var("DATABASE_URL").ok()?;
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    let crypto =
+        egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
+    let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
+    let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
+
+    let users = UserRepo::new(db.clone());
+    let sessions = SessionService::new(
+        db.clone(),
+        chrono::Duration::hours(24),
+        chrono::Duration::minutes(60),
+    );
+
+    let app = control_plane_router().with_state(CpState {
+        storage: egret_catalog::CatalogStore::new(db.clone()),
+        secrets: workspace_secrets,
+        sessions: sessions.clone(),
+    });
+
+    Some(Fixture {
+        app,
+        users,
+        sessions,
+        db,
+    })
+}
+
+/// Create a user (optionally a platform_admin) and return its session token.
+async fn session_for(f: &Fixture, tag: &str, platform_admin: bool) -> String {
+    let email = format!("{tag}_{}@egret.local", Uuid::new_v4().simple());
+    let uid = f
+        .users
+        .insert_local(&email, "Test", "x")
+        .await
+        .expect("insert user");
+    if platform_admin {
+        sqlx::query(
+            "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
+             SELECT 'user', $1, id FROM roles WHERE scope='platform' AND name='platform_admin'",
+        )
+        .bind(uid.0)
+        .execute(&f.db.pool)
+        .await
+        .expect("grant platform_admin");
+    }
+    f.sessions
+        .create(uid, "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token
+}
+
+fn req(method: &str, uri: &str, token: &str, body: Option<serde_json::Value>) -> HttpRequest<Body> {
+    let mut b = HttpRequest::builder()
+        .method(method)
+        .uri(uri)
+        .header("Cookie", format!("egret_session={token}"));
+    let body = match body {
+        Some(v) => {
+            b = b.header("Content-Type", "application/json");
+            Body::from(serde_json::to_vec(&v).unwrap())
+        }
+        None => Body::empty(),
+    };
+    b.body(body).unwrap()
+}
+
+#[tokio::test]
+async fn non_admin_is_forbidden() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "plain", false).await;
+
+    // GET /storage → 403.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/storage", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a non platform-admin must not list storage"
+    );
+
+    // POST /secrets → 403 (gate runs before persistence).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/secrets",
+            &token,
+            Some(serde_json::json!({ "name": "nope", "value": "x" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a non platform-admin must not create secrets"
+    );
+}
+
+#[tokio::test]
+async fn platform_admin_can_manage_storage_and_secrets() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "admin", true).await;
+    let suffix = Uuid::new_v4().simple().to_string();
+
+    // GET /storage → 200.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/storage", &token, None))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list storage; body={json}");
+    assert!(json.is_array(), "storage list is an array; body={json}");
+
+    // POST /secrets → 201, global named secret.
+    let secret_name = format!("cp-secret-{suffix}");
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/secrets",
+            &token,
+            Some(serde_json::json!({ "name": secret_name, "value": "s3cr3t" })),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create secret; body={json}");
+    let secret_id = json["id"].as_str().expect("secret id in body").to_string();
+    assert_eq!(json["name"], serde_json::json!(secret_name));
+
+    // POST /storage → 201, global storage connection referencing the secret.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/storage",
+            &token,
+            Some(serde_json::json!({
+                "name": format!("cp-store-{suffix}"),
+                "provider": "s3",
+                "region": "us-east-1",
+                "bucket": "egret-cp-test",
+                "access_key": "AKIATEST",
+                "secret_ref": secret_id,
+                "path_style": true,
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create storage; body={json}");
+    assert_eq!(json["bucket"], serde_json::json!("egret-cp-test"));
+    assert_eq!(json["secret_ref"], serde_json::json!(secret_id));
+}

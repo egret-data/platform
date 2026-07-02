@@ -72,7 +72,10 @@ async fn update_then_delete() {
         ..sample_input(&name)
     };
 
-    let changed = s.update_storage_conn(conn.id, &updated_input).await.unwrap();
+    let changed = s
+        .update_storage_conn(conn.id, &updated_input)
+        .await
+        .unwrap();
     assert!(changed, "update should return true when a row is updated");
 
     let got = s.get_storage_conn(conn.id).await.unwrap().unwrap();
@@ -91,7 +94,10 @@ async fn update_then_delete() {
 
     // Delete the real row → true, then gone.
     let deleted_ok = s.delete_storage_conn(conn.id).await.unwrap();
-    assert!(deleted_ok, "delete should return true when a row is removed");
+    assert!(
+        deleted_ok,
+        "delete should return true when a row is removed"
+    );
 
     let gone = s.get_storage_conn(conn.id).await.unwrap();
     assert!(gone.is_none(), "conn should be gone after delete");

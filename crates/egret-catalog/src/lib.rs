@@ -8,4 +8,4 @@ pub mod error;
 pub mod service;
 
 pub use error::CatalogError;
-pub use service::StorageConn;
+pub use service::{CatalogStore, StorageConn, StorageConnInput};

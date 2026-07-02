@@ -1696,6 +1696,7 @@ dependencies = [
  "egret-bi",
  "egret-catalog",
  "egret-config",
+ "egret-controlplane",
  "egret-core",
  "egret-database",
  "egret-engine",
@@ -1741,6 +1742,28 @@ dependencies = [
  "base64 0.22.1",
  "figment",
  "serde",
+]
+
+[[package]]
+name = "egret-controlplane"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "egret-auth",
+ "egret-catalog",
+ "egret-core",
+ "egret-metastore",
+ "egret-secrets",
+ "egret-workspace",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "uuid",
 ]
 
 [[package]]
@@ -1928,6 +1951,7 @@ dependencies = [
  "egret-bi",
  "egret-catalog",
  "egret-config",
+ "egret-controlplane",
  "egret-core",
  "egret-database",
  "egret-engine",
