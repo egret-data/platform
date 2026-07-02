@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
-  BarChart3, Bell, Boxes, ChevronDown, ChevronRight, Database,
+  BarChart3, Bell, ChevronDown, ChevronRight, Database,
   FolderKanban, HardDrive, KeyRound, LayoutDashboard, type LucideIcon,
   NotebookText, PanelLeftClose, PanelLeftOpen, Plug, Server, Share2, ShieldCheck,
   SquareTerminal, Table2, Users, Waypoints, Workflow,
@@ -50,7 +50,6 @@ const EXPLORE_GROUPS: NavGroup[] = [
   {
     heading: "Manage",
     items: [
-      { label: "Catalog", icon: Boxes },
       { label: "Storage", icon: HardDrive },
       { label: "Engines", icon: Database },
       { label: "Secrets", icon: KeyRound },
