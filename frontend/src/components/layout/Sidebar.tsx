@@ -50,9 +50,7 @@ const EXPLORE_GROUPS: NavGroup[] = [
   {
     heading: "Manage",
     items: [
-      { label: "Storage", icon: HardDrive },
       { label: "Engines", icon: Database },
-      { label: "Secrets", icon: KeyRound },
     ],
   },
 ];
@@ -65,6 +63,8 @@ const CONTROL_PLANE_GROUPS: NavGroup[] = [
     items: [
       { label: "Workspaces", icon: FolderKanban },
       { label: "Engines", icon: Server },
+      { label: "Storage", icon: HardDrive },
+      { label: "Secrets", icon: KeyRound },
       { label: "Users", icon: Users },
     ],
   },
