@@ -162,7 +162,6 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
     }
 }
 
-
 /// Seed a notebook owned by `owner` in `ws`. Returns its id.
 async fn seed_notebook(db: &Db, ws: WorkspaceId, owner: UserId) -> Uuid {
     sqlx::query_scalar::<_, Uuid>(
