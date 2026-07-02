@@ -5,14 +5,21 @@
 //! token obtained from Keycloak via client-credentials (Polaris runs in MIXED
 //! auth mode) and exposes typed operations over Polaris's management API.
 //!
-//! Task 1 scaffolds the crate: the mockable [`HttpTransport`] boundary and the
-//! cached [`TokenSource`]. Catalog / principal / role / grant operations and
-//! the top-level `PolarisClient` are added in later tasks.
+//! The mockable [`HttpTransport`] boundary and cached [`TokenSource`] back the
+//! [`PolarisClient`], which exposes typed catalog / principal / role / grant
+//! operations over Polaris's management API.
 
+mod client;
 mod error;
+mod model;
 mod token;
 mod transport;
 
+pub use client::PolarisClient;
 pub use error::PolarisError;
+pub use model::{
+    Catalog, CatalogType, Credentials, Grant, NewCatalog, Principal, PrincipalWithCredentials,
+    StorageConfig,
+};
 pub use token::{PolarisConfig, TokenSource};
 pub use transport::{HttpTransport, ReqwestTransport};
