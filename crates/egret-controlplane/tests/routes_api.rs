@@ -160,6 +160,24 @@ async fn non_admin_is_forbidden() {
         StatusCode::FORBIDDEN,
         "a non platform-admin must not list catalogs"
     );
+
+    // POST /polaris/principals → 403 (gate runs before any Polaris client is built).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/polaris/principals",
+            &token,
+            Some(serde_json::json!({ "name": "svc-nope" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a non platform-admin must not create principals"
+    );
 }
 
 #[tokio::test]

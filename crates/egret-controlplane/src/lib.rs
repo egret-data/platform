@@ -13,6 +13,7 @@ mod auth;
 mod catalogs;
 mod error;
 mod polaris_conn;
+mod rbac;
 mod secrets;
 mod storage;
 
@@ -54,4 +55,5 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(secrets::router())
         .merge(polaris_conn::router())
         .merge(catalogs::router())
+        .merge(rbac::router())
 }
