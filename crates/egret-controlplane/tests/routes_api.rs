@@ -59,6 +59,7 @@ async fn setup() -> Option<Fixture> {
         secrets: workspace_secrets,
         sessions: sessions.clone(),
         polaris_conn: egret_controlplane::PolarisConnStore::new(db.clone()),
+        assignments: egret_controlplane::AssignmentStore::new(db.clone()),
     });
 
     Some(Fixture {
@@ -177,6 +178,25 @@ async fn non_admin_is_forbidden() {
         resp.status(),
         StatusCode::FORBIDDEN,
         "a non platform-admin must not create principals"
+    );
+
+    // POST /workspaces/{ws}/catalog-assignments → 403 (gate runs before any
+    // Polaris client is built or the catalog is provisioned).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/workspaces/{}/catalog-assignments", Uuid::new_v4()),
+            &token,
+            Some(serde_json::json!({ "catalog": "lakehouse" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a non platform-admin must not assign a catalog to a workspace"
     );
 }
 
@@ -302,4 +322,71 @@ async fn polaris_conn_store_upsert_and_get() {
         .await
         .expect("count");
     assert_eq!(count, 1, "polaris_connection is a singleton");
+}
+
+#[tokio::test]
+async fn assignment_store_insert_list_get_delete() {
+    let Some(dsn) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    let suffix = Uuid::new_v4().simple().to_string();
+
+    // Seed a workspace to satisfy the `workspace_id` FK.
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name) VALUES ($1, 'assign-test') RETURNING id",
+    )
+    .bind(format!("assign-{suffix}"))
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed workspace");
+
+    // Seed a GLOBAL named secret to satisfy the `credential_ref` FK.
+    let crypto =
+        egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
+    let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
+    let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
+    let cred_ref = workspace_secrets
+        .create(None, &format!("polaris/lakehouse/{suffix}"), None, "{}")
+        .await
+        .expect("create credential secret");
+
+    let store = egret_controlplane::AssignmentStore::new(db.clone());
+    let catalog = format!("lakehouse-{suffix}");
+
+    // insert.
+    let row = store
+        .insert(ws, &catalog, "egret-ws-x", cred_ref)
+        .await
+        .expect("insert assignment");
+    assert_eq!(row.workspace_id, ws);
+    assert_eq!(row.catalog_name, catalog);
+    assert_eq!(row.principal_name, "egret-ws-x");
+    assert_eq!(row.credential_ref, cred_ref);
+
+    // list_for_workspace returns it.
+    let listed = store.list_for_workspace(ws).await.expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].catalog_name, catalog);
+
+    // get returns it.
+    let got = store.get(ws, &catalog).await.expect("get");
+    assert!(got.is_some(), "get returns the assignment");
+
+    // Duplicate insert (same ws+catalog) → AlreadyExists.
+    let dup = store.insert(ws, &catalog, "egret-ws-x", cred_ref).await;
+    assert!(
+        matches!(dup, Err(egret_controlplane::CpError::AlreadyExists(_))),
+        "duplicate (ws, catalog) must be a conflict, got {dup:?}"
+    );
+
+    // delete returns the deleted row; a second get is None.
+    let deleted = store.delete(ws, &catalog).await.expect("delete");
+    assert!(deleted.is_some(), "delete returns the removed row");
+    assert_eq!(deleted.unwrap().catalog_name, catalog);
+    let gone = store.get(ws, &catalog).await.expect("get after delete");
+    assert!(gone.is_none(), "assignment is gone after delete");
 }
