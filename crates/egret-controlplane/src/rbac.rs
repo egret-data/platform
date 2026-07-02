@@ -5,17 +5,13 @@
 //! role assignments, and grants) from the control plane. Every handler gates
 //! on `require_platform_admin` and builds a fresh `PolarisClient` from the
 //! singleton connection.
-//!
-//! Note: `egret-polaris` exposes no list endpoints for principals/roles, so the
-//! `GET /polaris/principals` list route is intentionally NOT implemented here;
-//! only create/delete/assign/grant operations are proxied.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{post, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
-use egret_polaris::{Grant, PrincipalWithCredentials};
+use egret_polaris::{Grant, PrincipalWithCredentials, Role};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::require_platform_admin;
@@ -60,15 +56,24 @@ pub struct GrantBody {
 }
 
 /// Response DTO for a principal (camelCase for the frontend).
-///
-/// Currently unused by any handler: `egret-polaris` exposes no principal-list
-/// method, so the `GET /polaris/principals` route is not implemented. Kept for
-/// the eventual list endpoint once the client gains a `list_principals` method.
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrincipalDto {
     pub name: String,
+}
+
+/// Response DTO for a principal-role or catalog-role (camelCase for the
+/// frontend).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleDto {
+    pub name: String,
+}
+
+impl From<Role> for RoleDto {
+    fn from(r: Role) -> Self {
+        RoleDto { name: r.name }
+    }
 }
 
 /// Response DTO for a freshly created principal, including its one-time
@@ -146,15 +151,21 @@ fn grant_from_body(b: &GrantBody) -> Result<Grant, CpError> {
 
 pub fn router() -> Router<CpState> {
     Router::new()
-        .route("/polaris/principals", post(create_principal))
+        .route(
+            "/polaris/principals",
+            get(list_principals).post(create_principal),
+        )
         .route(
             "/polaris/principals/{name}",
             axum::routing::delete(remove_principal),
         )
-        .route("/polaris/principal-roles", post(create_principal_role))
+        .route(
+            "/polaris/principal-roles",
+            get(list_principal_roles).post(create_principal_role),
+        )
         .route(
             "/polaris/catalogs/{catalog}/catalog-roles",
-            post(create_catalog_role),
+            get(list_catalog_roles).post(create_catalog_role),
         )
         .route(
             "/polaris/principals/{principal}/principal-roles",
@@ -196,6 +207,21 @@ async fn remove_principal(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn list_principals(
+    State(st): State<CpState>,
+    Auth(principal): Auth,
+) -> Result<Json<Vec<PrincipalDto>>, CpError> {
+    require_platform_admin(&principal)?;
+    let client = polaris_client(&st.polaris_conn, &st.secrets).await?;
+    let principals = client.list_principals().await?;
+    Ok(Json(
+        principals
+            .into_iter()
+            .map(|p| PrincipalDto { name: p.name })
+            .collect(),
+    ))
+}
+
 async fn create_principal_role(
     State(st): State<CpState>,
     Auth(principal): Auth,
@@ -205,6 +231,16 @@ async fn create_principal_role(
     let client = polaris_client(&st.polaris_conn, &st.secrets).await?;
     client.create_principal_role(&body.name).await?;
     Ok(StatusCode::CREATED)
+}
+
+async fn list_principal_roles(
+    State(st): State<CpState>,
+    Auth(principal): Auth,
+) -> Result<Json<Vec<RoleDto>>, CpError> {
+    require_platform_admin(&principal)?;
+    let client = polaris_client(&st.polaris_conn, &st.secrets).await?;
+    let roles = client.list_principal_roles().await?;
+    Ok(Json(roles.into_iter().map(Into::into).collect()))
 }
 
 async fn create_catalog_role(
@@ -217,6 +253,17 @@ async fn create_catalog_role(
     let client = polaris_client(&st.polaris_conn, &st.secrets).await?;
     client.create_catalog_role(&catalog, &body.name).await?;
     Ok(StatusCode::CREATED)
+}
+
+async fn list_catalog_roles(
+    State(st): State<CpState>,
+    Auth(principal): Auth,
+    Path(catalog): Path<String>,
+) -> Result<Json<Vec<RoleDto>>, CpError> {
+    require_platform_admin(&principal)?;
+    let client = polaris_client(&st.polaris_conn, &st.secrets).await?;
+    let roles = client.list_catalog_roles(&catalog).await?;
+    Ok(Json(roles.into_iter().map(Into::into).collect()))
 }
 
 async fn assign_principal_role(

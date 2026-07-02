@@ -19,7 +19,7 @@ pub use client::PolarisClient;
 pub use error::PolarisError;
 pub use model::{
     Catalog, CatalogType, Credentials, Grant, NewCatalog, Principal, PrincipalWithCredentials,
-    StorageConfig,
+    Role, StorageConfig,
 };
 pub use token::{PolarisConfig, TokenSource};
 pub use transport::{HttpTransport, ReqwestTransport};

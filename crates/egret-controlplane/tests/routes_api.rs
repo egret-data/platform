@@ -180,6 +180,19 @@ async fn non_admin_is_forbidden() {
         "a non platform-admin must not create principals"
     );
 
+    // GET /polaris/principals → 403 (gate runs before any Polaris client is built).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/polaris/principals", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a non platform-admin must not list principals"
+    );
+
     // POST /workspaces/{ws}/catalog-assignments → 403 (gate runs before any
     // Polaris client is built or the catalog is provisioned).
     let resp = f

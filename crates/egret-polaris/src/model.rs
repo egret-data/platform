@@ -126,6 +126,33 @@ pub struct Principal {
     pub name: String,
 }
 
+/// The `GET /principals` list envelope.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Principals {
+    #[serde(default)]
+    pub principals: Vec<Principal>,
+}
+
+/// A principal-role or catalog-role. Unknown fields are ignored.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Role {
+    pub name: String,
+}
+
+/// The `GET /principal-roles` list envelope (property `roles`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct PrincipalRoles {
+    #[serde(default)]
+    pub roles: Vec<Role>,
+}
+
+/// The `GET /catalogs/{catalog}/catalog-roles` list envelope (property `roles`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct CatalogRoles {
+    #[serde(default)]
+    pub roles: Vec<Role>,
+}
+
 /// Client-credentials for a freshly created principal.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Credentials {

@@ -6,7 +6,10 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::error::PolarisError;
-use crate::model::{Catalog, Catalogs, Grant, NewCatalog, PrincipalWithCredentials};
+use crate::model::{
+    Catalog, CatalogRoles, Catalogs, Grant, NewCatalog, Principal, PrincipalRoles,
+    PrincipalWithCredentials, Principals, Role,
+};
 use crate::token::{PolarisConfig, TokenSource};
 use crate::transport::HttpTransport;
 
@@ -146,6 +149,12 @@ impl PolarisClient {
             .await
     }
 
+    /// List all principals: `GET /principals`.
+    pub async fn list_principals(&self) -> Result<Vec<Principal>, PolarisError> {
+        let ps: Principals = self.call("GET", "/principals", None).await?;
+        Ok(ps.principals)
+    }
+
     // --- roles ---
 
     /// Create a principal-role: `POST /principal-roles`.
@@ -158,6 +167,12 @@ impl PolarisClient {
         .await
     }
 
+    /// List all principal-roles: `GET /principal-roles` (envelope property `roles`).
+    pub async fn list_principal_roles(&self) -> Result<Vec<Role>, PolarisError> {
+        let rs: PrincipalRoles = self.call("GET", "/principal-roles", None).await?;
+        Ok(rs.roles)
+    }
+
     /// Create a catalog-role in a catalog: `POST /catalogs/{catalog}/catalog-roles`.
     pub async fn create_catalog_role(&self, catalog: &str, name: &str) -> Result<(), PolarisError> {
         self.call_unit(
@@ -166,6 +181,15 @@ impl PolarisClient {
             Some(json!({ "catalogRole": { "name": name } })),
         )
         .await
+    }
+
+    /// List all catalog-roles in a catalog:
+    /// `GET /catalogs/{catalog}/catalog-roles` (envelope property `roles`).
+    pub async fn list_catalog_roles(&self, catalog: &str) -> Result<Vec<Role>, PolarisError> {
+        let rs: CatalogRoles = self
+            .call("GET", &format!("/catalogs/{catalog}/catalog-roles"), None)
+            .await?;
+        Ok(rs.roles)
     }
 
     // --- assignments ---
@@ -361,6 +385,45 @@ mod tests {
         assert_eq!(cats.len(), 1);
         assert_eq!(cats[0].name, "lakehouse");
         assert_eq!(cats[0].catalog_type, "INTERNAL");
+    }
+
+    #[tokio::test]
+    async fn list_principals_parses() {
+        let fake = FakeTransport::new(vec![
+            (200, TOKEN_OK.to_vec()),
+            (200, br#"{"principals":[{"name":"egret-ws-x"}]}"#.to_vec()),
+        ]);
+        let c = client(&fake);
+        let principals = c.list_principals().await.unwrap();
+        assert_eq!(principals.len(), 1);
+        assert_eq!(principals[0].name, "egret-ws-x");
+
+        let (method, url, _) = fake.last_request();
+        assert_eq!(method, "GET");
+        assert!(url.ends_with("/api/management/v1/principals"), "url: {url}");
+    }
+
+    #[tokio::test]
+    async fn list_catalog_roles_parses() {
+        let fake = FakeTransport::new(vec![
+            (200, TOKEN_OK.to_vec()),
+            (
+                200,
+                br#"{"roles":[{"name":"reader"},{"name":"writer"}]}"#.to_vec(),
+            ),
+        ]);
+        let c = client(&fake);
+        let roles = c.list_catalog_roles("lakehouse").await.unwrap();
+        assert_eq!(roles.len(), 2);
+        assert_eq!(roles[0].name, "reader");
+        assert_eq!(roles[1].name, "writer");
+
+        let (method, url, _) = fake.last_request();
+        assert_eq!(method, "GET");
+        assert!(
+            url.ends_with("/catalogs/lakehouse/catalog-roles"),
+            "url: {url}"
+        );
     }
 
     #[tokio::test]
