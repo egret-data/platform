@@ -1,8 +1,9 @@
-//! DB-gated workspace_storages (registry) store tests. Self-skip without DATABASE_URL.
+//! DB-gated storage_connections (global registry) store tests.
+//! Self-skip without DATABASE_URL.
 mod common;
-use common::{seed_workspace, store};
+use common::store;
 use egret_catalog::service::storage_conn::StorageConnInput;
-use egret_catalog::WorkspaceStorageConn;
+use egret_catalog::{CatalogError, StorageConn};
 use uuid::Uuid;
 
 fn sample_input(name: &str) -> StorageConnInput {
@@ -20,145 +21,103 @@ fn sample_input(name: &str) -> StorageConnInput {
     }
 }
 
+/// Unique name so global (un-scoped) rows never collide across test runs.
+fn unique_name(prefix: &str) -> String {
+    format!("{prefix}_{}", Uuid::new_v4().simple())
+}
+
 #[tokio::test]
-async fn create_then_list() {
+async fn create_list_get_roundtrip() {
     let Some(s) = store().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
-    let ws = seed_workspace(&s).await;
-    let input = sample_input("primary");
+    let name = unique_name("primary");
+    let input = sample_input(&name);
 
-    let conn: WorkspaceStorageConn = s.create_storage_conn(ws, &input).await.unwrap();
+    let conn: StorageConn = s.create_storage_conn(&input).await.unwrap();
     assert_ne!(conn.id, Uuid::nil());
-    assert_eq!(conn.workspace_id, ws);
-    assert_eq!(conn.name, "primary");
+    assert_eq!(conn.name, name);
     assert_eq!(conn.bucket, "test-bucket");
     assert!(conn.secret_ref.is_none(), "secret_ref should be None");
 
-    let list = s.list_storage_conns(ws).await.unwrap();
+    // Global list contains the created row.
+    let list = s.list_storage_conns().await.unwrap();
     assert!(
         list.iter().any(|c| c.id == conn.id),
-        "created conn must appear in list"
+        "created conn must appear in global list"
     );
-}
 
-#[tokio::test]
-async fn get_by_workspace_and_id() {
-    let Some(s) = store().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
-    let ws = seed_workspace(&s).await;
-    let other_ws = seed_workspace(&s).await;
-    let input = sample_input("primary");
-
-    let conn = s.create_storage_conn(ws, &input).await.unwrap();
-
-    // Correct workspace → found
-    let got = s.get_storage_conn(ws, conn.id).await.unwrap();
-    assert!(got.is_some(), "should find conn in correct workspace");
+    // Get by id returns the same row.
+    let got = s.get_storage_conn(conn.id).await.unwrap();
+    assert!(got.is_some(), "should find conn by id");
     assert_eq!(got.unwrap().id, conn.id);
 
-    // Different workspace → IDOR scope: not found
-    let wrong = s.get_storage_conn(other_ws, conn.id).await.unwrap();
-    assert!(
-        wrong.is_none(),
-        "should NOT return conn from a different workspace (IDOR)"
-    );
+    // Unknown id → None.
+    let missing = s.get_storage_conn(Uuid::new_v4()).await.unwrap();
+    assert!(missing.is_none(), "unknown id should return None");
 }
 
 #[tokio::test]
-async fn update_scoped() {
+async fn update_then_delete() {
     let Some(s) = store().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
-    let ws = seed_workspace(&s).await;
-    let other_ws = seed_workspace(&s).await;
-    let conn = s
-        .create_storage_conn(ws, &sample_input("primary"))
-        .await
-        .unwrap();
+    let name = unique_name("primary");
+    let conn = s.create_storage_conn(&sample_input(&name)).await.unwrap();
 
     let updated_input = StorageConnInput {
         bucket: "new-bucket".to_string(),
-        ..sample_input("primary")
+        ..sample_input(&name)
     };
 
-    // Correct workspace → update succeeds
-    let changed = s
-        .update_storage_conn(ws, conn.id, &updated_input)
-        .await
-        .unwrap();
-    assert!(changed, "update should return true when row is updated");
+    let changed = s.update_storage_conn(conn.id, &updated_input).await.unwrap();
+    assert!(changed, "update should return true when a row is updated");
 
-    let got = s.get_storage_conn(ws, conn.id).await.unwrap().unwrap();
+    let got = s.get_storage_conn(conn.id).await.unwrap().unwrap();
     assert_eq!(got.bucket, "new-bucket");
 
-    // Different workspace → no-op (scoped update)
+    // Update of a non-existent id → false (no-op).
     let no_change = s
-        .update_storage_conn(other_ws, conn.id, &updated_input)
+        .update_storage_conn(Uuid::new_v4(), &updated_input)
         .await
         .unwrap();
-    assert!(
-        !no_change,
-        "update from wrong workspace should return false"
-    );
-}
+    assert!(!no_change, "update of unknown id should return false");
 
-#[tokio::test]
-async fn delete_scoped() {
-    let Some(s) = store().await else {
-        eprintln!("skip: DATABASE_URL not set");
-        return;
-    };
-    let ws = seed_workspace(&s).await;
-    let other_ws = seed_workspace(&s).await;
-    let conn = s
-        .create_storage_conn(ws, &sample_input("primary"))
-        .await
-        .unwrap();
+    // Delete of a non-existent id → false.
+    let deleted_missing = s.delete_storage_conn(Uuid::new_v4()).await.unwrap();
+    assert!(!deleted_missing, "delete of unknown id should return false");
 
-    // Wrong workspace → false, still exists
-    let deleted = s.delete_storage_conn(other_ws, conn.id).await.unwrap();
-    assert!(!deleted, "delete from wrong workspace should return false");
+    // Delete the real row → true, then gone.
+    let deleted_ok = s.delete_storage_conn(conn.id).await.unwrap();
+    assert!(deleted_ok, "delete should return true when a row is removed");
 
-    let still_there = s.get_storage_conn(ws, conn.id).await.unwrap();
-    assert!(still_there.is_some(), "conn should still exist");
-
-    // Correct workspace → true, gone
-    let deleted_ok = s.delete_storage_conn(ws, conn.id).await.unwrap();
-    assert!(
-        deleted_ok,
-        "delete from correct workspace should return true"
-    );
-
-    let gone = s.get_storage_conn(ws, conn.id).await.unwrap();
+    let gone = s.get_storage_conn(conn.id).await.unwrap();
     assert!(gone.is_none(), "conn should be gone after delete");
 
-    let list = s.list_storage_conns(ws).await.unwrap();
+    let list = s.list_storage_conns().await.unwrap();
     assert!(
         !list.iter().any(|c| c.id == conn.id),
-        "conn should not appear in list"
+        "conn should not appear in list after delete"
     );
 }
 
 #[tokio::test]
-async fn unique_name_conflict() {
+async fn duplicate_name_rejected() {
     let Some(s) = store().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
-    let ws = seed_workspace(&s).await;
-    let input = sample_input("dup");
+    let name = unique_name("dup");
+    let input = sample_input(&name);
 
-    s.create_storage_conn(ws, &input).await.unwrap();
+    s.create_storage_conn(&input).await.unwrap();
 
-    // Second create with same name → should error (unique constraint)
-    let result = s.create_storage_conn(ws, &input).await;
-    assert!(
-        result.is_err(),
-        "duplicate name in same workspace must fail"
-    );
+    // Second create with same (global) name → AlreadyExists.
+    let result = s.create_storage_conn(&input).await;
+    match result {
+        Err(CatalogError::AlreadyExists(n)) => assert_eq!(n, name),
+        other => panic!("expected AlreadyExists({name}), got {other:?}"),
+    }
 }
