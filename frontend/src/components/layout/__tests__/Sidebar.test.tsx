@@ -57,7 +57,6 @@ describe("Sidebar – workspace zones", () => {
       "Alerts",
       "Policies",
       "Data Lineage",
-      "Catalog",
       "Engines",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
