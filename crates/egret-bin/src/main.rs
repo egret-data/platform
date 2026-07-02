@@ -434,6 +434,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         storage: egret_catalog::CatalogStore::new(db.clone()),
         secrets: workspace_secrets.clone(),
         sessions: sessions.clone(),
+        polaris_conn: egret_controlplane::PolarisConnStore::new(db.clone()),
     });
 
     let app = build_router(AppState {

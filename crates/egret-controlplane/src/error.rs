@@ -7,6 +7,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use egret_catalog::CatalogError;
+use egret_polaris::PolarisError;
 use egret_secrets::SecretsError;
 
 #[derive(Debug, thiserror::Error)]
@@ -48,6 +49,19 @@ impl From<SecretsError> for CpError {
                 CpError::BadRequest("secrets master_key is not configured".to_string())
             }
             SecretsError::Crypto(_) | SecretsError::Db(_) => CpError::Internal,
+        }
+    }
+}
+
+impl From<PolarisError> for CpError {
+    fn from(e: PolarisError) -> Self {
+        match e {
+            PolarisError::Forbidden => CpError::Forbidden,
+            PolarisError::NotFound => CpError::NotFound,
+            PolarisError::Conflict => CpError::AlreadyExists("polaris conflict".to_string()),
+            PolarisError::Status(_, _) | PolarisError::Http(_) | PolarisError::Decode(_) => {
+                CpError::Internal
+            }
         }
     }
 }

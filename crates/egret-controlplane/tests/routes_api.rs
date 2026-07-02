@@ -58,6 +58,7 @@ async fn setup() -> Option<Fixture> {
         storage: egret_catalog::CatalogStore::new(db.clone()),
         secrets: workspace_secrets,
         sessions: sessions.clone(),
+        polaris_conn: egret_controlplane::PolarisConnStore::new(db.clone()),
     });
 
     Some(Fixture {
@@ -210,4 +211,64 @@ async fn platform_admin_can_manage_storage_and_secrets() {
     assert_eq!(status, StatusCode::CREATED, "create storage; body={json}");
     assert_eq!(json["bucket"], serde_json::json!("egret-cp-test"));
     assert_eq!(json["secret_ref"], serde_json::json!(secret_id));
+}
+
+#[tokio::test]
+async fn polaris_conn_store_upsert_and_get() {
+    let Some(dsn) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    // Seed a GLOBAL named secret to satisfy the `kc_secret_ref` FK.
+    let crypto =
+        egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
+    let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
+    let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
+    let suffix = Uuid::new_v4().simple().to_string();
+    let secret_id = workspace_secrets
+        .create(None, &format!("polaris-kc-{suffix}"), None, "kc-secret")
+        .await
+        .expect("create global secret");
+
+    let store = egret_controlplane::PolarisConnStore::new(db.clone());
+
+    // First upsert: inserts the singleton row.
+    store
+        .upsert(&egret_controlplane::PolarisConnInput {
+            base_url: "http://polaris-1:8181".into(),
+            kc_token_url: "http://kc/token".into(),
+            kc_client_id: "polaris-admin".into(),
+            kc_secret_ref: secret_id,
+            kc_scope: Some("catalog".into()),
+        })
+        .await
+        .expect("first upsert");
+    let conn = store.get().await.expect("get").expect("row present");
+    assert_eq!(conn.base_url, "http://polaris-1:8181");
+    assert_eq!(conn.kc_secret_ref, secret_id);
+    assert_eq!(conn.kc_scope.as_deref(), Some("catalog"));
+
+    // Second upsert: updates in place (singleton — still exactly one row).
+    store
+        .upsert(&egret_controlplane::PolarisConnInput {
+            base_url: "http://polaris-2:8181".into(),
+            kc_token_url: "http://kc/token".into(),
+            kc_client_id: "polaris-admin".into(),
+            kc_secret_ref: secret_id,
+            kc_scope: None,
+        })
+        .await
+        .expect("second upsert");
+    let conn = store.get().await.expect("get").expect("row present");
+    assert_eq!(conn.base_url, "http://polaris-2:8181");
+    assert_eq!(conn.kc_scope, None);
+
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM polaris_connection")
+        .fetch_one(&db.pool)
+        .await
+        .expect("count");
+    assert_eq!(count, 1, "polaris_connection is a singleton");
 }

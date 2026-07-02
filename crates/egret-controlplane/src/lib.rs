@@ -11,11 +11,13 @@
 
 mod auth;
 mod error;
+mod polaris_conn;
 mod secrets;
 mod storage;
 
 pub use auth::require_platform_admin;
 pub use error::CpError;
+pub use polaris_conn::{polaris_client, PolarisConn, PolarisConnInput, PolarisConnStore};
 
 use axum::extract::FromRef;
 use axum::Router;
@@ -32,6 +34,8 @@ pub struct CpState {
     pub secrets: WorkspaceSecretStore,
     /// Session service backing the `Auth` extractor.
     pub sessions: SessionService,
+    /// Singleton Polaris connection registry (`polaris_connection`).
+    pub polaris_conn: PolarisConnStore,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.
@@ -47,4 +51,5 @@ pub fn control_plane_router() -> Router<CpState> {
     Router::new()
         .merge(storage::router())
         .merge(secrets::router())
+        .merge(polaris_conn::router())
 }
