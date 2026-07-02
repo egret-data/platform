@@ -117,6 +117,14 @@ describe("Sidebar – Control Plane group", () => {
       "href",
       "/control-plane/engines",
     );
+    expect(screen.getByRole("link", { name: "Catalog" })).toHaveAttribute(
+      "href",
+      "/control-plane/catalog",
+    );
+    expect(screen.getByRole("link", { name: "RBAC" })).toHaveAttribute(
+      "href",
+      "/control-plane/rbac",
+    );
     expect(screen.getByRole("link", { name: "Storage" })).toHaveAttribute(
       "href",
       "/control-plane/storage",
@@ -130,7 +138,7 @@ describe("Sidebar – Control Plane group", () => {
       "/control-plane/users",
     );
     // Dropped from the Control Plane.
-    for (const gone of ["Resources", "Monitoring", "Platform Policies", "Catalog"]) {
+    for (const gone of ["Resources", "Monitoring", "Platform Policies"]) {
       expect(screen.queryByRole("link", { name: gone })).not.toBeInTheDocument();
     }
   });

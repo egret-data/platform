@@ -63,6 +63,8 @@ const CONTROL_PLANE_GROUPS: NavGroup[] = [
     items: [
       { label: "Workspaces", icon: FolderKanban },
       { label: "Engines", icon: Server },
+      { label: "Catalog", icon: Database },
+      { label: "RBAC", icon: ShieldCheck },
       { label: "Storage", icon: HardDrive },
       { label: "Secrets", icon: KeyRound },
       { label: "Users", icon: Users },

@@ -30,6 +30,8 @@ import { Placeholder } from "@/routes/Placeholder";
 import ControlPlaneEngines from "@/routes/control-plane/ControlPlaneEngines";
 import ControlPlaneStorage from "@/routes/control-plane/ControlPlaneStorage";
 import ControlPlaneSecrets from "@/routes/control-plane/ControlPlaneSecrets";
+import ControlPlaneCatalog from "@/routes/control-plane/ControlPlaneCatalog";
+import ControlPlaneRbac from "@/routes/control-plane/ControlPlaneRbac";
 
 const qc = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1, staleTime: 30000 } } });
 
@@ -80,6 +82,8 @@ function ControlPlaneRoutes() {
           <Route index element={<Navigate to="workspaces" replace />} />
           <Route path="workspaces" element={<Placeholder title="Workspaces" />} />
           <Route path="engines" element={<ControlPlaneEngines />} />
+          <Route path="catalog" element={<ControlPlaneCatalog />} />
+          <Route path="rbac" element={<ControlPlaneRbac />} />
           <Route path="storage" element={<ControlPlaneStorage />} />
           <Route path="secrets" element={<ControlPlaneSecrets />} />
           <Route path="users" element={<Placeholder title="Users" />} />
