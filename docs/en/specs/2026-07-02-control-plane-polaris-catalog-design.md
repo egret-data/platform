@@ -98,6 +98,15 @@ Prior comparison (recorded in memory `egret-catalog-single-catalog-pivot` and th
 - **Data migration** (greenfield).
 - **Multiple Polaris connections / realms / federation** (single connection v1; realms/federation are Polaris capabilities we may use later).
 
+## Future direction — K8s provisioning (separate epic, not in this epic)
+
+egret's north star is a **K8s-native control plane** that not only *manages* but also *provisions* the backing services: creating engines (Trino / StarRocks / RisingWave) and the catalog (Polaris) on Kubernetes via operators/Helm, then managing them through this same control plane.
+
+- **Two halves:** this epic builds the **Manage** half (connection registry + drive the management API). K8s provisioning is the **Provision** half layered on top later — it does not replace this work.
+- **Keep the connection abstraction clean for a `Provisioner`.** Today a `platform_admin` *manually registers* a connection to an ops-deployed service. A future `Provisioner` (a K8s-operator CRD apply, or a Helm release) will *create* the service and **auto-register the same connection row** — so the register/manage routes here are reused unchanged. Do not couple management logic to "who deployed the service."
+- **Per-service provisioning (future, to be spiked in its own epic):** StarRocks and RisingWave have official K8s **operators**; Trino via its official **Helm chart** (or the Stackable operator); **Polaris has no operator yet** — deploy via the in-repo **Helm chart** (`polaris/helm/polaris`) or raw manifests, then manage via `egret-polaris` (P3/P4). So Polaris fits the "Helm-deploy + management-API-manage" shape cleanly.
+- **Own brainstorm when reached:** K8s client in egret, per-service provisioner (operator CRD vs Helm), deploy/health tracking, teardown, secrets injection.
+
 ## Risks / notes
 
 - **New external JVM dependency** (Polaris) — dev must run it (docker-compose); prod ops must deploy it. Bigger operational surface than embedded lakekeeper.

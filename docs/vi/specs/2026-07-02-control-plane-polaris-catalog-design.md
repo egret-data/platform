@@ -46,6 +46,15 @@ Control plane sở hữu hạ tầng; workspace tiêu thụ.
 ## Ngoài phạm vi
 Notebook (paused, chỉ gỡ phụ thuộc catalog); centralization Engines (trajectory song song); governance column/row (engine+Ranger); deploy/ops Polaris; migrate (greenfield); multi-connection/realms/federation (v1 một connection).
 
+## Future direction — K8s provisioning (epic riêng, KHÔNG thuộc epic này)
+
+North star của egret: control plane **K8s-native** không chỉ *quản* mà còn *provision* service nền — tạo engine (Trino/StarRocks/RisingWave) + catalog (Polaris) trên K8s qua operator/Helm, rồi quản qua chính control plane này.
+
+- **Hai nửa:** epic này xây nửa **Manage** (registry + drive management API). K8s provisioning là nửa **Provision** chồng lên sau — không thay thế.
+- **Giữ abstraction "connection" sạch cho `Provisioner`.** Hôm nay `platform_admin` **đăng ký tay** connection tới service ops deploy. Tương lai `Provisioner` (apply CRD operator, hoặc Helm release) sẽ **tạo service + auto-register cùng connection row** → routes register/manage ở đây tái dùng nguyên. Đừng ràng buộc logic quản trị vào "ai deploy service".
+- **Provision từng service (future, brainstorm riêng):** StarRocks + RisingWave có **operator** chính thức; Trino qua **Helm chart** chính thức (hoặc Stackable operator); **Polaris chưa có operator** → deploy bằng **Helm chart in-repo** (`polaris/helm/polaris`) hoặc manifest, rồi quản qua `egret-polaris` (P3/P4). Polaris khớp mẫu "Helm-deploy + management-API-manage".
+- **Brainstorm riêng khi tới:** K8s client trong egret, provisioner per-service (CRD vs Helm), theo dõi deploy/health, teardown, inject secret.
+
 ## Rủi ro
 - Thêm phụ thuộc **JVM ngoài** (Polaris) — dev chạy compose, prod ops deploy.
 - egret giữ **admin credential Polaris** — lưu ở Secrets control-plane, không log, least-privilege.
