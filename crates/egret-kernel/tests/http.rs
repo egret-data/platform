@@ -162,19 +162,6 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
     }
 }
 
-/// Seed a workspace_warehouses row so `build_notebook_runtime` can find a warehouse.
-async fn seed_warehouse(db: &Db, ws_id: WorkspaceId) -> Uuid {
-    sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO workspace_warehouses (workspace_id, warehouse_id, name) \
-         VALUES ($1, $2, $3) RETURNING id",
-    )
-    .bind(ws_id.0)
-    .bind(Uuid::new_v4())
-    .bind(format!("ktest-wh-{}", Uuid::new_v4().simple()))
-    .fetch_one(&db.pool)
-    .await
-    .expect("seed warehouse")
-}
 
 /// Seed a notebook owned by `owner` in `ws`. Returns its id.
 async fn seed_notebook(db: &Db, ws: WorkspaceId, owner: UserId) -> Uuid {
@@ -347,7 +334,6 @@ async fn ws_handshake(app: axum::Router, path: &str, token: &str) -> StatusCode 
 #[sqlx::test(migrations = "../../migrations")]
 async fn post_kernel_starts_and_launcher_got_runtime_env(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-    seed_warehouse(&f.db, f.ws).await;
     let (_uid, token) = add_member(&f, f.ws, "starter", "ws_editor").await;
 
     let resp = f
@@ -395,7 +381,6 @@ async fn post_kernel_starts_and_launcher_got_runtime_env(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn get_kernel_returns_status_after_start(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-    seed_warehouse(&f.db, f.ws).await;
     let (_uid, token) = add_member(&f, f.ws, "getter", "ws_editor").await;
     let uri = format!("/ws/{}/kernel", f.slug);
 
@@ -427,7 +412,6 @@ async fn get_kernel_returns_status_after_start(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn get_kernel_before_start_returns_none(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-    seed_warehouse(&f.db, f.ws).await;
     let (_uid, token) = add_member(&f, f.ws, "prestart", "ws_viewer").await;
 
     let resp = f
@@ -453,7 +437,6 @@ async fn get_kernel_before_start_returns_none(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn delete_kernel_removes_row(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-    seed_warehouse(&f.db, f.ws).await;
     let (_uid, token) = add_member(&f, f.ws, "stopper", "ws_editor").await;
     let uri = format!("/ws/{}/kernel", f.slug);
 
@@ -510,7 +493,6 @@ async fn delete_kernel_removes_row(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn non_member_post_is_rejected_before_provisioning(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-    seed_warehouse(&f.db, f.ws).await;
 
     // A user with NO membership in this workspace.
     let outsider = f
@@ -563,7 +545,6 @@ async fn non_member_post_is_rejected_before_provisioning(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn per_user_keying_user_b_does_not_see_user_a_kernel(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-    seed_warehouse(&f.db, f.ws).await;
 
     let (_uid_a, token_a) = add_member(&f, f.ws, "user-a", "ws_editor").await;
     let (_uid_b, token_b) = add_member(&f, f.ws, "user-b", "ws_editor").await;
@@ -598,7 +579,6 @@ async fn per_user_keying_user_b_does_not_see_user_a_kernel(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn connect_ready_creates_kernel_and_upserts(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-    seed_warehouse(&f.db, f.ws).await;
     let (uid, token) = add_member(&f, f.ws, "connector", "ws_editor").await;
     let nb = seed_notebook(&f.db, f.ws, uid).await;
 
@@ -649,7 +629,6 @@ async fn connect_ready_creates_kernel_and_upserts(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn connect_spawning_returns_without_kernel(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-    seed_warehouse(&f.db, f.ws).await;
     let (uid, token) = add_member(&f, f.ws, "spawning", "ws_editor").await;
     let nb = seed_notebook(&f.db, f.ws, uid).await;
     f.launcher.inner.lock().unwrap().phase = Some(egret_kernel::launcher::KernelPhase::Spawning);
@@ -695,7 +674,6 @@ async fn connect_spawning_returns_without_kernel(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn connect_non_member_rejected(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-    seed_warehouse(&f.db, f.ws).await;
     // A notebook owned by the workspace owner.
     let nb = seed_notebook(&f.db, f.ws, f.owner).await;
     let outsider = f
@@ -742,7 +720,6 @@ async fn connect_non_member_rejected(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn interrupt_ready_kernel_returns_204(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-    seed_warehouse(&f.db, f.ws).await;
     let (uid, token) = add_member(&f, f.ws, "interrupter", "ws_editor").await;
     let nb = seed_notebook(&f.db, f.ws, uid).await;
 
@@ -783,7 +760,6 @@ async fn interrupt_ready_kernel_returns_204(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn restart_ready_kernel_returns_kernel_id(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-    seed_warehouse(&f.db, f.ws).await;
     let (uid, token) = add_member(&f, f.ws, "restarter", "ws_editor").await;
     let nb = seed_notebook(&f.db, f.ws, uid).await;
 
@@ -825,7 +801,6 @@ async fn restart_ready_kernel_returns_kernel_id(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn interrupt_without_started_kernel_conflict(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-    seed_warehouse(&f.db, f.ws).await;
     let (uid, token) = add_member(&f, f.ws, "nointr", "ws_editor").await;
     let nb = seed_notebook(&f.db, f.ws, uid).await;
 
@@ -850,7 +825,6 @@ async fn interrupt_without_started_kernel_conflict(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn interrupt_non_member_rejected(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-    seed_warehouse(&f.db, f.ws).await;
     let nb = seed_notebook(&f.db, f.ws, f.owner).await;
     let outsider = f
         .users
@@ -897,7 +871,6 @@ async fn interrupt_non_member_rejected(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn active_executions_returns_running_cells(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-    seed_warehouse(&f.db, f.ws).await;
     let (uid, token) = add_member(&f, f.ws, "ae_member", "ws_editor").await;
     let nb = seed_notebook(&f.db, f.ws, uid).await;
     let cid = Uuid::now_v7();
@@ -943,7 +916,6 @@ async fn active_executions_returns_running_cells(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn active_executions_non_member_rejected(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-    seed_warehouse(&f.db, f.ws).await;
     let nb = seed_notebook(&f.db, f.ws, f.owner).await;
     let outsider = f
         .users
@@ -984,7 +956,6 @@ async fn active_executions_non_member_rejected(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn channels_non_member_rejected(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-    seed_warehouse(&f.db, f.ws).await;
     let nb = seed_notebook(&f.db, f.ws, f.owner).await;
     let outsider = f
         .users
@@ -1018,7 +989,6 @@ async fn channels_non_member_rejected(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn channels_kernel_not_started_conflict(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-    seed_warehouse(&f.db, f.ws).await;
     let (uid, token) = add_member(&f, f.ws, "chmember", "ws_editor").await;
     let nb = seed_notebook(&f.db, f.ws, uid).await;
 
@@ -1039,7 +1009,6 @@ async fn channels_kernel_not_started_conflict(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn channels_ready_upgrades_and_resolves_kernel(pool: sqlx::PgPool) {
     let f = setup(pool).await;
-    seed_warehouse(&f.db, f.ws).await;
     let (uid, token) = add_member(&f, f.ws, "chready", "ws_editor").await;
     let nb = seed_notebook(&f.db, f.ws, uid).await;
 
