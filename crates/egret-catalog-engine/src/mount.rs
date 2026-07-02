@@ -54,10 +54,11 @@ use anyhow::Context as _;
 use lakekeeper::api::iceberg::v1::new_v1_full_router;
 use lakekeeper::api::management::v1::server::{APACHE_LICENSE_STATUS, DEFAULT_BUILD_INFO};
 use lakekeeper::api::ApiContext;
+use lakekeeper::api::RequestMetadata;
 use lakekeeper::server::CatalogServer;
+use lakekeeper::service::authz::AllowAllAuthorizer;
 use lakekeeper::service::contract_verification::ContractVerifiers;
 use lakekeeper::service::events::EventDispatcher;
-use lakekeeper::service::authz::AllowAllAuthorizer;
 use lakekeeper::service::tasks::TaskQueueRegistry;
 use lakekeeper::service::{CatalogStore, State};
 use lakekeeper_storage_postgres::{CatalogState, PostgresBackend, SecretsState};
@@ -235,4 +236,20 @@ pub fn catalog_engine_router(state: ApiContext<EngineState>) -> axum::Router {
 ///   (migrated + bootstrapped).
 pub fn mount_catalog_engine(engine_state: ApiContext<EngineState>) -> axum::Router {
     catalog_engine_router(engine_state)
+        .layer(axum::middleware::from_fn(inject_system_request_metadata))
+}
+
+/// EB-1: inject an in-process system [`RequestMetadata`] on every catalog request.
+/// lakekeeper's handlers require this extension (they extract `Extension<RequestMetadata>`);
+/// with the [`AllowAllAuthorizer`] the internal system actor is permitted everything.
+/// EB-3 replaces this with JWT-derived, per-principal metadata (the real authn/authz layer).
+async fn inject_system_request_metadata(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    req.extensions_mut()
+        .insert(RequestMetadata::new_lakekeeper_internal(
+            uuid::Uuid::now_v7(),
+        ));
+    next.run(req).await
 }
