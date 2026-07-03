@@ -19,7 +19,9 @@ import {
   Loader2,
   Plus,
   Power,
+  ListChecks,
   RotateCcw,
+  Search,
   Settings2,
   Shield,
   ShieldCheck,
@@ -39,6 +41,8 @@ import {
   type Namespace,
   type TableDetail,
   type WarehouseConfig,
+  type SearchResult,
+  type WarehouseTask,
   type DeletedTabular,
   type Tabular,
   type Warehouse,
@@ -63,6 +67,8 @@ import {
   setDeleteProfile,
   setFormatPolicy,
   rotateCredential,
+  searchTabulars,
+  listWarehouseTasks,
   revokeClient,
   revokeGrant,
 } from "@/api/controlPlane";
@@ -1041,6 +1047,14 @@ function BrowseTab({ warehouseId }: { warehouseId: string }) {
   }
 
   const list = namespaces.data ?? [];
+  const [search, setSearch] = useState("");
+  const q = search.trim();
+  const results = useQuery<SearchResult[], ApiError>({
+    queryKey: ["cp", "browse", warehouseId, "search", q],
+    queryFn: () => searchTabulars(warehouseId, q),
+    enabled: q.length > 0,
+    retry: false,
+  });
 
   return (
     <div className="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
@@ -1060,8 +1074,49 @@ function BrowseTab({ warehouseId }: { warehouseId: string }) {
             Recycle bin
           </Button>
         </div>
-        <div className="max-h-[560px] overflow-y-auto py-1">
-          {namespaces.isLoading ? (
+        <div className="border-b p-2">
+          <div className="relative">
+            <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              className="h-8 pl-7 text-sm"
+              placeholder="Search tables & views…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </div>
+        </div>
+        <div className="max-h-[520px] overflow-y-auto py-1">
+          {q ? (
+            results.isLoading ? (
+              <BrowseEmpty>Searching…</BrowseEmpty>
+            ) : (results.data ?? []).length === 0 ? (
+              <BrowseEmpty icon={Search}>No matches for “{q}”.</BrowseEmpty>
+            ) : (
+              (results.data ?? []).map((r, i) => {
+                const nsLabel = r.namespace.join(".");
+                return (
+                  <button
+                    key={`${nsLabel}.${r.name}.${i}`}
+                    type="button"
+                    onClick={() => {
+                      setSelectedNs(nsLabel);
+                      setSelectedTabular({ name: r.name, kind: r.kind, id: null, protected: false });
+                    }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-muted"
+                  >
+                    <Table2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    <span className="flex-1 truncate">
+                      <span className="text-muted-foreground">{nsLabel}.</span>
+                      {r.name}
+                    </span>
+                    {r.kind === "view" && (
+                      <Badge variant="outline" className="text-[10px] uppercase">view</Badge>
+                    )}
+                  </button>
+                );
+              })
+            )
+          ) : namespaces.isLoading ? (
             <BrowseEmpty>Loading…</BrowseEmpty>
           ) : list.length === 0 ? (
             <BrowseEmpty icon={Database}>This warehouse has no namespaces yet.</BrowseEmpty>
@@ -1775,7 +1830,62 @@ function SettingsTab({ warehouseId }: { warehouseId: string }) {
           )}
         </CardContent>
       </Card>
+
+      <div className="md:col-span-2">
+        <WarehouseTasksCard warehouseId={warehouseId} />
+      </div>
     </div>
+  );
+}
+
+function WarehouseTasksCard({ warehouseId }: { warehouseId: string }) {
+  const tasks = useQuery<WarehouseTask[], ApiError>({
+    queryKey: ["cp", "warehouse-tasks", warehouseId],
+    queryFn: () => listWarehouseTasks(warehouseId),
+    retry: false,
+  });
+  const rows = tasks.data ?? [];
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <ListChecks className="h-4 w-4 text-muted-foreground" />
+          Background tasks
+        </CardTitle>
+        <CardDescription>
+          The catalog&apos;s GC queues (tabular expiry / purge / task-log cleanup) that reclaim
+          storage from dropped tables.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {tasks.isLoading ? (
+          <p className="py-4 text-center text-sm text-muted-foreground">Loading…</p>
+        ) : rows.length === 0 ? (
+          <p className="py-4 text-center text-sm text-muted-foreground">No pending tasks.</p>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Queue</TableHead>
+                <TableHead>Entity</TableHead>
+                <TableHead>Status</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((t, i) => (
+                <TableRow key={i}>
+                  <TableCell className="font-mono text-xs">{t.queue}</TableCell>
+                  <TableCell className="font-mono text-xs">{t.entity ?? "—"}</TableCell>
+                  <TableCell>
+                    <Badge variant="outline">{t.status}</Badge>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

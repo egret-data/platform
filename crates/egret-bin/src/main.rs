@@ -648,6 +648,45 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
         .await
         .map_err(|e| e.to_string())
     }
+
+    async fn search(
+        &self,
+        wh: &str,
+        query: &str,
+    ) -> Result<Vec<egret_controlplane::BrowseSearchResult>, String> {
+        egret_catalog_engine::search_tabulars(
+            self.engine_state.clone(),
+            &self.system_user,
+            wh,
+            query,
+        )
+        .await
+        .map(|v| {
+            v.into_iter()
+                .map(|r| egret_controlplane::BrowseSearchResult {
+                    namespace: r.namespace,
+                    name: r.name,
+                    kind: r.kind.to_string(),
+                })
+                .collect()
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    async fn tasks(&self, wh: &str) -> Result<Vec<egret_controlplane::BrowseTask>, String> {
+        egret_catalog_engine::list_tasks(self.engine_state.clone(), &self.system_user, wh)
+            .await
+            .map(|v| {
+                v.into_iter()
+                    .map(|t| egret_controlplane::BrowseTask {
+                        queue: t.queue,
+                        entity: t.entity,
+                        status: t.status,
+                    })
+                    .collect()
+            })
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// Extract the `warehouse` query-param value from a raw query string

@@ -346,6 +346,24 @@ export function loadViewColumns(
     `/control-plane/warehouses/${warehouseId}/namespaces/${encodeURIComponent(namespace)}/views/${encodeURIComponent(view)}`,
   );
 }
+export interface SearchResult {
+  namespace: string[];
+  name: string;
+  kind: "table" | "view";
+}
+export interface WarehouseTask {
+  queue: string;
+  entity: string | null;
+  status: string;
+}
+export function searchTabulars(warehouseId: string, q: string): Promise<SearchResult[]> {
+  return apiJson<SearchResult[]>(
+    `/control-plane/warehouses/${warehouseId}/search?q=${encodeURIComponent(q)}`,
+  );
+}
+export function listWarehouseTasks(warehouseId: string): Promise<WarehouseTask[]> {
+  return apiJson<WarehouseTask[]>(`/control-plane/warehouses/${warehouseId}/tasks`);
+}
 export interface WarehouseConfig {
   active: boolean;
   deleteProfileSeconds: number | null;

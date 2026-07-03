@@ -328,6 +328,16 @@ impl egret_controlplane::WarehouseBrowser for FakeBrowser {
     ) -> Result<(), String> {
         Ok(())
     }
+    async fn search(
+        &self,
+        _wh: &str,
+        _query: &str,
+    ) -> Result<Vec<egret_controlplane::BrowseSearchResult>, String> {
+        Ok(vec![])
+    }
+    async fn tasks(&self, _wh: &str) -> Result<Vec<egret_controlplane::BrowseTask>, String> {
+        Ok(vec![])
+    }
 }
 
 /// Seed a workspace + storage_connection + warehouse with lakekeeper_warehouse_id set.

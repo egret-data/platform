@@ -19,8 +19,9 @@ pub mod recovery;
 pub mod warehouse;
 
 pub use admin::{
-    get_warehouse_config, rotate_storage_credential, set_delete_profile, set_format_versions,
-    set_warehouse_active, WarehouseConfig,
+    get_warehouse_config, list_tasks, rotate_storage_credential, search_tabulars,
+    set_delete_profile, set_format_versions, set_warehouse_active, SearchResult, TaskInfo,
+    WarehouseConfig,
 };
 pub use bootstrap::ensure_bootstrapped;
 pub use browse::{
