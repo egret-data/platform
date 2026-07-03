@@ -302,6 +302,32 @@ impl egret_controlplane::WarehouseBrowser for FakeBrowser {
     ) -> Result<bool, String> {
         Ok(protected)
     }
+    async fn config(&self, _wh: &str) -> Result<egret_controlplane::BrowseWarehouseConfig, String> {
+        Ok(egret_controlplane::BrowseWarehouseConfig {
+            active: true,
+            delete_profile_seconds: Some(604800),
+            num_tables: 3,
+            num_views: 1,
+            stats_updated_ms: 0,
+        })
+    }
+    async fn set_active(&self, _wh: &str, _active: bool) -> Result<(), String> {
+        Ok(())
+    }
+    async fn set_delete_profile(&self, _wh: &str, _seconds: Option<i64>) -> Result<(), String> {
+        Ok(())
+    }
+    async fn set_format_versions(&self, _wh: &str, _versions: Vec<u8>) -> Result<(), String> {
+        Ok(())
+    }
+    async fn rotate_credential(
+        &self,
+        _wh: &str,
+        _access_key: &str,
+        _secret_key: &str,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Seed a workspace + storage_connection + warehouse with lakekeeper_warehouse_id set.

@@ -585,6 +585,69 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
         .await
         .map_err(|e| e.to_string())
     }
+
+    async fn config(&self, wh: &str) -> Result<egret_controlplane::BrowseWarehouseConfig, String> {
+        egret_catalog_engine::get_warehouse_config(self.engine_state.clone(), &self.system_user, wh)
+            .await
+            .map(|c| egret_controlplane::BrowseWarehouseConfig {
+                active: c.active,
+                delete_profile_seconds: c.delete_profile_seconds,
+                num_tables: c.num_tables,
+                num_views: c.num_views,
+                stats_updated_ms: c.stats_updated_ms,
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    async fn set_active(&self, wh: &str, active: bool) -> Result<(), String> {
+        egret_catalog_engine::set_warehouse_active(
+            self.engine_state.clone(),
+            &self.system_user,
+            wh,
+            active,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+
+    async fn set_delete_profile(&self, wh: &str, seconds: Option<i64>) -> Result<(), String> {
+        egret_catalog_engine::set_delete_profile(
+            self.engine_state.clone(),
+            &self.system_user,
+            wh,
+            seconds,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+
+    async fn set_format_versions(&self, wh: &str, versions: Vec<u8>) -> Result<(), String> {
+        egret_catalog_engine::set_format_versions(
+            self.engine_state.clone(),
+            &self.system_user,
+            wh,
+            &versions,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+
+    async fn rotate_credential(
+        &self,
+        wh: &str,
+        access_key: &str,
+        secret_key: &str,
+    ) -> Result<(), String> {
+        egret_catalog_engine::rotate_storage_credential(
+            self.engine_state.clone(),
+            &self.system_user,
+            wh,
+            access_key,
+            secret_key,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
 }
 
 /// Extract the `warehouse` query-param value from a raw query string

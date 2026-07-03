@@ -142,6 +142,38 @@ pub trait WarehouseBrowser: Send + Sync {
         id: uuid::Uuid,
         protected: bool,
     ) -> Result<bool, String>;
+    /// Read the warehouse's admin config (status / soft-delete TTL / statistics).
+    async fn config(&self, lakekeeper_warehouse_id: &str) -> Result<BrowseWarehouseConfig, String>;
+    /// Activate/deactivate the warehouse.
+    async fn set_active(&self, lakekeeper_warehouse_id: &str, active: bool) -> Result<(), String>;
+    /// Set soft-delete retention (`Some(seconds)`) or hard delete (`None`).
+    async fn set_delete_profile(
+        &self,
+        lakekeeper_warehouse_id: &str,
+        seconds: Option<i64>,
+    ) -> Result<(), String>;
+    /// Set the allowed Iceberg format versions.
+    async fn set_format_versions(
+        &self,
+        lakekeeper_warehouse_id: &str,
+        versions: Vec<u8>,
+    ) -> Result<(), String>;
+    /// Rotate the S3 access-key credential.
+    async fn rotate_credential(
+        &self,
+        lakekeeper_warehouse_id: &str,
+        access_key: &str,
+        secret_key: &str,
+    ) -> Result<(), String>;
+}
+
+/// Warehouse admin config (status / soft-delete TTL / latest statistics).
+pub struct BrowseWarehouseConfig {
+    pub active: bool,
+    pub delete_profile_seconds: Option<i64>,
+    pub num_tables: i64,
+    pub num_views: i64,
+    pub stats_updated_ms: i64,
 }
 
 pub fn router() -> Router<CpState> {
@@ -176,6 +208,17 @@ pub fn router() -> Router<CpState> {
         .route("/warehouses/{id}/deleted-tabulars", get(browse_deleted))
         .route("/warehouses/{id}/undrop", post(undrop_tabular))
         .route("/warehouses/{id}/protection", put(set_protection))
+        .route("/warehouses/{id}/config", get(warehouse_config))
+        .route("/warehouses/{id}/status", put(set_warehouse_status))
+        .route(
+            "/warehouses/{id}/delete-profile",
+            put(set_delete_profile_route),
+        )
+        .route("/warehouses/{id}/format-policy", put(set_format_policy))
+        .route(
+            "/warehouses/{id}/storage-credential",
+            put(rotate_credential),
+        )
 }
 
 #[derive(Serialize)]
@@ -844,4 +887,127 @@ async fn set_protection(
         .await
         .map_err(|e| CpError::BadRequest(format!("protection: {e}")))?;
     Ok(Json(ProtectionDto { protected }))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WarehouseConfigDto {
+    active: bool,
+    delete_profile_seconds: Option<i64>,
+    num_tables: i64,
+    num_views: i64,
+    stats_updated_ms: i64,
+}
+
+async fn warehouse_config(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<WarehouseConfigDto>, CpError> {
+    require_platform_admin(&p)?;
+    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
+    let b = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    let c = b
+        .config(&lk)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("config: {e}")))?;
+    Ok(Json(WarehouseConfigDto {
+        active: c.active,
+        delete_profile_seconds: c.delete_profile_seconds,
+        num_tables: c.num_tables,
+        num_views: c.num_views,
+        stats_updated_ms: c.stats_updated_ms,
+    }))
+}
+
+#[derive(Deserialize)]
+struct StatusBody {
+    active: bool,
+}
+
+async fn set_warehouse_status(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(b): Json<StatusBody>,
+) -> Result<StatusCode, CpError> {
+    require_platform_admin(&p)?;
+    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
+    let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    browser
+        .set_active(&lk, b.active)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("status: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct DeleteProfileBody {
+    /// Soft-delete retention in seconds; null = hard delete.
+    seconds: Option<i64>,
+}
+
+async fn set_delete_profile_route(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(b): Json<DeleteProfileBody>,
+) -> Result<StatusCode, CpError> {
+    require_platform_admin(&p)?;
+    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
+    let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    browser
+        .set_delete_profile(&lk, b.seconds)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("delete-profile: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct FormatPolicyBody {
+    versions: Vec<u8>,
+}
+
+async fn set_format_policy(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(b): Json<FormatPolicyBody>,
+) -> Result<StatusCode, CpError> {
+    require_platform_admin(&p)?;
+    if b.versions.is_empty() {
+        return Err(CpError::BadRequest(
+            "at least one format version required".into(),
+        ));
+    }
+    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
+    let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    browser
+        .set_format_versions(&lk, b.versions)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("format-policy: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RotateCredBody {
+    access_key: String,
+    secret_key: String,
+}
+
+async fn rotate_credential(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(b): Json<RotateCredBody>,
+) -> Result<StatusCode, CpError> {
+    require_platform_admin(&p)?;
+    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
+    let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    browser
+        .rotate_credential(&lk, &b.access_key, &b.secret_key)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("storage-credential: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
 }

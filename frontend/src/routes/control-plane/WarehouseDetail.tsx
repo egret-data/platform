@@ -18,7 +18,9 @@ import {
   KeyRound,
   Loader2,
   Plus,
+  Power,
   RotateCcw,
+  Settings2,
   Shield,
   ShieldCheck,
   Table2,
@@ -36,6 +38,7 @@ import {
   type GrantInput,
   type Namespace,
   type TableDetail,
+  type WarehouseConfig,
   type DeletedTabular,
   type Tabular,
   type Warehouse,
@@ -55,6 +58,11 @@ import {
   listDeletedTabulars,
   undropTabular,
   setProtection,
+  getWarehouseConfig,
+  setWarehouseStatus,
+  setDeleteProfile,
+  setFormatPolicy,
+  rotateCredential,
   revokeClient,
   revokeGrant,
 } from "@/api/controlPlane";
@@ -154,6 +162,10 @@ export default function WarehouseDetail() {
             <Cable className="h-4 w-4" />
             Connect
           </TabsTrigger>
+          <TabsTrigger value="settings">
+            <Settings2 className="h-4 w-4" />
+            Settings
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="roles" className="mt-4">
           <RolesTab warehouseId={id} />
@@ -166,6 +178,9 @@ export default function WarehouseDetail() {
         </TabsContent>
         <TabsContent value="connect" className="mt-4">
           <ConnectTab warehouse={warehouse.data} />
+        </TabsContent>
+        <TabsContent value="settings" className="mt-4">
+          <SettingsTab warehouseId={id} />
         </TabsContent>
       </Tabs>
     </div>
@@ -1551,6 +1566,215 @@ function BrowseEmpty({ icon: Icon, children }: { icon?: typeof Database; childre
     <div className="flex flex-col items-center gap-2 px-4 py-10 text-center text-sm text-muted-foreground">
       {Icon && <Icon className="h-6 w-6 opacity-40" />}
       <span>{children}</span>
+    </div>
+  );
+}
+
+function SettingsTab({ warehouseId }: { warehouseId: string }) {
+  const queryClient = useQueryClient();
+  const config = useQuery<WarehouseConfig, ApiError>({
+    queryKey: ["cp", "warehouse-config", warehouseId],
+    queryFn: () => getWarehouseConfig(warehouseId),
+    retry: false,
+  });
+  const c = config.data;
+  const invalidate = () =>
+    queryClient.invalidateQueries({ queryKey: ["cp", "warehouse-config", warehouseId] });
+
+  const statusMut = useMutation<void, ApiError, boolean>({
+    mutationFn: (active) => setWarehouseStatus(warehouseId, active),
+    onSuccess: invalidate,
+  });
+  const ttlMut = useMutation<void, ApiError, number | null>({
+    mutationFn: (seconds) => setDeleteProfile(warehouseId, seconds),
+    onSuccess: invalidate,
+  });
+  const fmtMut = useMutation<void, ApiError, number[]>({
+    mutationFn: (versions) => setFormatPolicy(warehouseId, versions),
+    onSuccess: invalidate,
+  });
+  const rotateMut = useMutation<void, ApiError, { ak: string; sk: string }>({
+    mutationFn: (v) => rotateCredential(warehouseId, v.ak, v.sk),
+    onSuccess: () => {
+      setAk("");
+      setSk("");
+    },
+  });
+
+  const [ttlDays, setTtlDays] = useState("");
+  const [fmt, setFmt] = useState("1,2");
+  const [ak, setAk] = useState("");
+  const [sk, setSk] = useState("");
+
+  const currentDays =
+    c?.deleteProfileSeconds != null ? Math.round(c.deleteProfileSeconds / 86400) : null;
+
+  return (
+    <div className="grid gap-4 md:grid-cols-2">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Power className="h-4 w-4 text-muted-foreground" />
+            Status &amp; statistics
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex items-center gap-2">
+            <Badge
+              variant="outline"
+              className={
+                c?.active
+                  ? "gap-1 border-teal-500/30 bg-teal-500/10 text-teal-700"
+                  : "gap-1 border-muted-foreground/30 bg-muted text-muted-foreground"
+              }
+            >
+              <span className={`h-1.5 w-1.5 rounded-full ${c?.active ? "bg-teal-500" : "bg-muted-foreground"}`} />
+              {config.isLoading ? "…" : c?.active ? "Active" : "Inactive"}
+            </Badge>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={statusMut.isPending || !c}
+              onClick={() => statusMut.mutate(!c?.active)}
+            >
+              {c?.active ? "Deactivate" : "Activate"}
+            </Button>
+          </div>
+          <div className="flex gap-6 text-sm">
+            <div>
+              <div className="text-xs uppercase tracking-wide text-muted-foreground">Tables</div>
+              <div className="text-lg font-semibold">{c?.numTables ?? "—"}</div>
+            </div>
+            <div>
+              <div className="text-xs uppercase tracking-wide text-muted-foreground">Views</div>
+              <div className="text-lg font-semibold">{c?.numViews ?? "—"}</div>
+            </div>
+          </div>
+          {c?.statsUpdatedMs ? (
+            <p className="text-xs text-muted-foreground">
+              Statistics as of {new Date(c.statsUpdatedMs).toLocaleString()}
+            </p>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Trash2 className="h-4 w-4 text-muted-foreground" />
+            Soft-delete retention
+          </CardTitle>
+          <CardDescription>
+            {currentDays != null
+              ? `Dropped tables are recoverable for ${currentDays} day${currentDays === 1 ? "" : "s"}.`
+              : "Hard delete — dropped tables are purged immediately (no recovery)."}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <div className="flex items-end gap-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="ttl">Retention (days)</Label>
+              <Input
+                id="ttl"
+                type="number"
+                min={7}
+                className="w-32"
+                placeholder={currentDays != null ? String(currentDays) : "7"}
+                value={ttlDays}
+                onChange={(e) => setTtlDays(e.target.value)}
+              />
+            </div>
+            <Button
+              size="sm"
+              disabled={ttlMut.isPending}
+              onClick={() => {
+                const days = Number(ttlDays || currentDays || 7);
+                ttlMut.mutate(Math.max(7, days) * 86400);
+              }}
+            >
+              Save
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={ttlMut.isPending}
+              onClick={() => ttlMut.mutate(null)}
+            >
+              Hard delete
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">Minimum ~7 days (enforced by the catalog).</p>
+          {ttlMut.isError && (
+            <p className="text-xs text-destructive">Retention rejected — try a longer window.</p>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+            Format-version policy
+          </CardTitle>
+          <CardDescription>Which Iceberg table format versions clients may create.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-end gap-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="fmt">Allowed versions</Label>
+              <Select value={fmt} onValueChange={setFmt}>
+                <SelectTrigger id="fmt" className="w-56">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="1,2">Allow v1 and v2</SelectItem>
+                  <SelectItem value="2">Require v2</SelectItem>
+                  <SelectItem value="2,3">Allow v2 and v3</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <Button
+              size="sm"
+              disabled={fmtMut.isPending}
+              onClick={() => fmtMut.mutate(fmt.split(",").map(Number))}
+            >
+              Save
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <RotateCcw className="h-4 w-4 text-muted-foreground" />
+            Rotate storage credential
+          </CardTitle>
+          <CardDescription>Replace the warehouse&apos;s S3 access key without re-provisioning.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="ak">Access key</Label>
+            <Input id="ak" value={ak} onChange={(e) => setAk(e.target.value)} />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="sk">Secret key</Label>
+            <Input id="sk" type="password" value={sk} onChange={(e) => setSk(e.target.value)} />
+          </div>
+          <Button
+            size="sm"
+            disabled={rotateMut.isPending || !ak || !sk}
+            onClick={() => rotateMut.mutate({ ak, sk })}
+          >
+            {rotateMut.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+            Rotate
+          </Button>
+          {rotateMut.isSuccess && <p className="text-xs text-teal-600">Credential rotated.</p>}
+          {rotateMut.isError && (
+            <p className="text-xs text-destructive">{rotateMut.error.message}</p>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
