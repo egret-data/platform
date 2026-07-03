@@ -24,6 +24,10 @@ migrate:
 reset-testdata:
     ./deploy/reset-testdata.sh
 
+# Seed a ready-to-test demo catalog (warehouse + role + client + demo_ns.events). Needs a running serve.
+seed-demo:
+    ./deploy/seed-demo-catalog.sh
+
 # Run the server
 serve:
     cargo run -p egret-bin -- serve

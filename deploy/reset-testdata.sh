@@ -51,5 +51,6 @@ else
 fi
 
 echo ""
-echo "✅ Reset done. Start the server to re-migrate the empty catalog:"
-echo "     just serve"
+echo "✅ Reset done. Next:"
+echo "     just serve        # re-migrates the empty catalog"
+echo "     just seed-demo    # (optional) seed a ready-to-test demo catalog"
