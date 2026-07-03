@@ -17,7 +17,9 @@ mod storage;
 mod warehouses;
 
 pub use auth::require_platform_admin;
-pub use engines::{EngineLiveStatus, EnginePod, EngineProvisionReq, EngineProvisioner};
+pub use engines::{
+    CatalogReq, EngineLiveStatus, EnginePod, EngineProvisionReq, EngineProvisioner, TrinoConfigReq,
+};
 pub use error::CpError;
 pub use warehouses::{
     BrowseColumn, BrowseDeletedTabular, BrowseNamespace, BrowsePartition, BrowseSearchResult,

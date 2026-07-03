@@ -461,6 +461,9 @@ export interface EngineSpec {
   cpuMax: string;
   memory: string;
   imageVersion: string;
+  // Fuller Trino config surface, stored under `spec.trinoConfig` (camelCase keys).
+  // Only present if the engine DTO exposes it — guard for undefined on read.
+  trinoConfig?: TrinoConfig;
 }
 
 /** A provisioned query engine (Phase 1: Trino on Kubernetes). */
@@ -481,6 +484,15 @@ export interface EngineStatus {
   pods: { name: string; phase: string; ready: boolean }[];
 }
 
+/** Optional fuller Trino config surface, sent under `trinoConfig` on the engine body. */
+export interface TrinoConfig {
+  jvmHeap?: string;
+  queryMaxMemory?: string;
+  queryMaxMemoryPerNode?: string;
+  configProperties?: Record<string, string>;
+  env?: Record<string, string>;
+}
+
 export interface CreateEngineInput {
   name: string;
   warehouseId: string;
@@ -490,6 +502,7 @@ export interface CreateEngineInput {
   cpuMin: string;
   cpuMax: string;
   memory: string;
+  trinoConfig?: TrinoConfig;
 }
 
 export function listEngines(): Promise<Engine[]> {
@@ -522,4 +535,37 @@ export function updateEngine(id: string, input: CreateEngineInput): Promise<Engi
 
 export async function deleteEngine(id: string): Promise<void> {
   await apiFetch(`/control-plane/engines/${id}`, { method: "DELETE" });
+}
+
+// ── Engine catalogs (multi-catalog / control-plane) ──────────────────────────
+
+/** A catalog attached to an engine. */
+export interface EngineCatalog {
+  id: string;
+  name: string;
+  kind: string;
+  isPrimary: boolean;
+}
+
+export interface AddCatalogInput {
+  name: string;
+  kind: string;
+  config: Record<string, unknown>;
+  secretRef?: string | null;
+}
+
+export function listEngineCatalogs(id: string): Promise<EngineCatalog[]> {
+  return apiJson<EngineCatalog[]>(`/control-plane/engines/${id}/catalogs`);
+}
+
+export function addEngineCatalog(id: string, input: AddCatalogInput): Promise<EngineCatalog> {
+  return apiJson<EngineCatalog>(`/control-plane/engines/${id}/catalogs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteEngineCatalog(id: string, cid: string): Promise<void> {
+  await apiFetch(`/control-plane/engines/${id}/catalogs/${cid}`, { method: "DELETE" });
 }

@@ -384,8 +384,9 @@ impl egret_controlplane::WarehouseProvisioner for LakekeeperProvisioner {
 
 /// Provisions query engines (Phase 1: Trino) onto Kubernetes for the control
 /// plane. Adapts the kube-free `egret_controlplane::EngineProvisioner`
-/// trait onto the `egret-orchestrator` `TrinoProvisioner`, mapping the flat
-/// `EngineProvisionReq` into an `EngineSpec` and the k8s status back out.
+/// trait onto the `egret-orchestrator` `TrinoProvisioner`, mapping the
+/// `EngineProvisionReq` (catalogs + config) into an `EngineSpec` and the k8s
+/// status back out.
 struct EgretEngineProvisioner {
     inner: std::sync::Arc<egret_orchestrator::TrinoProvisioner>,
 }
@@ -407,15 +408,22 @@ impl EgretEngineProvisioner {
                 cpu_max: req.cpu_max.clone(),
                 memory: req.memory.clone(),
             },
-            wiring: egret_orchestrator::CatalogWiring {
-                catalog_uri: req.catalog_uri.clone(),
-                token_uri: req.token_uri.clone(),
-                warehouse: req.warehouse.clone(),
-                s3_endpoint: req.s3_endpoint.clone(),
-                client_id: req.client_id.clone(),
-                client_secret: req.client_secret.clone(),
+            config: egret_orchestrator::TrinoConfig {
+                jvm_heap: req.config.jvm_heap.clone(),
+                query_max_memory: req.config.query_max_memory.clone(),
+                query_max_memory_per_node: req.config.query_max_memory_per_node.clone(),
+                config_properties: req.config.config_properties.clone(),
+                env: req.config.env.clone(),
             },
-            extra_props: vec![],
+            catalogs: req
+                .catalogs
+                .iter()
+                .map(|c| egret_orchestrator::CatalogSpec {
+                    name: c.name.clone(),
+                    properties: c.properties.clone(),
+                    env: c.env.clone(),
+                })
+                .collect(),
         }
     }
 }

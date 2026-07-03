@@ -1,46 +1,44 @@
-# Trino-on-Kubernetes e2e harness (kind + Stackable operator)
+# Trino-on-Kubernetes e2e harness (kind, plain manifests)
 
 This is the **opt-in, manual** end-to-end path for egret's engine provisioning
-against a real Kubernetes cluster with the [Stackable](https://stackable.tech/)
-Trino operator. It is **NOT part of CI** — same posture as the existing manual
-Trino integration test. Run it locally when you change the
-`LiveKube` provisioner or the Trino / TrinoCatalog manifest generation.
+against a real Kubernetes cluster. As of Phase 1.5, egret provisions Trino as
+**plain stateless Deployments** (coordinator + worker Deployments, a Service,
+two ConfigMaps, and an optional env Secret) that egret templates and applies
+itself — **no Stackable operator, no CRs, no PVCs**. It is **NOT part of CI** —
+same posture as the existing manual Trino integration test. Run it locally when
+you change the `LiveKube` provisioner or the Trino manifest templating.
 
 ## Prerequisites
 
 Install these on your host (Homebrew names shown):
 
 - `kind`    — `brew install kind`
-- `helm`    — `brew install helm`
 - `kubectl` — `brew install kubectl`
 - Docker (kind runs the cluster as containers)
+
+`helm` is **no longer required** for Trino — egret applies the workloads
+directly. It's only needed if/when the StarRocks/RisingWave phases add their own
+operators (installed via helm in `just k8s-up` at that point).
 
 ## `just k8s-up`
 
 `just k8s-up` does everything needed to stand the cluster up:
 
 1. `kind create cluster --name egret --config deploy/k8s/kind.yaml`
-2. `helm repo add stackable-stable https://repo.stackable.tech/repository/helm-stable/`
-   + `helm repo update`
-3. Installs the Stackable operators into the `stackable-operators` namespace
-   (`--create-namespace`). Trino needs its dependency operators, so all four
-   are installed:
-   - `commons-operator`
-   - `secret-operator`
-   - `listener-operator`
-   - `trino-operator`
-4. `kubectl create namespace egret-engines` — the target namespace egret
-   provisions Trino clusters into.
+2. `kubectl create namespace egret-engines` — the target namespace egret
+   provisions Trino Deployments into.
+
+No operators are installed. (Future StarRocks/RisingWave phases will add their
+operators to this recipe.)
 
 Tear the cluster down with `just k8s-down` (`kind delete cluster --name egret`).
 
 ## RBAC for egret's ServiceAccount
 
-egret provisions and reconciles Trino resources in the `egret-engines`
-namespace, so its ServiceAccount needs permission to manage
-`trinoclusters` + `trinocatalogs` (apiGroup `trino.stackable.tech`), the
-`secrets` that back catalog credentials (core), and to read `pods` for
-readiness polling.
+egret provisions and reconciles plain Kubernetes workloads in the
+`egret-engines` namespace, so its ServiceAccount needs permission to manage
+`deployments` (apiGroup `apps`) and the `services` / `configmaps` / `secrets`
+(core) that make up an engine, plus read access to `pods` for readiness polling.
 
 Apply this `Role` + `RoleBinding` in the target namespace. Replace
 `serviceAccountName` / `namespace` in the subject with wherever egret's pod
@@ -54,11 +52,11 @@ metadata:
   name: egret-engine-provisioner
   namespace: egret-engines
 rules:
-  - apiGroups: ["trino.stackable.tech"]
-    resources: ["trinoclusters", "trinocatalogs"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
     verbs: ["create", "get", "patch", "delete"]
   - apiGroups: [""]
-    resources: ["secrets"]
+    resources: ["services", "configmaps", "secrets"]
     verbs: ["create", "get", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods"]
@@ -81,7 +79,7 @@ roleRef:
 
 ## Manual e2e steps
 
-1. **Bring up the cluster + operators:**
+1. **Bring up the cluster (no operators):**
 
    ```bash
    just k8s-up
@@ -99,7 +97,9 @@ roleRef:
 
 3. **Provision a Trino from the egret UI**, wired to the `demo-catalog`
    warehouse (seed it first with `just seed-demo` if needed). egret writes a
-   `TrinoCluster` + `TrinoCatalog` (+ credential `Secret`) into `egret-engines`.
+   coordinator + worker `Deployment`, a `Service`, the config + catalogs
+   `ConfigMap`s, and an env `Secret` into `egret-engines` — all plain workloads,
+   using the official `trinodb/trino` image.
 
 4. **Wait for the pods to become Ready:**
 
@@ -110,9 +110,9 @@ roleRef:
    Wait until the coordinator and worker pods are `Running` / `Ready`.
 
 5. **Query the wired catalog** via the Trino CLI / coordinator. The coordinator
-   listener is reachable on the host at `localhost:30678` (see the
-   `extraPortMappings` in `deploy/k8s/kind.yaml`); otherwise
-   `kubectl -n egret-engines port-forward svc/<trino-coordinator> 8080:8080`.
+   Service is reachable on the host via the NodePort mapping in
+   `deploy/k8s/kind.yaml` (`localhost:30678`); otherwise
+   `kubectl -n egret-engines port-forward svc/<engine>-trino 8080:8080`.
 
    ```sql
    SELECT * FROM <catalog>.demo_ns.events LIMIT 5;
@@ -120,6 +120,24 @@ roleRef:
 
    where `<catalog>` is the catalog name egret wired to `demo-catalog`. Rows
    coming back confirms provisioning + catalog wiring end-to-end.
+
+6. **Add a second catalog and cross-query.** In the egret UI, add a `tpch`
+   catalog to the same engine. egret re-renders the catalogs `ConfigMap` and
+   bumps the pod-template checksum, so the Deployments **roll** (Trino has no
+   hot-reload). Watch them come back:
+
+   ```bash
+   kubectl -n egret-engines get pods -w
+   ```
+
+   Once Ready, run a cross-catalog query — the wired warehouse catalog plus the
+   new `tpch` catalog are both live on the one engine:
+
+   ```sql
+   SELECT count(*) FROM tpch.tiny.nation;
+   ```
+
+   A row count coming back confirms the multi-catalog + rolling-restart path.
 
 ## Cleanup
 
