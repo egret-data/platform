@@ -34,6 +34,20 @@ export interface StorageInput {
   new_secret?: { name: string; value: string };
 }
 
+export interface StorageObject {
+  key: string;
+  size: number;
+  lastModified: string | null;
+}
+export interface StorageListing {
+  folders: string[];
+  objects: StorageObject[];
+}
+export function browseStorageObjects(id: string, prefix: string): Promise<StorageListing> {
+  return apiJson<StorageListing>(
+    `/control-plane/storage/${id}/objects?prefix=${encodeURIComponent(prefix)}`,
+  );
+}
 export function listStorage(): Promise<Storage[]> {
   return apiJson<Storage[]>("/control-plane/storage");
 }
