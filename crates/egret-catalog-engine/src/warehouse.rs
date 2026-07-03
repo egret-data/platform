@@ -50,10 +50,13 @@ pub async fn create_lakekeeper_warehouse(
         "endpoint": s3.endpoint,
         "path-style-access": s3.path_style,
         "flavor": "s3-compat",
-        // Neither STS-vended credentials nor remote request-signing are available
-        // in the embedded mount (no sign endpoint), so clients access S3 with the
-        // direct access-key credential they configure.
-        "sts-enabled": false,
+        // STS-vended credentials: on a `vended-credentials` load, lakekeeper calls
+        // AssumeRole on the S3 endpoint (MinIO needs no role-arn for s3-compat) with
+        // an inline policy downscoped to the table's location, and hands the client
+        // short-lived, table-scoped creds. Clients that don't request delegation fall
+        // back to their own static access key. Remote request-signing stays off — the
+        // embedded mount exposes no `/sign` endpoint.
+        "sts-enabled": true,
         "remote-signing-enabled": false,
         "key-prefix": s3.key_prefix,
     }))

@@ -1343,7 +1343,9 @@ function ConnectTab({ warehouse }: { warehouse: Warehouse | undefined }) {
   const sc = storage.data?.find((s) => s.id === warehouse?.storageConnId);
   const server = window.location.origin;
   const s3 = sc?.endpoint ?? "http://localhost:9000";
-  const catalogUri = `${server}/catalog/v1`;
+  // Iceberg REST clients append `/v1/...` themselves, so the catalog base URI is
+  // `/catalog` (egret serves the endpoints under `/catalog/v1`).
+  const catalogUri = `${server}/catalog`;
   const tokenUri = `${server}/oauth/token`;
 
   if (!warehouse?.lakekeeperWarehouseId) {
@@ -1355,7 +1357,9 @@ function ConnectTab({ warehouse }: { warehouse: Warehouse | undefined }) {
       </Card>
     );
   }
-  const wh = warehouse.lakekeeperWarehouseId;
+  // Clients pass the warehouse NAME (the token is scoped to it); egret resolves it
+  // to the lakekeeper prefix internally.
+  const wh = warehouse.name;
 
   const pyiceberg = `from pyiceberg.catalog.rest import RestCatalog
 
@@ -1366,10 +1370,9 @@ catalog = RestCatalog(
     credential="<CLIENT_ID>:<CLIENT_SECRET>",
     **{
         "oauth2-server-uri": "${tokenUri}",
+        # ask egret to vend short-lived, table-scoped S3 creds:
+        "header.X-Iceberg-Access-Delegation": "vended-credentials",
         "s3.endpoint": "${s3}",
-        "s3.access-key-id": "<MINIO_ACCESS_KEY>",
-        "s3.secret-access-key": "<MINIO_SECRET_KEY>",
-        "s3.path-style-access": "true",
     },
 )
 
@@ -1385,17 +1388,18 @@ iceberg.rest-catalog.warehouse=${wh}
 iceberg.rest-catalog.security=OAUTH2
 iceberg.rest-catalog.oauth2.credential=<CLIENT_ID>:<CLIENT_SECRET>
 iceberg.rest-catalog.oauth2.server-uri=${tokenUri}
+# use egret's vended (short-lived, table-scoped) credentials:
+iceberg.rest-catalog.vended-credentials-enabled=true
 fs.native-s3.enabled=true
 s3.endpoint=${s3}
 s3.region=us-east-1
 s3.path-style-access=true
-s3.aws-access-key=<MINIO_ACCESS_KEY>
-s3.aws-secret-key=<MINIO_SECRET_KEY>
 
 -- then, in the Trino CLI:
 SELECT * FROM egret.demo_ns.events;`;
 
-  const starrocks = `CREATE EXTERNAL CATALOG egret
+  const starrocks = `-- StarRocks 4.0+
+CREATE EXTERNAL CATALOG egret
 PROPERTIES (
     "type" = "iceberg",
     "iceberg.catalog.type" = "rest",
@@ -1404,10 +1408,10 @@ PROPERTIES (
     "iceberg.catalog.security" = "OAUTH2",
     "iceberg.catalog.oauth2-server-uri" = "${tokenUri}",
     "iceberg.catalog.credential" = "<CLIENT_ID>:<CLIENT_SECRET>",
+    "iceberg.catalog.vended-credentials-enabled" = "true",
     "aws.s3.endpoint" = "${s3}",
-    "aws.s3.enable_path_style_access" = "true",
-    "aws.s3.access_key" = "<MINIO_ACCESS_KEY>",
-    "aws.s3.secret_key" = "<MINIO_SECRET_KEY>"
+    "aws.s3.region" = "us-east-1",
+    "aws.s3.enable_path_style_access" = "true"
 );
 
 SET CATALOG egret;
@@ -1440,10 +1444,13 @@ SELECT * FROM demo_ns.events;`;
 
         <Alert>
           <AlertDescription>
-            The <code className="font-mono text-xs">credential</code> below is{" "}
+            The <code className="font-mono text-xs">credential</code> is{" "}
             <code className="font-mono text-xs">client_id:client_secret</code> from a{" "}
-            <strong>Catalog Client</strong> (create one in the <em>Catalog Clients</em> tab). The
-            client&apos;s role grants decide which namespaces/tables it can read or write.
+            <strong>Catalog Client</strong> (create one in the <em>Catalog Clients</em> tab); its
+            role grants decide which namespaces/tables it may read or write. On a{" "}
+            <code className="font-mono text-xs">vended-credentials</code> load egret hands back{" "}
+            <strong>short-lived S3 credentials scoped to just that table</strong> — the configs below
+            opt into them, so no static object-store keys are needed.
           </AlertDescription>
         </Alert>
 
@@ -1460,9 +1467,8 @@ SELECT * FROM demo_ns.events;`;
               <CodeBlock code={e.code} />
               <p className="text-xs text-muted-foreground">
                 Replace the <code className="font-mono">&lt;…&gt;</code> placeholders with a Catalog
-                Client&apos;s id/secret and your object-store keys. If the engine runs in Docker, use
-                the egret host reachable from that container instead of{" "}
-                <code className="font-mono">{server}</code>.
+                Client&apos;s id/secret. If the engine runs in Docker, use the egret host reachable
+                from that container instead of <code className="font-mono">{server}</code>.
               </p>
             </TabsContent>
           ))}
