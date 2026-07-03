@@ -41,6 +41,13 @@ async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
 async fn setup_with_browser(
     browser: Option<Arc<dyn egret_controlplane::WarehouseBrowser>>,
 ) -> Option<Fixture> {
+    setup_full(browser, None).await
+}
+
+async fn setup_full(
+    browser: Option<Arc<dyn egret_controlplane::WarehouseBrowser>>,
+    engine_provisioner: Option<Arc<dyn egret_controlplane::EngineProvisioner>>,
+) -> Option<Fixture> {
     let dsn = std::env::var("DATABASE_URL").ok()?;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
@@ -63,6 +70,8 @@ async fn setup_with_browser(
         sessions: sessions.clone(),
         provisioner: None,
         browser,
+        engine_provisioner,
+        engine_egret_url: "http://egret:8080".into(),
     });
 
     Some(Fixture {
@@ -500,6 +509,127 @@ async fn browse_non_admin_forbidden() {
         resp.status(),
         StatusCode::FORBIDDEN,
         "non-admin must be forbidden"
+    );
+}
+
+// ── Engines ────────────────────────────────────────────────────────────────────
+
+struct FakeEngineProvisioner;
+
+#[async_trait::async_trait]
+impl egret_controlplane::EngineProvisioner for FakeEngineProvisioner {
+    async fn provision(&self, _req: &egret_controlplane::EngineProvisionReq) -> Result<(), String> {
+        Ok(())
+    }
+    async fn status(
+        &self,
+        _ns: &str,
+        _name: &str,
+    ) -> Result<egret_controlplane::EngineLiveStatus, String> {
+        Ok(egret_controlplane::EngineLiveStatus {
+            phase: "running".into(),
+            message: None,
+            pods: vec![egret_controlplane::EnginePod {
+                name: "coordinator-0".into(),
+                phase: "Running".into(),
+                ready: true,
+            }],
+        })
+    }
+    async fn update(&self, _req: &egret_controlplane::EngineProvisionReq) -> Result<(), String> {
+        Ok(())
+    }
+    async fn delete(&self, _ns: &str, _name: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn create_and_get_engine() {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    // POST /engines → 201, auto-wired to the provisioned warehouse.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name,
+                "warehouseId": wh_id,
+                "coordinatorReplicas": 1,
+                "workerReplicas": 2,
+                "cpuMin": "1",
+                "cpuMax": "2",
+                "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    assert_eq!(j["name"], serde_json::json!(name), "engine name; body={j}");
+    assert_eq!(j["type"], "trino", "engine type; body={j}");
+    assert_eq!(j["status"], "provisioning", "engine status; body={j}");
+    assert_eq!(
+        j["spec"]["workerReplicas"], 2,
+        "engine worker replicas; body={j}"
+    );
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // GET /engines/{id} → 200 with live phase "running" from the fake provisioner.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("/engines/{engine_id}"), &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "get engine; body={j}");
+    assert_eq!(j["status"]["phase"], "running", "live phase; body={j}");
+    assert_eq!(j["status"]["pods"][0]["ready"], true, "pod ready; body={j}");
+}
+
+#[tokio::test]
+async fn create_engine_unprovisioned_warehouse_400() {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_admin_unprov", true).await;
+    let wh_id = seed_unprovisioned_warehouse(&f).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": format!("trino-{}", Uuid::new_v4().simple()),
+                "warehouseId": wh_id,
+                "coordinatorReplicas": 1,
+                "workerReplicas": 1,
+                "cpuMin": "1",
+                "cpuMax": "2",
+                "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "unprovisioned warehouse must 400"
     );
 }
 

@@ -1018,6 +1018,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         sessions: sessions.clone(),
         provisioner: catalog_provisioner,
         browser: catalog_browser,
+        // Engine provisioning (kube client + TrinoProvisioner) is wired in a
+        // later task; until then engine routes report "kubernetes not configured".
+        engine_provisioner: None,
+        engine_egret_url: config
+            .catalog
+            .public_url
+            .clone()
+            .unwrap_or_else(|| "http://egret:8080".to_string()),
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).
