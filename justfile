@@ -20,6 +20,10 @@ check:
 migrate:
     cargo run -p egret-bin -- migrate
 
+# Reset local test data (keeps users + demo/eng; wipes catalog, test workspaces, MinIO)
+reset-testdata:
+    ./deploy/reset-testdata.sh
+
 # Run the server
 serve:
     cargo run -p egret-bin -- serve
