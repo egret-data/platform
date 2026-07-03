@@ -165,6 +165,14 @@ pub trait WarehouseBrowser: Send + Sync {
         access_key: &str,
         secret_key: &str,
     ) -> Result<(), String>;
+    /// Search tables/views across the warehouse by name.
+    async fn search(
+        &self,
+        lakekeeper_warehouse_id: &str,
+        query: &str,
+    ) -> Result<Vec<BrowseSearchResult>, String>;
+    /// List recent background (GC) tasks on the warehouse.
+    async fn tasks(&self, lakekeeper_warehouse_id: &str) -> Result<Vec<BrowseTask>, String>;
 }
 
 /// Warehouse admin config (status / soft-delete TTL / latest statistics).
@@ -174,6 +182,18 @@ pub struct BrowseWarehouseConfig {
     pub num_tables: i64,
     pub num_views: i64,
     pub stats_updated_ms: i64,
+}
+/// A table/view name-search match.
+pub struct BrowseSearchResult {
+    pub namespace: Vec<String>,
+    pub name: String,
+    pub kind: String,
+}
+/// A background (GC) task summary.
+pub struct BrowseTask {
+    pub queue: String,
+    pub entity: Option<String>,
+    pub status: String,
 }
 
 pub fn router() -> Router<CpState> {
@@ -219,6 +239,8 @@ pub fn router() -> Router<CpState> {
             "/warehouses/{id}/storage-credential",
             put(rotate_credential),
         )
+        .route("/warehouses/{id}/search", get(search_tabulars))
+        .route("/warehouses/{id}/tasks", get(list_tasks))
 }
 
 #[derive(Serialize)]
@@ -1010,4 +1032,80 @@ async fn rotate_credential(
         .await
         .map_err(|e| CpError::BadRequest(format!("storage-credential: {e}")))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResultDto {
+    namespace: Vec<String>,
+    name: String,
+    kind: String,
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    #[serde(default)]
+    q: String,
+}
+
+async fn search_tabulars(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    axum::extract::Query(sq): axum::extract::Query<SearchQuery>,
+) -> Result<Json<Vec<SearchResultDto>>, CpError> {
+    require_platform_admin(&p)?;
+    if sq.q.trim().is_empty() {
+        return Ok(Json(vec![]));
+    }
+    let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
+        return Ok(Json(vec![]));
+    };
+    let items = b
+        .search(&lk, sq.q.trim())
+        .await
+        .map_err(|e| CpError::BadRequest(format!("search: {e}")))?;
+    Ok(Json(
+        items
+            .into_iter()
+            .map(|r| SearchResultDto {
+                namespace: r.namespace,
+                name: r.name,
+                kind: r.kind,
+            })
+            .collect(),
+    ))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskDto {
+    queue: String,
+    entity: Option<String>,
+    status: String,
+}
+
+async fn list_tasks(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<TaskDto>>, CpError> {
+    require_platform_admin(&p)?;
+    let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
+        return Ok(Json(vec![]));
+    };
+    let items = b
+        .tasks(&lk)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("tasks: {e}")))?;
+    Ok(Json(
+        items
+            .into_iter()
+            .map(|t| TaskDto {
+                queue: t.queue,
+                entity: t.entity,
+                status: t.status,
+            })
+            .collect(),
+    ))
 }

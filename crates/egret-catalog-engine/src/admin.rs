@@ -194,3 +194,88 @@ pub async fn rotate_storage_credential(
     .map_err(|e| anyhow::anyhow!("update_storage_credential: {e:?}"))?;
     Ok(())
 }
+
+/// One tabular match from a warehouse-wide name search.
+pub struct SearchResult {
+    pub namespace: Vec<String>,
+    pub name: String,
+    pub kind: &'static str, // "table" | "view"
+}
+
+/// Search tables/views across the whole warehouse by (fuzzy) name.
+pub async fn search_tabulars(
+    engine_state: ApiContext<EngineState>,
+    system_user: &str,
+    warehouse_id: &str,
+    query: &str,
+) -> anyhow::Result<Vec<SearchResult>> {
+    use lakekeeper::api::management::v1::tabular::{
+        SearchTabularRequest, TabularManagementService,
+    };
+    use lakekeeper::service::TabularId;
+    let rm = system_request_metadata(system_user).context("system metadata")?;
+    let resp = <EngineApiServer as TabularManagementService<_, _, _>>::search_tabular(
+        wh(warehouse_id)?,
+        engine_state,
+        rm,
+        SearchTabularRequest {
+            search: query.to_string(),
+        },
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("search_tabular: {e:?}"))?;
+    Ok(resp
+        .tabulars
+        .into_iter()
+        .map(|t| SearchResult {
+            namespace: t.namespace_name,
+            name: t.tabular_name,
+            kind: match t.tabular_id {
+                TabularId::View(_) => "view",
+                _ => "table",
+            },
+        })
+        .collect())
+}
+
+/// One background (GC) task on the warehouse.
+pub struct TaskInfo {
+    pub queue: String,
+    pub entity: Option<String>,
+    pub status: String,
+}
+
+/// List the warehouse's recent background tasks (tabular expiry / purge / task-log).
+pub async fn list_tasks(
+    engine_state: ApiContext<EngineState>,
+    system_user: &str,
+    warehouse_id: &str,
+) -> anyhow::Result<Vec<TaskInfo>> {
+    use lakekeeper::api::management::v1::tasks::{ListTasksRequest, Service as TasksMgmtService};
+    let request: ListTasksRequest =
+        serde_json::from_value(serde_json::json!({})).context("list tasks request")?;
+    let rm = system_request_metadata(system_user).context("system metadata")?;
+    let resp = <EngineApiServer as TasksMgmtService<_, _, _>>::list_tasks(
+        wh(warehouse_id)?,
+        request,
+        engine_state,
+        rm,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("list_tasks: {e:?}"))?;
+    Ok(resp
+        .tasks
+        .into_iter()
+        .map(|t| TaskInfo {
+            queue: serde_json::to_value(&t.queue_name)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_else(|| format!("{:?}", t.queue_name)),
+            entity: t.entity_name.map(|n| n.join(".")),
+            status: serde_json::to_value(&t.status)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_else(|| format!("{:?}", t.status)),
+        })
+        .collect())
+}
