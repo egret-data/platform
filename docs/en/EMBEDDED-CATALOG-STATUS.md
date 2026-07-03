@@ -10,6 +10,10 @@ Branch: `design/polaris-gateway-machine-idp`. Spec: `docs/en/specs/2026-07-02-eg
 | **EB-2** mini machine-IdP | ✅ live | `/.well-known/*` + `/oauth/token` (RS256, JWKS). |
 | **EB-3** authN + authZ + provisioning | ✅ **live end-to-end** | see below. |
 | **EB-4** control-plane mgmt + revert Polaris | ✅ | warehouses/roles/grants/clients routes; `egret-polaris` + polaris tables removed (migrations 0052–0054). |
+| **EB-5** control-plane UI | ✅ live | Warehouses list + detail (roles/grants/clients, once-shown client secret); Polaris pages removed. Verified in the browser + 703 frontend tests. |
+| **EB-6** engine wiring + e2e | ✅ live | **pyiceberg** (real Iceberg client) create-table + append + read (3 rows) round-trips to MinIO through egret; opt-in Playwright e2e (`EGRET_E2E_CATALOG=1`) drives the machine path + deny; `deploy/embedded-catalog/engine-wiring.md` (Trino + pyiceberg). |
+
+**Epic complete (EB-1 → EB-6).** egret is a self-contained, all-Rust Iceberg catalog: owns authN (mini-IdP) + authZ (CatalogGuard), embeds lakekeeper, provisions warehouses, and serves real engines — no Polaris, no JVM, no external IdP for machines, no proxy. Full local CI green (backend fmt/clippy/93 test-suites; frontend tsc/lint/703 tests/build).
 
 ### EB-3 is complete — the embedded catalog works fully end-to-end
 Realized "egret owns authZ" as an **egret `CatalogGuard` middleware** on the `/catalog/v1` mount (lakekeeper keeps `AllowAllAuthorizer`; egret decides). This avoids reimplementing lakekeeper's ~25-method `Authorizer` trait while giving egret full control. Live-verified chain:
@@ -22,11 +26,14 @@ Realized "egret owns authZ" as an **egret `CatalogGuard` middleware** on the `/c
 
 All-Rust, in-process: no Polaris, no JVM, no external IdP. Commits: `d813609`, `2878e4d`, `75fa5a6`, `97a9382` (+ EB-1/2/4 earlier).
 
-## Remaining
+## Resolved along the way
 
-1. **`/config` `overrides.uri` = `http://localhost:8181`** (lakekeeper's hardcoded metadata `base_url`; no prod setter — only a `test-utils`-gated constructor takes a custom base_url). Real Iceberg clients that follow `overrides.uri` for subsequent calls would break; hitting egret's configured URI + prefix directly works (as demonstrated). Fix needs a lakekeeper-metadata shim or setting the base_url at metadata construction. **Non-blocking, deferred.**
-2. **EB-5 — UI**: warehouses list + detail (roles/grants/clients) pages; remove the stale `ControlPlaneCatalog`/`ControlPlaneRbac` Polaris pages (compile but call removed routes). Mgmt routes it needs already exist.
-3. **EB-6 — e2e + engine wiring**: formalize an automated e2e (the manual chain above is proven); wire an engine (Trino/StarRocks/Daft) to authenticate via a Catalog Client.
+- **`/config` `overrides.uri` = `:8181`** → FIXED: rewritten to the request `Host` in the mount middleware (both host + container clients get a reachable uri).
+- **S3 access delegation** → FIXED: warehouses provisioned with STS + remote-signing disabled (the embedded mount has no signer endpoint), so clients use direct access-key creds. pyiceberg write/read verified.
+
+## Future (out of epic)
+
+- Un-pause notebook Daft-direct writes onto this catalog; auto-push a Catalog Client into engine configs; K8s provisioning of warehouses/engines.
 
 ## Dev notes
 - `.env` is NOT auto-loaded by serve (figment reads process env). Run locally: `set -a; . ./.env; set +a; cargo run -p egret-bin -- serve`.
