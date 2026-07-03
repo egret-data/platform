@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import ControlPlaneStorage from "@/routes/control-plane/ControlPlaneStorage";
@@ -27,7 +28,9 @@ function renderPage() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <ControlPlaneStorage />
+      <MemoryRouter>
+        <ControlPlaneStorage />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }

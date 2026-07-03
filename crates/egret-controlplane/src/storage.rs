@@ -87,6 +87,73 @@ pub fn router() -> Router<CpState> {
         .route("/storage", get(list).post(create))
         .route("/storage/{id}", get(detail).put(update).delete(remove))
         .route("/storage/{id}/objects", get(browse_objects))
+        .route("/storage/{id}/download", get(download_object))
+}
+
+#[derive(serde::Deserialize)]
+struct DownloadQuery {
+    key: String,
+}
+
+/// Stream a single object from a storage connection's bucket as an attachment.
+async fn download_object(
+    State(st): State<CpState>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    axum::extract::Query(dq): axum::extract::Query<DownloadQuery>,
+) -> Result<axum::response::Response, CpError> {
+    require_platform_admin(&principal)?;
+    let (store, bucket) = open_store(&st, id).await?;
+    use egret_storage::ObjectStore as _;
+    let uri = format!("s3://{bucket}/{}", dq.key);
+    let bytes = store
+        .get(&uri)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("get object: {e}")))?;
+    let filename = dq
+        .key
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or("download");
+    use axum::http::header;
+    let mut resp = axum::response::Response::new(axum::body::Body::from(bytes));
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        "application/octet-stream".parse().unwrap(),
+    );
+    if let Ok(v) = format!("attachment; filename=\"{filename}\"").parse() {
+        resp.headers_mut().insert(header::CONTENT_DISPOSITION, v);
+    }
+    Ok(resp)
+}
+
+/// Resolve a storage connection + its secret and open an S3 store. Returns the bucket too.
+async fn open_store(st: &CpState, id: Uuid) -> Result<(egret_storage::S3Store, String), CpError> {
+    let conn = st
+        .storage
+        .get_storage_conn(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    let secret_key = match conn.secret_ref {
+        Some(ref_id) => st
+            .secrets
+            .resolve_plaintext(None, ref_id)
+            .await
+            .map_err(|e| CpError::BadRequest(format!("resolve secret: {e}")))?,
+        None => return Err(CpError::BadRequest("connection has no secret".into())),
+    };
+    let cfg = egret_storage::StorageConfig {
+        endpoint: conn.endpoint.clone(),
+        region: conn.region.clone(),
+        bucket: conn.bucket.clone(),
+        access_key: conn.access_key.clone(),
+        secret_key,
+        path_style: conn.path_style,
+    };
+    let store = egret_storage::S3Store::new(&cfg)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("open storage: {e}")))?;
+    Ok((store, conn.bucket))
 }
 
 #[derive(serde::Serialize)]
@@ -117,30 +184,7 @@ async fn browse_objects(
     axum::extract::Query(bq): axum::extract::Query<BrowseQuery>,
 ) -> Result<Json<ListingDto>, CpError> {
     require_platform_admin(&principal)?;
-    let conn = st
-        .storage
-        .get_storage_conn(id)
-        .await?
-        .ok_or(CpError::NotFound)?;
-    let secret_key = match conn.secret_ref {
-        Some(ref_id) => st
-            .secrets
-            .resolve_plaintext(None, ref_id)
-            .await
-            .map_err(|e| CpError::BadRequest(format!("resolve secret: {e}")))?,
-        None => return Err(CpError::BadRequest("connection has no secret".into())),
-    };
-    let cfg = egret_storage::StorageConfig {
-        endpoint: conn.endpoint.clone(),
-        region: conn.region.clone(),
-        bucket: conn.bucket.clone(),
-        access_key: conn.access_key.clone(),
-        secret_key,
-        path_style: conn.path_style,
-    };
-    let store = egret_storage::S3Store::new(&cfg)
-        .await
-        .map_err(|e| CpError::BadRequest(format!("open storage: {e}")))?;
+    let (store, _bucket) = open_store(&st, id).await?;
     use egret_storage::ObjectStore as _;
     let listing = store
         .list(&bq.prefix, Some("/"))
