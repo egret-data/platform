@@ -26,8 +26,8 @@ pub use lakekeeper::CancellationToken;
 #[cfg(feature = "test-utils")]
 pub use mount::build_state_with_gc_poll;
 pub use mount::{
-    build_state, catalog_engine_router, mount_catalog_engine, spawn_gc_workers, EngineServer,
-    EngineState,
+    build_state, catalog_engine_router, mount_catalog_engine, spawn_gc_workers, CatalogGuard,
+    EngineServer, EngineState,
 };
 pub use pool::{build_isolated_pool, LAKEKEEPER_SCHEMA};
 

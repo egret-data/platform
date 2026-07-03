@@ -234,19 +234,67 @@ pub fn catalog_engine_router(state: ApiContext<EngineState>) -> axum::Router {
 ///
 /// * `engine_state` — the lakekeeper [`ApiContext`] from [`build_state`]
 ///   (migrated + bootstrapped).
-pub fn mount_catalog_engine(engine_state: ApiContext<EngineState>) -> axum::Router {
-    catalog_engine_router(engine_state)
-        .layer(axum::middleware::from_fn(inject_system_request_metadata))
+/// egret's authN + authZ guard for embedded-catalog requests (EB-3). Implemented
+/// in the composition root (egret-bin) over the mini-IdP (JWT validation) + the
+/// RBAC store (warehouse/role → grants). Keeping this in egret owns the decision
+/// while lakekeeper runs with its permissive [`AllowAllAuthorizer`].
+///
+/// `path`/`query` are lakekeeper-relative (the router is mounted under
+/// `/catalog/v1`, so a request to `/catalog/v1/config` arrives here as `/config`).
+#[async_trait::async_trait]
+pub trait CatalogGuard: Send + Sync {
+    /// `Ok(())` → allowed; `Err((status, message))` → rejected (e.g. 401/403).
+    async fn check(
+        &self,
+        method: &str,
+        path: &str,
+        query: Option<&str>,
+        bearer: Option<&str>,
+    ) -> Result<(), (axum::http::StatusCode, String)>;
 }
 
-/// EB-1: inject an in-process system [`RequestMetadata`] on every catalog request.
-/// lakekeeper's handlers require this extension (they extract `Extension<RequestMetadata>`);
-/// with the [`AllowAllAuthorizer`] the internal system actor is permitted everything.
-/// EB-3 replaces this with JWT-derived, per-principal metadata (the real authn/authz layer).
-async fn inject_system_request_metadata(
+/// Assemble the catalog engine router, fronted by egret's [`CatalogGuard`] (when
+/// `Some`) and then a system [`RequestMetadata`] for lakekeeper's handlers.
+///
+/// * `engine_state` — the lakekeeper [`ApiContext`] from [`build_state`].
+/// * `guard` — egret's authN/authZ decision. `None` (tests) → no gate, every
+///   request runs as the internal system actor under `AllowAllAuthorizer`.
+pub fn mount_catalog_engine(
+    engine_state: ApiContext<EngineState>,
+    guard: Option<std::sync::Arc<dyn CatalogGuard>>,
+) -> axum::Router {
+    catalog_engine_router(engine_state).layer(axum::middleware::from_fn_with_state(
+        guard,
+        guard_then_inject_metadata,
+    ))
+}
+
+/// Run egret's guard (if configured), then inject the system [`RequestMetadata`]
+/// lakekeeper's handlers require. lakekeeper itself stays on `AllowAllAuthorizer`;
+/// egret has already decided allow/deny in the guard.
+async fn guard_then_inject_metadata(
+    axum::extract::State(guard): axum::extract::State<Option<std::sync::Arc<dyn CatalogGuard>>>,
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if let Some(g) = &guard {
+        let method = req.method().as_str().to_string();
+        let path = req.uri().path().to_string();
+        let query = req.uri().query().map(str::to_string);
+        let bearer = req
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .map(str::to_string);
+        if let Err((status, msg)) = g
+            .check(&method, &path, query.as_deref(), bearer.as_deref())
+            .await
+        {
+            return (status, msg).into_response();
+        }
+    }
     req.extensions_mut()
         .insert(RequestMetadata::new_lakekeeper_internal(
             uuid::Uuid::now_v7(),

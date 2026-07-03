@@ -163,6 +163,47 @@ impl egret_kernel::engine_conn::EngineConnResolver for EngineConnResolverImpl {
     }
 }
 
+/// egret's authN + authZ guard for the embedded catalog (EB-3). Validates the
+/// egret-issued JWT (authN); the JWT's `warehouse`+`roles` claims + the RBAC
+/// store drive authZ. lakekeeper itself runs on `AllowAllAuthorizer` — egret owns
+/// the decision here.
+struct EgretCatalogGuard {
+    keys: egret_machine_idp::PgSigningKeyStore,
+    #[allow(dead_code)] // used once fine-grained grant enforcement lands (EB-3 authZ)
+    catalog: egret_catalog::CatalogStore,
+}
+
+#[async_trait::async_trait]
+impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
+    async fn check(
+        &self,
+        _method: &str,
+        _path: &str,
+        _query: Option<&str>,
+        bearer: Option<&str>,
+    ) -> Result<(), (axum::http::StatusCode, String)> {
+        use axum::http::StatusCode;
+        // authN: a valid, unexpired egret JWT is required on every catalog request.
+        let token = bearer.ok_or((StatusCode::UNAUTHORIZED, "missing bearer token".into()))?;
+        use egret_machine_idp::SigningKeyStore as _;
+        let jwk = self
+            .keys
+            .active()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("idp key: {e}")))?
+            .public_jwk;
+        let claims = egret_machine_idp::verify_with_jwk(token, &jwk)
+            .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid token".to_string()))?;
+        let exp = claims.get("exp").and_then(|v| v.as_i64()).unwrap_or(0);
+        if exp <= chrono::Utc::now().timestamp() {
+            return Err((StatusCode::UNAUTHORIZED, "token expired".to_string()));
+        }
+        // authZ (fine-grained warehouse/role → grants) is added incrementally next;
+        // for now a valid egret token is required to reach the catalog.
+        Ok(())
+    }
+}
+
 async fn serve(config: Config) -> anyhow::Result<()> {
     let db = Db::connect(&config.database.url, config.database.max_connections)
         .await
@@ -456,7 +497,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .context("bootstrapping catalog engine")?;
         let gc_cancel = egret_catalog_engine::CancellationToken::new();
         egret_catalog_engine::spawn_gc_workers(gc_registry, gc_cancel);
-        Some(egret_catalog_engine::mount_catalog_engine(engine_state))
+        let guard: std::sync::Arc<dyn egret_catalog_engine::CatalogGuard> =
+            std::sync::Arc::new(EgretCatalogGuard {
+                keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
+                catalog: egret_catalog::CatalogStore::new(db.clone()),
+            });
+        Some(egret_catalog_engine::mount_catalog_engine(
+            engine_state,
+            Some(guard),
+        ))
     } else {
         None
     };
