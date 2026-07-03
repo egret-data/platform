@@ -112,235 +112,146 @@ export async function deleteSecret(id: string): Promise<void> {
   await apiFetch(`/control-plane/secrets/${id}`, { method: "DELETE" });
 }
 
-// ── Polaris connection (global / control-plane) ──────────────────────────────
+// ── Warehouses (embedded catalog / control-plane) ────────────────────────────
 
-/** External Apache Polaris catalog connection. Never carries the client secret. */
-export interface PolarisConnection {
-  baseUrl: string;
-  kcTokenUrl: string;
-  kcClientId: string;
-  kcScope?: string;
-}
-
-/** Write payload for the Polaris connection — includes the write-only client secret. */
-export interface PolarisConnectionInput {
-  baseUrl: string;
-  kcTokenUrl: string;
-  kcClientId: string;
-  kcClientSecret: string;
-  kcScope?: string;
-}
-
-export interface PolarisHealth {
-  ok: boolean;
-  error?: string;
-}
-
-export function getPolarisConnection(): Promise<PolarisConnection | null> {
-  return apiJson<PolarisConnection | null>("/control-plane/polaris/connection");
-}
-
-export function putPolarisConnection(input: PolarisConnectionInput): Promise<PolarisConnection> {
-  return apiJson<PolarisConnection>("/control-plane/polaris/connection", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
-}
-
-export function polarisHealth(): Promise<PolarisHealth> {
-  return apiJson<PolarisHealth>("/control-plane/polaris/connection/health");
-}
-
-// ── Polaris catalogs (global / control-plane) ────────────────────────────────
-
-export interface Catalog {
+/** A catalog warehouse (per workspace/domain). */
+export interface Warehouse {
+  id: string;
   name: string;
-  catalogType: string;
+  workspaceId: string;
+  storageConnId: string;
+  lakekeeperWarehouseId: string | null;
 }
 
-export interface CreateCatalogInput {
+export interface CreateWarehouseInput {
   name: string;
+  workspaceId: string;
   storageConnectionId: string;
 }
 
-export function listCatalogs(): Promise<Catalog[]> {
-  return apiJson<Catalog[]>("/control-plane/polaris/catalogs");
+export function listWarehouses(): Promise<Warehouse[]> {
+  return apiJson<Warehouse[]>("/control-plane/warehouses");
 }
 
-export function createCatalog(input: CreateCatalogInput): Promise<Catalog> {
-  return apiJson<Catalog>("/control-plane/polaris/catalogs", {
+export function getWarehouse(id: string): Promise<Warehouse> {
+  return apiJson<Warehouse>(`/control-plane/warehouses/${id}`);
+}
+
+export function createWarehouse(input: CreateWarehouseInput): Promise<Warehouse> {
+  return apiJson<Warehouse>("/control-plane/warehouses", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
 }
 
-export function getCatalog(name: string): Promise<Catalog> {
-  return apiJson<Catalog>(`/control-plane/polaris/catalogs/${encodeURIComponent(name)}`);
+export async function deleteWarehouse(id: string): Promise<void> {
+  await apiFetch(`/control-plane/warehouses/${id}`, { method: "DELETE" });
 }
 
-export async function deleteCatalog(name: string): Promise<void> {
-  await apiFetch(`/control-plane/polaris/catalogs/${encodeURIComponent(name)}`, {
-    method: "DELETE",
+// ── Catalog roles (keyed by consumer-type) ───────────────────────────────────
+
+export interface CatalogRole {
+  id: string;
+  name: string;
+  consumerType: string;
+}
+
+export interface CreateRoleInput {
+  name: string;
+  consumerType: string;
+}
+
+export function listRoles(warehouseId: string): Promise<CatalogRole[]> {
+  return apiJson<CatalogRole[]>(`/control-plane/warehouses/${warehouseId}/roles`);
+}
+
+export function createRole(
+  warehouseId: string,
+  input: CreateRoleInput,
+): Promise<CatalogRole> {
+  return apiJson<CatalogRole>(`/control-plane/warehouses/${warehouseId}/roles`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
   });
 }
 
-// ── Polaris RBAC (global / control-plane) ────────────────────────────────────
+// ── Grants (on a catalog role) ───────────────────────────────────────────────
 
-export interface Principal {
-  name: string;
+export interface Grant {
+  id: string;
+  securableType: string;
+  namespace: string[] | null;
+  tableName: string | null;
+  privilege: string;
 }
 
-/** Returned once on principal creation — carries the one-time credentials. */
-export interface PrincipalWithCreds {
+export interface GrantInput {
+  securableType: string;
+  namespace?: string[] | null;
+  tableName?: string | null;
+  privilege: string;
+}
+
+export function listGrants(roleId: string): Promise<Grant[]> {
+  return apiJson<Grant[]>(`/control-plane/roles/${roleId}/grants`);
+}
+
+export async function addGrant(roleId: string, input: GrantInput): Promise<void> {
+  await apiFetch(`/control-plane/roles/${roleId}/grants`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function revokeGrant(grantId: string): Promise<void> {
+  await apiFetch(`/control-plane/grants/${grantId}`, { method: "DELETE" });
+}
+
+// ── Catalog Clients (per-consumer machine credentials) ───────────────────────
+
+export interface CatalogClient {
+  id: string;
   name: string;
+  consumerType: string;
+  catalogRoleId: string;
+  clientId: string;
+}
+
+/** Returned ONCE on client creation — carries the one-time client secret. */
+export interface CatalogClientCreated {
+  id: string;
   clientId: string;
   clientSecret: string;
 }
 
-export interface PolarisRole {
+export interface CreateClientInput {
   name: string;
+  consumerType: string;
+  workspaceId: string;
+  catalogRoleId: string;
 }
 
-export interface GrantBody {
-  kind: "catalog" | "namespace" | "table" | "view";
-  privilege: string;
-  namespace?: string[];
-  table?: string;
-  view?: string;
+export function listClients(warehouseId: string): Promise<CatalogClient[]> {
+  return apiJson<CatalogClient[]>(`/control-plane/warehouses/${warehouseId}/clients`);
 }
 
-export function listPrincipals(): Promise<Principal[]> {
-  return apiJson<Principal[]>("/control-plane/polaris/principals");
-}
-
-export function createPrincipal(name: string): Promise<PrincipalWithCreds> {
-  return apiJson<PrincipalWithCreds>("/control-plane/polaris/principals", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
-  });
-}
-
-export async function deletePrincipal(name: string): Promise<void> {
-  await apiFetch(`/control-plane/polaris/principals/${encodeURIComponent(name)}`, {
-    method: "DELETE",
-  });
-}
-
-export function listPrincipalRoles(): Promise<PolarisRole[]> {
-  return apiJson<PolarisRole[]>("/control-plane/polaris/principal-roles");
-}
-
-export async function createPrincipalRole(name: string): Promise<void> {
-  await apiFetch("/control-plane/polaris/principal-roles", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
-  });
-}
-
-export function listCatalogRoles(catalog: string): Promise<PolarisRole[]> {
-  return apiJson<PolarisRole[]>(
-    `/control-plane/polaris/catalogs/${encodeURIComponent(catalog)}/catalog-roles`,
-  );
-}
-
-export async function createCatalogRole(catalog: string, name: string): Promise<void> {
-  await apiFetch(
-    `/control-plane/polaris/catalogs/${encodeURIComponent(catalog)}/catalog-roles`,
+export function createClient(
+  warehouseId: string,
+  input: CreateClientInput,
+): Promise<CatalogClientCreated> {
+  return apiJson<CatalogClientCreated>(
+    `/control-plane/warehouses/${warehouseId}/clients`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify(input),
     },
   );
 }
 
-export async function assignPrincipalRole(principal: string, role: string): Promise<void> {
-  await apiFetch(
-    `/control-plane/polaris/principals/${encodeURIComponent(principal)}/principal-roles`,
-    {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ role }),
-    },
-  );
-}
-
-export async function assignCatalogRole(
-  principalRole: string,
-  catalog: string,
-  catalogRole: string,
-): Promise<void> {
-  await apiFetch(
-    `/control-plane/polaris/principal-roles/${encodeURIComponent(principalRole)}/catalog-roles/${encodeURIComponent(catalog)}`,
-    {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ catalogRole }),
-    },
-  );
-}
-
-export async function addGrant(
-  catalog: string,
-  catalogRole: string,
-  grant: GrantBody,
-): Promise<void> {
-  await apiFetch(
-    `/control-plane/polaris/catalogs/${encodeURIComponent(catalog)}/catalog-roles/${encodeURIComponent(catalogRole)}/grants`,
-    {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(grant),
-    },
-  );
-}
-
-export async function revokeGrant(
-  catalog: string,
-  catalogRole: string,
-  grant: GrantBody,
-): Promise<void> {
-  await apiFetch(
-    `/control-plane/polaris/catalogs/${encodeURIComponent(catalog)}/catalog-roles/${encodeURIComponent(catalogRole)}/grants:revoke`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(grant),
-    },
-  );
-}
-
-// ── Workspace catalog assignment (control-plane) ─────────────────────────────
-
-export interface Assignment {
-  catalogName: string;
-  principalName: string;
-}
-
-export function listAssignments(ws: string): Promise<Assignment[]> {
-  return apiJson<Assignment[]>(
-    `/control-plane/workspaces/${encodeURIComponent(ws)}/catalog-assignments`,
-  );
-}
-
-export async function assignCatalog(ws: string, catalog: string): Promise<void> {
-  await apiFetch(
-    `/control-plane/workspaces/${encodeURIComponent(ws)}/catalog-assignments`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ catalog }),
-    },
-  );
-}
-
-export async function unassignCatalog(ws: string, catalog: string): Promise<void> {
-  await apiFetch(
-    `/control-plane/workspaces/${encodeURIComponent(ws)}/catalog-assignments/${encodeURIComponent(catalog)}`,
-    { method: "DELETE" },
-  );
+export async function revokeClient(id: string): Promise<void> {
+  await apiFetch(`/control-plane/clients/${id}`, { method: "DELETE" });
 }
