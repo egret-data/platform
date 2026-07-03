@@ -4,10 +4,10 @@
 --         surviving data, and the seeded `demo` and `eng` workspaces (plus their
 --         viz demo data).
 -- WIPES:  every embedded-catalog object (warehouses, catalog roles, catalog
---         clients, grants), the whole lakekeeper catalog schema (namespaces,
---         tables, snapshots, metadata), every OTHER (test) workspace — which
---         cascades to its notebooks, dashboards, connections, etc. — and every
---         orphan/test user left over.
+--         clients, grants), all storage connections + orphan secrets, the whole
+--         lakekeeper catalog schema (namespaces, tables, snapshots, metadata),
+--         every OTHER (test) workspace — which cascades to its notebooks,
+--         dashboards, connections, etc. — and every orphan/test user left over.
 --
 -- The lakekeeper schema is DROPPED rather than surgically truncated (it has
 -- ~45 tables + triggers); `egret serve` re-migrates + re-bootstraps an empty
@@ -50,6 +50,21 @@ CREATE TEMP TABLE _keep_users ON COMMIT DROP AS
 -- policy_audit.actor is NO-ACTION and would block; drop audit rows for pruned users.
 DELETE FROM policy_audit WHERE actor IS NOT NULL AND actor NOT IN (SELECT id FROM _keep_users);
 DELETE FROM users WHERE id NOT IN (SELECT id FROM _keep_users);
+
+-- Storage connections are global test config; the just-deleted warehouses were
+-- their only references. Drop them all, then drop every secret no longer
+-- referenced by surviving rows (viz database connections, workspace secrets,
+-- active refresh tokens) — this clears the pile of test/OIDC secrets.
+DELETE FROM storage_connections;
+-- Global (control-plane) named secrets — storage-connection creds + test
+-- secrets — carry workspace_id NULL. Drop those; keep workspace-scoped ones
+-- (demo/eng). Then drop every secret blob no longer referenced by anything.
+DELETE FROM workspace_secrets WHERE workspace_id IS NULL;
+DELETE FROM secrets WHERE id NOT IN (
+        SELECT secret_id  FROM databases           WHERE secret_id IS NOT NULL
+  UNION SELECT secret_ref FROM workspace_secrets    WHERE secret_ref IS NOT NULL
+  UNION SELECT secret_id  FROM oidc_refresh_tokens  WHERE secret_id IS NOT NULL
+);
 
 -- Drop lakekeeper's catalog metadata wholesale; serve re-creates it on boot.
 DROP SCHEMA IF EXISTS lakekeeper CASCADE;
