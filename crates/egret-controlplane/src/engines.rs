@@ -143,6 +143,9 @@ struct EngineSpecDto {
     cpu_max: String,
     memory: String,
     image_version: String,
+    /// Surfaced back so the UI can prefill the config editor on reload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trino_config: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
