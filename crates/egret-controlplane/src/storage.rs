@@ -173,6 +173,29 @@ async fn update(
         .get_storage_conn(id)
         .await?
         .ok_or(CpError::NotFound)?;
+
+    // Warehouses hold a provision-time COPY of the S3 credential in lakekeeper, so
+    // editing the connection (e.g. rotating its secret) must be pushed down to every
+    // provisioned warehouse using it — otherwise they keep authenticating with the
+    // old key. Best-effort: a single warehouse failure doesn't fail the whole update.
+    if let (Some(browser), Some(ref_id)) = (st.browser.as_ref(), conn.secret_ref) {
+        if let Ok(secret_key) = st.secrets.resolve_plaintext(None, ref_id).await {
+            for w in st
+                .storage
+                .list_warehouses()
+                .await?
+                .into_iter()
+                .filter(|w| w.storage_conn_id == id)
+            {
+                if let Some(lk) = w.lakekeeper_warehouse_id.as_deref() {
+                    let _ = browser
+                        .rotate_credential(lk, &conn.access_key, &secret_key)
+                        .await;
+                }
+            }
+        }
+    }
+
     Ok(Json(conn.into()))
 }
 

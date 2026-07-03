@@ -66,7 +66,6 @@ import {
   setWarehouseStatus,
   setDeleteProfile,
   setFormatPolicy,
-  rotateCredential,
   searchTabulars,
   listWarehouseTasks,
   revokeClient,
@@ -1648,18 +1647,9 @@ function SettingsTab({ warehouseId }: { warehouseId: string }) {
     mutationFn: (versions) => setFormatPolicy(warehouseId, versions),
     onSuccess: invalidate,
   });
-  const rotateMut = useMutation<void, ApiError, { ak: string; sk: string }>({
-    mutationFn: (v) => rotateCredential(warehouseId, v.ak, v.sk),
-    onSuccess: () => {
-      setAk("");
-      setSk("");
-    },
-  });
 
   const [ttlDays, setTtlDays] = useState("");
   const [fmt, setFmt] = useState("1,2");
-  const [ak, setAk] = useState("");
-  const [sk, setSk] = useState("");
 
   const currentDays =
     c?.deleteProfileSeconds != null ? Math.round(c.deleteProfileSeconds / 86400) : null;
@@ -1802,32 +1792,23 @@ function SettingsTab({ warehouseId }: { warehouseId: string }) {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
-            <RotateCcw className="h-4 w-4 text-muted-foreground" />
-            Rotate storage credential
+            <HardDrive className="h-4 w-4 text-muted-foreground" />
+            Storage credential
           </CardTitle>
-          <CardDescription>Replace the warehouse&apos;s S3 access key without re-provisioning.</CardDescription>
+          <CardDescription>
+            The S3 access key comes from this warehouse&apos;s{" "}
+            <strong>storage connection</strong>. Rotate it by editing that connection in{" "}
+            <em>Control Plane → Storage</em> — the new key is pushed to every warehouse using it.
+          </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-2">
-          <div className="space-y-1.5">
-            <Label htmlFor="ak">Access key</Label>
-            <Input id="ak" value={ak} onChange={(e) => setAk(e.target.value)} />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="sk">Secret key</Label>
-            <Input id="sk" type="password" value={sk} onChange={(e) => setSk(e.target.value)} />
-          </div>
-          <Button
-            size="sm"
-            disabled={rotateMut.isPending || !ak || !sk}
-            onClick={() => rotateMut.mutate({ ak, sk })}
+        <CardContent>
+          <Link
+            to="/control-plane/storage"
+            className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
           >
-            {rotateMut.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-            Rotate
-          </Button>
-          {rotateMut.isSuccess && <p className="text-xs text-teal-600">Credential rotated.</p>}
-          {rotateMut.isError && (
-            <p className="text-xs text-destructive">{rotateMut.error.message}</p>
-          )}
+            <HardDrive className="h-4 w-4" />
+            Manage storage connections
+          </Link>
         </CardContent>
       </Card>
 
