@@ -50,7 +50,11 @@ pub async fn create_lakekeeper_warehouse(
         "endpoint": s3.endpoint,
         "path-style-access": s3.path_style,
         "flavor": "s3-compat",
+        // Neither STS-vended credentials nor remote request-signing are available
+        // in the embedded mount (no sign endpoint), so clients access S3 with the
+        // direct access-key credential they configure.
         "sts-enabled": false,
+        "remote-signing-enabled": false,
         "key-prefix": s3.key_prefix,
     }))
     .context("building S3 storage profile")?;
