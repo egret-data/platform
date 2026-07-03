@@ -114,7 +114,7 @@ pub(crate) fn system_user_id(system_user: &str) -> anyhow::Result<UserId> {
 
 /// Build a prod (non-test-utils) [`RequestMetadata`] carrying the stable
 /// system-admin principal, using only public lakekeeper/limes APIs.
-fn system_request_metadata(system_user: &str) -> anyhow::Result<RequestMetadata> {
+pub(crate) fn system_request_metadata(system_user: &str) -> anyhow::Result<RequestMetadata> {
     let user_id = system_user_id(system_user)?;
 
     // Minimal authentication record describing the same principal. `bootstrap`

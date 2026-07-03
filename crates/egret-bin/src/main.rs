@@ -223,6 +223,40 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
     }
 }
 
+/// Provisions the embedded lakekeeper warehouse for an egret `warehouses` row.
+/// Holds the lakekeeper `ApiContext` (built in `serve`).
+struct LakekeeperProvisioner {
+    engine_state: egret_catalog_engine::ApiContext<egret_catalog_engine::EngineState>,
+    system_user: String,
+}
+
+#[async_trait::async_trait]
+impl egret_controlplane::WarehouseProvisioner for LakekeeperProvisioner {
+    async fn provision(
+        &self,
+        name: &str,
+        s3: &egret_controlplane::ProvisionS3,
+    ) -> Result<String, String> {
+        let cfg = egret_catalog_engine::S3StorageConfig {
+            bucket: s3.bucket.clone(),
+            region: s3.region.clone(),
+            endpoint: s3.endpoint.clone(),
+            path_style: s3.path_style,
+            access_key: s3.access_key.clone(),
+            secret_key: s3.secret_key.clone(),
+            key_prefix: s3.key_prefix.clone(),
+        };
+        egret_catalog_engine::create_lakekeeper_warehouse(
+            self.engine_state.clone(),
+            &self.system_user,
+            name,
+            &cfg,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+}
+
 /// Extract the `warehouse` query-param value from a raw query string
 /// (e.g. `"warehouse=lakehouse&x=y"` → `Some("lakehouse")`).
 fn warehouse_query_param(query: &str) -> Option<String> {
@@ -498,17 +532,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     });
     // ── end kernel wiring ───────────────────────────────────────────────────────
 
-    // Control plane: global platform-admin Storage + Secrets. Reuses the shared
-    // `workspace_secrets` (in GLOBAL scope) and a `CatalogStore` over the same db.
-    let control_plane = Some(egret_controlplane::CpState {
-        storage: egret_catalog::CatalogStore::new(db.clone()),
-        secrets: workspace_secrets.clone(),
-        sessions: sessions.clone(),
-    });
-
-    // Embedded catalog (EB-1): mount lakekeeper in-process at /catalog/v1 with
-    // lakekeeper's AllowAll authorizer. The real egret Authorizer + JWT authN
-    // come in EB-3; here it just serves the Iceberg REST catalog.
+    // Embedded catalog (EB-1/EB-3): mount lakekeeper in-process at /catalog/v1
+    // (fronted by egret's CatalogGuard), and build the warehouse provisioner —
+    // both need the lakekeeper ApiContext built here.
+    let mut catalog_provisioner: Option<
+        std::sync::Arc<dyn egret_controlplane::WarehouseProvisioner>,
+    > = None;
     let catalog_engine: Option<axum::Router> = if config.catalog.enabled {
         let dsn = config.database.url.as_str();
         egret_catalog_engine::run_lakekeeper_migrations(dsn)
@@ -526,6 +555,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .context("bootstrapping catalog engine")?;
         let gc_cancel = egret_catalog_engine::CancellationToken::new();
         egret_catalog_engine::spawn_gc_workers(gc_registry, gc_cancel);
+        catalog_provisioner = Some(std::sync::Arc::new(LakekeeperProvisioner {
+            engine_state: engine_state.clone(),
+            system_user: config.catalog.system_user.clone(),
+        }));
         let guard: std::sync::Arc<dyn egret_catalog_engine::CatalogGuard> =
             std::sync::Arc::new(EgretCatalogGuard {
                 keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
@@ -538,6 +571,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     } else {
         None
     };
+
+    // Control plane: global platform-admin Storage + Secrets + embedded-catalog
+    // management. The warehouse provisioner (above) creates lakekeeper warehouses.
+    let control_plane = Some(egret_controlplane::CpState {
+        storage: egret_catalog::CatalogStore::new(db.clone()),
+        secrets: workspace_secrets.clone(),
+        sessions: sessions.clone(),
+        provisioner: catalog_provisioner,
+    });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).
     // EB-3: the real ClientVerifier is the Catalog Client registry (CatalogStore).

@@ -58,6 +58,7 @@ async fn setup() -> Option<Fixture> {
         storage: egret_catalog::CatalogStore::new(db.clone()),
         secrets: workspace_secrets,
         sessions: sessions.clone(),
+        provisioner: None,
     });
 
     Some(Fixture {

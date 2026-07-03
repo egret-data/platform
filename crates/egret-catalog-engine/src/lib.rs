@@ -13,6 +13,7 @@
 pub mod bootstrap;
 pub mod mount;
 pub mod pool;
+pub mod warehouse;
 
 pub use bootstrap::ensure_bootstrapped;
 pub use lakekeeper::api::ApiContext;
@@ -30,6 +31,7 @@ pub use mount::{
     EngineServer, EngineState,
 };
 pub use pool::{build_isolated_pool, LAKEKEEPER_SCHEMA};
+pub use warehouse::{create_lakekeeper_warehouse, S3StorageConfig};
 
 /// Run lakekeeper's Postgres catalog migrations against an isolated
 /// `lakekeeper` schema in the database addressed by `dsn`.

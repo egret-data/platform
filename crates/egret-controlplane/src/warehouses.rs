@@ -17,6 +17,26 @@ use crate::auth::require_platform_admin;
 use crate::error::CpError;
 use crate::CpState;
 
+/// S3 config handed to the [`WarehouseProvisioner`] to create the lakekeeper
+/// warehouse (secret already resolved to plaintext).
+pub struct ProvisionS3 {
+    pub bucket: String,
+    pub region: String,
+    pub endpoint: Option<String>,
+    pub path_style: bool,
+    pub access_key: String,
+    pub secret_key: String,
+    pub key_prefix: Option<String>,
+}
+
+/// Provisions the embedded lakekeeper warehouse for a just-created egret
+/// `warehouses` row. Implemented in the composition root (egret-bin), which holds
+/// the lakekeeper `ApiContext`. Returns the lakekeeper warehouse id, or an error.
+#[async_trait::async_trait]
+pub trait WarehouseProvisioner: Send + Sync {
+    async fn provision(&self, name: &str, s3: &ProvisionS3) -> Result<String, String>;
+}
+
 pub fn router() -> Router<CpState> {
     Router::new()
         .route("/warehouses", get(list_warehouses).post(create_warehouse))
@@ -88,7 +108,60 @@ async fn create_warehouse(
         .storage
         .create_warehouse(&b.name, b.workspace_id, b.storage_connection_id)
         .await?;
+
+    // Provision the actual lakekeeper warehouse (so data ops work). If it fails,
+    // roll back the egret row — a warehouse with no lakekeeper counterpart is useless.
+    if let Some(prov) = &st.provisioner {
+        match provision_lakekeeper(&st, &b.name, b.storage_connection_id, prov.as_ref()).await {
+            Ok(lk_id) => st.storage.set_lakekeeper_warehouse_id(w.id, &lk_id).await?,
+            Err(e) => {
+                let _ = st.storage.delete_warehouse(w.id).await;
+                return Err(e);
+            }
+        }
+    }
+
+    let w = st
+        .storage
+        .get_warehouse(w.id)
+        .await?
+        .ok_or(CpError::NotFound)?;
     Ok((StatusCode::CREATED, Json(w.into())))
+}
+
+/// Resolve the storage connection (+ its secret) and provision the lakekeeper warehouse.
+async fn provision_lakekeeper(
+    st: &CpState,
+    name: &str,
+    storage_conn_id: Uuid,
+    prov: &dyn WarehouseProvisioner,
+) -> Result<String, CpError> {
+    let sc = st
+        .storage
+        .get_storage_conn(storage_conn_id)
+        .await?
+        .ok_or_else(|| CpError::BadRequest("unknown storage connection".into()))?;
+    let secret_key = match sc.secret_ref {
+        // Storage-connection secrets are GLOBAL (None scope), per P2.
+        Some(ref_id) => st
+            .secrets
+            .resolve_plaintext(None, ref_id)
+            .await
+            .map_err(|e| CpError::BadRequest(format!("resolve storage secret: {e}")))?,
+        None => String::new(),
+    };
+    let s3 = ProvisionS3 {
+        bucket: sc.bucket,
+        region: sc.region,
+        endpoint: sc.endpoint,
+        path_style: sc.path_style,
+        access_key: sc.access_key,
+        secret_key,
+        key_prefix: sc.key_prefix,
+    };
+    prov.provision(name, &s3)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("warehouse provisioning failed: {e}")))
 }
 
 async fn get_warehouse(

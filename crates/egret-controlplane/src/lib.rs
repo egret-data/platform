@@ -17,12 +17,14 @@ mod warehouses;
 
 pub use auth::require_platform_admin;
 pub use error::CpError;
+pub use warehouses::{ProvisionS3, WarehouseProvisioner};
 
 use axum::extract::FromRef;
 use axum::Router;
 use egret_auth::session::SessionService;
 use egret_catalog::CatalogStore;
 use egret_secrets::WorkspaceSecretStore;
+use std::sync::Arc;
 
 /// Shared state for the control-plane router.
 #[derive(Clone)]
@@ -33,6 +35,9 @@ pub struct CpState {
     pub secrets: WorkspaceSecretStore,
     /// Session service backing the `Auth` extractor.
     pub sessions: SessionService,
+    /// Provisions the embedded lakekeeper warehouse on create (wired in egret-bin);
+    /// `None` in tests (the egret row is recorded without a lakekeeper counterpart).
+    pub provisioner: Option<Arc<dyn WarehouseProvisioner>>,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.
