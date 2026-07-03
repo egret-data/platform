@@ -155,11 +155,13 @@ export interface CatalogRole {
   id: string;
   name: string;
   consumerType: string;
+  description: string | null;
 }
 
 export interface CreateRoleInput {
   name: string;
   consumerType: string;
+  description?: string | null;
 }
 
 export function listRoles(warehouseId: string): Promise<CatalogRole[]> {
@@ -175,6 +177,10 @@ export function createRole(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
+}
+
+export async function deleteRole(roleId: string): Promise<void> {
+  await apiFetch(`/control-plane/roles/${roleId}`, { method: "DELETE" });
 }
 
 // ── Grants (on a catalog role) ───────────────────────────────────────────────
@@ -254,4 +260,68 @@ export function createClient(
 
 export async function revokeClient(id: string): Promise<void> {
   await apiFetch(`/control-plane/clients/${id}`, { method: "DELETE" });
+}
+
+// ── Warehouse browse (embedded catalog) ──────────────────────────────────────
+
+export interface Namespace {
+  parts: string[];
+}
+export interface Tabular {
+  name: string;
+  kind: "table" | "view";
+}
+export interface Column {
+  name: string;
+  type: string;
+  required: boolean;
+}
+export interface PartitionField {
+  name: string;
+  sourceColumn: string;
+  transform: string;
+}
+export interface SortField {
+  column: string;
+  transform: string;
+  direction: string;
+  nullOrder: string;
+}
+export interface TableSnapshot {
+  snapshotId: number;
+  parentSnapshotId: number | null;
+  timestampMs: number;
+  operation: string;
+  summary: Record<string, string>;
+}
+/** Rich table detail: schema + partition/sort (with transforms) + location + properties + snapshots. */
+export interface TableDetail {
+  location: string;
+  formatVersion: number;
+  lastUpdatedMs: number;
+  currentSnapshotId: number | null;
+  snapshotCount: number;
+  columns: Column[];
+  partitionFields: PartitionField[];
+  sortFields: SortField[];
+  properties: Record<string, string>;
+  snapshots: TableSnapshot[];
+}
+
+export function listNamespaces(warehouseId: string): Promise<Namespace[]> {
+  return apiJson<Namespace[]>(`/control-plane/warehouses/${warehouseId}/namespaces`);
+}
+export function listTabulars(warehouseId: string, namespace: string): Promise<Tabular[]> {
+  return apiJson<Tabular[]>(
+    `/control-plane/warehouses/${warehouseId}/namespaces/${encodeURIComponent(namespace)}/tables`,
+  );
+}
+export function loadTableDetail(
+  warehouseId: string,
+  namespace: string,
+  table: string,
+): Promise<TableDetail> {
+  return apiJson<TableDetail>(
+    `/control-plane/warehouses/${warehouseId}/namespaces/${encodeURIComponent(namespace)}/tables/${encodeURIComponent(table)}`,
+  );
 }

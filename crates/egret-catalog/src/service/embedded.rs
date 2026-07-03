@@ -34,6 +34,7 @@ pub struct CatalogRole {
     pub warehouse_id: Uuid,
     pub name: String,
     pub consumer_type: String,
+    pub description: Option<String>,
 }
 
 #[derive(Clone, Debug, sqlx::FromRow)]
@@ -170,14 +171,16 @@ impl CatalogStore {
         warehouse_id: Uuid,
         name: &str,
         consumer_type: &str,
+        description: Option<&str>,
     ) -> Result<CatalogRole, CatalogError> {
         sqlx::query_as::<_, CatalogRole>(
-            "INSERT INTO catalog_roles (warehouse_id, name, consumer_type) VALUES ($1,$2,$3) \
-             RETURNING id, warehouse_id, name, consumer_type",
+            "INSERT INTO catalog_roles (warehouse_id, name, consumer_type, description) VALUES ($1,$2,$3,$4) \
+             RETURNING id, warehouse_id, name, consumer_type, description",
         )
         .bind(warehouse_id)
         .bind(name)
         .bind(consumer_type)
+        .bind(description)
         .fetch_one(self.pool())
         .await
         .map_err(|e| match &e {
@@ -192,7 +195,7 @@ impl CatalogStore {
 
     pub async fn list_roles(&self, warehouse_id: Uuid) -> Result<Vec<CatalogRole>, CatalogError> {
         Ok(sqlx::query_as::<_, CatalogRole>(
-            "SELECT id, warehouse_id, name, consumer_type FROM catalog_roles \
+            "SELECT id, warehouse_id, name, consumer_type, description FROM catalog_roles \
              WHERE warehouse_id = $1 ORDER BY name",
         )
         .bind(warehouse_id)
@@ -200,11 +203,44 @@ impl CatalogStore {
         .await?)
     }
 
+    /// Delete a role. Its grants cascade; blocked by FK if any Catalog Client
+    /// still references it (surfaced as `CatalogError::InUse`).
+    pub async fn delete_role(&self, role_id: Uuid) -> Result<(), CatalogError> {
+        sqlx::query("DELETE FROM catalog_roles WHERE id = $1")
+            .bind(role_id)
+            .execute(self.pool())
+            .await
+            .map_err(|e| match &e {
+                sqlx::Error::Database(d) if d.is_foreign_key_violation() => CatalogError::InUse,
+                _ => CatalogError::Db(e),
+            })?;
+        Ok(())
+    }
+
     pub async fn add_grant(
         &self,
         catalog_role_id: Uuid,
         g: &GrantInput,
     ) -> Result<CatalogGrant, CatalogError> {
+        // Reject a duplicate of an identical grant (same securable + privilege).
+        // NULL namespace/table are compared with IS NOT DISTINCT FROM so
+        // catalog-level duplicates are caught too.
+        let exists: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM catalog_grants \
+             WHERE catalog_role_id = $1 AND securable_type = $2 \
+               AND namespace IS NOT DISTINCT FROM $3 AND table_name IS NOT DISTINCT FROM $4 \
+               AND privilege = $5",
+        )
+        .bind(catalog_role_id)
+        .bind(&g.securable_type)
+        .bind(g.namespace.as_deref())
+        .bind(g.table_name.as_deref())
+        .bind(&g.privilege)
+        .fetch_optional(self.pool())
+        .await?;
+        if exists.is_some() {
+            return Err(CatalogError::AlreadyExists("grant".to_string()));
+        }
         Ok(sqlx::query_as::<_, CatalogGrant>(
             "INSERT INTO catalog_grants (catalog_role_id, securable_type, namespace, table_name, privilege) \
              VALUES ($1,$2,$3,$4,$5) \

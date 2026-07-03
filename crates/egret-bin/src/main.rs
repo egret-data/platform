@@ -302,6 +302,117 @@ impl egret_controlplane::WarehouseProvisioner for LakekeeperProvisioner {
     }
 }
 
+/// Reads catalog structure (namespaces/tables/schema) from the embedded
+/// lakekeeper for the control plane. Holds the lakekeeper `ApiContext` (like
+/// `LakekeeperProvisioner`).
+struct LakekeeperBrowser {
+    engine_state: egret_catalog_engine::ApiContext<egret_catalog_engine::EngineState>,
+    system_user: String,
+}
+
+#[async_trait::async_trait]
+impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
+    async fn namespaces(
+        &self,
+        wh: &str,
+    ) -> Result<Vec<egret_controlplane::BrowseNamespace>, String> {
+        egret_catalog_engine::list_namespaces(self.engine_state.clone(), &self.system_user, wh)
+            .await
+            .map(|v| {
+                v.into_iter()
+                    .map(|n| egret_controlplane::BrowseNamespace { parts: n.parts })
+                    .collect()
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    async fn tabulars(
+        &self,
+        wh: &str,
+        ns: &[String],
+    ) -> Result<Vec<egret_controlplane::BrowseTabular>, String> {
+        egret_catalog_engine::list_tabulars(self.engine_state.clone(), &self.system_user, wh, ns)
+            .await
+            .map(|v| {
+                v.into_iter()
+                    .map(|t| egret_controlplane::BrowseTabular {
+                        name: t.name,
+                        kind: match t.kind {
+                            egret_catalog_engine::TabularKind::View => "view",
+                            egret_catalog_engine::TabularKind::Table => "table",
+                        }
+                        .to_string(),
+                    })
+                    .collect()
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    async fn schema(
+        &self,
+        wh: &str,
+        ns: &[String],
+        table: &str,
+    ) -> Result<egret_controlplane::BrowseTableDetail, String> {
+        egret_catalog_engine::load_table_detail(
+            self.engine_state.clone(),
+            &self.system_user,
+            wh,
+            ns,
+            table,
+        )
+        .await
+        .map(|d| egret_controlplane::BrowseTableDetail {
+            location: d.location,
+            format_version: d.format_version,
+            last_updated_ms: d.last_updated_ms,
+            current_snapshot_id: d.current_snapshot_id,
+            snapshot_count: d.snapshot_count,
+            columns: d
+                .columns
+                .into_iter()
+                .map(|c| egret_controlplane::BrowseColumn {
+                    name: c.name,
+                    type_: c.r#type,
+                    required: c.required,
+                })
+                .collect(),
+            partition_fields: d
+                .partition_fields
+                .into_iter()
+                .map(|p| egret_controlplane::BrowsePartition {
+                    name: p.name,
+                    source_column: p.source_column,
+                    transform: p.transform,
+                })
+                .collect(),
+            sort_fields: d
+                .sort_fields
+                .into_iter()
+                .map(|s| egret_controlplane::BrowseSort {
+                    column: s.column,
+                    transform: s.transform,
+                    direction: s.direction,
+                    null_order: s.null_order,
+                })
+                .collect(),
+            properties: d.properties,
+            snapshots: d
+                .snapshots
+                .into_iter()
+                .map(|s| egret_controlplane::BrowseSnapshot {
+                    snapshot_id: s.snapshot_id,
+                    parent_snapshot_id: s.parent_snapshot_id,
+                    timestamp_ms: s.timestamp_ms,
+                    operation: s.operation,
+                    summary: s.summary,
+                })
+                .collect(),
+        })
+        .map_err(|e| e.to_string())
+    }
+}
+
 /// Extract the `warehouse` query-param value from a raw query string
 /// (e.g. `"warehouse=lakehouse&x=y"` → `Some("lakehouse")`).
 fn warehouse_query_param(query: &str) -> Option<String> {
@@ -583,6 +694,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let mut catalog_provisioner: Option<
         std::sync::Arc<dyn egret_controlplane::WarehouseProvisioner>,
     > = None;
+    let mut catalog_browser: Option<std::sync::Arc<dyn egret_controlplane::WarehouseBrowser>> =
+        None;
     let catalog_engine: Option<axum::Router> = if config.catalog.enabled {
         let dsn = config.database.url.as_str();
         egret_catalog_engine::run_lakekeeper_migrations(dsn)
@@ -601,6 +714,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         let gc_cancel = egret_catalog_engine::CancellationToken::new();
         egret_catalog_engine::spawn_gc_workers(gc_registry, gc_cancel);
         catalog_provisioner = Some(std::sync::Arc::new(LakekeeperProvisioner {
+            engine_state: engine_state.clone(),
+            system_user: config.catalog.system_user.clone(),
+        }));
+        catalog_browser = Some(std::sync::Arc::new(LakekeeperBrowser {
             engine_state: engine_state.clone(),
             system_user: config.catalog.system_user.clone(),
         }));
@@ -624,6 +741,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         secrets: workspace_secrets.clone(),
         sessions: sessions.clone(),
         provisioner: catalog_provisioner,
+        browser: catalog_browser,
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).

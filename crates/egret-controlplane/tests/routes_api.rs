@@ -18,6 +18,7 @@ use egret_auth::users::UserRepo;
 use egret_controlplane::{control_plane_router, CpState};
 use egret_metastore::Db;
 use http_body_util::BodyExt;
+use std::sync::Arc;
 use tower::ServiceExt; // oneshot
 use uuid::Uuid;
 
@@ -37,7 +38,9 @@ async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
     (status, json)
 }
 
-async fn setup() -> Option<Fixture> {
+async fn setup_with_browser(
+    browser: Option<Arc<dyn egret_controlplane::WarehouseBrowser>>,
+) -> Option<Fixture> {
     let dsn = std::env::var("DATABASE_URL").ok()?;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
@@ -59,6 +62,7 @@ async fn setup() -> Option<Fixture> {
         secrets: workspace_secrets,
         sessions: sessions.clone(),
         provisioner: None,
+        browser,
     });
 
     Some(Fixture {
@@ -67,6 +71,10 @@ async fn setup() -> Option<Fixture> {
         sessions,
         db,
     })
+}
+
+async fn setup() -> Option<Fixture> {
+    setup_with_browser(None).await
 }
 
 /// Create a user (optionally a platform_admin) and return its session token.
@@ -211,4 +219,245 @@ async fn platform_admin_can_manage_storage_and_secrets() {
     assert_eq!(status, StatusCode::CREATED, "create storage; body={json}");
     assert_eq!(json["bucket"], serde_json::json!("egret-cp-test"));
     assert_eq!(json["secret_ref"], serde_json::json!(secret_id));
+}
+
+// ── Warehouse browse ──────────────────────────────────────────────────────────
+
+struct FakeBrowser;
+
+#[async_trait::async_trait]
+impl egret_controlplane::WarehouseBrowser for FakeBrowser {
+    async fn namespaces(
+        &self,
+        _wh: &str,
+    ) -> Result<Vec<egret_controlplane::BrowseNamespace>, String> {
+        Ok(vec![egret_controlplane::BrowseNamespace {
+            parts: vec!["analytics".into()],
+        }])
+    }
+    async fn tabulars(
+        &self,
+        _wh: &str,
+        _ns: &[String],
+    ) -> Result<Vec<egret_controlplane::BrowseTabular>, String> {
+        Ok(vec![egret_controlplane::BrowseTabular {
+            name: "events".into(),
+            kind: "table".into(),
+        }])
+    }
+    async fn schema(
+        &self,
+        _wh: &str,
+        _ns: &[String],
+        _t: &str,
+    ) -> Result<egret_controlplane::BrowseTableDetail, String> {
+        Ok(egret_controlplane::BrowseTableDetail {
+            location: "s3://bucket/t".into(),
+            format_version: 2,
+            last_updated_ms: 0,
+            current_snapshot_id: None,
+            snapshot_count: 0,
+            columns: vec![egret_controlplane::BrowseColumn {
+                name: "id".into(),
+                type_: "long".into(),
+                required: true,
+            }],
+            partition_fields: vec![],
+            sort_fields: vec![],
+            properties: std::collections::BTreeMap::new(),
+            snapshots: vec![],
+        })
+    }
+}
+
+/// Seed a workspace + storage_connection + warehouse with lakekeeper_warehouse_id set.
+async fn seed_provisioned_warehouse(f: &Fixture) -> Uuid {
+    let (ws_id,): (Uuid,) =
+        sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
+            .bind(format!("browse-ws-{}", Uuid::new_v4().simple()))
+            .bind("Browse Test Workspace")
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("insert workspace");
+
+    let (storage_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO storage_connections (name, region, bucket, access_key) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(format!("browse-sc-{}", Uuid::new_v4().simple()))
+    .bind("us-east-1")
+    .bind("egret-browse-test")
+    .bind("AKIATEST")
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert storage connection");
+
+    let catalog_store = egret_catalog::CatalogStore::new(f.db.clone());
+    let wh = catalog_store
+        .create_warehouse(
+            &format!("browse-wh-{}", Uuid::new_v4().simple()),
+            ws_id,
+            storage_id,
+        )
+        .await
+        .expect("create warehouse");
+    catalog_store
+        .set_lakekeeper_warehouse_id(wh.id, "wh-123")
+        .await
+        .expect("set lakekeeper id");
+    wh.id
+}
+
+/// Seed a workspace + storage_connection + warehouse WITHOUT lakekeeper_warehouse_id.
+async fn seed_unprovisioned_warehouse(f: &Fixture) -> Uuid {
+    let (ws_id,): (Uuid,) =
+        sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
+            .bind(format!("browse-ws-unprov-{}", Uuid::new_v4().simple()))
+            .bind("Browse Test Workspace Unprov")
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("insert workspace");
+
+    let (storage_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO storage_connections (name, region, bucket, access_key) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(format!("browse-sc-unprov-{}", Uuid::new_v4().simple()))
+    .bind("us-east-1")
+    .bind("egret-browse-test")
+    .bind("AKIATEST")
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert storage connection");
+
+    let catalog_store = egret_catalog::CatalogStore::new(f.db.clone());
+    catalog_store
+        .create_warehouse(
+            &format!("browse-wh-unprov-{}", Uuid::new_v4().simple()),
+            ws_id,
+            storage_id,
+        )
+        .await
+        .expect("create warehouse")
+        .id
+}
+
+#[tokio::test]
+async fn browse_namespaces_tables_schema() {
+    let Some(f) = setup_with_browser(Some(Arc::new(FakeBrowser))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "browse_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+
+    // GET /warehouses/{id}/namespaces → 200, [{parts: ["analytics"]}]
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/warehouses/{wh_id}/namespaces"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "namespaces; body={j}");
+    assert_eq!(
+        j[0]["parts"][0], "analytics",
+        "namespace parts[0]; body={j}"
+    );
+
+    // GET /warehouses/{id}/namespaces/analytics/tables → 200
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/warehouses/{wh_id}/namespaces/analytics/tables"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "tables; body={j}");
+    assert_eq!(j[0]["name"], "events", "table name; body={j}");
+    assert_eq!(j[0]["kind"], "table", "table kind; body={j}");
+
+    // GET /warehouses/{id}/namespaces/analytics/tables/events → 200
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/warehouses/{wh_id}/namespaces/analytics/tables/events"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "schema; body={j}");
+    assert_eq!(j["columns"][0]["name"], "id", "column name; body={j}");
+    assert_eq!(j["columns"][0]["type"], "long", "column type; body={j}");
+}
+
+#[tokio::test]
+async fn browse_non_admin_forbidden() {
+    let Some(f) = setup_with_browser(None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "browse_nonadmin", false).await;
+    // 403 fires before any DB lookup — use a random UUID.
+    let wh_id = Uuid::new_v4();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/warehouses/{wh_id}/namespaces"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "non-admin must be forbidden"
+    );
+}
+
+#[tokio::test]
+async fn browse_unprovisioned_warehouse_empty() {
+    let Some(f) = setup_with_browser(Some(Arc::new(FakeBrowser))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "browse_admin_unprov", true).await;
+    let wh_id = seed_unprovisioned_warehouse(&f).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/warehouses/{wh_id}/namespaces"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "unprovisioned warehouse namespaces; body={j}"
+    );
+    assert_eq!(j, serde_json::json!([]), "should be empty array; body={j}");
 }

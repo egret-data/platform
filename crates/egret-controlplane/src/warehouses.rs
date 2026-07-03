@@ -37,6 +37,73 @@ pub trait WarehouseProvisioner: Send + Sync {
     async fn provision(&self, name: &str, s3: &ProvisionS3) -> Result<String, String>;
 }
 
+/// Catalog browse result rows (control-plane DTOs; camelCase on the wire).
+pub struct BrowseNamespace {
+    pub parts: Vec<String>,
+}
+pub struct BrowseTabular {
+    pub name: String,
+    pub kind: String, // "table" | "view"
+}
+pub struct BrowseColumn {
+    pub name: String,
+    pub type_: String,
+    pub required: bool,
+}
+pub struct BrowsePartition {
+    pub name: String,
+    pub source_column: String,
+    pub transform: String,
+}
+pub struct BrowseSort {
+    pub column: String,
+    pub transform: String,
+    pub direction: String,
+    pub null_order: String,
+}
+pub struct BrowseSnapshot {
+    pub snapshot_id: i64,
+    pub parent_snapshot_id: Option<i64>,
+    pub timestamp_ms: i64,
+    pub operation: String,
+    pub summary: std::collections::BTreeMap<String, String>,
+}
+/// Rich, UI-friendly table detail (schema + partition/sort + location + props + snapshots).
+pub struct BrowseTableDetail {
+    pub location: String,
+    pub format_version: u8,
+    pub last_updated_ms: i64,
+    pub current_snapshot_id: Option<i64>,
+    pub snapshot_count: usize,
+    pub columns: Vec<BrowseColumn>,
+    pub partition_fields: Vec<BrowsePartition>,
+    pub sort_fields: Vec<BrowseSort>,
+    pub properties: std::collections::BTreeMap<String, String>,
+    pub snapshots: Vec<BrowseSnapshot>,
+}
+
+/// Reads catalog structure (namespaces/tables/schema) from the embedded
+/// lakekeeper. Implemented in egret-bin over the lakekeeper `ApiContext`
+/// (like `WarehouseProvisioner`). All args key by the lakekeeper warehouse id.
+#[async_trait::async_trait]
+pub trait WarehouseBrowser: Send + Sync {
+    async fn namespaces(
+        &self,
+        lakekeeper_warehouse_id: &str,
+    ) -> Result<Vec<BrowseNamespace>, String>;
+    async fn tabulars(
+        &self,
+        lakekeeper_warehouse_id: &str,
+        namespace: &[String],
+    ) -> Result<Vec<BrowseTabular>, String>;
+    async fn schema(
+        &self,
+        lakekeeper_warehouse_id: &str,
+        namespace: &[String],
+        table: &str,
+    ) -> Result<BrowseTableDetail, String>;
+}
+
 pub fn router() -> Router<CpState> {
     Router::new()
         .route("/warehouses", get(list_warehouses).post(create_warehouse))
@@ -45,6 +112,7 @@ pub fn router() -> Router<CpState> {
             get(get_warehouse).delete(delete_warehouse),
         )
         .route("/warehouses/{id}/roles", get(list_roles).post(create_role))
+        .route("/roles/{role_id}", delete(delete_role))
         .route(
             "/warehouses/{id}/clients",
             get(list_clients).post(create_client),
@@ -52,6 +120,15 @@ pub fn router() -> Router<CpState> {
         .route("/roles/{role_id}/grants", get(list_grants).post(add_grant))
         .route("/grants/{grant_id}", delete(revoke_grant))
         .route("/clients/{id}", delete(revoke_client))
+        .route("/warehouses/{id}/namespaces", get(browse_namespaces))
+        .route(
+            "/warehouses/{id}/namespaces/{ns}/tables",
+            get(browse_tables),
+        )
+        .route(
+            "/warehouses/{id}/namespaces/{ns}/tables/{table}",
+            get(browse_schema),
+        )
 }
 
 #[derive(Serialize)]
@@ -194,12 +271,25 @@ struct RoleDto {
     id: Uuid,
     name: String,
     consumer_type: String,
+    description: Option<String>,
+}
+impl From<egret_catalog::service::CatalogRole> for RoleDto {
+    fn from(r: egret_catalog::service::CatalogRole) -> Self {
+        RoleDto {
+            id: r.id,
+            name: r.name,
+            consumer_type: r.consumer_type,
+            description: r.description,
+        }
+    }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateRoleBody {
     name: String,
     consumer_type: String,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 async fn list_roles(
@@ -213,11 +303,7 @@ async fn list_roles(
             .list_roles(id)
             .await?
             .into_iter()
-            .map(|r| RoleDto {
-                id: r.id,
-                name: r.name,
-                consumer_type: r.consumer_type,
-            })
+            .map(Into::into)
             .collect(),
     ))
 }
@@ -229,18 +315,22 @@ async fn create_role(
     Json(b): Json<CreateRoleBody>,
 ) -> Result<(StatusCode, Json<RoleDto>), CpError> {
     require_platform_admin(&p)?;
+    let desc = b.description.as_deref().filter(|d| !d.trim().is_empty());
     let r = st
         .storage
-        .create_role(id, &b.name, &b.consumer_type)
+        .create_role(id, &b.name, &b.consumer_type, desc)
         .await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(RoleDto {
-            id: r.id,
-            name: r.name,
-            consumer_type: r.consumer_type,
-        }),
-    ))
+    Ok((StatusCode::CREATED, Json(r.into())))
+}
+
+async fn delete_role(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(role_id): Path<Uuid>,
+) -> Result<StatusCode, CpError> {
+    require_platform_admin(&p)?;
+    st.storage.delete_role(role_id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Serialize)]
@@ -397,4 +487,189 @@ async fn revoke_client(
     require_platform_admin(&p)?;
     st.storage.revoke_client(id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Warehouse browse ─────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NamespaceDto {
+    parts: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TabularDto {
+    name: String,
+    kind: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ColumnDto {
+    name: String,
+    #[serde(rename = "type")]
+    r#type: String,
+    required: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PartitionDto {
+    name: String,
+    source_column: String,
+    transform: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SortDto {
+    column: String,
+    transform: String,
+    direction: String,
+    null_order: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotDto {
+    snapshot_id: i64,
+    parent_snapshot_id: Option<i64>,
+    timestamp_ms: i64,
+    operation: String,
+    summary: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SchemaDto {
+    location: String,
+    format_version: u8,
+    last_updated_ms: i64,
+    current_snapshot_id: Option<i64>,
+    snapshot_count: usize,
+    columns: Vec<ColumnDto>,
+    partition_fields: Vec<PartitionDto>,
+    sort_fields: Vec<SortDto>,
+    properties: std::collections::BTreeMap<String, String>,
+    snapshots: Vec<SnapshotDto>,
+}
+
+/// Split a dot-delimited namespace string into its parts.
+fn parse_ns(ns: &str) -> Vec<String> {
+    ns.split('.').map(|s| s.to_string()).collect()
+}
+
+/// Look up the lakekeeper warehouse id for an egret warehouse row.
+async fn lk_id(st: &CpState, id: Uuid) -> Result<Option<String>, CpError> {
+    Ok(st
+        .storage
+        .get_warehouse(id)
+        .await?
+        .and_then(|w| w.lakekeeper_warehouse_id))
+}
+
+async fn browse_namespaces(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<NamespaceDto>>, CpError> {
+    require_platform_admin(&p)?;
+    let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
+        return Ok(Json(vec![]));
+    };
+    let ns = b
+        .namespaces(&lk)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("browse: {e}")))?;
+    Ok(Json(
+        ns.into_iter()
+            .map(|n| NamespaceDto { parts: n.parts })
+            .collect(),
+    ))
+}
+
+async fn browse_tables(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, ns)): Path<(Uuid, String)>,
+) -> Result<Json<Vec<TabularDto>>, CpError> {
+    require_platform_admin(&p)?;
+    let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
+        return Ok(Json(vec![]));
+    };
+    let tabulars = b
+        .tabulars(&lk, &parse_ns(&ns))
+        .await
+        .map_err(|e| CpError::BadRequest(format!("browse: {e}")))?;
+    Ok(Json(
+        tabulars
+            .into_iter()
+            .map(|t| TabularDto {
+                name: t.name,
+                kind: t.kind,
+            })
+            .collect(),
+    ))
+}
+
+async fn browse_schema(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, ns, table)): Path<(Uuid, String, String)>,
+) -> Result<Json<SchemaDto>, CpError> {
+    require_platform_admin(&p)?;
+    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
+    let b = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    let d = b
+        .schema(&lk, &parse_ns(&ns), &table)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("browse: {e}")))?;
+    Ok(Json(SchemaDto {
+        location: d.location,
+        format_version: d.format_version,
+        last_updated_ms: d.last_updated_ms,
+        current_snapshot_id: d.current_snapshot_id,
+        snapshot_count: d.snapshot_count,
+        columns: d
+            .columns
+            .into_iter()
+            .map(|c| ColumnDto {
+                name: c.name,
+                r#type: c.type_,
+                required: c.required,
+            })
+            .collect(),
+        partition_fields: d
+            .partition_fields
+            .into_iter()
+            .map(|p| PartitionDto {
+                name: p.name,
+                source_column: p.source_column,
+                transform: p.transform,
+            })
+            .collect(),
+        sort_fields: d
+            .sort_fields
+            .into_iter()
+            .map(|s| SortDto {
+                column: s.column,
+                transform: s.transform,
+                direction: s.direction,
+                null_order: s.null_order,
+            })
+            .collect(),
+        properties: d.properties,
+        snapshots: d
+            .snapshots
+            .into_iter()
+            .map(|s| SnapshotDto {
+                snapshot_id: s.snapshot_id,
+                parent_snapshot_id: s.parent_snapshot_id,
+                timestamp_ms: s.timestamp_ms,
+                operation: s.operation,
+                summary: s.summary,
+            })
+            .collect(),
+    }))
 }

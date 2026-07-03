@@ -17,7 +17,10 @@ mod warehouses;
 
 pub use auth::require_platform_admin;
 pub use error::CpError;
-pub use warehouses::{ProvisionS3, WarehouseProvisioner};
+pub use warehouses::{
+    BrowseColumn, BrowseNamespace, BrowsePartition, BrowseSnapshot, BrowseSort, BrowseTableDetail,
+    BrowseTabular, ProvisionS3, WarehouseBrowser, WarehouseProvisioner,
+};
 
 use axum::extract::FromRef;
 use axum::Router;
@@ -38,6 +41,9 @@ pub struct CpState {
     /// Provisions the embedded lakekeeper warehouse on create (wired in egret-bin);
     /// `None` in tests (the egret row is recorded without a lakekeeper counterpart).
     pub provisioner: Option<Arc<dyn WarehouseProvisioner>>,
+    /// Reads catalog structure from the embedded lakekeeper (wired in egret-bin);
+    /// `None` in tests.
+    pub browser: Option<Arc<dyn WarehouseBrowser>>,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.
