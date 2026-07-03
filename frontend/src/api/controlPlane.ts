@@ -255,3 +255,37 @@ export function createClient(
 export async function revokeClient(id: string): Promise<void> {
   await apiFetch(`/control-plane/clients/${id}`, { method: "DELETE" });
 }
+
+// ── Warehouse browse (embedded catalog) ──────────────────────────────────────
+
+export interface Namespace {
+  parts: string[];
+}
+export interface Tabular {
+  name: string;
+  kind: "table" | "view";
+}
+export interface Column {
+  name: string;
+  type: string;
+  required: boolean;
+}
+export interface Schema {
+  columns: Column[];
+  partitionBy: string[];
+  sortBy: string[];
+}
+
+export function listNamespaces(warehouseId: string): Promise<Namespace[]> {
+  return apiJson<Namespace[]>(`/control-plane/warehouses/${warehouseId}/namespaces`);
+}
+export function listTabulars(warehouseId: string, namespace: string): Promise<Tabular[]> {
+  return apiJson<Tabular[]>(
+    `/control-plane/warehouses/${warehouseId}/namespaces/${encodeURIComponent(namespace)}/tables`,
+  );
+}
+export function loadSchema(warehouseId: string, namespace: string, table: string): Promise<Schema> {
+  return apiJson<Schema>(
+    `/control-plane/warehouses/${warehouseId}/namespaces/${encodeURIComponent(namespace)}/tables/${encodeURIComponent(table)}`,
+  );
+}
