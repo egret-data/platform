@@ -4,9 +4,9 @@ use crate::spec::EngineSpec;
 use serde_json::{json, Value};
 
 /// Name of the `Secret` holding the Catalog Client credential for this engine's
-/// wired warehouse.
+/// engine (so two engines wiring the same warehouse never collide on the Secret).
 fn creds_secret_name(spec: &EngineSpec) -> String {
-    format!("{}-creds", spec.wiring.warehouse)
+    format!("{}-creds", spec.name)
 }
 
 /// Kubernetes `Secret` holding the Catalog Client credential (`client_id:client_secret`).
@@ -152,7 +152,7 @@ mod tests {
         // credential is injected from the Secret, not inline
         assert_eq!(
             props["iceberg.rest-catalog.oauth2.credential"]["valueFromSecret"]["name"],
-            "demo-catalog-creds"
+            "demo-creds"
         );
     }
 
@@ -160,7 +160,7 @@ mod tests {
     fn secret_holds_client_credential() {
         let cr = trino_secret(&sample_spec());
         assert_eq!(cr["kind"], "Secret");
-        assert_eq!(cr["metadata"]["name"], "demo-catalog-creds");
+        assert_eq!(cr["metadata"]["name"], "demo-creds");
         assert_eq!(cr["stringData"]["credential"], "egret_abc:sekret");
     }
 
