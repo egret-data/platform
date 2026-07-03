@@ -61,7 +61,10 @@ pub struct BrowseSchema {
 /// (like `WarehouseProvisioner`). All args key by the lakekeeper warehouse id.
 #[async_trait::async_trait]
 pub trait WarehouseBrowser: Send + Sync {
-    async fn namespaces(&self, lakekeeper_warehouse_id: &str) -> Result<Vec<BrowseNamespace>, String>;
+    async fn namespaces(
+        &self,
+        lakekeeper_warehouse_id: &str,
+    ) -> Result<Vec<BrowseNamespace>, String>;
     async fn tabulars(
         &self,
         lakekeeper_warehouse_id: &str,
@@ -90,10 +93,7 @@ pub fn router() -> Router<CpState> {
         .route("/roles/{role_id}/grants", get(list_grants).post(add_grant))
         .route("/grants/{grant_id}", delete(revoke_grant))
         .route("/clients/{id}", delete(revoke_client))
-        .route(
-            "/warehouses/{id}/namespaces",
-            get(browse_namespaces),
-        )
+        .route("/warehouses/{id}/namespaces", get(browse_namespaces))
         .route(
             "/warehouses/{id}/namespaces/{ns}/tables",
             get(browse_tables),
@@ -509,7 +509,9 @@ async fn browse_namespaces(
         .await
         .map_err(|e| CpError::BadRequest(format!("browse: {e}")))?;
     Ok(Json(
-        ns.into_iter().map(|n| NamespaceDto { parts: n.parts }).collect(),
+        ns.into_iter()
+            .map(|n| NamespaceDto { parts: n.parts })
+            .collect(),
     ))
 }
 
@@ -529,7 +531,10 @@ async fn browse_tables(
     Ok(Json(
         tabulars
             .into_iter()
-            .map(|t| TabularDto { name: t.name, kind: t.kind })
+            .map(|t| TabularDto {
+                name: t.name,
+                kind: t.kind,
+            })
             .collect(),
     ))
 }

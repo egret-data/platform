@@ -265,14 +265,13 @@ impl egret_controlplane::WarehouseBrowser for FakeBrowser {
 
 /// Seed a workspace + storage_connection + warehouse with lakekeeper_warehouse_id set.
 async fn seed_provisioned_warehouse(f: &Fixture) -> Uuid {
-    let (ws_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id",
-    )
-    .bind(format!("browse-ws-{}", Uuid::new_v4().simple()))
-    .bind("Browse Test Workspace")
-    .fetch_one(&f.db.pool)
-    .await
-    .expect("insert workspace");
+    let (ws_id,): (Uuid,) =
+        sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
+            .bind(format!("browse-ws-{}", Uuid::new_v4().simple()))
+            .bind("Browse Test Workspace")
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("insert workspace");
 
     let (storage_id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO storage_connections (name, region, bucket, access_key) \
@@ -304,14 +303,13 @@ async fn seed_provisioned_warehouse(f: &Fixture) -> Uuid {
 
 /// Seed a workspace + storage_connection + warehouse WITHOUT lakekeeper_warehouse_id.
 async fn seed_unprovisioned_warehouse(f: &Fixture) -> Uuid {
-    let (ws_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id",
-    )
-    .bind(format!("browse-ws-unprov-{}", Uuid::new_v4().simple()))
-    .bind("Browse Test Workspace Unprov")
-    .fetch_one(&f.db.pool)
-    .await
-    .expect("insert workspace");
+    let (ws_id,): (Uuid,) =
+        sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
+            .bind(format!("browse-ws-unprov-{}", Uuid::new_v4().simple()))
+            .bind("Browse Test Workspace Unprov")
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("insert workspace");
 
     let (storage_id,): (Uuid,) = sqlx::query_as(
         "INSERT INTO storage_connections (name, region, bucket, access_key) \
@@ -360,7 +358,10 @@ async fn browse_namespaces_tables_schema() {
         .unwrap();
     let (status, j) = into_json(resp).await;
     assert_eq!(status, StatusCode::OK, "namespaces; body={j}");
-    assert_eq!(j[0]["parts"][0], "analytics", "namespace parts[0]; body={j}");
+    assert_eq!(
+        j[0]["parts"][0], "analytics",
+        "namespace parts[0]; body={j}"
+    );
 
     // GET /warehouses/{id}/namespaces/analytics/tables → 200
     let resp = f
