@@ -461,6 +461,9 @@ export interface EngineSpec {
   cpuMax: string;
   memory: string;
   imageVersion: string;
+  // Fuller Trino config surface, stored under `spec.trinoConfig` (camelCase keys).
+  // Only present if the engine DTO exposes it — guard for undefined on read.
+  trinoConfig?: TrinoConfig;
 }
 
 /** A provisioned query engine (Phase 1: Trino on Kubernetes). */
