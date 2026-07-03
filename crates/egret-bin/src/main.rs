@@ -178,8 +178,8 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
     async fn check(
         &self,
         _method: &str,
-        _path: &str,
-        _query: Option<&str>,
+        path: &str,
+        query: Option<&str>,
         bearer: Option<&str>,
     ) -> Result<(), (axum::http::StatusCode, String)> {
         use axum::http::StatusCode;
@@ -198,10 +198,39 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
         if exp <= chrono::Utc::now().timestamp() {
             return Err((StatusCode::UNAUTHORIZED, "token expired".to_string()));
         }
-        // authZ (fine-grained warehouse/role → grants) is added incrementally next;
-        // for now a valid egret token is required to reach the catalog.
+        let token_warehouse = claims
+            .get("warehouse")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // authZ: warehouse isolation. On warehouse discovery (`GET /config?warehouse=`),
+        // a client may only reach the warehouse named in its token. (Data-plane paths
+        // key the warehouse by lakekeeper prefix; enforcing those follows warehouse
+        // provisioning — see the overnight status doc.)
+        if path == "/config" {
+            if let Some(requested) = query.and_then(warehouse_query_param) {
+                if requested != token_warehouse {
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        format!(
+                            "token is scoped to warehouse '{token_warehouse}', not '{requested}'"
+                        ),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
+}
+
+/// Extract the `warehouse` query-param value from a raw query string
+/// (e.g. `"warehouse=lakehouse&x=y"` → `Some("lakehouse")`).
+fn warehouse_query_param(query: &str) -> Option<String> {
+    query.split('&').find_map(|kv| {
+        kv.split_once('=')
+            .filter(|(k, _)| *k == "warehouse")
+            .map(|(_, v)| v.replace('+', " "))
+    })
 }
 
 async fn serve(config: Config) -> anyhow::Result<()> {
