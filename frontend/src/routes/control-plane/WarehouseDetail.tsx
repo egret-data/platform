@@ -167,7 +167,7 @@ function RolesTab({ warehouseId }: { warehouseId: string }) {
             {roles.isLoading ? "Loading…" : "No roles yet — add one to grant catalog access."}
           </p>
         ) : (
-          items.map((role) => <RoleGrants key={role.id} role={role} />)
+          items.map((role) => <RoleGrants key={role.id} role={role} warehouseId={warehouseId} />)
         )}
       </CardContent>
 
@@ -176,7 +176,7 @@ function RolesTab({ warehouseId }: { warehouseId: string }) {
   );
 }
 
-function RoleGrants({ role }: { role: CatalogRole }) {
+function RoleGrants({ role, warehouseId }: { role: CatalogRole; warehouseId: string }) {
   const queryClient = useQueryClient();
   const grants = useQuery<Grant[], ApiError>({
     queryKey: grantsKey(role.id),
@@ -247,7 +247,7 @@ function RoleGrants({ role }: { role: CatalogRole }) {
           )}
         </TableBody>
       </Table>
-      <AddGrantDialog roleId={role.id} open={addOpen} onOpenChange={setAddOpen} />
+      <AddGrantDialog roleId={role.id} warehouseId={warehouseId} open={addOpen} onOpenChange={setAddOpen} />
     </div>
   );
 }
@@ -340,12 +340,17 @@ function AddRoleDialog({
   );
 }
 
+const ALL_NS = "__all_ns__";
+const ALL_TABLES = "__all_tables__";
+
 function AddGrantDialog({
   roleId,
+  warehouseId,
   open,
   onOpenChange,
 }: {
   roleId: string;
+  warehouseId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
@@ -354,18 +359,33 @@ function AddGrantDialog({
     mutationFn: (input) => addGrant(roleId, input),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: grantsKey(roleId) }),
   });
-  const [securableType, setSecurableType] = useState("catalog");
+  const [namespaceSel, setNamespaceSel] = useState(ALL_NS);
+  const [tableSel, setTableSel] = useState(ALL_TABLES);
   const [privilege, setPrivilege] = useState("read");
-  const [namespace, setNamespace] = useState("");
-  const [tableName, setTableName] = useState("");
   const [error, setError] = useState<string | null>(null);
+
+  const nsQuery = useQuery<Namespace[], ApiError>({
+    queryKey: ["cp", "browse", warehouseId, "ns"],
+    queryFn: () => listNamespaces(warehouseId),
+    enabled: open,
+  });
+
+  const tablesQuery = useQuery<Tabular[], ApiError>({
+    queryKey: ["cp", "browse", warehouseId, "tables", namespaceSel],
+    queryFn: () => listTabulars(warehouseId, namespaceSel),
+    enabled: open && namespaceSel !== ALL_NS,
+  });
+
+  function handleNamespaceChange(val: string) {
+    setNamespaceSel(val);
+    setTableSel(ALL_TABLES);
+  }
 
   function handleOpenChange(next: boolean) {
     if (!next) {
-      setSecurableType("catalog");
+      setNamespaceSel(ALL_NS);
+      setTableSel(ALL_TABLES);
       setPrivilege("read");
-      setNamespace("");
-      setTableName("");
       setError(null);
       create.reset();
     }
@@ -375,14 +395,12 @@ function AddGrantDialog({
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    const ns = namespace.trim();
+    const securableType =
+      tableSel !== ALL_TABLES ? "table" : namespaceSel !== ALL_NS ? "namespace" : "catalog";
+    const namespace = namespaceSel !== ALL_NS ? namespaceSel.split(".") : null;
+    const tableName = tableSel !== ALL_TABLES ? tableSel : null;
     try {
-      await create.mutateAsync({
-        securableType,
-        privilege,
-        namespace: ns.length > 0 ? ns.split(".").map((s) => s.trim()) : null,
-        tableName: tableName.trim().length > 0 ? tableName.trim() : null,
-      });
+      await create.mutateAsync({ securableType, namespace, tableName, privilege });
       handleOpenChange(false);
     } catch (err) {
       setError((err as ApiError).message ?? "Failed to add grant.");
@@ -400,51 +418,57 @@ function AddGrantDialog({
             </DialogDescription>
           </DialogHeader>
           <div className="my-4 space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1.5">
-                <Label htmlFor="cpg-securable">Securable</Label>
-                <Select value={securableType} onValueChange={setSecurableType}>
-                  <SelectTrigger id="cpg-securable" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="catalog">catalog</SelectItem>
-                    <SelectItem value="namespace">namespace</SelectItem>
-                    <SelectItem value="table">table</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="cpg-privilege">Privilege</Label>
-                <Select value={privilege} onValueChange={setPrivilege}>
-                  <SelectTrigger id="cpg-privilege" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="read">read</SelectItem>
-                    <SelectItem value="write">write</SelectItem>
-                    <SelectItem value="manage">manage</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="cpg-ns">Namespace</Label>
+              <Select value={namespaceSel} onValueChange={handleNamespaceChange}>
+                <SelectTrigger id="cpg-ns" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ALL_NS}>All namespaces</SelectItem>
+                  {(nsQuery.data ?? []).map((ns) => {
+                    const label = ns.parts.join(".");
+                    return (
+                      <SelectItem key={label} value={label}>
+                        {label}
+                      </SelectItem>
+                    );
+                  })}
+                </SelectContent>
+              </Select>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="cpg-namespace">Namespace</Label>
-              <Input
-                id="cpg-namespace"
-                value={namespace}
-                onChange={(e) => setNamespace(e.target.value)}
-                placeholder="Optional — dotted, e.g. analytics.events"
-              />
+              <Label htmlFor="cpg-table-sel">Table</Label>
+              <Select
+                value={tableSel}
+                onValueChange={setTableSel}
+                disabled={namespaceSel === ALL_NS}
+              >
+                <SelectTrigger id="cpg-table-sel" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ALL_TABLES}>All tables</SelectItem>
+                  {(tablesQuery.data ?? []).map((t) => (
+                    <SelectItem key={t.name} value={t.name}>
+                      {t.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="cpg-table">Table</Label>
-              <Input
-                id="cpg-table"
-                value={tableName}
-                onChange={(e) => setTableName(e.target.value)}
-                placeholder="Optional"
-              />
+              <Label htmlFor="cpg-privilege">Privilege</Label>
+              <Select value={privilege} onValueChange={setPrivilege}>
+                <SelectTrigger id="cpg-privilege" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="read">read</SelectItem>
+                  <SelectItem value="write">write</SelectItem>
+                  <SelectItem value="manage">manage</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
             {error && (
               <Alert variant="destructive">
