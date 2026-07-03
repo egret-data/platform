@@ -23,6 +23,8 @@ BEGIN;
 DELETE FROM catalog_grants;
 DELETE FROM catalog_clients;
 DELETE FROM catalog_roles;
+-- Engines FK-reference warehouses, so they must go first.
+DELETE FROM engines;
 DELETE FROM warehouses;
 
 -- Every workspace except the two seeded ones; FKs cascade the rest

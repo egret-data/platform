@@ -21,7 +21,10 @@ use crate::error::CpError;
 use crate::CpState;
 
 /// Default Trino image (Stackable `productVersion`) when the body omits it.
-const DEFAULT_IMAGE_VERSION: &str = "481";
+/// Must be a version the DEPLOYED Stackable operator supports (it rejects
+/// unknown versions during JVM-config generation). `470` is supported by the
+/// current stable SDP release (25.3); `481` is only on the operator's main branch.
+const DEFAULT_IMAGE_VERSION: &str = "470";
 /// Kubernetes namespace engines are provisioned into (Phase 1: fixed).
 const DEFAULT_NAMESPACE: &str = "egret-engines";
 /// Shared per-warehouse role that engine Catalog Clients are bound to.
