@@ -222,15 +222,17 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
             return Ok(());
         }
 
-        // authZ, data-plane (`/{prefix}/...`): the prefix must be the token's
-        // warehouse (isolation), and the role's grants must permit the action —
-        // a mutating method needs a `write`/`manage` grant; any grant permits reads.
-        if let Some(prefix) = path
+        // authZ, data-plane (`/{prefix}/namespaces/{ns}/tables/{table}` …): the
+        // prefix must be the token's warehouse (isolation), and a grant must cover
+        // the requested namespace/table with sufficient privilege — writes need
+        // `write`/`manage`; reads accept any privilege. Grant scope is honoured, so
+        // a table-level grant only reaches that one table, not the whole namespace.
+        let segs: Vec<&str> = path
             .trim_start_matches('/')
             .split('/')
-            .next()
             .filter(|s| !s.is_empty())
-        {
+            .collect();
+        if let Some(&prefix) = segs.first() {
             let wh = self
                 .catalog
                 .get_warehouse_by_name(token_warehouse)
@@ -254,17 +256,88 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
                 ));
             }
             let is_write = matches!(method, "POST" | "PUT" | "DELETE" | "PATCH");
-            let has_write = grants.iter().any(|g| {
-                g.privilege.eq_ignore_ascii_case("write")
-                    || g.privilege.eq_ignore_ascii_case("manage")
-            });
-            if is_write && !has_write {
+
+            // Resolve the request target: /namespaces/{ns}[/tables|views/{table}].
+            let target_ns: Option<Vec<String>> = (segs.get(1) == Some(&"namespaces"))
+                .then(|| segs.get(2))
+                .flatten()
+                .map(|s| catalog_ns_parts(s));
+            let target_table: Option<&str> =
+                matches!(segs.get(3), Some(&"tables") | Some(&"views"))
+                    .then(|| segs.get(4).copied())
+                    .flatten();
+
+            let allowed = if target_ns.is_none() {
+                // catalog-root op (list namespaces, transactions, …): any grant for
+                // reads, a write/manage grant for writes.
+                grants.iter().any(|g| {
+                    !is_write
+                        || g.privilege.eq_ignore_ascii_case("write")
+                        || g.privilege.eq_ignore_ascii_case("manage")
+                })
+            } else {
+                grants
+                    .iter()
+                    .any(|g| catalog_grant_covers(g, target_ns.as_deref(), target_table, is_write))
+            };
+            if !allowed {
                 return forbid(format!(
-                    "role '{token_role}' lacks write on warehouse '{token_warehouse}'"
+                    "role '{token_role}' is not granted {} on the requested resource",
+                    if is_write { "write" } else { "read" }
                 ));
             }
         }
         Ok(())
+    }
+}
+
+/// Split a namespace path segment into its parts. lakekeeper encodes multipart
+/// Iceberg namespaces with the unit separator (`\x1f`), percent-encoded as `%1F`
+/// in the URL; single-level namespaces are just the plain name.
+fn catalog_ns_parts(seg: &str) -> Vec<String> {
+    seg.replace("%1F", "\u{1f}")
+        .replace("%1f", "\u{1f}")
+        .split('\u{1f}')
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Does one grant authorize the requested `(namespace, table)` at the required
+/// privilege? `catalog` covers everything; `namespace` covers its own namespace
+/// and everything in it; `table` covers only its exact table (plus, for reads,
+/// listing the namespace that holds it). Writes require `write`/`manage`.
+fn catalog_grant_covers(
+    g: &egret_catalog::service::CatalogGrant,
+    target_ns: Option<&[String]>,
+    target_table: Option<&str>,
+    is_write: bool,
+) -> bool {
+    if is_write
+        && !(g.privilege.eq_ignore_ascii_case("write")
+            || g.privilege.eq_ignore_ascii_case("manage"))
+    {
+        return false;
+    }
+    match g.securable_type.as_str() {
+        "catalog" => true,
+        "namespace" => {
+            matches!((target_ns, g.namespace.as_deref()), (Some(t), Some(gn)) if t == gn)
+        }
+        "table" => {
+            let ns_match =
+                matches!((target_ns, g.namespace.as_deref()), (Some(t), Some(gn)) if t == gn);
+            if !ns_match {
+                return false;
+            }
+            match target_table {
+                // A specific table request must hit this grant's exact table.
+                Some(t) => g.table_name.as_deref() == Some(t),
+                // Listing/loading the enclosing namespace is a read affordance for
+                // a table-grant holder, never a write (e.g. creating a table).
+                None => !is_write,
+            }
+        }
+        _ => false,
     }
 }
 
@@ -780,4 +853,74 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     tracing::info!(%addr, "egret listening");
     axum::serve(listener, app).await.context("server error")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod catalog_authz_tests {
+    use super::{catalog_grant_covers, catalog_ns_parts};
+    use egret_catalog::service::CatalogGrant;
+    use uuid::Uuid;
+
+    fn grant(sec: &str, ns: Option<&[&str]>, table: Option<&str>, privilege: &str) -> CatalogGrant {
+        CatalogGrant {
+            id: Uuid::nil(),
+            catalog_role_id: Uuid::nil(),
+            securable_type: sec.to_string(),
+            namespace: ns.map(|p| p.iter().map(|s| s.to_string()).collect()),
+            table_name: table.map(|s| s.to_string()),
+            privilege: privilege.to_string(),
+        }
+    }
+
+    #[test]
+    fn table_grant_reaches_only_its_table() {
+        let g = grant("table", Some(&["demo_ns"]), Some("events"), "read");
+        let ns = vec!["demo_ns".to_string()];
+        assert!(catalog_grant_covers(&g, Some(&ns), Some("events"), false));
+        assert!(!catalog_grant_covers(
+            &g,
+            Some(&ns),
+            Some("customers"),
+            false
+        ));
+        let other = vec!["other".to_string()];
+        assert!(!catalog_grant_covers(
+            &g,
+            Some(&other),
+            Some("events"),
+            false
+        ));
+    }
+
+    #[test]
+    fn read_grant_denies_writes() {
+        let g = grant("table", Some(&["demo_ns"]), Some("events"), "read");
+        let ns = vec!["demo_ns".to_string()];
+        assert!(!catalog_grant_covers(&g, Some(&ns), Some("events"), true));
+    }
+
+    #[test]
+    fn namespace_grant_covers_its_tables_only() {
+        let g = grant("namespace", Some(&["demo_ns"]), None, "read");
+        let ns = vec!["demo_ns".to_string()];
+        assert!(catalog_grant_covers(&g, Some(&ns), Some("anything"), false));
+        let other = vec!["other".to_string()];
+        assert!(!catalog_grant_covers(&g, Some(&other), Some("x"), false));
+    }
+
+    #[test]
+    fn catalog_grant_covers_everything() {
+        let g = grant("catalog", None, None, "write");
+        let ns = vec!["demo_ns".to_string()];
+        assert!(catalog_grant_covers(&g, Some(&ns), Some("events"), true));
+    }
+
+    #[test]
+    fn ns_parts_handles_multipart() {
+        assert_eq!(catalog_ns_parts("demo_ns"), vec!["demo_ns".to_string()]);
+        assert_eq!(
+            catalog_ns_parts("a%1Fb"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
 }
