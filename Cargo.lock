@@ -2479,6 +2479,7 @@ dependencies = [
  "egret-machine-idp",
  "egret-metastore",
  "egret-notebook",
+ "egret-orchestrator",
  "egret-ranger",
  "egret-secrets",
  "egret-server",
