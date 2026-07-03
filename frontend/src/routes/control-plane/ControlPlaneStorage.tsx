@@ -1,11 +1,12 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { HardDrive, Loader2, Plus, Trash2 } from "lucide-react";
+import { HardDrive, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 
 import {
   type Storage,
   type StorageInput,
   createStorage,
+  updateStorage,
   deleteStorage,
   listSecrets,
   listStorage,
@@ -72,6 +73,7 @@ export default function ControlPlaneStorage() {
   });
 
   const [addOpen, setAddOpen] = useState(false);
+  const [editing, setEditing] = useState<Storage | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Storage | null>(null);
 
   const rows = conns.data ?? [];
@@ -90,7 +92,12 @@ export default function ControlPlaneStorage() {
               to catalogs and workspaces across the platform.
             </CardDescription>
           </div>
-          <Button onClick={() => setAddOpen(true)}>
+          <Button
+            onClick={() => {
+              setEditing(null);
+              setAddOpen(true);
+            }}
+          >
             <Plus className="h-4 w-4" />
             Add connection
           </Button>
@@ -154,6 +161,18 @@ export default function ControlPlaneStorage() {
                       <Button
                         variant="ghost"
                         size="sm"
+                        onClick={() => {
+                          setEditing(conn);
+                          setAddOpen(true);
+                        }}
+                        aria-label={`Edit ${conn.name}`}
+                      >
+                        <Pencil className="h-4 w-4" />
+                        Edit
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
                         className="text-muted-foreground hover:text-destructive"
                         onClick={() => setDeleteTarget(conn)}
                         aria-label={`Delete ${conn.name}`}
@@ -170,7 +189,7 @@ export default function ControlPlaneStorage() {
         )}
       </CardContent>
 
-      <AddStorageDialog open={addOpen} onOpenChange={setAddOpen} />
+      <AddStorageDialog open={addOpen} onOpenChange={setAddOpen} editing={editing} />
 
       <ConfirmDeleteDialog
         open={deleteTarget !== null}
@@ -197,9 +216,11 @@ const NEW_SECRET = "__new__";
 function AddStorageDialog({
   open,
   onOpenChange,
+  editing,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  editing: Storage | null;
 }) {
   const queryClient = useQueryClient();
   const secrets = useQuery({
@@ -209,6 +230,10 @@ function AddStorageDialog({
   });
   const createMutation = useMutation<Storage, ApiError, StorageInput>({
     mutationFn: createStorage,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: storageQueryKey }),
+  });
+  const updateMutation = useMutation<Storage, ApiError, StorageInput>({
+    mutationFn: (input) => updateStorage(editing!.id, input),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: storageQueryKey }),
   });
 
@@ -226,6 +251,26 @@ function AddStorageDialog({
   const [newSecretName, setNewSecretName] = useState("");
   const [newSecretValue, setNewSecretValue] = useState("");
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    if (editing) {
+      setName(editing.name);
+      setPurpose(editing.purpose ?? "");
+      setProvider(editing.provider);
+      setEndpoint(editing.endpoint ?? "");
+      setRegion(editing.region);
+      setBucket(editing.bucket);
+      setKeyPrefix(editing.key_prefix ?? "");
+      setAccessKey(editing.access_key);
+      setPathStyle(editing.path_style);
+      setSecretChoice(editing.secret_ref ?? NO_SECRET);
+      setError(null);
+    } else {
+      reset();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, editing]);
 
   function reset() {
     setName("");
@@ -272,7 +317,11 @@ function AddStorageDialog({
     }
 
     try {
-      await createMutation.mutateAsync(input);
+      if (editing) {
+        await updateMutation.mutateAsync(input);
+      } else {
+        await createMutation.mutateAsync(input);
+      }
       handleOpenChange(false);
     } catch (err) {
       setError((err as ApiError).message ?? "Failed to save storage connection.");
@@ -286,9 +335,11 @@ function AddStorageDialog({
       <DialogContent>
         <form onSubmit={handleSubmit}>
           <DialogHeader>
-            <DialogTitle>Add storage connection</DialogTitle>
+            <DialogTitle>{editing ? "Edit storage connection" : "Add storage connection"}</DialogTitle>
             <DialogDescription>
-              Register a global S3-compatible object store for the platform.
+              {editing
+                ? "Update the connection. Changing its secret rotates the credential on every warehouse using it."
+                : "Register a global S3-compatible object store for the platform."}
             </DialogDescription>
           </DialogHeader>
 
@@ -459,11 +510,14 @@ function AddStorageDialog({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={createMutation.isPending}>
-              {createMutation.isPending && (
+            <Button
+              type="submit"
+              disabled={createMutation.isPending || updateMutation.isPending}
+            >
+              {(createMutation.isPending || updateMutation.isPending) && (
                 <Loader2 className="h-4 w-4 animate-spin" />
               )}
-              Add connection
+              {editing ? "Save changes" : "Add connection"}
             </Button>
           </DialogFooter>
         </form>
