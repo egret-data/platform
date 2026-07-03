@@ -112,6 +112,7 @@ pub fn router() -> Router<CpState> {
             get(get_warehouse).delete(delete_warehouse),
         )
         .route("/warehouses/{id}/roles", get(list_roles).post(create_role))
+        .route("/roles/{role_id}", delete(delete_role))
         .route(
             "/warehouses/{id}/clients",
             get(list_clients).post(create_client),
@@ -270,12 +271,25 @@ struct RoleDto {
     id: Uuid,
     name: String,
     consumer_type: String,
+    description: Option<String>,
+}
+impl From<egret_catalog::service::CatalogRole> for RoleDto {
+    fn from(r: egret_catalog::service::CatalogRole) -> Self {
+        RoleDto {
+            id: r.id,
+            name: r.name,
+            consumer_type: r.consumer_type,
+            description: r.description,
+        }
+    }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateRoleBody {
     name: String,
     consumer_type: String,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 async fn list_roles(
@@ -289,11 +303,7 @@ async fn list_roles(
             .list_roles(id)
             .await?
             .into_iter()
-            .map(|r| RoleDto {
-                id: r.id,
-                name: r.name,
-                consumer_type: r.consumer_type,
-            })
+            .map(Into::into)
             .collect(),
     ))
 }
@@ -305,18 +315,22 @@ async fn create_role(
     Json(b): Json<CreateRoleBody>,
 ) -> Result<(StatusCode, Json<RoleDto>), CpError> {
     require_platform_admin(&p)?;
+    let desc = b.description.as_deref().filter(|d| !d.trim().is_empty());
     let r = st
         .storage
-        .create_role(id, &b.name, &b.consumer_type)
+        .create_role(id, &b.name, &b.consumer_type, desc)
         .await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(RoleDto {
-            id: r.id,
-            name: r.name,
-            consumer_type: r.consumer_type,
-        }),
-    ))
+    Ok((StatusCode::CREATED, Json(r.into())))
+}
+
+async fn delete_role(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(role_id): Path<Uuid>,
+) -> Result<StatusCode, CpError> {
+    require_platform_admin(&p)?;
+    st.storage.delete_role(role_id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Serialize)]

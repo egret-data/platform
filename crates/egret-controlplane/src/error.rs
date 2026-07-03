@@ -32,6 +32,10 @@ impl From<CatalogError> for CpError {
         match e {
             CatalogError::NotFound(_) => CpError::NotFound,
             CatalogError::AlreadyExists(s) => CpError::AlreadyExists(s),
+            CatalogError::InUse => CpError::BadRequest(
+                "role is in use by one or more Catalog Clients — delete those clients first"
+                    .to_string(),
+            ),
             CatalogError::BadRequest(s) => CpError::BadRequest(s),
             CatalogError::Db(_) => CpError::Internal,
         }

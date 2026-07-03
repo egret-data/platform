@@ -23,7 +23,9 @@ describe("WarehouseDetail browse", () => {
   beforeEach(() => {
     vi.mocked(hooks.useMyWorkspaces).mockReturnValue({ data: [] } as unknown as ReturnType<typeof hooks.useMyWorkspaces>);
     vi.mocked(api.getWarehouse).mockResolvedValue({ id: "w1", name: "test-wh", workspaceId: "x", storageConnId: "y", lakekeeperWarehouseId: "lk" });
-    vi.mocked(api.listRoles).mockResolvedValue([{ id: "r1", name: "engine", consumerType: "engine" }]);
+    vi.mocked(api.listRoles).mockResolvedValue([
+      { id: "r1", name: "engine", consumerType: "engine", description: null },
+    ]);
     vi.mocked(api.listGrants).mockResolvedValue([]);
     vi.mocked(api.addGrant).mockResolvedValue(undefined);
     vi.mocked(api.listClients).mockResolvedValue([]);

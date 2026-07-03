@@ -37,6 +37,7 @@ import {
   addGrant,
   createClient,
   createRole,
+  deleteRole,
   getWarehouse,
   listClients,
   listGrants,
@@ -85,6 +86,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 const CONSUMER_TYPES = ["engine", "notebook", "external"] as const;
@@ -286,8 +288,16 @@ function RolesTab({ warehouseId }: { warehouseId: string }) {
     queryFn: () => listRoles(warehouseId),
     retry: false,
   });
+  const clients = useQuery<CatalogClient[], ApiError>({
+    queryKey: clientsKey(warehouseId),
+    queryFn: () => listClients(warehouseId),
+    retry: false,
+  });
   const [addOpen, setAddOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const items = roles.data ?? [];
+  const clientCount = (roleId: string) =>
+    (clients.data ?? []).filter((c) => c.catalogRoleId === roleId).length;
 
   return (
     <Card>
@@ -299,7 +309,11 @@ function RolesTab({ warehouseId }: { warehouseId: string }) {
               Catalog roles
             </CardTitle>
             <CardDescription>
-              Roles are keyed by consumer-type; their grants gate reads/writes on the warehouse.
+              Keyed by consumer-type
+              <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-teal-500" />engine</span>
+              <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-violet-500" />notebook</span>
+              <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-amber-500" />external</span>
+              — their grants gate reads/writes on the warehouse.
             </CardDescription>
           </div>
           <Button onClick={() => setAddOpen(true)}>
@@ -308,13 +322,19 @@ function RolesTab({ warehouseId }: { warehouseId: string }) {
           </Button>
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-3">
+        {error && (
+          <Alert variant="destructive">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
         <Table>
           <TableHeader>
             <TableRow>
               <TableHead>Role</TableHead>
               <TableHead>Consumer</TableHead>
               <TableHead>Grants</TableHead>
+              <TableHead className="text-center">Clients</TableHead>
               <TableHead className="text-right">
                 <span className="sr-only">Actions</span>
               </TableHead>
@@ -323,12 +343,20 @@ function RolesTab({ warehouseId }: { warehouseId: string }) {
           <TableBody>
             {items.length === 0 ? (
               <TableRow className="hover:bg-transparent">
-                <TableCell colSpan={4} className="py-10 text-center text-muted-foreground">
+                <TableCell colSpan={5} className="py-10 text-center text-muted-foreground">
                   {roles.isLoading ? "Loading…" : "No roles yet — add one to grant catalog access."}
                 </TableCell>
               </TableRow>
             ) : (
-              items.map((role) => <RoleRow key={role.id} role={role} warehouseId={warehouseId} />)
+              items.map((role) => (
+                <RoleRow
+                  key={role.id}
+                  role={role}
+                  warehouseId={warehouseId}
+                  clientCount={clientCount(role.id)}
+                  onError={setError}
+                />
+              ))
             )}
           </TableBody>
         </Table>
@@ -339,7 +367,24 @@ function RolesTab({ warehouseId }: { warehouseId: string }) {
   );
 }
 
-function RoleRow({ role, warehouseId }: { role: CatalogRole; warehouseId: string }) {
+function consumerHint(type: string): string {
+  if (type === "engine") return "Query engines (Trino / StarRocks / Daft) authenticating to read/write.";
+  if (type === "notebook") return "Notebook kernels accessing the catalog.";
+  if (type === "external") return "External / third-party integrations.";
+  return type;
+}
+
+function RoleRow({
+  role,
+  warehouseId,
+  clientCount,
+  onError,
+}: {
+  role: CatalogRole;
+  warehouseId: string;
+  clientCount: number;
+  onError: (m: string | null) => void;
+}) {
   const queryClient = useQueryClient();
   const grants = useQuery<Grant[], ApiError>({
     queryKey: grantsKey(role.id),
@@ -350,7 +395,16 @@ function RoleRow({ role, warehouseId }: { role: CatalogRole; warehouseId: string
     mutationFn: revokeGrant,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: grantsKey(role.id) }),
   });
+  const del = useMutation<void, ApiError, void>({
+    mutationFn: () => deleteRole(role.id),
+    onSuccess: () => {
+      onError(null);
+      queryClient.invalidateQueries({ queryKey: rolesKey(warehouseId) });
+    },
+    onError: (e) => onError(e.message ?? "Failed to delete role."),
+  });
   const [addOpen, setAddOpen] = useState(false);
+  const [delOpen, setDelOpen] = useState(false);
   const rows = grants.data ?? [];
   const target = (g: Grant) =>
     g.namespace ? g.namespace.join(".") + (g.tableName ? `.${g.tableName}` : "") : g.securableType;
@@ -363,11 +417,16 @@ function RoleRow({ role, warehouseId }: { role: CatalogRole; warehouseId: string
             className={`h-2 w-2 shrink-0 rounded-full ${consumerDot(role.consumerType)}`}
             title={role.consumerType}
           />
-          <span className="font-medium">{role.name}</span>
+          <div className="min-w-0">
+            <div className="font-medium">{role.name}</div>
+            {role.description && (
+              <div className="truncate text-xs text-muted-foreground">{role.description}</div>
+            )}
+          </div>
         </div>
       </TableCell>
       <TableCell>
-        <Badge variant="secondary">{role.consumerType}</Badge>
+        <Badge variant="secondary" title={consumerHint(role.consumerType)}>{role.consumerType}</Badge>
       </TableCell>
       <TableCell>
         {rows.length === 0 ? (
@@ -395,12 +454,36 @@ function RoleRow({ role, warehouseId }: { role: CatalogRole; warehouseId: string
           </div>
         )}
       </TableCell>
+      <TableCell className="text-center text-sm text-muted-foreground">{clientCount}</TableCell>
       <TableCell className="text-right">
-        <Button variant="outline" size="sm" onClick={() => setAddOpen(true)}>
-          <Plus className="h-4 w-4" />
-          Add grant
-        </Button>
+        <div className="flex items-center justify-end gap-1">
+          <Button variant="outline" size="sm" onClick={() => setAddOpen(true)}>
+            <Plus className="h-4 w-4" />
+            Add grant
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-muted-foreground hover:text-destructive"
+            onClick={() => setDelOpen(true)}
+            aria-label={`Delete role ${role.name}`}
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
         <AddGrantDialog roleId={role.id} warehouseId={warehouseId} open={addOpen} onOpenChange={setAddOpen} />
+        <ConfirmDeleteDialog
+          open={delOpen}
+          onOpenChange={setDelOpen}
+          title={`Delete role «${role.name}»?`}
+          description={
+            clientCount > 0
+              ? `This role is used by ${clientCount} Catalog Client${clientCount === 1 ? "" : "s"} — delete those clients first.`
+              : "The role and its grants will be removed."
+          }
+          confirmText="delete"
+          onConfirm={() => del.mutate()}
+        />
       </TableCell>
     </TableRow>
   );
@@ -422,12 +505,14 @@ function AddRoleDialog({
   });
   const [name, setName] = useState("");
   const [consumerType, setConsumerType] = useState<string>("engine");
+  const [description, setDescription] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   function handleOpenChange(next: boolean) {
     if (!next) {
       setName("");
       setConsumerType("engine");
+      setDescription("");
       setError(null);
       create.reset();
     }
@@ -438,7 +523,11 @@ function AddRoleDialog({
     e.preventDefault();
     setError(null);
     try {
-      await create.mutateAsync({ name: name.trim(), consumerType });
+      await create.mutateAsync({
+        name: name.trim(),
+        consumerType,
+        description: description.trim() || null,
+      });
       handleOpenChange(false);
     } catch (err) {
       setError((err as ApiError).message ?? "Failed to create role.");
@@ -472,6 +561,15 @@ function AddRoleDialog({
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="cpr-desc">Description</Label>
+              <Input
+                id="cpr-desc"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="Optional — what this role is for"
+              />
             </div>
             {error && (
               <Alert variant="destructive">
@@ -620,7 +718,6 @@ function AddGrantDialog({
                 <SelectContent>
                   <SelectItem value="read">read</SelectItem>
                   <SelectItem value="write">write</SelectItem>
-                  <SelectItem value="manage">manage</SelectItem>
                 </SelectContent>
               </Select>
             </div>

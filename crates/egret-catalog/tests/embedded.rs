@@ -31,7 +31,10 @@ async fn create_client_then_verify() {
 
     let wh_name = format!("eb-wh-{}", Uuid::new_v4().simple());
     let wh = store.create_warehouse(&wh_name, ws, sc.id).await.unwrap();
-    let role = store.create_role(wh.id, "engine", "engine").await.unwrap();
+    let role = store
+        .create_role(wh.id, "engine", "engine", None)
+        .await
+        .unwrap();
 
     let created = store
         .create_client(&NewClient {

@@ -155,11 +155,13 @@ export interface CatalogRole {
   id: string;
   name: string;
   consumerType: string;
+  description: string | null;
 }
 
 export interface CreateRoleInput {
   name: string;
   consumerType: string;
+  description?: string | null;
 }
 
 export function listRoles(warehouseId: string): Promise<CatalogRole[]> {
@@ -175,6 +177,10 @@ export function createRole(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
+}
+
+export async function deleteRole(roleId: string): Promise<void> {
+  await apiFetch(`/control-plane/roles/${roleId}`, { method: "DELETE" });
 }
 
 // ── Grants (on a catalog role) ───────────────────────────────────────────────
