@@ -266,10 +266,22 @@ export async function revokeClient(id: string): Promise<void> {
 
 export interface Namespace {
   parts: string[];
+  id: string | null;
+  protected: boolean;
 }
 export interface Tabular {
   name: string;
   kind: "table" | "view";
+  id: string | null;
+  protected: boolean;
+}
+export interface DeletedTabular {
+  id: string;
+  name: string;
+  namespace: string[];
+  kind: "table" | "view";
+  deletedAt: string;
+  expiration: string;
 }
 export interface Column {
   name: string;
@@ -323,5 +335,43 @@ export function loadTableDetail(
 ): Promise<TableDetail> {
   return apiJson<TableDetail>(
     `/control-plane/warehouses/${warehouseId}/namespaces/${encodeURIComponent(namespace)}/tables/${encodeURIComponent(table)}`,
+  );
+}
+export function loadViewColumns(
+  warehouseId: string,
+  namespace: string,
+  view: string,
+): Promise<Column[]> {
+  return apiJson<Column[]>(
+    `/control-plane/warehouses/${warehouseId}/namespaces/${encodeURIComponent(namespace)}/views/${encodeURIComponent(view)}`,
+  );
+}
+export function listDeletedTabulars(warehouseId: string): Promise<DeletedTabular[]> {
+  return apiJson<DeletedTabular[]>(`/control-plane/warehouses/${warehouseId}/deleted-tabulars`);
+}
+export async function undropTabular(
+  warehouseId: string,
+  kind: "table" | "view",
+  id: string,
+): Promise<void> {
+  await apiFetch(`/control-plane/warehouses/${warehouseId}/undrop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind, id }),
+  });
+}
+export function setProtection(
+  warehouseId: string,
+  target: "table" | "view" | "namespace",
+  id: string,
+  protectedFlag: boolean,
+): Promise<{ protected: boolean }> {
+  return apiJson<{ protected: boolean }>(
+    `/control-plane/warehouses/${warehouseId}/protection`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target, id, protected: protectedFlag }),
+    },
   );
 }

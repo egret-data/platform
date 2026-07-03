@@ -4,7 +4,7 @@
 
 use anyhow::Context as _;
 use lakekeeper::api::management::v1::warehouse::{
-    CreateWarehouseRequest, Service as WarehouseService,
+    CreateWarehouseRequest, Service as WarehouseService, TabularDeleteProfile,
 };
 use lakekeeper::api::ApiContext;
 use lakekeeper::service::authz::AllowAllAuthorizer;
@@ -74,6 +74,11 @@ pub async fn create_lakekeeper_warehouse(
         .warehouse_name(name.to_string())
         .storage_profile(storage_profile)
         .storage_credential(storage_credential)
+        // Soft-delete so dropped tables are recoverable (the "Recycle bin") for a
+        // week before the GC purge queue reclaims their storage.
+        .delete_profile(TabularDeleteProfile::Soft {
+            expiration_seconds: chrono::Duration::days(7),
+        })
         .build();
 
     let response = <EngineApiServer as WarehouseService<

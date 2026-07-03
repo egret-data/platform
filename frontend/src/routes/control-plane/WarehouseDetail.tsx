@@ -18,6 +18,8 @@ import {
   KeyRound,
   Loader2,
   Plus,
+  RotateCcw,
+  Shield,
   ShieldCheck,
   Table2,
   Trash2,
@@ -25,6 +27,7 @@ import {
 
 import {
   type CatalogClient,
+  type Column,
   type CatalogClientCreated,
   type CatalogRole,
   type CreateClientInput,
@@ -33,6 +36,7 @@ import {
   type GrantInput,
   type Namespace,
   type TableDetail,
+  type DeletedTabular,
   type Tabular,
   type Warehouse,
   addGrant,
@@ -47,6 +51,10 @@ import {
   listStorage,
   listTabulars,
   loadTableDetail,
+  loadViewColumns,
+  listDeletedTabulars,
+  undropTabular,
+  setProtection,
   revokeClient,
   revokeGrant,
 } from "@/api/controlPlane";
@@ -998,8 +1006,9 @@ function AddClientDialog({
 
 function BrowseTab({ warehouseId }: { warehouseId: string }) {
   const [selectedNs, setSelectedNs] = useState<string | null>(null);
-  const [selectedTable, setSelectedTable] = useState<string | null>(null);
+  const [selectedTabular, setSelectedTabular] = useState<Tabular | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [deletedOpen, setDeletedOpen] = useState(false);
 
   const namespaces = useQuery<Namespace[], ApiError>({
     queryKey: ["cp", "browse", warehouseId, "ns"],
@@ -1025,6 +1034,16 @@ function BrowseTab({ warehouseId }: { warehouseId: string }) {
           <Database className="h-4 w-4 text-muted-foreground" />
           <span className="text-sm font-medium">Namespaces</span>
           <span className="ml-auto text-xs text-muted-foreground">{list.length}</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 gap-1 px-1.5 text-xs text-muted-foreground"
+            onClick={() => setDeletedOpen(true)}
+            title="Recover recently-dropped tables"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Recycle bin
+          </Button>
         </div>
         <div className="max-h-[560px] overflow-y-auto py-1">
           {namespaces.isLoading ? (
@@ -1038,13 +1057,14 @@ function BrowseTab({ warehouseId }: { warehouseId: string }) {
                 <NsNode
                   key={label}
                   warehouseId={warehouseId}
+                  ns={ns}
                   label={label}
                   open={expanded.has(label)}
                   onToggle={() => toggle(label)}
-                  selectedTable={selectedNs === label ? selectedTable : null}
+                  selectedTable={selectedNs === label ? (selectedTabular?.name ?? null) : null}
                   onSelectTable={(t) => {
                     setSelectedNs(label);
-                    setSelectedTable(t);
+                    setSelectedTabular(t);
                   }}
                 />
               );
@@ -1054,21 +1074,65 @@ function BrowseTab({ warehouseId }: { warehouseId: string }) {
       </Card>
 
       <Card className="overflow-hidden">
-        {selectedNs && selectedTable ? (
-          <TableDetailView warehouseId={warehouseId} namespace={selectedNs} table={selectedTable} />
+        {selectedNs && selectedTabular ? (
+          <TableDetailView warehouseId={warehouseId} namespace={selectedNs} tabular={selectedTabular} />
         ) : (
           <div className="flex min-h-[320px] flex-col items-center justify-center gap-2 p-6 text-sm text-muted-foreground">
             <Table2 className="h-8 w-8 opacity-30" />
-            <span>Select a table to view its details.</span>
+            <span>Select a table or view to see its details.</span>
           </div>
         )}
       </Card>
+
+      <DeletedTablesDialog warehouseId={warehouseId} open={deletedOpen} onOpenChange={setDeletedOpen} />
     </div>
+  );
+}
+
+/** Shield toggle that protects/unprotects a namespace/table/view from drops. */
+function ProtectToggle({
+  warehouseId,
+  target,
+  id,
+  isProtected,
+  className,
+}: {
+  warehouseId: string;
+  target: "table" | "view" | "namespace";
+  id: string | null;
+  isProtected: boolean;
+  className?: string;
+}) {
+  const queryClient = useQueryClient();
+  const mut = useMutation<{ protected: boolean }, ApiError, boolean>({
+    mutationFn: (next) => setProtection(warehouseId, target, id!, next),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["cp", "browse", warehouseId] }),
+  });
+  if (!id) return null;
+  return (
+    <button
+      type="button"
+      disabled={mut.isPending}
+      onClick={(e) => {
+        e.stopPropagation();
+        mut.mutate(!isProtected);
+      }}
+      title={isProtected ? "Protected from drops — click to unprotect" : "Protect from drops"}
+      aria-label={isProtected ? "Unprotect" : "Protect"}
+      className={`shrink-0 rounded p-1 transition-colors ${
+        isProtected
+          ? "text-amber-500 hover:text-amber-600"
+          : "text-muted-foreground/40 opacity-0 hover:text-foreground group-hover:opacity-100"
+      } ${className ?? ""}`}
+    >
+      {isProtected ? <ShieldCheck className="h-4 w-4" /> : <Shield className="h-4 w-4" />}
+    </button>
   );
 }
 
 function NsNode({
   warehouseId,
+  ns,
   label,
   open,
   onToggle,
@@ -1076,11 +1140,12 @@ function NsNode({
   onSelectTable,
 }: {
   warehouseId: string;
+  ns: Namespace;
   label: string;
   open: boolean;
   onToggle: () => void;
   selectedTable: string | null;
-  onSelectTable: (t: string) => void;
+  onSelectTable: (t: Tabular) => void;
 }) {
   const tabulars = useQuery<Tabular[], ApiError>({
     queryKey: ["cp", "browse", warehouseId, "tables", label],
@@ -1090,19 +1155,22 @@ function NsNode({
   });
   return (
     <div>
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-sm transition-colors hover:bg-muted"
-      >
-        {open ? (
-          <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
-        ) : (
-          <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-        )}
-        <Database className="h-4 w-4 shrink-0 text-muted-foreground" />
-        <span className="truncate">{label}</span>
-      </button>
+      <div className="group flex w-full items-center pr-2 transition-colors hover:bg-muted">
+        <button
+          type="button"
+          onClick={onToggle}
+          className="flex min-w-0 flex-1 items-center gap-1.5 px-3 py-2 text-left text-sm"
+        >
+          {open ? (
+            <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+          )}
+          <Database className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <span className="truncate">{label}</span>
+        </button>
+        <ProtectToggle warehouseId={warehouseId} target="namespace" id={ns.id} isProtected={ns.protected} />
+      </div>
       {open && (
         <div className="pb-1">
           {tabulars.isLoading ? (
@@ -1116,7 +1184,7 @@ function NsNode({
                 <button
                   key={t.name}
                   type="button"
-                  onClick={() => onSelectTable(t.name)}
+                  onClick={() => onSelectTable(t)}
                   className={`flex w-full items-center gap-2 border-l-2 py-1.5 pl-9 pr-3 text-left text-sm transition-colors ${
                     active
                       ? "border-primary bg-primary/10 font-medium text-primary"
@@ -1125,6 +1193,9 @@ function NsNode({
                 >
                   <Table2 className={`h-3.5 w-3.5 shrink-0 ${active ? "text-primary" : "text-muted-foreground"}`} />
                   <span className="flex-1 truncate">{t.name}</span>
+                  {t.protected && (
+                    <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-amber-500" aria-label="protected" />
+                  )}
                   {t.kind === "view" && (
                     <Badge variant="outline" className="text-[10px] uppercase">view</Badge>
                   )}
@@ -1141,15 +1212,24 @@ function NsNode({
 function TableDetailView({
   warehouseId,
   namespace,
-  table,
+  tabular,
 }: {
   warehouseId: string;
   namespace: string;
-  table: string;
+  tabular: Tabular;
 }) {
+  const isView = tabular.kind === "view";
+  const table = tabular.name;
   const detail = useQuery<TableDetail, ApiError>({
     queryKey: ["cp", "browse", warehouseId, "detail", namespace, table],
     queryFn: () => loadTableDetail(warehouseId, namespace, table),
+    enabled: !isView,
+    retry: false,
+  });
+  const viewCols = useQuery<Column[], ApiError>({
+    queryKey: ["cp", "browse", warehouseId, "view", namespace, table],
+    queryFn: () => loadViewColumns(warehouseId, namespace, table),
+    enabled: isView,
     retry: false,
   });
   const d = detail.data;
@@ -1163,11 +1243,26 @@ function TableDetailView({
           <ChevronRight className="h-3 w-3" />
           <span className="font-medium text-foreground">{table}</span>
         </div>
-        <h3 className="mt-1 flex items-center gap-2 text-lg font-semibold">
-          <Table2 className="h-5 w-5 text-primary" />
-          {table}
-        </h3>
-        {d && (
+        <div className="mt-1 flex items-center gap-2">
+          <h3 className="flex items-center gap-2 text-lg font-semibold">
+            <Table2 className="h-5 w-5 text-primary" />
+            {table}
+          </h3>
+          {isView && (
+            <Badge variant="outline" className="uppercase">view</Badge>
+          )}
+          <div className="group">
+            <ProtectToggle
+              warehouseId={warehouseId}
+              target={tabular.kind}
+              id={tabular.id}
+              isProtected={tabular.protected}
+              className="opacity-100"
+            />
+          </div>
+          {tabular.protected && <span className="text-xs text-amber-600">Protected from drops</span>}
+        </div>
+        {!isView && d && (
           <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
             <Fact2 label="Format" value={`v${d.formatVersion}`} />
             <Fact2 label="Columns" value={String(d.columns.length)} />
@@ -1182,7 +1277,42 @@ function TableDetailView({
         )}
       </div>
 
-      {detail.isLoading ? (
+      {isView ? (
+        <div className="p-5">
+          {viewCols.isLoading ? (
+            <p className="text-center text-sm text-muted-foreground">Loading…</p>
+          ) : viewCols.data ? (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead className="text-right">Required</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {viewCols.data.map((col) => (
+                  <TableRow key={col.name}>
+                    <TableCell className="font-mono">{col.name}</TableCell>
+                    <TableCell>
+                      <Badge variant="secondary" className="font-mono font-normal">{col.type}</Badge>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {col.required ? (
+                        <Check className="ml-auto h-4 w-4 text-teal-600" />
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          ) : (
+            <p className="text-center text-sm text-destructive">Failed to load view.</p>
+          )}
+        </div>
+      ) : detail.isLoading ? (
         <p className="p-6 text-center text-sm text-muted-foreground">Loading…</p>
       ) : d ? (
         <Tabs defaultValue="schema" className="p-5">
@@ -1313,6 +1443,97 @@ function TableDetailView({
         <p className="p-6 text-center text-sm text-destructive">Failed to load table detail.</p>
       )}
     </div>
+  );
+}
+
+function DeletedTablesDialog({
+  warehouseId,
+  open,
+  onOpenChange,
+}: {
+  warehouseId: string;
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+}) {
+  const queryClient = useQueryClient();
+  const deleted = useQuery<DeletedTabular[], ApiError>({
+    queryKey: ["cp", "browse", warehouseId, "deleted"],
+    queryFn: () => listDeletedTabulars(warehouseId),
+    enabled: open,
+    retry: false,
+  });
+  const undrop = useMutation<void, ApiError, DeletedTabular>({
+    mutationFn: (d) => undropTabular(warehouseId, d.kind, d.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["cp", "browse", warehouseId] }),
+  });
+  const rows = deleted.data ?? [];
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Recycle bin</DialogTitle>
+          <DialogDescription>
+            Dropped tables and views are soft-deleted and purged after a retention window. Recover
+            one before it expires.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="max-h-[420px] overflow-y-auto">
+          {deleted.isLoading ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p>
+          ) : rows.length === 0 ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">Nothing to recover.</p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Dropped</TableHead>
+                  <TableHead>Purges</TableHead>
+                  <TableHead className="text-right">
+                    <span className="sr-only">Recover</span>
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {rows.map((d) => (
+                  <TableRow key={d.id}>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        <Table2 className="h-4 w-4 text-muted-foreground" />
+                        <span className="font-mono text-sm">
+                          {d.namespace.join(".")}.{d.name}
+                        </span>
+                        {d.kind === "view" && (
+                          <Badge variant="outline" className="text-[10px] uppercase">view</Badge>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-sm text-muted-foreground">
+                      {new Date(d.deletedAt).toLocaleString()}
+                    </TableCell>
+                    <TableCell className="text-sm text-muted-foreground">
+                      {new Date(d.expiration).toLocaleDateString()}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={undrop.isPending}
+                        onClick={() => undrop.mutate(d)}
+                      >
+                        <RotateCcw className="h-4 w-4" />
+                        Undrop
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

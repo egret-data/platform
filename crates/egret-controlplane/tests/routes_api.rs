@@ -233,6 +233,8 @@ impl egret_controlplane::WarehouseBrowser for FakeBrowser {
     ) -> Result<Vec<egret_controlplane::BrowseNamespace>, String> {
         Ok(vec![egret_controlplane::BrowseNamespace {
             parts: vec!["analytics".into()],
+            id: None,
+            protected: false,
         }])
     }
     async fn tabulars(
@@ -243,6 +245,8 @@ impl egret_controlplane::WarehouseBrowser for FakeBrowser {
         Ok(vec![egret_controlplane::BrowseTabular {
             name: "events".into(),
             kind: "table".into(),
+            id: None,
+            protected: false,
         }])
     }
     async fn schema(
@@ -267,6 +271,36 @@ impl egret_controlplane::WarehouseBrowser for FakeBrowser {
             properties: std::collections::BTreeMap::new(),
             snapshots: vec![],
         })
+    }
+    async fn view_columns(
+        &self,
+        _wh: &str,
+        _ns: &[String],
+        _view: &str,
+    ) -> Result<Vec<egret_controlplane::BrowseColumn>, String> {
+        Ok(vec![egret_controlplane::BrowseColumn {
+            name: "id".into(),
+            type_: "long".into(),
+            required: true,
+        }])
+    }
+    async fn deleted_tabulars(
+        &self,
+        _wh: &str,
+    ) -> Result<Vec<egret_controlplane::BrowseDeletedTabular>, String> {
+        Ok(vec![])
+    }
+    async fn undrop(&self, _wh: &str, _kind: &str, _id: uuid::Uuid) -> Result<(), String> {
+        Ok(())
+    }
+    async fn set_protection(
+        &self,
+        _wh: &str,
+        _target: &str,
+        _id: uuid::Uuid,
+        protected: bool,
+    ) -> Result<bool, String> {
+        Ok(protected)
     }
 }
 

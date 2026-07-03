@@ -29,8 +29,8 @@ describe("WarehouseDetail browse", () => {
     vi.mocked(api.listGrants).mockResolvedValue([]);
     vi.mocked(api.addGrant).mockResolvedValue(undefined);
     vi.mocked(api.listClients).mockResolvedValue([]);
-    vi.mocked(api.listNamespaces).mockResolvedValue([{ parts: ["analytics"] }]);
-    vi.mocked(api.listTabulars).mockResolvedValue([{ name: "events", kind: "table" }]);
+    vi.mocked(api.listNamespaces).mockResolvedValue([{ parts: ["analytics"], id: "ns1", protected: false }]);
+    vi.mocked(api.listTabulars).mockResolvedValue([{ name: "events", kind: "table", id: "t1", protected: false }]);
     vi.mocked(api.loadTableDetail).mockResolvedValue({
       location: "s3://bucket/t",
       formatVersion: 2,
