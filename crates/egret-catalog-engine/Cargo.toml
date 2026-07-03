@@ -1,0 +1,122 @@
+[package]
+name = "egret-catalog-engine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# `test-utils` pulls in lakekeeper's `test-utils`, which exposes
+# `RequestMetadata::test_user` — a principal-carrying actor with a real
+# `UserId`. The spike's headless `bootstrap` (`provision::ensure_spike_warehouse`)
+# needs one: `bootstrap` registers the calling user, and
+# `parse_create_user_request` requires a user id extractable from the actor. The
+# in-process `LakekeeperInternal` actor has NO user id (`user_id()` -> None) and
+# `BootstrapRequest` carries no `id` field, so bootstrap-via-internal-actor fails
+# with `MissingUserId`. (CE-2 finding — see provision.rs.) `test-utils` only adds
+# `lakekeeper-io/storage-in-memory`, so it's cheap to carry. The `provision`
+# module is gated on this feature so the non-test prod build never references
+# `test_user`. The crate's own integration tests turn it on via the self
+# dev-dependency below.
+test-utils = ["lakekeeper/test-utils"]
+
+[dependencies]
+# Git-pinned to the lakekeeper checkout the CE-1 spike was developed against
+# (rev 791650571..., a public ancestor of lakekeeper/lakekeeper@main). The
+# lakekeeper workspace at that rev pins `iceberg` to the same fork rev as egret
+# (bb70173...), so a single `iceberg` version must resolve across both. `optional`
+# so the `test-utils` feature's `dep:lakekeeper` toggles the `test-utils` feature
+# on the same crate without making lakekeeper itself optional in practice — it is
+# always pulled in (directly here without the feature, and via `test-utils` with
+# it).
+lakekeeper = { git = "https://github.com/lakekeeper/lakekeeper", rev = "791650571da769679a2037102a9737eb4fc84cfa", features = [
+    "router",
+] }
+lakekeeper-storage-postgres = { git = "https://github.com/lakekeeper/lakekeeper", rev = "791650571da769679a2037102a9737eb4fc84cfa" }
+lakekeeper-io = { git = "https://github.com/lakekeeper/lakekeeper", rev = "791650571da769679a2037102a9737eb4fc84cfa", package = "lakekeeper-io" }
+
+egret-config = { workspace = true }
+egret-metastore = { workspace = true }
+# Workspace→warehouse mapping store (the egret-side, sqlx-0.8 pool). We only
+# call its async methods; its sqlx-0.8 `Pool` type never crosses into this
+# crate's sqlx-0.9 surface, so the two majors coexist as transitive deps.
+egret-catalog = { workspace = true }
+# Runtime S3 config threaded into the warehouse storage profile.
+egret-storage = { workspace = true }
+# Per-workspace storage secret_key is sealed/unsealed via the secret store
+# (CE-5 Task 3). Like `egret-catalog`, this is the egret-side sqlx-0.8 surface:
+# `SecretStore::{put,get}` return `Uuid`/`String` (never a `Pool`), so its
+# sqlx-0.8 pool type never crosses into this crate's sqlx-0.9 surface.
+egret-secrets = { workspace = true }
+# The `WarehouseProvisioner` trait egret-catalog-engine implements (the
+# composition-root seam) and the `WorkspaceId` newtype it takes. egret-workspace
+# stays free of the engine; the engine depends on it (downstream direction).
+egret-workspace = { workspace = true }
+egret-core = { workspace = true }
+# Session-authenticated browse API (CE-2 T6): the `WsContext` extractor needs
+# `SessionService` for session auth; the browse router is `WsContext`-gated.
+egret-auth = { workspace = true }
+
+anyhow.workspace = true
+# Direct dep so `spawn_gc_workers` calls `tokio::spawn` against our own tokio,
+# not lakekeeper's re-export (a prod build shouldn't depend on tokio implicitly
+# via a re-export). Workspace declares tokio with the `full` feature set.
+tokio = { workspace = true }
+# WARN-log the full lakekeeper error on a rejected storage re-point (the HTTP
+# response forwards only a trimmed message).
+tracing = { workspace = true }
+# `#[derive(Serialize)]` on the browse DTOs.
+serde = { workspace = true, features = ["derive"] }
+# `DateTime<Utc>` on the catalog-token browse DTO (re-exposes egret-catalog's
+# `CatalogToken::created_at`). Also used by the browse tests' `SessionService`.
+chrono = { workspace = true }
+# `#[async_trait]` impl of `WarehouseProvisioner` (see provisioner.rs).
+async-trait.workspace = true
+# serde_json: the bootstrap principal's `limes::Authentication` carries a
+# `claims: serde_json::Value` (we pass an empty object). Must be a regular dep —
+# the prod bootstrap path needs it, not just tests.
+serde_json.workspace = true
+# axum 0.8 — must be the SAME axum major lakekeeper's router uses, so the
+# `Router` types unify. lakekeeper re-exports its axum as `lakekeeper::axum`;
+# we depend on it directly here for `axum::Router` in our public signatures.
+axum = { version = "0.8" }
+http.workspace = true
+# uuid with v7: `RequestMetadata::new_lakekeeper_internal` and project ids use
+# v7/nil. v5 (name-based) derives the STABLE system-admin `UserId` deterministically
+# from `catalog.system_user` (see bootstrap.rs). Feature-unified with lakekeeper's
+# uuid anyway, but declared explicitly.
+uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
+url = { workspace = true }
+# NB: sqlx 0.9 (NOT egret's workspace 0.8) so the `PgPool` we build is the same
+# type lakekeeper's migrator accepts — the two sqlx majors have incompatible
+# `Pool<Postgres>` types and won't unify across the crate boundary.
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "migrate",
+] }
+
+[dev-dependencies]
+# Self dev-dependency so the crate's integration tests (`tests/*.rs`) link the
+# library built WITH `test-utils` — that's what compiles the `provision` module
+# (gated on `feature = "test-utils"`) whose `ensure_spike_warehouse` the
+# roundtrip test calls. The prod (non-test) `cargo build` leaves the feature off,
+# so `RequestMetadata::test_user` is never referenced outside test/dev builds.
+egret-catalog-engine = { path = ".", features = ["test-utils"] }
+tokio.workspace = true
+# oneshot harness: drive the mounted router with no socket (mirrors
+# egret-catalog/tests/http_roundtrip.rs's pattern). `tower::ServiceExt::oneshot`
+# + `http_body_util::BodyExt` to collect response bodies.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+serde_json.workspace = true
+# `provision_ws` integration test: needs egret's own migrations (workspaces +
+# workspace_warehouse tables) via `egret_metastore::Db`, and seeds a
+# workspace/user through the egret-side (sqlx-0.8) repos so the test never mixes
+# sqlx majors against the `Db` pool.
+egret-metastore = { workspace = true }
+# (`egret-auth` is now a regular dependency for the browse API; the browse_api
+# integration test reuses it for session minting.)
+# (`chrono` — used by the browse tests' `SessionService::new` TTLs — is now a
+# regular dependency for the catalog-token DTO, so it's available to tests too.)

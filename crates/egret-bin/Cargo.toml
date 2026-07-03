@@ -20,7 +20,9 @@ egret-server.workspace = true
 egret-auth.workspace = true
 egret-workspace.workspace = true
 egret-catalog.workspace = true
+egret-catalog-engine.workspace = true
 egret-controlplane.workspace = true
+egret-machine-idp.workspace = true
 # Composition root for the embedded lakekeeper catalog engine (CE-2 T5): builds
 egret-storage.workspace = true
 egret-authz.workspace = true

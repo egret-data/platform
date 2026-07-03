@@ -20,8 +20,14 @@ export async function loginViaOidc(page: Page): Promise<void> {
 /** Break-glass: expand the local form and sign in as the platform admin. */
 export async function loginLocalAdmin(page: Page): Promise<void> {
   await page.goto("/login");
-  const adminToggle = page.getByRole("button", { name: /admin sign-in/i });
-  if (await adminToggle.isVisible().catch(() => false)) await adminToggle.click();
+  // Wait for the auth-config to resolve (it flips OIDC on and hides the local
+  // form behind the break-glass toggle). Reveal the form if the toggle is shown.
+  const adminToggle = page.getByRole("button", { name: "Admin sign-in (break-glass)" });
+  await adminToggle.or(page.getByPlaceholder("Email")).first().waitFor({ timeout: 15_000 });
+  if (await adminToggle.isVisible().catch(() => false)) {
+    await adminToggle.click();
+  }
+  await page.getByPlaceholder("Email").waitFor({ timeout: 10_000 });
   await page.getByPlaceholder("Email").fill(ADMIN_EMAIL);
   await page.getByPlaceholder("Password").fill(ADMIN_PASSWORD);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();

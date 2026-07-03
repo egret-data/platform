@@ -16,6 +16,12 @@ export default defineConfig(({ mode }) => ({
   server: {
     // `ws: true` proxies WebSocket upgrades (the notebook kernel `/channels` WS)
     // to the backend; without it, notebooks can't connect a kernel in dev.
-    proxy: { "/api": { target: "http://localhost:8080", changeOrigin: true, ws: true } },
+    // `/catalog` (embedded Iceberg REST) + `/oauth` (mini-IdP) let engines and the
+    // catalog e2e reach the backend through the dev server, same-origin.
+    proxy: {
+      "/api": { target: "http://localhost:8080", changeOrigin: true, ws: true },
+      "/catalog": { target: "http://localhost:8080", changeOrigin: true },
+      "/oauth": { target: "http://localhost:8080", changeOrigin: true },
+    },
   },
 }));

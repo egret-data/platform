@@ -9,25 +9,22 @@
 //! The router is nested at `/api/control-plane` in `egret-server`, behind the
 //! same CSRF layer as the other mutating APIs.
 
-mod assignment;
 mod auth;
-mod catalogs;
 mod error;
-mod polaris_conn;
-mod rbac;
 mod secrets;
 mod storage;
+mod warehouses;
 
-pub use assignment::{Assignment, AssignmentStore};
 pub use auth::require_platform_admin;
 pub use error::CpError;
-pub use polaris_conn::{polaris_client, PolarisConn, PolarisConnInput, PolarisConnStore};
+pub use warehouses::{ProvisionS3, WarehouseProvisioner};
 
 use axum::extract::FromRef;
 use axum::Router;
 use egret_auth::session::SessionService;
 use egret_catalog::CatalogStore;
 use egret_secrets::WorkspaceSecretStore;
+use std::sync::Arc;
 
 /// Shared state for the control-plane router.
 #[derive(Clone)]
@@ -38,10 +35,9 @@ pub struct CpState {
     pub secrets: WorkspaceSecretStore,
     /// Session service backing the `Auth` extractor.
     pub sessions: SessionService,
-    /// Singleton Polaris connection registry (`polaris_connection`).
-    pub polaris_conn: PolarisConnStore,
-    /// Workspace↔catalog assignment registry (`workspace_catalog_assignments`).
-    pub assignments: AssignmentStore,
+    /// Provisions the embedded lakekeeper warehouse on create (wired in egret-bin);
+    /// `None` in tests (the egret row is recorded without a lakekeeper counterpart).
+    pub provisioner: Option<Arc<dyn WarehouseProvisioner>>,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.
@@ -57,8 +53,5 @@ pub fn control_plane_router() -> Router<CpState> {
     Router::new()
         .merge(storage::router())
         .merge(secrets::router())
-        .merge(polaris_conn::router())
-        .merge(catalogs::router())
-        .merge(rbac::router())
-        .merge(assignment::router())
+        .merge(warehouses::router())
 }

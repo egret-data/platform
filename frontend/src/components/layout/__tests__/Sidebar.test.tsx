@@ -105,7 +105,7 @@ describe("Sidebar – workspace zones", () => {
 });
 
 describe("Sidebar – Control Plane group", () => {
-  test("renders the Control Plane items (Workspaces, Engines, Storage, Secrets, Users)", () => {
+  test("renders the Control Plane items (Workspaces, Engines, Warehouses, Storage, Secrets, Users)", () => {
     renderSidebar("/control-plane/workspaces");
     expect(screen.getByText("Control Plane")).toBeInTheDocument();
 
@@ -117,13 +117,9 @@ describe("Sidebar – Control Plane group", () => {
       "href",
       "/control-plane/engines",
     );
-    expect(screen.getByRole("link", { name: "Catalog" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Warehouses" })).toHaveAttribute(
       "href",
-      "/control-plane/catalog",
-    );
-    expect(screen.getByRole("link", { name: "RBAC" })).toHaveAttribute(
-      "href",
-      "/control-plane/rbac",
+      "/control-plane/warehouses",
     );
     expect(screen.getByRole("link", { name: "Storage" })).toHaveAttribute(
       "href",

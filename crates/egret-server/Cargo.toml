@@ -12,6 +12,7 @@ egret-config.workspace = true
 egret-workspace.workspace = true
 egret-catalog.workspace = true
 egret-controlplane.workspace = true
+egret-machine-idp.workspace = true
 egret-ranger.workspace = true
 egret-database.workspace = true
 egret-engine.workspace = true

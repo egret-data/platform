@@ -163,6 +163,155 @@ impl egret_kernel::engine_conn::EngineConnResolver for EngineConnResolverImpl {
     }
 }
 
+/// egret's authN + authZ guard for the embedded catalog (EB-3). Validates the
+/// egret-issued JWT (authN); the JWT's `warehouse`+`roles` claims + the RBAC
+/// store drive authZ. lakekeeper itself runs on `AllowAllAuthorizer` — egret owns
+/// the decision here.
+struct EgretCatalogGuard {
+    keys: egret_machine_idp::PgSigningKeyStore,
+    catalog: egret_catalog::CatalogStore,
+}
+
+#[async_trait::async_trait]
+impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
+    async fn check(
+        &self,
+        method: &str,
+        path: &str,
+        query: Option<&str>,
+        bearer: Option<&str>,
+    ) -> Result<(), (axum::http::StatusCode, String)> {
+        use axum::http::StatusCode;
+        let forbid = |m: String| Err((StatusCode::FORBIDDEN, m));
+        // authN: a valid, unexpired egret JWT is required on every catalog request.
+        let token = bearer.ok_or((StatusCode::UNAUTHORIZED, "missing bearer token".into()))?;
+        use egret_machine_idp::SigningKeyStore as _;
+        let jwk = self
+            .keys
+            .active()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("idp key: {e}")))?
+            .public_jwk;
+        let claims = egret_machine_idp::verify_with_jwk(token, &jwk)
+            .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid token".to_string()))?;
+        let exp = claims.get("exp").and_then(|v| v.as_i64()).unwrap_or(0);
+        if exp <= chrono::Utc::now().timestamp() {
+            return Err((StatusCode::UNAUTHORIZED, "token expired".to_string()));
+        }
+        let token_warehouse = claims
+            .get("warehouse")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let token_role = claims
+            .get("roles")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // authZ, discovery (`GET /config?warehouse=`): a client may only discover
+        // the warehouse named in its token.
+        if path == "/config" {
+            if let Some(requested) = query.and_then(warehouse_query_param) {
+                if requested != token_warehouse {
+                    return forbid(format!(
+                        "token is scoped to warehouse '{token_warehouse}', not '{requested}'"
+                    ));
+                }
+            }
+            return Ok(());
+        }
+
+        // authZ, data-plane (`/{prefix}/...`): the prefix must be the token's
+        // warehouse (isolation), and the role's grants must permit the action —
+        // a mutating method needs a `write`/`manage` grant; any grant permits reads.
+        if let Some(prefix) = path
+            .trim_start_matches('/')
+            .split('/')
+            .next()
+            .filter(|s| !s.is_empty())
+        {
+            let wh = self
+                .catalog
+                .get_warehouse_by_name(token_warehouse)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("warehouse: {e}")))?
+                .ok_or((
+                    StatusCode::FORBIDDEN,
+                    format!("unknown warehouse '{token_warehouse}'"),
+                ))?;
+            if wh.lakekeeper_warehouse_id.as_deref() != Some(prefix) {
+                return forbid("token is not scoped to this warehouse".to_string());
+            }
+            let grants = self
+                .catalog
+                .grants_for_role(token_warehouse, token_role)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("grants: {e}")))?;
+            if grants.is_empty() {
+                return forbid(format!(
+                    "role '{token_role}' has no grants on warehouse '{token_warehouse}'"
+                ));
+            }
+            let is_write = matches!(method, "POST" | "PUT" | "DELETE" | "PATCH");
+            let has_write = grants.iter().any(|g| {
+                g.privilege.eq_ignore_ascii_case("write")
+                    || g.privilege.eq_ignore_ascii_case("manage")
+            });
+            if is_write && !has_write {
+                return forbid(format!(
+                    "role '{token_role}' lacks write on warehouse '{token_warehouse}'"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Provisions the embedded lakekeeper warehouse for an egret `warehouses` row.
+/// Holds the lakekeeper `ApiContext` (built in `serve`).
+struct LakekeeperProvisioner {
+    engine_state: egret_catalog_engine::ApiContext<egret_catalog_engine::EngineState>,
+    system_user: String,
+}
+
+#[async_trait::async_trait]
+impl egret_controlplane::WarehouseProvisioner for LakekeeperProvisioner {
+    async fn provision(
+        &self,
+        name: &str,
+        s3: &egret_controlplane::ProvisionS3,
+    ) -> Result<String, String> {
+        let cfg = egret_catalog_engine::S3StorageConfig {
+            bucket: s3.bucket.clone(),
+            region: s3.region.clone(),
+            endpoint: s3.endpoint.clone(),
+            path_style: s3.path_style,
+            access_key: s3.access_key.clone(),
+            secret_key: s3.secret_key.clone(),
+            key_prefix: s3.key_prefix.clone(),
+        };
+        egret_catalog_engine::create_lakekeeper_warehouse(
+            self.engine_state.clone(),
+            &self.system_user,
+            name,
+            &cfg,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+}
+
+/// Extract the `warehouse` query-param value from a raw query string
+/// (e.g. `"warehouse=lakehouse&x=y"` → `Some("lakehouse")`).
+fn warehouse_query_param(query: &str) -> Option<String> {
+    query.split('&').find_map(|kv| {
+        kv.split_once('=')
+            .filter(|(k, _)| *k == "warehouse")
+            .map(|(_, v)| v.replace('+', " "))
+    })
+}
+
 async fn serve(config: Config) -> anyhow::Result<()> {
     let db = Db::connect(&config.database.url, config.database.max_connections)
         .await
@@ -428,14 +577,67 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     });
     // ── end kernel wiring ───────────────────────────────────────────────────────
 
-    // Control plane: global platform-admin Storage + Secrets. Reuses the shared
-    // `workspace_secrets` (in GLOBAL scope) and a `CatalogStore` over the same db.
+    // Embedded catalog (EB-1/EB-3): mount lakekeeper in-process at /catalog/v1
+    // (fronted by egret's CatalogGuard), and build the warehouse provisioner —
+    // both need the lakekeeper ApiContext built here.
+    let mut catalog_provisioner: Option<
+        std::sync::Arc<dyn egret_controlplane::WarehouseProvisioner>,
+    > = None;
+    let catalog_engine: Option<axum::Router> = if config.catalog.enabled {
+        let dsn = config.database.url.as_str();
+        egret_catalog_engine::run_lakekeeper_migrations(dsn)
+            .await
+            .context("lakekeeper migrations")?;
+        let (engine_state, gc_registry) =
+            egret_catalog_engine::build_state(dsn, &config.catalog.system_user)
+                .await
+                .context("building catalog engine state")?;
+        egret_catalog_engine::ensure_bootstrapped(
+            engine_state.clone(),
+            &config.catalog.system_user,
+        )
+        .await
+        .context("bootstrapping catalog engine")?;
+        let gc_cancel = egret_catalog_engine::CancellationToken::new();
+        egret_catalog_engine::spawn_gc_workers(gc_registry, gc_cancel);
+        catalog_provisioner = Some(std::sync::Arc::new(LakekeeperProvisioner {
+            engine_state: engine_state.clone(),
+            system_user: config.catalog.system_user.clone(),
+        }));
+        let guard: std::sync::Arc<dyn egret_catalog_engine::CatalogGuard> =
+            std::sync::Arc::new(EgretCatalogGuard {
+                keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
+                catalog: egret_catalog::CatalogStore::new(db.clone()),
+            });
+        Some(egret_catalog_engine::mount_catalog_engine(
+            engine_state,
+            Some(guard),
+        ))
+    } else {
+        None
+    };
+
+    // Control plane: global platform-admin Storage + Secrets + embedded-catalog
+    // management. The warehouse provisioner (above) creates lakekeeper warehouses.
     let control_plane = Some(egret_controlplane::CpState {
         storage: egret_catalog::CatalogStore::new(db.clone()),
         secrets: workspace_secrets.clone(),
         sessions: sessions.clone(),
-        polaris_conn: egret_controlplane::PolarisConnStore::new(db.clone()),
-        assignments: egret_controlplane::AssignmentStore::new(db.clone()),
+        provisioner: catalog_provisioner,
+    });
+
+    // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).
+    // EB-3: the real ClientVerifier is the Catalog Client registry (CatalogStore).
+    // `issuer` is egret's public root URL (the JWT `iss` + OIDC issuer lakekeeper
+    // will trust in EB-3's Authorizer integration).
+    let idp = Some(egret_machine_idp::IdpState {
+        keys: std::sync::Arc::new(egret_machine_idp::PgSigningKeyStore::new(db.clone())),
+        issuer: config
+            .catalog
+            .public_url
+            .clone()
+            .unwrap_or_else(|| "http://localhost:8080".to_string()),
+        clients: std::sync::Arc::new(egret_catalog::CatalogStore::new(db.clone())),
     });
 
     let app = build_router(AppState {
@@ -450,6 +652,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         notebook,
         kernel,
         control_plane,
+        catalog_engine,
+        idp,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)
