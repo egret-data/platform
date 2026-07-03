@@ -18,8 +18,8 @@ mod warehouses;
 pub use auth::require_platform_admin;
 pub use error::CpError;
 pub use warehouses::{
-    BrowseColumn, BrowseNamespace, BrowseSchema, BrowseTabular, ProvisionS3, WarehouseBrowser,
-    WarehouseProvisioner,
+    BrowseColumn, BrowseNamespace, BrowsePartition, BrowseSnapshot, BrowseSort, BrowseTableDetail,
+    BrowseTabular, ProvisionS3, WarehouseBrowser, WarehouseProvisioner,
 };
 
 use axum::extract::FromRef;

@@ -250,15 +250,22 @@ impl egret_controlplane::WarehouseBrowser for FakeBrowser {
         _wh: &str,
         _ns: &[String],
         _t: &str,
-    ) -> Result<egret_controlplane::BrowseSchema, String> {
-        Ok(egret_controlplane::BrowseSchema {
+    ) -> Result<egret_controlplane::BrowseTableDetail, String> {
+        Ok(egret_controlplane::BrowseTableDetail {
+            location: "s3://bucket/t".into(),
+            format_version: 2,
+            last_updated_ms: 0,
+            current_snapshot_id: None,
+            snapshot_count: 0,
             columns: vec![egret_controlplane::BrowseColumn {
                 name: "id".into(),
                 type_: "long".into(),
                 required: true,
             }],
-            partition_by: vec![],
-            sort_by: vec![],
+            partition_fields: vec![],
+            sort_fields: vec![],
+            properties: std::collections::BTreeMap::new(),
+            snapshots: vec![],
         })
     }
 }

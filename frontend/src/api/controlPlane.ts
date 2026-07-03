@@ -270,10 +270,36 @@ export interface Column {
   type: string;
   required: boolean;
 }
-export interface Schema {
+export interface PartitionField {
+  name: string;
+  sourceColumn: string;
+  transform: string;
+}
+export interface SortField {
+  column: string;
+  transform: string;
+  direction: string;
+  nullOrder: string;
+}
+export interface TableSnapshot {
+  snapshotId: number;
+  parentSnapshotId: number | null;
+  timestampMs: number;
+  operation: string;
+  summary: Record<string, string>;
+}
+/** Rich table detail: schema + partition/sort (with transforms) + location + properties + snapshots. */
+export interface TableDetail {
+  location: string;
+  formatVersion: number;
+  lastUpdatedMs: number;
+  currentSnapshotId: number | null;
+  snapshotCount: number;
   columns: Column[];
-  partitionBy: string[];
-  sortBy: string[];
+  partitionFields: PartitionField[];
+  sortFields: SortField[];
+  properties: Record<string, string>;
+  snapshots: TableSnapshot[];
 }
 
 export function listNamespaces(warehouseId: string): Promise<Namespace[]> {
@@ -284,8 +310,12 @@ export function listTabulars(warehouseId: string, namespace: string): Promise<Ta
     `/control-plane/warehouses/${warehouseId}/namespaces/${encodeURIComponent(namespace)}/tables`,
   );
 }
-export function loadSchema(warehouseId: string, namespace: string, table: string): Promise<Schema> {
-  return apiJson<Schema>(
+export function loadTableDetail(
+  warehouseId: string,
+  namespace: string,
+  table: string,
+): Promise<TableDetail> {
+  return apiJson<TableDetail>(
     `/control-plane/warehouses/${warehouseId}/namespaces/${encodeURIComponent(namespace)}/tables/${encodeURIComponent(table)}`,
   );
 }

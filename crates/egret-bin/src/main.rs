@@ -353,8 +353,8 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
         wh: &str,
         ns: &[String],
         table: &str,
-    ) -> Result<egret_controlplane::BrowseSchema, String> {
-        egret_catalog_engine::load_table_schema(
+    ) -> Result<egret_controlplane::BrowseTableDetail, String> {
+        egret_catalog_engine::load_table_detail(
             self.engine_state.clone(),
             &self.system_user,
             wh,
@@ -362,8 +362,13 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             table,
         )
         .await
-        .map(|s| egret_controlplane::BrowseSchema {
-            columns: s
+        .map(|d| egret_controlplane::BrowseTableDetail {
+            location: d.location,
+            format_version: d.format_version,
+            last_updated_ms: d.last_updated_ms,
+            current_snapshot_id: d.current_snapshot_id,
+            snapshot_count: d.snapshot_count,
+            columns: d
                 .columns
                 .into_iter()
                 .map(|c| egret_controlplane::BrowseColumn {
@@ -372,8 +377,37 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
                     required: c.required,
                 })
                 .collect(),
-            partition_by: s.partition_by,
-            sort_by: s.sort_by,
+            partition_fields: d
+                .partition_fields
+                .into_iter()
+                .map(|p| egret_controlplane::BrowsePartition {
+                    name: p.name,
+                    source_column: p.source_column,
+                    transform: p.transform,
+                })
+                .collect(),
+            sort_fields: d
+                .sort_fields
+                .into_iter()
+                .map(|s| egret_controlplane::BrowseSort {
+                    column: s.column,
+                    transform: s.transform,
+                    direction: s.direction,
+                    null_order: s.null_order,
+                })
+                .collect(),
+            properties: d.properties,
+            snapshots: d
+                .snapshots
+                .into_iter()
+                .map(|s| egret_controlplane::BrowseSnapshot {
+                    snapshot_id: s.snapshot_id,
+                    parent_snapshot_id: s.parent_snapshot_id,
+                    timestamp_ms: s.timestamp_ms,
+                    operation: s.operation,
+                    summary: s.summary,
+                })
+                .collect(),
         })
         .map_err(|e| e.to_string())
     }

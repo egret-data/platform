@@ -18,8 +18,8 @@ pub mod warehouse;
 
 pub use bootstrap::ensure_bootstrapped;
 pub use browse::{
-    list_namespaces, list_tabulars, load_table_schema, ColumnInfo, NamespaceEntry, TableSchema,
-    TabularEntry, TabularKind,
+    list_namespaces, list_tabulars, load_table_detail, ColumnInfo, NamespaceEntry, PartitionField,
+    SnapshotInfo, SortField, TableDetail, TabularEntry, TabularKind,
 };
 pub use lakekeeper::api::ApiContext;
 /// lakekeeper's built-in open authorizer. EB-1 mounts the engine with this

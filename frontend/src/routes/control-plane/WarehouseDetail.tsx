@@ -6,11 +6,14 @@ import {
   Boxes,
   Building2,
   Check,
+  ChevronDown,
   ChevronRight,
   Columns3,
   Copy,
   Database,
+  FileText,
   HardDrive,
+  History,
   KeyRound,
   Loader2,
   Plus,
@@ -28,7 +31,7 @@ import {
   type Grant,
   type GrantInput,
   type Namespace,
-  type Schema,
+  type TableDetail,
   type Tabular,
   type Warehouse,
   addGrant,
@@ -41,7 +44,7 @@ import {
   listRoles,
   listStorage,
   listTabulars,
-  loadSchema,
+  loadTableDetail,
   revokeClient,
   revokeGrant,
 } from "@/api/controlPlane";
@@ -305,14 +308,30 @@ function RolesTab({ warehouseId }: { warehouseId: string }) {
           </Button>
         </div>
       </CardHeader>
-      <CardContent className="space-y-6">
-        {items.length === 0 ? (
-          <p className="py-6 text-center text-muted-foreground">
-            {roles.isLoading ? "Loading…" : "No roles yet — add one to grant catalog access."}
-          </p>
-        ) : (
-          items.map((role) => <RoleGrants key={role.id} role={role} warehouseId={warehouseId} />)
-        )}
+      <CardContent>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Role</TableHead>
+              <TableHead>Consumer</TableHead>
+              <TableHead>Grants</TableHead>
+              <TableHead className="text-right">
+                <span className="sr-only">Actions</span>
+              </TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {items.length === 0 ? (
+              <TableRow className="hover:bg-transparent">
+                <TableCell colSpan={4} className="py-10 text-center text-muted-foreground">
+                  {roles.isLoading ? "Loading…" : "No roles yet — add one to grant catalog access."}
+                </TableCell>
+              </TableRow>
+            ) : (
+              items.map((role) => <RoleRow key={role.id} role={role} warehouseId={warehouseId} />)
+            )}
+          </TableBody>
+        </Table>
       </CardContent>
 
       <AddRoleDialog warehouseId={warehouseId} open={addOpen} onOpenChange={setAddOpen} />
@@ -320,7 +339,7 @@ function RolesTab({ warehouseId }: { warehouseId: string }) {
   );
 }
 
-function RoleGrants({ role, warehouseId }: { role: CatalogRole; warehouseId: string }) {
+function RoleRow({ role, warehouseId }: { role: CatalogRole; warehouseId: string }) {
   const queryClient = useQueryClient();
   const grants = useQuery<Grant[], ApiError>({
     queryKey: grantsKey(role.id),
@@ -333,73 +352,57 @@ function RoleGrants({ role, warehouseId }: { role: CatalogRole; warehouseId: str
   });
   const [addOpen, setAddOpen] = useState(false);
   const rows = grants.data ?? [];
+  const target = (g: Grant) =>
+    g.namespace ? g.namespace.join(".") + (g.tableName ? `.${g.tableName}` : "") : g.securableType;
 
   return (
-    <div className="rounded-lg border p-4">
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2.5">
+    <TableRow>
+      <TableCell>
+        <div className="flex items-center gap-2">
           <span
-            className={`h-2.5 w-2.5 shrink-0 rounded-full ${consumerDot(role.consumerType)}`}
+            className={`h-2 w-2 shrink-0 rounded-full ${consumerDot(role.consumerType)}`}
             title={role.consumerType}
           />
           <span className="font-medium">{role.name}</span>
-          <Badge variant="secondary">{role.consumerType}</Badge>
-          <span className="text-xs text-muted-foreground">
-            {rows.length} grant{rows.length === 1 ? "" : "s"}
-          </span>
         </div>
+      </TableCell>
+      <TableCell>
+        <Badge variant="secondary">{role.consumerType}</Badge>
+      </TableCell>
+      <TableCell>
+        {rows.length === 0 ? (
+          <span className="text-sm text-muted-foreground">No grants</span>
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {rows.map((g) => (
+              <span
+                key={g.id}
+                className="group inline-flex items-center gap-1 rounded-md border bg-muted/40 px-1.5 py-0.5 text-xs"
+              >
+                <span className="font-mono">{target(g)}</span>
+                <span className="text-muted-foreground">·</span>
+                <span className="font-medium">{g.privilege}</span>
+                <button
+                  type="button"
+                  aria-label="Revoke grant"
+                  onClick={() => revoke.mutate(g.id)}
+                  className="text-muted-foreground opacity-60 transition-opacity hover:text-destructive"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+      </TableCell>
+      <TableCell className="text-right">
         <Button variant="outline" size="sm" onClick={() => setAddOpen(true)}>
           <Plus className="h-4 w-4" />
           Add grant
         </Button>
-      </div>
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Securable</TableHead>
-            <TableHead>Target</TableHead>
-            <TableHead>Privilege</TableHead>
-            <TableHead className="text-right">
-              <span className="sr-only">Actions</span>
-            </TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.length === 0 ? (
-            <TableRow className="hover:bg-transparent">
-              <TableCell colSpan={4} className="py-4 text-center text-sm text-muted-foreground">
-                No grants — this role has no catalog access.
-              </TableCell>
-            </TableRow>
-          ) : (
-            rows.map((g) => (
-              <TableRow key={g.id}>
-                <TableCell>{g.securableType}</TableCell>
-                <TableCell className="font-mono text-muted-foreground">
-                  {g.namespace ? g.namespace.join(".") : "—"}
-                  {g.tableName ? `.${g.tableName}` : ""}
-                </TableCell>
-                <TableCell>
-                  <Badge variant="outline">{g.privilege}</Badge>
-                </TableCell>
-                <TableCell className="text-right">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="text-muted-foreground hover:text-destructive"
-                    onClick={() => revoke.mutate(g.id)}
-                    aria-label="Revoke grant"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </TableCell>
-              </TableRow>
-            ))
-          )}
-        </TableBody>
-      </Table>
-      <AddGrantDialog roleId={role.id} warehouseId={warehouseId} open={addOpen} onOpenChange={setAddOpen} />
-    </div>
+        <AddGrantDialog roleId={role.id} warehouseId={warehouseId} open={addOpen} onOpenChange={setAddOpen} />
+      </TableCell>
+    </TableRow>
   );
 }
 
@@ -891,6 +894,7 @@ function AddClientDialog({
 function BrowseTab({ warehouseId }: { warehouseId: string }) {
   const [selectedNs, setSelectedNs] = useState<string | null>(null);
   const [selectedTable, setSelectedTable] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const namespaces = useQuery<Namespace[], ApiError>({
     queryKey: ["cp", "browse", warehouseId, "ns"],
@@ -898,163 +902,320 @@ function BrowseTab({ warehouseId }: { warehouseId: string }) {
     retry: false,
   });
 
-  const tabulars = useQuery<Tabular[], ApiError>({
-    queryKey: ["cp", "browse", warehouseId, "tables", selectedNs],
-    queryFn: () => listTabulars(warehouseId, selectedNs!),
-    enabled: !!selectedNs,
-    retry: false,
-  });
-
-  const schema = useQuery<Schema, ApiError>({
-    queryKey: ["cp", "browse", warehouseId, "schema", selectedNs, selectedTable],
-    queryFn: () => loadSchema(warehouseId, selectedNs!, selectedTable!),
-    enabled: !!selectedNs && !!selectedTable,
-    retry: false,
-  });
-
-  function handleNsSelect(ns: string) {
-    setSelectedNs(ns);
-    setSelectedTable(null);
+  function toggle(label: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      return next;
+    });
   }
 
-  const rowClass = (active: boolean) =>
-    `flex w-full items-center gap-2 border-l-2 px-4 py-2 text-left text-sm transition-colors ${
-      active
-        ? "border-primary bg-primary/10 font-medium text-primary"
-        : "border-transparent hover:bg-muted"
-    }`;
+  const list = namespaces.data ?? [];
 
   return (
-    <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.5fr)]">
-      {/* Namespaces */}
+    <div className="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
       <Card className="overflow-hidden">
-        <ColHeader icon={Database} title="Namespaces" count={(namespaces.data ?? []).length} show />
-        <div className="max-h-[440px] overflow-y-auto">
+        <div className="flex items-center gap-2 border-b bg-muted/30 px-4 py-2.5">
+          <Database className="h-4 w-4 text-muted-foreground" />
+          <span className="text-sm font-medium">Namespaces</span>
+          <span className="ml-auto text-xs text-muted-foreground">{list.length}</span>
+        </div>
+        <div className="max-h-[560px] overflow-y-auto py-1">
           {namespaces.isLoading ? (
             <BrowseEmpty>Loading…</BrowseEmpty>
-          ) : (namespaces.data ?? []).length === 0 ? (
+          ) : list.length === 0 ? (
             <BrowseEmpty icon={Database}>This warehouse has no namespaces yet.</BrowseEmpty>
           ) : (
-            (namespaces.data ?? []).map((ns) => {
+            list.map((ns) => {
               const label = ns.parts.join(".");
-              const active = selectedNs === label;
               return (
-                <button key={label} onClick={() => handleNsSelect(label)} className={rowClass(active)}>
-                  <Database className={`h-4 w-4 shrink-0 ${active ? "text-primary" : "text-muted-foreground"}`} />
-                  <span className="truncate">{label}</span>
-                </button>
+                <NsNode
+                  key={label}
+                  warehouseId={warehouseId}
+                  label={label}
+                  open={expanded.has(label)}
+                  onToggle={() => toggle(label)}
+                  selectedTable={selectedNs === label ? selectedTable : null}
+                  onSelectTable={(t) => {
+                    setSelectedNs(label);
+                    setSelectedTable(t);
+                  }}
+                />
               );
             })
           )}
         </div>
       </Card>
 
-      {/* Tables */}
       <Card className="overflow-hidden">
-        <ColHeader icon={Table2} title="Tables" count={(tabulars.data ?? []).length} show={!!selectedNs} />
-        <div className="max-h-[440px] overflow-y-auto">
-          {!selectedNs ? (
-            <BrowseEmpty icon={Table2}>Select a namespace.</BrowseEmpty>
-          ) : tabulars.isLoading ? (
-            <BrowseEmpty>Loading…</BrowseEmpty>
-          ) : (tabulars.data ?? []).length === 0 ? (
-            <BrowseEmpty icon={Table2}>No tables in this namespace.</BrowseEmpty>
-          ) : (
-            (tabulars.data ?? []).map((t) => {
-              const active = selectedTable === t.name;
-              return (
-                <button key={t.name} onClick={() => setSelectedTable(t.name)} className={rowClass(active)}>
-                  <Table2 className={`h-4 w-4 shrink-0 ${active ? "text-primary" : "text-muted-foreground"}`} />
-                  <span className="flex-1 truncate">{t.name}</span>
-                  <Badge variant="outline" className="text-[10px] uppercase">{t.kind}</Badge>
-                </button>
-              );
-            })
-          )}
-        </div>
-      </Card>
-
-      {/* Schema */}
-      <Card className="overflow-hidden">
-        <ColHeader icon={Columns3} title="Schema" count={0} show={false} />
-        <CardContent className="pt-4">
-          {!selectedTable ? (
-            <BrowseEmpty icon={Columns3}>Select a table to view its schema.</BrowseEmpty>
-          ) : schema.isLoading ? (
-            <BrowseEmpty>Loading…</BrowseEmpty>
-          ) : schema.data ? (
-            <div className="space-y-4">
-              <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                <span>{selectedNs}</span>
-                <ChevronRight className="h-3 w-3" />
-                <span className="font-medium text-foreground">{selectedTable}</span>
-              </div>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Name</TableHead>
-                    <TableHead>Type</TableHead>
-                    <TableHead className="text-right">Required</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {schema.data.columns.map((col) => (
-                    <TableRow key={col.name}>
-                      <TableCell className="font-mono">{col.name}</TableCell>
-                      <TableCell>
-                        <Badge variant="secondary" className="font-mono font-normal">{col.type}</Badge>
-                      </TableCell>
-                      <TableCell className="text-right">
-                        {col.required ? (
-                          <Check className="ml-auto h-4 w-4 text-teal-600" />
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-              {schema.data.partitionBy.length > 0 && (
-                <div className="flex flex-wrap items-center gap-2 text-sm">
-                  <span className="text-muted-foreground">Partitioned by:</span>
-                  {schema.data.partitionBy.map((p) => (
-                    <Badge key={p} variant="outline">{p}</Badge>
-                  ))}
-                </div>
-              )}
-              {schema.data.sortBy.length > 0 && (
-                <div className="flex flex-wrap items-center gap-2 text-sm">
-                  <span className="text-muted-foreground">Sorted by:</span>
-                  {schema.data.sortBy.map((srt) => (
-                    <Badge key={srt} variant="outline">{srt}</Badge>
-                  ))}
-                </div>
-              )}
-            </div>
-          ) : null}
-        </CardContent>
+        {selectedNs && selectedTable ? (
+          <TableDetailView warehouseId={warehouseId} namespace={selectedNs} table={selectedTable} />
+        ) : (
+          <div className="flex min-h-[320px] flex-col items-center justify-center gap-2 p-6 text-sm text-muted-foreground">
+            <Table2 className="h-8 w-8 opacity-30" />
+            <span>Select a table to view its details.</span>
+          </div>
+        )}
       </Card>
     </div>
   );
 }
 
-function ColHeader({
-  icon: Icon,
-  title,
-  count,
-  show,
+function NsNode({
+  warehouseId,
+  label,
+  open,
+  onToggle,
+  selectedTable,
+  onSelectTable,
 }: {
-  icon: typeof Database;
-  title: string;
-  count: number;
-  show: boolean;
+  warehouseId: string;
+  label: string;
+  open: boolean;
+  onToggle: () => void;
+  selectedTable: string | null;
+  onSelectTable: (t: string) => void;
 }) {
+  const tabulars = useQuery<Tabular[], ApiError>({
+    queryKey: ["cp", "browse", warehouseId, "tables", label],
+    queryFn: () => listTabulars(warehouseId, label),
+    enabled: open,
+    retry: false,
+  });
   return (
-    <div className="flex items-center gap-2 border-b bg-muted/30 px-4 py-2.5">
-      <Icon className="h-4 w-4 text-muted-foreground" />
-      <span className="text-sm font-medium">{title}</span>
-      {show && <span className="ml-auto text-xs text-muted-foreground">{count}</span>}
+    <div>
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-sm transition-colors hover:bg-muted"
+      >
+        {open ? (
+          <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+        ) : (
+          <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+        )}
+        <Database className="h-4 w-4 shrink-0 text-muted-foreground" />
+        <span className="truncate">{label}</span>
+      </button>
+      {open && (
+        <div className="pb-1">
+          {tabulars.isLoading ? (
+            <p className="px-9 py-1.5 text-xs text-muted-foreground">Loading…</p>
+          ) : (tabulars.data ?? []).length === 0 ? (
+            <p className="px-9 py-1.5 text-xs text-muted-foreground">No tables.</p>
+          ) : (
+            (tabulars.data ?? []).map((t) => {
+              const active = selectedTable === t.name;
+              return (
+                <button
+                  key={t.name}
+                  type="button"
+                  onClick={() => onSelectTable(t.name)}
+                  className={`flex w-full items-center gap-2 border-l-2 py-1.5 pl-9 pr-3 text-left text-sm transition-colors ${
+                    active
+                      ? "border-primary bg-primary/10 font-medium text-primary"
+                      : "border-transparent hover:bg-muted"
+                  }`}
+                >
+                  <Table2 className={`h-3.5 w-3.5 shrink-0 ${active ? "text-primary" : "text-muted-foreground"}`} />
+                  <span className="flex-1 truncate">{t.name}</span>
+                  {t.kind === "view" && (
+                    <Badge variant="outline" className="text-[10px] uppercase">view</Badge>
+                  )}
+                </button>
+              );
+            })
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TableDetailView({
+  warehouseId,
+  namespace,
+  table,
+}: {
+  warehouseId: string;
+  namespace: string;
+  table: string;
+}) {
+  const detail = useQuery<TableDetail, ApiError>({
+    queryKey: ["cp", "browse", warehouseId, "detail", namespace, table],
+    queryFn: () => loadTableDetail(warehouseId, namespace, table),
+    retry: false,
+  });
+  const d = detail.data;
+  const transform = (t: string, col: string) => (t === "identity" ? col : `${t}(${col})`);
+
+  return (
+    <div>
+      <div className="border-b p-5">
+        <div className="flex items-center gap-1 text-xs text-muted-foreground">
+          <span>{namespace}</span>
+          <ChevronRight className="h-3 w-3" />
+          <span className="font-medium text-foreground">{table}</span>
+        </div>
+        <h3 className="mt-1 flex items-center gap-2 text-lg font-semibold">
+          <Table2 className="h-5 w-5 text-primary" />
+          {table}
+        </h3>
+        {d && (
+          <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+            <Fact2 label="Format" value={`v${d.formatVersion}`} />
+            <Fact2 label="Columns" value={String(d.columns.length)} />
+            <Fact2 label="Snapshots" value={String(d.snapshotCount)} />
+            <Fact2 label="Updated" value={new Date(d.lastUpdatedMs).toLocaleString()} />
+            <div className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+              <span className="text-xs uppercase tracking-wide">Location</span>
+              <code className="max-w-[260px] truncate font-mono text-xs text-foreground">{d.location}</code>
+              <CopyButton value={d.location} />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {detail.isLoading ? (
+        <p className="p-6 text-center text-sm text-muted-foreground">Loading…</p>
+      ) : d ? (
+        <Tabs defaultValue="schema" className="p-5">
+          <TabsList>
+            <TabsTrigger value="schema">
+              <Columns3 className="h-4 w-4" />
+              Schema
+            </TabsTrigger>
+            <TabsTrigger value="properties">
+              <FileText className="h-4 w-4" />
+              Properties
+            </TabsTrigger>
+            <TabsTrigger value="snapshots">
+              <History className="h-4 w-4" />
+              Snapshots
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="schema" className="mt-4 space-y-4">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead className="text-right">Required</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {d.columns.map((col) => (
+                  <TableRow key={col.name}>
+                    <TableCell className="font-mono">{col.name}</TableCell>
+                    <TableCell>
+                      <Badge variant="secondary" className="font-mono font-normal">{col.type}</Badge>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {col.required ? (
+                        <Check className="ml-auto h-4 w-4 text-teal-600" />
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+            {d.partitionFields.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="text-muted-foreground">Partitioned by:</span>
+                {d.partitionFields.map((pf) => (
+                  <Badge key={pf.name} variant="outline">{transform(pf.transform, pf.sourceColumn)}</Badge>
+                ))}
+              </div>
+            )}
+            {d.sortFields.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="text-muted-foreground">Sorted by:</span>
+                {d.sortFields.map((sf, i) => (
+                  <Badge key={i} variant="outline">
+                    {transform(sf.transform, sf.column)} {sf.direction}
+                  </Badge>
+                ))}
+              </div>
+            )}
+          </TabsContent>
+
+          <TabsContent value="properties" className="mt-4">
+            {Object.keys(d.properties).length === 0 ? (
+              <p className="py-6 text-center text-sm text-muted-foreground">No table properties.</p>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Key</TableHead>
+                    <TableHead>Value</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {Object.entries(d.properties).map(([k, v]) => (
+                    <TableRow key={k}>
+                      <TableCell className="font-mono text-muted-foreground">{k}</TableCell>
+                      <TableCell className="break-all font-mono">{v}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </TabsContent>
+
+          <TabsContent value="snapshots" className="mt-4">
+            {d.snapshots.length === 0 ? (
+              <p className="py-6 text-center text-sm text-muted-foreground">No snapshots yet.</p>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Snapshot</TableHead>
+                    <TableHead>Operation</TableHead>
+                    <TableHead>When</TableHead>
+                    <TableHead className="text-right">Records</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {d.snapshots.map((snap) => (
+                    <TableRow key={snap.snapshotId}>
+                      <TableCell className="font-mono text-xs">
+                        {snap.snapshotId}
+                        {snap.snapshotId === d.currentSnapshotId && (
+                          <Badge variant="secondary" className="ml-2 text-[10px]">current</Badge>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline">{snap.operation}</Badge>
+                      </TableCell>
+                      <TableCell className="text-sm text-muted-foreground">
+                        {new Date(snap.timestampMs).toLocaleString()}
+                      </TableCell>
+                      <TableCell className="text-right font-mono text-xs">
+                        {snap.summary["added-records"] ?? snap.summary["total-records"] ?? "—"}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </TabsContent>
+        </Tabs>
+      ) : (
+        <p className="p-6 text-center text-sm text-destructive">Failed to load table detail.</p>
+      )}
+    </div>
+  );
+}
+
+function Fact2({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center gap-1.5 text-muted-foreground">
+      <span className="text-xs uppercase tracking-wide">{label}</span>
+      <span className="text-foreground">{value}</span>
     </div>
   );
 }

@@ -29,14 +29,27 @@ describe("WarehouseDetail browse", () => {
     vi.mocked(api.listClients).mockResolvedValue([]);
     vi.mocked(api.listNamespaces).mockResolvedValue([{ parts: ["analytics"] }]);
     vi.mocked(api.listTabulars).mockResolvedValue([{ name: "events", kind: "table" }]);
-    vi.mocked(api.loadSchema).mockResolvedValue({ columns: [{ name: "id", type: "long", required: true }], partitionBy: [], sortBy: [] });
+    vi.mocked(api.loadTableDetail).mockResolvedValue({
+      location: "s3://bucket/t",
+      formatVersion: 2,
+      lastUpdatedMs: 0,
+      currentSnapshotId: null,
+      snapshotCount: 0,
+      columns: [{ name: "id", type: "long", required: true }],
+      partitionFields: [],
+      sortFields: [],
+      properties: {},
+      snapshots: [],
+    });
   });
   test("browse namespaces -> tables -> schema", async () => {
     const user = userEvent.setup();
     renderAt();
     await user.click(await screen.findByRole("tab", { name: /Browse/ }));
+    // Click the namespace to expand it, then its table.
     await user.click(await screen.findByText("analytics"));
     await user.click(await screen.findByText("events"));
+    // Table detail loads with the schema tab showing the column.
     expect(await screen.findByText("id")).toBeInTheDocument();
     expect(screen.getByText("long")).toBeInTheDocument();
   });

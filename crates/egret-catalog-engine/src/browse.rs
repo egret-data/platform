@@ -39,10 +39,39 @@ pub struct ColumnInfo {
     pub required: bool,
 }
 
-pub struct TableSchema {
+pub struct PartitionField {
+    pub name: String,
+    pub source_column: String,
+    pub transform: String,
+}
+
+pub struct SortField {
+    pub column: String,
+    pub transform: String,
+    pub direction: String,
+    pub null_order: String,
+}
+
+pub struct SnapshotInfo {
+    pub snapshot_id: i64,
+    pub parent_snapshot_id: Option<i64>,
+    pub timestamp_ms: i64,
+    pub operation: String,
+    pub summary: std::collections::BTreeMap<String, String>,
+}
+
+/// A UI-friendly projection of a table's current metadata (no query execution).
+pub struct TableDetail {
+    pub location: String,
+    pub format_version: u8,
+    pub last_updated_ms: i64,
+    pub current_snapshot_id: Option<i64>,
+    pub snapshot_count: usize,
     pub columns: Vec<ColumnInfo>,
-    pub partition_by: Vec<String>,
-    pub sort_by: Vec<String>,
+    pub partition_fields: Vec<PartitionField>,
+    pub sort_fields: Vec<SortField>,
+    pub properties: std::collections::BTreeMap<String, String>,
+    pub snapshots: Vec<SnapshotInfo>,
 }
 
 fn prefix(warehouse_id: &str) -> Prefix {
@@ -170,15 +199,16 @@ fn list_query(page_token: PageToken) -> ListTablesQuery {
     }
 }
 
-/// Load a table's current schema: columns (name/type/required) + the partition
-/// and sort column names.
-pub async fn load_table_schema(
+/// Load a UI-friendly projection of a table's current metadata: schema columns,
+/// partition/sort fields (with transforms), location, format version, properties,
+/// and snapshot history — all from the metadata the load already returns.
+pub async fn load_table_detail(
     engine_state: ApiContext<EngineState>,
     system_user: &str,
     warehouse_id: &str,
     namespace: &[String],
     table: &str,
-) -> anyhow::Result<TableSchema> {
+) -> anyhow::Result<TableDetail> {
     let ident = TableIdent {
         namespace: NamespaceIdent::from_vec(namespace.to_vec())
             .map_err(|e| anyhow::anyhow!("namespace ident: {e:?}"))?,
@@ -225,22 +255,61 @@ pub async fn load_table_schema(
             .map(|f| f.name.clone())
             .unwrap_or_else(|| id.to_string())
     };
-    let partition_by = md
+    let partition_fields = md
         .default_partition_spec()
         .fields()
         .iter()
-        .map(|pf| col_name(pf.source_id))
+        .map(|pf| PartitionField {
+            name: pf.name.clone(),
+            source_column: col_name(pf.source_id),
+            transform: pf.transform.to_string(),
+        })
         .collect();
-    let sort_by = md
+    let sort_fields = md
         .default_sort_order()
         .fields
         .iter()
-        .map(|sf| col_name(sf.source_id))
+        .map(|sf| SortField {
+            column: col_name(sf.source_id),
+            transform: sf.transform.to_string(),
+            direction: sf.direction.to_string(),
+            null_order: sf.null_order.to_string(),
+        })
         .collect();
 
-    Ok(TableSchema {
+    let properties = md
+        .properties()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    let mut snapshots: Vec<SnapshotInfo> = md
+        .snapshots()
+        .map(|s| SnapshotInfo {
+            snapshot_id: s.snapshot_id(),
+            parent_snapshot_id: s.parent_snapshot_id(),
+            timestamp_ms: s.timestamp_ms(),
+            operation: s.summary().operation.as_str().to_string(),
+            summary: s
+                .summary()
+                .additional_properties
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        })
+        .collect();
+    snapshots.sort_by_key(|s| std::cmp::Reverse(s.timestamp_ms));
+
+    Ok(TableDetail {
+        location: md.location().to_string(),
+        format_version: md.format_version() as u8,
+        last_updated_ms: md.last_updated_ms(),
+        current_snapshot_id: md.current_snapshot_id(),
+        snapshot_count: md.snapshots().count(),
         columns,
-        partition_by,
-        sort_by,
+        partition_fields,
+        sort_fields,
+        properties,
+        snapshots,
     })
 }

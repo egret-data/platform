@@ -50,10 +50,36 @@ pub struct BrowseColumn {
     pub type_: String,
     pub required: bool,
 }
-pub struct BrowseSchema {
+pub struct BrowsePartition {
+    pub name: String,
+    pub source_column: String,
+    pub transform: String,
+}
+pub struct BrowseSort {
+    pub column: String,
+    pub transform: String,
+    pub direction: String,
+    pub null_order: String,
+}
+pub struct BrowseSnapshot {
+    pub snapshot_id: i64,
+    pub parent_snapshot_id: Option<i64>,
+    pub timestamp_ms: i64,
+    pub operation: String,
+    pub summary: std::collections::BTreeMap<String, String>,
+}
+/// Rich, UI-friendly table detail (schema + partition/sort + location + props + snapshots).
+pub struct BrowseTableDetail {
+    pub location: String,
+    pub format_version: u8,
+    pub last_updated_ms: i64,
+    pub current_snapshot_id: Option<i64>,
+    pub snapshot_count: usize,
     pub columns: Vec<BrowseColumn>,
-    pub partition_by: Vec<String>,
-    pub sort_by: Vec<String>,
+    pub partition_fields: Vec<BrowsePartition>,
+    pub sort_fields: Vec<BrowseSort>,
+    pub properties: std::collections::BTreeMap<String, String>,
+    pub snapshots: Vec<BrowseSnapshot>,
 }
 
 /// Reads catalog structure (namespaces/tables/schema) from the embedded
@@ -75,7 +101,7 @@ pub trait WarehouseBrowser: Send + Sync {
         lakekeeper_warehouse_id: &str,
         namespace: &[String],
         table: &str,
-    ) -> Result<BrowseSchema, String>;
+    ) -> Result<BrowseTableDetail, String>;
 }
 
 pub fn router() -> Router<CpState> {
@@ -475,10 +501,44 @@ struct ColumnDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct PartitionDto {
+    name: String,
+    source_column: String,
+    transform: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SortDto {
+    column: String,
+    transform: String,
+    direction: String,
+    null_order: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotDto {
+    snapshot_id: i64,
+    parent_snapshot_id: Option<i64>,
+    timestamp_ms: i64,
+    operation: String,
+    summary: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SchemaDto {
+    location: String,
+    format_version: u8,
+    last_updated_ms: i64,
+    current_snapshot_id: Option<i64>,
+    snapshot_count: usize,
     columns: Vec<ColumnDto>,
-    partition_by: Vec<String>,
-    sort_by: Vec<String>,
+    partition_fields: Vec<PartitionDto>,
+    sort_fields: Vec<SortDto>,
+    properties: std::collections::BTreeMap<String, String>,
+    snapshots: Vec<SnapshotDto>,
 }
 
 /// Split a dot-delimited namespace string into its parts.
@@ -547,12 +607,17 @@ async fn browse_schema(
     require_platform_admin(&p)?;
     let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
     let b = st.browser.as_ref().ok_or(CpError::NotFound)?;
-    let schema = b
+    let d = b
         .schema(&lk, &parse_ns(&ns), &table)
         .await
         .map_err(|e| CpError::BadRequest(format!("browse: {e}")))?;
     Ok(Json(SchemaDto {
-        columns: schema
+        location: d.location,
+        format_version: d.format_version,
+        last_updated_ms: d.last_updated_ms,
+        current_snapshot_id: d.current_snapshot_id,
+        snapshot_count: d.snapshot_count,
+        columns: d
             .columns
             .into_iter()
             .map(|c| ColumnDto {
@@ -561,7 +626,36 @@ async fn browse_schema(
                 required: c.required,
             })
             .collect(),
-        partition_by: schema.partition_by,
-        sort_by: schema.sort_by,
+        partition_fields: d
+            .partition_fields
+            .into_iter()
+            .map(|p| PartitionDto {
+                name: p.name,
+                source_column: p.source_column,
+                transform: p.transform,
+            })
+            .collect(),
+        sort_fields: d
+            .sort_fields
+            .into_iter()
+            .map(|s| SortDto {
+                column: s.column,
+                transform: s.transform,
+                direction: s.direction,
+                null_order: s.null_order,
+            })
+            .collect(),
+        properties: d.properties,
+        snapshots: d
+            .snapshots
+            .into_iter()
+            .map(|s| SnapshotDto {
+                snapshot_id: s.snapshot_id,
+                parent_snapshot_id: s.parent_snapshot_id,
+                timestamp_ms: s.timestamp_ms,
+                operation: s.operation,
+                summary: s.summary,
+            })
+            .collect(),
     }))
 }
