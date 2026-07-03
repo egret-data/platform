@@ -29,6 +29,7 @@ import DatabasesPage from "@/routes/explore/DatabasesPage";
 import { Placeholder } from "@/routes/Placeholder";
 import ControlPlaneEngines from "@/routes/control-plane/ControlPlaneEngines";
 import ControlPlaneStorage from "@/routes/control-plane/ControlPlaneStorage";
+import StorageBrowser from "@/routes/control-plane/StorageBrowser";
 import ControlPlaneSecrets from "@/routes/control-plane/ControlPlaneSecrets";
 import Warehouses from "@/routes/control-plane/Warehouses";
 import WarehouseDetail from "@/routes/control-plane/WarehouseDetail";
@@ -85,6 +86,7 @@ function ControlPlaneRoutes() {
           <Route path="warehouses" element={<Warehouses />} />
           <Route path="warehouses/:id" element={<WarehouseDetail />} />
           <Route path="storage" element={<ControlPlaneStorage />} />
+          <Route path="storage/:id/browse" element={<StorageBrowser />} />
           <Route path="secrets" element={<ControlPlaneSecrets />} />
           <Route path="users" element={<Placeholder title="Users" />} />
           <Route path="*" element={<Navigate to="workspaces" replace />} />
