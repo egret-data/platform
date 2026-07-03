@@ -67,9 +67,16 @@ print(t.scan().to_arrow().num_rows)   # 3 — data lands in s3://<bucket>/... on
 
 ## Notes
 
-- **Access delegation**: warehouses are provisioned with STS and remote-signing
-  **disabled** — the embedded mount doesn't expose the S3 signer endpoint, so
-  clients use the direct access-key credential they configure.
+- **Access delegation**: warehouses are provisioned with **STS enabled**
+  (remote-signing stays off — the embedded mount exposes no signer endpoint). A
+  client that sends `X-Iceberg-Access-Delegation: vended-credentials` gets
+  **short-lived S3 credentials downscoped to just the table it loaded** (lakekeeper
+  calls AssumeRole on the S3 endpoint; MinIO needs no role-arn). Enable it with
+  `iceberg.rest-catalog.vended-credentials-enabled=true` (Trino),
+  `"iceberg.catalog.vended-credentials-enabled" = "true"` (StarRocks 4.0+), or
+  `"header.X-Iceberg-Access-Delegation": "vended-credentials"` (pyiceberg) — then the
+  static `s3.*` keys below are no longer required. Clients that don't request
+  delegation still fall back to their own access-key credential.
 - **Advertised `uri`**: lakekeeper hardcodes `http://localhost:8181` in `/config`;
   egret rewrites it to the request's `Host`, so both host and container clients
   get a reachable catalog uri.
