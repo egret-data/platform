@@ -86,6 +86,78 @@ pub fn router() -> Router<CpState> {
     Router::new()
         .route("/storage", get(list).post(create))
         .route("/storage/{id}", get(detail).put(update).delete(remove))
+        .route("/storage/{id}/objects", get(browse_objects))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ListingDto {
+    folders: Vec<String>,
+    objects: Vec<ObjectDto>,
+}
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ObjectDto {
+    key: String,
+    size: i64,
+    last_modified: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct BrowseQuery {
+    #[serde(default)]
+    prefix: String,
+}
+
+/// Browse the objects/folders in a storage connection's bucket (folder-style).
+async fn browse_objects(
+    State(st): State<CpState>,
+    Auth(principal): Auth,
+    Path(id): Path<Uuid>,
+    axum::extract::Query(bq): axum::extract::Query<BrowseQuery>,
+) -> Result<Json<ListingDto>, CpError> {
+    require_platform_admin(&principal)?;
+    let conn = st
+        .storage
+        .get_storage_conn(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    let secret_key = match conn.secret_ref {
+        Some(ref_id) => st
+            .secrets
+            .resolve_plaintext(None, ref_id)
+            .await
+            .map_err(|e| CpError::BadRequest(format!("resolve secret: {e}")))?,
+        None => return Err(CpError::BadRequest("connection has no secret".into())),
+    };
+    let cfg = egret_storage::StorageConfig {
+        endpoint: conn.endpoint.clone(),
+        region: conn.region.clone(),
+        bucket: conn.bucket.clone(),
+        access_key: conn.access_key.clone(),
+        secret_key,
+        path_style: conn.path_style,
+    };
+    let store = egret_storage::S3Store::new(&cfg)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("open storage: {e}")))?;
+    use egret_storage::ObjectStore as _;
+    let listing = store
+        .list(&bq.prefix, Some("/"))
+        .await
+        .map_err(|e| CpError::BadRequest(format!("list objects: {e}")))?;
+    Ok(Json(ListingDto {
+        folders: listing.folders,
+        objects: listing
+            .objects
+            .into_iter()
+            .map(|o| ObjectDto {
+                key: o.key,
+                size: o.size,
+                last_modified: o.last_modified,
+            })
+            .collect(),
+    }))
 }
 
 /// Resolve the connection's `secret_ref`: a `new_secret` mints a new GLOBAL

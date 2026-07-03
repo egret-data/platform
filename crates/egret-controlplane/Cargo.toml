@@ -8,6 +8,7 @@ license.workspace = true
 egret-core.workspace = true
 egret-auth.workspace = true
 egret-catalog.workspace = true
+egret-storage.workspace = true
 async-trait.workspace = true
 egret-secrets.workspace = true
 egret-metastore.workspace = true

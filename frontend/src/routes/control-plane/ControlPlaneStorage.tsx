@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { HardDrive, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
+import { ChevronRight, File, Folder, FolderOpen, HardDrive, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 
 import {
   type Storage,
@@ -8,6 +8,7 @@ import {
   createStorage,
   updateStorage,
   deleteStorage,
+  browseStorageObjects,
   listSecrets,
   listStorage,
 } from "@/api/controlPlane";
@@ -75,6 +76,7 @@ export default function ControlPlaneStorage() {
   const [addOpen, setAddOpen] = useState(false);
   const [editing, setEditing] = useState<Storage | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Storage | null>(null);
+  const [browseTarget, setBrowseTarget] = useState<Storage | null>(null);
 
   const rows = conns.data ?? [];
 
@@ -161,6 +163,15 @@ export default function ControlPlaneStorage() {
                       <Button
                         variant="ghost"
                         size="sm"
+                        onClick={() => setBrowseTarget(conn)}
+                        aria-label={`Browse ${conn.name}`}
+                      >
+                        <FolderOpen className="h-4 w-4" />
+                        Browse
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
                         onClick={() => {
                           setEditing(conn);
                           setAddOpen(true);
@@ -191,6 +202,8 @@ export default function ControlPlaneStorage() {
 
       <AddStorageDialog open={addOpen} onOpenChange={setAddOpen} editing={editing} />
 
+      <StorageBrowserDialog conn={browseTarget} onClose={() => setBrowseTarget(null)} />
+
       <ConfirmDeleteDialog
         open={deleteTarget !== null}
         onOpenChange={(o) => {
@@ -212,6 +225,106 @@ export default function ControlPlaneStorage() {
 // Sentinel <Select> values that must not collide with a real secret id.
 const NO_SECRET = "__none__";
 const NEW_SECRET = "__new__";
+
+function StorageBrowserDialog({
+  conn,
+  onClose,
+}: {
+  conn: Storage | null;
+  onClose: () => void;
+}) {
+  const [prefix, setPrefix] = useState("");
+  useEffect(() => {
+    if (conn) setPrefix("");
+  }, [conn]);
+  const listing = useQuery({
+    queryKey: ["cp", "storage-objects", conn?.id, prefix],
+    queryFn: () => browseStorageObjects(conn!.id, prefix),
+    enabled: !!conn,
+    retry: false,
+  });
+  const parts = prefix.split("/").filter(Boolean);
+  const fmtSize = (n: number) => {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  };
+  const folders = listing.data?.folders ?? [];
+  const objects = listing.data?.objects ?? [];
+
+  return (
+    <Dialog open={!!conn} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-3xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <FolderOpen className="h-5 w-5 text-muted-foreground" />
+            {conn?.name}
+          </DialogTitle>
+          <DialogDescription className="font-mono text-xs">{conn?.bucket}</DialogDescription>
+        </DialogHeader>
+
+        <div className="flex flex-wrap items-center gap-1 text-sm">
+          <button
+            type="button"
+            className="text-primary hover:underline"
+            onClick={() => setPrefix("")}
+          >
+            {conn?.bucket}
+          </button>
+          {parts.map((part, i) => (
+            <span key={i} className="flex items-center gap-1">
+              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+              <button
+                type="button"
+                className="text-primary hover:underline"
+                onClick={() => setPrefix(parts.slice(0, i + 1).join("/") + "/")}
+              >
+                {part}
+              </button>
+            </span>
+          ))}
+        </div>
+
+        <div className="max-h-[440px] overflow-y-auto rounded-lg border">
+          {listing.isLoading ? (
+            <p className="py-10 text-center text-sm text-muted-foreground">Loading…</p>
+          ) : listing.isError ? (
+            <p className="py-10 text-center text-sm text-destructive">
+              {(listing.error as ApiError).message}
+            </p>
+          ) : folders.length === 0 && objects.length === 0 ? (
+            <p className="py-10 text-center text-sm text-muted-foreground">Empty.</p>
+          ) : (
+            <>
+              {folders.map((f) => (
+                <button
+                  key={f}
+                  type="button"
+                  onClick={() => setPrefix(f)}
+                  className="flex w-full items-center gap-2 border-b px-3 py-2 text-left text-sm last:border-b-0 hover:bg-muted"
+                >
+                  <Folder className="h-4 w-4 shrink-0 text-amber-500" />
+                  <span className="truncate">{f.slice(prefix.length).replace(/\/$/, "")}</span>
+                </button>
+              ))}
+              {objects.map((o) => (
+                <div
+                  key={o.key}
+                  className="flex items-center gap-2 border-b px-3 py-2 text-sm last:border-b-0"
+                >
+                  <File className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="flex-1 truncate font-mono text-xs">{o.key.slice(prefix.length)}</span>
+                  <span className="shrink-0 text-xs text-muted-foreground">{fmtSize(o.size)}</span>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 function AddStorageDialog({
   open,
