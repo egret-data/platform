@@ -496,8 +496,12 @@ export function listEngines(): Promise<Engine[]> {
   return apiJson<Engine[]>("/control-plane/engines");
 }
 
-export function getEngine(id: string): Promise<Engine & { status: EngineStatus }> {
-  return apiJson<Engine & { status: EngineStatus }>(`/control-plane/engines/${id}`);
+export function getEngine(
+  id: string,
+): Promise<Omit<Engine, "status"> & { status: EngineStatus }> {
+  return apiJson<Omit<Engine, "status"> & { status: EngineStatus }>(
+    `/control-plane/engines/${id}`,
+  );
 }
 
 export function createEngine(input: CreateEngineInput): Promise<Engine> {
