@@ -1,7 +1,23 @@
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, KeyRound, Loader2, Plus, ShieldCheck, Trash2 } from "lucide-react";
+import {
+  ArrowLeft,
+  Boxes,
+  Building2,
+  Check,
+  ChevronRight,
+  Columns3,
+  Copy,
+  Database,
+  HardDrive,
+  KeyRound,
+  Loader2,
+  Plus,
+  ShieldCheck,
+  Table2,
+  Trash2,
+} from "lucide-react";
 
 import {
   type CatalogClient,
@@ -23,6 +39,7 @@ import {
   listGrants,
   listNamespaces,
   listRoles,
+  listStorage,
   listTabulars,
   loadSchema,
   revokeClient,
@@ -94,39 +111,166 @@ export default function WarehouseDetail() {
   });
 
   return (
-    <div className="space-y-4">
-      <div>
-        <Link
-          to="/control-plane/warehouses"
-          className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          Warehouses
-        </Link>
-        <h1 className="mt-1 text-2xl font-semibold">{warehouse.data?.name ?? "Warehouse"}</h1>
-        {warehouse.data?.lakekeeperWarehouseId && (
-          <p className="font-mono text-xs text-muted-foreground">
-            lakekeeper id: {warehouse.data.lakekeeperWarehouseId}
-          </p>
-        )}
-      </div>
+    <div className="space-y-5">
+      <Link
+        to="/control-plane/warehouses"
+        className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
+      >
+        <ArrowLeft className="h-4 w-4" />
+        Warehouses
+      </Link>
+
+      <WarehouseSummary warehouseId={id} warehouse={warehouse.data} />
 
       <Tabs defaultValue="roles">
         <TabsList>
-          <TabsTrigger value="roles">Roles &amp; grants</TabsTrigger>
-          <TabsTrigger value="clients">Catalog Clients</TabsTrigger>
-          <TabsTrigger value="browse">Browse</TabsTrigger>
+          <TabsTrigger value="roles">
+            <ShieldCheck className="h-4 w-4" />
+            Roles &amp; grants
+          </TabsTrigger>
+          <TabsTrigger value="clients">
+            <KeyRound className="h-4 w-4" />
+            Catalog Clients
+          </TabsTrigger>
+          <TabsTrigger value="browse">
+            <Database className="h-4 w-4" />
+            Browse
+          </TabsTrigger>
         </TabsList>
-        <TabsContent value="roles">
+        <TabsContent value="roles" className="mt-4">
           <RolesTab warehouseId={id} />
         </TabsContent>
-        <TabsContent value="clients">
+        <TabsContent value="clients" className="mt-4">
           <ClientsTab warehouseId={id} />
         </TabsContent>
-        <TabsContent value="browse">
+        <TabsContent value="browse" className="mt-4">
           <BrowseTab warehouseId={id} />
         </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+/** engine → teal, notebook → violet, external → amber. */
+function consumerDot(type: string): string {
+  if (type === "engine") return "bg-teal-500";
+  if (type === "notebook") return "bg-violet-500";
+  if (type === "external") return "bg-amber-500";
+  return "bg-muted-foreground";
+}
+
+function CopyButton({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      aria-label="Copy"
+      className="text-muted-foreground transition-colors hover:text-foreground"
+      onClick={() => {
+        void navigator.clipboard?.writeText(value);
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1200);
+      }}
+    >
+      {copied ? <Check className="h-3.5 w-3.5 text-teal-600" /> : <Copy className="h-3.5 w-3.5" />}
+    </button>
+  );
+}
+
+/** Warehouse summary band: identity + status + key facts + quick counts. */
+function WarehouseSummary({
+  warehouseId,
+  warehouse,
+}: {
+  warehouseId: string;
+  warehouse: Warehouse | undefined;
+}) {
+  const roles = useQuery({ queryKey: rolesKey(warehouseId), queryFn: () => listRoles(warehouseId), retry: false });
+  const clients = useQuery({ queryKey: clientsKey(warehouseId), queryFn: () => listClients(warehouseId), retry: false });
+  const namespaces = useQuery({ queryKey: ["cp", "browse", warehouseId, "ns"], queryFn: () => listNamespaces(warehouseId), retry: false });
+  const workspaces = useMyWorkspaces(true);
+  const storage = useQuery({ queryKey: ["control-plane", "storage"], queryFn: listStorage, retry: false });
+
+  const wsName = workspaces.data?.find((w) => w.id === warehouse?.workspaceId)?.name;
+  const storageName = storage.data?.find((s) => s.id === warehouse?.storageConnId)?.name;
+  const provisioned = !!warehouse?.lakekeeperWarehouseId;
+
+  const stats = [
+    { icon: ShieldCheck, label: "roles", value: roles.data?.length ?? 0 },
+    { icon: KeyRound, label: "clients", value: clients.data?.length ?? 0 },
+    { icon: Database, label: "namespaces", value: namespaces.data?.length ?? 0 },
+  ];
+
+  return (
+    <Card className="overflow-hidden">
+      <div className="flex flex-col gap-5 p-6 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <Boxes className="h-6 w-6" />
+            </div>
+            <div className="min-w-0">
+              <h1 className="truncate text-2xl font-semibold leading-tight">{warehouse?.name ?? "Warehouse"}</h1>
+              <Badge
+                variant="outline"
+                className={
+                  provisioned
+                    ? "mt-1 gap-1 border-teal-500/30 bg-teal-500/10 text-teal-700"
+                    : "mt-1 gap-1 border-amber-500/30 bg-amber-500/10 text-amber-700"
+                }
+              >
+                <span className={`h-1.5 w-1.5 rounded-full ${provisioned ? "bg-teal-500" : "bg-amber-500"}`} />
+                {provisioned ? "Provisioned" : "Pending"}
+              </Badge>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+            <Fact icon={Building2} label="Workspace" value={wsName ?? "—"} />
+            <Fact icon={HardDrive} label="Storage" value={storageName ?? "—"} />
+            {warehouse?.lakekeeperWarehouseId && (
+              <div className="flex items-center gap-1.5 text-muted-foreground">
+                <span className="text-xs uppercase tracking-wide">Lakekeeper</span>
+                <code className="font-mono text-xs text-foreground">
+                  {warehouse.lakekeeperWarehouseId.slice(0, 8)}…
+                </code>
+                <CopyButton value={warehouse.lakekeeperWarehouseId} />
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-3 gap-2 sm:gap-3">
+          {stats.map((s) => (
+            <div
+              key={s.label}
+              className="flex min-w-[76px] flex-col items-center rounded-lg border bg-muted/30 px-3 py-2"
+            >
+              <s.icon className="h-4 w-4 text-muted-foreground" />
+              <span className="mt-1 text-lg font-semibold leading-none">{s.value}</span>
+              <span className="text-xs text-muted-foreground">{s.label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function Fact({
+  icon: Icon,
+  label,
+  value,
+}: {
+  icon: typeof Building2;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="flex items-center gap-1.5 text-muted-foreground">
+      <Icon className="h-4 w-4" />
+      <span className="text-xs uppercase tracking-wide">{label}</span>
+      <span className="text-foreground">{value}</span>
     </div>
   );
 }
@@ -193,9 +337,16 @@ function RoleGrants({ role, warehouseId }: { role: CatalogRole; warehouseId: str
   return (
     <div className="rounded-lg border p-4">
       <div className="mb-3 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2.5">
+          <span
+            className={`h-2.5 w-2.5 shrink-0 rounded-full ${consumerDot(role.consumerType)}`}
+            title={role.consumerType}
+          />
           <span className="font-medium">{role.name}</span>
           <Badge variant="secondary">{role.consumerType}</Badge>
+          <span className="text-xs text-muted-foreground">
+            {rows.length} grant{rows.length === 1 ? "" : "s"}
+          </span>
         </div>
         <Button variant="outline" size="sm" onClick={() => setAddOpen(true)}>
           <Plus className="h-4 w-4" />
@@ -766,98 +917,100 @@ function BrowseTab({ warehouseId }: { warehouseId: string }) {
     setSelectedTable(null);
   }
 
+  const rowClass = (active: boolean) =>
+    `flex w-full items-center gap-2 border-l-2 px-4 py-2 text-left text-sm transition-colors ${
+      active
+        ? "border-primary bg-primary/10 font-medium text-primary"
+        : "border-transparent hover:bg-muted"
+    }`;
+
   return (
-    <div className="grid grid-cols-3 gap-4">
+    <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.5fr)]">
       {/* Namespaces */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Namespaces</CardTitle>
-        </CardHeader>
-        <CardContent className="p-0">
+      <Card className="overflow-hidden">
+        <ColHeader icon={Database} title="Namespaces" count={(namespaces.data ?? []).length} show />
+        <div className="max-h-[440px] overflow-y-auto">
           {namespaces.isLoading ? (
-            <p className="p-4 text-center text-sm text-muted-foreground">Loading…</p>
+            <BrowseEmpty>Loading…</BrowseEmpty>
           ) : (namespaces.data ?? []).length === 0 ? (
-            <p className="p-4 text-center text-sm text-muted-foreground">
-              This warehouse has no namespaces yet.
-            </p>
+            <BrowseEmpty icon={Database}>This warehouse has no namespaces yet.</BrowseEmpty>
           ) : (
-            <ul>
-              {(namespaces.data ?? []).map((ns) => {
-                const label = ns.parts.join(".");
-                return (
-                  <li
-                    key={label}
-                    className={`cursor-pointer px-4 py-2 text-sm hover:bg-muted ${selectedNs === label ? "bg-muted font-medium" : ""}`}
-                    onClick={() => handleNsSelect(label)}
-                  >
-                    {label}
-                  </li>
-                );
-              })}
-            </ul>
+            (namespaces.data ?? []).map((ns) => {
+              const label = ns.parts.join(".");
+              const active = selectedNs === label;
+              return (
+                <button key={label} onClick={() => handleNsSelect(label)} className={rowClass(active)}>
+                  <Database className={`h-4 w-4 shrink-0 ${active ? "text-primary" : "text-muted-foreground"}`} />
+                  <span className="truncate">{label}</span>
+                </button>
+              );
+            })
           )}
-        </CardContent>
+        </div>
       </Card>
 
       {/* Tables */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Tables</CardTitle>
-        </CardHeader>
-        <CardContent className="p-0">
+      <Card className="overflow-hidden">
+        <ColHeader icon={Table2} title="Tables" count={(tabulars.data ?? []).length} show={!!selectedNs} />
+        <div className="max-h-[440px] overflow-y-auto">
           {!selectedNs ? (
-            <p className="p-4 text-center text-sm text-muted-foreground">Select a namespace.</p>
+            <BrowseEmpty icon={Table2}>Select a namespace.</BrowseEmpty>
           ) : tabulars.isLoading ? (
-            <p className="p-4 text-center text-sm text-muted-foreground">Loading…</p>
+            <BrowseEmpty>Loading…</BrowseEmpty>
           ) : (tabulars.data ?? []).length === 0 ? (
-            <p className="p-4 text-center text-sm text-muted-foreground">
-              No tables in this namespace.
-            </p>
+            <BrowseEmpty icon={Table2}>No tables in this namespace.</BrowseEmpty>
           ) : (
-            <ul>
-              {(tabulars.data ?? []).map((t) => (
-                <li
-                  key={t.name}
-                  className={`flex cursor-pointer items-center justify-between px-4 py-2 text-sm hover:bg-muted ${selectedTable === t.name ? "bg-muted font-medium" : ""}`}
-                  onClick={() => setSelectedTable(t.name)}
-                >
-                  <span>{t.name}</span>
-                  <Badge variant="outline">{t.kind}</Badge>
-                </li>
-              ))}
-            </ul>
+            (tabulars.data ?? []).map((t) => {
+              const active = selectedTable === t.name;
+              return (
+                <button key={t.name} onClick={() => setSelectedTable(t.name)} className={rowClass(active)}>
+                  <Table2 className={`h-4 w-4 shrink-0 ${active ? "text-primary" : "text-muted-foreground"}`} />
+                  <span className="flex-1 truncate">{t.name}</span>
+                  <Badge variant="outline" className="text-[10px] uppercase">{t.kind}</Badge>
+                </button>
+              );
+            })
           )}
-        </CardContent>
+        </div>
       </Card>
 
       {/* Schema */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Schema</CardTitle>
-        </CardHeader>
-        <CardContent>
+      <Card className="overflow-hidden">
+        <ColHeader icon={Columns3} title="Schema" count={0} show={false} />
+        <CardContent className="pt-4">
           {!selectedTable ? (
-            <p className="text-center text-sm text-muted-foreground">
-              Select a table to view its schema.
-            </p>
+            <BrowseEmpty icon={Columns3}>Select a table to view its schema.</BrowseEmpty>
           ) : schema.isLoading ? (
-            <p className="text-center text-sm text-muted-foreground">Loading…</p>
+            <BrowseEmpty>Loading…</BrowseEmpty>
           ) : schema.data ? (
             <div className="space-y-4">
+              <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                <span>{selectedNs}</span>
+                <ChevronRight className="h-3 w-3" />
+                <span className="font-medium text-foreground">{selectedTable}</span>
+              </div>
               <Table>
                 <TableHeader>
                   <TableRow>
                     <TableHead>Name</TableHead>
                     <TableHead>Type</TableHead>
-                    <TableHead>Required</TableHead>
+                    <TableHead className="text-right">Required</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {schema.data.columns.map((col) => (
                     <TableRow key={col.name}>
                       <TableCell className="font-mono">{col.name}</TableCell>
-                      <TableCell className="font-mono text-muted-foreground">{col.type}</TableCell>
-                      <TableCell>{col.required ? "yes" : "—"}</TableCell>
+                      <TableCell>
+                        <Badge variant="secondary" className="font-mono font-normal">{col.type}</Badge>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {col.required ? (
+                          <Check className="ml-auto h-4 w-4 text-teal-600" />
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -866,19 +1019,15 @@ function BrowseTab({ warehouseId }: { warehouseId: string }) {
                 <div className="flex flex-wrap items-center gap-2 text-sm">
                   <span className="text-muted-foreground">Partitioned by:</span>
                   {schema.data.partitionBy.map((p) => (
-                    <Badge key={p} variant="outline">
-                      {p}
-                    </Badge>
+                    <Badge key={p} variant="outline">{p}</Badge>
                   ))}
                 </div>
               )}
               {schema.data.sortBy.length > 0 && (
                 <div className="flex flex-wrap items-center gap-2 text-sm">
                   <span className="text-muted-foreground">Sorted by:</span>
-                  {schema.data.sortBy.map((s) => (
-                    <Badge key={s} variant="outline">
-                      {s}
-                    </Badge>
+                  {schema.data.sortBy.map((srt) => (
+                    <Badge key={srt} variant="outline">{srt}</Badge>
                   ))}
                 </div>
               )}
@@ -886,6 +1035,35 @@ function BrowseTab({ warehouseId }: { warehouseId: string }) {
           ) : null}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+function ColHeader({
+  icon: Icon,
+  title,
+  count,
+  show,
+}: {
+  icon: typeof Database;
+  title: string;
+  count: number;
+  show: boolean;
+}) {
+  return (
+    <div className="flex items-center gap-2 border-b bg-muted/30 px-4 py-2.5">
+      <Icon className="h-4 w-4 text-muted-foreground" />
+      <span className="text-sm font-medium">{title}</span>
+      {show && <span className="ml-auto text-xs text-muted-foreground">{count}</span>}
+    </div>
+  );
+}
+
+function BrowseEmpty({ icon: Icon, children }: { icon?: typeof Database; children: React.ReactNode }) {
+  return (
+    <div className="flex flex-col items-center gap-2 px-4 py-10 text-center text-sm text-muted-foreground">
+      {Icon && <Icon className="h-6 w-6 opacity-40" />}
+      <span>{children}</span>
     </div>
   );
 }
