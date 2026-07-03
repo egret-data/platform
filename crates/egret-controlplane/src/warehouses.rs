@@ -37,6 +37,44 @@ pub trait WarehouseProvisioner: Send + Sync {
     async fn provision(&self, name: &str, s3: &ProvisionS3) -> Result<String, String>;
 }
 
+/// Catalog browse result rows (control-plane DTOs; camelCase on the wire).
+pub struct BrowseNamespace {
+    pub parts: Vec<String>,
+}
+pub struct BrowseTabular {
+    pub name: String,
+    pub kind: String, // "table" | "view"
+}
+pub struct BrowseColumn {
+    pub name: String,
+    pub type_: String,
+    pub required: bool,
+}
+pub struct BrowseSchema {
+    pub columns: Vec<BrowseColumn>,
+    pub partition_by: Vec<String>,
+    pub sort_by: Vec<String>,
+}
+
+/// Reads catalog structure (namespaces/tables/schema) from the embedded
+/// lakekeeper. Implemented in egret-bin over the lakekeeper `ApiContext`
+/// (like `WarehouseProvisioner`). All args key by the lakekeeper warehouse id.
+#[async_trait::async_trait]
+pub trait WarehouseBrowser: Send + Sync {
+    async fn namespaces(&self, lakekeeper_warehouse_id: &str) -> Result<Vec<BrowseNamespace>, String>;
+    async fn tabulars(
+        &self,
+        lakekeeper_warehouse_id: &str,
+        namespace: &[String],
+    ) -> Result<Vec<BrowseTabular>, String>;
+    async fn schema(
+        &self,
+        lakekeeper_warehouse_id: &str,
+        namespace: &[String],
+        table: &str,
+    ) -> Result<BrowseSchema, String>;
+}
+
 pub fn router() -> Router<CpState> {
     Router::new()
         .route("/warehouses", get(list_warehouses).post(create_warehouse))

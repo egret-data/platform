@@ -59,6 +59,7 @@ async fn setup() -> Option<Fixture> {
         secrets: workspace_secrets,
         sessions: sessions.clone(),
         provisioner: None,
+        browser: None,
     });
 
     Some(Fixture {

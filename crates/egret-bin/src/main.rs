@@ -624,6 +624,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         secrets: workspace_secrets.clone(),
         sessions: sessions.clone(),
         provisioner: catalog_provisioner,
+        browser: None,
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).
