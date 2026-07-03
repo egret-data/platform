@@ -32,15 +32,11 @@ seed-demo:
 serve:
     cargo run -p egret-bin -- serve
 
-# Opt-in Trino-on-k8s e2e harness: kind cluster + Stackable operators + namespace (NOT in CI). See deploy/k8s/README.md
+# Opt-in Trino-on-k8s e2e harness: kind cluster + target namespace (NOT in CI). See deploy/k8s/README.md
 k8s-up:
     kind create cluster --name egret --config deploy/k8s/kind.yaml
-    helm repo add stackable-stable https://repo.stackable.tech/repository/helm-stable/
-    helm repo update
-    helm install --namespace stackable-operators --create-namespace commons-operator stackable-stable/commons-operator
-    helm install --namespace stackable-operators --create-namespace secret-operator stackable-stable/secret-operator
-    helm install --namespace stackable-operators --create-namespace listener-operator stackable-stable/listener-operator
-    helm install --namespace stackable-operators --create-namespace trino-operator stackable-stable/trino-operator
+    # Trino provisions as plain Deployments egret applies directly — no operator.
+    # StarRocks/RisingWave phases will add their own operators here later.
     kubectl create namespace egret-engines
 
 # Tear down the kind e2e cluster
