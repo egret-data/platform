@@ -1,0 +1,17 @@
+# kind cluster for the manual Trino-on-Kubernetes e2e harness.
+# Opt-in only — NOT used in CI. See deploy/k8s/README.md.
+#
+#   just k8s-up     # create cluster + install Stackable operators + namespace
+#   just k8s-down   # kind delete cluster --name egret
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    # Expose the Trino coordinator (NodePort) on the host so a local Trino
+    # CLI / egret can reach it without kubectl port-forward. The Stackable
+    # Trino coordinator listener defaults to a NodePort in the 30000-32767
+    # range; map one here and target it when wiring the CLI.
+    extraPortMappings:
+      - containerPort: 30678
+        hostPort: 30678
+        protocol: TCP
