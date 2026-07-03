@@ -11,6 +11,9 @@ import {
   type CreateRoleInput,
   type Grant,
   type GrantInput,
+  type Namespace,
+  type Schema,
+  type Tabular,
   type Warehouse,
   addGrant,
   createClient,
@@ -18,7 +21,10 @@ import {
   getWarehouse,
   listClients,
   listGrants,
+  listNamespaces,
   listRoles,
+  listTabulars,
+  loadSchema,
   revokeClient,
   revokeGrant,
 } from "@/api/controlPlane";
@@ -109,12 +115,16 @@ export default function WarehouseDetail() {
         <TabsList>
           <TabsTrigger value="roles">Roles &amp; grants</TabsTrigger>
           <TabsTrigger value="clients">Catalog Clients</TabsTrigger>
+          <TabsTrigger value="browse">Browse</TabsTrigger>
         </TabsList>
         <TabsContent value="roles">
           <RolesTab warehouseId={id} />
         </TabsContent>
         <TabsContent value="clients">
           <ClientsTab warehouseId={id} />
+        </TabsContent>
+        <TabsContent value="browse">
+          <BrowseTab warehouseId={id} />
         </TabsContent>
       </Tabs>
     </div>
@@ -698,6 +708,161 @@ function AddClientDialog({
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+// ── Browse (namespaces / tables / schema) ────────────────────────────────────
+
+function BrowseTab({ warehouseId }: { warehouseId: string }) {
+  const [selectedNs, setSelectedNs] = useState<string | null>(null);
+  const [selectedTable, setSelectedTable] = useState<string | null>(null);
+
+  const namespaces = useQuery<Namespace[], ApiError>({
+    queryKey: ["cp", "browse", warehouseId, "ns"],
+    queryFn: () => listNamespaces(warehouseId),
+    retry: false,
+  });
+
+  const tabulars = useQuery<Tabular[], ApiError>({
+    queryKey: ["cp", "browse", warehouseId, "tables", selectedNs],
+    queryFn: () => listTabulars(warehouseId, selectedNs!),
+    enabled: !!selectedNs,
+    retry: false,
+  });
+
+  const schema = useQuery<Schema, ApiError>({
+    queryKey: ["cp", "browse", warehouseId, "schema", selectedNs, selectedTable],
+    queryFn: () => loadSchema(warehouseId, selectedNs!, selectedTable!),
+    enabled: !!selectedNs && !!selectedTable,
+    retry: false,
+  });
+
+  function handleNsSelect(ns: string) {
+    setSelectedNs(ns);
+    setSelectedTable(null);
+  }
+
+  return (
+    <div className="grid grid-cols-3 gap-4">
+      {/* Namespaces */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Namespaces</CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          {namespaces.isLoading ? (
+            <p className="p-4 text-center text-sm text-muted-foreground">Loading…</p>
+          ) : (namespaces.data ?? []).length === 0 ? (
+            <p className="p-4 text-center text-sm text-muted-foreground">
+              This warehouse has no namespaces yet.
+            </p>
+          ) : (
+            <ul>
+              {(namespaces.data ?? []).map((ns) => {
+                const label = ns.parts.join(".");
+                return (
+                  <li
+                    key={label}
+                    className={`cursor-pointer px-4 py-2 text-sm hover:bg-muted ${selectedNs === label ? "bg-muted font-medium" : ""}`}
+                    onClick={() => handleNsSelect(label)}
+                  >
+                    {label}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Tables */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Tables</CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          {!selectedNs ? (
+            <p className="p-4 text-center text-sm text-muted-foreground">Select a namespace.</p>
+          ) : tabulars.isLoading ? (
+            <p className="p-4 text-center text-sm text-muted-foreground">Loading…</p>
+          ) : (tabulars.data ?? []).length === 0 ? (
+            <p className="p-4 text-center text-sm text-muted-foreground">
+              No tables in this namespace.
+            </p>
+          ) : (
+            <ul>
+              {(tabulars.data ?? []).map((t) => (
+                <li
+                  key={t.name}
+                  className={`flex cursor-pointer items-center justify-between px-4 py-2 text-sm hover:bg-muted ${selectedTable === t.name ? "bg-muted font-medium" : ""}`}
+                  onClick={() => setSelectedTable(t.name)}
+                >
+                  <span>{t.name}</span>
+                  <Badge variant="outline">{t.kind}</Badge>
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Schema */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Schema</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {!selectedTable ? (
+            <p className="text-center text-sm text-muted-foreground">
+              Select a table to view its schema.
+            </p>
+          ) : schema.isLoading ? (
+            <p className="text-center text-sm text-muted-foreground">Loading…</p>
+          ) : schema.data ? (
+            <div className="space-y-4">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Name</TableHead>
+                    <TableHead>Type</TableHead>
+                    <TableHead>Required</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {schema.data.columns.map((col) => (
+                    <TableRow key={col.name}>
+                      <TableCell className="font-mono">{col.name}</TableCell>
+                      <TableCell className="font-mono text-muted-foreground">{col.type}</TableCell>
+                      <TableCell>{col.required ? "yes" : "—"}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              {schema.data.partitionBy.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2 text-sm">
+                  <span className="text-muted-foreground">Partitioned by:</span>
+                  {schema.data.partitionBy.map((p) => (
+                    <Badge key={p} variant="outline">
+                      {p}
+                    </Badge>
+                  ))}
+                </div>
+              )}
+              {schema.data.sortBy.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2 text-sm">
+                  <span className="text-muted-foreground">Sorted by:</span>
+                  {schema.data.sortBy.map((s) => (
+                    <Badge key={s} variant="outline">
+                      {s}
+                    </Badge>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 
