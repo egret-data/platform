@@ -599,6 +599,114 @@ async fn create_and_get_engine() {
 }
 
 #[tokio::test]
+async fn engine_catalog_routes() {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_cat_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    // Create the engine (auto-wires the primary egret-warehouse catalog).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name,
+                "warehouseId": wh_id,
+                "coordinatorReplicas": 1,
+                "workerReplicas": 1,
+                "cpuMin": "1",
+                "cpuMax": "2",
+                "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // POST a tpch catalog → 201.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/catalogs"),
+            &token,
+            Some(serde_json::json!({ "name": "bench", "kind": "tpch", "config": {} })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "add tpch catalog; body={j}");
+    assert_eq!(j["kind"], "tpch", "catalog kind; body={j}");
+    assert_eq!(j["isPrimary"], false, "tpch is not primary; body={j}");
+    let tpch_id = j["id"].as_str().expect("tpch catalog id").to_string();
+
+    // GET → 2 catalogs, primary first.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/catalogs"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list catalogs; body={j}");
+    assert_eq!(
+        j.as_array().map(|a| a.len()),
+        Some(2),
+        "two catalogs; body={j}"
+    );
+    assert_eq!(j[0]["isPrimary"], true, "primary listed first; body={j}");
+    assert_eq!(j[0]["kind"], "egret-warehouse", "primary kind; body={j}");
+    let primary_id = j[0]["id"].as_str().expect("primary catalog id").to_string();
+
+    // DELETE the tpch catalog → 200.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/engines/{engine_id}/catalogs/{tpch_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "delete tpch catalog");
+
+    // DELETE the primary catalog → 400.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/engines/{engine_id}/catalogs/{primary_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "deleting the primary catalog must 400"
+    );
+}
+
+#[tokio::test]
 async fn create_engine_unprovisioned_warehouse_400() {
     let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
         eprintln!("skip: DATABASE_URL not set");
