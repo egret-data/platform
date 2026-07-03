@@ -95,9 +95,89 @@ pub fn trino_cluster_cr(spec: &EngineSpec) -> Value {
     })
 }
 
-/// Provisions a Trino engine via the Stackable operator (wired up in a later task).
-#[derive(Default)]
-pub struct TrinoProvisioner {}
+use crate::kube_client::KubeClient;
+use crate::provisioner::EngineProvisioner;
+use crate::spec::{EngineStatus, PodStatus};
+use std::sync::Arc;
+
+/// Provisions a Trino engine via the Stackable operator: applies a `Secret`, a
+/// `TrinoCatalog`, and a `TrinoCluster` (with rollback on partial failure).
+pub struct TrinoProvisioner {
+    kube: Arc<dyn KubeClient>,
+}
+
+impl TrinoProvisioner {
+    pub fn new(kube: Arc<dyn KubeClient>) -> Self {
+        Self { kube }
+    }
+}
+
+#[async_trait::async_trait]
+impl EngineProvisioner for TrinoProvisioner {
+    async fn provision(&self, spec: &EngineSpec) -> anyhow::Result<()> {
+        // Order: Secret -> Catalog -> Cluster. On any failure, best-effort delete
+        // what we applied so a partial cluster never lingers.
+        let secret = trino_secret(spec);
+        let catalog = trino_catalog_cr(spec);
+        let cluster = trino_cluster_cr(spec);
+        if let Err(e) = async {
+            self.kube.apply(&secret).await?;
+            self.kube.apply(&catalog).await?;
+            self.kube.apply(&cluster).await?;
+            anyhow::Ok(())
+        }
+        .await
+        {
+            let _ = self.delete(&spec.namespace, &spec.name).await;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    async fn status(&self, namespace: &str, name: &str) -> anyhow::Result<EngineStatus> {
+        let pods = self.kube.list_pods(namespace, name).await?;
+        let pod_status: Vec<PodStatus> = pods
+            .into_iter()
+            .map(|(name, phase, ready)| PodStatus { name, phase, ready })
+            .collect();
+        let phase = if pod_status.is_empty() {
+            "provisioning"
+        } else if pod_status.iter().all(|p| p.ready) {
+            "running"
+        } else if pod_status.iter().any(|p| p.phase == "Failed") {
+            "failed"
+        } else {
+            "provisioning"
+        };
+        Ok(EngineStatus {
+            phase: phase.into(),
+            message: None,
+            pods: pod_status,
+        })
+    }
+
+    async fn update(&self, spec: &EngineSpec) -> anyhow::Result<()> {
+        // Server-side apply is idempotent: re-applying is the update path.
+        self.kube.apply(&trino_secret(spec)).await?;
+        self.kube.apply(&trino_catalog_cr(spec)).await?;
+        self.kube.apply(&trino_cluster_cr(spec)).await?;
+        Ok(())
+    }
+
+    async fn delete(&self, namespace: &str, name: &str) -> anyhow::Result<()> {
+        let v = "trino.stackable.tech/v1alpha1";
+        let _ = self.kube.delete(v, "TrinoCluster", namespace, name).await;
+        let _ = self
+            .kube
+            .delete(v, "TrinoCatalog", namespace, &format!("{name}-egret"))
+            .await;
+        let _ = self
+            .kube
+            .delete("v1", "Secret", namespace, &format!("{name}-creds"))
+            .await;
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -181,5 +261,28 @@ mod tests {
             2
         );
         assert_eq!(cr["spec"]["image"]["productVersion"], "481");
+    }
+
+    #[tokio::test]
+    async fn provision_applies_secret_catalog_cluster() {
+        use crate::kube_client::FakeKube;
+        use std::sync::Arc;
+        let kube = Arc::new(FakeKube::default());
+        let p = TrinoProvisioner::new(kube.clone());
+        p.provision(&sample_spec()).await.unwrap();
+        let applied = kube.applied.lock().unwrap();
+        assert!(applied.contains_key("Secret/demo-creds"));
+        assert!(applied.contains_key("TrinoCatalog/demo-egret"));
+        assert!(applied.contains_key("TrinoCluster/demo"));
+    }
+
+    #[tokio::test]
+    async fn status_maps_pods_to_phase() {
+        use crate::kube_client::FakeKube;
+        use std::sync::Arc;
+        let p = TrinoProvisioner::new(Arc::new(FakeKube::default()));
+        let st = p.status("egret-engines", "demo").await.unwrap();
+        assert_eq!(st.phase, "running"); // fake returns a ready pod
+        assert_eq!(st.pods.len(), 1);
     }
 }
