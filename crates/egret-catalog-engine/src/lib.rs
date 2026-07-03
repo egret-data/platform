@@ -10,6 +10,7 @@
 
 /// Prod bootstrap of lakekeeper's default project using a stable admin principal
 /// derived from `catalog.system_user`.
+pub mod admin;
 pub mod bootstrap;
 pub mod browse;
 pub mod mount;
@@ -17,6 +18,10 @@ pub mod pool;
 pub mod recovery;
 pub mod warehouse;
 
+pub use admin::{
+    get_warehouse_config, rotate_storage_credential, set_delete_profile, set_format_versions,
+    set_warehouse_active, WarehouseConfig,
+};
 pub use bootstrap::ensure_bootstrapped;
 pub use browse::{
     list_namespaces, list_tabulars, load_table_detail, load_view_detail, ColumnInfo,

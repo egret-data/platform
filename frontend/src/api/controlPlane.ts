@@ -346,6 +346,49 @@ export function loadViewColumns(
     `/control-plane/warehouses/${warehouseId}/namespaces/${encodeURIComponent(namespace)}/views/${encodeURIComponent(view)}`,
   );
 }
+export interface WarehouseConfig {
+  active: boolean;
+  deleteProfileSeconds: number | null;
+  numTables: number;
+  numViews: number;
+  statsUpdatedMs: number;
+}
+export function getWarehouseConfig(warehouseId: string): Promise<WarehouseConfig> {
+  return apiJson<WarehouseConfig>(`/control-plane/warehouses/${warehouseId}/config`);
+}
+export async function setWarehouseStatus(warehouseId: string, active: boolean): Promise<void> {
+  await apiFetch(`/control-plane/warehouses/${warehouseId}/status`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ active }),
+  });
+}
+export async function setDeleteProfile(warehouseId: string, seconds: number | null): Promise<void> {
+  await apiFetch(`/control-plane/warehouses/${warehouseId}/delete-profile`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ seconds }),
+  });
+}
+export async function setFormatPolicy(warehouseId: string, versions: number[]): Promise<void> {
+  await apiFetch(`/control-plane/warehouses/${warehouseId}/format-policy`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ versions }),
+  });
+}
+export async function rotateCredential(
+  warehouseId: string,
+  accessKey: string,
+  secretKey: string,
+): Promise<void> {
+  await apiFetch(`/control-plane/warehouses/${warehouseId}/storage-credential`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ accessKey, secretKey }),
+  });
+}
+
 export function listDeletedTabulars(warehouseId: string): Promise<DeletedTabular[]> {
   return apiJson<DeletedTabular[]>(`/control-plane/warehouses/${warehouseId}/deleted-tabulars`);
 }

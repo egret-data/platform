@@ -19,8 +19,8 @@ pub use auth::require_platform_admin;
 pub use error::CpError;
 pub use warehouses::{
     BrowseColumn, BrowseDeletedTabular, BrowseNamespace, BrowsePartition, BrowseSnapshot,
-    BrowseSort, BrowseTableDetail, BrowseTabular, ProvisionS3, WarehouseBrowser,
-    WarehouseProvisioner,
+    BrowseSort, BrowseTableDetail, BrowseTabular, BrowseWarehouseConfig, ProvisionS3,
+    WarehouseBrowser, WarehouseProvisioner,
 };
 
 use axum::extract::FromRef;
