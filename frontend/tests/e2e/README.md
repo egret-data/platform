@@ -125,3 +125,26 @@ In addition to the prerequisites above, the target workspace needs:
    least one **registered + enabled engine** for the workspace.
 
 Without (1), Run reports no read-write catalog and the roundtrip fails.
+
+## Embedded-catalog e2e (`embedded-catalog.spec.ts`)
+
+Opt-in machine-path loop for the embedded catalog: provision a warehouse + role
++ grant + Catalog Client → `/oauth/token` (mini-IdP) → `/catalog/v1` (embedded
+lakekeeper) → egret guard. Also asserts a role with no grants is **403** on the
+data plane.
+
+```bash
+EGRET_E2E_CATALOG=1 EGRET_E2E_BUCKET=e2e-auto npx playwright test embedded-catalog
+```
+
+Requirements:
+- The live stack up (`serve` + Vite; Vite proxies `/api`, `/catalog`, `/oauth`).
+- A **reserved, initially-empty** MinIO bucket (`EGRET_E2E_BUCKET`, default `e2e`)
+  with **no prefix-less warehouse** on it — each run uses a unique `key_prefix`,
+  so repeated runs on that bucket don't overlap. Create it once:
+  `docker exec egret-dev-minio-1 mc mb --ignore-existing loc/e2e-auto`.
+- S3 overrides (defaults match dev MinIO): `EGRET_E2E_S3_ENDPOINT`,
+  `EGRET_E2E_S3_KEY`, `EGRET_E2E_S3_SECRET`.
+
+Skipped unless `EGRET_E2E_CATALOG=1`. See `deploy/embedded-catalog/engine-wiring.md`
+to wire a real engine (Trino / pyiceberg).
