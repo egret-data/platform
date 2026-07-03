@@ -43,6 +43,21 @@ pub struct Engine {
     pub created_at: DateTime<Utc>,
 }
 
+/// A catalog attached to a provisioned engine. Each row renders to one Trino
+/// `<name>.properties` file; `kind` selects the connector translation and
+/// `config` holds the typed per-kind parameters.
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct EngineCatalog {
+    pub id: Uuid,
+    pub engine_id: Uuid,
+    pub name: String,
+    pub kind: String,
+    pub config: serde_json::Value,
+    pub secret_ref: Option<Uuid>,
+    pub is_primary: bool,
+    pub created_at: DateTime<Utc>,
+}
+
 // ── roles + grants ───────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, sqlx::FromRow)]
@@ -255,6 +270,74 @@ impl CatalogStore {
 
     pub async fn delete_engine(&self, id: Uuid) -> Result<(), CatalogError> {
         sqlx::query("DELETE FROM engines WHERE id = $1")
+            .bind(id)
+            .execute(self.pool())
+            .await?;
+        Ok(())
+    }
+
+    // engine catalogs ----------------------------------------------------------
+
+    pub async fn create_engine_catalog(
+        &self,
+        engine_id: Uuid,
+        name: &str,
+        kind: &str,
+        config: &serde_json::Value,
+        secret_ref: Option<Uuid>,
+        is_primary: bool,
+    ) -> Result<EngineCatalog, CatalogError> {
+        sqlx::query_as::<_, EngineCatalog>(
+            "INSERT INTO engine_catalogs (engine_id, name, kind, config, secret_ref, is_primary) \
+             VALUES ($1,$2,$3,$4,$5,$6) \
+             RETURNING id, engine_id, name, kind, config, secret_ref, is_primary, created_at",
+        )
+        .bind(engine_id)
+        .bind(name)
+        .bind(kind)
+        .bind(config)
+        .bind(secret_ref)
+        .bind(is_primary)
+        .fetch_one(self.pool())
+        .await
+        .map_err(|e| match &e {
+            sqlx::Error::Database(d)
+                if d.constraint() == Some("engine_catalogs_engine_id_name_key") =>
+            {
+                CatalogError::AlreadyExists(name.to_string())
+            }
+            _ => CatalogError::Db(e),
+        })
+    }
+
+    pub async fn list_engine_catalogs(
+        &self,
+        engine_id: Uuid,
+    ) -> Result<Vec<EngineCatalog>, CatalogError> {
+        Ok(sqlx::query_as::<_, EngineCatalog>(
+            "SELECT id, engine_id, name, kind, config, secret_ref, is_primary, created_at \
+             FROM engine_catalogs WHERE engine_id = $1 ORDER BY is_primary DESC, created_at",
+        )
+        .bind(engine_id)
+        .fetch_all(self.pool())
+        .await?)
+    }
+
+    pub async fn get_engine_catalog(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<EngineCatalog>, CatalogError> {
+        Ok(sqlx::query_as::<_, EngineCatalog>(
+            "SELECT id, engine_id, name, kind, config, secret_ref, is_primary, created_at \
+             FROM engine_catalogs WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(self.pool())
+        .await?)
+    }
+
+    pub async fn delete_engine_catalog(&self, id: Uuid) -> Result<(), CatalogError> {
+        sqlx::query("DELETE FROM engine_catalogs WHERE id = $1")
             .bind(id)
             .execute(self.pool())
             .await?;
