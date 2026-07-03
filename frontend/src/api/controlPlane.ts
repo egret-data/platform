@@ -450,3 +450,72 @@ export function setProtection(
     },
   );
 }
+
+// ── Engines (query engines / control-plane) ──────────────────────────────────
+
+/** Provisioning parameters surfaced back to clients (subset of the stored spec). */
+export interface EngineSpec {
+  coordinatorReplicas: number;
+  workerReplicas: number;
+  cpuMin: string;
+  cpuMax: string;
+  memory: string;
+  imageVersion: string;
+}
+
+/** A provisioned query engine (Phase 1: Trino on Kubernetes). */
+export interface Engine {
+  id: string;
+  name: string;
+  type: string;
+  namespace: string;
+  warehouseId: string;
+  status: string;
+  spec: EngineSpec;
+}
+
+/** Live status read back from the operator + pods. */
+export interface EngineStatus {
+  phase: string;
+  message: string | null;
+  pods: { name: string; phase: string; ready: boolean }[];
+}
+
+export interface CreateEngineInput {
+  name: string;
+  warehouseId: string;
+  imageVersion?: string;
+  coordinatorReplicas: number;
+  workerReplicas: number;
+  cpuMin: string;
+  cpuMax: string;
+  memory: string;
+}
+
+export function listEngines(): Promise<Engine[]> {
+  return apiJson<Engine[]>("/control-plane/engines");
+}
+
+export function getEngine(id: string): Promise<Engine & { status: EngineStatus }> {
+  return apiJson<Engine & { status: EngineStatus }>(`/control-plane/engines/${id}`);
+}
+
+export function createEngine(input: CreateEngineInput): Promise<Engine> {
+  return apiJson<Engine>("/control-plane/engines", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateEngine(id: string, input: CreateEngineInput): Promise<Engine> {
+  return apiJson<Engine>(`/control-plane/engines/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteEngine(id: string): Promise<void> {
+  await apiFetch(`/control-plane/engines/${id}`, { method: "DELETE" });
+}
