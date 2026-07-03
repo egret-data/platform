@@ -387,20 +387,10 @@ async fn update_engine(
         .ok_or_else(|| CpError::BadRequest("unknown storage connection".into()))?;
     let s3_endpoint = sc.endpoint.unwrap_or_default();
 
-    // Re-mint a fresh Catalog Client so the re-applied Secret has valid creds
-    // (the plaintext secret is only ever shown once).
-    let role_id = ensure_engine_role(&st, wh.id).await?;
-    let client = st
-        .storage
-        .create_client(&NewClient {
-            name: format!("engine-{}", engine.name),
-            consumer_type: "engine".into(),
-            workspace_id: wh.workspace_id,
-            warehouse_id: wh.id,
-            catalog_role_id: role_id,
-        })
-        .await?;
-
+    // A config update re-applies only the TrinoCluster/TrinoCatalog CRs; the
+    // catalog-creds Secret (and its Catalog Client) are left untouched, so no new
+    // client is minted and none is revoked. The Trino catalog references the Secret
+    // by name, so the wiring is rebuilt with the same coordinates but no credential.
     let image_version = b
         .image_version
         .clone()
@@ -419,32 +409,31 @@ async fn update_engine(
         token_uri: format!("{}/oauth/token", st.engine_egret_url),
         warehouse: wh.name.clone(),
         s3_endpoint,
-        client_id: client.client_id.clone(),
-        client_secret: client.client_secret.clone(),
+        // Unused on the update path (the Secret is not re-applied), so no
+        // credential is threaded here.
+        client_id: String::new(),
+        client_secret: String::new(),
     };
 
     let Some(prov) = st.engine_provisioner.as_ref() else {
-        let _ = st.storage.revoke_client(client.id).await;
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
     if let Err(msg) = prov.update(&req).await {
-        let _ = st.storage.revoke_client(client.id).await;
         return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
     }
 
-    // Success: retire the previous client, persist the new spec.
-    if let Some(old) = client_row_id(&engine.spec) {
-        let _ = st.storage.revoke_client(old).await;
-    }
-    let spec = serde_json::json!({
+    // Persist the new config, preserving the existing Catalog Client reference.
+    let mut spec = serde_json::json!({
         "coordinatorReplicas": b.coordinator_replicas,
         "workerReplicas": b.worker_replicas,
         "cpuMin": b.cpu_min,
         "cpuMax": b.cpu_max,
         "memory": b.memory,
         "imageVersion": image_version,
-        "clientRowId": client.id,
     });
+    if let Some(old) = client_row_id(&engine.spec) {
+        spec["clientRowId"] = serde_json::json!(old);
+    }
     st.storage.update_engine(id, &spec, &engine.status).await?;
     let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
     Ok(Json(engine.into()))

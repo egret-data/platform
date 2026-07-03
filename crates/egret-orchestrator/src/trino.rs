@@ -157,8 +157,11 @@ impl EngineProvisioner for TrinoProvisioner {
     }
 
     async fn update(&self, spec: &EngineSpec) -> anyhow::Result<()> {
-        // Server-side apply is idempotent: re-applying is the update path.
-        self.kube.apply(&trino_secret(spec)).await?;
+        // A config update re-applies only the Catalog + Cluster CRs (server-side
+        // apply is idempotent). The catalog-creds `Secret` is deliberately NOT
+        // re-applied: credentials don't change on a config edit, the Catalog
+        // references the Secret by name, and re-minting would leave a window with
+        // no valid credential. Credential rotation is a separate flow.
         self.kube.apply(&trino_catalog_cr(spec)).await?;
         self.kube.apply(&trino_cluster_cr(spec)).await?;
         Ok(())
