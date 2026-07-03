@@ -1,5 +1,20 @@
-import { Plus, Server } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ExternalLink, Loader2, Plus, Server } from "lucide-react";
 
+import {
+  type CreateEngineInput,
+  type Engine,
+  type Warehouse,
+  createEngine,
+  getEngine,
+  listEngines,
+  listWarehouses,
+} from "@/api/controlPlane";
+import { ApiError } from "@/api/client";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -8,6 +23,23 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -21,12 +53,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 /**
  * Control Plane → Engines
  *
- * A structured, no-backend frame for the future platform engine registry
- * (Trino / StarRocks / Spark Connect). It renders the eventual layout — type
- * tabs, the engine table header (incl. live Status/health, folded in here),
- * an empty state per tab, and a stub "Add engine" button — but makes no API
- * calls. Real provisioning + per-workspace assignment + live monitoring arrive
- * in a later epic.
+ * Platform-admin registry of query engines. Phase 1 provisions Trino clusters
+ * on Kubernetes; StarRocks / RisingWave tabs are placeholders for later phases.
+ * Lists engines per type, shows a live health badge (per-row status poll), and
+ * provisions a new Trino engine against a catalog warehouse.
  */
 
 type EngineType = {
@@ -37,41 +67,31 @@ type EngineType = {
 const ENGINE_TYPES: EngineType[] = [
   { value: "trino", label: "Trino" },
   { value: "starrocks", label: "StarRocks" },
-  { value: "spark-connect", label: "Spark Connect" },
+  { value: "risingwave", label: "RisingWave" },
 ];
 
-const COLUMNS = ["Name", "Type", "Endpoint", "Status", "Workspaces", "Actions"];
+// Only Trino provisioning is wired up in Phase 1.
+const PROVISIONABLE = new Set(["trino"]);
 
-function EngineTable({ label }: { label: string }) {
-  return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          {COLUMNS.map((col) => (
-            <TableHead
-              key={col}
-              className={col === "Actions" ? "text-right" : undefined}
-            >
-              {col}
-            </TableHead>
-          ))}
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        <TableRow className="hover:bg-transparent">
-          <TableCell
-            colSpan={COLUMNS.length}
-            className="py-10 text-center text-muted-foreground"
-          >
-            No {label} engines yet — provision one in a later phase.
-          </TableCell>
-        </TableRow>
-      </TableBody>
-    </Table>
-  );
-}
+const COLUMNS = ["Name", "Type", "Endpoint", "Status", "Actions"];
+
+export const enginesQueryKey = ["cp", "engines"] as const;
+const warehousesQueryKey = ["cp", "warehouses"] as const;
 
 export default function ControlPlaneEngines() {
+  const engines = useQuery<Engine[], ApiError>({
+    queryKey: enginesQueryKey,
+    queryFn: listEngines,
+    retry: false,
+  });
+
+  const [activeType, setActiveType] = useState(ENGINE_TYPES[0].value);
+  const [addOpen, setAddOpen] = useState(false);
+
+  const canProvision = PROVISIONABLE.has(activeType);
+  const activeLabel =
+    ENGINE_TYPES.find((t) => t.value === activeType)?.label ?? activeType;
+
   return (
     <Card data-testid="engines-frame">
       <CardHeader>
@@ -82,33 +102,381 @@ export default function ControlPlaneEngines() {
               Engines
             </CardTitle>
             <CardDescription>
-              Platform query engines (Trino, StarRocks, Spark Connect). Provision
-              new engines and assign them to workspaces — arrives in a later
-              phase.
+              Platform query engines. Provision a Trino cluster against a catalog
+              warehouse and monitor its health. StarRocks / RisingWave arrive in
+              a later phase.
             </CardDescription>
           </div>
-          <Button disabled title="Coming soon">
+          <Button
+            onClick={() => setAddOpen(true)}
+            disabled={!canProvision}
+            title={canProvision ? undefined : "Coming soon"}
+          >
             <Plus className="h-4 w-4" />
             Add engine
           </Button>
         </div>
       </CardHeader>
       <CardContent>
-        <Tabs defaultValue={ENGINE_TYPES[0].value}>
-          <TabsList>
+        {engines.isError ? (
+          <Alert variant="destructive">
+            <AlertDescription>
+              Failed to load engines. Please try again.
+            </AlertDescription>
+          </Alert>
+        ) : (
+          <Tabs value={activeType} onValueChange={setActiveType}>
+            <TabsList>
+              {ENGINE_TYPES.map((type) => (
+                <TabsTrigger key={type.value} value={type.value}>
+                  {type.label}
+                </TabsTrigger>
+              ))}
+            </TabsList>
             {ENGINE_TYPES.map((type) => (
-              <TabsTrigger key={type.value} value={type.value}>
-                {type.label}
-              </TabsTrigger>
+              <TabsContent key={type.value} value={type.value}>
+                <EngineTable
+                  label={type.label}
+                  rows={(engines.data ?? []).filter((e) => e.type === type.value)}
+                  loading={engines.isLoading}
+                />
+              </TabsContent>
             ))}
-          </TabsList>
-          {ENGINE_TYPES.map((type) => (
-            <TabsContent key={type.value} value={type.value}>
-              <EngineTable label={type.label} />
-            </TabsContent>
-          ))}
-        </Tabs>
+          </Tabs>
+        )}
       </CardContent>
+
+      <AddEngineDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        engineType={activeType}
+        engineLabel={activeLabel}
+      />
     </Card>
+  );
+}
+
+function EngineTable({
+  label,
+  rows,
+  loading,
+}: {
+  label: string;
+  rows: Engine[];
+  loading: boolean;
+}) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          {COLUMNS.map((col) => (
+            <TableHead
+              key={col}
+              className={col === "Actions" ? "text-right" : undefined}
+            >
+              {col === "Actions" ? <span className="sr-only">Actions</span> : col}
+            </TableHead>
+          ))}
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {rows.length === 0 ? (
+          <TableRow className="hover:bg-transparent">
+            <TableCell
+              colSpan={COLUMNS.length}
+              className="py-10 text-center text-muted-foreground"
+            >
+              {loading ? "Loading…" : `No ${label} engines yet.`}
+            </TableCell>
+          </TableRow>
+        ) : (
+          rows.map((engine) => (
+            <TableRow key={engine.id}>
+              <TableCell className="font-medium">
+                <Link
+                  to={`/control-plane/engines/${engine.id}`}
+                  className="hover:underline"
+                >
+                  {engine.name}
+                </Link>
+              </TableCell>
+              <TableCell>
+                <Badge variant="secondary">{engine.type}</Badge>
+              </TableCell>
+              <TableCell className="font-mono text-xs text-muted-foreground">
+                {engine.name}-coordinator.{engine.namespace}
+              </TableCell>
+              <TableCell>
+                <EngineStatusBadge id={engine.id} fallback={engine.status} />
+              </TableCell>
+              <TableCell className="text-right">
+                <Button variant="ghost" size="sm" asChild>
+                  <Link
+                    to={`/control-plane/engines/${engine.id}`}
+                    aria-label={`View ${engine.name}`}
+                  >
+                    <ExternalLink className="h-4 w-4" />
+                    Details
+                  </Link>
+                </Button>
+              </TableCell>
+            </TableRow>
+          ))
+        )}
+      </TableBody>
+    </Table>
+  );
+}
+
+type BadgeVariant = "success" | "warning" | "destructive" | "secondary";
+
+function phaseVariant(phase: string): BadgeVariant {
+  switch (phase.toLowerCase()) {
+    case "running":
+    case "ready":
+      return "success";
+    case "failed":
+    case "error":
+      return "destructive";
+    case "provisioning":
+    case "pending":
+    case "creating":
+    case "updating":
+      return "warning";
+    default:
+      return "secondary";
+  }
+}
+
+/** Per-row live health: polls `getEngine` and paints `status.phase` as a badge. */
+function EngineStatusBadge({ id, fallback }: { id: string; fallback: string }) {
+  const detail = useQuery({
+    queryKey: ["cp", "engine", id],
+    queryFn: () => getEngine(id),
+    refetchInterval: 5000,
+    retry: false,
+  });
+
+  const phase = detail.data?.status.phase ?? fallback;
+  return <Badge variant={phaseVariant(phase)}>{phase}</Badge>;
+}
+
+function AddEngineDialog({
+  open,
+  onOpenChange,
+  engineType,
+  engineLabel,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  engineType: string;
+  engineLabel: string;
+}) {
+  const queryClient = useQueryClient();
+  const warehouses = useQuery<Warehouse[], ApiError>({
+    queryKey: warehousesQueryKey,
+    queryFn: listWarehouses,
+    retry: false,
+    enabled: open,
+  });
+  const createMutation = useMutation<Engine, ApiError, CreateEngineInput>({
+    mutationFn: createEngine,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: enginesQueryKey }),
+  });
+
+  const [name, setName] = useState("");
+  const [warehouseId, setWarehouseId] = useState("");
+  const [coordinatorReplicas, setCoordinatorReplicas] = useState(1);
+  const [workerReplicas, setWorkerReplicas] = useState(2);
+  const [cpuMin, setCpuMin] = useState("1");
+  const [cpuMax, setCpuMax] = useState("2");
+  const [memory, setMemory] = useState("4Gi");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) reset();
+  }, [open]);
+
+  function reset() {
+    setName("");
+    setWarehouseId("");
+    setCoordinatorReplicas(1);
+    setWorkerReplicas(2);
+    setCpuMin("1");
+    setCpuMax("2");
+    setMemory("4Gi");
+    setError(null);
+    createMutation.reset();
+  }
+
+  function handleOpenChange(next: boolean) {
+    if (!next) reset();
+    onOpenChange(next);
+  }
+
+  // Only provisioned warehouses (embedded catalog id resolved) can back an engine.
+  const provisioned = (warehouses.data ?? []).filter(
+    (w) => w.lakekeeperWarehouseId,
+  );
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+
+    const input: CreateEngineInput = {
+      name: name.trim(),
+      warehouseId,
+      coordinatorReplicas,
+      workerReplicas,
+      cpuMin: cpuMin.trim(),
+      cpuMax: cpuMax.trim(),
+      memory: memory.trim(),
+    };
+
+    try {
+      await createMutation.mutateAsync(input);
+      handleOpenChange(false);
+    } catch (err) {
+      setError((err as ApiError).message ?? "Failed to provision engine.");
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogContent>
+        <form onSubmit={handleSubmit}>
+          <DialogHeader>
+            <DialogTitle>Add {engineLabel} engine</DialogTitle>
+            <DialogDescription>
+              Provision a {engineLabel} cluster against a catalog warehouse.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="my-4 space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="cpe-name">Name</Label>
+              <Input
+                id="cpe-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. analytics-trino"
+                required
+                autoFocus
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="cpe-warehouse">Warehouse</Label>
+              <Select value={warehouseId} onValueChange={setWarehouseId}>
+                <SelectTrigger id="cpe-warehouse" className="w-full">
+                  <SelectValue placeholder="Select a warehouse" />
+                </SelectTrigger>
+                <SelectContent>
+                  {provisioned.length === 0 ? (
+                    <SelectItem value="__none__" disabled>
+                      No provisioned warehouses
+                    </SelectItem>
+                  ) : (
+                    provisioned.map((w) => (
+                      <SelectItem key={w.id} value={w.id}>
+                        {w.name}
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="cpe-coordinators">Coordinator replicas</Label>
+                <Input
+                  id="cpe-coordinators"
+                  type="number"
+                  min={1}
+                  value={coordinatorReplicas}
+                  onChange={(e) => setCoordinatorReplicas(Number(e.target.value))}
+                  required
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="cpe-workers">Worker replicas</Label>
+                <Input
+                  id="cpe-workers"
+                  type="number"
+                  min={0}
+                  value={workerReplicas}
+                  onChange={(e) => setWorkerReplicas(Number(e.target.value))}
+                  required
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="cpe-cpu-min">CPU min</Label>
+                <Input
+                  id="cpe-cpu-min"
+                  value={cpuMin}
+                  onChange={(e) => setCpuMin(e.target.value)}
+                  placeholder="1"
+                  required
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="cpe-cpu-max">CPU max</Label>
+                <Input
+                  id="cpe-cpu-max"
+                  value={cpuMax}
+                  onChange={(e) => setCpuMax(e.target.value)}
+                  placeholder="2"
+                  required
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="cpe-memory">Memory</Label>
+                <Input
+                  id="cpe-memory"
+                  value={memory}
+                  onChange={(e) => setMemory(e.target.value)}
+                  placeholder="4Gi"
+                  required
+                />
+              </div>
+            </div>
+
+            {error && (
+              <Alert variant="destructive">
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => handleOpenChange(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              disabled={
+                createMutation.isPending ||
+                !name.trim() ||
+                !warehouseId ||
+                engineType !== "trino"
+              }
+            >
+              {createMutation.isPending && (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              )}
+              Add engine
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
