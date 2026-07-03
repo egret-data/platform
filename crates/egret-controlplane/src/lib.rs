@@ -10,12 +10,14 @@
 //! same CSRF layer as the other mutating APIs.
 
 mod auth;
+mod engines;
 mod error;
 mod secrets;
 mod storage;
 mod warehouses;
 
 pub use auth::require_platform_admin;
+pub use engines::{EngineLiveStatus, EnginePod, EngineProvisionReq, EngineProvisioner};
 pub use error::CpError;
 pub use warehouses::{
     BrowseColumn, BrowseDeletedTabular, BrowseNamespace, BrowsePartition, BrowseSearchResult,
@@ -45,6 +47,13 @@ pub struct CpState {
     /// Reads catalog structure from the embedded lakekeeper (wired in egret-bin);
     /// `None` in tests.
     pub browser: Option<Arc<dyn WarehouseBrowser>>,
+    /// Provisions query engines onto Kubernetes (wired in egret-bin over
+    /// `egret-orchestrator`); `None` in tests and when no cluster is configured
+    /// (the routes then report "kubernetes not configured").
+    pub engine_provisioner: Option<Arc<dyn EngineProvisioner>>,
+    /// In-cluster URL Trino pods use to reach egret's REST catalog + token
+    /// endpoint (e.g. `http://egret:8080`); populated from config in egret-bin.
+    pub engine_egret_url: String,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.
@@ -61,4 +70,5 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(storage::router())
         .merge(secrets::router())
         .merge(warehouses::router())
+        .merge(engines::router())
 }

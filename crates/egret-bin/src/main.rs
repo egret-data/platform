@@ -375,6 +375,89 @@ impl egret_controlplane::WarehouseProvisioner for LakekeeperProvisioner {
     }
 }
 
+/// Provisions query engines (Phase 1: Trino) onto Kubernetes for the control
+/// plane. Adapts the kube-free `egret_controlplane::EngineProvisioner`
+/// trait onto the `egret-orchestrator` `TrinoProvisioner`, mapping the flat
+/// `EngineProvisionReq` into an `EngineSpec` and the k8s status back out.
+struct EgretEngineProvisioner {
+    inner: std::sync::Arc<egret_orchestrator::TrinoProvisioner>,
+}
+
+impl EgretEngineProvisioner {
+    fn new(inner: std::sync::Arc<egret_orchestrator::TrinoProvisioner>) -> Self {
+        Self { inner }
+    }
+
+    fn spec_from(req: &egret_controlplane::EngineProvisionReq) -> egret_orchestrator::EngineSpec {
+        egret_orchestrator::EngineSpec {
+            name: req.name.clone(),
+            namespace: req.namespace.clone(),
+            image_version: req.image_version.clone(),
+            coordinator_replicas: req.coordinator_replicas,
+            worker_replicas: req.worker_replicas,
+            resources: egret_orchestrator::Resources {
+                cpu_min: req.cpu_min.clone(),
+                cpu_max: req.cpu_max.clone(),
+                memory: req.memory.clone(),
+            },
+            wiring: egret_orchestrator::CatalogWiring {
+                catalog_uri: req.catalog_uri.clone(),
+                token_uri: req.token_uri.clone(),
+                warehouse: req.warehouse.clone(),
+                s3_endpoint: req.s3_endpoint.clone(),
+                client_id: req.client_id.clone(),
+                client_secret: req.client_secret.clone(),
+            },
+            extra_props: vec![],
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl egret_controlplane::EngineProvisioner for EgretEngineProvisioner {
+    async fn provision(&self, req: &egret_controlplane::EngineProvisionReq) -> Result<(), String> {
+        egret_orchestrator::EngineProvisioner::provision(self.inner.as_ref(), &Self::spec_from(req))
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn status(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<egret_controlplane::EngineLiveStatus, String> {
+        let st =
+            egret_orchestrator::EngineProvisioner::status(self.inner.as_ref(), namespace, name)
+                .await
+                .map_err(|e| e.to_string())?;
+        Ok(egret_controlplane::EngineLiveStatus {
+            phase: st.phase,
+            message: st.message,
+            pods: st
+                .pods
+                .into_iter()
+                .map(|p| egret_controlplane::EnginePod {
+                    name: p.name,
+                    phase: p.phase,
+                    ready: p.ready,
+                })
+                .collect(),
+        })
+    }
+
+    async fn update(&self, req: &egret_controlplane::EngineProvisionReq) -> Result<(), String> {
+        egret_orchestrator::EngineProvisioner::update(self.inner.as_ref(), &Self::spec_from(req))
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn delete(&self, namespace: &str, name: &str) -> Result<(), String> {
+        egret_orchestrator::EngineProvisioner::delete(self.inner.as_ref(), namespace, name)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// Reads catalog structure (namespaces/tables/schema) from the embedded
 /// lakekeeper for the control plane. Holds the lakekeeper `ApiContext` (like
 /// `LakekeeperProvisioner`).
@@ -1010,6 +1093,28 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         None
     };
 
+    // Engine provisioning: build a kube client best-effort (in-cluster first, then
+    // the local kubeconfig for dev). If neither is available egret still boots —
+    // engine routes then report "kubernetes not configured".
+    let engine_provisioner: Option<std::sync::Arc<dyn egret_controlplane::EngineProvisioner>> = {
+        let kube = match egret_orchestrator::LiveKube::in_cluster().await {
+            Ok(k) => Some(k),
+            Err(_) => egret_orchestrator::LiveKube::from_kubeconfig().await.ok(),
+        };
+        match kube {
+            Some(k) => {
+                let trino = egret_orchestrator::TrinoProvisioner::new(std::sync::Arc::new(k));
+                Some(std::sync::Arc::new(EgretEngineProvisioner::new(
+                    std::sync::Arc::new(trino),
+                )))
+            }
+            None => {
+                tracing::warn!("kubernetes unavailable; engine provisioning disabled");
+                None
+            }
+        }
+    };
+
     // Control plane: global platform-admin Storage + Secrets + embedded-catalog
     // management. The warehouse provisioner (above) creates lakekeeper warehouses.
     let control_plane = Some(egret_controlplane::CpState {
@@ -1018,6 +1123,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         sessions: sessions.clone(),
         provisioner: catalog_provisioner,
         browser: catalog_browser,
+        engine_provisioner,
+        engine_egret_url: config
+            .catalog
+            .public_url
+            .clone()
+            .unwrap_or_else(|| "http://egret:8080".to_string()),
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).

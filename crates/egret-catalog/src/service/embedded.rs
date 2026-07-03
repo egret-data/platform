@@ -26,6 +26,23 @@ pub struct Warehouse {
     pub created_at: DateTime<Utc>,
 }
 
+// ── engines ──────────────────────────────────────────────────────────────────
+
+/// A provisioned query engine (control-plane, platform-global) wired to a
+/// warehouse. `spec` holds the desired provisioning parameters; `status` tracks
+/// the last-known lifecycle phase.
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct Engine {
+    pub id: Uuid,
+    pub name: String,
+    pub r#type: String,
+    pub namespace: String,
+    pub warehouse_id: Uuid,
+    pub spec: serde_json::Value,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+}
+
 // ── roles + grants ───────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, sqlx::FromRow)]
@@ -158,6 +175,86 @@ impl CatalogStore {
 
     pub async fn delete_warehouse(&self, id: Uuid) -> Result<(), CatalogError> {
         sqlx::query("DELETE FROM warehouses WHERE id = $1")
+            .bind(id)
+            .execute(self.pool())
+            .await?;
+        Ok(())
+    }
+
+    // engines ------------------------------------------------------------------
+
+    pub async fn create_engine(
+        &self,
+        name: &str,
+        r#type: &str,
+        namespace: &str,
+        warehouse_id: Uuid,
+        spec: &serde_json::Value,
+    ) -> Result<Engine, CatalogError> {
+        sqlx::query_as::<_, Engine>(
+            "INSERT INTO engines (name, type, namespace, warehouse_id, spec) VALUES ($1,$2,$3,$4,$5) \
+             RETURNING id, name, type, namespace, warehouse_id, spec, status, created_at",
+        )
+        .bind(name)
+        .bind(r#type)
+        .bind(namespace)
+        .bind(warehouse_id)
+        .bind(spec)
+        .fetch_one(self.pool())
+        .await
+        .map_err(|e| match &e {
+            sqlx::Error::Database(d) if d.constraint() == Some("engines_name_key") => {
+                CatalogError::AlreadyExists(name.to_string())
+            }
+            _ => CatalogError::Db(e),
+        })
+    }
+
+    pub async fn list_engines(&self) -> Result<Vec<Engine>, CatalogError> {
+        Ok(sqlx::query_as::<_, Engine>(
+            "SELECT id, name, type, namespace, warehouse_id, spec, status, created_at \
+             FROM engines ORDER BY created_at",
+        )
+        .fetch_all(self.pool())
+        .await?)
+    }
+
+    pub async fn get_engine(&self, id: Uuid) -> Result<Option<Engine>, CatalogError> {
+        Ok(sqlx::query_as::<_, Engine>(
+            "SELECT id, name, type, namespace, warehouse_id, spec, status, created_at \
+             FROM engines WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(self.pool())
+        .await?)
+    }
+
+    pub async fn update_engine(
+        &self,
+        id: Uuid,
+        spec: &serde_json::Value,
+        status: &str,
+    ) -> Result<(), CatalogError> {
+        sqlx::query("UPDATE engines SET spec = $2, status = $3 WHERE id = $1")
+            .bind(id)
+            .bind(spec)
+            .bind(status)
+            .execute(self.pool())
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_engine_status(&self, id: Uuid, status: &str) -> Result<(), CatalogError> {
+        sqlx::query("UPDATE engines SET status = $2 WHERE id = $1")
+            .bind(id)
+            .bind(status)
+            .execute(self.pool())
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_engine(&self, id: Uuid) -> Result<(), CatalogError> {
+        sqlx::query("DELETE FROM engines WHERE id = $1")
             .bind(id)
             .execute(self.pool())
             .await?;

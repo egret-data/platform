@@ -33,6 +33,7 @@ egret-engine.workspace = true
 egret-bi.workspace = true
 egret-notebook.workspace = true
 egret-kernel.workspace = true
+egret-orchestrator.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
