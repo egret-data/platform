@@ -2544,6 +2544,7 @@ dependencies = [
  "egret-core",
  "egret-metastore",
  "egret-secrets",
+ "egret-storage",
  "egret-workspace",
  "http-body-util",
  "reqwest 0.12.28",
