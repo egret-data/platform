@@ -393,7 +393,11 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             .await
             .map(|v| {
                 v.into_iter()
-                    .map(|n| egret_controlplane::BrowseNamespace { parts: n.parts })
+                    .map(|n| egret_controlplane::BrowseNamespace {
+                        parts: n.parts,
+                        id: n.id,
+                        protected: n.protected,
+                    })
                     .collect()
             })
             .map_err(|e| e.to_string())
@@ -415,6 +419,8 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
                             egret_catalog_engine::TabularKind::Table => "table",
                         }
                         .to_string(),
+                        id: t.id,
+                        protected: t.protected,
                     })
                     .collect()
             })
@@ -482,6 +488,101 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
                 })
                 .collect(),
         })
+        .map_err(|e| e.to_string())
+    }
+
+    async fn view_columns(
+        &self,
+        wh: &str,
+        ns: &[String],
+        view: &str,
+    ) -> Result<Vec<egret_controlplane::BrowseColumn>, String> {
+        egret_catalog_engine::load_view_detail(
+            self.engine_state.clone(),
+            &self.system_user,
+            wh,
+            ns,
+            view,
+        )
+        .await
+        .map(|cols| {
+            cols.into_iter()
+                .map(|c| egret_controlplane::BrowseColumn {
+                    name: c.name,
+                    type_: c.r#type,
+                    required: c.required,
+                })
+                .collect()
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    async fn deleted_tabulars(
+        &self,
+        wh: &str,
+    ) -> Result<Vec<egret_controlplane::BrowseDeletedTabular>, String> {
+        egret_catalog_engine::list_deleted_tabulars(
+            self.engine_state.clone(),
+            &self.system_user,
+            wh,
+        )
+        .await
+        .map(|v| {
+            v.into_iter()
+                .map(|d| egret_controlplane::BrowseDeletedTabular {
+                    id: d.id,
+                    name: d.name,
+                    namespace: d.namespace,
+                    kind: match d.kind {
+                        egret_catalog_engine::TabularKindName::View => "view",
+                        egret_catalog_engine::TabularKindName::Table => "table",
+                    }
+                    .to_string(),
+                    deleted_at: d.deleted_at,
+                    expiration: d.expiration,
+                })
+                .collect()
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    async fn undrop(&self, wh: &str, kind: &str, id: uuid::Uuid) -> Result<(), String> {
+        let k = match kind {
+            "view" => egret_catalog_engine::TabularKindName::View,
+            _ => egret_catalog_engine::TabularKindName::Table,
+        };
+        egret_catalog_engine::undrop_tabular(
+            self.engine_state.clone(),
+            &self.system_user,
+            wh,
+            k,
+            id,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+
+    async fn set_protection(
+        &self,
+        wh: &str,
+        target: &str,
+        id: uuid::Uuid,
+        protected: bool,
+    ) -> Result<bool, String> {
+        let t = match target {
+            "namespace" => egret_catalog_engine::ProtectTarget::Namespace,
+            "view" => egret_catalog_engine::ProtectTarget::View,
+            _ => egret_catalog_engine::ProtectTarget::Table,
+        };
+        egret_catalog_engine::set_protection(
+            self.engine_state.clone(),
+            &self.system_user,
+            wh,
+            t,
+            id,
+            protected,
+        )
+        .await
         .map_err(|e| e.to_string())
     }
 }

@@ -6,7 +6,7 @@
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
 use egret_catalog::service::embedded::{GrantInput, NewClient};
@@ -40,10 +40,23 @@ pub trait WarehouseProvisioner: Send + Sync {
 /// Catalog browse result rows (control-plane DTOs; camelCase on the wire).
 pub struct BrowseNamespace {
     pub parts: Vec<String>,
+    pub id: Option<uuid::Uuid>,
+    pub protected: bool,
 }
 pub struct BrowseTabular {
     pub name: String,
     pub kind: String, // "table" | "view"
+    pub id: Option<uuid::Uuid>,
+    pub protected: bool,
+}
+/// A soft-deleted table/view awaiting purge (recoverable via undrop).
+pub struct BrowseDeletedTabular {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub namespace: Vec<String>,
+    pub kind: String, // "table" | "view"
+    pub deleted_at: chrono::DateTime<chrono::Utc>,
+    pub expiration: chrono::DateTime<chrono::Utc>,
 }
 pub struct BrowseColumn {
     pub name: String,
@@ -102,6 +115,33 @@ pub trait WarehouseBrowser: Send + Sync {
         namespace: &[String],
         table: &str,
     ) -> Result<BrowseTableDetail, String>;
+    /// Current-schema columns of a view.
+    async fn view_columns(
+        &self,
+        lakekeeper_warehouse_id: &str,
+        namespace: &[String],
+        view: &str,
+    ) -> Result<Vec<BrowseColumn>, String>;
+    /// Soft-deleted tables/views awaiting purge.
+    async fn deleted_tabulars(
+        &self,
+        lakekeeper_warehouse_id: &str,
+    ) -> Result<Vec<BrowseDeletedTabular>, String>;
+    /// Recover a soft-deleted table (`kind`="table") or view (`kind`="view").
+    async fn undrop(
+        &self,
+        lakekeeper_warehouse_id: &str,
+        kind: &str,
+        id: uuid::Uuid,
+    ) -> Result<(), String>;
+    /// Set the protected flag on a `target` ("table"/"view"/"namespace") by id.
+    async fn set_protection(
+        &self,
+        lakekeeper_warehouse_id: &str,
+        target: &str,
+        id: uuid::Uuid,
+        protected: bool,
+    ) -> Result<bool, String>;
 }
 
 pub fn router() -> Router<CpState> {
@@ -129,6 +169,13 @@ pub fn router() -> Router<CpState> {
             "/warehouses/{id}/namespaces/{ns}/tables/{table}",
             get(browse_schema),
         )
+        .route(
+            "/warehouses/{id}/namespaces/{ns}/views/{view}",
+            get(browse_view),
+        )
+        .route("/warehouses/{id}/deleted-tabulars", get(browse_deleted))
+        .route("/warehouses/{id}/undrop", post(undrop_tabular))
+        .route("/warehouses/{id}/protection", put(set_protection))
 }
 
 #[derive(Serialize)]
@@ -495,6 +542,8 @@ async fn revoke_client(
 #[serde(rename_all = "camelCase")]
 struct NamespaceDto {
     parts: Vec<String>,
+    id: Option<Uuid>,
+    protected: bool,
 }
 
 #[derive(Serialize)]
@@ -502,6 +551,19 @@ struct NamespaceDto {
 struct TabularDto {
     name: String,
     kind: String,
+    id: Option<Uuid>,
+    protected: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeletedTabularDto {
+    id: Uuid,
+    name: String,
+    namespace: Vec<String>,
+    kind: String,
+    deleted_at: chrono::DateTime<chrono::Utc>,
+    expiration: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Serialize)]
@@ -584,7 +646,11 @@ async fn browse_namespaces(
         .map_err(|e| CpError::BadRequest(format!("browse: {e}")))?;
     Ok(Json(
         ns.into_iter()
-            .map(|n| NamespaceDto { parts: n.parts })
+            .map(|n| NamespaceDto {
+                parts: n.parts,
+                id: n.id,
+                protected: n.protected,
+            })
             .collect(),
     ))
 }
@@ -608,6 +674,8 @@ async fn browse_tables(
             .map(|t| TabularDto {
                 name: t.name,
                 kind: t.kind,
+                id: t.id,
+                protected: t.protected,
             })
             .collect(),
     ))
@@ -672,4 +740,108 @@ async fn browse_schema(
             })
             .collect(),
     }))
+}
+
+async fn browse_view(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, ns, view)): Path<(Uuid, String, String)>,
+) -> Result<Json<Vec<ColumnDto>>, CpError> {
+    require_platform_admin(&p)?;
+    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
+    let b = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    let cols = b
+        .view_columns(&lk, &parse_ns(&ns), &view)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("browse: {e}")))?;
+    Ok(Json(
+        cols.into_iter()
+            .map(|c| ColumnDto {
+                name: c.name,
+                r#type: c.type_,
+                required: c.required,
+            })
+            .collect(),
+    ))
+}
+
+async fn browse_deleted(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<DeletedTabularDto>>, CpError> {
+    require_platform_admin(&p)?;
+    let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
+        return Ok(Json(vec![]));
+    };
+    let items = b
+        .deleted_tabulars(&lk)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("browse: {e}")))?;
+    Ok(Json(
+        items
+            .into_iter()
+            .map(|d| DeletedTabularDto {
+                id: d.id,
+                name: d.name,
+                namespace: d.namespace,
+                kind: d.kind,
+                deleted_at: d.deleted_at,
+                expiration: d.expiration,
+            })
+            .collect(),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UndropBody {
+    kind: String,
+    id: Uuid,
+}
+
+async fn undrop_tabular(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(b): Json<UndropBody>,
+) -> Result<StatusCode, CpError> {
+    require_platform_admin(&p)?;
+    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
+    let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    browser
+        .undrop(&lk, &b.kind, b.id)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("undrop: {e}")))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProtectionBody {
+    target: String,
+    id: Uuid,
+    protected: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProtectionDto {
+    protected: bool,
+}
+
+async fn set_protection(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(b): Json<ProtectionBody>,
+) -> Result<Json<ProtectionDto>, CpError> {
+    require_platform_admin(&p)?;
+    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
+    let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    let protected = browser
+        .set_protection(&lk, &b.target, b.id, b.protected)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("protection: {e}")))?;
+    Ok(Json(ProtectionDto { protected }))
 }

@@ -14,13 +14,17 @@ use lakekeeper::api::iceberg::v1::namespace::{
 use lakekeeper::api::iceberg::v1::tables::{
     ListTablesQuery, LoadTableRequest, LoadTableResultOrNotModified, TableParameters, TablesService,
 };
-use lakekeeper::api::iceberg::v1::views::ViewService;
+use lakekeeper::api::iceberg::v1::views::{LoadViewRequest, ViewParameters, ViewService};
 use lakekeeper::api::ApiContext;
 use lakekeeper::iceberg::{NamespaceIdent, TableIdent};
+use uuid::Uuid;
 
 /// A namespace as its multipart identifier (Iceberg namespaces can be nested).
+/// `id` is the lakekeeper namespace UUID (for protection); `protected` blocks drops.
 pub struct NamespaceEntry {
     pub parts: Vec<String>,
+    pub id: Option<Uuid>,
+    pub protected: bool,
 }
 
 pub enum TabularKind {
@@ -31,6 +35,8 @@ pub enum TabularKind {
 pub struct TabularEntry {
     pub name: String,
     pub kind: TabularKind,
+    pub id: Option<Uuid>,
+    pub protected: bool,
 }
 
 pub struct ColumnInfo {
@@ -95,8 +101,8 @@ pub async fn list_namespaces(
                 page_token: page.clone(),
                 page_size: None,
                 parent: parent.clone(),
-                return_uuids: false,
-                return_protection_status: false,
+                return_uuids: true,
+                return_protection_status: true,
             };
             let rm = system_request_metadata(system_user).context("system metadata")?;
             let resp = <EngineServer as NamespaceService<EngineState>>::list_namespaces(
@@ -107,13 +113,19 @@ pub async fn list_namespaces(
             )
             .await
             .map_err(|e| anyhow::anyhow!("list_namespaces: {e:?}"))?;
-            for ns in resp.namespaces.iter() {
+            let uuids = resp.namespace_uuids.clone().unwrap_or_default();
+            let protection = resp.protection_status.clone().unwrap_or_default();
+            for (i, ns) in resp.namespaces.iter().enumerate() {
                 let levels = ns.clone().inner();
                 frontier.push(Some(
                     NamespaceIdent::from_vec(levels.clone())
                         .map_err(|e| anyhow::anyhow!("namespace ident: {e:?}"))?,
                 ));
-                out.push(NamespaceEntry { parts: levels });
+                out.push(NamespaceEntry {
+                    parts: levels,
+                    id: uuids.get(i).copied(),
+                    protected: protection.get(i).copied().unwrap_or(false),
+                });
             }
             match resp.next_page_token {
                 Some(t) if !t.is_empty() => page = PageToken::Present(t),
@@ -152,10 +164,14 @@ pub async fn list_tabulars(
         )
         .await
         .map_err(|e| anyhow::anyhow!("list_tables: {e:?}"))?;
-        for ident in resp.identifiers.iter() {
+        let uuids = resp.table_uuids.clone().unwrap_or_default();
+        let protection = resp.protection_status.clone().unwrap_or_default();
+        for (i, ident) in resp.identifiers.iter().enumerate() {
             out.push(TabularEntry {
                 name: ident.name.clone(),
                 kind: TabularKind::Table,
+                id: uuids.get(i).copied(),
+                protected: protection.get(i).copied().unwrap_or(false),
             });
         }
         match resp.next_page_token {
@@ -176,10 +192,14 @@ pub async fn list_tabulars(
         )
         .await
         .map_err(|e| anyhow::anyhow!("list_views: {e:?}"))?;
-        for ident in resp.identifiers.iter() {
+        let uuids = resp.table_uuids.clone().unwrap_or_default();
+        let protection = resp.protection_status.clone().unwrap_or_default();
+        for (i, ident) in resp.identifiers.iter().enumerate() {
             out.push(TabularEntry {
                 name: ident.name.clone(),
                 kind: TabularKind::View,
+                id: uuids.get(i).copied(),
+                protected: protection.get(i).copied().unwrap_or(false),
             });
         }
         match resp.next_page_token {
@@ -194,9 +214,48 @@ fn list_query(page_token: PageToken) -> ListTablesQuery {
     ListTablesQuery {
         page_token,
         page_size: None,
-        return_uuids: false,
-        return_protection_status: false,
+        return_uuids: true,
+        return_protection_status: true,
     }
+}
+
+/// Load a view's current-schema columns (views have no snapshots/partitions).
+pub async fn load_view_detail(
+    engine_state: ApiContext<EngineState>,
+    system_user: &str,
+    warehouse_id: &str,
+    namespace: &[String],
+    view: &str,
+) -> anyhow::Result<Vec<ColumnInfo>> {
+    let ident = TableIdent {
+        namespace: NamespaceIdent::from_vec(namespace.to_vec())
+            .map_err(|e| anyhow::anyhow!("namespace ident: {e:?}"))?,
+        name: view.to_string(),
+    };
+    let rm = system_request_metadata(system_user).context("system metadata")?;
+    let loaded = <EngineServer as ViewService<EngineState>>::load_view(
+        ViewParameters {
+            prefix: Some(prefix(warehouse_id)),
+            view: ident,
+        },
+        LoadViewRequest::default(),
+        engine_state,
+        rm,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("load_view: {e:?}"))?;
+
+    let schema = loaded.metadata.current_schema();
+    Ok(schema
+        .as_struct()
+        .fields()
+        .iter()
+        .map(|f| ColumnInfo {
+            name: f.name.clone(),
+            r#type: f.field_type.to_string(),
+            required: f.required,
+        })
+        .collect())
 }
 
 /// Load a UI-friendly projection of a table's current metadata: schema columns,

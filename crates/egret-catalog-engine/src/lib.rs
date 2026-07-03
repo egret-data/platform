@@ -14,12 +14,14 @@ pub mod bootstrap;
 pub mod browse;
 pub mod mount;
 pub mod pool;
+pub mod recovery;
 pub mod warehouse;
 
 pub use bootstrap::ensure_bootstrapped;
 pub use browse::{
-    list_namespaces, list_tabulars, load_table_detail, ColumnInfo, NamespaceEntry, PartitionField,
-    SnapshotInfo, SortField, TableDetail, TabularEntry, TabularKind,
+    list_namespaces, list_tabulars, load_table_detail, load_view_detail, ColumnInfo,
+    NamespaceEntry, PartitionField, SnapshotInfo, SortField, TableDetail, TabularEntry,
+    TabularKind,
 };
 pub use lakekeeper::api::ApiContext;
 /// lakekeeper's built-in open authorizer. EB-1 mounts the engine with this
@@ -36,6 +38,10 @@ pub use mount::{
     EngineServer, EngineState,
 };
 pub use pool::{build_isolated_pool, LAKEKEEPER_SCHEMA};
+pub use recovery::{
+    list_deleted_tabulars, set_protection, undrop_tabular, DeletedTabular, ProtectTarget,
+    TabularKindName,
+};
 pub use warehouse::{create_lakekeeper_warehouse, S3StorageConfig};
 
 /// Run lakekeeper's Postgres catalog migrations against an isolated
