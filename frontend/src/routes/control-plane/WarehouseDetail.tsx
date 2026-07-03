@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   Boxes,
   Building2,
+  Cable,
   Check,
   ChevronDown,
   ChevronRight,
@@ -141,6 +142,10 @@ export default function WarehouseDetail() {
             <Database className="h-4 w-4" />
             Browse
           </TabsTrigger>
+          <TabsTrigger value="connect">
+            <Cable className="h-4 w-4" />
+            Connect
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="roles" className="mt-4">
           <RolesTab warehouseId={id} />
@@ -150,6 +155,9 @@ export default function WarehouseDetail() {
         </TabsContent>
         <TabsContent value="browse" className="mt-4">
           <BrowseTab warehouseId={id} />
+        </TabsContent>
+        <TabsContent value="connect" className="mt-4">
+          <ConnectTab warehouse={warehouse.data} />
         </TabsContent>
       </Tabs>
     </div>
@@ -1322,6 +1330,169 @@ function BrowseEmpty({ icon: Icon, children }: { icon?: typeof Database; childre
     <div className="flex flex-col items-center gap-2 px-4 py-10 text-center text-sm text-muted-foreground">
       {Icon && <Icon className="h-6 w-6 opacity-40" />}
       <span>{children}</span>
+    </div>
+  );
+}
+
+function ConnectTab({ warehouse }: { warehouse: Warehouse | undefined }) {
+  const storage = useQuery({
+    queryKey: ["control-plane", "storage"],
+    queryFn: listStorage,
+    retry: false,
+  });
+  const sc = storage.data?.find((s) => s.id === warehouse?.storageConnId);
+  const server = window.location.origin;
+  const s3 = sc?.endpoint ?? "http://localhost:9000";
+  const catalogUri = `${server}/catalog/v1`;
+  const tokenUri = `${server}/oauth/token`;
+
+  if (!warehouse?.lakekeeperWarehouseId) {
+    return (
+      <Card>
+        <CardContent className="py-10 text-center text-sm text-muted-foreground">
+          This warehouse isn&apos;t provisioned yet — no catalog endpoint to connect to.
+        </CardContent>
+      </Card>
+    );
+  }
+  const wh = warehouse.lakekeeperWarehouseId;
+
+  const pyiceberg = `from pyiceberg.catalog.rest import RestCatalog
+
+catalog = RestCatalog(
+    "egret",
+    uri="${catalogUri}",
+    warehouse="${wh}",
+    credential="<CLIENT_ID>:<CLIENT_SECRET>",
+    **{
+        "oauth2-server-uri": "${tokenUri}",
+        "s3.endpoint": "${s3}",
+        "s3.access-key-id": "<MINIO_ACCESS_KEY>",
+        "s3.secret-access-key": "<MINIO_SECRET_KEY>",
+        "s3.path-style-access": "true",
+    },
+)
+
+print(catalog.list_namespaces())
+table = catalog.load_table("demo_ns.events")
+print(table.scan().to_arrow())`;
+
+  const trino = `# etc/catalog/egret.properties
+connector.name=iceberg
+iceberg.catalog.type=rest
+iceberg.rest-catalog.uri=${catalogUri}
+iceberg.rest-catalog.warehouse=${wh}
+iceberg.rest-catalog.security=OAUTH2
+iceberg.rest-catalog.oauth2.credential=<CLIENT_ID>:<CLIENT_SECRET>
+iceberg.rest-catalog.oauth2.server-uri=${tokenUri}
+fs.native-s3.enabled=true
+s3.endpoint=${s3}
+s3.region=us-east-1
+s3.path-style-access=true
+s3.aws-access-key=<MINIO_ACCESS_KEY>
+s3.aws-secret-key=<MINIO_SECRET_KEY>
+
+-- then, in the Trino CLI:
+SELECT * FROM egret.demo_ns.events;`;
+
+  const starrocks = `CREATE EXTERNAL CATALOG egret
+PROPERTIES (
+    "type" = "iceberg",
+    "iceberg.catalog.type" = "rest",
+    "iceberg.catalog.uri" = "${catalogUri}",
+    "iceberg.catalog.warehouse" = "${wh}",
+    "iceberg.catalog.security" = "OAUTH2",
+    "iceberg.catalog.oauth2-server-uri" = "${tokenUri}",
+    "iceberg.catalog.credential" = "<CLIENT_ID>:<CLIENT_SECRET>",
+    "aws.s3.endpoint" = "${s3}",
+    "aws.s3.enable_path_style_access" = "true",
+    "aws.s3.access_key" = "<MINIO_ACCESS_KEY>",
+    "aws.s3.secret_key" = "<MINIO_SECRET_KEY>"
+);
+
+SET CATALOG egret;
+SELECT * FROM demo_ns.events;`;
+
+  const engines = [
+    { key: "pyiceberg", label: "PyIceberg", code: pyiceberg },
+    { key: "trino", label: "Trino", code: trino },
+    { key: "starrocks", label: "StarRocks", code: starrocks },
+  ];
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-lg">
+          <Cable className="h-5 w-5 text-muted-foreground" />
+          Connect an engine
+        </CardTitle>
+        <CardDescription>
+          egret exposes this warehouse as an Iceberg REST catalog. Point any Iceberg-compatible
+          engine at it using a Catalog Client&apos;s credentials.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-5">
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Coord label="Catalog URI" value={catalogUri} />
+          <Coord label="Warehouse" value={wh} />
+          <Coord label="OAuth token URL" value={tokenUri} />
+        </div>
+
+        <Alert>
+          <AlertDescription>
+            The <code className="font-mono text-xs">credential</code> below is{" "}
+            <code className="font-mono text-xs">client_id:client_secret</code> from a{" "}
+            <strong>Catalog Client</strong> (create one in the <em>Catalog Clients</em> tab). The
+            client&apos;s role grants decide which namespaces/tables it can read or write.
+          </AlertDescription>
+        </Alert>
+
+        <Tabs defaultValue="pyiceberg">
+          <TabsList>
+            {engines.map((e) => (
+              <TabsTrigger key={e.key} value={e.key}>
+                {e.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          {engines.map((e) => (
+            <TabsContent key={e.key} value={e.key} className="mt-4 space-y-2">
+              <CodeBlock code={e.code} />
+              <p className="text-xs text-muted-foreground">
+                Replace the <code className="font-mono">&lt;…&gt;</code> placeholders with a Catalog
+                Client&apos;s id/secret and your object-store keys. If the engine runs in Docker, use
+                the egret host reachable from that container instead of{" "}
+                <code className="font-mono">{server}</code>.
+              </p>
+            </TabsContent>
+          ))}
+        </Tabs>
+      </CardContent>
+    </Card>
+  );
+}
+
+function Coord({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border bg-muted/20 p-3">
+      <div className="text-xs uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="mt-1 flex items-center gap-1.5">
+        <code className="min-w-0 flex-1 truncate font-mono text-xs">{value}</code>
+        <CopyButton value={value} />
+      </div>
+    </div>
+  );
+}
+
+function CodeBlock({ code }: { code: string }) {
+  return (
+    <div className="relative">
+      <div className="absolute right-2 top-2 z-10">
+        <CopyButton value={code} />
+      </div>
+      <pre className="overflow-x-auto rounded-lg border bg-muted/40 p-4 pr-10 text-xs leading-relaxed">
+        <code className="font-mono">{code}</code>
+      </pre>
     </div>
   );
 }
