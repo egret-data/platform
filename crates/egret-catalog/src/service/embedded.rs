@@ -142,6 +142,19 @@ impl CatalogStore {
         .await?)
     }
 
+    pub async fn get_warehouse_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<Warehouse>, CatalogError> {
+        Ok(sqlx::query_as::<_, Warehouse>(
+            "SELECT id, name, workspace_id, storage_conn_id, lakekeeper_warehouse_id, created_at \
+             FROM warehouses WHERE name = $1",
+        )
+        .bind(name)
+        .fetch_optional(self.pool())
+        .await?)
+    }
+
     pub async fn delete_warehouse(&self, id: Uuid) -> Result<(), CatalogError> {
         sqlx::query("DELETE FROM warehouses WHERE id = $1")
             .bind(id)

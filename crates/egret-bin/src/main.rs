@@ -169,7 +169,6 @@ impl egret_kernel::engine_conn::EngineConnResolver for EngineConnResolverImpl {
 /// the decision here.
 struct EgretCatalogGuard {
     keys: egret_machine_idp::PgSigningKeyStore,
-    #[allow(dead_code)] // used once fine-grained grant enforcement lands (EB-3 authZ)
     catalog: egret_catalog::CatalogStore,
 }
 
@@ -177,12 +176,13 @@ struct EgretCatalogGuard {
 impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
     async fn check(
         &self,
-        _method: &str,
+        method: &str,
         path: &str,
         query: Option<&str>,
         bearer: Option<&str>,
     ) -> Result<(), (axum::http::StatusCode, String)> {
         use axum::http::StatusCode;
+        let forbid = |m: String| Err((StatusCode::FORBIDDEN, m));
         // authN: a valid, unexpired egret JWT is required on every catalog request.
         let token = bearer.ok_or((StatusCode::UNAUTHORIZED, "missing bearer token".into()))?;
         use egret_machine_idp::SigningKeyStore as _;
@@ -202,21 +202,66 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
             .get("warehouse")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        let token_role = claims
+            .get("roles")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
-        // authZ: warehouse isolation. On warehouse discovery (`GET /config?warehouse=`),
-        // a client may only reach the warehouse named in its token. (Data-plane paths
-        // key the warehouse by lakekeeper prefix; enforcing those follows warehouse
-        // provisioning — see the overnight status doc.)
+        // authZ, discovery (`GET /config?warehouse=`): a client may only discover
+        // the warehouse named in its token.
         if path == "/config" {
             if let Some(requested) = query.and_then(warehouse_query_param) {
                 if requested != token_warehouse {
-                    return Err((
-                        StatusCode::FORBIDDEN,
-                        format!(
-                            "token is scoped to warehouse '{token_warehouse}', not '{requested}'"
-                        ),
+                    return forbid(format!(
+                        "token is scoped to warehouse '{token_warehouse}', not '{requested}'"
                     ));
                 }
+            }
+            return Ok(());
+        }
+
+        // authZ, data-plane (`/{prefix}/...`): the prefix must be the token's
+        // warehouse (isolation), and the role's grants must permit the action —
+        // a mutating method needs a `write`/`manage` grant; any grant permits reads.
+        if let Some(prefix) = path
+            .trim_start_matches('/')
+            .split('/')
+            .next()
+            .filter(|s| !s.is_empty())
+        {
+            let wh = self
+                .catalog
+                .get_warehouse_by_name(token_warehouse)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("warehouse: {e}")))?
+                .ok_or((
+                    StatusCode::FORBIDDEN,
+                    format!("unknown warehouse '{token_warehouse}'"),
+                ))?;
+            if wh.lakekeeper_warehouse_id.as_deref() != Some(prefix) {
+                return forbid("token is not scoped to this warehouse".to_string());
+            }
+            let grants = self
+                .catalog
+                .grants_for_role(token_warehouse, token_role)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("grants: {e}")))?;
+            if grants.is_empty() {
+                return forbid(format!(
+                    "role '{token_role}' has no grants on warehouse '{token_warehouse}'"
+                ));
+            }
+            let is_write = matches!(method, "POST" | "PUT" | "DELETE" | "PATCH");
+            let has_write = grants.iter().any(|g| {
+                g.privilege.eq_ignore_ascii_case("write")
+                    || g.privilege.eq_ignore_ascii_case("manage")
+            });
+            if is_write && !has_write {
+                return forbid(format!(
+                    "role '{token_role}' lacks write on warehouse '{token_warehouse}'"
+                ));
             }
         }
         Ok(())
