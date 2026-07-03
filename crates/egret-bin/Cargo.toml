@@ -37,6 +37,9 @@ egret-orchestrator.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+# Pin a rustls crypto provider so kube-rs's TLS client has one to use (the tree
+# enables both ring + aws-lc-rs, which otherwise panics rustls at runtime).
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 axum.workspace = true
 clap.workspace = true
 anyhow.workspace = true

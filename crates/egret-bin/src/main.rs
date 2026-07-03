@@ -23,6 +23,13 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // kube-rs (engine provisioning) builds a rustls client for the k8s API. The
+    // workspace tree enables BOTH rustls crypto providers — `ring` (via sqlx) and
+    // `aws-lc-rs` (via lakekeeper's jsonwebtoken) — so rustls cannot auto-select
+    // one and panics the moment a TLS client is built. Install a process-wide
+    // default up front so every rustls consumer (kube included) has a provider.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = Cli::parse();
     let config = Config::load().context("loading configuration")?;
     config.validate().map_err(|e| anyhow::anyhow!(e))?;
