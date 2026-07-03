@@ -278,9 +278,23 @@ async fn guard_then_inject_metadata(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use axum::response::IntoResponse as _;
+    let path = req.uri().path().to_string();
+    // Capture how the client reached egret, to rewrite the catalog config `uri`
+    // lakekeeper otherwise advertises as its hardcoded `http://localhost:8181`.
+    let host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let scheme = req
+        .headers()
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("http")
+        .to_string();
+
     if let Some(g) = &guard {
         let method = req.method().as_str().to_string();
-        let path = req.uri().path().to_string();
         let query = req.uri().query().map(str::to_string);
         let bearer = req
             .headers()
@@ -299,5 +313,36 @@ async fn guard_then_inject_metadata(
         .insert(RequestMetadata::new_lakekeeper_internal(
             uuid::Uuid::now_v7(),
         ));
-    next.run(req).await
+    let response = next.run(req).await;
+
+    // Rewrite the `/config` response so the advertised catalog `uri` (and S3
+    // signer uri) point back at egret via the host the client actually used —
+    // lakekeeper hardcodes `http://localhost:8181` in `RequestMetadata`, which no
+    // external Iceberg client (Trino, pyiceberg) could reach.
+    if path == "/config" && response.status().is_success() {
+        if let Some(host) = host {
+            return rewrite_config_host(response, &scheme, &host).await;
+        }
+    }
+    response
+}
+
+/// Replace lakekeeper's hardcoded `http://localhost:8181` in the `/config` body
+/// with `{scheme}://{host}` (how the client reached egret).
+async fn rewrite_config_host(
+    response: axum::response::Response,
+    scheme: &str,
+    host: &str,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let (mut parts, body) = response.into_parts();
+    let bytes = match axum::body::to_bytes(body, 1 << 20).await {
+        Ok(b) => b,
+        Err(_) => return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let replaced = String::from_utf8_lossy(&bytes)
+        .replace("http://localhost:8181", &format!("{scheme}://{host}"));
+    // Body length changed; drop the stale Content-Length so it is re-derived.
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    axum::response::Response::from_parts(parts, axum::body::Body::from(replaced))
 }
