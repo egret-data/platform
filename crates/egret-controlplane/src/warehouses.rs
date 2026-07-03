@@ -90,6 +90,18 @@ pub fn router() -> Router<CpState> {
         .route("/roles/{role_id}/grants", get(list_grants).post(add_grant))
         .route("/grants/{grant_id}", delete(revoke_grant))
         .route("/clients/{id}", delete(revoke_client))
+        .route(
+            "/warehouses/{id}/namespaces",
+            get(browse_namespaces),
+        )
+        .route(
+            "/warehouses/{id}/namespaces/{ns}/tables",
+            get(browse_tables),
+        )
+        .route(
+            "/warehouses/{id}/namespaces/{ns}/tables/{table}",
+            get(browse_schema),
+        )
 }
 
 #[derive(Serialize)]
@@ -435,4 +447,116 @@ async fn revoke_client(
     require_platform_admin(&p)?;
     st.storage.revoke_client(id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Warehouse browse ─────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NamespaceDto {
+    parts: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TabularDto {
+    name: String,
+    kind: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ColumnDto {
+    name: String,
+    #[serde(rename = "type")]
+    r#type: String,
+    required: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SchemaDto {
+    columns: Vec<ColumnDto>,
+    partition_by: Vec<String>,
+    sort_by: Vec<String>,
+}
+
+/// Split a dot-delimited namespace string into its parts.
+fn parse_ns(ns: &str) -> Vec<String> {
+    ns.split('.').map(|s| s.to_string()).collect()
+}
+
+/// Look up the lakekeeper warehouse id for an egret warehouse row.
+async fn lk_id(st: &CpState, id: Uuid) -> Result<Option<String>, CpError> {
+    Ok(st
+        .storage
+        .get_warehouse(id)
+        .await?
+        .and_then(|w| w.lakekeeper_warehouse_id))
+}
+
+async fn browse_namespaces(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<NamespaceDto>>, CpError> {
+    require_platform_admin(&p)?;
+    let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
+        return Ok(Json(vec![]));
+    };
+    let ns = b
+        .namespaces(&lk)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("browse: {e}")))?;
+    Ok(Json(
+        ns.into_iter().map(|n| NamespaceDto { parts: n.parts }).collect(),
+    ))
+}
+
+async fn browse_tables(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, ns)): Path<(Uuid, String)>,
+) -> Result<Json<Vec<TabularDto>>, CpError> {
+    require_platform_admin(&p)?;
+    let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
+        return Ok(Json(vec![]));
+    };
+    let tabulars = b
+        .tabulars(&lk, &parse_ns(&ns))
+        .await
+        .map_err(|e| CpError::BadRequest(format!("browse: {e}")))?;
+    Ok(Json(
+        tabulars
+            .into_iter()
+            .map(|t| TabularDto { name: t.name, kind: t.kind })
+            .collect(),
+    ))
+}
+
+async fn browse_schema(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, ns, table)): Path<(Uuid, String, String)>,
+) -> Result<Json<SchemaDto>, CpError> {
+    require_platform_admin(&p)?;
+    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
+    let b = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    let schema = b
+        .schema(&lk, &parse_ns(&ns), &table)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("browse: {e}")))?;
+    Ok(Json(SchemaDto {
+        columns: schema
+            .columns
+            .into_iter()
+            .map(|c| ColumnDto {
+                name: c.name,
+                r#type: c.type_,
+                required: c.required,
+            })
+            .collect(),
+        partition_by: schema.partition_by,
+        sort_by: schema.sort_by,
+    }))
 }
