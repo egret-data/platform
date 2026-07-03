@@ -55,7 +55,13 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
         out.push_str("coordinator=false\n");
     }
     out.push_str("http-server.http.port=8080\n");
-    out.push_str(&format!("discovery.uri=http://{}-trino:8080\n", spec.name));
+    // The coordinator IS the discovery server, so it announces to itself over
+    // localhost (robust at startup). Workers reach the coordinator via its Service.
+    if coord {
+        out.push_str("discovery.uri=http://localhost:8080\n");
+    } else {
+        out.push_str(&format!("discovery.uri=http://{}-trino:8080\n", spec.name));
+    }
     if let Some(v) = &spec.config.query_max_memory {
         out.push_str(&format!("query.max-memory={v}\n"));
     }
@@ -357,6 +363,11 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("query.max-memory=3GB"));
+        // Coordinator announces to itself; workers reach it via the Service.
+        assert!(data["config-coordinator.properties"]
+            .as_str()
+            .unwrap()
+            .contains("discovery.uri=http://localhost:8080"));
         assert!(data["config-worker.properties"]
             .as_str()
             .unwrap()
