@@ -10,5 +10,5 @@ pub mod trino;
 
 pub use kube_client::{KubeClient, LiveKube};
 pub use provisioner::EngineProvisioner;
-pub use spec::{CatalogProp, CatalogWiring, EngineSpec, EngineStatus, PodStatus, Resources};
+pub use spec::{CatalogSpec, EngineSpec, EngineStatus, PodStatus, Resources, TrinoConfig};
 pub use trino::TrinoProvisioner;
