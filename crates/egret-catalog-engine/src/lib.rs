@@ -11,11 +11,16 @@
 /// Prod bootstrap of lakekeeper's default project using a stable admin principal
 /// derived from `catalog.system_user`.
 pub mod bootstrap;
+pub mod browse;
 pub mod mount;
 pub mod pool;
 pub mod warehouse;
 
 pub use bootstrap::ensure_bootstrapped;
+pub use browse::{
+    list_namespaces, list_tabulars, load_table_schema, ColumnInfo, NamespaceEntry, TableSchema,
+    TabularEntry, TabularKind,
+};
 pub use lakekeeper::api::ApiContext;
 /// lakekeeper's built-in open authorizer. EB-1 mounts the engine with this
 /// permissive authorizer; EB-3 replaces it with the real egret authorizer.
