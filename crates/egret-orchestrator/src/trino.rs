@@ -396,6 +396,35 @@ fn probe_json(defaults_ready: bool, p: Option<&crate::spec::Probe>) -> Value {
             "failureThreshold": fail, "successThreshold": succ })
 }
 
+/// Render an [`Affinity`] to k8s JSON. A `raw_override` wins verbatim; otherwise
+/// assemble node affinity from `node_match` and a preferred pod-anti-affinity
+/// (weight 100) selecting on the role's `app` label when a topology key is set.
+fn affinity_json(a: &crate::spec::Affinity, app_label: &str) -> Value {
+    if let Some(raw) = &a.raw_override {
+        return raw.clone();
+    }
+    let mut out = serde_json::Map::new();
+    if !a.node_match.is_empty() {
+        let exprs: Vec<Value> = a
+            .node_match
+            .iter()
+            .map(|r| json!({ "key": r.key, "operator": r.operator, "values": r.values }))
+            .collect();
+        out.insert(
+            "nodeAffinity".into(),
+            json!({ "requiredDuringSchedulingIgnoredDuringExecution": { "nodeSelectorTerms": [{ "matchExpressions": exprs }] } }),
+        );
+    }
+    if let Some(tk) = &a.pod_anti_affinity_topology_key {
+        out.insert(
+            "podAntiAffinity".into(),
+            json!({ "preferredDuringSchedulingIgnoredDuringExecution": [{
+                "weight": 100, "podAffinityTerm": { "topologyKey": tk, "labelSelector": { "matchLabels": { "app": app_label } } } }] }),
+        );
+    }
+    Value::Object(out)
+}
+
 pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
     let app = format!("{}-{}", spec.name, role.suffix());
     let (rc, jvm_file, cfg_file, replicas) = if role.is_coord() {
@@ -484,6 +513,16 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
     if let Some(p) = rc.probes.startup.as_ref() {
         container["startupProbe"] = probe_json(false, Some(p));
     }
+    // Per-role additional exposed ports: APPEND to the base http port array.
+    if !rc.additional_exposed_ports.is_empty() {
+        if !container["ports"].is_array() {
+            container["ports"] = json!([]);
+        }
+        let ports = container["ports"].as_array_mut().unwrap();
+        for p in &rc.additional_exposed_ports {
+            ports.push(json!({ "name": p.name, "containerPort": p.container_port }));
+        }
+    }
 
     // pod-spec: worker graceful shutdown adds a preStop + terminationGracePeriodSeconds.
     let mut pod_spec = json!({
@@ -504,6 +543,68 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
                 pod_spec["containers"][0]["lifecycle"] =
                     json!({ "preStop": { "exec": { "command": ["/bin/sh", "-c", cmd] } } });
             }
+        }
+    }
+
+    // Per-role pod placement. Splice each field only when set; `app` is the
+    // role's app label used for pod-anti-affinity selection.
+    if !rc.node_selector.is_empty() {
+        pod_spec["nodeSelector"] = Value::Object(
+            rc.node_selector
+                .iter()
+                .map(|(k, v)| (k.clone(), json!(v)))
+                .collect(),
+        );
+    }
+    if !rc.tolerations.is_empty() {
+        let tols: Vec<Value> = rc
+            .tolerations
+            .iter()
+            .map(|t| {
+                let mut o = serde_json::Map::new();
+                if let Some(v) = &t.key {
+                    o.insert("key".into(), json!(v));
+                }
+                if let Some(v) = &t.operator {
+                    o.insert("operator".into(), json!(v));
+                }
+                if let Some(v) = &t.value {
+                    o.insert("value".into(), json!(v));
+                }
+                if let Some(v) = &t.effect {
+                    o.insert("effect".into(), json!(v));
+                }
+                if let Some(v) = &t.toleration_seconds {
+                    o.insert("tolerationSeconds".into(), json!(v));
+                }
+                Value::Object(o)
+            })
+            .collect();
+        pod_spec["tolerations"] = Value::Array(tols);
+    }
+    if !rc.topology_spread.is_empty() {
+        let tsc: Vec<Value> = rc
+            .topology_spread
+            .iter()
+            .map(|t| {
+                json!({
+                    "maxSkew": t.max_skew,
+                    "topologyKey": t.topology_key,
+                    "whenUnsatisfiable": t.when_unsatisfiable,
+                    "labelSelector": { "matchLabels": t.match_labels },
+                })
+            })
+            .collect();
+        pod_spec["topologySpreadConstraints"] = Value::Array(tsc);
+    }
+    if let Some(a) = &rc.affinity {
+        pod_spec["affinity"] = affinity_json(a, &app);
+    }
+    // Only set the grace period if the worker graceful-shutdown block above did
+    // not already set it — GS wins.
+    if let Some(tg) = rc.termination_grace_seconds {
+        if pod_spec.get("terminationGracePeriodSeconds").is_none() {
+            pod_spec["terminationGracePeriodSeconds"] = json!(tg);
         }
     }
 
@@ -1260,6 +1361,81 @@ mod tests {
     fn ingress_none_when_disabled() {
         let s = sample_spec(); // no ingress
         assert!(trino_ingress(&s).is_none());
+    }
+
+    #[test]
+    fn per_role_placement_renders() {
+        let mut s = sample_spec();
+        let c = &mut s.config.coordinator;
+        c.node_selector.insert("disktype".into(), "ssd".into());
+        c.tolerations = vec![Toleration {
+            key: Some("dedicated".into()),
+            operator: Some("Equal".into()),
+            value: Some("trino".into()),
+            effect: Some("NoSchedule".into()),
+            toleration_seconds: None,
+        }];
+        c.topology_spread = vec![TopologySpreadConstraint {
+            max_skew: 1,
+            topology_key: "kubernetes.io/hostname".into(),
+            when_unsatisfiable: "ScheduleAnyway".into(),
+            match_labels: [("app".to_string(), "x".to_string())].into(),
+        }];
+        c.termination_grace_seconds = Some(60);
+        c.additional_exposed_ports = vec![ContainerPort {
+            name: "jmx".into(),
+            container_port: 9080,
+        }];
+        let d = trino_deployment(&s, Role::Coordinator);
+        let ps = &d["spec"]["template"]["spec"];
+        assert_eq!(ps["nodeSelector"]["disktype"], "ssd");
+        assert_eq!(ps["tolerations"][0]["key"], "dedicated");
+        assert_eq!(ps["tolerations"][0]["effect"], "NoSchedule");
+        assert_eq!(ps["topologySpreadConstraints"][0]["maxSkew"], 1);
+        assert_eq!(ps["terminationGracePeriodSeconds"], 60);
+        let ports = &ps["containers"][0]["ports"];
+        assert!(ports
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "jmx" && p["containerPort"] == 9080));
+    }
+
+    #[test]
+    fn affinity_structured_and_raw_override() {
+        let mut s = sample_spec();
+        s.config.coordinator.affinity = Some(Affinity {
+            node_match: vec![NodeSelectorRequirement {
+                key: "role".into(),
+                operator: "In".into(),
+                values: vec!["trino".into()],
+            }],
+            pod_anti_affinity_topology_key: Some("kubernetes.io/hostname".into()),
+            raw_override: None,
+        });
+        let ps = trino_deployment(&s, Role::Coordinator)["spec"]["template"]["spec"].clone();
+        assert_eq!(
+            ps["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+                ["nodeSelectorTerms"][0]["matchExpressions"][0]["key"],
+            "role"
+        );
+        assert_eq!(
+            ps["affinity"]["podAntiAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"][0]
+                ["podAffinityTerm"]["topologyKey"],
+            "kubernetes.io/hostname"
+        );
+        // raw override wins verbatim
+        let mut s2 = sample_spec();
+        s2.config.coordinator.affinity = Some(Affinity {
+            node_match: vec![],
+            pod_anti_affinity_topology_key: None,
+            raw_override: Some(serde_json::json!({"custom": true})),
+        });
+        assert_eq!(
+            trino_deployment(&s2, Role::Coordinator)["spec"]["template"]["spec"]["affinity"]
+                ["custom"],
+            true
+        );
     }
 
     #[tokio::test]
