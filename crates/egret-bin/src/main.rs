@@ -427,11 +427,25 @@ impl EgretEngineProvisioner {
             },
             query_max_memory_per_node: r.query_max_memory_per_node.clone(),
             additional_jvm_config: r.additional_jvm_config.clone(),
+            heap_headroom_per_node: r.heap_headroom_per_node.clone(),
             probes: egret_orchestrator::Probes {
                 liveness: r.probes.liveness.as_ref().map(Self::probe_from),
                 readiness: r.probes.readiness.as_ref().map(Self::probe_from),
                 startup: r.probes.startup.as_ref().map(Self::probe_from),
             },
+        }
+    }
+
+    /// Map a control-plane `ResourceGroupReq` onto the orchestrator
+    /// `ResourceGroup`, recursing into sub-groups.
+    fn rg_from(g: &egret_controlplane::ResourceGroupReq) -> egret_orchestrator::ResourceGroup {
+        egret_orchestrator::ResourceGroup {
+            name: g.name.clone(),
+            soft_memory_limit: g.soft_memory_limit.clone(),
+            hard_concurrency_limit: g.hard_concurrency_limit,
+            max_queued: g.max_queued,
+            scheduling_policy: g.scheduling_policy.clone(),
+            sub_groups: g.sub_groups.iter().map(Self::rg_from).collect(),
         }
     }
 
@@ -456,6 +470,43 @@ impl EgretEngineProvisioner {
                         }
                     }),
                 },
+                additional_node_properties: cfg.additional_node_properties.clone(),
+                additional_log_properties: cfg.additional_log_properties.clone(),
+                event_listener: cfg.event_listener.clone(),
+                resource_groups: cfg.resource_groups.as_ref().map(|rg| {
+                    egret_orchestrator::ResourceGroups {
+                        root_groups: rg.root_groups.iter().map(Self::rg_from).collect(),
+                        selectors: rg
+                            .selectors
+                            .iter()
+                            .map(|s| egret_orchestrator::ResourceSelector {
+                                user: s.user.clone(),
+                                source: s.source.clone(),
+                                query_type: s.query_type.clone(),
+                                group: s.group.clone(),
+                            })
+                            .collect(),
+                    }
+                }),
+                session_properties: cfg
+                    .session_properties
+                    .iter()
+                    .map(|r| egret_orchestrator::SessionRule {
+                        match_user: r.match_user.clone(),
+                        match_source: r.match_source.clone(),
+                        match_client_tags: r.match_client_tags.clone(),
+                        properties: r.properties.clone(),
+                    })
+                    .collect(),
+                fault_tolerant: cfg.fault_tolerant.as_ref().map(|f| {
+                    egret_orchestrator::FaultTolerant {
+                        retry_policy: f.retry_policy.clone(),
+                        s3_base_dir: f.s3_base_dir.clone(),
+                        s3_endpoint: f.s3_endpoint.clone(),
+                        s3_region: f.s3_region.clone(),
+                        s3_path_style: f.s3_path_style,
+                    }
+                }),
             },
             catalogs: req
                 .catalogs
