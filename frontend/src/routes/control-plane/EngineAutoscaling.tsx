@@ -12,7 +12,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { RawJsonField } from "./config/RawJsonField";
-import { ValidityProvider } from "./config/validityRegistry";
 import {
   type AutoscaleMode,
   type AutoscaleTriggerForm,
@@ -398,14 +397,16 @@ export interface EngineAutoscalingProps {
   setHpa: Dispatch<SetStateAction<HpaForm>>;
   keda: KedaForm;
   setKeda: Dispatch<SetStateAction<KedaForm>>;
-  /** Reports whether every raw-JSON override parses; blocks Save on false. */
-  onValidityChange: (valid: boolean) => void;
 }
 
 /**
  * "Autoscaling" config sub-tab: scale the worker Deployment with either a native
  * HorizontalPodAutoscaler (CPU/memory targets) or a KEDA ScaledObject (cron /
  * Prometheus / raw triggers). Off drops `autoscaling` from the payload entirely.
+ *
+ * The `RawJsonField`s here register their validity in the single
+ * `ValidityProvider` the ConfigurationTab wraps around all sections, so an
+ * unparseable override blocks Save without any per-section validity prop.
  */
 export function EngineAutoscaling({
   mode,
@@ -414,38 +415,32 @@ export function EngineAutoscaling({
   setHpa,
   keda,
   setKeda,
-  onValidityChange,
 }: EngineAutoscalingProps) {
-  // The shared `RawJsonField`s register their own validity in this provider;
-  // bridge its `anyInvalid` back to the section's `onValidityChange` (inverted:
-  // valid = !anyInvalid) so an unparseable override still blocks Save.
   return (
-    <ValidityProvider onAnyInvalidChange={(invalid) => onValidityChange(!invalid)}>
-      <div className="space-y-4">
-        <div className="max-w-xs space-y-1.5">
-          <Label htmlFor="as-mode">Autoscaling</Label>
-          <Select
-            value={mode || "off"}
-            onValueChange={(v) => setMode(v === "off" ? "" : (v as AutoscaleMode))}
-          >
-            <SelectTrigger id="as-mode" className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="off">Off</SelectItem>
-              <SelectItem value="hpa">HPA (HorizontalPodAutoscaler)</SelectItem>
-              <SelectItem value="keda">KEDA (ScaledObject)</SelectItem>
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-muted-foreground">
-            Scales the worker Deployment. Off leaves the fixed worker replica
-            count in place.
-          </p>
-        </div>
-
-        {mode === "hpa" && <HpaEditor value={hpa} onChange={setHpa} />}
-        {mode === "keda" && <KedaEditor value={keda} onChange={setKeda} />}
+    <div className="space-y-4">
+      <div className="max-w-xs space-y-1.5">
+        <Label htmlFor="as-mode">Autoscaling</Label>
+        <Select
+          value={mode || "off"}
+          onValueChange={(v) => setMode(v === "off" ? "" : (v as AutoscaleMode))}
+        >
+          <SelectTrigger id="as-mode" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="off">Off</SelectItem>
+            <SelectItem value="hpa">HPA (HorizontalPodAutoscaler)</SelectItem>
+            <SelectItem value="keda">KEDA (ScaledObject)</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          Scales the worker Deployment. Off leaves the fixed worker replica count
+          in place.
+        </p>
       </div>
-    </ValidityProvider>
+
+      {mode === "hpa" && <HpaEditor value={hpa} onChange={setHpa} />}
+      {mode === "keda" && <KedaEditor value={keda} onChange={setKeda} />}
+    </div>
   );
 }

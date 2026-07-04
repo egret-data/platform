@@ -71,7 +71,10 @@ import { EngineRoleConfig } from "./EngineRoleConfig";
 import { EngineConfigGeneral } from "./EngineConfigGeneral";
 import { EngineConfigReliability } from "./EngineConfigReliability";
 import { EngineConfigAdvanced } from "./EngineConfigAdvanced";
-import { PodSchedulingSection } from "./PodSchedulingSection";
+import { PodSection } from "./config/PodSection";
+import { PlacementSection } from "./config/PlacementSection";
+import { ContainersMountsSection } from "./config/ContainersMountsSection";
+import { ValidityProvider } from "./config/validityRegistry";
 import { EngineAutoscaling } from "./EngineAutoscaling";
 import { EngineSecurity } from "./EngineSecurity";
 import EngineMonitor from "./EngineMonitor";
@@ -299,8 +302,8 @@ function StatusCard({ status }: { status: EngineStatus }) {
 // Per-role config form model + serialization lives in `useEngineConfigForm.ts`;
 // the per-role editor UI lives in `EngineRoleConfig.tsx`.
 
-// Configuration left-nav sections (label + `section` key). Pod & Scheduling is
-// one item for now; Task 6 replaces it with Pod / Placement / Containers & Mounts.
+// Configuration left-nav sections (label + `section` key). The former combined
+// "Pod & Scheduling" item is split into Pod / Placement / Containers & Mounts.
 const CONFIG_NAV: { key: string; label: string }[] = [
   { key: "general", label: "General" },
   { key: "coordinator", label: "Coordinator" },
@@ -308,7 +311,9 @@ const CONFIG_NAV: { key: string; label: string }[] = [
   { key: "workload", label: "Workload" },
   { key: "reliability", label: "Reliability" },
   { key: "advanced", label: "Advanced" },
-  { key: "podScheduling", label: "Pod & Scheduling" },
+  { key: "pod", label: "Pod" },
+  { key: "placement", label: "Placement" },
+  { key: "containersMounts", label: "Containers & Mounts" },
   { key: "autoscaling", label: "Autoscaling" },
 ];
 
@@ -387,23 +392,16 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
     sectionCounts,
   } = cfg;
 
-  // Goes false when a raw-JSON pod/scheduling override fails to parse; blocks Save.
-  const [podSchedValid, setPodSchedValid] = useState(true);
-  // Goes false when a raw-JSON autoscaling override fails to parse; blocks Save.
-  const [autoscaleValid, setAutoscaleValid] = useState(true);
+  // Goes true when any raw-JSON override (any section) fails to parse; blocks
+  // Save. Every `RawJsonField` under the single `ValidityProvider` below reports
+  // into this one registry — no per-section validity gates.
+  const [rawInvalid, setRawInvalid] = useState(false);
 
-  // Active left-nav section. Pod & Scheduling stays a single item for now
-  // (Task 6 splits it into Pod / Placement / Containers & Mounts).
+  // Active left-nav section.
   const [section, setSection] = useState("general");
 
-  // Non-default field count per nav item (drives the badges). The combined
-  // Pod & Scheduling item sums its three underlying section counts.
-  const countFor = (key: string): number =>
-    key === "podScheduling"
-      ? (sectionCounts.pod ?? 0) +
-        (sectionCounts.placement ?? 0) +
-        (sectionCounts.containersMounts ?? 0)
-      : (sectionCounts[key] ?? 0);
+  // Non-default field count per nav item (drives the badges).
+  const countFor = (key: string): number => sectionCounts[key] ?? 0;
 
   return (
     <Card>
@@ -441,7 +439,8 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
               })}
             </nav>
 
-            <div className="min-w-0 flex-1">
+            <ValidityProvider onAnyInvalidChange={setRawInvalid}>
+             <div className="min-w-0 flex-1">
               {section === "general" && (
                 <EngineConfigGeneral
                   queryMaxMemory={queryMaxMemory}
@@ -519,16 +518,8 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
                 />
               )}
 
-              {section === "podScheduling" && (
-                <PodSchedulingSection
-                  coordinator={coordinator}
-                  setCoordinator={setCoordinator}
-                  worker={worker}
-                  setWorker={setWorker}
-                  initContainers={initContainers}
-                  setInitContainers={setInitContainers}
-                  sidecarContainers={sidecarContainers}
-                  setSidecarContainers={setSidecarContainers}
+              {section === "pod" && (
+                <PodSection
                   serviceAccount={serviceAccount}
                   setServiceAccount={setServiceAccount}
                   imagePullSecrets={imagePullSecrets}
@@ -539,12 +530,6 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
                   setPodSecurityContext={setPodSecurityContext}
                   containerSecurityContext={containerSecurityContext}
                   setContainerSecurityContext={setContainerSecurityContext}
-                  envFrom={envFrom}
-                  setEnvFrom={setEnvFrom}
-                  configMounts={configMounts}
-                  setConfigMounts={setConfigMounts}
-                  secretMounts={secretMounts}
-                  setSecretMounts={setSecretMounts}
                   deploymentStrategy={deploymentStrategy}
                   setDeploymentStrategy={setDeploymentStrategy}
                   deploymentAnnotations={deploymentAnnotations}
@@ -555,7 +540,30 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
                   setProgressDeadlineSeconds={setProgressDeadlineSeconds}
                   shareProcessNamespace={shareProcessNamespace}
                   setShareProcessNamespace={setShareProcessNamespace}
-                  onValidityChange={setPodSchedValid}
+                />
+              )}
+
+              {section === "placement" && (
+                <PlacementSection
+                  coordinator={coordinator}
+                  setCoordinator={setCoordinator}
+                  worker={worker}
+                  setWorker={setWorker}
+                />
+              )}
+
+              {section === "containersMounts" && (
+                <ContainersMountsSection
+                  initContainers={initContainers}
+                  setInitContainers={setInitContainers}
+                  sidecarContainers={sidecarContainers}
+                  setSidecarContainers={setSidecarContainers}
+                  envFrom={envFrom}
+                  setEnvFrom={setEnvFrom}
+                  configMounts={configMounts}
+                  setConfigMounts={setConfigMounts}
+                  secretMounts={secretMounts}
+                  setSecretMounts={setSecretMounts}
                 />
               )}
 
@@ -567,13 +575,13 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
                   setHpa={setAutoscaleHpa}
                   keda={autoscaleKeda}
                   setKeda={setAutoscaleKeda}
-                  onValidityChange={setAutoscaleValid}
                 />
               )}
-            </div>
+             </div>
+            </ValidityProvider>
           </div>
 
-          <SaveBar cfg={cfg} disabled={!podSchedValid || !autoscaleValid} />
+          <SaveBar cfg={cfg} disabled={rawInvalid} />
         </div>
       </CardContent>
     </Card>
