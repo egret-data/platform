@@ -515,12 +515,39 @@ export interface RoleConfig {
   resources?: RoleResources;
   heap?: HeapConfig;
   queryMaxMemoryPerNode?: string;
+  heapHeadroomPerNode?: string;
   additionalJvmConfig?: string[];
   probes?: {
     liveness?: Probe;
     readiness?: Probe;
     startup?: Probe;
   };
+}
+
+/** A Trino file resource-group node (recursive tree). */
+export interface Group {
+  name: string;
+  softMemoryLimit: string;
+  hardConcurrencyLimit: number;
+  maxQueued: number;
+  schedulingPolicy?: string;
+  subGroups?: Group[];
+}
+
+/** A resource-group selector: match criteria → target group (dot-path). */
+export interface Selector {
+  user?: string;
+  source?: string;
+  queryType?: string;
+  group: string;
+}
+
+/** A file session-property manager match rule. */
+export interface SessionRule {
+  matchUser?: string;
+  matchSource?: string;
+  matchClientTags?: string[];
+  properties: Record<string, string>;
 }
 
 /** Worker role config: a `RoleConfig` plus optional graceful shutdown. */
@@ -540,6 +567,16 @@ export interface TrinoConfig {
   logLevel?: string;
   configProperties?: Record<string, string>;
   env?: Record<string, string>;
+  additionalNodeProperties?: Record<string, string>;
+  additionalLogProperties?: Record<string, string>;
+  eventListener?: Record<string, string>;
+  faultTolerant?: {
+    retryPolicy: "TASK" | "QUERY";
+    exchangeStorageConnId: string;
+    exchangePrefix: string;
+  };
+  resourceGroups?: { rootGroups: Group[]; selectors: Selector[] };
+  sessionProperties?: SessionRule[];
   coordinator: RoleConfig;
   worker: WorkerRoleConfig;
 }

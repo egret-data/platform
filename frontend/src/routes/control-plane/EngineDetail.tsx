@@ -14,6 +14,7 @@ import {
   type RoleConfig,
   type RoleResources,
   type Secret,
+  type Storage,
   type TrinoConfig,
   type Warehouse,
   addEngineCatalog,
@@ -22,6 +23,7 @@ import {
   getEngine,
   listEngineCatalogs,
   listSecrets,
+  listStorage,
   listWarehouses,
   updateEngine,
 } from "@/api/controlPlane";
@@ -352,6 +354,7 @@ type RoleForm = {
   maxPercent: string;
   initialPercent: string;
   queryMaxMemoryPerNode: string;
+  heapHeadroomPerNode: string;
   additionalJvmConfig: string[];
   liveness: ProbeForm;
   readiness: ProbeForm;
@@ -375,6 +378,7 @@ function roleToForm(rc: RoleConfig | undefined): RoleForm {
     maxPercent: heap?.maxPercent?.toString() ?? "",
     initialPercent: heap?.initialPercent?.toString() ?? "",
     queryMaxMemoryPerNode: rc?.queryMaxMemoryPerNode ?? "",
+    heapHeadroomPerNode: rc?.heapHeadroomPerNode ?? "",
     additionalJvmConfig: rc?.additionalJvmConfig ? [...rc.additionalJvmConfig] : [],
     liveness: probeToForm(rc?.probes?.liveness),
     readiness: probeToForm(rc?.probes?.readiness),
@@ -409,6 +413,9 @@ function formToRole(f: RoleForm): RoleConfig {
 
   if (f.queryMaxMemoryPerNode.trim())
     rc.queryMaxMemoryPerNode = f.queryMaxMemoryPerNode.trim();
+
+  if (f.heapHeadroomPerNode.trim())
+    rc.heapHeadroomPerNode = f.heapHeadroomPerNode.trim();
 
   const jvm = f.additionalJvmConfig.map((s) => s.trim()).filter(Boolean);
   if (jvm.length) rc.additionalJvmConfig = jvm;
@@ -680,6 +687,15 @@ function RoleConfigEditor({
             onChange={(e) => set("queryMaxMemoryPerNode", e.target.value)}
           />
         </div>
+        <div className="space-y-1.5">
+          <Label htmlFor={`${idPrefix}-hhpn`}>Heap headroom / node</Label>
+          <Input
+            id={`${idPrefix}-hhpn`}
+            value={value.heapHeadroomPerNode}
+            placeholder="2GB"
+            onChange={(e) => set("heapHeadroomPerNode", e.target.value)}
+          />
+        </div>
       </div>
 
       <div className="space-y-1.5">
@@ -725,6 +741,12 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
   const queryClient = useQueryClient();
   const tc = engine.spec.trinoConfig;
 
+  const storage = useQuery<Storage[], ApiError>({
+    queryKey: ["cp", "storage"],
+    queryFn: listStorage,
+    retry: false,
+  });
+
   // Cluster-wide config.
   const [queryMaxMemory, setQueryMaxMemory] = useState(tc?.queryMaxMemory ?? "");
   const [logLevel, setLogLevel] = useState(tc?.logLevel ?? "INFO");
@@ -732,6 +754,29 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
     recordToKv(tc?.configProperties),
   );
   const [env, setEnv] = useState<Kv[]>(recordToKv(tc?.env));
+
+  // Raw property maps (config-file surface).
+  const [eventListener, setEventListener] = useState<Kv[]>(
+    recordToKv(tc?.eventListener),
+  );
+  const [nodeProps, setNodeProps] = useState<Kv[]>(
+    recordToKv(tc?.additionalNodeProperties),
+  );
+  const [logProps, setLogProps] = useState<Kv[]>(
+    recordToKv(tc?.additionalLogProperties),
+  );
+
+  // Fault-tolerant execution.
+  const [ftEnabled, setFtEnabled] = useState(tc?.faultTolerant != null);
+  const [retryPolicy, setRetryPolicy] = useState<"TASK" | "QUERY">(
+    tc?.faultTolerant?.retryPolicy ?? "TASK",
+  );
+  const [exchangeStorageConnId, setExchangeStorageConnId] = useState(
+    tc?.faultTolerant?.exchangeStorageConnId ?? "",
+  );
+  const [exchangePrefix, setExchangePrefix] = useState(
+    tc?.faultTolerant?.exchangePrefix ?? "exchange",
+  );
 
   // Per-role config.
   const [coordinator, setCoordinator] = useState<RoleForm>(roleToForm(tc?.coordinator));
@@ -743,6 +788,10 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
     tc?.worker?.gracefulShutdown?.gracePeriodSeconds?.toString() ?? "",
   );
 
+  // Structured configs owned by Task 7's builders — preserved on save (pass-through).
+  const [resourceGroups, setResourceGroups] = useState(tc?.resourceGroups);
+  const [sessionProperties, setSessionProperties] = useState(tc?.sessionProperties);
+
   const [error, setError] = useState<string | null>(null);
 
   // Keep inputs in sync when the polled engine changes (e.g. an external update).
@@ -752,12 +801,21 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
     setLogLevel(next?.logLevel ?? "INFO");
     setConfigProps(recordToKv(next?.configProperties));
     setEnv(recordToKv(next?.env));
+    setEventListener(recordToKv(next?.eventListener));
+    setNodeProps(recordToKv(next?.additionalNodeProperties));
+    setLogProps(recordToKv(next?.additionalLogProperties));
+    setFtEnabled(next?.faultTolerant != null);
+    setRetryPolicy(next?.faultTolerant?.retryPolicy ?? "TASK");
+    setExchangeStorageConnId(next?.faultTolerant?.exchangeStorageConnId ?? "");
+    setExchangePrefix(next?.faultTolerant?.exchangePrefix ?? "exchange");
     setCoordinator(roleToForm(next?.coordinator));
     setWorker(roleToForm(next?.worker));
     setGsEnabled(next?.worker?.gracefulShutdown?.enabled ?? false);
     setGracePeriod(
       next?.worker?.gracefulShutdown?.gracePeriodSeconds?.toString() ?? "",
     );
+    setResourceGroups(next?.resourceGroups);
+    setSessionProperties(next?.sessionProperties);
   }, [engine.spec]);
 
   const saveMutation = useMutation<Engine, ApiError, CreateEngineInput>({
@@ -780,6 +838,26 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
     if (Object.keys(cp).length) trinoConfig.configProperties = cp;
     const ev = kvToRecord(env);
     if (Object.keys(ev).length) trinoConfig.env = ev;
+
+    const el = kvToRecord(eventListener);
+    if (Object.keys(el).length) trinoConfig.eventListener = el;
+    const np = kvToRecord(nodeProps);
+    if (Object.keys(np).length) trinoConfig.additionalNodeProperties = np;
+    const lp = kvToRecord(logProps);
+    if (Object.keys(lp).length) trinoConfig.additionalLogProperties = lp;
+
+    if (ftEnabled && exchangeStorageConnId) {
+      trinoConfig.faultTolerant = {
+        retryPolicy,
+        exchangeStorageConnId,
+        exchangePrefix: exchangePrefix.trim() || "exchange",
+      };
+    }
+
+    // Preserve Task 7's structured configs (this UI doesn't edit them).
+    if (resourceGroups) trinoConfig.resourceGroups = resourceGroups;
+    if (sessionProperties) trinoConfig.sessionProperties = sessionProperties;
+
     if (gsEnabled) {
       trinoConfig.worker.gracefulShutdown = {
         enabled: true,
@@ -877,6 +955,118 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
                   keyPlaceholder="MY_VAR"
                   valuePlaceholder="value"
                   addLabel="Add variable"
+                />
+              </div>
+
+              <div className="space-y-3 rounded-lg border p-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="ced-ft-enabled">
+                      Fault-tolerant execution
+                    </Label>
+                    <p className="text-xs text-muted-foreground">
+                      Retry failed tasks/queries, spooling exchange data to an S3
+                      storage connection.
+                    </p>
+                  </div>
+                  <Switch
+                    id="ced-ft-enabled"
+                    checked={ftEnabled}
+                    onCheckedChange={setFtEnabled}
+                  />
+                </div>
+                {ftEnabled && (
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="ced-ft-retry">Retry policy</Label>
+                      <Select
+                        value={retryPolicy}
+                        onValueChange={(v) =>
+                          setRetryPolicy(v as "TASK" | "QUERY")
+                        }
+                      >
+                        <SelectTrigger id="ced-ft-retry" className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="TASK">TASK</SelectItem>
+                          <SelectItem value="QUERY">QUERY</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="ced-ft-storage">Exchange storage</Label>
+                      <Select
+                        value={exchangeStorageConnId}
+                        onValueChange={setExchangeStorageConnId}
+                      >
+                        <SelectTrigger id="ced-ft-storage" className="w-full">
+                          <SelectValue placeholder="Select a connection" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {(storage.data ?? []).length === 0 ? (
+                            <SelectItem value="__none__" disabled>
+                              No storage connections
+                            </SelectItem>
+                          ) : (
+                            (storage.data ?? []).map((s) => (
+                              <SelectItem key={s.id} value={s.id}>
+                                {s.name}
+                              </SelectItem>
+                            ))
+                          )}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="ced-ft-prefix">Exchange prefix</Label>
+                      <Input
+                        id="ced-ft-prefix"
+                        value={exchangePrefix}
+                        placeholder="exchange"
+                        onChange={(e) => setExchangePrefix(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-1.5">
+                <Label>Event listener</Label>
+                <p className="text-xs text-muted-foreground">
+                  Raw <code>event-listener.properties</code> key/value pairs.
+                </p>
+                <KeyValueEditor
+                  rows={eventListener}
+                  onChange={setEventListener}
+                  keyPlaceholder="event-listener.name"
+                  valuePlaceholder="http"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label>Additional node properties</Label>
+                <p className="text-xs text-muted-foreground">
+                  Extra <code>node.properties</code> key/value pairs.
+                </p>
+                <KeyValueEditor
+                  rows={nodeProps}
+                  onChange={setNodeProps}
+                  keyPlaceholder="node.internal-address-source"
+                  valuePlaceholder="FQDN"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label>Additional log properties</Label>
+                <p className="text-xs text-muted-foreground">
+                  Extra <code>log.properties</code> logger levels.
+                </p>
+                <KeyValueEditor
+                  rows={logProps}
+                  onChange={setLogProps}
+                  keyPlaceholder="io.trino.execution"
+                  valuePlaceholder="DEBUG"
                 />
               </div>
             </TabsContent>
