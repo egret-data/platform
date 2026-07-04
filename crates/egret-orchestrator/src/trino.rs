@@ -396,6 +396,104 @@ fn probe_json(defaults_ready: bool, p: Option<&crate::spec::Probe>) -> Value {
             "failureThreshold": fail, "successThreshold": succ })
 }
 
+/// Render an [`Affinity`] to k8s JSON. A `raw_override` wins verbatim; otherwise
+/// assemble node affinity from `node_match` and a preferred pod-anti-affinity
+/// (weight 100) selecting on the role's `app` label when a topology key is set.
+fn affinity_json(a: &crate::spec::Affinity, app_label: &str) -> Value {
+    if let Some(raw) = &a.raw_override {
+        return raw.clone();
+    }
+    let mut out = serde_json::Map::new();
+    if !a.node_match.is_empty() {
+        let exprs: Vec<Value> = a
+            .node_match
+            .iter()
+            .map(|r| json!({ "key": r.key, "operator": r.operator, "values": r.values }))
+            .collect();
+        out.insert(
+            "nodeAffinity".into(),
+            json!({ "requiredDuringSchedulingIgnoredDuringExecution": { "nodeSelectorTerms": [{ "matchExpressions": exprs }] } }),
+        );
+    }
+    if let Some(tk) = &a.pod_anti_affinity_topology_key {
+        out.insert(
+            "podAntiAffinity".into(),
+            json!({ "preferredDuringSchedulingIgnoredDuringExecution": [{
+                "weight": 100, "podAffinityTerm": { "topologyKey": tk, "labelSelector": { "matchLabels": { "app": app_label } } } }] }),
+        );
+    }
+    Value::Object(out)
+}
+
+/// Render a [`SecurityContext`] to k8s JSON: the flat `Some` fields first, then
+/// any `raw_override` keys merged verbatim ON TOP (so an override wins).
+fn security_context_json(sc: &crate::spec::SecurityContext) -> Value {
+    let mut out = serde_json::Map::new();
+    if let Some(v) = sc.run_as_user {
+        out.insert("runAsUser".into(), json!(v));
+    }
+    if let Some(v) = sc.run_as_group {
+        out.insert("runAsGroup".into(), json!(v));
+    }
+    if let Some(v) = sc.fs_group {
+        out.insert("fsGroup".into(), json!(v));
+    }
+    if let Some(v) = sc.run_as_non_root {
+        out.insert("runAsNonRoot".into(), json!(v));
+    }
+    if let Some(raw) = &sc.raw_override {
+        if let Some(obj) = raw.as_object() {
+            for (k, v) in obj {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+/// Render a [`MiniContainer`] to k8s JSON. A `raw_override` wins verbatim;
+/// otherwise build `{name, image}` plus optional `command`/`args`/`env`/
+/// `volumeMounts`, omitting any empty collection.
+fn container_json(c: &crate::spec::MiniContainer) -> Value {
+    if let Some(raw) = &c.raw_override {
+        return raw.clone();
+    }
+    let mut out = serde_json::Map::new();
+    out.insert("name".into(), json!(c.name));
+    out.insert("image".into(), json!(c.image));
+    if !c.command.is_empty() {
+        out.insert("command".into(), json!(c.command));
+    }
+    if !c.args.is_empty() {
+        out.insert("args".into(), json!(c.args));
+    }
+    if !c.env.is_empty() {
+        let env: Vec<Value> = c
+            .env
+            .iter()
+            .map(|(k, v)| json!({ "name": k, "value": v }))
+            .collect();
+        out.insert("env".into(), Value::Array(env));
+    }
+    if !c.volume_mounts.is_empty() {
+        let vms: Vec<Value> = c
+            .volume_mounts
+            .iter()
+            .map(|m| {
+                let mut o = serde_json::Map::new();
+                o.insert("name".into(), json!(m.name));
+                o.insert("mountPath".into(), json!(m.mount_path));
+                if let Some(sp) = &m.sub_path {
+                    o.insert("subPath".into(), json!(sp));
+                }
+                Value::Object(o)
+            })
+            .collect();
+        out.insert("volumeMounts".into(), Value::Array(vms));
+    }
+    Value::Object(out)
+}
+
 pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
     let app = format!("{}-{}", spec.name, role.suffix());
     let (rc, jvm_file, cfg_file, replicas) = if role.is_coord() {
@@ -484,6 +582,66 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
     if let Some(p) = rc.probes.startup.as_ref() {
         container["startupProbe"] = probe_json(false, Some(p));
     }
+    // Per-role additional exposed ports: APPEND to the base http port array.
+    if !rc.additional_exposed_ports.is_empty() {
+        if !container["ports"].is_array() {
+            container["ports"] = json!([]);
+        }
+        let ports = container["ports"].as_array_mut().unwrap();
+        for p in &rc.additional_exposed_ports {
+            ports.push(json!({ "name": p.name, "containerPort": p.container_port }));
+        }
+    }
+
+    // Cluster-wide container fields (from spec.config, applied to both roles).
+    if let Some(p) = &spec.config.image_pull_policy {
+        container["imagePullPolicy"] = json!(p);
+    }
+    if let Some(sc) = &spec.config.container_security_context {
+        container["securityContext"] = security_context_json(sc);
+    }
+    // Cluster-wide extra env sources: prepend user ConfigMap/Secret refs ahead of
+    // the base `-env` secret (kept last so the container still loads it).
+    if !spec.config.env_from.is_empty() {
+        let mut sources: Vec<Value> = spec
+            .config
+            .env_from
+            .iter()
+            .flat_map(|ef| {
+                let mut v = Vec::new();
+                if let Some(cm) = &ef.config_map_ref {
+                    v.push(json!({ "configMapRef": { "name": cm } }));
+                }
+                if let Some(sec) = &ef.secret_ref {
+                    v.push(json!({ "secretRef": { "name": sec } }));
+                }
+                v
+            })
+            .collect();
+        if let Some(existing) = container["envFrom"].as_array() {
+            sources.extend(existing.iter().cloned());
+        }
+        container["envFrom"] = Value::Array(sources);
+    }
+    // Cluster-wide config/secret file mounts: a volumeMount per entry on the main
+    // container (the matching volume is added to the pod spec below).
+    for m in spec
+        .config
+        .config_mounts
+        .iter()
+        .chain(&spec.config.secret_mounts)
+    {
+        let mut o = serde_json::Map::new();
+        o.insert("name".into(), json!(m.name));
+        o.insert("mountPath".into(), json!(m.mount_path));
+        if let Some(sp) = &m.sub_path {
+            o.insert("subPath".into(), json!(sp));
+        }
+        container["volumeMounts"]
+            .as_array_mut()
+            .unwrap()
+            .push(Value::Object(o));
+    }
 
     // pod-spec: worker graceful shutdown adds a preStop + terminationGracePeriodSeconds.
     let mut pod_spec = json!({
@@ -507,7 +665,128 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
         }
     }
 
-    json!({
+    // Per-role pod placement. Splice each field only when set; `app` is the
+    // role's app label used for pod-anti-affinity selection.
+    if !rc.node_selector.is_empty() {
+        pod_spec["nodeSelector"] = Value::Object(
+            rc.node_selector
+                .iter()
+                .map(|(k, v)| (k.clone(), json!(v)))
+                .collect(),
+        );
+    }
+    if !rc.tolerations.is_empty() {
+        let tols: Vec<Value> = rc
+            .tolerations
+            .iter()
+            .map(|t| {
+                let mut o = serde_json::Map::new();
+                if let Some(v) = &t.key {
+                    o.insert("key".into(), json!(v));
+                }
+                if let Some(v) = &t.operator {
+                    o.insert("operator".into(), json!(v));
+                }
+                if let Some(v) = &t.value {
+                    o.insert("value".into(), json!(v));
+                }
+                if let Some(v) = &t.effect {
+                    o.insert("effect".into(), json!(v));
+                }
+                if let Some(v) = &t.toleration_seconds {
+                    o.insert("tolerationSeconds".into(), json!(v));
+                }
+                Value::Object(o)
+            })
+            .collect();
+        pod_spec["tolerations"] = Value::Array(tols);
+    }
+    if !rc.topology_spread.is_empty() {
+        let tsc: Vec<Value> = rc
+            .topology_spread
+            .iter()
+            .map(|t| {
+                json!({
+                    "maxSkew": t.max_skew,
+                    "topologyKey": t.topology_key,
+                    "whenUnsatisfiable": t.when_unsatisfiable,
+                    "labelSelector": { "matchLabels": t.match_labels },
+                })
+            })
+            .collect();
+        pod_spec["topologySpreadConstraints"] = Value::Array(tsc);
+    }
+    if let Some(a) = &rc.affinity {
+        pod_spec["affinity"] = affinity_json(a, &app);
+    }
+    // Only set the grace period if the worker graceful-shutdown block above did
+    // not already set it — GS wins.
+    if let Some(tg) = rc.termination_grace_seconds {
+        if pod_spec.get("terminationGracePeriodSeconds").is_none() {
+            pod_spec["terminationGracePeriodSeconds"] = json!(tg);
+        }
+    }
+
+    // Cluster-wide pod fields (from spec.config, applied to both roles).
+    if let Some(sa) = &spec.config.service_account {
+        pod_spec["serviceAccountName"] = json!(sa);
+    }
+    if !spec.config.image_pull_secrets.is_empty() {
+        pod_spec["imagePullSecrets"] = Value::Array(
+            spec.config
+                .image_pull_secrets
+                .iter()
+                .map(|s| json!({ "name": s }))
+                .collect(),
+        );
+    }
+    if let Some(b) = spec.config.share_process_namespace {
+        pod_spec["shareProcessNamespace"] = json!(b);
+    }
+    if let Some(sc) = &spec.config.pod_security_context {
+        pod_spec["securityContext"] = security_context_json(sc);
+    }
+
+    // Cluster-wide init/sidecar containers + config/secret volumes.
+    if !spec.config.init_containers.is_empty() {
+        pod_spec["initContainers"] = Value::Array(
+            spec.config
+                .init_containers
+                .iter()
+                .map(container_json)
+                .collect(),
+        );
+    }
+    for sc in &spec.config.sidecar_containers {
+        pod_spec["containers"]
+            .as_array_mut()
+            .unwrap()
+            .push(container_json(sc));
+    }
+    for m in &spec.config.config_mounts {
+        let mut inner = serde_json::Map::new();
+        inner.insert("name".into(), json!(m.name));
+        if let Some(dm) = m.default_mode {
+            inner.insert("defaultMode".into(), json!(dm));
+        }
+        pod_spec["volumes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "name": m.name, "configMap": Value::Object(inner) }));
+    }
+    for m in &spec.config.secret_mounts {
+        let mut inner = serde_json::Map::new();
+        inner.insert("secretName".into(), json!(m.name));
+        if let Some(dm) = m.default_mode {
+            inner.insert("defaultMode".into(), json!(dm));
+        }
+        pod_spec["volumes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "name": m.name, "secret": Value::Object(inner) }));
+    }
+
+    let mut deployment = json!({
         "apiVersion": "apps/v1", "kind": "Deployment",
         "metadata": { "name": app, "namespace": spec.namespace,
                       "labels": { "app": app, "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
@@ -520,7 +799,46 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
                 "spec": pod_spec
             }
         }
-    })
+    });
+
+    // Cluster-wide Deployment-level fields (from spec.config).
+    if let Some(strat) = &spec.config.deployment_strategy {
+        let mut s = json!({ "type": strat.kind });
+        if strat.kind == "RollingUpdate"
+            && (strat.max_surge.is_some() || strat.max_unavailable.is_some())
+        {
+            let mut ru = serde_json::Map::new();
+            if let Some(v) = &strat.max_surge {
+                ru.insert("maxSurge".into(), json!(v));
+            }
+            if let Some(v) = &strat.max_unavailable {
+                ru.insert("maxUnavailable".into(), json!(v));
+            }
+            s["rollingUpdate"] = Value::Object(ru);
+        }
+        deployment["spec"]["strategy"] = s;
+    }
+    if let Some(v) = spec.config.revision_history_limit {
+        deployment["spec"]["revisionHistoryLimit"] = json!(v);
+    }
+    if let Some(v) = spec.config.progress_deadline_seconds {
+        deployment["spec"]["progressDeadlineSeconds"] = json!(v);
+    }
+    // Merge deployment_annotations onto the OUTER Deployment metadata (distinct
+    // from the pod-template's config-checksum annotation map).
+    if !spec.config.deployment_annotations.is_empty() {
+        if !deployment["metadata"]["annotations"].is_object() {
+            deployment["metadata"]["annotations"] = json!({});
+        }
+        let anns = deployment["metadata"]["annotations"]
+            .as_object_mut()
+            .unwrap();
+        for (k, v) in &spec.config.deployment_annotations {
+            anns.insert(k.clone(), json!(v));
+        }
+    }
+
+    deployment
 }
 
 pub fn trino_service(spec: &EngineSpec) -> Value {
@@ -1260,6 +1578,196 @@ mod tests {
     fn ingress_none_when_disabled() {
         let s = sample_spec(); // no ingress
         assert!(trino_ingress(&s).is_none());
+    }
+
+    #[test]
+    fn per_role_placement_renders() {
+        let mut s = sample_spec();
+        let c = &mut s.config.coordinator;
+        c.node_selector.insert("disktype".into(), "ssd".into());
+        c.tolerations = vec![Toleration {
+            key: Some("dedicated".into()),
+            operator: Some("Equal".into()),
+            value: Some("trino".into()),
+            effect: Some("NoSchedule".into()),
+            toleration_seconds: None,
+        }];
+        c.topology_spread = vec![TopologySpreadConstraint {
+            max_skew: 1,
+            topology_key: "kubernetes.io/hostname".into(),
+            when_unsatisfiable: "ScheduleAnyway".into(),
+            match_labels: [("app".to_string(), "x".to_string())].into(),
+        }];
+        c.termination_grace_seconds = Some(60);
+        c.additional_exposed_ports = vec![ContainerPort {
+            name: "jmx".into(),
+            container_port: 9080,
+        }];
+        let d = trino_deployment(&s, Role::Coordinator);
+        let ps = &d["spec"]["template"]["spec"];
+        assert_eq!(ps["nodeSelector"]["disktype"], "ssd");
+        assert_eq!(ps["tolerations"][0]["key"], "dedicated");
+        assert_eq!(ps["tolerations"][0]["effect"], "NoSchedule");
+        assert_eq!(ps["topologySpreadConstraints"][0]["maxSkew"], 1);
+        assert_eq!(ps["terminationGracePeriodSeconds"], 60);
+        let ports = &ps["containers"][0]["ports"];
+        assert!(ports
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "jmx" && p["containerPort"] == 9080));
+    }
+
+    #[test]
+    fn affinity_structured_and_raw_override() {
+        let mut s = sample_spec();
+        s.config.coordinator.affinity = Some(Affinity {
+            node_match: vec![NodeSelectorRequirement {
+                key: "role".into(),
+                operator: "In".into(),
+                values: vec!["trino".into()],
+            }],
+            pod_anti_affinity_topology_key: Some("kubernetes.io/hostname".into()),
+            raw_override: None,
+        });
+        let ps = trino_deployment(&s, Role::Coordinator)["spec"]["template"]["spec"].clone();
+        assert_eq!(
+            ps["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+                ["nodeSelectorTerms"][0]["matchExpressions"][0]["key"],
+            "role"
+        );
+        assert_eq!(
+            ps["affinity"]["podAntiAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"][0]
+                ["podAffinityTerm"]["topologyKey"],
+            "kubernetes.io/hostname"
+        );
+        // raw override wins verbatim
+        let mut s2 = sample_spec();
+        s2.config.coordinator.affinity = Some(Affinity {
+            node_match: vec![],
+            pod_anti_affinity_topology_key: None,
+            raw_override: Some(serde_json::json!({"custom": true})),
+        });
+        assert_eq!(
+            trino_deployment(&s2, Role::Coordinator)["spec"]["template"]["spec"]["affinity"]
+                ["custom"],
+            true
+        );
+    }
+
+    #[test]
+    fn cluster_pod_and_deployment_fields() {
+        let mut s = sample_spec();
+        s.config.service_account = Some("trino-sa".into());
+        s.config.image_pull_secrets = vec!["regcred".into()];
+        s.config.image_pull_policy = Some("Always".into());
+        s.config.share_process_namespace = Some(true);
+        s.config.pod_security_context = Some(SecurityContext {
+            run_as_user: Some(1000),
+            fs_group: Some(1000),
+            ..Default::default()
+        });
+        s.config.container_security_context = Some(SecurityContext {
+            run_as_non_root: Some(true),
+            raw_override: Some(json!({"readOnlyRootFilesystem": true})),
+            ..Default::default()
+        });
+        s.config.deployment_strategy = Some(DeploymentStrategy {
+            kind: "Recreate".into(),
+            max_surge: None,
+            max_unavailable: None,
+        });
+        s.config
+            .deployment_annotations
+            .insert("team".into(), "data".into());
+        s.config.revision_history_limit = Some(3);
+        s.config.progress_deadline_seconds = Some(600);
+        let d = trino_deployment(&s, Role::Coordinator);
+        let ps = &d["spec"]["template"]["spec"];
+        assert_eq!(ps["serviceAccountName"], "trino-sa");
+        assert_eq!(ps["imagePullSecrets"][0]["name"], "regcred");
+        assert_eq!(ps["shareProcessNamespace"], true);
+        assert_eq!(ps["securityContext"]["runAsUser"], 1000);
+        assert_eq!(ps["containers"][0]["imagePullPolicy"], "Always");
+        assert_eq!(ps["containers"][0]["securityContext"]["runAsNonRoot"], true);
+        assert_eq!(
+            ps["containers"][0]["securityContext"]["readOnlyRootFilesystem"],
+            true
+        ); // raw merged
+        assert_eq!(d["spec"]["strategy"]["type"], "Recreate");
+        assert_eq!(d["spec"]["revisionHistoryLimit"], 3);
+        assert_eq!(d["spec"]["progressDeadlineSeconds"], 600);
+        assert_eq!(d["metadata"]["annotations"]["team"], "data");
+    }
+
+    #[test]
+    fn containers_envfrom_mounts_render_and_gs_preserved() {
+        let mut s = sample_spec();
+        // worker graceful shutdown sets a grace period we must not clobber:
+        s.config.worker.base.termination_grace_seconds = Some(30); // must lose to graceful shutdown
+        s.config.worker.graceful_shutdown = Some(GracefulShutdown {
+            enabled: true,
+            grace_period_seconds: 240,
+        });
+        s.config.init_containers = vec![MiniContainer {
+            name: "wait".into(),
+            image: "busybox".into(),
+            command: vec!["sh".into(), "-c".into()],
+            args: vec!["echo hi".into()],
+            ..Default::default()
+        }];
+        s.config.sidecar_containers = vec![MiniContainer {
+            name: "raw-side".into(),
+            image: "".into(),
+            raw_override: Some(json!({"name":"exporter","image":"prom/exporter"})),
+            ..Default::default()
+        }];
+        s.config.env_from = vec![EnvFromSource {
+            config_map_ref: Some("shared-env".into()),
+            secret_ref: None,
+        }];
+        s.config.config_mounts = vec![ObjectMount {
+            name: "extra-cm".into(),
+            mount_path: "/etc/extra".into(),
+            sub_path: None,
+            default_mode: None,
+        }];
+        s.config.secret_mounts = vec![ObjectMount {
+            name: "kt".into(),
+            mount_path: "/etc/krb".into(),
+            sub_path: Some("krb5.keytab".into()),
+            default_mode: Some(0o400),
+        }];
+        let d = trino_deployment(&s, Role::Worker);
+        let ps = &d["spec"]["template"]["spec"];
+        assert_eq!(ps["initContainers"][0]["name"], "wait");
+        assert!(ps["containers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["name"] == "exporter")); // sidecar raw appended
+        assert_eq!(
+            ps["containers"][0]["envFrom"][0]["configMapRef"]["name"],
+            "shared-env"
+        );
+        assert!(ps["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["name"] == "extra-cm" && v["configMap"]["name"] == "extra-cm"));
+        assert!(ps["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["secret"]["secretName"] == "kt"));
+        let vm = &ps["containers"][0]["volumeMounts"];
+        assert!(vm
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["mountPath"] == "/etc/krb" && m["subPath"] == "krb5.keytab"));
+        // graceful shutdown grace period preserved (worker GS uses its own value, not 30):
+        assert_ne!(ps["terminationGracePeriodSeconds"], 30);
     }
 
     #[tokio::test]

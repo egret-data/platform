@@ -19,10 +19,13 @@ mod warehouses;
 
 pub use auth::require_platform_admin;
 pub use engines::{
-    AuthReq, CatalogReq, EngineLiveStatus, EnginePod, EngineProvisionReq, EngineProvisioner,
-    FaultTolerantReq, GracefulShutdownReq, HeapReq, IngressReq, JwtReq, PasswordEntryReq, ProbeReq,
-    ProbesReq, ResourceGroupReq, ResourceGroupsReq, ResourceSelectorReq, RoleConfigReq,
-    RoleResourcesReq, SessionRuleReq, TrinoConfigReq, WorkerRoleConfigReq,
+    AffinityReq, AuthReq, CatalogReq, ContainerPortReq, DeploymentStrategyReq, EngineLiveStatus,
+    EnginePod, EngineProvisionReq, EngineProvisioner, EnvFromSourceReq, FaultTolerantReq,
+    GracefulShutdownReq, HeapReq, IngressReq, JwtReq, MiniContainerReq, NodeSelectorRequirementReq,
+    ObjectMountReq, PasswordEntryReq, ProbeReq, ProbesReq, ResourceGroupReq, ResourceGroupsReq,
+    ResourceSelectorReq, RoleConfigReq, RoleResourcesReq, SecurityContextReq, SessionRuleReq,
+    TolerationReq, TopologySpreadConstraintReq, TrinoConfigReq, VolumeMountReq,
+    WorkerRoleConfigReq,
 };
 pub use error::CpError;
 pub use warehouses::{

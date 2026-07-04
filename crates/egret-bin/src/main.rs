@@ -439,6 +439,155 @@ impl EgretEngineProvisioner {
                 readiness: r.probes.readiness.as_ref().map(Self::probe_from),
                 startup: r.probes.startup.as_ref().map(Self::probe_from),
             },
+            node_selector: r.node_selector.clone(),
+            tolerations: r.tolerations.iter().map(Self::toleration_from).collect(),
+            topology_spread: r
+                .topology_spread
+                .iter()
+                .map(Self::topology_spread_from)
+                .collect(),
+            affinity: r.affinity.as_ref().map(Self::affinity_from),
+            termination_grace_seconds: r.termination_grace_seconds,
+            additional_exposed_ports: r
+                .additional_exposed_ports
+                .iter()
+                .map(Self::container_port_from)
+                .collect(),
+        }
+    }
+
+    /// Map a control-plane `TolerationReq` onto the orchestrator `Toleration`.
+    fn toleration_from(t: &egret_controlplane::TolerationReq) -> egret_orchestrator::Toleration {
+        egret_orchestrator::Toleration {
+            key: t.key.clone(),
+            operator: t.operator.clone(),
+            value: t.value.clone(),
+            effect: t.effect.clone(),
+            toleration_seconds: t.toleration_seconds,
+        }
+    }
+
+    /// Map a `TopologySpreadConstraintReq` onto the orchestrator type.
+    fn topology_spread_from(
+        t: &egret_controlplane::TopologySpreadConstraintReq,
+    ) -> egret_orchestrator::TopologySpreadConstraint {
+        egret_orchestrator::TopologySpreadConstraint {
+            max_skew: t.max_skew,
+            topology_key: t.topology_key.clone(),
+            when_unsatisfiable: t.when_unsatisfiable.clone(),
+            match_labels: t.match_labels.clone(),
+        }
+    }
+
+    /// Map a `NodeSelectorRequirementReq` onto the orchestrator type.
+    fn node_selector_requirement_from(
+        n: &egret_controlplane::NodeSelectorRequirementReq,
+    ) -> egret_orchestrator::NodeSelectorRequirement {
+        egret_orchestrator::NodeSelectorRequirement {
+            key: n.key.clone(),
+            operator: n.operator.clone(),
+            values: n.values.clone(),
+        }
+    }
+
+    /// Map an `AffinityReq` onto the orchestrator `Affinity` (structured node
+    /// match + anti-affinity key + verbatim raw override).
+    fn affinity_from(a: &egret_controlplane::AffinityReq) -> egret_orchestrator::Affinity {
+        egret_orchestrator::Affinity {
+            node_match: a
+                .node_match
+                .iter()
+                .map(Self::node_selector_requirement_from)
+                .collect(),
+            pod_anti_affinity_topology_key: a.pod_anti_affinity_topology_key.clone(),
+            raw_override: a.raw_override.clone(),
+        }
+    }
+
+    /// Map a `ContainerPortReq` onto the orchestrator `ContainerPort`.
+    fn container_port_from(
+        p: &egret_controlplane::ContainerPortReq,
+    ) -> egret_orchestrator::ContainerPort {
+        egret_orchestrator::ContainerPort {
+            name: p.name.clone(),
+            container_port: p.container_port,
+        }
+    }
+
+    /// Map a `SecurityContextReq` onto the orchestrator `SecurityContext`.
+    fn security_context_from(
+        s: &egret_controlplane::SecurityContextReq,
+    ) -> egret_orchestrator::SecurityContext {
+        egret_orchestrator::SecurityContext {
+            run_as_user: s.run_as_user,
+            run_as_group: s.run_as_group,
+            fs_group: s.fs_group,
+            run_as_non_root: s.run_as_non_root,
+            raw_override: s.raw_override.clone(),
+        }
+    }
+
+    /// Map a `VolumeMountReq` onto the orchestrator `VolumeMount`.
+    fn volume_mount_from(
+        v: &egret_controlplane::VolumeMountReq,
+    ) -> egret_orchestrator::VolumeMount {
+        egret_orchestrator::VolumeMount {
+            name: v.name.clone(),
+            mount_path: v.mount_path.clone(),
+            sub_path: v.sub_path.clone(),
+        }
+    }
+
+    /// Map a `MiniContainerReq` onto the orchestrator `MiniContainer`
+    /// (structured-common fields + verbatim raw override).
+    fn mini_container_from(
+        c: &egret_controlplane::MiniContainerReq,
+    ) -> egret_orchestrator::MiniContainer {
+        egret_orchestrator::MiniContainer {
+            name: c.name.clone(),
+            image: c.image.clone(),
+            command: c.command.clone(),
+            args: c.args.clone(),
+            env: c.env.clone(),
+            volume_mounts: c
+                .volume_mounts
+                .iter()
+                .map(Self::volume_mount_from)
+                .collect(),
+            raw_override: c.raw_override.clone(),
+        }
+    }
+
+    /// Map an `EnvFromSourceReq` onto the orchestrator `EnvFromSource`.
+    fn env_from_source_from(
+        e: &egret_controlplane::EnvFromSourceReq,
+    ) -> egret_orchestrator::EnvFromSource {
+        egret_orchestrator::EnvFromSource {
+            config_map_ref: e.config_map_ref.clone(),
+            secret_ref: e.secret_ref.clone(),
+        }
+    }
+
+    /// Map an `ObjectMountReq` onto the orchestrator `ObjectMount`.
+    fn object_mount_from(
+        o: &egret_controlplane::ObjectMountReq,
+    ) -> egret_orchestrator::ObjectMount {
+        egret_orchestrator::ObjectMount {
+            name: o.name.clone(),
+            mount_path: o.mount_path.clone(),
+            sub_path: o.sub_path.clone(),
+            default_mode: o.default_mode,
+        }
+    }
+
+    /// Map a `DeploymentStrategyReq` onto the orchestrator `DeploymentStrategy`.
+    fn deployment_strategy_from(
+        d: &egret_controlplane::DeploymentStrategyReq,
+    ) -> egret_orchestrator::DeploymentStrategy {
+        egret_orchestrator::DeploymentStrategy {
+            kind: d.kind.clone(),
+            max_surge: d.max_surge.clone(),
+            max_unavailable: d.max_unavailable.clone(),
         }
     }
 
@@ -534,6 +683,50 @@ impl EgretEngineProvisioner {
                     tls_secret: i.tls_secret.clone(),
                     annotations: i.annotations.clone(),
                 }),
+                image_pull_secrets: cfg.image_pull_secrets.clone(),
+                image_pull_policy: cfg.image_pull_policy.clone(),
+                service_account: cfg.service_account.clone(),
+                pod_security_context: cfg
+                    .pod_security_context
+                    .as_ref()
+                    .map(Self::security_context_from),
+                container_security_context: cfg
+                    .container_security_context
+                    .as_ref()
+                    .map(Self::security_context_from),
+                init_containers: cfg
+                    .init_containers
+                    .iter()
+                    .map(Self::mini_container_from)
+                    .collect(),
+                sidecar_containers: cfg
+                    .sidecar_containers
+                    .iter()
+                    .map(Self::mini_container_from)
+                    .collect(),
+                env_from: cfg
+                    .env_from
+                    .iter()
+                    .map(Self::env_from_source_from)
+                    .collect(),
+                config_mounts: cfg
+                    .config_mounts
+                    .iter()
+                    .map(Self::object_mount_from)
+                    .collect(),
+                secret_mounts: cfg
+                    .secret_mounts
+                    .iter()
+                    .map(Self::object_mount_from)
+                    .collect(),
+                deployment_strategy: cfg
+                    .deployment_strategy
+                    .as_ref()
+                    .map(Self::deployment_strategy_from),
+                deployment_annotations: cfg.deployment_annotations.clone(),
+                revision_history_limit: cfg.revision_history_limit,
+                progress_deadline_seconds: cfg.progress_deadline_seconds,
+                share_process_namespace: cfg.share_process_namespace,
             },
             catalogs: req
                 .catalogs

@@ -71,6 +71,7 @@ import { EngineRoleConfig } from "./EngineRoleConfig";
 import { EngineConfigGeneral } from "./EngineConfigGeneral";
 import { EngineConfigReliability } from "./EngineConfigReliability";
 import { EngineConfigAdvanced } from "./EngineConfigAdvanced";
+import { PodSchedulingSection } from "./PodSchedulingSection";
 import { EngineSecurity } from "./EngineSecurity";
 import EngineMonitor from "./EngineMonitor";
 
@@ -211,7 +212,14 @@ function EngineTabs({
  * Shared "Save changes" footer for the Configuration and Security tabs. Both
  * act on the same `useEngineConfigForm` instance passed down as `cfg`.
  */
-function SaveBar({ cfg }: { cfg: EngineConfigForm }) {
+function SaveBar({
+  cfg,
+  disabled = false,
+}: {
+  cfg: EngineConfigForm;
+  /** Extra disable condition (e.g. an invalid raw-JSON override) on top of `!dirty || saving`. */
+  disabled?: boolean;
+}) {
   const { error, saved, dirty, saving, save } = cfg;
   return (
     <div className="space-y-4">
@@ -224,7 +232,11 @@ function SaveBar({ cfg }: { cfg: EngineConfigForm }) {
       )}
 
       <div className="flex justify-end">
-        <Button type="button" onClick={save} disabled={!dirty || saving}>
+        <Button
+          type="button"
+          onClick={save}
+          disabled={!dirty || saving || disabled}
+        >
           {saving && <Loader2 className="h-4 w-4 animate-spin" />}
           Save changes
         </Button>
@@ -322,7 +334,40 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
     setResourceGroups,
     sessionRules,
     setSessionRules,
+    initContainers,
+    setInitContainers,
+    sidecarContainers,
+    setSidecarContainers,
+    serviceAccount,
+    setServiceAccount,
+    imagePullSecrets,
+    setImagePullSecrets,
+    imagePullPolicy,
+    setImagePullPolicy,
+    podSecurityContext,
+    setPodSecurityContext,
+    containerSecurityContext,
+    setContainerSecurityContext,
+    envFrom,
+    setEnvFrom,
+    configMounts,
+    setConfigMounts,
+    secretMounts,
+    setSecretMounts,
+    deploymentStrategy,
+    setDeploymentStrategy,
+    deploymentAnnotations,
+    setDeploymentAnnotations,
+    revisionHistoryLimit,
+    setRevisionHistoryLimit,
+    progressDeadlineSeconds,
+    setProgressDeadlineSeconds,
+    shareProcessNamespace,
+    setShareProcessNamespace,
   } = cfg;
+
+  // Goes false when a raw-JSON pod/scheduling override fails to parse; blocks Save.
+  const [podSchedValid, setPodSchedValid] = useState(true);
 
   return (
     <Card>
@@ -343,6 +388,7 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
               <TabsTrigger value="workload">Workload</TabsTrigger>
               <TabsTrigger value="reliability">Reliability</TabsTrigger>
               <TabsTrigger value="advanced">Advanced</TabsTrigger>
+              <TabsTrigger value="pod-scheduling">Pod &amp; Scheduling</TabsTrigger>
             </TabsList>
 
             <TabsContent value="general" className="pt-4">
@@ -417,9 +463,49 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
                 setLogProps={setLogProps}
               />
             </TabsContent>
+
+            <TabsContent value="pod-scheduling" className="pt-4">
+              <PodSchedulingSection
+                coordinator={coordinator}
+                setCoordinator={setCoordinator}
+                worker={worker}
+                setWorker={setWorker}
+                initContainers={initContainers}
+                setInitContainers={setInitContainers}
+                sidecarContainers={sidecarContainers}
+                setSidecarContainers={setSidecarContainers}
+                serviceAccount={serviceAccount}
+                setServiceAccount={setServiceAccount}
+                imagePullSecrets={imagePullSecrets}
+                setImagePullSecrets={setImagePullSecrets}
+                imagePullPolicy={imagePullPolicy}
+                setImagePullPolicy={setImagePullPolicy}
+                podSecurityContext={podSecurityContext}
+                setPodSecurityContext={setPodSecurityContext}
+                containerSecurityContext={containerSecurityContext}
+                setContainerSecurityContext={setContainerSecurityContext}
+                envFrom={envFrom}
+                setEnvFrom={setEnvFrom}
+                configMounts={configMounts}
+                setConfigMounts={setConfigMounts}
+                secretMounts={secretMounts}
+                setSecretMounts={setSecretMounts}
+                deploymentStrategy={deploymentStrategy}
+                setDeploymentStrategy={setDeploymentStrategy}
+                deploymentAnnotations={deploymentAnnotations}
+                setDeploymentAnnotations={setDeploymentAnnotations}
+                revisionHistoryLimit={revisionHistoryLimit}
+                setRevisionHistoryLimit={setRevisionHistoryLimit}
+                progressDeadlineSeconds={progressDeadlineSeconds}
+                setProgressDeadlineSeconds={setProgressDeadlineSeconds}
+                shareProcessNamespace={shareProcessNamespace}
+                setShareProcessNamespace={setShareProcessNamespace}
+                onValidityChange={setPodSchedValid}
+              />
+            </TabsContent>
           </Tabs>
 
-          <SaveBar cfg={cfg} />
+          <SaveBar cfg={cfg} disabled={!podSchedValid} />
         </div>
       </CardContent>
     </Card>

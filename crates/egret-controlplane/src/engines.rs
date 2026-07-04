@@ -83,6 +83,106 @@ pub struct ProbesReq {
     pub startup: Option<ProbeReq>,
 }
 
+// ── pod & scheduling carriers (kube-free mirrors of the orchestrator types) ──────
+// These reference k8s objects by name / carry raw JSON, so they need NO secret
+// resolution and map straight through in `build_provision_req`.
+
+/// A pod toleration (mirrors orchestrator `Toleration`).
+#[derive(Clone, Default)]
+pub struct TolerationReq {
+    pub key: Option<String>,
+    pub operator: Option<String>,
+    pub value: Option<String>,
+    pub effect: Option<String>,
+    pub toleration_seconds: Option<i64>,
+}
+
+/// A pod topology-spread constraint (mirrors orchestrator `TopologySpreadConstraint`).
+#[derive(Clone, Default)]
+pub struct TopologySpreadConstraintReq {
+    pub max_skew: u32,
+    pub topology_key: String,
+    pub when_unsatisfiable: String,
+    pub match_labels: BTreeMap<String, String>,
+}
+
+/// A node-selector match expression (mirrors orchestrator `NodeSelectorRequirement`).
+#[derive(Clone, Default)]
+pub struct NodeSelectorRequirementReq {
+    pub key: String,
+    pub operator: String,
+    pub values: Vec<String>,
+}
+
+/// Structured-common affinity + raw-JSON override (mirrors orchestrator `Affinity`).
+#[derive(Clone, Default)]
+pub struct AffinityReq {
+    pub node_match: Vec<NodeSelectorRequirementReq>,
+    pub pod_anti_affinity_topology_key: Option<String>,
+    pub raw_override: Option<serde_json::Value>,
+}
+
+/// An additional container port (mirrors orchestrator `ContainerPort`).
+#[derive(Clone, Default)]
+pub struct ContainerPortReq {
+    pub name: String,
+    pub container_port: u16,
+}
+
+/// Pod-/container-level security context (mirrors orchestrator `SecurityContext`).
+#[derive(Clone, Default)]
+pub struct SecurityContextReq {
+    pub run_as_user: Option<i64>,
+    pub run_as_group: Option<i64>,
+    pub fs_group: Option<i64>,
+    pub run_as_non_root: Option<bool>,
+    pub raw_override: Option<serde_json::Value>,
+}
+
+/// A volume mount inside a container (mirrors orchestrator `VolumeMount`).
+#[derive(Clone, Default)]
+pub struct VolumeMountReq {
+    pub name: String,
+    pub mount_path: String,
+    pub sub_path: Option<String>,
+}
+
+/// A minimal init/sidecar container (mirrors orchestrator `MiniContainer`).
+#[derive(Clone, Default)]
+pub struct MiniContainerReq {
+    pub name: String,
+    pub image: String,
+    pub command: Vec<String>,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    pub volume_mounts: Vec<VolumeMountReq>,
+    pub raw_override: Option<serde_json::Value>,
+}
+
+/// A ConfigMap/Secret env-from reference (mirrors orchestrator `EnvFromSource`).
+#[derive(Clone, Default)]
+pub struct EnvFromSourceReq {
+    pub config_map_ref: Option<String>,
+    pub secret_ref: Option<String>,
+}
+
+/// A ConfigMap/Secret-backed volume mount (mirrors orchestrator `ObjectMount`).
+#[derive(Clone, Default)]
+pub struct ObjectMountReq {
+    pub name: String,
+    pub mount_path: String,
+    pub sub_path: Option<String>,
+    pub default_mode: Option<i32>,
+}
+
+/// A Deployment update strategy (mirrors orchestrator `DeploymentStrategy`).
+#[derive(Clone, Default)]
+pub struct DeploymentStrategyReq {
+    pub kind: String,
+    pub max_surge: Option<String>,
+    pub max_unavailable: Option<String>,
+}
+
 /// Per-role config shared by coordinator and worker (mirrors `RoleConfig`).
 #[derive(Clone, Default)]
 pub struct RoleConfigReq {
@@ -93,6 +193,12 @@ pub struct RoleConfigReq {
     pub heap_headroom_per_node: Option<String>,
     pub additional_jvm_config: Vec<String>,
     pub probes: ProbesReq,
+    pub node_selector: BTreeMap<String, String>,
+    pub tolerations: Vec<TolerationReq>,
+    pub topology_spread: Vec<TopologySpreadConstraintReq>,
+    pub affinity: Option<AffinityReq>,
+    pub termination_grace_seconds: Option<u32>,
+    pub additional_exposed_ports: Vec<ContainerPortReq>,
 }
 
 /// One resource group in the file-based resource-group manager (recursive).
@@ -217,6 +323,22 @@ pub struct TrinoConfigReq {
     /// `auth` (which carries `secretRef`, not hashes) in [`build_provision_req`].
     pub auth: Option<AuthReq>,
     pub ingress: Option<IngressReq>,
+    // ── pod & scheduling (cluster-wide) ──────────────────────────────────────
+    pub image_pull_secrets: Vec<String>,
+    pub image_pull_policy: Option<String>,
+    pub service_account: Option<String>,
+    pub pod_security_context: Option<SecurityContextReq>,
+    pub container_security_context: Option<SecurityContextReq>,
+    pub init_containers: Vec<MiniContainerReq>,
+    pub sidecar_containers: Vec<MiniContainerReq>,
+    pub env_from: Vec<EnvFromSourceReq>,
+    pub config_mounts: Vec<ObjectMountReq>,
+    pub secret_mounts: Vec<ObjectMountReq>,
+    pub deployment_strategy: Option<DeploymentStrategyReq>,
+    pub deployment_annotations: BTreeMap<String, String>,
+    pub revision_history_limit: Option<u32>,
+    pub progress_deadline_seconds: Option<u32>,
+    pub share_process_namespace: Option<bool>,
 }
 
 /// Resolved provisioning request handed to egret-bin (no k8s types here). The
@@ -679,7 +801,201 @@ fn parse_role(v: &serde_json::Value, default_replicas: u32) -> RoleConfigReq {
             })
             .unwrap_or_default(),
         probes: parse_probes(&v["probes"]),
+        node_selector: str_map(&v["nodeSelector"]),
+        tolerations: parse_tolerations(&v["tolerations"]),
+        topology_spread: parse_topology_spread(&v["topologySpread"]),
+        affinity: parse_affinity(&v["affinity"]),
+        termination_grace_seconds: v["terminationGraceSeconds"].as_u64().map(|n| n as u32),
+        additional_exposed_ports: parse_container_ports(&v["additionalExposedPorts"]),
     }
+}
+
+/// Parse the `tolerations[]` wire array. Omitted/`None` fields stay `None`.
+fn parse_tolerations(v: &serde_json::Value) -> Vec<TolerationReq> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .map(|t| TolerationReq {
+                    key: t["key"].as_str().map(Into::into),
+                    operator: t["operator"].as_str().map(Into::into),
+                    value: t["value"].as_str().map(Into::into),
+                    effect: t["effect"].as_str().map(Into::into),
+                    toleration_seconds: t["tolerationSeconds"].as_i64(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse the `topologySpread[]` wire array.
+fn parse_topology_spread(v: &serde_json::Value) -> Vec<TopologySpreadConstraintReq> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .map(|t| TopologySpreadConstraintReq {
+                    max_skew: t["maxSkew"].as_u64().unwrap_or(0) as u32,
+                    topology_key: t["topologyKey"].as_str().unwrap_or_default().to_string(),
+                    when_unsatisfiable: t["whenUnsatisfiable"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                    match_labels: str_map(&t["matchLabels"]),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse the `affinity{nodeMatch,podAntiAffinityTopologyKey,rawOverride}` wire
+/// object; `None` when absent. `rawOverride` carries opaque JSON through.
+fn parse_affinity(v: &serde_json::Value) -> Option<AffinityReq> {
+    if !v.is_object() {
+        return None;
+    }
+    let node_match = v["nodeMatch"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|r| NodeSelectorRequirementReq {
+                    key: r["key"].as_str().unwrap_or_default().to_string(),
+                    operator: r["operator"].as_str().unwrap_or_default().to_string(),
+                    values: r["values"]
+                        .as_array()
+                        .map(|vs| {
+                            vs.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(AffinityReq {
+        node_match,
+        pod_anti_affinity_topology_key: v["podAntiAffinityTopologyKey"].as_str().map(Into::into),
+        raw_override: v.get("rawOverride").filter(|r| !r.is_null()).cloned(),
+    })
+}
+
+/// Parse an `additionalExposedPorts[]` / port-list wire array.
+fn parse_container_ports(v: &serde_json::Value) -> Vec<ContainerPortReq> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .map(|p| ContainerPortReq {
+                    name: p["name"].as_str().unwrap_or_default().to_string(),
+                    container_port: p["containerPort"].as_u64().unwrap_or(0) as u16,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse a `{runAsUser,runAsGroup,fsGroup,runAsNonRoot,rawOverride}` security
+/// context; `None` when absent. `rawOverride` carries opaque JSON through.
+fn parse_security_context(v: &serde_json::Value) -> Option<SecurityContextReq> {
+    if !v.is_object() {
+        return None;
+    }
+    Some(SecurityContextReq {
+        run_as_user: v["runAsUser"].as_i64(),
+        run_as_group: v["runAsGroup"].as_i64(),
+        fs_group: v["fsGroup"].as_i64(),
+        run_as_non_root: v["runAsNonRoot"].as_bool(),
+        raw_override: v.get("rawOverride").filter(|r| !r.is_null()).cloned(),
+    })
+}
+
+/// Parse a `volumeMounts[]` wire array.
+fn parse_volume_mounts(v: &serde_json::Value) -> Vec<VolumeMountReq> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .map(|m| VolumeMountReq {
+                    name: m["name"].as_str().unwrap_or_default().to_string(),
+                    mount_path: m["mountPath"].as_str().unwrap_or_default().to_string(),
+                    sub_path: m["subPath"].as_str().map(Into::into),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse an init/sidecar `containers[]` wire array. `rawOverride` (opaque JSON)
+/// wins verbatim downstream in the orchestrator; here it just carries through.
+fn parse_mini_containers(v: &serde_json::Value) -> Vec<MiniContainerReq> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .map(|c| MiniContainerReq {
+                    name: c["name"].as_str().unwrap_or_default().to_string(),
+                    image: c["image"].as_str().unwrap_or_default().to_string(),
+                    command: c["command"]
+                        .as_array()
+                        .map(|x| {
+                            x.iter()
+                                .filter_map(|s| s.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    args: c["args"]
+                        .as_array()
+                        .map(|x| {
+                            x.iter()
+                                .filter_map(|s| s.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    env: str_map(&c["env"]),
+                    volume_mounts: parse_volume_mounts(&c["volumeMounts"]),
+                    raw_override: c.get("rawOverride").filter(|r| !r.is_null()).cloned(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse an `envFrom[]` wire array of `{configMapRef,secretRef}` refs.
+fn parse_env_from(v: &serde_json::Value) -> Vec<EnvFromSourceReq> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .map(|e| EnvFromSourceReq {
+                    config_map_ref: e["configMapRef"].as_str().map(Into::into),
+                    secret_ref: e["secretRef"].as_str().map(Into::into),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse a `{name,mountPath,subPath,defaultMode}` object-mount wire array.
+fn parse_object_mounts(v: &serde_json::Value) -> Vec<ObjectMountReq> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .map(|m| ObjectMountReq {
+                    name: m["name"].as_str().unwrap_or_default().to_string(),
+                    mount_path: m["mountPath"].as_str().unwrap_or_default().to_string(),
+                    sub_path: m["subPath"].as_str().map(Into::into),
+                    default_mode: m["defaultMode"].as_i64().map(|n| n as i32),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse the `deploymentStrategy{kind,maxSurge,maxUnavailable}` wire object.
+fn parse_deployment_strategy(v: &serde_json::Value) -> Option<DeploymentStrategyReq> {
+    if !v.is_object() {
+        return None;
+    }
+    Some(DeploymentStrategyReq {
+        kind: v["kind"].as_str().unwrap_or_default().to_string(),
+        max_surge: v["maxSurge"].as_str().map(Into::into),
+        max_unavailable: v["maxUnavailable"].as_str().map(Into::into),
+    })
 }
 
 /// Read `engine.spec["trinoConfig"]`. If it already carries a per-role
@@ -874,6 +1190,30 @@ fn trino_config_from_json(v: &serde_json::Value) -> TrinoConfigReq {
         // secretRef}], jwt} wire body (secret → bcrypt). Ingress has no secrets.
         auth: None,
         ingress: parse_ingress(&v["ingress"]),
+        // ── pod & scheduling (cluster-wide) — k8s object names / raw JSON, no
+        //    secret resolution, so parsed straight from the wire here. ────────
+        image_pull_secrets: v["imagePullSecrets"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        image_pull_policy: v["imagePullPolicy"].as_str().map(Into::into),
+        service_account: v["serviceAccount"].as_str().map(Into::into),
+        pod_security_context: parse_security_context(&v["podSecurityContext"]),
+        container_security_context: parse_security_context(&v["containerSecurityContext"]),
+        init_containers: parse_mini_containers(&v["initContainers"]),
+        sidecar_containers: parse_mini_containers(&v["sidecarContainers"]),
+        env_from: parse_env_from(&v["envFrom"]),
+        config_mounts: parse_object_mounts(&v["configMounts"]),
+        secret_mounts: parse_object_mounts(&v["secretMounts"]),
+        deployment_strategy: parse_deployment_strategy(&v["deploymentStrategy"]),
+        deployment_annotations: str_map(&v["deploymentAnnotations"]),
+        revision_history_limit: v["revisionHistoryLimit"].as_u64().map(|n| n as u32),
+        progress_deadline_seconds: v["progressDeadlineSeconds"].as_u64().map(|n| n as u32),
+        share_process_namespace: v["shareProcessNamespace"].as_bool(),
     }
 }
 
