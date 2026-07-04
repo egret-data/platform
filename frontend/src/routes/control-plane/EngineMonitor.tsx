@@ -5,12 +5,22 @@ import { Loader2, Ban } from "lucide-react";
 import {
   type ClusterInfo,
   type MonitorQuery,
+  type MonitorQueryDetail,
   getCluster,
+  getQuery,
   killQuery,
   listQueries,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import StageTree from "./StageTree";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -89,6 +99,12 @@ function isKillable(state: string): boolean {
   return s === "RUNNING" || s === "QUEUED" || s === "PLANNING" || s === "STARTING";
 }
 
+/** Live (non-terminal) states — poll the detail while true, stop when terminal. */
+function isRunning(state: string): boolean {
+  const s = state.toUpperCase();
+  return s === "RUNNING" || s === "QUEUED" || s === "PLANNING" || s === "STARTING";
+}
+
 function truncate(s: string, max: number): string {
   const flat = s.replace(/\s+/g, " ").trim();
   return flat.length > max ? flat.slice(0, max) + "…" : flat;
@@ -119,9 +135,20 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
     retry: false,
   });
 
-  // ── Task 7 seam: the selected query id (detail panel consumes this later). ──
+  // ── The selected query id drives the detail panel (Task 7). ──
   const [selectedQid, setSelectedQid] = useState<string | null>(null);
-  void selectedQid;
+
+  const detail = useQuery<MonitorQueryDetail, ApiError>({
+    queryKey: ["query", engineId, selectedQid],
+    queryFn: () => getQuery(engineId, selectedQid!),
+    enabled: selectedQid !== null,
+    // Poll while the query is live; stop once it reaches a terminal state.
+    refetchInterval: (q) => {
+      const d = q.state.data;
+      return d && isRunning(d.state) ? 2000 : false;
+    },
+    retry: false,
+  });
 
   const [stateFilter, setStateFilter] = useState<string>("ALL");
   const [search, setSearch] = useState("");
@@ -293,6 +320,109 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
           </Table>
         </CardContent>
       </Card>
+
+      <Dialog
+        open={selectedQid !== null}
+        onOpenChange={(o) => {
+          if (!o) setSelectedQid(null);
+        }}
+      >
+        <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <span className="font-mono text-sm">{selectedQid}</span>
+              {detail.data && (
+                <Badge variant={stateVariant(detail.data.state)}>
+                  {detail.data.state}
+                </Badge>
+              )}
+            </DialogTitle>
+            <DialogDescription>Query detail, refreshed while running.</DialogDescription>
+          </DialogHeader>
+
+          {detail.isLoading ? (
+            <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading…
+            </div>
+          ) : detail.isError || !detail.data ? (
+            <Alert variant="destructive">
+              <AlertDescription>Could not load query detail.</AlertDescription>
+            </Alert>
+          ) : (
+            <div className="space-y-4">
+              {detail.data.errorMessage && (
+                <Alert variant="destructive">
+                  <AlertDescription className="whitespace-pre-wrap font-mono text-xs">
+                    {detail.data.errorMessage}
+                  </AlertDescription>
+                </Alert>
+              )}
+
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                {[
+                  { label: "User", value: detail.data.user },
+                  { label: "Elapsed", value: detail.data.elapsed },
+                  { label: "CPU", value: detail.data.cpu },
+                  { label: "Memory", value: detail.data.memory },
+                ].map((s) => (
+                  <div key={s.label} className="space-y-0.5">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                      {s.label}
+                    </p>
+                    <p className="font-mono text-sm">{s.value}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <Progress
+                    value={Math.min(100, Math.max(0, detail.data.progressPercent))}
+                    className="h-2"
+                  />
+                  <span className="w-9 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
+                    {Math.round(detail.data.progressPercent)}%
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                  SQL
+                </p>
+                <pre className="max-h-64 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs">
+                  {detail.data.query}
+                </pre>
+              </div>
+
+              {detail.data.outputStage != null && (
+                <div className="space-y-1.5">
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                    Stages
+                  </p>
+                  {/* Trino outputStage is raw `unknown` JSON — StageTree (any) guards traversal. */}
+                  <StageTree stage={detail.data.outputStage} />
+                </div>
+              )}
+
+              {isKillable(detail.data.state) && (
+                <div className="flex justify-end">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-destructive hover:text-destructive"
+                    onClick={() => detail.data && setKillTarget(detail.data)}
+                  >
+                    <Ban className="h-4 w-4" />
+                    Kill query
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       <AlertDialog
         open={killTarget !== null}
