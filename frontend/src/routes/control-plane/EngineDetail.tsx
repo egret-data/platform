@@ -9,7 +9,6 @@ import {
   type EngineCatalog,
   type EngineStatus,
   type Secret,
-  type Storage,
   type Warehouse,
   addEngineCatalog,
   deleteEngine,
@@ -17,7 +16,6 @@ import {
   getEngine,
   listEngineCatalogs,
   listSecrets,
-  listStorage,
   listWarehouses,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
@@ -68,6 +66,9 @@ import {
 } from "./EngineResourceGroups";
 import { useEngineConfigForm } from "./useEngineConfigForm";
 import { EngineRoleConfig } from "./EngineRoleConfig";
+import { EngineConfigGeneral } from "./EngineConfigGeneral";
+import { EngineConfigReliability } from "./EngineConfigReliability";
+import { EngineConfigAdvanced } from "./EngineConfigAdvanced";
 import EngineMonitor from "./EngineMonitor";
 
 type EngineWithStatus = Omit<Engine, "status"> & { status: EngineStatus };
@@ -223,17 +224,10 @@ function StatusCard({ status }: { status: EngineStatus }) {
   );
 }
 
-const LOG_LEVELS = ["INFO", "DEBUG", "WARN", "ERROR"] as const;
-
 // Per-role config form model + serialization lives in `useEngineConfigForm.ts`;
 // the per-role editor UI lives in `EngineRoleConfig.tsx`.
 
 function ConfigCard({ engine }: { engine: EngineWithStatus }) {
-  const storage = useQuery<Storage[], ApiError>({
-    queryKey: ["cp", "storage"],
-    queryFn: listStorage,
-    retry: false,
-  });
   const secrets = useQuery<Secret[], ApiError>({
     queryKey: ["cp", "secrets"],
     queryFn: listSecrets,
@@ -323,171 +317,36 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
             </TabsList>
 
             <TabsContent value="cluster" className="space-y-5 pt-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-1.5">
-                  <Label htmlFor="ced-qmm">Query max memory</Label>
-                  <Input
-                    id="ced-qmm"
-                    value={queryMaxMemory}
-                    onChange={(e) => setQueryMaxMemory(e.target.value)}
-                    placeholder="4GB"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="ced-log-level">Log level</Label>
-                  <Select value={logLevel} onValueChange={setLogLevel}>
-                    <SelectTrigger id="ced-log-level" className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {LOG_LEVELS.map((lvl) => (
-                        <SelectItem key={lvl} value={lvl}>
-                          {lvl}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
+              <EngineConfigGeneral
+                queryMaxMemory={queryMaxMemory}
+                setQueryMaxMemory={setQueryMaxMemory}
+                logLevel={logLevel}
+                setLogLevel={setLogLevel}
+                configProps={configProps}
+                setConfigProps={setConfigProps}
+                env={env}
+                setEnv={setEnv}
+              />
 
-              <div className="space-y-1.5">
-                <Label>Config properties</Label>
-                <p className="text-xs text-muted-foreground">
-                  Raw <code>config.properties</code> key/value pairs (both roles).
-                </p>
-                <KeyValueEditor
-                  rows={configProps}
-                  onChange={setConfigProps}
-                  keyPlaceholder="query.max-run-time"
-                  valuePlaceholder="1h"
-                />
-              </div>
+              <EngineConfigReliability
+                ftEnabled={ftEnabled}
+                setFtEnabled={setFtEnabled}
+                retryPolicy={retryPolicy}
+                setRetryPolicy={setRetryPolicy}
+                exchangeStorageConnId={exchangeStorageConnId}
+                setExchangeStorageConnId={setExchangeStorageConnId}
+                exchangePrefix={exchangePrefix}
+                setExchangePrefix={setExchangePrefix}
+              />
 
-              <div className="space-y-1.5">
-                <Label>Environment variables</Label>
-                <p className="text-xs text-muted-foreground">
-                  Extra env applied to both coordinator and worker pods.
-                </p>
-                <KeyValueEditor
-                  rows={env}
-                  onChange={setEnv}
-                  keyPlaceholder="MY_VAR"
-                  valuePlaceholder="value"
-                  addLabel="Add variable"
-                />
-              </div>
-
-              <div className="space-y-3 rounded-lg border p-4">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="space-y-0.5">
-                    <Label htmlFor="ced-ft-enabled">
-                      Fault-tolerant execution
-                    </Label>
-                    <p className="text-xs text-muted-foreground">
-                      Retry failed tasks/queries, spooling exchange data to an S3
-                      storage connection.
-                    </p>
-                  </div>
-                  <Switch
-                    id="ced-ft-enabled"
-                    checked={ftEnabled}
-                    onCheckedChange={setFtEnabled}
-                  />
-                </div>
-                {ftEnabled && (
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-                    <div className="space-y-1.5">
-                      <Label htmlFor="ced-ft-retry">Retry policy</Label>
-                      <Select
-                        value={retryPolicy}
-                        onValueChange={(v) =>
-                          setRetryPolicy(v as "TASK" | "QUERY")
-                        }
-                      >
-                        <SelectTrigger id="ced-ft-retry" className="w-full">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="TASK">TASK</SelectItem>
-                          <SelectItem value="QUERY">QUERY</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="ced-ft-storage">Exchange storage</Label>
-                      <Select
-                        value={exchangeStorageConnId}
-                        onValueChange={setExchangeStorageConnId}
-                      >
-                        <SelectTrigger id="ced-ft-storage" className="w-full">
-                          <SelectValue placeholder="Select a connection" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {(storage.data ?? []).length === 0 ? (
-                            <SelectItem value="__none__" disabled>
-                              No storage connections
-                            </SelectItem>
-                          ) : (
-                            (storage.data ?? []).map((s) => (
-                              <SelectItem key={s.id} value={s.id}>
-                                {s.name}
-                              </SelectItem>
-                            ))
-                          )}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="ced-ft-prefix">Exchange prefix</Label>
-                      <Input
-                        id="ced-ft-prefix"
-                        value={exchangePrefix}
-                        placeholder="exchange"
-                        onChange={(e) => setExchangePrefix(e.target.value)}
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className="space-y-1.5">
-                <Label>Event listener</Label>
-                <p className="text-xs text-muted-foreground">
-                  Raw <code>event-listener.properties</code> key/value pairs.
-                </p>
-                <KeyValueEditor
-                  rows={eventListener}
-                  onChange={setEventListener}
-                  keyPlaceholder="event-listener.name"
-                  valuePlaceholder="http"
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <Label>Additional node properties</Label>
-                <p className="text-xs text-muted-foreground">
-                  Extra <code>node.properties</code> key/value pairs.
-                </p>
-                <KeyValueEditor
-                  rows={nodeProps}
-                  onChange={setNodeProps}
-                  keyPlaceholder="node.internal-address-source"
-                  valuePlaceholder="FQDN"
-                />
-              </div>
-
-              <div className="space-y-1.5">
-                <Label>Additional log properties</Label>
-                <p className="text-xs text-muted-foreground">
-                  Extra <code>log.properties</code> logger levels.
-                </p>
-                <KeyValueEditor
-                  rows={logProps}
-                  onChange={setLogProps}
-                  keyPlaceholder="io.trino.execution"
-                  valuePlaceholder="DEBUG"
-                />
-              </div>
+              <EngineConfigAdvanced
+                eventListener={eventListener}
+                setEventListener={setEventListener}
+                nodeProps={nodeProps}
+                setNodeProps={setNodeProps}
+                logProps={logProps}
+                setLogProps={setLogProps}
+              />
 
               <div className="rounded-lg border p-4">
                 <ResourceGroupsSection
