@@ -19,7 +19,8 @@ mod warehouses;
 pub use auth::require_platform_admin;
 pub use engines::{
     CatalogReq, EngineLiveStatus, EnginePod, EngineProvisionReq, EngineProvisioner,
-    GracefulShutdownReq, HeapReq, ProbeReq, ProbesReq, RoleConfigReq, RoleResourcesReq,
+    FaultTolerantReq, GracefulShutdownReq, HeapReq, ProbeReq, ProbesReq, ResourceGroupReq,
+    ResourceGroupsReq, ResourceSelectorReq, RoleConfigReq, RoleResourcesReq, SessionRuleReq,
     TrinoConfigReq, WorkerRoleConfigReq,
 };
 pub use error::CpError;

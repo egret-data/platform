@@ -14,6 +14,7 @@ import {
   type RoleConfig,
   type RoleResources,
   type Secret,
+  type Storage,
   type TrinoConfig,
   type Warehouse,
   addEngineCatalog,
@@ -22,6 +23,7 @@ import {
   getEngine,
   listEngineCatalogs,
   listSecrets,
+  listStorage,
   listWarehouses,
   updateEngine,
 } from "@/api/controlPlane";
@@ -70,6 +72,17 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  type Kv,
+  type SessionRuleForm,
+  KeyValueEditor,
+  ResourceGroupsSection,
+  SessionPropertiesSection,
+  formToSessionRules,
+  kvToRecord,
+  recordToKv,
+  sessionRulesToForm,
+} from "./EngineResourceGroups";
 
 type EngineWithStatus = Omit<Engine, "status"> & { status: EngineStatus };
 
@@ -91,84 +104,6 @@ function phaseVariant(phase: string): BadgeVariant {
     default:
       return "secondary";
   }
-}
-
-// ── raw key→value editor helpers ─────────────────────────────────────────────
-
-type Kv = { key: string; value: string };
-
-function recordToKv(rec: Record<string, string> | undefined): Kv[] {
-  return rec ? Object.entries(rec).map(([key, value]) => ({ key, value })) : [];
-}
-
-function kvToRecord(rows: Kv[]): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const row of rows) {
-    const key = row.key.trim();
-    if (key) out[key] = row.value;
-  }
-  return out;
-}
-
-/** A small list of {key,value} input rows with add/remove. */
-function KeyValueEditor({
-  rows,
-  onChange,
-  keyPlaceholder = "key",
-  valuePlaceholder = "value",
-  addLabel = "Add property",
-}: {
-  rows: Kv[];
-  onChange: (rows: Kv[]) => void;
-  keyPlaceholder?: string;
-  valuePlaceholder?: string;
-  addLabel?: string;
-}) {
-  return (
-    <div className="space-y-2">
-      {rows.map((row, i) => (
-        <div key={i} className="flex items-center gap-2">
-          <Input
-            value={row.key}
-            placeholder={keyPlaceholder}
-            onChange={(e) =>
-              onChange(
-                rows.map((r, j) => (j === i ? { ...r, key: e.target.value } : r)),
-              )
-            }
-          />
-          <Input
-            value={row.value}
-            placeholder={valuePlaceholder}
-            onChange={(e) =>
-              onChange(
-                rows.map((r, j) => (j === i ? { ...r, value: e.target.value } : r)),
-              )
-            }
-          />
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="shrink-0 text-muted-foreground"
-            onClick={() => onChange(rows.filter((_, j) => j !== i))}
-            aria-label="Remove row"
-          >
-            <Trash2 className="h-4 w-4" />
-          </Button>
-        </div>
-      ))}
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={() => onChange([...rows, { key: "", value: "" }])}
-      >
-        <Plus className="h-4 w-4" />
-        {addLabel}
-      </Button>
-    </div>
-  );
 }
 
 /**
@@ -352,6 +287,7 @@ type RoleForm = {
   maxPercent: string;
   initialPercent: string;
   queryMaxMemoryPerNode: string;
+  heapHeadroomPerNode: string;
   additionalJvmConfig: string[];
   liveness: ProbeForm;
   readiness: ProbeForm;
@@ -375,6 +311,7 @@ function roleToForm(rc: RoleConfig | undefined): RoleForm {
     maxPercent: heap?.maxPercent?.toString() ?? "",
     initialPercent: heap?.initialPercent?.toString() ?? "",
     queryMaxMemoryPerNode: rc?.queryMaxMemoryPerNode ?? "",
+    heapHeadroomPerNode: rc?.heapHeadroomPerNode ?? "",
     additionalJvmConfig: rc?.additionalJvmConfig ? [...rc.additionalJvmConfig] : [],
     liveness: probeToForm(rc?.probes?.liveness),
     readiness: probeToForm(rc?.probes?.readiness),
@@ -409,6 +346,9 @@ function formToRole(f: RoleForm): RoleConfig {
 
   if (f.queryMaxMemoryPerNode.trim())
     rc.queryMaxMemoryPerNode = f.queryMaxMemoryPerNode.trim();
+
+  if (f.heapHeadroomPerNode.trim())
+    rc.heapHeadroomPerNode = f.heapHeadroomPerNode.trim();
 
   const jvm = f.additionalJvmConfig.map((s) => s.trim()).filter(Boolean);
   if (jvm.length) rc.additionalJvmConfig = jvm;
@@ -680,6 +620,15 @@ function RoleConfigEditor({
             onChange={(e) => set("queryMaxMemoryPerNode", e.target.value)}
           />
         </div>
+        <div className="space-y-1.5">
+          <Label htmlFor={`${idPrefix}-hhpn`}>Heap headroom / node</Label>
+          <Input
+            id={`${idPrefix}-hhpn`}
+            value={value.heapHeadroomPerNode}
+            placeholder="2GB"
+            onChange={(e) => set("heapHeadroomPerNode", e.target.value)}
+          />
+        </div>
       </div>
 
       <div className="space-y-1.5">
@@ -725,6 +674,12 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
   const queryClient = useQueryClient();
   const tc = engine.spec.trinoConfig;
 
+  const storage = useQuery<Storage[], ApiError>({
+    queryKey: ["cp", "storage"],
+    queryFn: listStorage,
+    retry: false,
+  });
+
   // Cluster-wide config.
   const [queryMaxMemory, setQueryMaxMemory] = useState(tc?.queryMaxMemory ?? "");
   const [logLevel, setLogLevel] = useState(tc?.logLevel ?? "INFO");
@@ -732,6 +687,29 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
     recordToKv(tc?.configProperties),
   );
   const [env, setEnv] = useState<Kv[]>(recordToKv(tc?.env));
+
+  // Raw property maps (config-file surface).
+  const [eventListener, setEventListener] = useState<Kv[]>(
+    recordToKv(tc?.eventListener),
+  );
+  const [nodeProps, setNodeProps] = useState<Kv[]>(
+    recordToKv(tc?.additionalNodeProperties),
+  );
+  const [logProps, setLogProps] = useState<Kv[]>(
+    recordToKv(tc?.additionalLogProperties),
+  );
+
+  // Fault-tolerant execution.
+  const [ftEnabled, setFtEnabled] = useState(tc?.faultTolerant != null);
+  const [retryPolicy, setRetryPolicy] = useState<"TASK" | "QUERY">(
+    tc?.faultTolerant?.retryPolicy ?? "TASK",
+  );
+  const [exchangeStorageConnId, setExchangeStorageConnId] = useState(
+    tc?.faultTolerant?.exchangeStorageConnId ?? "",
+  );
+  const [exchangePrefix, setExchangePrefix] = useState(
+    tc?.faultTolerant?.exchangePrefix ?? "exchange",
+  );
 
   // Per-role config.
   const [coordinator, setCoordinator] = useState<RoleForm>(roleToForm(tc?.coordinator));
@@ -743,6 +721,12 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
     tc?.worker?.gracefulShutdown?.gracePeriodSeconds?.toString() ?? "",
   );
 
+  // Structured configs (resource groups + session properties builders).
+  const [resourceGroups, setResourceGroups] = useState(tc?.resourceGroups);
+  const [sessionRules, setSessionRules] = useState<SessionRuleForm[]>(
+    sessionRulesToForm(tc?.sessionProperties),
+  );
+
   const [error, setError] = useState<string | null>(null);
 
   // Keep inputs in sync when the polled engine changes (e.g. an external update).
@@ -752,12 +736,21 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
     setLogLevel(next?.logLevel ?? "INFO");
     setConfigProps(recordToKv(next?.configProperties));
     setEnv(recordToKv(next?.env));
+    setEventListener(recordToKv(next?.eventListener));
+    setNodeProps(recordToKv(next?.additionalNodeProperties));
+    setLogProps(recordToKv(next?.additionalLogProperties));
+    setFtEnabled(next?.faultTolerant != null);
+    setRetryPolicy(next?.faultTolerant?.retryPolicy ?? "TASK");
+    setExchangeStorageConnId(next?.faultTolerant?.exchangeStorageConnId ?? "");
+    setExchangePrefix(next?.faultTolerant?.exchangePrefix ?? "exchange");
     setCoordinator(roleToForm(next?.coordinator));
     setWorker(roleToForm(next?.worker));
     setGsEnabled(next?.worker?.gracefulShutdown?.enabled ?? false);
     setGracePeriod(
       next?.worker?.gracefulShutdown?.gracePeriodSeconds?.toString() ?? "",
     );
+    setResourceGroups(next?.resourceGroups);
+    setSessionRules(sessionRulesToForm(next?.sessionProperties));
   }, [engine.spec]);
 
   const saveMutation = useMutation<Engine, ApiError, CreateEngineInput>({
@@ -780,6 +773,28 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
     if (Object.keys(cp).length) trinoConfig.configProperties = cp;
     const ev = kvToRecord(env);
     if (Object.keys(ev).length) trinoConfig.env = ev;
+
+    const el = kvToRecord(eventListener);
+    if (Object.keys(el).length) trinoConfig.eventListener = el;
+    const np = kvToRecord(nodeProps);
+    if (Object.keys(np).length) trinoConfig.additionalNodeProperties = np;
+    const lp = kvToRecord(logProps);
+    if (Object.keys(lp).length) trinoConfig.additionalLogProperties = lp;
+
+    if (ftEnabled && exchangeStorageConnId) {
+      trinoConfig.faultTolerant = {
+        retryPolicy,
+        exchangeStorageConnId,
+        exchangePrefix: exchangePrefix.trim() || "exchange",
+      };
+    }
+
+    // Structured builders — omit entirely when empty.
+    if (resourceGroups && resourceGroups.rootGroups.length)
+      trinoConfig.resourceGroups = resourceGroups;
+    const sr = formToSessionRules(sessionRules);
+    if (sr.length) trinoConfig.sessionProperties = sr;
+
     if (gsEnabled) {
       trinoConfig.worker.gracefulShutdown = {
         enabled: true,
@@ -877,6 +892,132 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
                   keyPlaceholder="MY_VAR"
                   valuePlaceholder="value"
                   addLabel="Add variable"
+                />
+              </div>
+
+              <div className="space-y-3 rounded-lg border p-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="ced-ft-enabled">
+                      Fault-tolerant execution
+                    </Label>
+                    <p className="text-xs text-muted-foreground">
+                      Retry failed tasks/queries, spooling exchange data to an S3
+                      storage connection.
+                    </p>
+                  </div>
+                  <Switch
+                    id="ced-ft-enabled"
+                    checked={ftEnabled}
+                    onCheckedChange={setFtEnabled}
+                  />
+                </div>
+                {ftEnabled && (
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="ced-ft-retry">Retry policy</Label>
+                      <Select
+                        value={retryPolicy}
+                        onValueChange={(v) =>
+                          setRetryPolicy(v as "TASK" | "QUERY")
+                        }
+                      >
+                        <SelectTrigger id="ced-ft-retry" className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="TASK">TASK</SelectItem>
+                          <SelectItem value="QUERY">QUERY</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="ced-ft-storage">Exchange storage</Label>
+                      <Select
+                        value={exchangeStorageConnId}
+                        onValueChange={setExchangeStorageConnId}
+                      >
+                        <SelectTrigger id="ced-ft-storage" className="w-full">
+                          <SelectValue placeholder="Select a connection" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {(storage.data ?? []).length === 0 ? (
+                            <SelectItem value="__none__" disabled>
+                              No storage connections
+                            </SelectItem>
+                          ) : (
+                            (storage.data ?? []).map((s) => (
+                              <SelectItem key={s.id} value={s.id}>
+                                {s.name}
+                              </SelectItem>
+                            ))
+                          )}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="ced-ft-prefix">Exchange prefix</Label>
+                      <Input
+                        id="ced-ft-prefix"
+                        value={exchangePrefix}
+                        placeholder="exchange"
+                        onChange={(e) => setExchangePrefix(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-1.5">
+                <Label>Event listener</Label>
+                <p className="text-xs text-muted-foreground">
+                  Raw <code>event-listener.properties</code> key/value pairs.
+                </p>
+                <KeyValueEditor
+                  rows={eventListener}
+                  onChange={setEventListener}
+                  keyPlaceholder="event-listener.name"
+                  valuePlaceholder="http"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label>Additional node properties</Label>
+                <p className="text-xs text-muted-foreground">
+                  Extra <code>node.properties</code> key/value pairs.
+                </p>
+                <KeyValueEditor
+                  rows={nodeProps}
+                  onChange={setNodeProps}
+                  keyPlaceholder="node.internal-address-source"
+                  valuePlaceholder="FQDN"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <Label>Additional log properties</Label>
+                <p className="text-xs text-muted-foreground">
+                  Extra <code>log.properties</code> logger levels.
+                </p>
+                <KeyValueEditor
+                  rows={logProps}
+                  onChange={setLogProps}
+                  keyPlaceholder="io.trino.execution"
+                  valuePlaceholder="DEBUG"
+                />
+              </div>
+
+              <div className="rounded-lg border p-4">
+                <ResourceGroupsSection
+                  value={resourceGroups}
+                  onChange={setResourceGroups}
+                />
+              </div>
+
+              <div className="rounded-lg border p-4">
+                <SessionPropertiesSection
+                  value={sessionRules}
+                  onChange={setSessionRules}
                 />
               </div>
             </TabsContent>
