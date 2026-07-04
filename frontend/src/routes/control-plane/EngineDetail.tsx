@@ -72,6 +72,17 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  type Kv,
+  type SessionRuleForm,
+  KeyValueEditor,
+  ResourceGroupsSection,
+  SessionPropertiesSection,
+  formToSessionRules,
+  kvToRecord,
+  recordToKv,
+  sessionRulesToForm,
+} from "./EngineResourceGroups";
 
 type EngineWithStatus = Omit<Engine, "status"> & { status: EngineStatus };
 
@@ -93,84 +104,6 @@ function phaseVariant(phase: string): BadgeVariant {
     default:
       return "secondary";
   }
-}
-
-// ── raw key→value editor helpers ─────────────────────────────────────────────
-
-type Kv = { key: string; value: string };
-
-function recordToKv(rec: Record<string, string> | undefined): Kv[] {
-  return rec ? Object.entries(rec).map(([key, value]) => ({ key, value })) : [];
-}
-
-function kvToRecord(rows: Kv[]): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const row of rows) {
-    const key = row.key.trim();
-    if (key) out[key] = row.value;
-  }
-  return out;
-}
-
-/** A small list of {key,value} input rows with add/remove. */
-function KeyValueEditor({
-  rows,
-  onChange,
-  keyPlaceholder = "key",
-  valuePlaceholder = "value",
-  addLabel = "Add property",
-}: {
-  rows: Kv[];
-  onChange: (rows: Kv[]) => void;
-  keyPlaceholder?: string;
-  valuePlaceholder?: string;
-  addLabel?: string;
-}) {
-  return (
-    <div className="space-y-2">
-      {rows.map((row, i) => (
-        <div key={i} className="flex items-center gap-2">
-          <Input
-            value={row.key}
-            placeholder={keyPlaceholder}
-            onChange={(e) =>
-              onChange(
-                rows.map((r, j) => (j === i ? { ...r, key: e.target.value } : r)),
-              )
-            }
-          />
-          <Input
-            value={row.value}
-            placeholder={valuePlaceholder}
-            onChange={(e) =>
-              onChange(
-                rows.map((r, j) => (j === i ? { ...r, value: e.target.value } : r)),
-              )
-            }
-          />
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="shrink-0 text-muted-foreground"
-            onClick={() => onChange(rows.filter((_, j) => j !== i))}
-            aria-label="Remove row"
-          >
-            <Trash2 className="h-4 w-4" />
-          </Button>
-        </div>
-      ))}
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={() => onChange([...rows, { key: "", value: "" }])}
-      >
-        <Plus className="h-4 w-4" />
-        {addLabel}
-      </Button>
-    </div>
-  );
 }
 
 /**
@@ -788,9 +721,11 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
     tc?.worker?.gracefulShutdown?.gracePeriodSeconds?.toString() ?? "",
   );
 
-  // Structured configs owned by Task 7's builders — preserved on save (pass-through).
+  // Structured configs (resource groups + session properties builders).
   const [resourceGroups, setResourceGroups] = useState(tc?.resourceGroups);
-  const [sessionProperties, setSessionProperties] = useState(tc?.sessionProperties);
+  const [sessionRules, setSessionRules] = useState<SessionRuleForm[]>(
+    sessionRulesToForm(tc?.sessionProperties),
+  );
 
   const [error, setError] = useState<string | null>(null);
 
@@ -815,7 +750,7 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
       next?.worker?.gracefulShutdown?.gracePeriodSeconds?.toString() ?? "",
     );
     setResourceGroups(next?.resourceGroups);
-    setSessionProperties(next?.sessionProperties);
+    setSessionRules(sessionRulesToForm(next?.sessionProperties));
   }, [engine.spec]);
 
   const saveMutation = useMutation<Engine, ApiError, CreateEngineInput>({
@@ -854,9 +789,11 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
       };
     }
 
-    // Preserve Task 7's structured configs (this UI doesn't edit them).
-    if (resourceGroups) trinoConfig.resourceGroups = resourceGroups;
-    if (sessionProperties) trinoConfig.sessionProperties = sessionProperties;
+    // Structured builders — omit entirely when empty.
+    if (resourceGroups && resourceGroups.rootGroups.length)
+      trinoConfig.resourceGroups = resourceGroups;
+    const sr = formToSessionRules(sessionRules);
+    if (sr.length) trinoConfig.sessionProperties = sr;
 
     if (gsEnabled) {
       trinoConfig.worker.gracefulShutdown = {
@@ -1067,6 +1004,20 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
                   onChange={setLogProps}
                   keyPlaceholder="io.trino.execution"
                   valuePlaceholder="DEBUG"
+                />
+              </div>
+
+              <div className="rounded-lg border p-4">
+                <ResourceGroupsSection
+                  value={resourceGroups}
+                  onChange={setResourceGroups}
+                />
+              </div>
+
+              <div className="rounded-lg border p-4">
+                <SessionPropertiesSection
+                  value={sessionRules}
+                  onChange={setSessionRules}
                 />
               </div>
             </TabsContent>
