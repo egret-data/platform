@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Loader2, Plus, Server, Trash2 } from "lucide-react";
+import { ArrowLeft, ChevronDown, Loader2, Plus, Server, Trash2 } from "lucide-react";
 
 import {
   type AddCatalogInput,
@@ -9,6 +9,10 @@ import {
   type Engine,
   type EngineCatalog,
   type EngineStatus,
+  type HeapConfig,
+  type Probe,
+  type RoleConfig,
+  type RoleResources,
   type Secret,
   type TrinoConfig,
   type Warehouse,
@@ -32,6 +36,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
   Dialog,
@@ -43,6 +52,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   Select,
   SelectContent,
@@ -50,6 +60,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Table,
   TableBody,
@@ -281,43 +293,471 @@ function StatusCard({ status }: { status: EngineStatus }) {
   );
 }
 
+// ── per-role config form model ───────────────────────────────────────────────
+
+/** Parse a text field to a non-negative integer, or undefined when blank/invalid. */
+function numOrUndef(s: string): number | undefined {
+  const t = s.trim();
+  if (t === "") return undefined;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+const LOG_LEVELS = ["INFO", "DEBUG", "WARN", "ERROR"] as const;
+
+type ProbeForm = {
+  initialDelaySeconds: string;
+  periodSeconds: string;
+  timeoutSeconds: string;
+  failureThreshold: string;
+  successThreshold: string;
+};
+
+const PROBE_FIELDS: { key: keyof ProbeForm; label: string }[] = [
+  { key: "initialDelaySeconds", label: "Initial delay (s)" },
+  { key: "periodSeconds", label: "Period (s)" },
+  { key: "timeoutSeconds", label: "Timeout (s)" },
+  { key: "failureThreshold", label: "Failure threshold" },
+  { key: "successThreshold", label: "Success threshold" },
+];
+
+function probeToForm(p: Probe | undefined): ProbeForm {
+  return {
+    initialDelaySeconds: p?.initialDelaySeconds?.toString() ?? "",
+    periodSeconds: p?.periodSeconds?.toString() ?? "",
+    timeoutSeconds: p?.timeoutSeconds?.toString() ?? "",
+    failureThreshold: p?.failureThreshold?.toString() ?? "",
+    successThreshold: p?.successThreshold?.toString() ?? "",
+  };
+}
+
+function formToProbe(f: ProbeForm): Probe | undefined {
+  const p: Probe = {};
+  for (const { key } of PROBE_FIELDS) {
+    const n = numOrUndef(f[key]);
+    if (n !== undefined) p[key] = n;
+  }
+  return Object.keys(p).length ? p : undefined;
+}
+
+type RoleForm = {
+  replicas: string;
+  cpuRequest: string;
+  cpuLimit: string;
+  memRequest: string;
+  memLimit: string;
+  heapMode: "fixed" | "percent";
+  maxSize: string;
+  minSize: string;
+  maxPercent: string;
+  initialPercent: string;
+  queryMaxMemoryPerNode: string;
+  additionalJvmConfig: string[];
+  liveness: ProbeForm;
+  readiness: ProbeForm;
+  startup: ProbeForm;
+};
+
+function roleToForm(rc: RoleConfig | undefined): RoleForm {
+  const heap = rc?.heap;
+  // Prefer percent mode only when a percent is set and no fixed size is present.
+  const heapMode: RoleForm["heapMode"] =
+    heap?.maxPercent !== undefined && heap?.maxSize === undefined ? "percent" : "fixed";
+  return {
+    replicas: rc?.replicas?.toString() ?? "",
+    cpuRequest: rc?.resources?.cpuRequest ?? "",
+    cpuLimit: rc?.resources?.cpuLimit ?? "",
+    memRequest: rc?.resources?.memRequest ?? "",
+    memLimit: rc?.resources?.memLimit ?? "",
+    heapMode,
+    maxSize: heap?.maxSize ?? "",
+    minSize: heap?.minSize ?? "",
+    maxPercent: heap?.maxPercent?.toString() ?? "",
+    initialPercent: heap?.initialPercent?.toString() ?? "",
+    queryMaxMemoryPerNode: rc?.queryMaxMemoryPerNode ?? "",
+    additionalJvmConfig: rc?.additionalJvmConfig ? [...rc.additionalJvmConfig] : [],
+    liveness: probeToForm(rc?.probes?.liveness),
+    readiness: probeToForm(rc?.probes?.readiness),
+    startup: probeToForm(rc?.probes?.startup),
+  };
+}
+
+/** Serialize a role form to a `RoleConfig`, omitting blank/unset values. */
+function formToRole(f: RoleForm): RoleConfig {
+  const rc: RoleConfig = {};
+  const replicas = numOrUndef(f.replicas);
+  if (replicas !== undefined) rc.replicas = replicas;
+
+  const resources: RoleResources = {};
+  if (f.cpuRequest.trim()) resources.cpuRequest = f.cpuRequest.trim();
+  if (f.cpuLimit.trim()) resources.cpuLimit = f.cpuLimit.trim();
+  if (f.memRequest.trim()) resources.memRequest = f.memRequest.trim();
+  if (f.memLimit.trim()) resources.memLimit = f.memLimit.trim();
+  if (Object.keys(resources).length) rc.resources = resources;
+
+  const heap: HeapConfig = {};
+  if (f.heapMode === "fixed") {
+    if (f.maxSize.trim()) heap.maxSize = f.maxSize.trim();
+    if (f.minSize.trim()) heap.minSize = f.minSize.trim();
+  } else {
+    const mp = numOrUndef(f.maxPercent);
+    const ip = numOrUndef(f.initialPercent);
+    if (mp !== undefined) heap.maxPercent = mp;
+    if (ip !== undefined) heap.initialPercent = ip;
+  }
+  if (Object.keys(heap).length) rc.heap = heap;
+
+  if (f.queryMaxMemoryPerNode.trim())
+    rc.queryMaxMemoryPerNode = f.queryMaxMemoryPerNode.trim();
+
+  const jvm = f.additionalJvmConfig.map((s) => s.trim()).filter(Boolean);
+  if (jvm.length) rc.additionalJvmConfig = jvm;
+
+  const probes: NonNullable<RoleConfig["probes"]> = {};
+  const liveness = formToProbe(f.liveness);
+  const readiness = formToProbe(f.readiness);
+  const startup = formToProbe(f.startup);
+  if (liveness) probes.liveness = liveness;
+  if (readiness) probes.readiness = readiness;
+  if (startup) probes.startup = startup;
+  if (Object.keys(probes).length) rc.probes = probes;
+
+  return rc;
+}
+
+/** A list of free-text lines (used for `additionalJvmConfig`). */
+function StringListEditor({
+  rows,
+  onChange,
+  placeholder,
+}: {
+  rows: string[];
+  onChange: (rows: string[]) => void;
+  placeholder?: string;
+}) {
+  return (
+    <div className="space-y-2">
+      {rows.map((row, i) => (
+        <div key={i} className="flex items-center gap-2">
+          <Input
+            value={row}
+            placeholder={placeholder}
+            onChange={(e) =>
+              onChange(rows.map((r, j) => (j === i ? e.target.value : r)))
+            }
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="shrink-0 text-muted-foreground"
+            onClick={() => onChange(rows.filter((_, j) => j !== i))}
+            aria-label="Remove line"
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
+      ))}
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => onChange([...rows, ""])}
+      >
+        <Plus className="h-4 w-4" />
+        Add JVM flag
+      </Button>
+    </div>
+  );
+}
+
+/** A single collapsible probe editor (liveness/readiness/startup). */
+function ProbeEditor({
+  label,
+  idPrefix,
+  value,
+  onChange,
+}: {
+  label: string;
+  idPrefix: string;
+  value: ProbeForm;
+  onChange: (next: ProbeForm) => void;
+}) {
+  return (
+    <Collapsible className="rounded-md border">
+      <CollapsibleTrigger className="group flex w-full items-center justify-between px-3 py-2 text-sm font-medium">
+        {label} probe
+        <ChevronDown className="h-4 w-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+      </CollapsibleTrigger>
+      <CollapsibleContent className="border-t px-3 py-3">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          {PROBE_FIELDS.map((f) => (
+            <div key={f.key} className="space-y-1.5">
+              <Label htmlFor={`${idPrefix}-${f.key}`} className="text-xs">
+                {f.label}
+              </Label>
+              <Input
+                id={`${idPrefix}-${f.key}`}
+                type="number"
+                min={0}
+                value={value[f.key]}
+                placeholder="default"
+                onChange={(e) => onChange({ ...value, [f.key]: e.target.value })}
+              />
+            </div>
+          ))}
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+/** Shared editor for a Trino role (coordinator or worker) config block. */
+function RoleConfigEditor({
+  value,
+  onChange,
+  idPrefix,
+}: {
+  value: RoleForm;
+  onChange: (next: RoleForm) => void;
+  idPrefix: string;
+}) {
+  const set = <K extends keyof RoleForm>(key: K, v: RoleForm[K]) =>
+    onChange({ ...value, [key]: v });
+
+  return (
+    <div className="space-y-5">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div className="space-y-1.5">
+          <Label htmlFor={`${idPrefix}-replicas`}>Replicas</Label>
+          <Input
+            id={`${idPrefix}-replicas`}
+            type="number"
+            min={0}
+            value={value.replicas}
+            placeholder="1"
+            onChange={(e) => set("replicas", e.target.value)}
+          />
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <Label>Resources</Label>
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <div className="space-y-1.5">
+            <Label htmlFor={`${idPrefix}-cpu-req`} className="text-xs">
+              CPU request
+            </Label>
+            <Input
+              id={`${idPrefix}-cpu-req`}
+              value={value.cpuRequest}
+              placeholder="1"
+              onChange={(e) => set("cpuRequest", e.target.value)}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor={`${idPrefix}-cpu-lim`} className="text-xs">
+              CPU limit
+            </Label>
+            <Input
+              id={`${idPrefix}-cpu-lim`}
+              value={value.cpuLimit}
+              placeholder="2"
+              onChange={(e) => set("cpuLimit", e.target.value)}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor={`${idPrefix}-mem-req`} className="text-xs">
+              Memory request
+            </Label>
+            <Input
+              id={`${idPrefix}-mem-req`}
+              value={value.memRequest}
+              placeholder="2Gi"
+              onChange={(e) => set("memRequest", e.target.value)}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor={`${idPrefix}-mem-lim`} className="text-xs">
+              Memory limit
+            </Label>
+            <Input
+              id={`${idPrefix}-mem-lim`}
+              value={value.memLimit}
+              placeholder="4Gi"
+              onChange={(e) => set("memLimit", e.target.value)}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <Label>JVM heap</Label>
+        <RadioGroup
+          className="flex gap-6"
+          value={value.heapMode}
+          onValueChange={(v) => set("heapMode", v as RoleForm["heapMode"])}
+        >
+          <div className="flex items-center gap-2">
+            <RadioGroupItem value="fixed" id={`${idPrefix}-heap-fixed`} />
+            <Label htmlFor={`${idPrefix}-heap-fixed`} className="font-normal">
+              Fixed size
+            </Label>
+          </div>
+          <div className="flex items-center gap-2">
+            <RadioGroupItem value="percent" id={`${idPrefix}-heap-percent`} />
+            <Label htmlFor={`${idPrefix}-heap-percent`} className="font-normal">
+              Percent
+            </Label>
+          </div>
+        </RadioGroup>
+        {value.heapMode === "fixed" ? (
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <Label htmlFor={`${idPrefix}-heap-max`} className="text-xs">
+                Max size (-Xmx)
+              </Label>
+              <Input
+                id={`${idPrefix}-heap-max`}
+                value={value.maxSize}
+                placeholder="2G"
+                onChange={(e) => set("maxSize", e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor={`${idPrefix}-heap-min`} className="text-xs">
+                Min size (-Xms)
+              </Label>
+              <Input
+                id={`${idPrefix}-heap-min`}
+                value={value.minSize}
+                placeholder="2G"
+                onChange={(e) => set("minSize", e.target.value)}
+              />
+            </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <Label htmlFor={`${idPrefix}-heap-maxpct`} className="text-xs">
+                Max RAM percent
+              </Label>
+              <Input
+                id={`${idPrefix}-heap-maxpct`}
+                type="number"
+                min={0}
+                max={100}
+                value={value.maxPercent}
+                placeholder="80"
+                onChange={(e) => set("maxPercent", e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor={`${idPrefix}-heap-initpct`} className="text-xs">
+                Initial RAM percent
+              </Label>
+              <Input
+                id={`${idPrefix}-heap-initpct`}
+                type="number"
+                min={0}
+                max={100}
+                value={value.initialPercent}
+                placeholder="80"
+                onChange={(e) => set("initialPercent", e.target.value)}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        <div className="space-y-1.5">
+          <Label htmlFor={`${idPrefix}-qmmpn`}>Query max memory / node</Label>
+          <Input
+            id={`${idPrefix}-qmmpn`}
+            value={value.queryMaxMemoryPerNode}
+            placeholder="1GB"
+            onChange={(e) => set("queryMaxMemoryPerNode", e.target.value)}
+          />
+        </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <Label>Additional JVM config</Label>
+        <p className="text-xs text-muted-foreground">
+          Extra lines appended to <code>jvm.config</code>.
+        </p>
+        <StringListEditor
+          rows={value.additionalJvmConfig}
+          onChange={(rows) => set("additionalJvmConfig", rows)}
+          placeholder="-XX:MaxHeapFreeRatio=100"
+        />
+      </div>
+
+      <div className="space-y-2">
+        <Label>Probes</Label>
+        <div className="space-y-2">
+          <ProbeEditor
+            label="Liveness"
+            idPrefix={`${idPrefix}-live`}
+            value={value.liveness}
+            onChange={(p) => set("liveness", p)}
+          />
+          <ProbeEditor
+            label="Readiness"
+            idPrefix={`${idPrefix}-ready`}
+            value={value.readiness}
+            onChange={(p) => set("readiness", p)}
+          />
+          <ProbeEditor
+            label="Startup"
+            idPrefix={`${idPrefix}-startup`}
+            value={value.startup}
+            onChange={(p) => set("startup", p)}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ConfigCard({ engine }: { engine: EngineWithStatus }) {
   const queryClient = useQueryClient();
-  const [coordinatorReplicas, setCoordinatorReplicas] = useState(
-    engine.spec.coordinatorReplicas,
-  );
-  const [workerReplicas, setWorkerReplicas] = useState(engine.spec.workerReplicas);
-  const [cpuMin, setCpuMin] = useState(engine.spec.cpuMin);
-  const [cpuMax, setCpuMax] = useState(engine.spec.cpuMax);
-  const [memory, setMemory] = useState(engine.spec.memory);
-
-  // Curated Trino config (read from `spec.trinoConfig` if the DTO exposes it).
   const tc = engine.spec.trinoConfig;
-  const [jvmHeap, setJvmHeap] = useState(tc?.jvmHeap ?? "");
+
+  // Cluster-wide config.
   const [queryMaxMemory, setQueryMaxMemory] = useState(tc?.queryMaxMemory ?? "");
-  const [queryMaxMemoryPerNode, setQueryMaxMemoryPerNode] = useState(
-    tc?.queryMaxMemoryPerNode ?? "",
-  );
+  const [logLevel, setLogLevel] = useState(tc?.logLevel ?? "INFO");
   const [configProps, setConfigProps] = useState<Kv[]>(
     recordToKv(tc?.configProperties),
   );
   const [env, setEnv] = useState<Kv[]>(recordToKv(tc?.env));
 
+  // Per-role config.
+  const [coordinator, setCoordinator] = useState<RoleForm>(roleToForm(tc?.coordinator));
+  const [worker, setWorker] = useState<RoleForm>(roleToForm(tc?.worker));
+  const [gsEnabled, setGsEnabled] = useState(
+    tc?.worker?.gracefulShutdown?.enabled ?? false,
+  );
+  const [gracePeriod, setGracePeriod] = useState(
+    tc?.worker?.gracefulShutdown?.gracePeriodSeconds?.toString() ?? "",
+  );
+
   const [error, setError] = useState<string | null>(null);
 
   // Keep inputs in sync when the polled engine changes (e.g. an external update).
   useEffect(() => {
-    setCoordinatorReplicas(engine.spec.coordinatorReplicas);
-    setWorkerReplicas(engine.spec.workerReplicas);
-    setCpuMin(engine.spec.cpuMin);
-    setCpuMax(engine.spec.cpuMax);
-    setMemory(engine.spec.memory);
     const next = engine.spec.trinoConfig;
-    setJvmHeap(next?.jvmHeap ?? "");
     setQueryMaxMemory(next?.queryMaxMemory ?? "");
-    setQueryMaxMemoryPerNode(next?.queryMaxMemoryPerNode ?? "");
+    setLogLevel(next?.logLevel ?? "INFO");
     setConfigProps(recordToKv(next?.configProperties));
     setEnv(recordToKv(next?.env));
+    setCoordinator(roleToForm(next?.coordinator));
+    setWorker(roleToForm(next?.worker));
+    setGsEnabled(next?.worker?.gracefulShutdown?.enabled ?? false);
+    setGracePeriod(
+      next?.worker?.gracefulShutdown?.gracePeriodSeconds?.toString() ?? "",
+    );
   }, [engine.spec]);
 
   const saveMutation = useMutation<Engine, ApiError, CreateEngineInput>({
@@ -330,22 +770,34 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
     e.preventDefault();
     setError(null);
 
-    const trinoConfig: TrinoConfig = {};
-    if (jvmHeap.trim()) trinoConfig.jvmHeap = jvmHeap.trim();
+    const trinoConfig: TrinoConfig = {
+      coordinator: formToRole(coordinator),
+      worker: formToRole(worker),
+    };
     if (queryMaxMemory.trim()) trinoConfig.queryMaxMemory = queryMaxMemory.trim();
-    if (queryMaxMemoryPerNode.trim())
-      trinoConfig.queryMaxMemoryPerNode = queryMaxMemoryPerNode.trim();
-    trinoConfig.configProperties = kvToRecord(configProps);
-    trinoConfig.env = kvToRecord(env);
+    if (logLevel) trinoConfig.logLevel = logLevel;
+    const cp = kvToRecord(configProps);
+    if (Object.keys(cp).length) trinoConfig.configProperties = cp;
+    const ev = kvToRecord(env);
+    if (Object.keys(ev).length) trinoConfig.env = ev;
+    if (gsEnabled) {
+      trinoConfig.worker.gracefulShutdown = {
+        enabled: true,
+        gracePeriodSeconds: numOrUndef(gracePeriod) ?? 0,
+      };
+    }
 
+    // The wizard-era required fields still ride along; replicas now come from
+    // the per-role editor, resources fall back to the stored flat values.
     const input: CreateEngineInput = {
       name: engine.name,
       warehouseId: engine.warehouseId,
-      coordinatorReplicas,
-      workerReplicas,
-      cpuMin: cpuMin.trim(),
-      cpuMax: cpuMax.trim(),
-      memory: memory.trim(),
+      coordinatorReplicas:
+        numOrUndef(coordinator.replicas) ?? engine.spec.coordinatorReplicas,
+      workerReplicas: numOrUndef(worker.replicas) ?? engine.spec.workerReplicas,
+      cpuMin: engine.spec.cpuMin,
+      cpuMax: engine.spec.cpuMax,
+      memory: engine.spec.memory,
       trinoConfig,
     };
     try {
@@ -360,129 +812,119 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
       <CardHeader>
         <CardTitle className="text-lg">Configuration</CardTitle>
         <CardDescription>
-          Adjust cluster size, resources, and Trino config. Saving re-provisions
+          Cluster-wide, coordinator, and worker Trino config. Saving re-provisions
           the engine.
         </CardDescription>
       </CardHeader>
       <CardContent>
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="ced-coordinators">Coordinator replicas</Label>
-              <Input
-                id="ced-coordinators"
-                type="number"
-                min={1}
-                value={coordinatorReplicas}
-                onChange={(e) => setCoordinatorReplicas(Number(e.target.value))}
-                required
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="ced-workers">Worker replicas</Label>
-              <Input
-                id="ced-workers"
-                type="number"
-                min={0}
-                value={workerReplicas}
-                onChange={(e) => setWorkerReplicas(Number(e.target.value))}
-                required
-              />
-            </div>
-          </div>
+          <Tabs defaultValue="cluster">
+            <TabsList>
+              <TabsTrigger value="cluster">Cluster</TabsTrigger>
+              <TabsTrigger value="coordinator">Coordinator</TabsTrigger>
+              <TabsTrigger value="worker">Worker</TabsTrigger>
+            </TabsList>
 
-          <div className="grid grid-cols-3 gap-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="ced-cpu-min">CPU min</Label>
-              <Input
-                id="ced-cpu-min"
-                value={cpuMin}
-                onChange={(e) => setCpuMin(e.target.value)}
-                placeholder="1"
-                required
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="ced-cpu-max">CPU max</Label>
-              <Input
-                id="ced-cpu-max"
-                value={cpuMax}
-                onChange={(e) => setCpuMax(e.target.value)}
-                placeholder="2"
-                required
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="ced-memory">Memory</Label>
-              <Input
-                id="ced-memory"
-                value={memory}
-                onChange={(e) => setMemory(e.target.value)}
-                placeholder="4Gi"
-                required
-              />
-            </div>
-          </div>
+            <TabsContent value="cluster" className="space-y-5 pt-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <Label htmlFor="ced-qmm">Query max memory</Label>
+                  <Input
+                    id="ced-qmm"
+                    value={queryMaxMemory}
+                    onChange={(e) => setQueryMaxMemory(e.target.value)}
+                    placeholder="4GB"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="ced-log-level">Log level</Label>
+                  <Select value={logLevel} onValueChange={setLogLevel}>
+                    <SelectTrigger id="ced-log-level" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {LOG_LEVELS.map((lvl) => (
+                        <SelectItem key={lvl} value={lvl}>
+                          {lvl}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
 
-          <div className="space-y-4 rounded-lg border p-4">
-            <p className="text-sm font-medium">Trino config</p>
-            <div className="grid grid-cols-3 gap-4">
               <div className="space-y-1.5">
-                <Label htmlFor="ced-jvm-heap">JVM heap</Label>
-                <Input
-                  id="ced-jvm-heap"
-                  value={jvmHeap}
-                  onChange={(e) => setJvmHeap(e.target.value)}
-                  placeholder="2G"
+                <Label>Config properties</Label>
+                <p className="text-xs text-muted-foreground">
+                  Raw <code>config.properties</code> key/value pairs (both roles).
+                </p>
+                <KeyValueEditor
+                  rows={configProps}
+                  onChange={setConfigProps}
+                  keyPlaceholder="query.max-run-time"
+                  valuePlaceholder="1h"
                 />
               </div>
+
               <div className="space-y-1.5">
-                <Label htmlFor="ced-qmm">Query max memory</Label>
-                <Input
-                  id="ced-qmm"
-                  value={queryMaxMemory}
-                  onChange={(e) => setQueryMaxMemory(e.target.value)}
-                  placeholder="4GB"
+                <Label>Environment variables</Label>
+                <p className="text-xs text-muted-foreground">
+                  Extra env applied to both coordinator and worker pods.
+                </p>
+                <KeyValueEditor
+                  rows={env}
+                  onChange={setEnv}
+                  keyPlaceholder="MY_VAR"
+                  valuePlaceholder="value"
+                  addLabel="Add variable"
                 />
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="ced-qmmpn">Query max memory / node</Label>
-                <Input
-                  id="ced-qmmpn"
-                  value={queryMaxMemoryPerNode}
-                  onChange={(e) => setQueryMaxMemoryPerNode(e.target.value)}
-                  placeholder="1GB"
-                />
+            </TabsContent>
+
+            <TabsContent value="coordinator" className="pt-4">
+              <RoleConfigEditor
+                idPrefix="ced-coord"
+                value={coordinator}
+                onChange={setCoordinator}
+              />
+            </TabsContent>
+
+            <TabsContent value="worker" className="space-y-5 pt-4">
+              <RoleConfigEditor
+                idPrefix="ced-worker"
+                value={worker}
+                onChange={setWorker}
+              />
+              <div className="space-y-3 rounded-lg border p-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="ced-gs-enabled">Graceful shutdown</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Drain in-flight queries before a worker terminates.
+                    </p>
+                  </div>
+                  <Switch
+                    id="ced-gs-enabled"
+                    checked={gsEnabled}
+                    onCheckedChange={setGsEnabled}
+                  />
+                </div>
+                {gsEnabled && (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="ced-gs-grace">Grace period (s)</Label>
+                    <Input
+                      id="ced-gs-grace"
+                      type="number"
+                      min={0}
+                      value={gracePeriod}
+                      placeholder="120"
+                      onChange={(e) => setGracePeriod(e.target.value)}
+                    />
+                  </div>
+                )}
               </div>
-            </div>
-
-            <div className="space-y-1.5">
-              <Label>Config properties</Label>
-              <p className="text-xs text-muted-foreground">
-                Raw <code>config.properties</code> key/value pairs.
-              </p>
-              <KeyValueEditor
-                rows={configProps}
-                onChange={setConfigProps}
-                keyPlaceholder="query.max-run-time"
-                valuePlaceholder="1h"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label>Environment variables</Label>
-              <p className="text-xs text-muted-foreground">
-                Extra env applied to both coordinator and worker pods.
-              </p>
-              <KeyValueEditor
-                rows={env}
-                onChange={setEnv}
-                keyPlaceholder="MY_VAR"
-                valuePlaceholder="value"
-                addLabel="Add variable"
-              />
-            </div>
-          </div>
+            </TabsContent>
+          </Tabs>
 
           {error && (
             <Alert variant="destructive">
