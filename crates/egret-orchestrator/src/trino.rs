@@ -4,7 +4,9 @@
 
 use crate::kube_client::KubeClient;
 use crate::provisioner::EngineProvisioner;
-use crate::spec::{EngineSpec, EngineStatus, PodStatus, RoleConfig};
+use crate::spec::{
+    EngineSpec, EngineStatus, PodStatus, ResourceGroup, ResourceGroups, RoleConfig, SessionRule,
+};
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -109,19 +111,120 @@ fn log_properties(spec: &EngineSpec) -> String {
     )
 }
 
+fn rg_to_json(g: &ResourceGroup) -> Value {
+    let mut o = json!({
+        "name": g.name, "softMemoryLimit": g.soft_memory_limit,
+        "hardConcurrencyLimit": g.hard_concurrency_limit, "maxQueued": g.max_queued,
+    });
+    if let Some(p) = &g.scheduling_policy {
+        o["schedulingPolicy"] = json!(p);
+    }
+    if !g.sub_groups.is_empty() {
+        o["subGroups"] = Value::Array(g.sub_groups.iter().map(rg_to_json).collect());
+    }
+    o
+}
+
+fn resource_groups_json(rg: &ResourceGroups) -> String {
+    let selectors: Vec<Value> = rg
+        .selectors
+        .iter()
+        .map(|s| {
+            let mut o = json!({ "group": s.group });
+            if let Some(v) = &s.user {
+                o["user"] = json!(v);
+            }
+            if let Some(v) = &s.source {
+                o["source"] = json!(v);
+            }
+            if let Some(v) = &s.query_type {
+                o["queryType"] = json!(v);
+            }
+            o
+        })
+        .collect();
+    serde_json::to_string_pretty(&json!({
+        "rootGroups": rg.root_groups.iter().map(rg_to_json).collect::<Vec<_>>(),
+        "selectors": selectors,
+    }))
+    .unwrap()
+        + "\n"
+}
+
+fn session_properties_json(rules: &[SessionRule]) -> String {
+    let specs: Vec<Value> = rules
+        .iter()
+        .map(|r| {
+            let mut o = json!({ "sessionProperties": r.properties });
+            if let Some(v) = &r.match_user {
+                o["user"] = json!(v);
+            }
+            if let Some(v) = &r.match_source {
+                o["source"] = json!(v);
+            }
+            if !r.match_client_tags.is_empty() {
+                o["clientTags"] = json!(r.match_client_tags);
+            }
+            o
+        })
+        .collect();
+    serde_json::to_string_pretty(&Value::Array(specs)).unwrap() + "\n"
+}
+
 pub fn trino_config_map(spec: &EngineSpec) -> Value {
+    let mut data = serde_json::Map::new();
+    data.insert(
+        "config-coordinator.properties".into(),
+        json!(config_properties(spec, true)),
+    );
+    data.insert(
+        "config-worker.properties".into(),
+        json!(config_properties(spec, false)),
+    );
+    data.insert(
+        "jvm-coordinator.config".into(),
+        json!(jvm_config(&spec.config.coordinator)),
+    );
+    data.insert(
+        "jvm-worker.config".into(),
+        json!(jvm_config(&spec.config.worker.base)),
+    );
+    data.insert(
+        "node.properties".into(),
+        json!("node.environment=egret\nnode.data-dir=/data/trino\n"),
+    );
+    data.insert("log.properties".into(), json!(log_properties(spec)));
+
+    if let Some(rg) = &spec.config.resource_groups {
+        data.insert(
+            "resource-groups.json".into(),
+            json!(resource_groups_json(rg)),
+        );
+        data.insert(
+            "resource-groups.properties".into(),
+            json!(
+                "resource-groups.configuration-manager=file\nresource-groups.config-file=/etc/trino/resource-groups/resource-groups.json\n"
+            ),
+        );
+    }
+    if !spec.config.session_properties.is_empty() {
+        data.insert(
+            "session-property-config.json".into(),
+            json!(session_properties_json(&spec.config.session_properties)),
+        );
+        data.insert(
+            "session-property-config.properties".into(),
+            json!(
+                "session-property-config.configuration-manager=file\nsession-property-manager.config-file=/etc/trino/session-property-config.json\n"
+            ),
+        );
+    }
+
     json!({
         "apiVersion": "v1", "kind": "ConfigMap",
         "metadata": { "name": format!("{}-config", spec.name), "namespace": spec.namespace,
                       "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
-        "data": {
-            "config-coordinator.properties": config_properties(spec, true),
-            "config-worker.properties": config_properties(spec, false),
-            "jvm-coordinator.config": jvm_config(&spec.config.coordinator),
-            "jvm-worker.config": jvm_config(&spec.config.worker.base),
-            "node.properties": "node.environment=egret\nnode.data-dir=/data/trino\n",
-            "log.properties": log_properties(spec),
-        }
+        "data": Value::Object(data)
     })
 }
 
@@ -465,6 +568,7 @@ mod tests {
                         grace_period_seconds: 120,
                     }),
                 },
+                ..Default::default()
             },
             catalogs: vec![CatalogSpec {
                 name: "egret".into(),
@@ -653,6 +757,67 @@ mod tests {
     fn coordinator_has_no_prestop() {
         let d = trino_deployment(&sample_spec(), Role::Coordinator);
         assert!(d["spec"]["template"]["spec"]["containers"][0]["lifecycle"].is_null());
+    }
+
+    #[test]
+    fn resource_groups_json_serializes_tree_and_selectors() {
+        let mut s = sample_spec();
+        s.config.resource_groups = Some(ResourceGroups {
+            root_groups: vec![ResourceGroup {
+                name: "global".into(),
+                soft_memory_limit: "80%".into(),
+                hard_concurrency_limit: 100,
+                max_queued: 1000,
+                scheduling_policy: None,
+                sub_groups: vec![ResourceGroup {
+                    name: "etl".into(),
+                    soft_memory_limit: "50%".into(),
+                    hard_concurrency_limit: 10,
+                    max_queued: 100,
+                    scheduling_policy: None,
+                    sub_groups: vec![],
+                }],
+            }],
+            selectors: vec![ResourceSelector {
+                user: Some("admin".into()),
+                source: None,
+                query_type: None,
+                group: "global.etl".into(),
+            }],
+        });
+        let cm = trino_config_map(&s);
+        let rg: serde_json::Value =
+            serde_json::from_str(cm["data"]["resource-groups.json"].as_str().unwrap()).unwrap();
+        assert_eq!(rg["rootGroups"][0]["name"], "global");
+        assert_eq!(rg["rootGroups"][0]["hardConcurrencyLimit"], 100);
+        assert_eq!(rg["rootGroups"][0]["subGroups"][0]["name"], "etl");
+        assert_eq!(rg["selectors"][0]["user"], "admin");
+        assert_eq!(rg["selectors"][0]["group"], "global.etl");
+        assert!(cm["data"]["resource-groups.properties"]
+            .as_str()
+            .unwrap()
+            .contains("resource-groups.configuration-manager=file"));
+    }
+
+    #[test]
+    fn session_properties_json_serializes_rules() {
+        let mut s = sample_spec();
+        let mut props = std::collections::BTreeMap::new();
+        props.insert("query_max_memory".to_string(), "10GB".to_string());
+        s.config.session_properties = vec![SessionRule {
+            match_user: Some("admin".into()),
+            match_source: None,
+            match_client_tags: vec!["etl".into()],
+            properties: props,
+        }];
+        let cm = trino_config_map(&s);
+        let sp: serde_json::Value =
+            serde_json::from_str(cm["data"]["session-property-config.json"].as_str().unwrap())
+                .unwrap();
+        // Trino file session-property manager: a top-level array of match specs.
+        assert_eq!(sp[0]["user"], "admin");
+        assert_eq!(sp[0]["clientTags"][0], "etl");
+        assert_eq!(sp[0]["sessionProperties"]["query_max_memory"], "10GB");
     }
 
     #[tokio::test]
