@@ -95,6 +95,15 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
             }
         }
     }
+    if let Some(v) = &role.heap_headroom_per_node {
+        out.push_str(&format!("memory.heap-headroom-per-node={v}\n"));
+    }
+    if let Some(ft) = &cfg.fault_tolerant {
+        out.push_str(&format!("retry-policy={}\n", ft.retry_policy));
+    }
+    if !cfg.event_listener.is_empty() {
+        out.push_str("event-listener.config-files=/etc/trino/event-listener.properties\n");
+    }
     for (k, v) in &cfg.config_properties {
         out.push_str(&format!("{k}={v}\n"));
     }
@@ -102,13 +111,17 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
 }
 
 fn log_properties(spec: &EngineSpec) -> String {
-    format!(
+    let mut out = format!(
         "io.trino={}\n",
         spec.config
             .log_level
             .clone()
             .unwrap_or_else(|| "INFO".into())
-    )
+    );
+    for (k, v) in &spec.config.additional_log_properties {
+        out.push_str(&format!("{k}={v}\n"));
+    }
+    out
 }
 
 fn rg_to_json(g: &ResourceGroup) -> Value {
@@ -189,10 +202,11 @@ pub fn trino_config_map(spec: &EngineSpec) -> Value {
         "jvm-worker.config".into(),
         json!(jvm_config(&spec.config.worker.base)),
     );
-    data.insert(
-        "node.properties".into(),
-        json!("node.environment=egret\nnode.data-dir=/data/trino\n"),
-    );
+    let mut node = "node.environment=egret\nnode.data-dir=/data/trino\n".to_string();
+    for (k, v) in &spec.config.additional_node_properties {
+        node.push_str(&format!("{k}={v}\n"));
+    }
+    data.insert("node.properties".into(), json!(node));
     data.insert("log.properties".into(), json!(log_properties(spec)));
 
     if let Some(rg) = &spec.config.resource_groups {
@@ -218,6 +232,24 @@ pub fn trino_config_map(spec: &EngineSpec) -> Value {
                 "session-property-config.configuration-manager=file\nsession-property-manager.config-file=/etc/trino/session-property-config.json\n"
             ),
         );
+    }
+    if let Some(ft) = &spec.config.fault_tolerant {
+        data.insert(
+            "exchange-manager.properties".into(),
+            json!(format!(
+                "exchange-manager.name=filesystem\nexchange.base-directories={}\nexchange.s3.region={}\nexchange.s3.endpoint={}\nexchange.s3.path-style-access={}\nexchange.s3.aws-access-key=${{ENV:EXCHANGE_S3_ACCESS_KEY}}\nexchange.s3.aws-secret-key=${{ENV:EXCHANGE_S3_SECRET_KEY}}\n",
+                ft.s3_base_dir, ft.s3_region, ft.s3_endpoint, ft.s3_path_style
+            )),
+        );
+    }
+    if !spec.config.event_listener.is_empty() {
+        let body: String = spec
+            .config
+            .event_listener
+            .iter()
+            .map(|(k, v)| format!("{k}={v}\n"))
+            .collect();
+        data.insert("event-listener.properties".into(), json!(body));
     }
 
     json!({
@@ -344,6 +376,31 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
         resources.insert("limits".into(), Value::Object(limits));
     }
 
+    // volumeMounts: base mounts always, plus a subPath mount for each optional
+    // config file that was rendered into the config map.
+    let mut volume_mounts = vec![
+        json!({ "name": "config", "mountPath": "/etc/trino/config.properties", "subPath": cfg_file }),
+        json!({ "name": "config", "mountPath": "/etc/trino/jvm.config", "subPath": jvm_file }),
+        json!({ "name": "config", "mountPath": "/etc/trino/node.properties", "subPath": "node.properties" }),
+        json!({ "name": "config", "mountPath": "/etc/trino/log.properties", "subPath": "log.properties" }),
+        json!({ "name": "catalogs", "mountPath": "/etc/trino/catalog" }),
+        json!({ "name": "data", "mountPath": "/data/trino" }),
+    ];
+    if spec.config.resource_groups.is_some() {
+        volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/resource-groups.properties", "subPath": "resource-groups.properties" }));
+        volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/resource-groups/resource-groups.json", "subPath": "resource-groups.json" }));
+    }
+    if !spec.config.session_properties.is_empty() {
+        volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/session-property-config.properties", "subPath": "session-property-config.properties" }));
+        volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/session-property-config.json", "subPath": "session-property-config.json" }));
+    }
+    if !spec.config.event_listener.is_empty() {
+        volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/event-listener.properties", "subPath": "event-listener.properties" }));
+    }
+    if spec.config.fault_tolerant.is_some() {
+        volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/exchange-manager.properties", "subPath": "exchange-manager.properties" }));
+    }
+
     // probes: readiness always (generous default), liveness/startup only if configured.
     let mut container = json!({
         "name": "trino",
@@ -352,14 +409,7 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
         "envFrom": [{ "secretRef": { "name": format!("{}-env", spec.name) } }],
         "resources": Value::Object(resources),
         "readinessProbe": probe_json(true, rc.probes.readiness.as_ref()),
-        "volumeMounts": [
-            { "name": "config", "mountPath": "/etc/trino/config.properties", "subPath": cfg_file },
-            { "name": "config", "mountPath": "/etc/trino/jvm.config", "subPath": jvm_file },
-            { "name": "config", "mountPath": "/etc/trino/node.properties", "subPath": "node.properties" },
-            { "name": "config", "mountPath": "/etc/trino/log.properties", "subPath": "log.properties" },
-            { "name": "catalogs", "mountPath": "/etc/trino/catalog" },
-            { "name": "data", "mountPath": "/data/trino" }
-        ]
+        "volumeMounts": Value::Array(volume_mounts)
     });
     if let Some(p) = rc.probes.liveness.as_ref() {
         container["livenessProbe"] = probe_json(false, Some(p));
@@ -818,6 +868,128 @@ mod tests {
         assert_eq!(sp[0]["user"], "admin");
         assert_eq!(sp[0]["clientTags"][0], "etl");
         assert_eq!(sp[0]["sessionProperties"]["query_max_memory"], "10GB");
+    }
+
+    #[test]
+    fn fault_tolerant_renders_retry_and_exchange() {
+        let mut s = sample_spec();
+        s.config.fault_tolerant = Some(FaultTolerant {
+            retry_policy: "TASK".into(),
+            s3_base_dir: "s3://spool/exchange".into(),
+            s3_endpoint: "http://minio:9000".into(),
+            s3_region: "us-east-1".into(),
+            s3_path_style: true,
+        });
+        let cm = trino_config_map(&s);
+        assert!(cm["data"]["config-coordinator.properties"]
+            .as_str()
+            .unwrap()
+            .contains("retry-policy=TASK"));
+        assert!(cm["data"]["config-worker.properties"]
+            .as_str()
+            .unwrap()
+            .contains("retry-policy=TASK"));
+        let ex = cm["data"]["exchange-manager.properties"].as_str().unwrap();
+        assert!(ex.contains("exchange-manager.name=filesystem"));
+        assert!(ex.contains("exchange.base-directories=s3://spool/exchange"));
+        assert!(ex.contains("exchange.s3.aws-access-key=${ENV:EXCHANGE_S3_ACCESS_KEY}"));
+        assert!(ex.contains("exchange.s3.path-style-access=true"));
+    }
+
+    #[test]
+    fn heap_headroom_and_raw_props() {
+        let mut s = sample_spec();
+        s.config.coordinator.heap_headroom_per_node = Some("2GB".into());
+        s.config
+            .additional_node_properties
+            .insert("node.internal-address-source".into(), "FQDN".into());
+        s.config
+            .additional_log_properties
+            .insert("io.trino.execution".into(), "DEBUG".into());
+        let cm = trino_config_map(&s);
+        assert!(cm["data"]["config-coordinator.properties"]
+            .as_str()
+            .unwrap()
+            .contains("memory.heap-headroom-per-node=2GB"));
+        assert!(cm["data"]["node.properties"]
+            .as_str()
+            .unwrap()
+            .contains("node.internal-address-source=FQDN"));
+        assert!(cm["data"]["log.properties"]
+            .as_str()
+            .unwrap()
+            .contains("io.trino.execution=DEBUG"));
+    }
+
+    #[test]
+    fn event_listener_properties_rendered() {
+        let mut s = sample_spec();
+        s.config
+            .event_listener
+            .insert("event-listener.name".into(), "http".into());
+        let cm = trino_config_map(&s);
+        assert!(cm["data"]["event-listener.properties"]
+            .as_str()
+            .unwrap()
+            .contains("event-listener.name=http"));
+        assert!(cm["data"]["config-coordinator.properties"]
+            .as_str()
+            .unwrap()
+            .contains("event-listener.config-files=/etc/trino/event-listener.properties"));
+    }
+
+    #[test]
+    fn deployment_mounts_optional_files() {
+        // Absent when unset.
+        let d = trino_deployment(&sample_spec(), Role::Coordinator);
+        let mounts = d["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap();
+        assert!(!mounts
+            .iter()
+            .any(|m| m["mountPath"] == "/etc/trino/exchange-manager.properties"));
+        assert!(!mounts
+            .iter()
+            .any(|m| m["mountPath"] == "/etc/trino/resource-groups.properties"));
+
+        // Present when set.
+        let mut s = sample_spec();
+        s.config.fault_tolerant = Some(FaultTolerant {
+            retry_policy: "TASK".into(),
+            s3_base_dir: "s3://spool/exchange".into(),
+            s3_endpoint: "http://minio:9000".into(),
+            s3_region: "us-east-1".into(),
+            s3_path_style: true,
+        });
+        s.config.resource_groups = Some(ResourceGroups::default());
+        s.config
+            .event_listener
+            .insert("event-listener.name".into(), "http".into());
+        let mut props = std::collections::BTreeMap::new();
+        props.insert("query_max_memory".to_string(), "10GB".to_string());
+        s.config.session_properties = vec![SessionRule {
+            match_user: Some("admin".into()),
+            match_source: None,
+            match_client_tags: vec![],
+            properties: props,
+        }];
+        let d = trino_deployment(&s, Role::Coordinator);
+        let mounts = d["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap();
+        for path in [
+            "/etc/trino/exchange-manager.properties",
+            "/etc/trino/resource-groups.properties",
+            "/etc/trino/resource-groups/resource-groups.json",
+            "/etc/trino/session-property-config.properties",
+            "/etc/trino/session-property-config.json",
+            "/etc/trino/event-listener.properties",
+        ] {
+            assert!(
+                mounts.iter().any(|m| m["mountPath"] == path),
+                "missing mount {path}"
+            );
+        }
     }
 
     #[tokio::test]
