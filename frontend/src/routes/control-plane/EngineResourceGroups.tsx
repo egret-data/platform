@@ -4,6 +4,7 @@ import type { Group, Selector, SessionRule } from "@/api/controlPlane";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ConfigSection } from "./config/ConfigSection";
 
 // ── raw key→value editor helpers ─────────────────────────────────────────────
 
@@ -240,15 +241,11 @@ export function ResourceGroupsSection({
     onChange({ rootGroups: roots, selectors: sels });
 
   return (
-    <div className="space-y-4">
-      <div className="space-y-1.5">
-        <Label>Resource groups</Label>
-        <p className="text-xs text-muted-foreground">
-          Structured <code>resource-groups.json</code> — hierarchical query
-          admission control (coordinator only).
-        </p>
-      </div>
-
+    <ConfigSection
+      title="Resource groups"
+      description="Structured resource-groups.json — hierarchical query admission control (coordinator only)."
+      docsUrl="https://trino.io/docs/current/admin/resource-groups.html"
+    >
       <div className="space-y-3">
         {rootGroups.map((g, i) => (
           <GroupEditor
@@ -338,7 +335,7 @@ export function ResourceGroupsSection({
           Add selector
         </Button>
       </div>
-    </div>
+    </ConfigSection>
   );
 }
 
@@ -402,15 +399,11 @@ export function SessionPropertiesSection({
     onChange(value.map((r, j) => (j === i ? next : r)));
 
   return (
-    <div className="space-y-4">
-      <div className="space-y-1.5">
-        <Label>Session properties</Label>
-        <p className="text-xs text-muted-foreground">
-          Structured <code>session-property-config.json</code> — default session
-          properties applied by match rule.
-        </p>
-      </div>
-
+    <ConfigSection
+      title="Session properties"
+      description="Structured session-property-config.json — default session properties applied by match rule."
+      docsUrl="https://trino.io/docs/current/admin/session-property-managers.html"
+    >
       {value.map((rule, i) => (
         <div key={i} className="space-y-3 rounded-md border p-3">
           <div className="flex items-start gap-2">
@@ -474,6 +467,6 @@ export function SessionPropertiesSection({
         <Plus className="h-4 w-4" />
         Add rule
       </Button>
-    </div>
+    </ConfigSection>
   );
 }
