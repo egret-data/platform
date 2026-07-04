@@ -83,6 +83,7 @@ import {
   recordToKv,
   sessionRulesToForm,
 } from "./EngineResourceGroups";
+import EngineMonitor from "./EngineMonitor";
 
 type EngineWithStatus = Omit<Engine, "status"> & { status: EngineStatus };
 
@@ -167,12 +168,21 @@ export default function EngineDetail() {
       ) : !data ? (
         <p className="py-14 text-center text-sm text-muted-foreground">Loading…</p>
       ) : (
-        <>
-          <StatusCard status={data.status} />
-          <ConfigCard engine={data} />
-          <CatalogsCard engine={data} />
-          <DangerCard engine={data} />
-        </>
+        <Tabs defaultValue="overview" className="space-y-5">
+          <TabsList>
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="monitor">Monitor</TabsTrigger>
+          </TabsList>
+          <TabsContent value="overview" className="space-y-5">
+            <StatusCard status={data.status} />
+            <ConfigCard engine={data} />
+            <CatalogsCard engine={data} />
+            <DangerCard engine={data} />
+          </TabsContent>
+          <TabsContent value="monitor">
+            <EngineMonitor engineId={id} />
+          </TabsContent>
+        </Tabs>
       )}
     </div>
   );

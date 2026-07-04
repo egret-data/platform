@@ -123,11 +123,15 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
         out.push_str(&format!("{k}={v}\n"));
     }
     if coord {
+        // egret always reaches the coordinator through a proxy — the ingress for
+        // external clients, and the kube API-server proxy / Service for the monitor —
+        // which add X-Forwarded-* headers. Trino (Jetty) rejects requests carrying
+        // those unless process-forwarded is enabled, so set it unconditionally.
+        out.push_str("http-server.process-forwarded=true\n");
         if let Some(auth) = &cfg.auth {
             if let Some(t) = auth_type(auth) {
                 out.push_str(&format!("http-server.authentication.type={t}\n"));
                 out.push_str("http-server.authentication.allow-insecure-over-http=true\n");
-                out.push_str("http-server.process-forwarded=true\n");
                 if let Some(j) = &auth.jwt {
                     out.push_str(&format!(
                         "http-server.authentication.jwt.key-file={}\n",
@@ -145,7 +149,7 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
     // Trino REQUIRES a coordinator<->worker shared secret whenever any client
     // authentication is enabled (it refuses to start otherwise). Both roles must
     // carry the same value; egret injects it via the env Secret.
-    if cfg.auth.as_ref().and_then(|a| auth_type(a)).is_some() {
+    if cfg.auth.as_ref().and_then(auth_type).is_some() {
         out.push_str("internal-communication.shared-secret=${ENV:TRINO_INTERNAL_SECRET}\n");
     }
     out

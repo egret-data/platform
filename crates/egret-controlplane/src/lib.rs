@@ -12,6 +12,7 @@
 mod auth;
 mod engines;
 mod error;
+pub mod monitor;
 mod secrets;
 mod storage;
 mod warehouses;

@@ -543,6 +543,140 @@ impl egret_controlplane::EngineProvisioner for FakeEngineProvisioner {
     async fn delete(&self, _ns: &str, _name: &str) -> Result<(), String> {
         Ok(())
     }
+    async fn coordinator_request(
+        &self,
+        _namespace: &str,
+        _service: &str,
+        _method: &str,
+        _path: &str,
+        _headers: &[(String, String)],
+        _body: Option<Vec<u8>>,
+    ) -> anyhow::Result<(u16, Vec<u8>)> {
+        Ok((200, b"[]".to_vec()))
+    }
+}
+
+/// Engine provisioner fake whose `coordinator_request` returns a canned
+/// `(status, body)` that the test can flip between calls (shared via `Arc`).
+#[derive(Clone, Default)]
+struct MonitorFakeProvisioner {
+    response: Arc<std::sync::Mutex<(u16, Vec<u8>)>>,
+}
+
+impl MonitorFakeProvisioner {
+    fn set(&self, code: u16, body: &[u8]) {
+        *self.response.lock().unwrap() = (code, body.to_vec());
+    }
+}
+
+#[async_trait::async_trait]
+impl egret_controlplane::EngineProvisioner for MonitorFakeProvisioner {
+    async fn provision(&self, _req: &egret_controlplane::EngineProvisionReq) -> Result<(), String> {
+        Ok(())
+    }
+    async fn status(
+        &self,
+        _ns: &str,
+        _name: &str,
+    ) -> Result<egret_controlplane::EngineLiveStatus, String> {
+        Ok(egret_controlplane::EngineLiveStatus {
+            phase: "running".into(),
+            message: None,
+            pods: vec![],
+        })
+    }
+    async fn update(&self, _req: &egret_controlplane::EngineProvisionReq) -> Result<(), String> {
+        Ok(())
+    }
+    async fn delete(&self, _ns: &str, _name: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn coordinator_request(
+        &self,
+        _namespace: &str,
+        _service: &str,
+        _method: &str,
+        _path: &str,
+        _headers: &[(String, String)],
+        _body: Option<Vec<u8>>,
+    ) -> anyhow::Result<(u16, Vec<u8>)> {
+        Ok(self.response.lock().unwrap().clone())
+    }
+}
+
+#[tokio::test]
+async fn monitor_queries_maps_list_and_maps_bad_gateway() {
+    let fake = MonitorFakeProvisioner::default();
+    let Some(f) = setup_full(None, Some(Arc::new(fake.clone()))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_monitor_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    // Create the engine.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // Coordinator returns a `/v1/query` array → mapped to Vec<QueryDto>.
+    fake.set(
+        200,
+        br#"[{"queryId":"20260704_x","state":"RUNNING","query":"SELECT 1",
+            "session":{"user":"bob"},
+            "queryStats":{"elapsedTime":"1.23s","totalCpuTime":"0.50s","userMemoryReservation":"12MB","progressPercentage":42.0}}]"#,
+    );
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/queries"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list queries; body={j}");
+    assert_eq!(j[0]["id"], "20260704_x", "mapped query id; body={j}");
+    assert_eq!(j[0]["user"], "bob", "mapped query user; body={j}");
+    assert_eq!(j[0]["memory"], "12MB", "mapped query memory; body={j}");
+
+    // A non-2xx coordinator response → the route returns 502.
+    fake.set(503, b"<html>service unavailable</html>");
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/queries"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_GATEWAY,
+        "non-2xx coordinator response must 502"
+    );
 }
 
 #[tokio::test]

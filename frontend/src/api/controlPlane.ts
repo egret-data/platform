@@ -639,6 +639,60 @@ export async function deleteEngine(id: string): Promise<void> {
   await apiFetch(`/control-plane/engines/${id}`, { method: "DELETE" });
 }
 
+// ── Engine monitor (native Trino monitor / control-plane) ────────────────────
+
+/**
+ * A single query row from the coordinator's Trino REST API.
+ * `elapsed`/`cpu`/`memory` are RAW Trino strings ("1.23s", "12MB") — display
+ * verbatim; `progressPercent` is a number 0..100.
+ */
+export interface MonitorQuery {
+  id: string;
+  user: string;
+  state: string;
+  query: string;
+  elapsed: string;
+  cpu: string;
+  memory: string;
+  progressPercent: number;
+}
+
+/** A single query with detail — adds the failure message + raw output stage tree. */
+export type MonitorQueryDetail = MonitorQuery & {
+  errorMessage?: string;
+  // Raw Trino `outputStage` JSON — consumed by the Task 7 stage visualizer.
+  outputStage?: unknown;
+};
+
+/** Cluster/node stats derived from `/v1/query` + `/v1/node`. */
+export interface ClusterInfo {
+  running: number;
+  queued: number;
+  blocked: number;
+  nodes: { uri: string; recentFailures: number }[];
+}
+
+export function listQueries(engineId: string): Promise<MonitorQuery[]> {
+  return apiJson<MonitorQuery[]>(`/control-plane/engines/${engineId}/queries`);
+}
+
+export function getQuery(engineId: string, qid: string): Promise<MonitorQueryDetail> {
+  return apiJson<MonitorQueryDetail>(
+    `/control-plane/engines/${engineId}/queries/${encodeURIComponent(qid)}`,
+  );
+}
+
+export async function killQuery(engineId: string, qid: string): Promise<void> {
+  await apiFetch(
+    `/control-plane/engines/${engineId}/queries/${encodeURIComponent(qid)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function getCluster(engineId: string): Promise<ClusterInfo> {
+  return apiJson<ClusterInfo>(`/control-plane/engines/${engineId}/cluster`);
+}
+
 // ── Engine catalogs (multi-catalog / control-plane) ──────────────────────────
 
 /** A catalog attached to an engine. */
