@@ -1,4 +1,3 @@
-import { useEffect } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { Plus, Trash2 } from "lucide-react";
 
@@ -12,8 +11,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
-import { validateRawJson } from "./PodSchedulingSection";
+import { RawJsonField } from "./config/RawJsonField";
+import { ValidityProvider } from "./config/validityRegistry";
 import {
   type AutoscaleMode,
   type AutoscaleTriggerForm,
@@ -22,44 +21,26 @@ import {
   emptyTriggerForm,
 } from "./useEngineConfigForm";
 
-// ── raw-JSON text field (text-in-form, validated on every keystroke) ─────────
+// ── raw-JSON text ⇄ parsed bridge ─────────────────────────────────────────────
+// The autoscaling form model stores raw overrides as JSON *text* (the payload
+// builder parses them). The shared `RawJsonField` works in *parsed* values, so
+// convert at the boundary: seed the field from parsed text and store the
+// re-serialized parsed value back — the built payload stays byte-identical.
 
-/**
- * A raw-JSON `<Textarea>` whose text lives directly in the form model (mirrors
- * PodSchedulingSection's affinity override). Validity is aggregated centrally
- * by the section's `onValidityChange` effect, so no per-field error callback is
- * needed — the inline message is derived from the current text.
- */
-function RawJsonField({
-  id,
-  label,
-  value,
-  onChange,
-  placeholder,
-}: {
-  id: string;
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-}) {
-  const err = validateRawJson(value);
-  return (
-    <div className="space-y-1.5">
-      <Label htmlFor={id} className="text-xs">
-        {label}
-      </Label>
-      <Textarea
-        id={id}
-        value={value}
-        rows={4}
-        className="font-mono text-xs"
-        placeholder={placeholder}
-        onChange={(e) => onChange(e.target.value)}
-      />
-      {err && <p className="text-xs text-destructive">Invalid JSON: {err}</p>}
-    </div>
-  );
+/** Parse raw-override text; undefined when blank or invalid. */
+function textToRaw(s: string): unknown {
+  const t = s.trim();
+  if (t === "") return undefined;
+  try {
+    return JSON.parse(t);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Serialize a parsed raw override back to editable JSON text (or ""). */
+function rawToText(v: unknown): string {
+  return v === undefined || v === null ? "" : JSON.stringify(v, null, 2);
 }
 
 // ── HPA editor ───────────────────────────────────────────────────────────────
@@ -115,10 +96,10 @@ function HpaEditor({
         </div>
       </div>
       <RawJsonField
-        id="as-hpa-behavior"
+        id="autoscaling.hpa.behavior"
         label="Scaling behavior (raw JSON, merged into spec.behavior)"
-        value={value.behaviorRaw}
-        onChange={(v) => set("behaviorRaw", v)}
+        value={textToRaw(value.behaviorRaw)}
+        onChange={(v) => set("behaviorRaw", rawToText(v))}
         placeholder='{"scaleDown": {"stabilizationWindowSeconds": 300}}'
       />
     </div>
@@ -287,8 +268,8 @@ function TriggerRow({
         <RawJsonField
           id={`${idPrefix}-raw`}
           label="Raw trigger (KEDA ScaledObject trigger JSON)"
-          value={value.rawOverride}
-          onChange={(v) => onChange({ ...value, rawOverride: v })}
+          value={textToRaw(value.rawOverride)}
+          onChange={(v) => onChange({ ...value, rawOverride: rawToText(v) })}
           placeholder='{"type": "kafka", "metadata": {}}'
         />
       )}
@@ -398,10 +379,10 @@ function KedaEditor({
       </div>
 
       <RawJsonField
-        id="as-keda-fallback"
+        id="autoscaling.keda.fallback"
         label="Fallback (raw JSON, merged into spec.fallback)"
-        value={value.fallbackRaw}
-        onChange={(v) => set("fallbackRaw", v)}
+        value={textToRaw(value.fallbackRaw)}
+        onChange={(v) => set("fallbackRaw", rawToText(v))}
         placeholder='{"failureThreshold": 3, "replicas": 2}'
       />
     </div>
@@ -435,43 +416,36 @@ export function EngineAutoscaling({
   setKeda,
   onValidityChange,
 }: EngineAutoscalingProps) {
-  // Aggregate raw-JSON validity across whichever mode's textareas are visible.
-  useEffect(() => {
-    let valid = true;
-    if (mode === "hpa") {
-      valid = validateRawJson(hpa.behaviorRaw) === null;
-    } else if (mode === "keda") {
-      valid =
-        validateRawJson(keda.fallbackRaw) === null &&
-        keda.triggers.every(
-          (t) => t.kind !== "raw" || validateRawJson(t.rawOverride) === null,
-        );
-    }
-    onValidityChange(valid);
-  }, [mode, hpa, keda, onValidityChange]);
-
+  // The shared `RawJsonField`s register their own validity in this provider;
+  // bridge its `anyInvalid` back to the section's `onValidityChange` (inverted:
+  // valid = !anyInvalid) so an unparseable override still blocks Save.
   return (
-    <div className="space-y-4">
-      <div className="max-w-xs space-y-1.5">
-        <Label htmlFor="as-mode">Autoscaling</Label>
-        <Select value={mode || "off"} onValueChange={(v) => setMode(v === "off" ? "" : (v as AutoscaleMode))}>
-          <SelectTrigger id="as-mode" className="w-full">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="off">Off</SelectItem>
-            <SelectItem value="hpa">HPA (HorizontalPodAutoscaler)</SelectItem>
-            <SelectItem value="keda">KEDA (ScaledObject)</SelectItem>
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">
-          Scales the worker Deployment. Off leaves the fixed worker replica count
-          in place.
-        </p>
-      </div>
+    <ValidityProvider onAnyInvalidChange={(invalid) => onValidityChange(!invalid)}>
+      <div className="space-y-4">
+        <div className="max-w-xs space-y-1.5">
+          <Label htmlFor="as-mode">Autoscaling</Label>
+          <Select
+            value={mode || "off"}
+            onValueChange={(v) => setMode(v === "off" ? "" : (v as AutoscaleMode))}
+          >
+            <SelectTrigger id="as-mode" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="off">Off</SelectItem>
+              <SelectItem value="hpa">HPA (HorizontalPodAutoscaler)</SelectItem>
+              <SelectItem value="keda">KEDA (ScaledObject)</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Scales the worker Deployment. Off leaves the fixed worker replica
+            count in place.
+          </p>
+        </div>
 
-      {mode === "hpa" && <HpaEditor value={hpa} onChange={setHpa} />}
-      {mode === "keda" && <KedaEditor value={keda} onChange={setKeda} />}
-    </div>
+        {mode === "hpa" && <HpaEditor value={hpa} onChange={setHpa} />}
+        {mode === "keda" && <KedaEditor value={keda} onChange={setKeda} />}
+      </div>
+    </ValidityProvider>
   );
 }
