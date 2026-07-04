@@ -702,6 +702,40 @@ export interface TrinoConfig {
   revisionHistoryLimit?: number;
   progressDeadlineSeconds?: number;
   shareProcessNamespace?: boolean;
+  // Autoscaling (Phase 1.5.4): either a native HorizontalPodAutoscaler or a
+  // KEDA ScaledObject on the worker Deployment. Omitted entirely when off.
+  autoscaling?: {
+    mode: "hpa" | "keda";
+    hpa?: {
+      maxReplicas: number;
+      targetCpuPercent?: number;
+      targetMemoryPercent?: number;
+      behaviorRaw?: unknown;
+    };
+    keda?: {
+      minReplicaCount: number;
+      maxReplicaCount: number;
+      pollingInterval?: number;
+      cooldownPeriod?: number;
+      triggers: {
+        kind: string;
+        cron?: {
+          start: string;
+          end: string;
+          desiredReplicas: number;
+          timezone: string;
+        };
+        prometheus?: {
+          serverAddress: string;
+          metricName: string;
+          query: string;
+          threshold: string;
+        };
+        rawOverride?: unknown;
+      }[];
+      fallbackRaw?: unknown;
+    };
+  };
   coordinator: RoleConfig;
   worker: WorkerRoleConfig;
 }

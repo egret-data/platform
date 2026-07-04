@@ -72,6 +72,7 @@ import { EngineConfigGeneral } from "./EngineConfigGeneral";
 import { EngineConfigReliability } from "./EngineConfigReliability";
 import { EngineConfigAdvanced } from "./EngineConfigAdvanced";
 import { PodSchedulingSection } from "./PodSchedulingSection";
+import { EngineAutoscaling } from "./EngineAutoscaling";
 import { EngineSecurity } from "./EngineSecurity";
 import EngineMonitor from "./EngineMonitor";
 
@@ -364,10 +365,18 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
     setProgressDeadlineSeconds,
     shareProcessNamespace,
     setShareProcessNamespace,
+    autoscaleMode,
+    setAutoscaleMode,
+    autoscaleHpa,
+    setAutoscaleHpa,
+    autoscaleKeda,
+    setAutoscaleKeda,
   } = cfg;
 
   // Goes false when a raw-JSON pod/scheduling override fails to parse; blocks Save.
   const [podSchedValid, setPodSchedValid] = useState(true);
+  // Goes false when a raw-JSON autoscaling override fails to parse; blocks Save.
+  const [autoscaleValid, setAutoscaleValid] = useState(true);
 
   return (
     <Card>
@@ -389,6 +398,7 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
               <TabsTrigger value="reliability">Reliability</TabsTrigger>
               <TabsTrigger value="advanced">Advanced</TabsTrigger>
               <TabsTrigger value="pod-scheduling">Pod &amp; Scheduling</TabsTrigger>
+              <TabsTrigger value="autoscaling">Autoscaling</TabsTrigger>
             </TabsList>
 
             <TabsContent value="general" className="pt-4">
@@ -503,9 +513,21 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
                 onValidityChange={setPodSchedValid}
               />
             </TabsContent>
+
+            <TabsContent value="autoscaling" className="pt-4">
+              <EngineAutoscaling
+                mode={autoscaleMode}
+                setMode={setAutoscaleMode}
+                hpa={autoscaleHpa}
+                setHpa={setAutoscaleHpa}
+                keda={autoscaleKeda}
+                setKeda={setAutoscaleKeda}
+                onValidityChange={setAutoscaleValid}
+              />
+            </TabsContent>
           </Tabs>
 
-          <SaveBar cfg={cfg} disabled={!podSchedValid} />
+          <SaveBar cfg={cfg} disabled={!podSchedValid || !autoscaleValid} />
         </div>
       </CardContent>
     </Card>
