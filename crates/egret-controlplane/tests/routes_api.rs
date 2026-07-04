@@ -1133,6 +1133,99 @@ async fn update_engine_auth_and_ingress() {
 }
 
 #[tokio::test]
+async fn update_engine_pod_scheduling_roundtrips() {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_pod_sched_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    // Create with the simple wizard.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // PUT a trinoConfig with per-role nodeSelector + affinity.rawOverride, a
+    // cluster serviceAccount, and an init container → 200.
+    let put_body = serde_json::json!({
+        "name": name, "warehouseId": wh_id,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+        "trinoConfig": {
+            "coordinator": {
+                "replicas": 1,
+                "nodeSelector": { "disktype": "ssd" },
+                "affinity": { "rawOverride": { "custom": true } }
+            },
+            "worker": { "replicas": 1 },
+            "serviceAccount": "sa",
+            "initContainers": [{ "name": "wait", "image": "busybox" }]
+        }
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(put_body),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "update engine pod scheduling; body={j}"
+    );
+
+    // GET reflects the persisted pod/scheduling fields.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("/engines/{engine_id}"), &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "get engine; body={j}");
+    let tc = &j["spec"]["trinoConfig"];
+    assert_eq!(
+        tc["coordinator"]["nodeSelector"]["disktype"], "ssd",
+        "per-role nodeSelector round-trips; body={j}"
+    );
+    assert_eq!(
+        tc["serviceAccount"], "sa",
+        "cluster serviceAccount round-trips; body={j}"
+    );
+    assert_eq!(
+        tc["initContainers"][0]["name"], "wait",
+        "init container round-trips; body={j}"
+    );
+    assert_eq!(
+        tc["coordinator"]["affinity"]["rawOverride"]["custom"], true,
+        "raw affinity override round-trips verbatim; body={j}"
+    );
+}
+
+#[tokio::test]
 async fn engine_catalog_routes() {
     let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
         eprintln!("skip: DATABASE_URL not set");
