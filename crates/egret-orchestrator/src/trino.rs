@@ -523,6 +523,44 @@ pub fn trino_service(spec: &EngineSpec) -> Value {
     })
 }
 
+/// Render a `networking.k8s.io/v1` Ingress exposing the `{name}-trino`
+/// coordinator Service. Returns `None` when no ingress is configured or it is
+/// disabled. TLS terminates at the ingress; Trino stays HTTP internally.
+pub fn trino_ingress(spec: &EngineSpec) -> Option<Value> {
+    let ing = spec.config.ingress.as_ref()?;
+    if !ing.enabled {
+        return None;
+    }
+    let mut meta = json!({
+        "name": format!("{}-trino", spec.name), "namespace": spec.namespace,
+        "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name }
+    });
+    if !ing.annotations.is_empty() {
+        meta["annotations"] = Value::Object(
+            ing.annotations
+                .iter()
+                .map(|(k, v)| (k.clone(), json!(v)))
+                .collect(),
+        );
+    }
+    let mut spec_obj = json!({
+        "rules": [{ "host": ing.host, "http": { "paths": [{
+            "path": "/", "pathType": "Prefix",
+            "backend": { "service": { "name": format!("{}-trino", spec.name), "port": { "number": 8080 } } }
+        }]}}]
+    });
+    if let Some(cn) = &ing.class_name {
+        spec_obj["ingressClassName"] = json!(cn);
+    }
+    if let Some(ts) = &ing.tls_secret {
+        spec_obj["tls"] = json!([{ "hosts": [ing.host], "secretName": ts }]);
+    }
+    Some(json!({
+        "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+        "metadata": meta, "spec": spec_obj
+    }))
+}
+
 /// Provisions a Trino engine as plain Kubernetes manifests: two Deployments
 /// (coordinator + worker), a Service, two ConfigMaps (config + catalogs), and an
 /// env Secret. A checksum annotation on the pod template rolls pods on change.
@@ -549,6 +587,9 @@ impl TrinoProvisioner {
         self.kube
             .apply(&trino_deployment(spec, Role::Worker))
             .await?;
+        if let Some(ing) = trino_ingress(spec) {
+            self.kube.apply(&ing).await?;
+        }
         Ok(())
     }
 }
@@ -586,7 +627,22 @@ impl EngineProvisioner for TrinoProvisioner {
     async fn update(&self, spec: &EngineSpec) -> anyhow::Result<()> {
         // Re-apply everything; the recomputed checksum annotation rolls the pods
         // so Trino reloads the (static) config + catalogs.
-        self.apply_all(spec).await
+        self.apply_all(spec).await?;
+        // `apply_all` only applies the Ingress when enabled, so toggling ingress
+        // off would otherwise leave a stale Ingress behind. Best-effort delete it
+        // when it is absent or disabled.
+        if spec.config.ingress.as_ref().map(|i| i.enabled) != Some(true) {
+            let _ = self
+                .kube
+                .delete(
+                    "networking.k8s.io/v1",
+                    "Ingress",
+                    &spec.namespace,
+                    &format!("{}-trino", spec.name),
+                )
+                .await;
+        }
+        Ok(())
     }
     async fn delete(&self, namespace: &str, name: &str) -> anyhow::Result<()> {
         let _ = self
@@ -622,6 +678,16 @@ impl EngineProvisioner for TrinoProvisioner {
         let _ = self
             .kube
             .delete("v1", "Secret", namespace, &format!("{name}-env"))
+            .await;
+        // Best-effort; harmless when no Ingress was ever applied.
+        let _ = self
+            .kube
+            .delete(
+                "networking.k8s.io/v1",
+                "Ingress",
+                namespace,
+                &format!("{name}-trino"),
+            )
             .await;
         Ok(())
     }
@@ -1142,6 +1208,78 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ingress_resource_shape() {
+        let mut s = sample_spec();
+        let mut anns = std::collections::BTreeMap::new();
+        anns.insert(
+            "nginx.ingress.kubernetes.io/proxy-read-timeout".into(),
+            "300".into(),
+        );
+        s.config.ingress = Some(crate::spec::Ingress {
+            enabled: true,
+            class_name: Some("nginx".into()),
+            host: "trino-demo.egret.example.com".into(),
+            tls_secret: Some("trino-demo-tls".into()),
+            annotations: anns,
+        });
+        let ing = trino_ingress(&s).unwrap();
+        assert_eq!(ing["apiVersion"], "networking.k8s.io/v1");
+        assert_eq!(ing["kind"], "Ingress");
+        assert_eq!(ing["metadata"]["name"], "demo-trino");
+        assert_eq!(
+            ing["metadata"]["annotations"]["nginx.ingress.kubernetes.io/proxy-read-timeout"],
+            "300"
+        );
+        assert_eq!(ing["spec"]["ingressClassName"], "nginx");
+        assert_eq!(
+            ing["spec"]["rules"][0]["host"],
+            "trino-demo.egret.example.com"
+        );
+        assert_eq!(
+            ing["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]["name"],
+            "demo-trino"
+        );
+        assert_eq!(
+            ing["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]["port"]["number"],
+            8080
+        );
+        assert_eq!(ing["spec"]["tls"][0]["secretName"], "trino-demo-tls");
+    }
+    #[test]
+    fn ingress_none_when_disabled() {
+        let s = sample_spec(); // no ingress
+        assert!(trino_ingress(&s).is_none());
+    }
+
+    #[tokio::test]
+    async fn provision_applies_ingress_and_delete_removes_it() {
+        use crate::kube_client::FakeKube;
+        let kube = std::sync::Arc::new(FakeKube::default());
+        let p = TrinoProvisioner::new(kube.clone());
+        let mut s = sample_spec();
+        s.config.ingress = Some(crate::spec::Ingress {
+            enabled: true,
+            class_name: Some("nginx".into()),
+            host: "trino-demo.egret.example.com".into(),
+            tls_secret: None,
+            annotations: std::collections::BTreeMap::new(),
+        });
+        p.provision(&s).await.unwrap();
+        assert!(kube
+            .applied
+            .lock()
+            .unwrap()
+            .contains_key("Ingress/demo-trino"));
+
+        p.delete(&s.namespace, &s.name).await.unwrap();
+        assert!(kube
+            .deleted
+            .lock()
+            .unwrap()
+            .contains(&"Ingress/demo-trino".to_string()));
+    }
+
     #[tokio::test]
     async fn provision_applies_all_objects() {
         use crate::kube_client::FakeKube;
@@ -1168,6 +1306,6 @@ mod tests {
         let p = TrinoProvisioner::new(kube.clone());
         p.delete("egret-engines", "demo").await.unwrap();
         let d = kube.deleted.lock().unwrap();
-        assert_eq!(d.len(), 6); // 2 deployments, service, 2 configmaps, secret
+        assert_eq!(d.len(), 7); // 2 deployments, service, 2 configmaps, secret, ingress
     }
 }
