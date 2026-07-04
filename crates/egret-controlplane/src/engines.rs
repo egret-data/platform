@@ -90,8 +90,61 @@ pub struct RoleConfigReq {
     pub resources: RoleResourcesReq,
     pub heap: HeapReq,
     pub query_max_memory_per_node: Option<String>,
+    pub heap_headroom_per_node: Option<String>,
     pub additional_jvm_config: Vec<String>,
     pub probes: ProbesReq,
+}
+
+/// One resource group in the file-based resource-group manager (recursive).
+/// Kube-free mirror of the orchestrator `ResourceGroup`.
+#[derive(Clone, Default)]
+pub struct ResourceGroupReq {
+    pub name: String,
+    pub soft_memory_limit: String,
+    pub hard_concurrency_limit: u32,
+    pub max_queued: u32,
+    pub scheduling_policy: Option<String>,
+    pub sub_groups: Vec<ResourceGroupReq>,
+}
+
+/// A resource-group selector (mirrors orchestrator `ResourceSelector`).
+#[derive(Clone, Default)]
+pub struct ResourceSelectorReq {
+    pub user: Option<String>,
+    pub source: Option<String>,
+    pub query_type: Option<String>,
+    /// Dot-path into the group tree, e.g. `global.etl`.
+    pub group: String,
+}
+
+/// The full resource-group config (mirrors orchestrator `ResourceGroups`).
+#[derive(Clone, Default)]
+pub struct ResourceGroupsReq {
+    pub root_groups: Vec<ResourceGroupReq>,
+    pub selectors: Vec<ResourceSelectorReq>,
+}
+
+/// One session-property match rule (mirrors orchestrator `SessionRule`).
+#[derive(Clone, Default)]
+pub struct SessionRuleReq {
+    pub match_user: Option<String>,
+    pub match_source: Option<String>,
+    pub match_client_tags: Vec<String>,
+    pub properties: BTreeMap<String, String>,
+}
+
+/// Fault-tolerant execution config with RESOLVED S3 exchange coordinates
+/// (mirrors orchestrator `FaultTolerant`). The wire body carries
+/// `{retryPolicy, exchangeStorageConnId, exchangePrefix}`; the handler resolves
+/// the storage connection into these coords and passes the creds via
+/// `TrinoConfigReq.env` (`EXCHANGE_S3_ACCESS_KEY` / `EXCHANGE_S3_SECRET_KEY`).
+#[derive(Clone, Default)]
+pub struct FaultTolerantReq {
+    pub retry_policy: String,
+    pub s3_base_dir: String,
+    pub s3_endpoint: String,
+    pub s3_region: String,
+    pub s3_path_style: bool,
 }
 
 /// Worker graceful-shutdown drain settings (mirrors `GracefulShutdown`).
@@ -118,6 +171,12 @@ pub struct TrinoConfigReq {
     pub env: BTreeMap<String, String>,
     pub coordinator: RoleConfigReq,
     pub worker: WorkerRoleConfigReq,
+    pub additional_node_properties: BTreeMap<String, String>,
+    pub additional_log_properties: BTreeMap<String, String>,
+    pub event_listener: BTreeMap<String, String>,
+    pub resource_groups: Option<ResourceGroupsReq>,
+    pub session_properties: Vec<SessionRuleReq>,
+    pub fault_tolerant: Option<FaultTolerantReq>,
 }
 
 /// Resolved provisioning request handed to egret-bin (no k8s types here). The
@@ -415,6 +474,11 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
     for (i, c) in cats.iter().enumerate() {
         catalogs.push(build_catalog_req(st, engine, c, &format!("C{i}")).await?);
     }
+    let mut config = build_trino_config(&engine.spec);
+    // Resolve the fault-tolerant exchange storage connection (if any) into S3
+    // coords + creds, mirroring the egret-warehouse arm's storage resolution.
+    config.fault_tolerant =
+        resolve_fault_tolerant(st, &engine.spec["trinoConfig"], &mut config.env).await?;
     Ok(EngineProvisionReq {
         name: engine.name.clone(),
         namespace: engine.namespace.clone(),
@@ -423,8 +487,53 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
             .unwrap_or(DEFAULT_IMAGE_VERSION)
             .into(),
         catalogs,
-        config: build_trino_config(&engine.spec),
+        config,
     })
+}
+
+/// Resolve the stored `trinoConfig.faultTolerant`
+/// `{retryPolicy, exchangeStorageConnId, exchangePrefix}` into a
+/// [`FaultTolerantReq`] with resolved S3 coords, pushing the exchange creds into
+/// `env` as `EXCHANGE_S3_ACCESS_KEY` / `EXCHANGE_S3_SECRET_KEY`. `None` when the
+/// block is absent; `BadRequest` when the connection or its secret is missing.
+async fn resolve_fault_tolerant(
+    st: &CpState,
+    tc: &serde_json::Value,
+    env: &mut BTreeMap<String, String>,
+) -> Result<Option<FaultTolerantReq>, CpError> {
+    let ft = &tc["faultTolerant"];
+    if !ft.is_object() {
+        return Ok(None);
+    }
+    let Some(conn_id) = ft["exchangeStorageConnId"]
+        .as_str()
+        .and_then(|s| Uuid::parse_str(s).ok())
+    else {
+        return Ok(None);
+    };
+    let sc = st
+        .storage
+        .get_storage_conn(conn_id)
+        .await?
+        .ok_or_else(|| CpError::BadRequest("unknown exchange storage connection".into()))?;
+    let secret_ref = sc
+        .secret_ref
+        .ok_or_else(|| CpError::BadRequest("exchange storage connection has no secret".into()))?;
+    let secret_key = st
+        .secrets
+        .resolve_plaintext(None, secret_ref)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("resolve exchange secret: {e}")))?;
+    env.insert("EXCHANGE_S3_ACCESS_KEY".into(), sc.access_key.clone());
+    env.insert("EXCHANGE_S3_SECRET_KEY".into(), secret_key);
+    let prefix = ft["exchangePrefix"].as_str().unwrap_or_default();
+    Ok(Some(FaultTolerantReq {
+        retry_policy: ft["retryPolicy"].as_str().unwrap_or("TASK").to_string(),
+        s3_base_dir: format!("s3://{}/{}", sc.bucket, prefix),
+        s3_endpoint: sc.endpoint.clone().unwrap_or_default(),
+        s3_region: sc.region.clone(),
+        s3_path_style: sc.path_style,
+    }))
 }
 
 /// Collect a `{ "k": "v", ... }` JSON object into a `BTreeMap<String, String>`
@@ -489,6 +598,7 @@ fn parse_role(v: &serde_json::Value, default_replicas: u32) -> RoleConfigReq {
         resources: parse_resources(&v["resources"]),
         heap: parse_heap(&v["heap"]),
         query_max_memory_per_node: v["queryMaxMemoryPerNode"].as_str().map(Into::into),
+        heap_headroom_per_node: v["heapHeadroomPerNode"].as_str().map(Into::into),
         additional_jvm_config: v["additionalJvmConfig"]
             .as_array()
             .map(|a| {
@@ -546,6 +656,7 @@ fn build_trino_config(spec: &serde_json::Value) -> TrinoConfigReq {
             base: worker_base,
             graceful_shutdown: None,
         },
+        ..Default::default()
     }
 }
 
@@ -564,7 +675,103 @@ fn seed_trino_config(b: &CreateEngineBody) -> serde_json::Value {
     })
 }
 
+/// Parse one recursive resource-group node from the camelCase wire shape.
+fn parse_resource_group(v: &serde_json::Value) -> ResourceGroupReq {
+    ResourceGroupReq {
+        name: v["name"].as_str().unwrap_or_default().to_string(),
+        soft_memory_limit: v["softMemoryLimit"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        hard_concurrency_limit: v["hardConcurrencyLimit"].as_u64().unwrap_or(0) as u32,
+        max_queued: v["maxQueued"].as_u64().unwrap_or(0) as u32,
+        scheduling_policy: v["schedulingPolicy"].as_str().map(Into::into),
+        sub_groups: v["subGroups"]
+            .as_array()
+            .map(|a| a.iter().map(parse_resource_group).collect())
+            .unwrap_or_default(),
+    }
+}
+
+/// Parse the `resourceGroups{rootGroups,selectors}` wire object; `None` when absent.
+fn parse_resource_groups(v: &serde_json::Value) -> Option<ResourceGroupsReq> {
+    if !v.is_object() {
+        return None;
+    }
+    let selectors = v["selectors"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|s| ResourceSelectorReq {
+                    user: s["user"].as_str().map(Into::into),
+                    source: s["source"].as_str().map(Into::into),
+                    query_type: s["queryType"].as_str().map(Into::into),
+                    group: s["group"].as_str().unwrap_or_default().to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ResourceGroupsReq {
+        root_groups: v["rootGroups"]
+            .as_array()
+            .map(|a| a.iter().map(parse_resource_group).collect())
+            .unwrap_or_default(),
+        selectors,
+    })
+}
+
+/// Parse the `sessionProperties[]` wire array into session-rule carriers.
+fn parse_session_rules(v: &serde_json::Value) -> Vec<SessionRuleReq> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .map(|r| SessionRuleReq {
+                    match_user: r["matchUser"].as_str().map(Into::into),
+                    match_source: r["matchSource"].as_str().map(Into::into),
+                    match_client_tags: r["matchClientTags"]
+                        .as_array()
+                        .map(|t| {
+                            t.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    properties: str_map(&r["properties"]),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every selector's group first segment (before the first `.`) must name an
+/// existing root group; a dangling reference is a `BadRequest`.
+fn validate_resource_groups(rg: &ResourceGroupsReq) -> Result<(), CpError> {
+    let roots: std::collections::HashSet<&str> =
+        rg.root_groups.iter().map(|g| g.name.as_str()).collect();
+    for s in &rg.selectors {
+        let root = s.group.split('.').next().unwrap_or_default();
+        if !roots.contains(root) {
+            return Err(CpError::BadRequest(format!(
+                "resource-group selector references unknown root group: {root:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate any `resourceGroups` block carried on a spec's `trinoConfig` (no-op
+/// when absent) before it is persisted/provisioned.
+fn validate_spec_resource_groups(spec: &serde_json::Value) -> Result<(), CpError> {
+    if let Some(rg) = parse_resource_groups(&spec["trinoConfig"]["resourceGroups"]) {
+        validate_resource_groups(&rg)?;
+    }
+    Ok(())
+}
+
 /// Parse the nested per-role `trinoConfig` wire shape (camelCase) into carriers.
+/// NOTE: `faultTolerant` is NOT parsed here — its wire body carries a storage
+/// connection id + prefix (not resolved S3 coords), so it is resolved later in
+/// [`build_provision_req`].
 fn trino_config_from_json(v: &serde_json::Value) -> TrinoConfigReq {
     let worker_v = &v["worker"];
     let graceful_shutdown = {
@@ -584,6 +791,14 @@ fn trino_config_from_json(v: &serde_json::Value) -> TrinoConfigReq {
             base: parse_role(worker_v, 1),
             graceful_shutdown,
         },
+        additional_node_properties: str_map(&v["additionalNodeProperties"]),
+        additional_log_properties: str_map(&v["additionalLogProperties"]),
+        event_listener: str_map(&v["eventListener"]),
+        resource_groups: parse_resource_groups(&v["resourceGroups"]),
+        session_properties: parse_session_rules(&v["sessionProperties"]),
+        // Resolved in build_provision_req from the raw {retryPolicy,
+        // exchangeStorageConnId, exchangePrefix} wire body.
+        fault_tolerant: None,
     }
 }
 
@@ -718,6 +933,7 @@ async fn create_engine(
         }
     }
     spec["trinoConfig"] = trino_config;
+    validate_spec_resource_groups(&spec)?;
     let engine = match st
         .storage
         .create_engine(&b.name, "trino", &namespace, wh.id, &spec)
@@ -854,6 +1070,7 @@ async fn update_engine(
     } else if let Some(tc) = engine.spec.get("trinoConfig") {
         spec["trinoConfig"] = tc.clone();
     }
+    validate_spec_resource_groups(&spec)?;
     st.storage.update_engine(id, &spec, &engine.status).await?;
     let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
 
@@ -1053,4 +1270,43 @@ async fn remove_catalog(
         }
     }
     Ok(StatusCode::OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn root(name: &str) -> ResourceGroupReq {
+        ResourceGroupReq {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+    fn sel(group: &str) -> ResourceSelectorReq {
+        ResourceSelectorReq {
+            group: group.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_resource_groups_accepts_matching_roots() {
+        let rg = ResourceGroupsReq {
+            root_groups: vec![root("global")],
+            selectors: vec![sel("global"), sel("global.etl")],
+        };
+        assert!(validate_resource_groups(&rg).is_ok());
+    }
+
+    #[test]
+    fn validate_resource_groups_rejects_dangling_selector() {
+        let rg = ResourceGroupsReq {
+            root_groups: vec![root("global")],
+            selectors: vec![sel("nope")],
+        };
+        assert!(matches!(
+            validate_resource_groups(&rg),
+            Err(CpError::BadRequest(_))
+        ));
+    }
 }

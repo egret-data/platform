@@ -698,6 +698,165 @@ async fn update_engine_per_role_trino_config_roundtrips() {
     );
 }
 
+/// Seed a global storage_connection with a resolvable secret_ref; returns its id.
+async fn seed_exchange_storage_conn(f: &Fixture) -> Uuid {
+    let secrets = egret_secrets::WorkspaceSecretStore::new(
+        f.db.clone(),
+        egret_secrets::SecretStore::new(
+            f.db.clone(),
+            Some(egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("crypto")),
+        ),
+    );
+    let secret_id = secrets
+        .create(
+            None,
+            &format!("exchange-secret-{}", Uuid::new_v4().simple()),
+            None,
+            "s3cr3t",
+        )
+        .await
+        .expect("create exchange secret");
+    let (id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO storage_connections (name, region, bucket, access_key, endpoint, secret_ref, path_style) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+    )
+    .bind(format!("exchange-sc-{}", Uuid::new_v4().simple()))
+    .bind("us-east-1")
+    .bind("egret-exchange-test")
+    .bind("AKIATEST")
+    .bind("http://minio:9000")
+    .bind(secret_id)
+    .bind(true)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert exchange storage connection");
+    id
+}
+
+#[tokio::test]
+async fn update_engine_resource_groups_and_fault_tolerant() {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_rg_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let exchange_conn = seed_exchange_storage_conn(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    // Create with the simple wizard.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // PUT resourceGroups (root `global` + selector {group:"global"}) + faultTolerant.
+    let put_body = serde_json::json!({
+        "name": name, "warehouseId": wh_id,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+        "trinoConfig": {
+            "coordinator": { "replicas": 1 },
+            "worker": { "replicas": 1 },
+            "resourceGroups": {
+                "rootGroups": [{
+                    "name": "global", "softMemoryLimit": "80%",
+                    "hardConcurrencyLimit": 50, "maxQueued": 100
+                }],
+                "selectors": [{ "group": "global" }]
+            },
+            "faultTolerant": {
+                "retryPolicy": "TASK",
+                "exchangeStorageConnId": exchange_conn,
+                "exchangePrefix": "exchange"
+            }
+        }
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(put_body),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "update engine with rg + ft; body={j}"
+    );
+
+    // GET reflects the persisted resourceGroups.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("/engines/{engine_id}"), &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "get engine; body={j}");
+    assert_eq!(
+        j["spec"]["trinoConfig"]["resourceGroups"]["rootGroups"][0]["name"], "global",
+        "resource group round-trips; body={j}"
+    );
+    assert_eq!(
+        j["spec"]["trinoConfig"]["faultTolerant"]["retryPolicy"], "TASK",
+        "fault-tolerant round-trips; body={j}"
+    );
+
+    // PUT with a dangling selector group → 400.
+    let bad_body = serde_json::json!({
+        "name": name, "warehouseId": wh_id,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+        "trinoConfig": {
+            "coordinator": { "replicas": 1 },
+            "worker": { "replicas": 1 },
+            "resourceGroups": {
+                "rootGroups": [{
+                    "name": "global", "softMemoryLimit": "80%",
+                    "hardConcurrencyLimit": 50, "maxQueued": 100
+                }],
+                "selectors": [{ "group": "nope" }]
+            }
+        }
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(bad_body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "dangling resource-group selector must 400"
+    );
+}
+
 #[tokio::test]
 async fn engine_catalog_routes() {
     let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
