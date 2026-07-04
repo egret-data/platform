@@ -3,12 +3,20 @@ import type { Dispatch, SetStateAction } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 import {
+  type Affinity,
   type CreateEngineInput,
+  type DeploymentStrategy,
   type Engine,
+  type EnvFromSource,
   type HeapConfig,
+  type MiniContainer,
+  type ObjectMount,
   type Probe,
   type RoleConfig,
   type RoleResources,
+  type SecurityContext,
+  type Toleration,
+  type TopologySpread,
   type TrinoConfig,
   updateEngine,
 } from "@/api/controlPlane";
@@ -70,6 +78,45 @@ function formToProbe(f: ProbeForm): Probe | undefined {
   return Object.keys(p).length ? p : undefined;
 }
 
+// ── per-role pod-placement form models (Task 8 edits these) ──────────────────
+
+/** A toleration row (numeric `tolerationSeconds` kept as text). */
+export type TolerationForm = {
+  key: string;
+  operator: string;
+  value: string;
+  effect: string;
+  tolerationSeconds: string;
+};
+
+/** A topology-spread-constraint row (numeric `maxSkew` kept as text). */
+export type TopologySpreadForm = {
+  maxSkew: string;
+  topologyKey: string;
+  whenUnsatisfiable: string;
+  matchLabels: Kv[];
+};
+
+/** A node-affinity match-expression row (`values` as a CSV string). */
+export type NodeMatchForm = {
+  key: string;
+  operator: string;
+  values: string;
+};
+
+/** Affinity form: structured node-match + anti-affinity key + raw-JSON text. */
+export type AffinityForm = {
+  nodeMatch: NodeMatchForm[];
+  podAntiAffinityTopologyKey: string;
+  rawOverride: string;
+};
+
+/** An extra-exposed-port row (numeric `containerPort` kept as text). */
+export type ContainerPortForm = {
+  name: string;
+  containerPort: string;
+};
+
 export type RoleForm = {
   replicas: string;
   cpuRequest: string;
@@ -87,7 +134,30 @@ export type RoleForm = {
   liveness: ProbeForm;
   readiness: ProbeForm;
   startup: ProbeForm;
+  // Pod placement (per role).
+  nodeSelector: Kv[];
+  tolerations: TolerationForm[];
+  topologySpread: TopologySpreadForm[];
+  affinity: AffinityForm;
+  terminationGraceSeconds: string;
+  additionalExposedPorts: ContainerPortForm[];
 };
+
+/** Stringify a parsed raw-override object back to editable JSON text (or ""). */
+function rawToText(v: unknown): string {
+  return v === undefined || v === null ? "" : JSON.stringify(v, null, 2);
+}
+
+/** Parse raw-override text; returns undefined when blank or invalid. */
+function textToRaw(s: string): unknown {
+  const t = s.trim();
+  if (t === "") return undefined;
+  try {
+    return JSON.parse(t);
+  } catch {
+    return undefined;
+  }
+}
 
 function roleToForm(rc: RoleConfig | undefined): RoleForm {
   const heap = rc?.heap;
@@ -111,6 +181,34 @@ function roleToForm(rc: RoleConfig | undefined): RoleForm {
     liveness: probeToForm(rc?.probes?.liveness),
     readiness: probeToForm(rc?.probes?.readiness),
     startup: probeToForm(rc?.probes?.startup),
+    nodeSelector: recordToKv(rc?.nodeSelector),
+    tolerations: (rc?.tolerations ?? []).map((t) => ({
+      key: t.key ?? "",
+      operator: t.operator ?? "",
+      value: t.value ?? "",
+      effect: t.effect ?? "",
+      tolerationSeconds: t.tolerationSeconds?.toString() ?? "",
+    })),
+    topologySpread: (rc?.topologySpread ?? []).map((t) => ({
+      maxSkew: t.maxSkew?.toString() ?? "",
+      topologyKey: t.topologyKey ?? "",
+      whenUnsatisfiable: t.whenUnsatisfiable ?? "",
+      matchLabels: recordToKv(t.matchLabels),
+    })),
+    affinity: {
+      nodeMatch: (rc?.affinity?.nodeMatch ?? []).map((n) => ({
+        key: n.key,
+        operator: n.operator,
+        values: (n.values ?? []).join(", "),
+      })),
+      podAntiAffinityTopologyKey: rc?.affinity?.podAntiAffinityTopologyKey ?? "",
+      rawOverride: rawToText(rc?.affinity?.rawOverride),
+    },
+    terminationGraceSeconds: rc?.terminationGraceSeconds?.toString() ?? "",
+    additionalExposedPorts: (rc?.additionalExposedPorts ?? []).map((p) => ({
+      name: p.name,
+      containerPort: p.containerPort?.toString() ?? "",
+    })),
   };
 }
 
@@ -157,7 +255,97 @@ function formToRole(f: RoleForm): RoleConfig {
   if (startup) probes.startup = startup;
   if (Object.keys(probes).length) rc.probes = probes;
 
+  // Pod placement — omit each field when empty.
+  const nodeSelector = kvToRecord(f.nodeSelector);
+  if (Object.keys(nodeSelector).length) rc.nodeSelector = nodeSelector;
+
+  const tolerations = f.tolerations
+    .map((t) => {
+      const out: Toleration = {};
+      if (t.key.trim()) out.key = t.key.trim();
+      if (t.operator.trim()) out.operator = t.operator.trim();
+      if (t.value.trim()) out.value = t.value.trim();
+      if (t.effect.trim()) out.effect = t.effect.trim();
+      const ts = numOrUndef(t.tolerationSeconds);
+      if (ts !== undefined) out.tolerationSeconds = ts;
+      return out;
+    })
+    .filter((t) => Object.keys(t).length);
+  if (tolerations.length) rc.tolerations = tolerations;
+
+  const topologySpread = f.topologySpread
+    .map((t) => {
+      const matchLabels = kvToRecord(t.matchLabels);
+      const ts: TopologySpread = {
+        maxSkew: numOrUndef(t.maxSkew) ?? 0,
+        topologyKey: t.topologyKey.trim(),
+        whenUnsatisfiable: t.whenUnsatisfiable.trim(),
+        matchLabels,
+      };
+      return ts;
+    })
+    .filter(
+      (t) =>
+        t.topologyKey || t.whenUnsatisfiable || Object.keys(t.matchLabels).length,
+    );
+  if (topologySpread.length) rc.topologySpread = topologySpread;
+
+  const nodeMatch = f.affinity.nodeMatch
+    .map((n) => ({
+      key: n.key.trim(),
+      operator: n.operator.trim(),
+      values: n.values
+        .split(",")
+        .map((v) => v.trim())
+        .filter(Boolean),
+    }))
+    .filter((n) => n.key);
+  const antiTk = f.affinity.podAntiAffinityTopologyKey.trim();
+  const affinityRaw = textToRaw(f.affinity.rawOverride);
+  if (nodeMatch.length || antiTk || affinityRaw !== undefined) {
+    const aff: Affinity = {};
+    if (nodeMatch.length) aff.nodeMatch = nodeMatch;
+    if (antiTk) aff.podAntiAffinityTopologyKey = antiTk;
+    if (affinityRaw !== undefined) aff.rawOverride = affinityRaw;
+    rc.affinity = aff;
+  }
+
+  const grace = numOrUndef(f.terminationGraceSeconds);
+  if (grace !== undefined) rc.terminationGraceSeconds = grace;
+
+  const ports = f.additionalExposedPorts
+    .map((p) => ({
+      name: p.name.trim(),
+      containerPort: numOrUndef(p.containerPort) ?? 0,
+    }))
+    .filter((p) => p.name);
+  if (ports.length) rc.additionalExposedPorts = ports;
+
   return rc;
+}
+
+// ── cluster pod & scheduling helpers ─────────────────────────────────────────
+
+/** An empty (all-undefined) security context — the initial hook state. */
+function emptySecurityContext(): SecurityContext {
+  return {};
+}
+
+/** Drop a security context to `undefined` when it carries no set field. */
+function cleanSecurityContext(sc: SecurityContext): SecurityContext | undefined {
+  const out: SecurityContext = {};
+  if (sc.runAsUser !== undefined) out.runAsUser = sc.runAsUser;
+  if (sc.runAsGroup !== undefined) out.runAsGroup = sc.runAsGroup;
+  if (sc.fsGroup !== undefined) out.fsGroup = sc.fsGroup;
+  if (sc.runAsNonRoot !== undefined) out.runAsNonRoot = sc.runAsNonRoot;
+  if (sc.rawOverride !== undefined && sc.rawOverride !== null)
+    out.rawOverride = sc.rawOverride;
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** An empty deployment-strategy — the initial hook state (kind unset). */
+function emptyDeploymentStrategy(): DeploymentStrategy {
+  return { kind: "" };
 }
 
 /** A password-user row: a username + the egret secret holding its password. */
@@ -224,6 +412,37 @@ export interface EngineConfigForm {
   setIngressTlsSecret: (v: string) => void;
   ingressAnnotations: Kv[];
   setIngressAnnotations: Dispatch<SetStateAction<Kv[]>>;
+  // pod & scheduling (cluster-wide)
+  serviceAccount: string;
+  setServiceAccount: (v: string) => void;
+  imagePullSecrets: string[];
+  setImagePullSecrets: Dispatch<SetStateAction<string[]>>;
+  imagePullPolicy: string;
+  setImagePullPolicy: (v: string) => void;
+  podSecurityContext: SecurityContext;
+  setPodSecurityContext: Dispatch<SetStateAction<SecurityContext>>;
+  containerSecurityContext: SecurityContext;
+  setContainerSecurityContext: Dispatch<SetStateAction<SecurityContext>>;
+  initContainers: MiniContainer[];
+  setInitContainers: Dispatch<SetStateAction<MiniContainer[]>>;
+  sidecarContainers: MiniContainer[];
+  setSidecarContainers: Dispatch<SetStateAction<MiniContainer[]>>;
+  envFrom: EnvFromSource[];
+  setEnvFrom: Dispatch<SetStateAction<EnvFromSource[]>>;
+  configMounts: ObjectMount[];
+  setConfigMounts: Dispatch<SetStateAction<ObjectMount[]>>;
+  secretMounts: ObjectMount[];
+  setSecretMounts: Dispatch<SetStateAction<ObjectMount[]>>;
+  deploymentStrategy: DeploymentStrategy;
+  setDeploymentStrategy: Dispatch<SetStateAction<DeploymentStrategy>>;
+  deploymentAnnotations: Kv[];
+  setDeploymentAnnotations: Dispatch<SetStateAction<Kv[]>>;
+  revisionHistoryLimit: string;
+  setRevisionHistoryLimit: (v: string) => void;
+  progressDeadlineSeconds: string;
+  setProgressDeadlineSeconds: (v: string) => void;
+  shareProcessNamespace: boolean;
+  setShareProcessNamespace: (v: boolean) => void;
   // meta
   error: string | null;
   dirty: boolean;
@@ -316,6 +535,54 @@ export function useEngineConfigForm(
     recordToKv(tc?.ingress?.annotations),
   );
 
+  // Pod & scheduling (cluster-wide).
+  const [serviceAccount, setServiceAccount] = useState(tc?.serviceAccount ?? "");
+  const [imagePullSecrets, setImagePullSecrets] = useState<string[]>(
+    tc?.imagePullSecrets ? [...tc.imagePullSecrets] : [],
+  );
+  const [imagePullPolicy, setImagePullPolicy] = useState(tc?.imagePullPolicy ?? "");
+  const [podSecurityContext, setPodSecurityContext] = useState<SecurityContext>(
+    tc?.podSecurityContext ? { ...tc.podSecurityContext } : emptySecurityContext(),
+  );
+  const [containerSecurityContext, setContainerSecurityContext] =
+    useState<SecurityContext>(
+      tc?.containerSecurityContext
+        ? { ...tc.containerSecurityContext }
+        : emptySecurityContext(),
+    );
+  const [initContainers, setInitContainers] = useState<MiniContainer[]>(
+    tc?.initContainers ? tc.initContainers.map((c) => ({ ...c })) : [],
+  );
+  const [sidecarContainers, setSidecarContainers] = useState<MiniContainer[]>(
+    tc?.sidecarContainers ? tc.sidecarContainers.map((c) => ({ ...c })) : [],
+  );
+  const [envFrom, setEnvFrom] = useState<EnvFromSource[]>(
+    tc?.envFrom ? tc.envFrom.map((e) => ({ ...e })) : [],
+  );
+  const [configMounts, setConfigMounts] = useState<ObjectMount[]>(
+    tc?.configMounts ? tc.configMounts.map((m) => ({ ...m })) : [],
+  );
+  const [secretMounts, setSecretMounts] = useState<ObjectMount[]>(
+    tc?.secretMounts ? tc.secretMounts.map((m) => ({ ...m })) : [],
+  );
+  const [deploymentStrategy, setDeploymentStrategy] = useState<DeploymentStrategy>(
+    tc?.deploymentStrategy
+      ? { ...tc.deploymentStrategy }
+      : emptyDeploymentStrategy(),
+  );
+  const [deploymentAnnotations, setDeploymentAnnotations] = useState<Kv[]>(
+    recordToKv(tc?.deploymentAnnotations),
+  );
+  const [revisionHistoryLimit, setRevisionHistoryLimit] = useState(
+    tc?.revisionHistoryLimit?.toString() ?? "",
+  );
+  const [progressDeadlineSeconds, setProgressDeadlineSeconds] = useState(
+    tc?.progressDeadlineSeconds?.toString() ?? "",
+  );
+  const [shareProcessNamespace, setShareProcessNamespace] = useState(
+    tc?.shareProcessNamespace ?? false,
+  );
+
   const [error, setError] = useState<string | null>(null);
 
   const [dirty, setDirty] = useState(false);
@@ -352,6 +619,41 @@ export function useEngineConfigForm(
     setIngressClassName(next?.ingress?.className ?? "nginx");
     setIngressTlsSecret(next?.ingress?.tlsSecret ?? "");
     setIngressAnnotations(recordToKv(next?.ingress?.annotations));
+    setServiceAccount(next?.serviceAccount ?? "");
+    setImagePullSecrets(next?.imagePullSecrets ? [...next.imagePullSecrets] : []);
+    setImagePullPolicy(next?.imagePullPolicy ?? "");
+    setPodSecurityContext(
+      next?.podSecurityContext
+        ? { ...next.podSecurityContext }
+        : emptySecurityContext(),
+    );
+    setContainerSecurityContext(
+      next?.containerSecurityContext
+        ? { ...next.containerSecurityContext }
+        : emptySecurityContext(),
+    );
+    setInitContainers(
+      next?.initContainers ? next.initContainers.map((c) => ({ ...c })) : [],
+    );
+    setSidecarContainers(
+      next?.sidecarContainers ? next.sidecarContainers.map((c) => ({ ...c })) : [],
+    );
+    setEnvFrom(next?.envFrom ? next.envFrom.map((e) => ({ ...e })) : []);
+    setConfigMounts(
+      next?.configMounts ? next.configMounts.map((m) => ({ ...m })) : [],
+    );
+    setSecretMounts(
+      next?.secretMounts ? next.secretMounts.map((m) => ({ ...m })) : [],
+    );
+    setDeploymentStrategy(
+      next?.deploymentStrategy
+        ? { ...next.deploymentStrategy }
+        : emptyDeploymentStrategy(),
+    );
+    setDeploymentAnnotations(recordToKv(next?.deploymentAnnotations));
+    setRevisionHistoryLimit(next?.revisionHistoryLimit?.toString() ?? "");
+    setProgressDeadlineSeconds(next?.progressDeadlineSeconds?.toString() ?? "");
+    setShareProcessNamespace(next?.shareProcessNamespace ?? false);
     // A re-sync from the server must not mark the form dirty.
     skipDirty.current = true;
     setDirty(false);
@@ -391,6 +693,21 @@ export function useEngineConfigForm(
     ingressClassName,
     ingressTlsSecret,
     ingressAnnotations,
+    serviceAccount,
+    imagePullSecrets,
+    imagePullPolicy,
+    podSecurityContext,
+    containerSecurityContext,
+    initContainers,
+    sidecarContainers,
+    envFrom,
+    configMounts,
+    secretMounts,
+    deploymentStrategy,
+    deploymentAnnotations,
+    revisionHistoryLimit,
+    progressDeadlineSeconds,
+    shareProcessNamespace,
   ]);
 
   const saveMutation = useMutation<Engine, ApiError, CreateEngineInput>({
@@ -478,6 +795,70 @@ export function useEngineConfigForm(
       };
     }
 
+    // Pod & scheduling (cluster-wide) — same omit-empty style: skip empty
+    // arrays/objects/blanks so an untouched engine's payload is unchanged.
+    if (serviceAccount.trim()) trinoConfig.serviceAccount = serviceAccount.trim();
+    const pullSecrets = imagePullSecrets.map((s) => s.trim()).filter(Boolean);
+    if (pullSecrets.length) trinoConfig.imagePullSecrets = pullSecrets;
+    if (imagePullPolicy)
+      trinoConfig.imagePullPolicy =
+        imagePullPolicy as TrinoConfig["imagePullPolicy"];
+
+    const podSc = cleanSecurityContext(podSecurityContext);
+    if (podSc) trinoConfig.podSecurityContext = podSc;
+    const ctrSc = cleanSecurityContext(containerSecurityContext);
+    if (ctrSc) trinoConfig.containerSecurityContext = ctrSc;
+
+    const cleanContainers = (list: MiniContainer[]): MiniContainer[] =>
+      list.filter((c) => c.name.trim() || c.rawOverride !== undefined);
+    const inits = cleanContainers(initContainers);
+    if (inits.length) trinoConfig.initContainers = inits;
+    const sidecars = cleanContainers(sidecarContainers);
+    if (sidecars.length) trinoConfig.sidecarContainers = sidecars;
+
+    const cleanEnvFrom = envFrom
+      .map((e) => {
+        const out: EnvFromSource = {};
+        if (e.configMapRef?.trim()) out.configMapRef = e.configMapRef.trim();
+        if (e.secretRef?.trim()) out.secretRef = e.secretRef.trim();
+        return out;
+      })
+      .filter((e) => Object.keys(e).length);
+    if (cleanEnvFrom.length) trinoConfig.envFrom = cleanEnvFrom;
+
+    const cleanMounts = (list: ObjectMount[]): ObjectMount[] =>
+      list
+        .map((m) => {
+          const out: ObjectMount = { name: m.name.trim(), mountPath: m.mountPath.trim() };
+          if (m.subPath?.trim()) out.subPath = m.subPath.trim();
+          if (m.defaultMode !== undefined) out.defaultMode = m.defaultMode;
+          return out;
+        })
+        .filter((m) => m.name && m.mountPath);
+    const cfgMounts = cleanMounts(configMounts);
+    if (cfgMounts.length) trinoConfig.configMounts = cfgMounts;
+    const secMounts = cleanMounts(secretMounts);
+    if (secMounts.length) trinoConfig.secretMounts = secMounts;
+
+    if (deploymentStrategy.kind) {
+      const ds: DeploymentStrategy = { kind: deploymentStrategy.kind };
+      if (deploymentStrategy.maxSurge?.trim())
+        ds.maxSurge = deploymentStrategy.maxSurge.trim();
+      if (deploymentStrategy.maxUnavailable?.trim())
+        ds.maxUnavailable = deploymentStrategy.maxUnavailable.trim();
+      trinoConfig.deploymentStrategy = ds;
+    }
+
+    const depAnns = kvToRecord(deploymentAnnotations);
+    if (Object.keys(depAnns).length) trinoConfig.deploymentAnnotations = depAnns;
+
+    const revLimit = numOrUndef(revisionHistoryLimit);
+    if (revLimit !== undefined) trinoConfig.revisionHistoryLimit = revLimit;
+    const progDeadline = numOrUndef(progressDeadlineSeconds);
+    if (progDeadline !== undefined)
+      trinoConfig.progressDeadlineSeconds = progDeadline;
+    if (shareProcessNamespace) trinoConfig.shareProcessNamespace = true;
+
     // The wizard-era required fields still ride along; replicas now come from
     // the per-role editor, resources fall back to the stored flat values.
     const input: CreateEngineInput = {
@@ -551,6 +932,36 @@ export function useEngineConfigForm(
     setIngressTlsSecret,
     ingressAnnotations,
     setIngressAnnotations,
+    serviceAccount,
+    setServiceAccount,
+    imagePullSecrets,
+    setImagePullSecrets,
+    imagePullPolicy,
+    setImagePullPolicy,
+    podSecurityContext,
+    setPodSecurityContext,
+    containerSecurityContext,
+    setContainerSecurityContext,
+    initContainers,
+    setInitContainers,
+    sidecarContainers,
+    setSidecarContainers,
+    envFrom,
+    setEnvFrom,
+    configMounts,
+    setConfigMounts,
+    secretMounts,
+    setSecretMounts,
+    deploymentStrategy,
+    setDeploymentStrategy,
+    deploymentAnnotations,
+    setDeploymentAnnotations,
+    revisionHistoryLimit,
+    setRevisionHistoryLimit,
+    progressDeadlineSeconds,
+    setProgressDeadlineSeconds,
+    shareProcessNamespace,
+    setShareProcessNamespace,
     error,
     dirty,
     saving: saveMutation.isPending,

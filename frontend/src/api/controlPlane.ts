@@ -509,6 +509,93 @@ export interface RoleResources {
   memLimit?: string;
 }
 
+// ── Pod & scheduling (Phase 1.5.3) ───────────────────────────────────────────
+
+/** A pod toleration (all fields optional). */
+export interface Toleration {
+  key?: string;
+  operator?: string;
+  value?: string;
+  effect?: string;
+  tolerationSeconds?: number;
+}
+
+/** A topology-spread constraint (labelSelector.matchLabels). */
+export interface TopologySpread {
+  maxSkew: number;
+  topologyKey: string;
+  whenUnsatisfiable: string;
+  matchLabels: Record<string, string>;
+}
+
+/** A node-affinity match expression (nodeSelectorTerms/matchExpressions). */
+export interface NodeSelectorRequirement {
+  key: string;
+  operator: string;
+  values: string[];
+}
+
+/** Structured-common + raw-override affinity. `rawOverride` wins verbatim. */
+export interface Affinity {
+  nodeMatch?: NodeSelectorRequirement[];
+  podAntiAffinityTopologyKey?: string;
+  rawOverride?: unknown;
+}
+
+/** An extra exposed container port. */
+export interface ContainerPort {
+  name: string;
+  containerPort: number;
+}
+
+/** Pod/container security context (flat common fields + raw override). */
+export interface SecurityContext {
+  runAsUser?: number;
+  runAsGroup?: number;
+  fsGroup?: number;
+  runAsNonRoot?: boolean;
+  rawOverride?: unknown;
+}
+
+/** A container volume mount. */
+export interface VolumeMount {
+  name: string;
+  mountPath: string;
+  subPath?: string;
+}
+
+/** A minimal init/sidecar container spec (structured-common + raw override). */
+export interface MiniContainer {
+  name: string;
+  image: string;
+  command?: string[];
+  args?: string[];
+  env?: Record<string, string>;
+  volumeMounts?: VolumeMount[];
+  rawOverride?: unknown;
+}
+
+/** An envFrom source referencing a ConfigMap or Secret by name. */
+export interface EnvFromSource {
+  configMapRef?: string;
+  secretRef?: string;
+}
+
+/** A ConfigMap/Secret volume mount (defaultMode is a decimal octal-ish int). */
+export interface ObjectMount {
+  name: string;
+  mountPath: string;
+  subPath?: string;
+  defaultMode?: number;
+}
+
+/** Deployment update strategy (`RollingUpdate` uses maxSurge/maxUnavailable). */
+export interface DeploymentStrategy {
+  kind: string;
+  maxSurge?: string;
+  maxUnavailable?: string;
+}
+
 /** Per-role config block shared by coordinator + worker. */
 export interface RoleConfig {
   replicas?: number;
@@ -522,6 +609,13 @@ export interface RoleConfig {
     readiness?: Probe;
     startup?: Probe;
   };
+  // Pod placement (per role — coordinator & worker independently).
+  nodeSelector?: Record<string, string>;
+  tolerations?: Toleration[];
+  topologySpread?: TopologySpread[];
+  affinity?: Affinity;
+  terminationGraceSeconds?: number;
+  additionalExposedPorts?: ContainerPort[];
 }
 
 /** A Trino file resource-group node (recursive tree). */
@@ -591,6 +685,23 @@ export interface TrinoConfig {
     tlsSecret?: string;
     annotations?: Record<string, string>;
   };
+  // Cluster-wide pod & scheduling (Phase 1.5.3): pod-shape/placement knobs
+  // applied to both coordinator & worker Deployments.
+  imagePullSecrets?: string[];
+  imagePullPolicy?: "Always" | "IfNotPresent" | "Never";
+  serviceAccount?: string;
+  podSecurityContext?: SecurityContext;
+  containerSecurityContext?: SecurityContext;
+  initContainers?: MiniContainer[];
+  sidecarContainers?: MiniContainer[];
+  envFrom?: EnvFromSource[];
+  configMounts?: ObjectMount[];
+  secretMounts?: ObjectMount[];
+  deploymentStrategy?: DeploymentStrategy;
+  deploymentAnnotations?: Record<string, string>;
+  revisionHistoryLimit?: number;
+  progressDeadlineSeconds?: number;
+  shareProcessNamespace?: boolean;
   coordinator: RoleConfig;
   worker: WorkerRoleConfig;
 }
