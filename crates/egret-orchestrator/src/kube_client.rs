@@ -25,13 +25,48 @@ pub trait KubeClient: Send + Sync {
         namespace: &str,
         instance: &str,
     ) -> anyhow::Result<Vec<(String, String, bool)>>;
+
+    /// Issue a raw HTTP request to a Trino coordinator `Service` (port 8080) and
+    /// return `(status, body)`. In-cluster this hits the Service DNS directly; in
+    /// dev it goes through the kube API-server proxy subresource. Non-2xx statuses
+    /// are returned as-is (the caller decides how to map them).
+    async fn coordinator_request(
+        &self,
+        namespace: &str,
+        service: &str,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: Option<Vec<u8>>,
+    ) -> anyhow::Result<(u16, Vec<u8>)>;
 }
 
 /// In-memory fake for unit tests: records applied/deleted objects.
-#[derive(Default)]
 pub struct FakeKube {
     pub applied: Mutex<BTreeMap<String, Value>>, // key = "kind/name"
     pub deleted: Mutex<Vec<String>>,
+    /// `(method, path)` per `coordinator_request` call.
+    pub coordinator_calls: Mutex<Vec<(String, String)>>,
+    /// Canned `(status, body)` returned by `coordinator_request`.
+    pub coordinator_response: Mutex<(u16, Vec<u8>)>,
+}
+
+impl Default for FakeKube {
+    fn default() -> Self {
+        Self {
+            applied: Mutex::new(BTreeMap::new()),
+            deleted: Mutex::new(Vec::new()),
+            coordinator_calls: Mutex::new(Vec::new()),
+            coordinator_response: Mutex::new((200, Vec::new())),
+        }
+    }
+}
+
+impl FakeKube {
+    /// Set the canned response returned by `coordinator_request`.
+    pub fn set_coordinator_response(&self, status: u16, body: Vec<u8>) {
+        *self.coordinator_response.lock().unwrap() = (status, body);
+    }
 }
 
 #[async_trait::async_trait]
@@ -56,6 +91,22 @@ impl KubeClient for FakeKube {
     ) -> anyhow::Result<Vec<(String, String, bool)>> {
         Ok(vec![("demo-coordinator-0".into(), "Running".into(), true)])
     }
+
+    async fn coordinator_request(
+        &self,
+        _namespace: &str,
+        _service: &str,
+        method: &str,
+        path: &str,
+        _headers: &[(String, String)],
+        _body: Option<Vec<u8>>,
+    ) -> anyhow::Result<(u16, Vec<u8>)> {
+        self.coordinator_calls
+            .lock()
+            .unwrap()
+            .push((method.to_string(), path.to_string()));
+        Ok(self.coordinator_response.lock().unwrap().clone())
+    }
 }
 
 /// Real kube-rs backed client. Applies/deletes CRs as `DynamicObject`s (server-side
@@ -63,6 +114,9 @@ impl KubeClient for FakeKube {
 /// the `FakeKube` tests are the coverage.
 pub struct LiveKube {
     client: kube::Client,
+    /// True when egret runs inside the cluster (reach coordinators via Service DNS);
+    /// false in dev (reach them via the kube API-server proxy subresource).
+    in_cluster: bool,
 }
 
 impl LiveKube {
@@ -70,14 +124,20 @@ impl LiveKube {
     pub async fn in_cluster() -> anyhow::Result<Self> {
         let config = kube::Config::incluster()?;
         let client = kube::Client::try_from(config)?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            in_cluster: true,
+        })
     }
 
     /// Build from the local kubeconfig / inferred config (dev).
     pub async fn from_kubeconfig() -> anyhow::Result<Self> {
         let config = kube::Config::infer().await?;
         let client = kube::Client::try_from(config)?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            in_cluster: false,
+        })
     }
 
     /// Derive an `ApiResource` from an object's `apiVersion` + `kind`.
@@ -169,5 +229,70 @@ impl KubeClient for LiveKube {
             })
             .collect();
         Ok(out)
+    }
+
+    async fn coordinator_request(
+        &self,
+        namespace: &str,
+        service: &str,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: Option<Vec<u8>>,
+    ) -> anyhow::Result<(u16, Vec<u8>)> {
+        if self.in_cluster {
+            // Prod: reach the coordinator Service directly over cluster DNS.
+            let url = format!("http://{service}.{namespace}.svc:8080{path}");
+            let mut rb = reqwest::Client::new().request(method.parse()?, &url);
+            for (k, v) in headers {
+                rb = rb.header(k, v);
+            }
+            if let Some(b) = body {
+                rb = rb.body(b);
+            }
+            let resp = rb.send().await?;
+            Ok((resp.status().as_u16(), resp.bytes().await?.to_vec()))
+        } else {
+            // Dev: egret on the host proxies through the kube API server.
+            use kube::client::Body;
+            let uri = format!("/api/v1/namespaces/{namespace}/services/{service}:8080/proxy{path}");
+            let mut req = http::Request::builder().method(method).uri(uri);
+            for (k, v) in headers {
+                req = req.header(k.as_str(), v.as_str());
+            }
+            let req = req.body(Body::from(body.unwrap_or_default()))?;
+            let resp = self.client.send(req).await?;
+            let status = resp.status().as_u16();
+            let bytes = resp.into_body().collect_bytes().await?.to_vec();
+            Ok((status, bytes))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn fake_kube_coordinator_request_records() {
+        let k = FakeKube::default();
+        k.set_coordinator_response(200, br#"[{"queryId":"x"}]"#.to_vec());
+        let (code, body) = k
+            .coordinator_request(
+                "egret-engines",
+                "demo-trino",
+                "GET",
+                "/v1/query",
+                &[("X-Trino-User".into(), "egret-monitor".into())],
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(code, 200);
+        assert!(String::from_utf8_lossy(&body).contains("queryId"));
+        assert_eq!(
+            k.coordinator_calls.lock().unwrap()[0],
+            ("GET".to_string(), "/v1/query".to_string())
+        );
     }
 }
