@@ -6,8 +6,21 @@
 //! parsing — and `outputStage` passes through as a raw `serde_json::Value` for
 //! the frontend stage visualizer.
 
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::routing::get;
+use axum::{Json, Router};
+use base64::Engine as _;
+use egret_auth::principal::Auth;
+use egret_catalog::service::Engine;
 use serde::Serialize;
 use serde_json::Value;
+use uuid::Uuid;
+
+use crate::auth::require_platform_admin;
+use crate::engines::monitor_password;
+use crate::error::CpError;
+use crate::CpState;
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -99,6 +112,133 @@ pub fn cluster_dto(queries: &Value, nodes: &Value) -> ClusterDto {
             })
             .unwrap_or_default(),
     }
+}
+
+// ── routes ─────────────────────────────────────────────────────────────────────
+//
+// The native Trino monitor: each route resolves the engine, builds the monitor
+// auth headers, and issues a raw HTTP request to the coordinator `Service`
+// (`{name}-trino`) via the kube-free `EngineProvisioner::coordinator_request`
+// seam. A coordinator that is unreachable, non-2xx, or returns a non-JSON error
+// page maps to `CpError::BadGateway` (502) so the UI can surface it distinctly
+// from a 4xx/5xx egret error.
+
+/// Monitor routes mounted onto the engines router.
+pub fn routes() -> Router<CpState> {
+    Router::new()
+        .route("/engines/{id}/queries", get(list_queries))
+        .route(
+            "/engines/{id}/queries/{qid}",
+            get(get_query).delete(kill_query),
+        )
+        .route("/engines/{id}/cluster", get(get_cluster))
+}
+
+/// Monitor auth headers for a coordinator request. When the engine's stored spec
+/// has an auth block (`trinoConfig.auth`), authenticate as the derived
+/// `egret-monitor` file-password user over HTTP Basic (plus `X-Forwarded-Proto:
+/// https` so Trino accepts Basic on the proxied hop); otherwise pass the trino
+/// user header directly (no-auth engines).
+fn monitor_headers(engine: &Engine) -> Vec<(String, String)> {
+    if engine.spec["trinoConfig"]["auth"].is_object() {
+        let creds = format!("egret-monitor:{}", monitor_password(engine.id));
+        let b64 = base64::engine::general_purpose::STANDARD.encode(creds);
+        vec![
+            ("Authorization".into(), format!("Basic {b64}")),
+            ("X-Forwarded-Proto".into(), "https".into()),
+        ]
+    } else {
+        vec![("X-Trino-User".into(), "egret-monitor".into())]
+    }
+}
+
+async fn load_engine(st: &CpState, id: Uuid) -> Result<Engine, CpError> {
+    st.storage.get_engine(id).await?.ok_or(CpError::NotFound)
+}
+
+/// Issue one coordinator request, mapping transport errors to a 502.
+async fn coordinator_call(
+    st: &CpState,
+    engine: &Engine,
+    method: &str,
+    path: &str,
+) -> Result<(u16, Vec<u8>), CpError> {
+    let prov = st
+        .engine_provisioner
+        .as_ref()
+        .ok_or_else(|| CpError::BadRequest("kubernetes not configured".into()))?;
+    let service = format!("{}-trino", engine.name);
+    let headers = monitor_headers(engine);
+    prov.coordinator_request(&engine.namespace, &service, method, path, &headers, None)
+        .await
+        .map_err(|_| CpError::BadGateway)
+}
+
+/// Call the coordinator and parse a 2xx JSON body; any non-2xx status or
+/// non-JSON body (e.g. a Trino HTML error page) is a 502.
+async fn coordinator_json(
+    st: &CpState,
+    engine: &Engine,
+    method: &str,
+    path: &str,
+) -> Result<Value, CpError> {
+    let (code, body) = coordinator_call(st, engine, method, path).await?;
+    if !(200..300).contains(&code) {
+        return Err(CpError::BadGateway);
+    }
+    serde_json::from_slice(&body).map_err(|_| CpError::BadGateway)
+}
+
+async fn list_queries(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<QueryDto>>, CpError> {
+    require_platform_admin(&p)?;
+    let engine = load_engine(&st, id).await?;
+    let v = coordinator_json(&st, &engine, "GET", "/v1/query").await?;
+    let list = v
+        .as_array()
+        .map(|a| a.iter().map(query_dto).collect())
+        .unwrap_or_default();
+    Ok(Json(list))
+}
+
+async fn get_query(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, qid)): Path<(Uuid, String)>,
+) -> Result<Json<QueryDetailDto>, CpError> {
+    require_platform_admin(&p)?;
+    let engine = load_engine(&st, id).await?;
+    let v = coordinator_json(&st, &engine, "GET", &format!("/v1/query/{qid}")).await?;
+    Ok(Json(query_detail_dto(&v)))
+}
+
+async fn kill_query(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, qid)): Path<(Uuid, String)>,
+) -> Result<StatusCode, CpError> {
+    require_platform_admin(&p)?;
+    let engine = load_engine(&st, id).await?;
+    let (code, _) = coordinator_call(&st, &engine, "DELETE", &format!("/v1/query/{qid}")).await?;
+    if !(200..300).contains(&code) {
+        return Err(CpError::BadGateway);
+    }
+    Ok(StatusCode::OK)
+}
+
+async fn get_cluster(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ClusterDto>, CpError> {
+    require_platform_admin(&p)?;
+    let engine = load_engine(&st, id).await?;
+    let nodes = coordinator_json(&st, &engine, "GET", "/v1/node").await?;
+    let queries = coordinator_json(&st, &engine, "GET", "/v1/query").await?;
+    Ok(Json(cluster_dto(&queries, &nodes)))
 }
 
 #[cfg(test)]

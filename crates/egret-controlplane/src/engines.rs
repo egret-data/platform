@@ -282,6 +282,8 @@ pub fn router() -> Router<CpState> {
             get(list_catalogs).post(add_catalog),
         )
         .route("/engines/{id}/catalogs/{cid}", delete(remove_catalog))
+        // Native Trino monitor (query list / detail / kill / cluster).
+        .merge(crate::monitor::routes())
 }
 
 // ── DTOs (camelCase on the wire) ───────────────────────────────────────────────
