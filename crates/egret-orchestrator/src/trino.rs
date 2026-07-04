@@ -425,6 +425,32 @@ fn affinity_json(a: &crate::spec::Affinity, app_label: &str) -> Value {
     Value::Object(out)
 }
 
+/// Render a [`SecurityContext`] to k8s JSON: the flat `Some` fields first, then
+/// any `raw_override` keys merged verbatim ON TOP (so an override wins).
+fn security_context_json(sc: &crate::spec::SecurityContext) -> Value {
+    let mut out = serde_json::Map::new();
+    if let Some(v) = sc.run_as_user {
+        out.insert("runAsUser".into(), json!(v));
+    }
+    if let Some(v) = sc.run_as_group {
+        out.insert("runAsGroup".into(), json!(v));
+    }
+    if let Some(v) = sc.fs_group {
+        out.insert("fsGroup".into(), json!(v));
+    }
+    if let Some(v) = sc.run_as_non_root {
+        out.insert("runAsNonRoot".into(), json!(v));
+    }
+    if let Some(raw) = &sc.raw_override {
+        if let Some(obj) = raw.as_object() {
+            for (k, v) in obj {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    Value::Object(out)
+}
+
 pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
     let app = format!("{}-{}", spec.name, role.suffix());
     let (rc, jvm_file, cfg_file, replicas) = if role.is_coord() {
@@ -524,6 +550,14 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
         }
     }
 
+    // Cluster-wide container fields (from spec.config, applied to both roles).
+    if let Some(p) = &spec.config.image_pull_policy {
+        container["imagePullPolicy"] = json!(p);
+    }
+    if let Some(sc) = &spec.config.container_security_context {
+        container["securityContext"] = security_context_json(sc);
+    }
+
     // pod-spec: worker graceful shutdown adds a preStop + terminationGracePeriodSeconds.
     let mut pod_spec = json!({
         "containers": [container],
@@ -608,7 +642,27 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
         }
     }
 
-    json!({
+    // Cluster-wide pod fields (from spec.config, applied to both roles).
+    if let Some(sa) = &spec.config.service_account {
+        pod_spec["serviceAccountName"] = json!(sa);
+    }
+    if !spec.config.image_pull_secrets.is_empty() {
+        pod_spec["imagePullSecrets"] = Value::Array(
+            spec.config
+                .image_pull_secrets
+                .iter()
+                .map(|s| json!({ "name": s }))
+                .collect(),
+        );
+    }
+    if let Some(b) = spec.config.share_process_namespace {
+        pod_spec["shareProcessNamespace"] = json!(b);
+    }
+    if let Some(sc) = &spec.config.pod_security_context {
+        pod_spec["securityContext"] = security_context_json(sc);
+    }
+
+    let mut deployment = json!({
         "apiVersion": "apps/v1", "kind": "Deployment",
         "metadata": { "name": app, "namespace": spec.namespace,
                       "labels": { "app": app, "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
@@ -621,7 +675,46 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
                 "spec": pod_spec
             }
         }
-    })
+    });
+
+    // Cluster-wide Deployment-level fields (from spec.config).
+    if let Some(strat) = &spec.config.deployment_strategy {
+        let mut s = json!({ "type": strat.kind });
+        if strat.kind == "RollingUpdate"
+            && (strat.max_surge.is_some() || strat.max_unavailable.is_some())
+        {
+            let mut ru = serde_json::Map::new();
+            if let Some(v) = &strat.max_surge {
+                ru.insert("maxSurge".into(), json!(v));
+            }
+            if let Some(v) = &strat.max_unavailable {
+                ru.insert("maxUnavailable".into(), json!(v));
+            }
+            s["rollingUpdate"] = Value::Object(ru);
+        }
+        deployment["spec"]["strategy"] = s;
+    }
+    if let Some(v) = spec.config.revision_history_limit {
+        deployment["spec"]["revisionHistoryLimit"] = json!(v);
+    }
+    if let Some(v) = spec.config.progress_deadline_seconds {
+        deployment["spec"]["progressDeadlineSeconds"] = json!(v);
+    }
+    // Merge deployment_annotations onto the OUTER Deployment metadata (distinct
+    // from the pod-template's config-checksum annotation map).
+    if !spec.config.deployment_annotations.is_empty() {
+        if !deployment["metadata"]["annotations"].is_object() {
+            deployment["metadata"]["annotations"] = json!({});
+        }
+        let anns = deployment["metadata"]["annotations"]
+            .as_object_mut()
+            .unwrap();
+        for (k, v) in &spec.config.deployment_annotations {
+            anns.insert(k.clone(), json!(v));
+        }
+    }
+
+    deployment
 }
 
 pub fn trino_service(spec: &EngineSpec) -> Value {
@@ -1436,6 +1529,51 @@ mod tests {
                 ["custom"],
             true
         );
+    }
+
+    #[test]
+    fn cluster_pod_and_deployment_fields() {
+        let mut s = sample_spec();
+        s.config.service_account = Some("trino-sa".into());
+        s.config.image_pull_secrets = vec!["regcred".into()];
+        s.config.image_pull_policy = Some("Always".into());
+        s.config.share_process_namespace = Some(true);
+        s.config.pod_security_context = Some(SecurityContext {
+            run_as_user: Some(1000),
+            fs_group: Some(1000),
+            ..Default::default()
+        });
+        s.config.container_security_context = Some(SecurityContext {
+            run_as_non_root: Some(true),
+            raw_override: Some(json!({"readOnlyRootFilesystem": true})),
+            ..Default::default()
+        });
+        s.config.deployment_strategy = Some(DeploymentStrategy {
+            kind: "Recreate".into(),
+            max_surge: None,
+            max_unavailable: None,
+        });
+        s.config
+            .deployment_annotations
+            .insert("team".into(), "data".into());
+        s.config.revision_history_limit = Some(3);
+        s.config.progress_deadline_seconds = Some(600);
+        let d = trino_deployment(&s, Role::Coordinator);
+        let ps = &d["spec"]["template"]["spec"];
+        assert_eq!(ps["serviceAccountName"], "trino-sa");
+        assert_eq!(ps["imagePullSecrets"][0]["name"], "regcred");
+        assert_eq!(ps["shareProcessNamespace"], true);
+        assert_eq!(ps["securityContext"]["runAsUser"], 1000);
+        assert_eq!(ps["containers"][0]["imagePullPolicy"], "Always");
+        assert_eq!(ps["containers"][0]["securityContext"]["runAsNonRoot"], true);
+        assert_eq!(
+            ps["containers"][0]["securityContext"]["readOnlyRootFilesystem"],
+            true
+        ); // raw merged
+        assert_eq!(d["spec"]["strategy"]["type"], "Recreate");
+        assert_eq!(d["spec"]["revisionHistoryLimit"], 3);
+        assert_eq!(d["spec"]["progressDeadlineSeconds"], 600);
+        assert_eq!(d["metadata"]["annotations"]["team"], "data");
     }
 
     #[tokio::test]
