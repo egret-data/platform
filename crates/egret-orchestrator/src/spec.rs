@@ -47,6 +47,54 @@ pub struct RoleConfig {
     pub query_max_memory_per_node: Option<String>,
     pub additional_jvm_config: Vec<String>,
     pub probes: Probes,
+    pub heap_headroom_per_node: Option<String>,
+}
+
+/// One resource group in the file-based resource-group manager tree.
+#[derive(Clone, Debug, Default)]
+pub struct ResourceGroup {
+    pub name: String,
+    pub soft_memory_limit: String, // "80%" or "10GB"
+    pub hard_concurrency_limit: u32,
+    pub max_queued: u32,
+    pub scheduling_policy: Option<String>,
+    pub sub_groups: Vec<ResourceGroup>, // recursive
+}
+
+/// A selector mapping incoming queries onto a resource group.
+#[derive(Clone, Debug, Default)]
+pub struct ResourceSelector {
+    pub user: Option<String>,
+    pub source: Option<String>,
+    pub query_type: Option<String>,
+    pub group: String, // dot-path, e.g. "global.etl"
+}
+
+/// The full file-based resource-group config: root groups + selectors.
+#[derive(Clone, Debug, Default)]
+pub struct ResourceGroups {
+    pub root_groups: Vec<ResourceGroup>,
+    pub selectors: Vec<ResourceSelector>,
+}
+
+/// One rule in the file-based session-property manager.
+#[derive(Clone, Debug, Default)]
+pub struct SessionRule {
+    pub match_user: Option<String>,
+    pub match_source: Option<String>,
+    pub match_client_tags: Vec<String>,
+    pub properties: BTreeMap<String, String>,
+}
+
+/// Fault-tolerant execution config: retry policy + S3 exchange manager.
+#[derive(Clone, Debug, Default)]
+pub struct FaultTolerant {
+    pub retry_policy: String, // "TASK" | "QUERY"
+    pub s3_base_dir: String,  // "s3://bucket/prefix"
+    pub s3_endpoint: String,
+    pub s3_region: String,
+    pub s3_path_style: bool,
+    // creds are provided via TrinoConfig.env (EXCHANGE_S3_ACCESS_KEY / _SECRET_KEY)
 }
 
 /// Worker graceful-shutdown drain settings.
@@ -72,6 +120,12 @@ pub struct TrinoConfig {
     pub env: BTreeMap<String, String>,    // extra env on both roles
     pub coordinator: RoleConfig,
     pub worker: WorkerRoleConfig,
+    pub additional_node_properties: BTreeMap<String, String>,
+    pub additional_log_properties: BTreeMap<String, String>,
+    pub event_listener: BTreeMap<String, String>,
+    pub resource_groups: Option<ResourceGroups>,
+    pub session_properties: Vec<SessionRule>,
+    pub fault_tolerant: Option<FaultTolerant>,
 }
 
 /// One catalog rendered as `<name>.properties`. `properties` may contain
