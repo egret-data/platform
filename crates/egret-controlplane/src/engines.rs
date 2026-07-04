@@ -536,6 +536,10 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
     // Resolve the RAW auth block (password secrets → bcrypt hashes, JWKS default),
     // mirroring the fault-tolerant storage resolution. Ingress is parsed inline.
     config.auth = resolve_auth(st, &engine.spec["trinoConfig"]).await?;
+    // When the engine ALREADY has auth on, inject the derived `egret-monitor`
+    // system user so the native Trino monitor can authenticate. Guarded on
+    // `auth.is_some()` (inside the helper) so a no-auth engine stays auth-free.
+    inject_monitor_user(&mut config.auth, engine.id)?;
     // Trino requires a coordinator<->worker shared secret whenever auth is enabled.
     // Derive a stable per-engine value (both roles read it from the env Secret).
     if config.auth.is_some() {
@@ -944,6 +948,33 @@ async fn resolve_auth(st: &CpState, tc: &serde_json::Value) -> Result<Option<Aut
         password_users,
         jwt,
     }))
+}
+
+/// System user the native Trino monitor (Phase 1.6b) authenticates as against a
+/// coordinator that has auth enabled. The password is DERIVED from the engine id
+/// (no storage): both provisioning (bcrypt into `password.db`, [`inject_monitor_user`])
+/// and the monitor's Basic auth header re-derive the same value.
+pub fn monitor_password(id: Uuid) -> String {
+    format!("egret-monitor-{id}")
+}
+
+/// Inject the derived `egret-monitor` password entry into an engine's auth block
+/// so the native monitor can authenticate. No-op when `auth` is `None`: this must
+/// NOT turn auth on for engines that have none — it only rides along when auth is
+/// already enabled. Uses the same `$2b$`→`$2y$` relabel as the human users so
+/// Trino's jBCrypt file authenticator accepts the hash.
+fn inject_monitor_user(auth: &mut Option<AuthReq>, engine_id: Uuid) -> Result<(), CpError> {
+    let Some(auth) = auth.as_mut() else {
+        return Ok(());
+    };
+    let bcrypt_hash = bcrypt::hash(monitor_password(engine_id), bcrypt::DEFAULT_COST)
+        .map_err(|e| CpError::BadRequest(format!("bcrypt monitor password: {e}")))?
+        .replacen("$2b$", "$2y$", 1);
+    auth.password_users.push(PasswordEntryReq {
+        username: "egret-monitor".into(),
+        bcrypt_hash,
+    });
+    Ok(())
 }
 
 // ── handlers ───────────────────────────────────────────────────────────────────
@@ -1452,5 +1483,48 @@ mod tests {
             validate_resource_groups(&rg),
             Err(CpError::BadRequest(_))
         ));
+    }
+
+    #[test]
+    fn monitor_password_is_derived_from_id() {
+        assert_eq!(
+            monitor_password(Uuid::nil()),
+            "egret-monitor-00000000-0000-0000-0000-000000000000"
+        );
+    }
+
+    #[test]
+    fn inject_monitor_user_adds_egret_monitor_when_auth_on() {
+        let id = Uuid::new_v4();
+        // An engine WITH auth (one human password user).
+        let mut auth = Some(AuthReq {
+            password_users: vec![PasswordEntryReq {
+                username: "bob".into(),
+                bcrypt_hash: "$2y$hash".into(),
+            }],
+            jwt: None,
+        });
+        inject_monitor_user(&mut auth, id).unwrap();
+
+        let users = &auth.unwrap().password_users;
+        // Both the human user AND egret-monitor are present.
+        assert!(users.iter().any(|u| u.username == "bob"));
+        let mon = users
+            .iter()
+            .find(|u| u.username == "egret-monitor")
+            .expect("egret-monitor injected");
+        // The hash stored for Trino stays `$2y$`.
+        assert!(mon.bcrypt_hash.starts_with("$2y$"));
+        // `bcrypt::verify` wants the `$2b$` prefix; relabel back for the check.
+        let hash = mon.bcrypt_hash.replacen("$2y$", "$2b$", 1);
+        assert!(bcrypt::verify(monitor_password(id), &hash).unwrap());
+    }
+
+    #[test]
+    fn inject_monitor_user_noop_when_no_auth() {
+        // A no-auth engine must NOT gain an auth block (egret-monitor not forced on).
+        let mut auth: Option<AuthReq> = None;
+        inject_monitor_user(&mut auth, Uuid::new_v4()).unwrap();
+        assert!(auth.is_none());
     }
 }
