@@ -11,9 +11,10 @@ pub mod trino;
 pub use kube_client::{KubeClient, LiveKube};
 pub use provisioner::EngineProvisioner;
 pub use spec::{
-    Affinity, Auth, CatalogSpec, ContainerPort, DeploymentStrategy, EngineSpec, EngineStatus,
-    EnvFromSource, FaultTolerant, GracefulShutdown, HeapConfig, Ingress, Jwt, MiniContainer,
-    NodeSelectorRequirement, ObjectMount, PasswordEntry, PodStatus, Probe, Probes, ResourceGroup,
+    Affinity, Auth, Autoscaling, CatalogSpec, ContainerPort, CronTrigger, DeploymentStrategy,
+    EngineSpec, EngineStatus, EnvFromSource, FaultTolerant, GracefulShutdown, HeapConfig,
+    HpaConfig, Ingress, Jwt, KedaConfig, KedaTrigger, MiniContainer, NodeSelectorRequirement,
+    ObjectMount, PasswordEntry, PodStatus, Probe, Probes, PrometheusTrigger, ResourceGroup,
     ResourceGroups, ResourceSelector, RoleConfig, RoleResources, SecurityContext, SessionRule,
     Toleration, TopologySpreadConstraint, TrinoConfig, VolumeMount, WorkerRoleConfig,
 };
