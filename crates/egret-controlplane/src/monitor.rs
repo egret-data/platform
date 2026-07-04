@@ -117,11 +117,13 @@ pub fn cluster_dto(queries: &Value, nodes: &Value) -> ClusterDto {
 // ── routes ─────────────────────────────────────────────────────────────────────
 //
 // The native Trino monitor: each route resolves the engine, builds the monitor
-// auth headers, and issues a raw HTTP request to the coordinator `Service`
-// (`{name}-trino`) via the kube-free `EngineProvisioner::coordinator_request`
-// seam. A coordinator that is unreachable, non-2xx, or returns a non-JSON error
-// page maps to `CpError::BadGateway` (502) so the UI can surface it distinctly
-// from a 4xx/5xx egret error.
+// auth headers, and issues a raw HTTP request to the coordinator via
+// `coordinator_call`, which PREFERS the engine's public Ingress URL when it has
+// one and falls back to the kube-free `EngineProvisioner::coordinator_request`
+// seam (`{name}-trino` Service) otherwise or on an ingress transport error. A
+// coordinator that is unreachable, non-2xx, or returns a non-JSON error page
+// maps to `CpError::BadGateway` (502) so the UI can surface it distinctly from a
+// 4xx/5xx egret error.
 
 /// Monitor routes mounted onto the engines router.
 pub fn routes() -> Router<CpState> {
@@ -156,20 +158,70 @@ async fn load_engine(st: &CpState, id: Uuid) -> Result<Engine, CpError> {
     st.storage.get_engine(id).await?.ok_or(CpError::NotFound)
 }
 
-/// Issue one coordinator request, mapping transport errors to a 502.
+/// The engine's public Ingress base URL (`https://{host}`) when
+/// `trinoConfig.ingress` is enabled with a non-empty host; otherwise `None`.
+fn ingress_base(engine: &Engine) -> Option<String> {
+    let ing = &engine.spec["trinoConfig"]["ingress"];
+    if ing["enabled"].as_bool() != Some(true) {
+        return None;
+    }
+    let host = ing["host"].as_str().filter(|h| !h.is_empty())?;
+    Some(format!("https://{host}"))
+}
+
+/// Attempt the coordinator request via the engine's public Ingress. Returns
+/// `Some((status, body))` on ANY HTTP response, or `None` when there is no
+/// usable ingress or the request fails at the transport level (bad method,
+/// client build, connect/timeout) — so the caller falls back to the internal
+/// seam. The dev ingress is self-signed (`danger_accept_invalid_certs`) and a
+/// short timeout lets a dead ingress fall back fast.
+async fn try_ingress(
+    engine: &Engine,
+    method: &str,
+    path: &str,
+    headers: &[(String, String)],
+    body: Option<Vec<u8>>,
+) -> Option<(u16, Vec<u8>)> {
+    let url = format!("{}{path}", ingress_base(engine)?);
+    let m = method.parse::<reqwest::Method>().ok()?;
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(4))
+        .build()
+        .ok()?;
+    let mut rb = client.request(m, &url);
+    for (k, v) in headers {
+        rb = rb.header(k.as_str(), v.as_str());
+    }
+    if let Some(b) = body {
+        rb = rb.body(b);
+    }
+    let resp = rb.send().await.ok()?;
+    let status = resp.status().as_u16();
+    let bytes = resp.bytes().await.ok()?.to_vec();
+    Some((status, bytes))
+}
+
+/// Issue one coordinator request, preferring the engine's public Ingress URL
+/// when it has one and falling back to the internal kube-free seam otherwise or
+/// on a transport error. Transport errors map to a 502.
 async fn coordinator_call(
     st: &CpState,
     engine: &Engine,
     method: &str,
     path: &str,
+    body: Option<Vec<u8>>,
 ) -> Result<(u16, Vec<u8>), CpError> {
+    let headers = monitor_headers(engine);
+    if let Some(resp) = try_ingress(engine, method, path, &headers, body.clone()).await {
+        return Ok(resp);
+    }
     let prov = st
         .engine_provisioner
         .as_ref()
         .ok_or_else(|| CpError::BadRequest("kubernetes not configured".into()))?;
     let service = format!("{}-trino", engine.name);
-    let headers = monitor_headers(engine);
-    prov.coordinator_request(&engine.namespace, &service, method, path, &headers, None)
+    prov.coordinator_request(&engine.namespace, &service, method, path, &headers, body)
         .await
         .map_err(|_| CpError::BadGateway)
 }
@@ -182,7 +234,7 @@ async fn coordinator_json(
     method: &str,
     path: &str,
 ) -> Result<Value, CpError> {
-    let (code, body) = coordinator_call(st, engine, method, path).await?;
+    let (code, body) = coordinator_call(st, engine, method, path, None).await?;
     if !(200..300).contains(&code) {
         return Err(CpError::BadGateway);
     }
@@ -222,7 +274,8 @@ async fn kill_query(
 ) -> Result<StatusCode, CpError> {
     require_platform_admin(&p)?;
     let engine = load_engine(&st, id).await?;
-    let (code, _) = coordinator_call(&st, &engine, "DELETE", &format!("/v1/query/{qid}")).await?;
+    let (code, _) =
+        coordinator_call(&st, &engine, "DELETE", &format!("/v1/query/{qid}"), None).await?;
     if !(200..300).contains(&code) {
         return Err(CpError::BadGateway);
     }
@@ -271,6 +324,51 @@ mod tests {
         assert_eq!(d.base.state, "FAILED");
         assert_eq!(d.error_message.as_deref(), Some("boom"));
         assert_eq!(d.output_stage.as_ref().unwrap()["stageId"], "0");
+    }
+
+    fn engine_with_spec(spec: Value) -> Engine {
+        Engine {
+            id: Uuid::nil(),
+            name: "t".into(),
+            r#type: "trino".into(),
+            namespace: "ns".into(),
+            warehouse_id: Uuid::nil(),
+            spec,
+            status: "running".into(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn ingress_base_none_when_disabled_or_missing() {
+        assert_eq!(ingress_base(&engine_with_spec(json!({}))), None);
+        assert_eq!(
+            ingress_base(&engine_with_spec(
+                json!({"trinoConfig":{"ingress":{"enabled":false,"host":"h.local"}}})
+            )),
+            None
+        );
+        // enabled but empty/absent host → no usable ingress.
+        assert_eq!(
+            ingress_base(&engine_with_spec(
+                json!({"trinoConfig":{"ingress":{"enabled":true,"host":""}}})
+            )),
+            None
+        );
+        assert_eq!(
+            ingress_base(&engine_with_spec(
+                json!({"trinoConfig":{"ingress":{"enabled":true}}})
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn ingress_base_uses_host_when_enabled() {
+        let e = engine_with_spec(
+            json!({"trinoConfig":{"ingress":{"enabled":true,"host":"trino.dev.local"}}}),
+        );
+        assert_eq!(ingress_base(&e).as_deref(), Some("https://trino.dev.local"));
     }
 
     #[test]
