@@ -1226,6 +1226,130 @@ async fn update_engine_pod_scheduling_roundtrips() {
 }
 
 #[tokio::test]
+async fn update_engine_autoscaling_roundtrips() {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_autoscale_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    // Create with the simple wizard.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // PUT a trinoConfig with HPA autoscaling → 200.
+    let put_body = serde_json::json!({
+        "name": name, "warehouseId": wh_id,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+        "trinoConfig": {
+            "coordinator": { "replicas": 1 },
+            "worker": { "replicas": 1 },
+            "autoscaling": {
+                "mode": "hpa",
+                "hpa": { "maxReplicas": 5, "targetCpuPercent": 60 }
+            }
+        }
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(put_body),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "update engine hpa; body={j}");
+
+    // GET reflects the HPA autoscaling block.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("/engines/{engine_id}"), &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "get engine; body={j}");
+    let asc = &j["spec"]["trinoConfig"]["autoscaling"];
+    assert_eq!(asc["mode"], "hpa", "autoscaling mode round-trips; body={j}");
+    assert_eq!(
+        asc["hpa"]["maxReplicas"], 5,
+        "hpa maxReplicas round-trips; body={j}"
+    );
+
+    // PUT a KEDA config with a cron trigger → 200; GET reflects the trigger kind.
+    let put_body = serde_json::json!({
+        "name": name, "warehouseId": wh_id,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+        "trinoConfig": {
+            "coordinator": { "replicas": 1 },
+            "worker": { "replicas": 1 },
+            "autoscaling": {
+                "mode": "keda",
+                "keda": {
+                    "minReplicaCount": 0, "maxReplicaCount": 4,
+                    "triggers": [{
+                        "kind": "cron",
+                        "cron": { "start": "0 8 * * *", "end": "0 20 * * *", "desiredReplicas": 3, "timezone": "UTC" }
+                    }]
+                }
+            }
+        }
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(put_body),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "update engine keda; body={j}");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("/engines/{engine_id}"), &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "get engine; body={j}");
+    let asc = &j["spec"]["trinoConfig"]["autoscaling"];
+    assert_eq!(asc["mode"], "keda", "keda mode round-trips; body={j}");
+    assert_eq!(
+        asc["keda"]["triggers"][0]["kind"], "cron",
+        "keda trigger kind round-trips; body={j}"
+    );
+}
+
+#[tokio::test]
 async fn engine_catalog_routes() {
     let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
         eprintln!("skip: DATABASE_URL not set");
