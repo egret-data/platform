@@ -900,8 +900,12 @@ async fn resolve_auth(st: &CpState, tc: &serde_json::Value) -> Result<Option<Aut
                 .resolve_plaintext(None, secret_ref)
                 .await
                 .map_err(|e| CpError::BadRequest(format!("resolve password secret: {e}")))?;
+            // Trino's file password authenticator (jBCrypt) accepts the `$2y$`
+            // variant; the bcrypt crate emits `$2b$`. They are algorithmically
+            // identical, so relabel the prefix.
             let bcrypt_hash = bcrypt::hash(pw, bcrypt::DEFAULT_COST)
-                .map_err(|e| CpError::BadRequest(format!("bcrypt password: {e}")))?;
+                .map_err(|e| CpError::BadRequest(format!("bcrypt password: {e}")))?
+                .replacen("$2b$", "$2y$", 1);
             password_users.push(PasswordEntryReq {
                 username,
                 bcrypt_hash,
