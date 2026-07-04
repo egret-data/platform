@@ -63,7 +63,10 @@ import {
   SessionPropertiesSection,
   kvToRecord,
 } from "./EngineResourceGroups";
-import { useEngineConfigForm } from "./useEngineConfigForm";
+import {
+  useEngineConfigForm,
+  type EngineConfigForm,
+} from "./useEngineConfigForm";
 import { EngineRoleConfig } from "./EngineRoleConfig";
 import { EngineConfigGeneral } from "./EngineConfigGeneral";
 import { EngineConfigReliability } from "./EngineConfigReliability";
@@ -154,22 +157,78 @@ export default function EngineDetail() {
       ) : !data ? (
         <p className="py-14 text-center text-sm text-muted-foreground">Loading…</p>
       ) : (
-        <Tabs defaultValue="overview" className="space-y-5">
-          <TabsList>
-            <TabsTrigger value="overview">Overview</TabsTrigger>
-            <TabsTrigger value="monitor">Monitor</TabsTrigger>
-          </TabsList>
-          <TabsContent value="overview" className="space-y-5">
-            <StatusCard status={data.status} />
-            <ConfigCard engine={data} />
-            <CatalogsCard engine={data} />
-            <DangerCard engine={data} />
-          </TabsContent>
-          <TabsContent value="monitor">
-            <EngineMonitor engineId={id} />
-          </TabsContent>
-        </Tabs>
+        <EngineTabs engine={data} engineId={id} />
       )}
+    </div>
+  );
+}
+
+/**
+ * Top-level engine tabs: Overview / Configuration / Security & Exposure /
+ * Monitor. The config form hook is instantiated here so the Configuration and
+ * Security tabs share a single form state (and a single Save action).
+ */
+function EngineTabs({
+  engine,
+  engineId,
+}: {
+  engine: EngineWithStatus;
+  engineId: string;
+}) {
+  const cfg = useEngineConfigForm(engine);
+
+  return (
+    <Tabs defaultValue="overview" className="space-y-5">
+      <TabsList>
+        <TabsTrigger value="overview">Overview</TabsTrigger>
+        <TabsTrigger value="configuration">Configuration</TabsTrigger>
+        <TabsTrigger value="security">Security &amp; Exposure</TabsTrigger>
+        <TabsTrigger value="monitor">Monitor</TabsTrigger>
+      </TabsList>
+
+      <TabsContent value="overview" className="space-y-5">
+        <StatusCard status={engine.status} />
+        <CatalogsCard engine={engine} />
+        <DangerCard engine={engine} />
+      </TabsContent>
+
+      <TabsContent value="configuration">
+        <ConfigurationTab cfg={cfg} />
+      </TabsContent>
+
+      <TabsContent value="security">
+        <SecurityTab cfg={cfg} />
+      </TabsContent>
+
+      <TabsContent value="monitor">
+        <EngineMonitor engineId={engineId} />
+      </TabsContent>
+    </Tabs>
+  );
+}
+
+/**
+ * Shared "Save changes" footer for the Configuration and Security tabs. Both
+ * act on the same `useEngineConfigForm` instance passed down as `cfg`.
+ */
+function SaveBar({ cfg }: { cfg: EngineConfigForm }) {
+  const { error, saved, dirty, saving, save } = cfg;
+  return (
+    <div className="space-y-4">
+      {error && <p className="text-sm text-destructive">{error}</p>}
+
+      {saved && !error && (
+        <p className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-sm text-muted-foreground">
+          Saved. The engine will restart to apply the new configuration.
+        </p>
+      )}
+
+      <div className="flex justify-end">
+        <Button type="button" onClick={save} disabled={!dirty || saving}>
+          {saving && <Loader2 className="h-4 w-4 animate-spin" />}
+          Save changes
+        </Button>
+      </div>
     </div>
   );
 }
@@ -227,11 +286,7 @@ function StatusCard({ status }: { status: EngineStatus }) {
 // Per-role config form model + serialization lives in `useEngineConfigForm.ts`;
 // the per-role editor UI lives in `EngineRoleConfig.tsx`.
 
-function ConfigCard({ engine }: { engine: EngineWithStatus }) {
-  // All config form state, prefill, dirty tracking, and the save mutation +
-  // payload builder live in the shared hook. Destructure to the same names the
-  // JSX below already uses.
-  const cfg = useEngineConfigForm(engine);
+function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
   const {
     queryMaxMemory,
     setQueryMaxMemory,
@@ -267,29 +322,6 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
     setResourceGroups,
     sessionRules,
     setSessionRules,
-    passwordUsers,
-    setPasswordUsers,
-    jwtEnabled,
-    setJwtEnabled,
-    jwksUri,
-    setJwksUri,
-    requiredAudience,
-    setRequiredAudience,
-    ingressEnabled,
-    setIngressEnabled,
-    ingressHost,
-    setIngressHost,
-    ingressClassName,
-    setIngressClassName,
-    ingressTlsSecret,
-    setIngressTlsSecret,
-    ingressAnnotations,
-    setIngressAnnotations,
-    error,
-    dirty,
-    saving,
-    saved,
-    save,
   } = cfg;
 
   return (
@@ -303,14 +335,17 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
       </CardHeader>
       <CardContent>
         <div className="space-y-4">
-          <Tabs defaultValue="cluster">
+          <Tabs defaultValue="general">
             <TabsList>
-              <TabsTrigger value="cluster">Cluster</TabsTrigger>
+              <TabsTrigger value="general">General</TabsTrigger>
               <TabsTrigger value="coordinator">Coordinator</TabsTrigger>
               <TabsTrigger value="worker">Worker</TabsTrigger>
+              <TabsTrigger value="workload">Workload</TabsTrigger>
+              <TabsTrigger value="reliability">Reliability</TabsTrigger>
+              <TabsTrigger value="advanced">Advanced</TabsTrigger>
             </TabsList>
 
-            <TabsContent value="cluster" className="space-y-5 pt-4">
+            <TabsContent value="general" className="pt-4">
               <EngineConfigGeneral
                 queryMaxMemory={queryMaxMemory}
                 setQueryMaxMemory={setQueryMaxMemory}
@@ -320,61 +355,6 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
                 setConfigProps={setConfigProps}
                 env={env}
                 setEnv={setEnv}
-              />
-
-              <EngineConfigReliability
-                ftEnabled={ftEnabled}
-                setFtEnabled={setFtEnabled}
-                retryPolicy={retryPolicy}
-                setRetryPolicy={setRetryPolicy}
-                exchangeStorageConnId={exchangeStorageConnId}
-                setExchangeStorageConnId={setExchangeStorageConnId}
-                exchangePrefix={exchangePrefix}
-                setExchangePrefix={setExchangePrefix}
-              />
-
-              <EngineConfigAdvanced
-                eventListener={eventListener}
-                setEventListener={setEventListener}
-                nodeProps={nodeProps}
-                setNodeProps={setNodeProps}
-                logProps={logProps}
-                setLogProps={setLogProps}
-              />
-
-              <div className="rounded-lg border p-4">
-                <ResourceGroupsSection
-                  value={resourceGroups}
-                  onChange={setResourceGroups}
-                />
-              </div>
-
-              <div className="rounded-lg border p-4">
-                <SessionPropertiesSection
-                  value={sessionRules}
-                  onChange={setSessionRules}
-                />
-              </div>
-
-              <EngineSecurity
-                passwordUsers={passwordUsers}
-                setPasswordUsers={setPasswordUsers}
-                jwtEnabled={jwtEnabled}
-                setJwtEnabled={setJwtEnabled}
-                jwksUri={jwksUri}
-                setJwksUri={setJwksUri}
-                requiredAudience={requiredAudience}
-                setRequiredAudience={setRequiredAudience}
-                ingressEnabled={ingressEnabled}
-                setIngressEnabled={setIngressEnabled}
-                ingressHost={ingressHost}
-                setIngressHost={setIngressHost}
-                ingressClassName={ingressClassName}
-                setIngressClassName={setIngressClassName}
-                ingressTlsSecret={ingressTlsSecret}
-                setIngressTlsSecret={setIngressTlsSecret}
-                ingressAnnotations={ingressAnnotations}
-                setIngressAnnotations={setIngressAnnotations}
               />
             </TabsContent>
 
@@ -397,26 +377,110 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
                 onGracePeriodChange={setGracePeriod}
               />
             </TabsContent>
+
+            <TabsContent value="workload" className="space-y-5 pt-4">
+              <div className="rounded-lg border p-4">
+                <ResourceGroupsSection
+                  value={resourceGroups}
+                  onChange={setResourceGroups}
+                />
+              </div>
+
+              <div className="rounded-lg border p-4">
+                <SessionPropertiesSection
+                  value={sessionRules}
+                  onChange={setSessionRules}
+                />
+              </div>
+            </TabsContent>
+
+            <TabsContent value="reliability" className="pt-4">
+              <EngineConfigReliability
+                ftEnabled={ftEnabled}
+                setFtEnabled={setFtEnabled}
+                retryPolicy={retryPolicy}
+                setRetryPolicy={setRetryPolicy}
+                exchangeStorageConnId={exchangeStorageConnId}
+                setExchangeStorageConnId={setExchangeStorageConnId}
+                exchangePrefix={exchangePrefix}
+                setExchangePrefix={setExchangePrefix}
+              />
+            </TabsContent>
+
+            <TabsContent value="advanced" className="pt-4">
+              <EngineConfigAdvanced
+                eventListener={eventListener}
+                setEventListener={setEventListener}
+                nodeProps={nodeProps}
+                setNodeProps={setNodeProps}
+                logProps={logProps}
+                setLogProps={setLogProps}
+              />
+            </TabsContent>
           </Tabs>
 
-          {error && (
-            <Alert variant="destructive">
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-          )}
+          <SaveBar cfg={cfg} />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
-          {saved && !error && (
-            <p className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-sm text-muted-foreground">
-              Saved. The engine will restart to apply the new configuration.
-            </p>
-          )}
+function SecurityTab({ cfg }: { cfg: EngineConfigForm }) {
+  const {
+    passwordUsers,
+    setPasswordUsers,
+    jwtEnabled,
+    setJwtEnabled,
+    jwksUri,
+    setJwksUri,
+    requiredAudience,
+    setRequiredAudience,
+    ingressEnabled,
+    setIngressEnabled,
+    ingressHost,
+    setIngressHost,
+    ingressClassName,
+    setIngressClassName,
+    ingressTlsSecret,
+    setIngressTlsSecret,
+    ingressAnnotations,
+    setIngressAnnotations,
+  } = cfg;
 
-          <div className="flex justify-end">
-            <Button type="button" onClick={save} disabled={!dirty || saving}>
-              {saving && <Loader2 className="h-4 w-4 animate-spin" />}
-              Save changes
-            </Button>
-          </div>
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-lg">Security &amp; Exposure</CardTitle>
+        <CardDescription>
+          Client authentication and coordinator exposure. Saving re-provisions
+          the engine.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-4">
+          <EngineSecurity
+            passwordUsers={passwordUsers}
+            setPasswordUsers={setPasswordUsers}
+            jwtEnabled={jwtEnabled}
+            setJwtEnabled={setJwtEnabled}
+            jwksUri={jwksUri}
+            setJwksUri={setJwksUri}
+            requiredAudience={requiredAudience}
+            setRequiredAudience={setRequiredAudience}
+            ingressEnabled={ingressEnabled}
+            setIngressEnabled={setIngressEnabled}
+            ingressHost={ingressHost}
+            setIngressHost={setIngressHost}
+            ingressClassName={ingressClassName}
+            setIngressClassName={setIngressClassName}
+            ingressTlsSecret={ingressTlsSecret}
+            setIngressTlsSecret={setIngressTlsSecret}
+            ingressAnnotations={ingressAnnotations}
+            setIngressAnnotations={setIngressAnnotations}
+          />
+
+          <SaveBar cfg={cfg} />
         </div>
       </CardContent>
     </Card>
