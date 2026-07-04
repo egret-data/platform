@@ -299,6 +299,19 @@ function StatusCard({ status }: { status: EngineStatus }) {
 // Per-role config form model + serialization lives in `useEngineConfigForm.ts`;
 // the per-role editor UI lives in `EngineRoleConfig.tsx`.
 
+// Configuration left-nav sections (label + `section` key). Pod & Scheduling is
+// one item for now; Task 6 replaces it with Pod / Placement / Containers & Mounts.
+const CONFIG_NAV: { key: string; label: string }[] = [
+  { key: "general", label: "General" },
+  { key: "coordinator", label: "Coordinator" },
+  { key: "worker", label: "Worker" },
+  { key: "workload", label: "Workload" },
+  { key: "reliability", label: "Reliability" },
+  { key: "advanced", label: "Advanced" },
+  { key: "podScheduling", label: "Pod & Scheduling" },
+  { key: "autoscaling", label: "Autoscaling" },
+];
+
 function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
   const {
     queryMaxMemory,
@@ -371,12 +384,26 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
     setAutoscaleHpa,
     autoscaleKeda,
     setAutoscaleKeda,
+    sectionCounts,
   } = cfg;
 
   // Goes false when a raw-JSON pod/scheduling override fails to parse; blocks Save.
   const [podSchedValid, setPodSchedValid] = useState(true);
   // Goes false when a raw-JSON autoscaling override fails to parse; blocks Save.
   const [autoscaleValid, setAutoscaleValid] = useState(true);
+
+  // Active left-nav section. Pod & Scheduling stays a single item for now
+  // (Task 6 splits it into Pod / Placement / Containers & Mounts).
+  const [section, setSection] = useState("general");
+
+  // Non-default field count per nav item (drives the badges). The combined
+  // Pod & Scheduling item sums its three underlying section counts.
+  const countFor = (key: string): number =>
+    key === "podScheduling"
+      ? (sectionCounts.pod ?? 0) +
+        (sectionCounts.placement ?? 0) +
+        (sectionCounts.containersMounts ?? 0)
+      : (sectionCounts[key] ?? 0);
 
   return (
     <Card>
@@ -389,143 +416,162 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
       </CardHeader>
       <CardContent>
         <div className="space-y-4">
-          <Tabs defaultValue="general">
-            <TabsList>
-              <TabsTrigger value="general">General</TabsTrigger>
-              <TabsTrigger value="coordinator">Coordinator</TabsTrigger>
-              <TabsTrigger value="worker">Worker</TabsTrigger>
-              <TabsTrigger value="workload">Workload</TabsTrigger>
-              <TabsTrigger value="reliability">Reliability</TabsTrigger>
-              <TabsTrigger value="advanced">Advanced</TabsTrigger>
-              <TabsTrigger value="pod-scheduling">Pod &amp; Scheduling</TabsTrigger>
-              <TabsTrigger value="autoscaling">Autoscaling</TabsTrigger>
-            </TabsList>
+          <div className="flex flex-col gap-4 md:flex-row">
+            <nav className="shrink-0 space-y-1 md:w-48">
+              {CONFIG_NAV.map((item) => {
+                const count = countFor(item.key);
+                const active = section === item.key;
+                return (
+                  <button
+                    key={item.key}
+                    type="button"
+                    onClick={() => setSection(item.key)}
+                    className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-muted ${
+                      active ? "bg-muted font-medium" : "text-muted-foreground"
+                    }`}
+                  >
+                    <span>{item.label}</span>
+                    {count > 0 && (
+                      <Badge variant="secondary" className="ml-2">
+                        {count}
+                      </Badge>
+                    )}
+                  </button>
+                );
+              })}
+            </nav>
 
-            <TabsContent value="general" className="pt-4">
-              <EngineConfigGeneral
-                queryMaxMemory={queryMaxMemory}
-                setQueryMaxMemory={setQueryMaxMemory}
-                logLevel={logLevel}
-                setLogLevel={setLogLevel}
-                configProps={configProps}
-                setConfigProps={setConfigProps}
-                env={env}
-                setEnv={setEnv}
-              />
-            </TabsContent>
-
-            <TabsContent value="coordinator" className="pt-4">
-              <EngineRoleConfig
-                role="coordinator"
-                value={coordinator}
-                onChange={setCoordinator}
-              />
-            </TabsContent>
-
-            <TabsContent value="worker" className="space-y-5 pt-4">
-              <EngineRoleConfig
-                role="worker"
-                value={worker}
-                onChange={setWorker}
-                gsEnabled={gsEnabled}
-                onGsEnabledChange={setGsEnabled}
-                gracePeriod={gracePeriod}
-                onGracePeriodChange={setGracePeriod}
-              />
-            </TabsContent>
-
-            <TabsContent value="workload" className="space-y-5 pt-4">
-              <div className="rounded-lg border p-4">
-                <ResourceGroupsSection
-                  value={resourceGroups}
-                  onChange={setResourceGroups}
+            <div className="min-w-0 flex-1">
+              {section === "general" && (
+                <EngineConfigGeneral
+                  queryMaxMemory={queryMaxMemory}
+                  setQueryMaxMemory={setQueryMaxMemory}
+                  logLevel={logLevel}
+                  setLogLevel={setLogLevel}
+                  configProps={configProps}
+                  setConfigProps={setConfigProps}
+                  env={env}
+                  setEnv={setEnv}
                 />
-              </div>
+              )}
 
-              <div className="rounded-lg border p-4">
-                <SessionPropertiesSection
-                  value={sessionRules}
-                  onChange={setSessionRules}
+              {section === "coordinator" && (
+                <EngineRoleConfig
+                  role="coordinator"
+                  value={coordinator}
+                  onChange={setCoordinator}
                 />
-              </div>
-            </TabsContent>
+              )}
 
-            <TabsContent value="reliability" className="pt-4">
-              <EngineConfigReliability
-                ftEnabled={ftEnabled}
-                setFtEnabled={setFtEnabled}
-                retryPolicy={retryPolicy}
-                setRetryPolicy={setRetryPolicy}
-                exchangeStorageConnId={exchangeStorageConnId}
-                setExchangeStorageConnId={setExchangeStorageConnId}
-                exchangePrefix={exchangePrefix}
-                setExchangePrefix={setExchangePrefix}
-              />
-            </TabsContent>
+              {section === "worker" && (
+                <div className="space-y-5">
+                  <EngineRoleConfig
+                    role="worker"
+                    value={worker}
+                    onChange={setWorker}
+                    gsEnabled={gsEnabled}
+                    onGsEnabledChange={setGsEnabled}
+                    gracePeriod={gracePeriod}
+                    onGracePeriodChange={setGracePeriod}
+                  />
+                </div>
+              )}
 
-            <TabsContent value="advanced" className="pt-4">
-              <EngineConfigAdvanced
-                eventListener={eventListener}
-                setEventListener={setEventListener}
-                nodeProps={nodeProps}
-                setNodeProps={setNodeProps}
-                logProps={logProps}
-                setLogProps={setLogProps}
-              />
-            </TabsContent>
+              {section === "workload" && (
+                <div className="space-y-5">
+                  <div className="rounded-lg border p-4">
+                    <ResourceGroupsSection
+                      value={resourceGroups}
+                      onChange={setResourceGroups}
+                    />
+                  </div>
 
-            <TabsContent value="pod-scheduling" className="pt-4">
-              <PodSchedulingSection
-                coordinator={coordinator}
-                setCoordinator={setCoordinator}
-                worker={worker}
-                setWorker={setWorker}
-                initContainers={initContainers}
-                setInitContainers={setInitContainers}
-                sidecarContainers={sidecarContainers}
-                setSidecarContainers={setSidecarContainers}
-                serviceAccount={serviceAccount}
-                setServiceAccount={setServiceAccount}
-                imagePullSecrets={imagePullSecrets}
-                setImagePullSecrets={setImagePullSecrets}
-                imagePullPolicy={imagePullPolicy}
-                setImagePullPolicy={setImagePullPolicy}
-                podSecurityContext={podSecurityContext}
-                setPodSecurityContext={setPodSecurityContext}
-                containerSecurityContext={containerSecurityContext}
-                setContainerSecurityContext={setContainerSecurityContext}
-                envFrom={envFrom}
-                setEnvFrom={setEnvFrom}
-                configMounts={configMounts}
-                setConfigMounts={setConfigMounts}
-                secretMounts={secretMounts}
-                setSecretMounts={setSecretMounts}
-                deploymentStrategy={deploymentStrategy}
-                setDeploymentStrategy={setDeploymentStrategy}
-                deploymentAnnotations={deploymentAnnotations}
-                setDeploymentAnnotations={setDeploymentAnnotations}
-                revisionHistoryLimit={revisionHistoryLimit}
-                setRevisionHistoryLimit={setRevisionHistoryLimit}
-                progressDeadlineSeconds={progressDeadlineSeconds}
-                setProgressDeadlineSeconds={setProgressDeadlineSeconds}
-                shareProcessNamespace={shareProcessNamespace}
-                setShareProcessNamespace={setShareProcessNamespace}
-                onValidityChange={setPodSchedValid}
-              />
-            </TabsContent>
+                  <div className="rounded-lg border p-4">
+                    <SessionPropertiesSection
+                      value={sessionRules}
+                      onChange={setSessionRules}
+                    />
+                  </div>
+                </div>
+              )}
 
-            <TabsContent value="autoscaling" className="pt-4">
-              <EngineAutoscaling
-                mode={autoscaleMode}
-                setMode={setAutoscaleMode}
-                hpa={autoscaleHpa}
-                setHpa={setAutoscaleHpa}
-                keda={autoscaleKeda}
-                setKeda={setAutoscaleKeda}
-                onValidityChange={setAutoscaleValid}
-              />
-            </TabsContent>
-          </Tabs>
+              {section === "reliability" && (
+                <EngineConfigReliability
+                  ftEnabled={ftEnabled}
+                  setFtEnabled={setFtEnabled}
+                  retryPolicy={retryPolicy}
+                  setRetryPolicy={setRetryPolicy}
+                  exchangeStorageConnId={exchangeStorageConnId}
+                  setExchangeStorageConnId={setExchangeStorageConnId}
+                  exchangePrefix={exchangePrefix}
+                  setExchangePrefix={setExchangePrefix}
+                />
+              )}
+
+              {section === "advanced" && (
+                <EngineConfigAdvanced
+                  eventListener={eventListener}
+                  setEventListener={setEventListener}
+                  nodeProps={nodeProps}
+                  setNodeProps={setNodeProps}
+                  logProps={logProps}
+                  setLogProps={setLogProps}
+                />
+              )}
+
+              {section === "podScheduling" && (
+                <PodSchedulingSection
+                  coordinator={coordinator}
+                  setCoordinator={setCoordinator}
+                  worker={worker}
+                  setWorker={setWorker}
+                  initContainers={initContainers}
+                  setInitContainers={setInitContainers}
+                  sidecarContainers={sidecarContainers}
+                  setSidecarContainers={setSidecarContainers}
+                  serviceAccount={serviceAccount}
+                  setServiceAccount={setServiceAccount}
+                  imagePullSecrets={imagePullSecrets}
+                  setImagePullSecrets={setImagePullSecrets}
+                  imagePullPolicy={imagePullPolicy}
+                  setImagePullPolicy={setImagePullPolicy}
+                  podSecurityContext={podSecurityContext}
+                  setPodSecurityContext={setPodSecurityContext}
+                  containerSecurityContext={containerSecurityContext}
+                  setContainerSecurityContext={setContainerSecurityContext}
+                  envFrom={envFrom}
+                  setEnvFrom={setEnvFrom}
+                  configMounts={configMounts}
+                  setConfigMounts={setConfigMounts}
+                  secretMounts={secretMounts}
+                  setSecretMounts={setSecretMounts}
+                  deploymentStrategy={deploymentStrategy}
+                  setDeploymentStrategy={setDeploymentStrategy}
+                  deploymentAnnotations={deploymentAnnotations}
+                  setDeploymentAnnotations={setDeploymentAnnotations}
+                  revisionHistoryLimit={revisionHistoryLimit}
+                  setRevisionHistoryLimit={setRevisionHistoryLimit}
+                  progressDeadlineSeconds={progressDeadlineSeconds}
+                  setProgressDeadlineSeconds={setProgressDeadlineSeconds}
+                  shareProcessNamespace={shareProcessNamespace}
+                  setShareProcessNamespace={setShareProcessNamespace}
+                  onValidityChange={setPodSchedValid}
+                />
+              )}
+
+              {section === "autoscaling" && (
+                <EngineAutoscaling
+                  mode={autoscaleMode}
+                  setMode={setAutoscaleMode}
+                  hpa={autoscaleHpa}
+                  setHpa={setAutoscaleHpa}
+                  keda={autoscaleKeda}
+                  setKeda={setAutoscaleKeda}
+                  onValidityChange={setAutoscaleValid}
+                />
+              )}
+            </div>
+          </div>
 
           <SaveBar cfg={cfg} disabled={!podSchedValid || !autoscaleValid} />
         </div>
