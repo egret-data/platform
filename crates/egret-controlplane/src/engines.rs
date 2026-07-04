@@ -161,6 +161,42 @@ pub struct WorkerRoleConfigReq {
     pub graceful_shutdown: Option<GracefulShutdownReq>,
 }
 
+/// One password-authenticator user (mirrors orchestrator `PasswordEntry`). Holds
+/// the ALREADY-bcrypted hash: the control plane resolves the password secret and
+/// hashes it in [`build_provision_req`], so the orchestrator never sees plaintext.
+#[derive(Clone, Default)]
+pub struct PasswordEntryReq {
+    pub username: String,
+    pub bcrypt_hash: String,
+}
+
+/// JWT authenticator config (mirrors orchestrator `Jwt`). `jwks_uri` defaults to
+/// the control-plane's `engine_jwks_uri` when the wire value is empty/absent.
+#[derive(Clone, Default)]
+pub struct JwtReq {
+    pub jwks_uri: String,
+    pub required_audience: Option<String>,
+}
+
+/// Trino auth block: file-password users + an optional JWT authenticator
+/// (mirrors orchestrator `Auth`).
+#[derive(Clone, Default)]
+pub struct AuthReq {
+    pub password_users: Vec<PasswordEntryReq>,
+    pub jwt: Option<JwtReq>,
+}
+
+/// Kubernetes Ingress exposure config (mirrors orchestrator `Ingress`). No
+/// secrets, so it is parsed straight from the wire in [`trino_config_from_json`].
+#[derive(Clone, Default)]
+pub struct IngressReq {
+    pub enabled: bool,
+    pub class_name: Option<String>,
+    pub host: String,
+    pub tls_secret: Option<String>,
+    pub annotations: BTreeMap<String, String>,
+}
+
 /// Fuller Trino config surface, split per-role, kube-free (mirrors the
 /// orchestrator `TrinoConfig`).
 #[derive(Clone, Default)]
@@ -177,6 +213,10 @@ pub struct TrinoConfigReq {
     pub resource_groups: Option<ResourceGroupsReq>,
     pub session_properties: Vec<SessionRuleReq>,
     pub fault_tolerant: Option<FaultTolerantReq>,
+    /// Password users (bcrypt hashes) + optional JWT. Resolved from the RAW wire
+    /// `auth` (which carries `secretRef`, not hashes) in [`build_provision_req`].
+    pub auth: Option<AuthReq>,
+    pub ingress: Option<IngressReq>,
 }
 
 /// Resolved provisioning request handed to egret-bin (no k8s types here). The
@@ -479,6 +519,17 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
     // coords + creds, mirroring the egret-warehouse arm's storage resolution.
     config.fault_tolerant =
         resolve_fault_tolerant(st, &engine.spec["trinoConfig"], &mut config.env).await?;
+    // Resolve the RAW auth block (password secrets → bcrypt hashes, JWKS default),
+    // mirroring the fault-tolerant storage resolution. Ingress is parsed inline.
+    config.auth = resolve_auth(st, &engine.spec["trinoConfig"]).await?;
+    // Trino requires a coordinator<->worker shared secret whenever auth is enabled.
+    // Derive a stable per-engine value (both roles read it from the env Secret).
+    if config.auth.is_some() {
+        config.env.insert(
+            "TRINO_INTERNAL_SECRET".into(),
+            format!("egret-internal-{}", engine.id),
+        );
+    }
     Ok(EngineProvisionReq {
         name: engine.name.clone(),
         namespace: engine.namespace.clone(),
@@ -799,7 +850,86 @@ fn trino_config_from_json(v: &serde_json::Value) -> TrinoConfigReq {
         // Resolved in build_provision_req from the raw {retryPolicy,
         // exchangeStorageConnId, exchangePrefix} wire body.
         fault_tolerant: None,
+        // Resolved in build_provision_req from the raw {passwordUsers:[{username,
+        // secretRef}], jwt} wire body (secret → bcrypt). Ingress has no secrets.
+        auth: None,
+        ingress: parse_ingress(&v["ingress"]),
     }
+}
+
+/// Parse the `ingress { enabled, className?, host, tlsSecret?, annotations? }`
+/// wire object into an [`IngressReq`]; `None` when absent.
+fn parse_ingress(v: &serde_json::Value) -> Option<IngressReq> {
+    if !v.is_object() {
+        return None;
+    }
+    Some(IngressReq {
+        enabled: v["enabled"].as_bool().unwrap_or(false),
+        class_name: v["className"].as_str().map(Into::into),
+        host: v["host"].as_str().unwrap_or_default().to_string(),
+        tls_secret: v["tlsSecret"].as_str().map(Into::into),
+        annotations: str_map(&v["annotations"]),
+    })
+}
+
+/// Resolve the RAW `trinoConfig.auth`
+/// `{ passwordUsers: [{username, secretRef}], jwt?: {jwksUri?, requiredAudience?} }`
+/// into an [`AuthReq`]: each password secret is resolved + bcrypted so the
+/// orchestrator never sees plaintext, and an empty `jwksUri` falls back to the
+/// control-plane default [`CpState::engine_jwks_uri`]. `None` when the block is
+/// absent; `BadRequest` when a referenced secret is missing/unresolvable.
+async fn resolve_auth(st: &CpState, tc: &serde_json::Value) -> Result<Option<AuthReq>, CpError> {
+    let auth = &tc["auth"];
+    if !auth.is_object() {
+        return Ok(None);
+    }
+    let mut password_users = Vec::new();
+    if let Some(arr) = auth["passwordUsers"].as_array() {
+        for u in arr {
+            let username = u["username"].as_str().unwrap_or_default().to_string();
+            let Some(secret_ref) = u["secretRef"]
+                .as_str()
+                .and_then(|s| Uuid::parse_str(s).ok())
+            else {
+                return Err(CpError::BadRequest(
+                    "password user missing or invalid secretRef".into(),
+                ));
+            };
+            let pw = st
+                .secrets
+                .resolve_plaintext(None, secret_ref)
+                .await
+                .map_err(|e| CpError::BadRequest(format!("resolve password secret: {e}")))?;
+            // Trino's file password authenticator (jBCrypt) accepts the `$2y$`
+            // variant; the bcrypt crate emits `$2b$`. They are algorithmically
+            // identical, so relabel the prefix.
+            let bcrypt_hash = bcrypt::hash(pw, bcrypt::DEFAULT_COST)
+                .map_err(|e| CpError::BadRequest(format!("bcrypt password: {e}")))?
+                .replacen("$2b$", "$2y$", 1);
+            password_users.push(PasswordEntryReq {
+                username,
+                bcrypt_hash,
+            });
+        }
+    }
+    let jwt = {
+        let j = &auth["jwt"];
+        j.is_object().then(|| {
+            let jwks_uri = j["jwksUri"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .unwrap_or_else(|| st.engine_jwks_uri.clone());
+            JwtReq {
+                jwks_uri,
+                required_audience: j["requiredAudience"].as_str().map(Into::into),
+            }
+        })
+    };
+    Ok(Some(AuthReq {
+        password_users,
+        jwt,
+    }))
 }
 
 // ── handlers ───────────────────────────────────────────────────────────────────

@@ -670,6 +670,9 @@ function RoleConfigEditor({
   );
 }
 
+/** A password-user row: a username + the egret secret holding its password. */
+type PasswordUserForm = { username: string; secretRef: string };
+
 function ConfigCard({ engine }: { engine: EngineWithStatus }) {
   const queryClient = useQueryClient();
   const tc = engine.spec.trinoConfig;
@@ -677,6 +680,11 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
   const storage = useQuery<Storage[], ApiError>({
     queryKey: ["cp", "storage"],
     queryFn: listStorage,
+    retry: false,
+  });
+  const secrets = useQuery<Secret[], ApiError>({
+    queryKey: ["cp", "secrets"],
+    queryFn: listSecrets,
     retry: false,
   });
 
@@ -727,6 +735,29 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
     sessionRulesToForm(tc?.sessionProperties),
   );
 
+  // Exposure & auth: password users, egret-JWT acceptance, and ingress.
+  const [passwordUsers, setPasswordUsers] = useState<PasswordUserForm[]>(
+    tc?.auth?.passwordUsers?.map((u) => ({ ...u })) ?? [],
+  );
+  const [jwtEnabled, setJwtEnabled] = useState(tc?.auth?.jwt != null);
+  const [jwksUri, setJwksUri] = useState(tc?.auth?.jwt?.jwksUri ?? "");
+  const [requiredAudience, setRequiredAudience] = useState(
+    tc?.auth?.jwt?.requiredAudience ?? "",
+  );
+  const [ingressEnabled, setIngressEnabled] = useState(
+    tc?.ingress?.enabled ?? false,
+  );
+  const [ingressHost, setIngressHost] = useState(tc?.ingress?.host ?? "");
+  const [ingressClassName, setIngressClassName] = useState(
+    tc?.ingress?.className ?? "nginx",
+  );
+  const [ingressTlsSecret, setIngressTlsSecret] = useState(
+    tc?.ingress?.tlsSecret ?? "",
+  );
+  const [ingressAnnotations, setIngressAnnotations] = useState<Kv[]>(
+    recordToKv(tc?.ingress?.annotations),
+  );
+
   const [error, setError] = useState<string | null>(null);
 
   // Keep inputs in sync when the polled engine changes (e.g. an external update).
@@ -751,6 +782,15 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
     );
     setResourceGroups(next?.resourceGroups);
     setSessionRules(sessionRulesToForm(next?.sessionProperties));
+    setPasswordUsers(next?.auth?.passwordUsers?.map((u) => ({ ...u })) ?? []);
+    setJwtEnabled(next?.auth?.jwt != null);
+    setJwksUri(next?.auth?.jwt?.jwksUri ?? "");
+    setRequiredAudience(next?.auth?.jwt?.requiredAudience ?? "");
+    setIngressEnabled(next?.ingress?.enabled ?? false);
+    setIngressHost(next?.ingress?.host ?? "");
+    setIngressClassName(next?.ingress?.className ?? "nginx");
+    setIngressTlsSecret(next?.ingress?.tlsSecret ?? "");
+    setIngressAnnotations(recordToKv(next?.ingress?.annotations));
   }, [engine.spec]);
 
   const saveMutation = useMutation<Engine, ApiError, CreateEngineInput>({
@@ -799,6 +839,41 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
       trinoConfig.worker.gracefulShutdown = {
         enabled: true,
         gracePeriodSeconds: numOrUndef(gracePeriod) ?? 0,
+      };
+    }
+
+    // Exposure & auth. Password users hold a secret ref (never plaintext);
+    // JWT is undefined when off; omit `auth` entirely when neither is set.
+    const cleanUsers = passwordUsers
+      .map((u) => ({ username: u.username.trim(), secretRef: u.secretRef }))
+      .filter((u) => u.username && u.secretRef);
+    const jwt = jwtEnabled
+      ? {
+          ...(jwksUri.trim() ? { jwksUri: jwksUri.trim() } : {}),
+          ...(requiredAudience.trim()
+            ? { requiredAudience: requiredAudience.trim() }
+            : {}),
+        }
+      : undefined;
+    if (cleanUsers.length || jwt) {
+      trinoConfig.auth = {
+        passwordUsers: cleanUsers,
+        ...(jwt ? { jwt } : {}),
+      };
+    }
+
+    if (ingressEnabled && ingressHost.trim()) {
+      const anns = kvToRecord(ingressAnnotations);
+      trinoConfig.ingress = {
+        enabled: true,
+        host: ingressHost.trim(),
+        ...(ingressClassName.trim()
+          ? { className: ingressClassName.trim() }
+          : {}),
+        ...(ingressTlsSecret.trim()
+          ? { tlsSecret: ingressTlsSecret.trim() }
+          : {}),
+        ...(Object.keys(anns).length ? { annotations: anns } : {}),
       };
     }
 
@@ -1019,6 +1094,209 @@ function ConfigCard({ engine }: { engine: EngineWithStatus }) {
                   value={sessionRules}
                   onChange={setSessionRules}
                 />
+              </div>
+
+              <div className="space-y-5 rounded-lg border p-4">
+                <div className="space-y-0.5">
+                  <Label className="text-base">Exposure &amp; auth</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Authenticate clients and expose the coordinator outside the
+                    cluster.
+                  </p>
+                </div>
+
+                {/* Password users */}
+                <div className="space-y-2">
+                  <Label>Password users</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Each user signs in with a username and the password held in
+                    the selected egret secret (hashed server-side).
+                  </p>
+                  <div className="space-y-2">
+                    {passwordUsers.map((row, i) => (
+                      <div key={i} className="flex items-center gap-2">
+                        <Input
+                          value={row.username}
+                          placeholder="username"
+                          aria-label="Username"
+                          onChange={(e) =>
+                            setPasswordUsers(
+                              passwordUsers.map((r, j) =>
+                                j === i ? { ...r, username: e.target.value } : r,
+                              ),
+                            )
+                          }
+                        />
+                        <Select
+                          value={row.secretRef}
+                          onValueChange={(v) =>
+                            setPasswordUsers(
+                              passwordUsers.map((r, j) =>
+                                j === i ? { ...r, secretRef: v } : r,
+                              ),
+                            )
+                          }
+                        >
+                          <SelectTrigger className="w-full" aria-label="Password secret">
+                            <SelectValue placeholder="Password secret" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {(secrets.data ?? []).length === 0 ? (
+                              <SelectItem value="__none__" disabled>
+                                No secrets
+                              </SelectItem>
+                            ) : (
+                              (secrets.data ?? []).map((s) => (
+                                <SelectItem key={s.id} value={s.id}>
+                                  {s.name}
+                                </SelectItem>
+                              ))
+                            )}
+                          </SelectContent>
+                        </Select>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="shrink-0 text-muted-foreground"
+                          onClick={() =>
+                            setPasswordUsers(
+                              passwordUsers.filter((_, j) => j !== i),
+                            )
+                          }
+                          aria-label="Remove user"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    ))}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        setPasswordUsers([
+                          ...passwordUsers,
+                          { username: "", secretRef: "" },
+                        ])
+                      }
+                    >
+                      <Plus className="h-4 w-4" />
+                      Add user
+                    </Button>
+                  </div>
+                </div>
+
+                {/* JWT */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="space-y-0.5">
+                      <Label htmlFor="ced-jwt-enabled">Accept egret JWT</Label>
+                      <p className="text-xs text-muted-foreground">
+                        Also accept egret-issued JWTs (e.g. from notebooks) as
+                        client credentials.
+                      </p>
+                    </div>
+                    <Switch
+                      id="ced-jwt-enabled"
+                      checked={jwtEnabled}
+                      onCheckedChange={setJwtEnabled}
+                    />
+                  </div>
+                  {jwtEnabled && (
+                    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="ced-jwt-jwks">JWKS URI</Label>
+                        <Input
+                          id="ced-jwt-jwks"
+                          value={jwksUri}
+                          placeholder="default IdP JWKS"
+                          onChange={(e) => setJwksUri(e.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="ced-jwt-aud">Required audience</Label>
+                        <Input
+                          id="ced-jwt-aud"
+                          value={requiredAudience}
+                          placeholder="optional"
+                          onChange={(e) => setRequiredAudience(e.target.value)}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Ingress */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="space-y-0.5">
+                      <Label htmlFor="ced-ing-enabled">Expose via ingress</Label>
+                      <p className="text-xs text-muted-foreground">
+                        Create a Kubernetes Ingress for the coordinator. TLS
+                        terminates at the ingress.
+                      </p>
+                    </div>
+                    <Switch
+                      id="ced-ing-enabled"
+                      checked={ingressEnabled}
+                      onCheckedChange={setIngressEnabled}
+                    />
+                  </div>
+                  {ingressEnabled && (
+                    <div className="space-y-4">
+                      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <Label htmlFor="ced-ing-host">Host</Label>
+                          <Input
+                            id="ced-ing-host"
+                            value={ingressHost}
+                            placeholder="trino-demo.example.com"
+                            onChange={(e) => setIngressHost(e.target.value)}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="ced-ing-class">Ingress class</Label>
+                          <Input
+                            id="ced-ing-class"
+                            value={ingressClassName}
+                            placeholder="nginx"
+                            onChange={(e) => setIngressClassName(e.target.value)}
+                          />
+                        </div>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="ced-ing-tls">TLS secret</Label>
+                        <Input
+                          id="ced-ing-tls"
+                          value={ingressTlsSecret}
+                          placeholder="optional — Kubernetes TLS secret name"
+                          onChange={(e) => setIngressTlsSecret(e.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Annotations</Label>
+                        <p className="text-xs text-muted-foreground">
+                          Extra ingress annotations (e.g. controller tuning).
+                        </p>
+                        <KeyValueEditor
+                          rows={ingressAnnotations}
+                          onChange={setIngressAnnotations}
+                          keyPlaceholder="nginx.ingress.kubernetes.io/proxy-read-timeout"
+                          valuePlaceholder="300"
+                          addLabel="Add annotation"
+                        />
+                      </div>
+                      {ingressHost.trim() && (
+                        <p className="text-xs text-muted-foreground">
+                          Clients connect to{" "}
+                          <code>https://{ingressHost.trim()}</code> with their
+                          username + password (or an egret JWT).
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             </TabsContent>
 

@@ -111,6 +111,38 @@ pub struct WorkerRoleConfig {
     pub graceful_shutdown: Option<GracefulShutdown>,
 }
 
+/// One PASSWORD-authenticator user: username plus a bcrypt hash of the password.
+/// The control plane derives the hash; the orchestrator never sees plaintext.
+#[derive(Clone, Debug, Default)]
+pub struct PasswordEntry {
+    pub username: String,
+    pub bcrypt_hash: String,
+}
+
+/// JWT authenticator config: JWKS URI plus an optional required audience.
+#[derive(Clone, Debug, Default)]
+pub struct Jwt {
+    pub jwks_uri: String,
+    pub required_audience: Option<String>,
+}
+
+/// Trino authentication: file PASSWORD users and/or a JWT authenticator.
+#[derive(Clone, Debug, Default)]
+pub struct Auth {
+    pub password_users: Vec<PasswordEntry>,
+    pub jwt: Option<Jwt>,
+}
+
+/// A Kubernetes Ingress exposing the coordinator's HTTP endpoint.
+#[derive(Clone, Debug, Default)]
+pub struct Ingress {
+    pub enabled: bool,
+    pub class_name: Option<String>,
+    pub host: String,
+    pub tls_secret: Option<String>,
+    pub annotations: BTreeMap<String, String>,
+}
+
 /// Fuller Trino config surface, split per-role (coordinator/worker independent).
 #[derive(Clone, Debug, Default)]
 pub struct TrinoConfig {
@@ -126,6 +158,8 @@ pub struct TrinoConfig {
     pub resource_groups: Option<ResourceGroups>,
     pub session_properties: Vec<SessionRule>,
     pub fault_tolerant: Option<FaultTolerant>,
+    pub auth: Option<Auth>,
+    pub ingress: Option<Ingress>,
 }
 
 /// One catalog rendered as `<name>.properties`. `properties` may contain

@@ -577,6 +577,20 @@ export interface TrinoConfig {
   };
   resourceGroups?: { rootGroups: Group[]; selectors: Selector[] };
   sessionProperties?: SessionRule[];
+  // Client auth: file password users (password held in an egret secret,
+  // bcrypted server-side) + optional egret-JWT acceptance.
+  auth?: {
+    passwordUsers: { username: string; secretRef: string }[];
+    jwt?: { jwksUri?: string; requiredAudience?: string };
+  };
+  // Kubernetes Ingress exposure (TLS terminates at the ingress).
+  ingress?: {
+    enabled: boolean;
+    className?: string;
+    host: string;
+    tlsSecret?: string;
+    annotations?: Record<string, string>;
+  };
   coordinator: RoleConfig;
   worker: WorkerRoleConfig;
 }

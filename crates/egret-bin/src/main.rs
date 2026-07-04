@@ -507,6 +507,27 @@ impl EgretEngineProvisioner {
                         s3_path_style: f.s3_path_style,
                     }
                 }),
+                auth: cfg.auth.as_ref().map(|a| egret_orchestrator::Auth {
+                    password_users: a
+                        .password_users
+                        .iter()
+                        .map(|p| egret_orchestrator::PasswordEntry {
+                            username: p.username.clone(),
+                            bcrypt_hash: p.bcrypt_hash.clone(),
+                        })
+                        .collect(),
+                    jwt: a.jwt.as_ref().map(|j| egret_orchestrator::Jwt {
+                        jwks_uri: j.jwks_uri.clone(),
+                        required_audience: j.required_audience.clone(),
+                    }),
+                }),
+                ingress: cfg.ingress.as_ref().map(|i| egret_orchestrator::Ingress {
+                    enabled: i.enabled,
+                    class_name: i.class_name.clone(),
+                    host: i.host.clone(),
+                    tls_secret: i.tls_secret.clone(),
+                    annotations: i.annotations.clone(),
+                }),
             },
             catalogs: req
                 .catalogs
@@ -1237,6 +1258,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             .public_url
             .clone()
             .unwrap_or_else(|| "http://egret:8080".to_string()),
+        // Default JWKS the JWT authenticator validates engine tokens against.
+        // Derived from the OIDC realm (Keycloak `.../realms/<realm>` issuer):
+        // JWKS lives at `.../protocol/openid-connect/certs`. Empty when OIDC is
+        // unconfigured — the admin then sets `jwksUri` per engine. Not hard-failed.
+        engine_jwks_uri: if config.oidc.enabled && !config.oidc.issuer_url.is_empty() {
+            format!(
+                "{}/protocol/openid-connect/certs",
+                config.oidc.issuer_url.trim_end_matches('/')
+            )
+        } else {
+            String::new()
+        },
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).

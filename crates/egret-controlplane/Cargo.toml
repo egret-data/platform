@@ -12,6 +12,7 @@ egret-storage.workspace = true
 async-trait.workspace = true
 egret-secrets.workspace = true
 egret-metastore.workspace = true
+bcrypt = "0.15"
 reqwest.workspace = true
 sqlx.workspace = true
 axum.workspace = true

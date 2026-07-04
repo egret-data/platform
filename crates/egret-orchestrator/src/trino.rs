@@ -59,6 +59,21 @@ fn jvm_config(role: &RoleConfig) -> String {
     lines.join("\n") + "\n"
 }
 
+fn auth_type(auth: &crate::spec::Auth) -> Option<String> {
+    let mut parts = vec![];
+    if !auth.password_users.is_empty() {
+        parts.push("PASSWORD");
+    }
+    if auth.jwt.is_some() {
+        parts.push("JWT");
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(","))
+    }
+}
+
 fn config_properties(spec: &EngineSpec, coord: bool) -> String {
     let cfg = &spec.config;
     let role = if coord {
@@ -106,6 +121,32 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
     }
     for (k, v) in &cfg.config_properties {
         out.push_str(&format!("{k}={v}\n"));
+    }
+    if coord {
+        if let Some(auth) = &cfg.auth {
+            if let Some(t) = auth_type(auth) {
+                out.push_str(&format!("http-server.authentication.type={t}\n"));
+                out.push_str("http-server.authentication.allow-insecure-over-http=true\n");
+                out.push_str("http-server.process-forwarded=true\n");
+                if let Some(j) = &auth.jwt {
+                    out.push_str(&format!(
+                        "http-server.authentication.jwt.key-file={}\n",
+                        j.jwks_uri
+                    ));
+                    if let Some(a) = &j.required_audience {
+                        out.push_str(&format!(
+                            "http-server.authentication.jwt.required-audience={a}\n"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    // Trino REQUIRES a coordinator<->worker shared secret whenever any client
+    // authentication is enabled (it refuses to start otherwise). Both roles must
+    // carry the same value; egret injects it via the env Secret.
+    if cfg.auth.as_ref().and_then(|a| auth_type(a)).is_some() {
+        out.push_str("internal-communication.shared-secret=${ENV:TRINO_INTERNAL_SECRET}\n");
     }
     out
 }
@@ -250,6 +291,22 @@ pub fn trino_config_map(spec: &EngineSpec) -> Value {
             .map(|(k, v)| format!("{k}={v}\n"))
             .collect();
         data.insert("event-listener.properties".into(), json!(body));
+    }
+    if let Some(auth) = &spec.config.auth {
+        if !auth.password_users.is_empty() {
+            let db: String = auth
+                .password_users
+                .iter()
+                .map(|u| format!("{}:{}\n", u.username, u.bcrypt_hash))
+                .collect();
+            data.insert("password.db".into(), json!(db));
+            data.insert(
+                "password-authenticator.properties".into(),
+                json!(
+                    "password-authenticator.name=file\nfile.password-file=/etc/trino/auth/password/password.db\n"
+                ),
+            );
+        }
     }
 
     json!({
@@ -400,6 +457,12 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
     if spec.config.fault_tolerant.is_some() {
         volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/exchange-manager.properties", "subPath": "exchange-manager.properties" }));
     }
+    if let Some(auth) = &spec.config.auth {
+        if !auth.password_users.is_empty() {
+            volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/password-authenticator.properties", "subPath": "password-authenticator.properties" }));
+            volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/auth/password/password.db", "subPath": "password.db" }));
+        }
+    }
 
     // probes: readiness always (generous default), liveness/startup only if configured.
     let mut container = json!({
@@ -466,6 +529,44 @@ pub fn trino_service(spec: &EngineSpec) -> Value {
     })
 }
 
+/// Render a `networking.k8s.io/v1` Ingress exposing the `{name}-trino`
+/// coordinator Service. Returns `None` when no ingress is configured or it is
+/// disabled. TLS terminates at the ingress; Trino stays HTTP internally.
+pub fn trino_ingress(spec: &EngineSpec) -> Option<Value> {
+    let ing = spec.config.ingress.as_ref()?;
+    if !ing.enabled {
+        return None;
+    }
+    let mut meta = json!({
+        "name": format!("{}-trino", spec.name), "namespace": spec.namespace,
+        "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name }
+    });
+    if !ing.annotations.is_empty() {
+        meta["annotations"] = Value::Object(
+            ing.annotations
+                .iter()
+                .map(|(k, v)| (k.clone(), json!(v)))
+                .collect(),
+        );
+    }
+    let mut spec_obj = json!({
+        "rules": [{ "host": ing.host, "http": { "paths": [{
+            "path": "/", "pathType": "Prefix",
+            "backend": { "service": { "name": format!("{}-trino", spec.name), "port": { "number": 8080 } } }
+        }]}}]
+    });
+    if let Some(cn) = &ing.class_name {
+        spec_obj["ingressClassName"] = json!(cn);
+    }
+    if let Some(ts) = &ing.tls_secret {
+        spec_obj["tls"] = json!([{ "hosts": [ing.host], "secretName": ts }]);
+    }
+    Some(json!({
+        "apiVersion": "networking.k8s.io/v1", "kind": "Ingress",
+        "metadata": meta, "spec": spec_obj
+    }))
+}
+
 /// Provisions a Trino engine as plain Kubernetes manifests: two Deployments
 /// (coordinator + worker), a Service, two ConfigMaps (config + catalogs), and an
 /// env Secret. A checksum annotation on the pod template rolls pods on change.
@@ -492,6 +593,9 @@ impl TrinoProvisioner {
         self.kube
             .apply(&trino_deployment(spec, Role::Worker))
             .await?;
+        if let Some(ing) = trino_ingress(spec) {
+            self.kube.apply(&ing).await?;
+        }
         Ok(())
     }
 }
@@ -529,7 +633,22 @@ impl EngineProvisioner for TrinoProvisioner {
     async fn update(&self, spec: &EngineSpec) -> anyhow::Result<()> {
         // Re-apply everything; the recomputed checksum annotation rolls the pods
         // so Trino reloads the (static) config + catalogs.
-        self.apply_all(spec).await
+        self.apply_all(spec).await?;
+        // `apply_all` only applies the Ingress when enabled, so toggling ingress
+        // off would otherwise leave a stale Ingress behind. Best-effort delete it
+        // when it is absent or disabled.
+        if spec.config.ingress.as_ref().map(|i| i.enabled) != Some(true) {
+            let _ = self
+                .kube
+                .delete(
+                    "networking.k8s.io/v1",
+                    "Ingress",
+                    &spec.namespace,
+                    &format!("{}-trino", spec.name),
+                )
+                .await;
+        }
+        Ok(())
     }
     async fn delete(&self, namespace: &str, name: &str) -> anyhow::Result<()> {
         let _ = self
@@ -565,6 +684,16 @@ impl EngineProvisioner for TrinoProvisioner {
         let _ = self
             .kube
             .delete("v1", "Secret", namespace, &format!("{name}-env"))
+            .await;
+        // Best-effort; harmless when no Ingress was ever applied.
+        let _ = self
+            .kube
+            .delete(
+                "networking.k8s.io/v1",
+                "Ingress",
+                namespace,
+                &format!("{name}-trino"),
+            )
             .await;
         Ok(())
     }
@@ -654,6 +783,99 @@ mod tests {
         let wc = cm["data"]["config-worker.properties"].as_str().unwrap();
         assert!(wc.contains("shutdown.grace-period=120s"));
     }
+    #[test]
+    fn auth_config_password_and_jwt() {
+        let mut s = sample_spec();
+        s.config.auth = Some(Auth {
+            password_users: vec![PasswordEntry {
+                username: "bob".into(),
+                bcrypt_hash: "$2b$10$abc".into(),
+            }],
+            jwt: Some(Jwt {
+                jwks_uri: "https://kc/realms/egret/protocol/openid-connect/certs".into(),
+                required_audience: Some("trino".into()),
+            }),
+        });
+        let cm = trino_config_map(&s);
+        let cc = cm["data"]["config-coordinator.properties"]
+            .as_str()
+            .unwrap();
+        assert!(cc.contains("http-server.authentication.type=PASSWORD,JWT"));
+        assert!(cc.contains("http-server.authentication.allow-insecure-over-http=true"));
+        assert!(cc.contains("http-server.process-forwarded=true"));
+        assert!(cc.contains(
+            "http-server.authentication.jwt.key-file=https://kc/realms/egret/protocol/openid-connect/certs"
+        ));
+        assert!(cc.contains("http-server.authentication.jwt.required-audience=trino"));
+        // workers don't authenticate clients
+        assert!(!cm["data"]["config-worker.properties"]
+            .as_str()
+            .unwrap()
+            .contains("authentication.type"));
+        assert!(cm["data"]["password.db"]
+            .as_str()
+            .unwrap()
+            .contains("bob:$2b$10$abc"));
+        assert!(cm["data"]["password-authenticator.properties"]
+            .as_str()
+            .unwrap()
+            .contains("password-authenticator.name=file"));
+    }
+    #[test]
+    fn auth_type_password_only() {
+        let mut s = sample_spec();
+        s.config.auth = Some(Auth {
+            password_users: vec![PasswordEntry {
+                username: "a".into(),
+                bcrypt_hash: "h".into(),
+            }],
+            jwt: None,
+        });
+        let cc = trino_config_map(&s)["data"]["config-coordinator.properties"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(cc.contains("http-server.authentication.type=PASSWORD"));
+        assert!(!cc.contains("JWT"));
+    }
+    #[test]
+    fn deployment_mounts_auth_files() {
+        // Absent when unset.
+        let d = trino_deployment(&sample_spec(), Role::Coordinator);
+        let mounts = d["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap();
+        assert!(!mounts
+            .iter()
+            .any(|m| m["mountPath"] == "/etc/trino/password-authenticator.properties"));
+        assert!(!mounts
+            .iter()
+            .any(|m| m["mountPath"] == "/etc/trino/auth/password/password.db"));
+
+        // Present when set.
+        let mut s = sample_spec();
+        s.config.auth = Some(Auth {
+            password_users: vec![PasswordEntry {
+                username: "bob".into(),
+                bcrypt_hash: "$2b$10$abc".into(),
+            }],
+            jwt: None,
+        });
+        let d = trino_deployment(&s, Role::Coordinator);
+        let mounts = d["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap();
+        for path in [
+            "/etc/trino/password-authenticator.properties",
+            "/etc/trino/auth/password/password.db",
+        ] {
+            assert!(
+                mounts.iter().any(|m| m["mountPath"] == path),
+                "missing mount {path}"
+            );
+        }
+    }
+
     #[test]
     fn log_properties_carries_level() {
         let cm = trino_config_map(&sample_spec());
@@ -992,6 +1214,78 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ingress_resource_shape() {
+        let mut s = sample_spec();
+        let mut anns = std::collections::BTreeMap::new();
+        anns.insert(
+            "nginx.ingress.kubernetes.io/proxy-read-timeout".into(),
+            "300".into(),
+        );
+        s.config.ingress = Some(crate::spec::Ingress {
+            enabled: true,
+            class_name: Some("nginx".into()),
+            host: "trino-demo.egret.example.com".into(),
+            tls_secret: Some("trino-demo-tls".into()),
+            annotations: anns,
+        });
+        let ing = trino_ingress(&s).unwrap();
+        assert_eq!(ing["apiVersion"], "networking.k8s.io/v1");
+        assert_eq!(ing["kind"], "Ingress");
+        assert_eq!(ing["metadata"]["name"], "demo-trino");
+        assert_eq!(
+            ing["metadata"]["annotations"]["nginx.ingress.kubernetes.io/proxy-read-timeout"],
+            "300"
+        );
+        assert_eq!(ing["spec"]["ingressClassName"], "nginx");
+        assert_eq!(
+            ing["spec"]["rules"][0]["host"],
+            "trino-demo.egret.example.com"
+        );
+        assert_eq!(
+            ing["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]["name"],
+            "demo-trino"
+        );
+        assert_eq!(
+            ing["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]["port"]["number"],
+            8080
+        );
+        assert_eq!(ing["spec"]["tls"][0]["secretName"], "trino-demo-tls");
+    }
+    #[test]
+    fn ingress_none_when_disabled() {
+        let s = sample_spec(); // no ingress
+        assert!(trino_ingress(&s).is_none());
+    }
+
+    #[tokio::test]
+    async fn provision_applies_ingress_and_delete_removes_it() {
+        use crate::kube_client::FakeKube;
+        let kube = std::sync::Arc::new(FakeKube::default());
+        let p = TrinoProvisioner::new(kube.clone());
+        let mut s = sample_spec();
+        s.config.ingress = Some(crate::spec::Ingress {
+            enabled: true,
+            class_name: Some("nginx".into()),
+            host: "trino-demo.egret.example.com".into(),
+            tls_secret: None,
+            annotations: std::collections::BTreeMap::new(),
+        });
+        p.provision(&s).await.unwrap();
+        assert!(kube
+            .applied
+            .lock()
+            .unwrap()
+            .contains_key("Ingress/demo-trino"));
+
+        p.delete(&s.namespace, &s.name).await.unwrap();
+        assert!(kube
+            .deleted
+            .lock()
+            .unwrap()
+            .contains(&"Ingress/demo-trino".to_string()));
+    }
+
     #[tokio::test]
     async fn provision_applies_all_objects() {
         use crate::kube_client::FakeKube;
@@ -1018,6 +1312,6 @@ mod tests {
         let p = TrinoProvisioner::new(kube.clone());
         p.delete("egret-engines", "demo").await.unwrap();
         let d = kube.deleted.lock().unwrap();
-        assert_eq!(d.len(), 6); // 2 deployments, service, 2 configmaps, secret
+        assert_eq!(d.len(), 7); // 2 deployments, service, 2 configmaps, secret, ingress
     }
 }
