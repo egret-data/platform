@@ -59,6 +59,21 @@ fn jvm_config(role: &RoleConfig) -> String {
     lines.join("\n") + "\n"
 }
 
+fn auth_type(auth: &crate::spec::Auth) -> Option<String> {
+    let mut parts = vec![];
+    if !auth.password_users.is_empty() {
+        parts.push("PASSWORD");
+    }
+    if auth.jwt.is_some() {
+        parts.push("JWT");
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(","))
+    }
+}
+
 fn config_properties(spec: &EngineSpec, coord: bool) -> String {
     let cfg = &spec.config;
     let role = if coord {
@@ -106,6 +121,26 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
     }
     for (k, v) in &cfg.config_properties {
         out.push_str(&format!("{k}={v}\n"));
+    }
+    if coord {
+        if let Some(auth) = &cfg.auth {
+            if let Some(t) = auth_type(auth) {
+                out.push_str(&format!("http-server.authentication.type={t}\n"));
+                out.push_str("http-server.authentication.allow-insecure-over-http=true\n");
+                out.push_str("http-server.process-forwarded=true\n");
+                if let Some(j) = &auth.jwt {
+                    out.push_str(&format!(
+                        "http-server.authentication.jwt.key-file={}\n",
+                        j.jwks_uri
+                    ));
+                    if let Some(a) = &j.required_audience {
+                        out.push_str(&format!(
+                            "http-server.authentication.jwt.required-audience={a}\n"
+                        ));
+                    }
+                }
+            }
+        }
     }
     out
 }
@@ -250,6 +285,22 @@ pub fn trino_config_map(spec: &EngineSpec) -> Value {
             .map(|(k, v)| format!("{k}={v}\n"))
             .collect();
         data.insert("event-listener.properties".into(), json!(body));
+    }
+    if let Some(auth) = &spec.config.auth {
+        if !auth.password_users.is_empty() {
+            let db: String = auth
+                .password_users
+                .iter()
+                .map(|u| format!("{}:{}\n", u.username, u.bcrypt_hash))
+                .collect();
+            data.insert("password.db".into(), json!(db));
+            data.insert(
+                "password-authenticator.properties".into(),
+                json!(
+                    "password-authenticator.name=file\nfile.password-file=/etc/trino/auth/password/password.db\n"
+                ),
+            );
+        }
     }
 
     json!({
@@ -399,6 +450,12 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
     }
     if spec.config.fault_tolerant.is_some() {
         volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/exchange-manager.properties", "subPath": "exchange-manager.properties" }));
+    }
+    if let Some(auth) = &spec.config.auth {
+        if !auth.password_users.is_empty() {
+            volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/password-authenticator.properties", "subPath": "password-authenticator.properties" }));
+            volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/auth/password/password.db", "subPath": "password.db" }));
+        }
     }
 
     // probes: readiness always (generous default), liveness/startup only if configured.
@@ -654,6 +711,99 @@ mod tests {
         let wc = cm["data"]["config-worker.properties"].as_str().unwrap();
         assert!(wc.contains("shutdown.grace-period=120s"));
     }
+    #[test]
+    fn auth_config_password_and_jwt() {
+        let mut s = sample_spec();
+        s.config.auth = Some(Auth {
+            password_users: vec![PasswordEntry {
+                username: "bob".into(),
+                bcrypt_hash: "$2b$10$abc".into(),
+            }],
+            jwt: Some(Jwt {
+                jwks_uri: "https://kc/realms/egret/protocol/openid-connect/certs".into(),
+                required_audience: Some("trino".into()),
+            }),
+        });
+        let cm = trino_config_map(&s);
+        let cc = cm["data"]["config-coordinator.properties"]
+            .as_str()
+            .unwrap();
+        assert!(cc.contains("http-server.authentication.type=PASSWORD,JWT"));
+        assert!(cc.contains("http-server.authentication.allow-insecure-over-http=true"));
+        assert!(cc.contains("http-server.process-forwarded=true"));
+        assert!(cc.contains(
+            "http-server.authentication.jwt.key-file=https://kc/realms/egret/protocol/openid-connect/certs"
+        ));
+        assert!(cc.contains("http-server.authentication.jwt.required-audience=trino"));
+        // workers don't authenticate clients
+        assert!(!cm["data"]["config-worker.properties"]
+            .as_str()
+            .unwrap()
+            .contains("authentication.type"));
+        assert!(cm["data"]["password.db"]
+            .as_str()
+            .unwrap()
+            .contains("bob:$2b$10$abc"));
+        assert!(cm["data"]["password-authenticator.properties"]
+            .as_str()
+            .unwrap()
+            .contains("password-authenticator.name=file"));
+    }
+    #[test]
+    fn auth_type_password_only() {
+        let mut s = sample_spec();
+        s.config.auth = Some(Auth {
+            password_users: vec![PasswordEntry {
+                username: "a".into(),
+                bcrypt_hash: "h".into(),
+            }],
+            jwt: None,
+        });
+        let cc = trino_config_map(&s)["data"]["config-coordinator.properties"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(cc.contains("http-server.authentication.type=PASSWORD"));
+        assert!(!cc.contains("JWT"));
+    }
+    #[test]
+    fn deployment_mounts_auth_files() {
+        // Absent when unset.
+        let d = trino_deployment(&sample_spec(), Role::Coordinator);
+        let mounts = d["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap();
+        assert!(!mounts
+            .iter()
+            .any(|m| m["mountPath"] == "/etc/trino/password-authenticator.properties"));
+        assert!(!mounts
+            .iter()
+            .any(|m| m["mountPath"] == "/etc/trino/auth/password/password.db"));
+
+        // Present when set.
+        let mut s = sample_spec();
+        s.config.auth = Some(Auth {
+            password_users: vec![PasswordEntry {
+                username: "bob".into(),
+                bcrypt_hash: "$2b$10$abc".into(),
+            }],
+            jwt: None,
+        });
+        let d = trino_deployment(&s, Role::Coordinator);
+        let mounts = d["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap();
+        for path in [
+            "/etc/trino/password-authenticator.properties",
+            "/etc/trino/auth/password/password.db",
+        ] {
+            assert!(
+                mounts.iter().any(|m| m["mountPath"] == path),
+                "missing mount {path}"
+            );
+        }
+    }
+
     #[test]
     fn log_properties_carries_level() {
         let cm = trino_config_map(&sample_spec());
