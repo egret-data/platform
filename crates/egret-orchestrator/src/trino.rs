@@ -123,11 +123,15 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
         out.push_str(&format!("{k}={v}\n"));
     }
     if coord {
+        // egret always reaches the coordinator through a proxy — the ingress for
+        // external clients, and the kube API-server proxy / Service for the monitor —
+        // which add X-Forwarded-* headers. Trino (Jetty) rejects requests carrying
+        // those unless process-forwarded is enabled, so set it unconditionally.
+        out.push_str("http-server.process-forwarded=true\n");
         if let Some(auth) = &cfg.auth {
             if let Some(t) = auth_type(auth) {
                 out.push_str(&format!("http-server.authentication.type={t}\n"));
                 out.push_str("http-server.authentication.allow-insecure-over-http=true\n");
-                out.push_str("http-server.process-forwarded=true\n");
                 if let Some(j) = &auth.jwt {
                     out.push_str(&format!(
                         "http-server.authentication.jwt.key-file={}\n",
