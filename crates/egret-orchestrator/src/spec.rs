@@ -1,6 +1,103 @@
 //! Engine-agnostic provisioning spec + status (no k8s types leak out).
 
+use serde_json::Value;
 use std::collections::BTreeMap;
+
+/// A pod toleration allowing scheduling onto tainted nodes.
+#[derive(Clone, Debug, Default)]
+pub struct Toleration {
+    pub key: Option<String>,
+    pub operator: Option<String>,
+    pub value: Option<String>,
+    pub effect: Option<String>,
+    pub toleration_seconds: Option<i64>,
+}
+
+/// A pod topology-spread constraint.
+#[derive(Clone, Debug, Default)]
+pub struct TopologySpreadConstraint {
+    pub max_skew: u32,
+    pub topology_key: String,
+    pub when_unsatisfiable: String,
+    pub match_labels: BTreeMap<String, String>,
+}
+
+/// A single node-selector match expression (used inside node affinity).
+#[derive(Clone, Debug, Default)]
+pub struct NodeSelectorRequirement {
+    pub key: String,
+    pub operator: String,
+    pub values: Vec<String>,
+}
+
+/// Structured-common affinity with a raw-JSON override that wins verbatim.
+#[derive(Clone, Debug, Default)]
+pub struct Affinity {
+    pub node_match: Vec<NodeSelectorRequirement>,
+    pub pod_anti_affinity_topology_key: Option<String>,
+    pub raw_override: Option<Value>,
+}
+
+/// An additional container port to expose.
+#[derive(Clone, Debug, Default)]
+pub struct ContainerPort {
+    pub name: String,
+    pub container_port: u16,
+}
+
+/// Pod- or container-level security context (flat fields + raw override).
+#[derive(Clone, Debug, Default)]
+pub struct SecurityContext {
+    pub run_as_user: Option<i64>,
+    pub run_as_group: Option<i64>,
+    pub fs_group: Option<i64>,
+    pub run_as_non_root: Option<bool>,
+    pub raw_override: Option<Value>,
+}
+
+/// A volume mount inside a container.
+#[derive(Clone, Debug, Default)]
+pub struct VolumeMount {
+    pub name: String,
+    pub mount_path: String,
+    pub sub_path: Option<String>,
+}
+
+/// A minimal init/sidecar container definition (structured-common + raw override).
+#[derive(Clone, Debug, Default)]
+pub struct MiniContainer {
+    pub name: String,
+    pub image: String,
+    pub command: Vec<String>,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    pub volume_mounts: Vec<VolumeMount>,
+    pub raw_override: Option<Value>,
+}
+
+/// A reference feeding container env from a ConfigMap or Secret.
+#[derive(Clone, Debug, Default)]
+pub struct EnvFromSource {
+    pub config_map_ref: Option<String>,
+    pub secret_ref: Option<String>,
+}
+
+/// A ConfigMap- or Secret-backed volume mount referenced by object name.
+#[derive(Clone, Debug, Default)]
+pub struct ObjectMount {
+    pub name: String,
+    pub mount_path: String,
+    pub sub_path: Option<String>,
+    pub default_mode: Option<i32>,
+}
+
+/// A Deployment update strategy.
+#[derive(Clone, Debug, Default)]
+pub struct DeploymentStrategy {
+    pub kind: String,
+    pub max_surge: Option<String>,
+    pub max_unavailable: Option<String>,
+}
 
 /// JVM heap sizing for a role: either a fixed size (`-Xmx`) or a RAM percentage.
 #[derive(Clone, Debug, Default)]
@@ -48,6 +145,12 @@ pub struct RoleConfig {
     pub additional_jvm_config: Vec<String>,
     pub probes: Probes,
     pub heap_headroom_per_node: Option<String>,
+    pub node_selector: BTreeMap<String, String>,
+    pub tolerations: Vec<Toleration>,
+    pub topology_spread: Vec<TopologySpreadConstraint>,
+    pub affinity: Option<Affinity>,
+    pub termination_grace_seconds: Option<u32>,
+    pub additional_exposed_ports: Vec<ContainerPort>,
 }
 
 /// One resource group in the file-based resource-group manager tree.
@@ -160,6 +263,21 @@ pub struct TrinoConfig {
     pub fault_tolerant: Option<FaultTolerant>,
     pub auth: Option<Auth>,
     pub ingress: Option<Ingress>,
+    pub image_pull_secrets: Vec<String>,
+    pub image_pull_policy: Option<String>,
+    pub service_account: Option<String>,
+    pub pod_security_context: Option<SecurityContext>,
+    pub container_security_context: Option<SecurityContext>,
+    pub init_containers: Vec<MiniContainer>,
+    pub sidecar_containers: Vec<MiniContainer>,
+    pub env_from: Vec<EnvFromSource>,
+    pub config_mounts: Vec<ObjectMount>,
+    pub secret_mounts: Vec<ObjectMount>,
+    pub deployment_strategy: Option<DeploymentStrategy>,
+    pub deployment_annotations: BTreeMap<String, String>,
+    pub revision_history_limit: Option<u32>,
+    pub progress_deadline_seconds: Option<u32>,
+    pub share_process_namespace: Option<bool>,
 }
 
 /// One catalog rendered as `<name>.properties`. `properties` may contain
