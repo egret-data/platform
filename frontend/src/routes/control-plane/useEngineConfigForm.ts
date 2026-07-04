@@ -351,6 +351,148 @@ function emptyDeploymentStrategy(): DeploymentStrategy {
 /** A password-user row: a username + the egret secret holding its password. */
 export type PasswordUserForm = { username: string; secretRef: string };
 
+// ── autoscaling form models ──────────────────────────────────────────────────
+
+/** Autoscaling mode: "" is off (autoscaling dropped from the payload). */
+export type AutoscaleMode = "" | "hpa" | "keda";
+
+/** HPA form: replica cap + target utilisation (numbers kept as text) + raw behavior JSON text. */
+export type HpaForm = {
+  maxReplicas: string;
+  targetCpuPercent: string;
+  targetMemoryPercent: string;
+  behaviorRaw: string;
+};
+
+/** A single KEDA trigger row. `kind` selects which structured slice (or raw text) applies. */
+export type AutoscaleTriggerForm = {
+  kind: string;
+  cron: { start: string; end: string; desiredReplicas: string; timezone: string };
+  prometheus: {
+    serverAddress: string;
+    metricName: string;
+    query: string;
+    threshold: string;
+  };
+  rawOverride: string;
+};
+
+/** KEDA form: replica bounds + poll/cooldown (numbers as text) + triggers + raw fallback JSON text. */
+export type KedaForm = {
+  minReplicaCount: string;
+  maxReplicaCount: string;
+  pollingInterval: string;
+  cooldownPeriod: string;
+  triggers: AutoscaleTriggerForm[];
+  fallbackRaw: string;
+};
+
+type Autoscaling = NonNullable<TrinoConfig["autoscaling"]>;
+
+/** A blank trigger row (defaults to a cron trigger). */
+export function emptyTriggerForm(): AutoscaleTriggerForm {
+  return {
+    kind: "cron",
+    cron: { start: "", end: "", desiredReplicas: "", timezone: "" },
+    prometheus: { serverAddress: "", metricName: "", query: "", threshold: "" },
+    rawOverride: "",
+  };
+}
+
+function hpaToForm(hpa: Autoscaling["hpa"]): HpaForm {
+  return {
+    maxReplicas: hpa?.maxReplicas?.toString() ?? "",
+    targetCpuPercent: hpa?.targetCpuPercent?.toString() ?? "",
+    targetMemoryPercent: hpa?.targetMemoryPercent?.toString() ?? "",
+    behaviorRaw: rawToText(hpa?.behaviorRaw),
+  };
+}
+
+function kedaToForm(keda: Autoscaling["keda"]): KedaForm {
+  return {
+    minReplicaCount: keda?.minReplicaCount?.toString() ?? "",
+    maxReplicaCount: keda?.maxReplicaCount?.toString() ?? "",
+    pollingInterval: keda?.pollingInterval?.toString() ?? "",
+    cooldownPeriod: keda?.cooldownPeriod?.toString() ?? "",
+    triggers: (keda?.triggers ?? []).map((t) => ({
+      kind: t.kind || "cron",
+      cron: {
+        start: t.cron?.start ?? "",
+        end: t.cron?.end ?? "",
+        desiredReplicas: t.cron?.desiredReplicas?.toString() ?? "",
+        timezone: t.cron?.timezone ?? "",
+      },
+      prometheus: {
+        serverAddress: t.prometheus?.serverAddress ?? "",
+        metricName: t.prometheus?.metricName ?? "",
+        query: t.prometheus?.query ?? "",
+        threshold: t.prometheus?.threshold ?? "",
+      },
+      rawOverride: rawToText(t.rawOverride),
+    })),
+    fallbackRaw: rawToText(keda?.fallbackRaw),
+  };
+}
+
+/** Serialize the mode + HPA/KEDA forms to an `autoscaling` slice, or undefined when off. */
+function formToAutoscaling(
+  mode: AutoscaleMode,
+  hpa: HpaForm,
+  keda: KedaForm,
+): Autoscaling | undefined {
+  if (mode === "hpa") {
+    const out: NonNullable<Autoscaling["hpa"]> = {
+      maxReplicas: numOrUndef(hpa.maxReplicas) ?? 0,
+    };
+    const cpu = numOrUndef(hpa.targetCpuPercent);
+    if (cpu !== undefined) out.targetCpuPercent = cpu;
+    const mem = numOrUndef(hpa.targetMemoryPercent);
+    if (mem !== undefined) out.targetMemoryPercent = mem;
+    const behavior = textToRaw(hpa.behaviorRaw);
+    if (behavior !== undefined) out.behaviorRaw = behavior;
+    return { mode: "hpa", hpa: out };
+  }
+  if (mode === "keda") {
+    const triggers = keda.triggers.map((t) => {
+      const trig: NonNullable<Autoscaling["keda"]>["triggers"][number] = {
+        kind: t.kind,
+      };
+      if (t.kind === "cron") {
+        trig.cron = {
+          start: t.cron.start.trim(),
+          end: t.cron.end.trim(),
+          desiredReplicas: numOrUndef(t.cron.desiredReplicas) ?? 0,
+          timezone: t.cron.timezone.trim(),
+        };
+      } else if (t.kind === "prometheus") {
+        trig.prometheus = {
+          serverAddress: t.prometheus.serverAddress.trim(),
+          metricName: t.prometheus.metricName.trim(),
+          query: t.prometheus.query.trim(),
+          threshold: t.prometheus.threshold.trim(),
+        };
+      } else {
+        const raw = textToRaw(t.rawOverride);
+        if (raw !== undefined) trig.rawOverride = raw;
+      }
+      return trig;
+    });
+    const out: NonNullable<Autoscaling["keda"]> = {
+      minReplicaCount: numOrUndef(keda.minReplicaCount) ?? 0,
+      maxReplicaCount: numOrUndef(keda.maxReplicaCount) ?? 0,
+      triggers,
+    };
+    const poll = numOrUndef(keda.pollingInterval);
+    if (poll !== undefined) out.pollingInterval = poll;
+    const cooldown = numOrUndef(keda.cooldownPeriod);
+    if (cooldown !== undefined) out.cooldownPeriod = cooldown;
+    const fallback = textToRaw(keda.fallbackRaw);
+    if (fallback !== undefined) out.fallbackRaw = fallback;
+    return { mode: "keda", keda: out };
+  }
+  return undefined;
+}
+
 // ── hook ─────────────────────────────────────────────────────────────────────
 
 export interface EngineConfigForm {
@@ -443,6 +585,13 @@ export interface EngineConfigForm {
   setProgressDeadlineSeconds: (v: string) => void;
   shareProcessNamespace: boolean;
   setShareProcessNamespace: (v: boolean) => void;
+  // autoscaling
+  autoscaleMode: AutoscaleMode;
+  setAutoscaleMode: (v: AutoscaleMode) => void;
+  autoscaleHpa: HpaForm;
+  setAutoscaleHpa: Dispatch<SetStateAction<HpaForm>>;
+  autoscaleKeda: KedaForm;
+  setAutoscaleKeda: Dispatch<SetStateAction<KedaForm>>;
   // meta
   error: string | null;
   dirty: boolean;
@@ -583,6 +732,17 @@ export function useEngineConfigForm(
     tc?.shareProcessNamespace ?? false,
   );
 
+  // Autoscaling (HPA / KEDA on the worker Deployment).
+  const [autoscaleMode, setAutoscaleMode] = useState<AutoscaleMode>(
+    tc?.autoscaling?.mode ?? "",
+  );
+  const [autoscaleHpa, setAutoscaleHpa] = useState<HpaForm>(
+    hpaToForm(tc?.autoscaling?.hpa),
+  );
+  const [autoscaleKeda, setAutoscaleKeda] = useState<KedaForm>(
+    kedaToForm(tc?.autoscaling?.keda),
+  );
+
   const [error, setError] = useState<string | null>(null);
 
   const [dirty, setDirty] = useState(false);
@@ -654,6 +814,9 @@ export function useEngineConfigForm(
     setRevisionHistoryLimit(next?.revisionHistoryLimit?.toString() ?? "");
     setProgressDeadlineSeconds(next?.progressDeadlineSeconds?.toString() ?? "");
     setShareProcessNamespace(next?.shareProcessNamespace ?? false);
+    setAutoscaleMode(next?.autoscaling?.mode ?? "");
+    setAutoscaleHpa(hpaToForm(next?.autoscaling?.hpa));
+    setAutoscaleKeda(kedaToForm(next?.autoscaling?.keda));
     // A re-sync from the server must not mark the form dirty.
     skipDirty.current = true;
     setDirty(false);
@@ -708,6 +871,9 @@ export function useEngineConfigForm(
     revisionHistoryLimit,
     progressDeadlineSeconds,
     shareProcessNamespace,
+    autoscaleMode,
+    autoscaleHpa,
+    autoscaleKeda,
   ]);
 
   const saveMutation = useMutation<Engine, ApiError, CreateEngineInput>({
@@ -859,6 +1025,10 @@ export function useEngineConfigForm(
       trinoConfig.progressDeadlineSeconds = progDeadline;
     if (shareProcessNamespace) trinoConfig.shareProcessNamespace = true;
 
+    // Autoscaling — dropped entirely when the mode is off.
+    const autoscaling = formToAutoscaling(autoscaleMode, autoscaleHpa, autoscaleKeda);
+    if (autoscaling) trinoConfig.autoscaling = autoscaling;
+
     // The wizard-era required fields still ride along; replicas now come from
     // the per-role editor, resources fall back to the stored flat values.
     const input: CreateEngineInput = {
@@ -962,6 +1132,12 @@ export function useEngineConfigForm(
     setProgressDeadlineSeconds,
     shareProcessNamespace,
     setShareProcessNamespace,
+    autoscaleMode,
+    setAutoscaleMode,
+    autoscaleHpa,
+    setAutoscaleHpa,
+    autoscaleKeda,
+    setAutoscaleKeda,
     error,
     dirty,
     saving: saveMutation.isPending,

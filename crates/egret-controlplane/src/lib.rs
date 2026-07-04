@@ -19,12 +19,13 @@ mod warehouses;
 
 pub use auth::require_platform_admin;
 pub use engines::{
-    AffinityReq, AuthReq, CatalogReq, ContainerPortReq, DeploymentStrategyReq, EngineLiveStatus,
-    EnginePod, EngineProvisionReq, EngineProvisioner, EnvFromSourceReq, FaultTolerantReq,
-    GracefulShutdownReq, HeapReq, IngressReq, JwtReq, MiniContainerReq, NodeSelectorRequirementReq,
-    ObjectMountReq, PasswordEntryReq, ProbeReq, ProbesReq, ResourceGroupReq, ResourceGroupsReq,
-    ResourceSelectorReq, RoleConfigReq, RoleResourcesReq, SecurityContextReq, SessionRuleReq,
-    TolerationReq, TopologySpreadConstraintReq, TrinoConfigReq, VolumeMountReq,
+    AffinityReq, AuthReq, AutoscalingReq, CatalogReq, ContainerPortReq, CronTriggerReq,
+    DeploymentStrategyReq, EngineLiveStatus, EnginePod, EngineProvisionReq, EngineProvisioner,
+    EnvFromSourceReq, FaultTolerantReq, GracefulShutdownReq, HeapReq, HpaConfigReq, IngressReq,
+    JwtReq, KedaConfigReq, KedaTriggerReq, MiniContainerReq, NodeSelectorRequirementReq,
+    ObjectMountReq, PasswordEntryReq, ProbeReq, ProbesReq, PrometheusTriggerReq, ResourceGroupReq,
+    ResourceGroupsReq, ResourceSelectorReq, RoleConfigReq, RoleResourcesReq, SecurityContextReq,
+    SessionRuleReq, TolerationReq, TopologySpreadConstraintReq, TrinoConfigReq, VolumeMountReq,
     WorkerRoleConfigReq,
 };
 pub use error::CpError;

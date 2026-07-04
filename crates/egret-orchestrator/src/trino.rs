@@ -5,7 +5,8 @@
 use crate::kube_client::KubeClient;
 use crate::provisioner::EngineProvisioner;
 use crate::spec::{
-    EngineSpec, EngineStatus, PodStatus, ResourceGroup, ResourceGroups, RoleConfig, SessionRule,
+    EngineSpec, EngineStatus, KedaTrigger, PodStatus, ResourceGroup, ResourceGroups, RoleConfig,
+    SessionRule,
 };
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
@@ -838,6 +839,15 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
         }
     }
 
+    // When autoscaling owns the worker, omit `spec.replicas` so the HPA /
+    // ScaledObject is the sole authority. The coordinator is untouched.
+    if !role.is_coord() && spec.config.autoscaling.is_some() {
+        deployment["spec"]
+            .as_object_mut()
+            .unwrap()
+            .remove("replicas");
+    }
+
     deployment
 }
 
@@ -889,6 +899,112 @@ pub fn trino_ingress(spec: &EngineSpec) -> Option<Value> {
     }))
 }
 
+/// Render an `autoscaling/v2 HorizontalPodAutoscaler` targeting the
+/// `{name}-worker` Deployment. Returns `None` unless autoscaling is configured
+/// with `mode == "hpa"`. `minReplicas` = the configured worker replicas.
+pub fn trino_hpa(spec: &EngineSpec) -> Option<Value> {
+    let auto = spec.config.autoscaling.as_ref()?;
+    if auto.mode != "hpa" {
+        return None;
+    }
+    let hpa = auto.hpa.as_ref()?;
+    let worker = format!("{}-worker", spec.name);
+    let mut metrics = Vec::new();
+    if let Some(pct) = hpa.target_cpu_percent {
+        metrics.push(json!({
+            "type": "Resource",
+            "resource": { "name": "cpu", "target": { "type": "Utilization", "averageUtilization": pct } }
+        }));
+    }
+    if let Some(pct) = hpa.target_memory_percent {
+        metrics.push(json!({
+            "type": "Resource",
+            "resource": { "name": "memory", "target": { "type": "Utilization", "averageUtilization": pct } }
+        }));
+    }
+    let mut hpa_spec = json!({
+        "scaleTargetRef": { "apiVersion": "apps/v1", "kind": "Deployment", "name": worker },
+        "minReplicas": spec.config.worker.base.replicas,
+        "maxReplicas": hpa.max_replicas,
+        "metrics": metrics
+    });
+    if let Some(behavior) = &hpa.behavior_raw {
+        hpa_spec["behavior"] = behavior.clone();
+    }
+    Some(json!({
+        "apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler",
+        "metadata": { "name": format!("{}-worker", spec.name), "namespace": spec.namespace,
+                      "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
+        "spec": hpa_spec
+    }))
+}
+
+/// Render one KEDA ScaledObject trigger. `raw` triggers pass through verbatim;
+/// structured `cron`/`prometheus` triggers render KEDA metadata as STRINGS.
+fn keda_trigger_json(t: &KedaTrigger) -> Value {
+    match t.kind.as_str() {
+        "raw" => t.raw_override.clone().unwrap_or_else(|| json!({})),
+        "cron" => {
+            let c = t.cron.clone().unwrap_or_default();
+            json!({
+                "type": "cron",
+                "metadata": {
+                    "start": c.start,
+                    "end": c.end,
+                    "desiredReplicas": c.desired_replicas.to_string(),
+                    "timezone": c.timezone
+                }
+            })
+        }
+        "prometheus" => {
+            let p = t.prometheus.clone().unwrap_or_default();
+            json!({
+                "type": "prometheus",
+                "metadata": {
+                    "serverAddress": p.server_address,
+                    "metricName": p.metric_name,
+                    "query": p.query,
+                    "threshold": p.threshold
+                }
+            })
+        }
+        _ => json!({}),
+    }
+}
+
+/// Render a `keda.sh/v1alpha1 ScaledObject` targeting the `{name}-worker`
+/// Deployment. Returns `None` unless autoscaling is configured with
+/// `mode == "keda"`.
+pub fn trino_scaled_object(spec: &EngineSpec) -> Option<Value> {
+    let auto = spec.config.autoscaling.as_ref()?;
+    if auto.mode != "keda" {
+        return None;
+    }
+    let keda = auto.keda.as_ref()?;
+    let triggers: Vec<Value> = keda.triggers.iter().map(keda_trigger_json).collect();
+    let mut so_spec = json!({
+        "scaleTargetRef": { "name": format!("{}-worker", spec.name) },
+        "minReplicaCount": keda.min_replica_count,
+        "maxReplicaCount": keda.max_replica_count,
+        "triggers": triggers
+    });
+    if let Some(v) = keda.polling_interval {
+        so_spec["pollingInterval"] = json!(v);
+    }
+    if let Some(v) = keda.cooldown_period {
+        so_spec["cooldownPeriod"] = json!(v);
+    }
+    if let Some(fb) = &keda.fallback_raw {
+        so_spec["fallback"] = fb.clone();
+    }
+    Some(json!({
+        "apiVersion": "keda.sh/v1alpha1", "kind": "ScaledObject",
+        "metadata": { "name": format!("{}-worker", spec.name), "namespace": spec.namespace,
+                      "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
+        "spec": so_spec
+    }))
+}
+
 /// Provisions a Trino engine as plain Kubernetes manifests: two Deployments
 /// (coordinator + worker), a Service, two ConfigMaps (config + catalogs), and an
 /// env Secret. A checksum annotation on the pod template rolls pods on change.
@@ -917,6 +1033,14 @@ impl TrinoProvisioner {
             .await?;
         if let Some(ing) = trino_ingress(spec) {
             self.kube.apply(&ing).await?;
+        }
+        // Autoscaling owns the worker Deployment's replica count. Each renderer
+        // returns Some only for its matching mode, so at most one is applied.
+        if let Some(h) = trino_hpa(spec) {
+            self.kube.apply(&h).await?;
+        }
+        if let Some(so) = trino_scaled_object(spec) {
+            self.kube.apply(&so).await?;
         }
         Ok(())
     }
@@ -970,6 +1094,34 @@ impl EngineProvisioner for TrinoProvisioner {
                 )
                 .await;
         }
+        // Likewise, `apply_all` only applies the autoscaler for the current mode.
+        // Best-effort delete the stale object when autoscaling is off or the mode
+        // switched, so HPA↔KEDA↔off never leaves an orphaned scaler behind.
+        let worker = format!("{}-worker", spec.name);
+        let hpa = || {
+            self.kube.delete(
+                "autoscaling/v2",
+                "HorizontalPodAutoscaler",
+                &spec.namespace,
+                &worker,
+            )
+        };
+        let so = || {
+            self.kube
+                .delete("keda.sh/v1alpha1", "ScaledObject", &spec.namespace, &worker)
+        };
+        match spec.config.autoscaling.as_ref().map(|a| a.mode.as_str()) {
+            Some("hpa") => {
+                let _ = so().await;
+            }
+            Some("keda") => {
+                let _ = hpa().await;
+            }
+            _ => {
+                let _ = hpa().await;
+                let _ = so().await;
+            }
+        }
         Ok(())
     }
     async fn delete(&self, namespace: &str, name: &str) -> anyhow::Result<()> {
@@ -1015,6 +1167,26 @@ impl EngineProvisioner for TrinoProvisioner {
                 "Ingress",
                 namespace,
                 &format!("{name}-trino"),
+            )
+            .await;
+        // Best-effort delete BOTH autoscalers regardless of mode; harmless when
+        // the object was never applied.
+        let _ = self
+            .kube
+            .delete(
+                "autoscaling/v2",
+                "HorizontalPodAutoscaler",
+                namespace,
+                &format!("{name}-worker"),
+            )
+            .await;
+        let _ = self
+            .kube
+            .delete(
+                "keda.sh/v1alpha1",
+                "ScaledObject",
+                namespace,
+                &format!("{name}-worker"),
             )
             .await;
         Ok(())
@@ -1079,6 +1251,107 @@ mod tests {
         }
     }
 
+    #[test]
+    fn hpa_object_shape() {
+        let mut s = sample_spec();
+        s.config.worker.base.replicas = 2;
+        s.config.autoscaling = Some(Autoscaling {
+            mode: "hpa".into(),
+            hpa: Some(HpaConfig {
+                max_replicas: 5,
+                target_cpu_percent: Some(60),
+                target_memory_percent: Some(80),
+                behavior_raw: None,
+            }),
+            keda: None,
+        });
+        let h = trino_hpa(&s).unwrap();
+        assert_eq!(h["apiVersion"], "autoscaling/v2");
+        assert_eq!(h["kind"], "HorizontalPodAutoscaler");
+        assert_eq!(h["metadata"]["name"], format!("{}-worker", s.name));
+        assert_eq!(
+            h["spec"]["scaleTargetRef"]["name"],
+            format!("{}-worker", s.name)
+        );
+        assert_eq!(h["spec"]["minReplicas"], 2);
+        assert_eq!(h["spec"]["maxReplicas"], 5);
+        let metrics = h["spec"]["metrics"].as_array().unwrap();
+        assert!(metrics.iter().any(|m| m["resource"]["name"] == "cpu"
+            && m["resource"]["target"]["averageUtilization"] == 60));
+        assert!(metrics.iter().any(|m| m["resource"]["name"] == "memory"
+            && m["resource"]["target"]["averageUtilization"] == 80));
+        assert!(trino_scaled_object(&s).is_none()); // mode=hpa ⇒ no ScaledObject
+    }
+    #[test]
+    fn scaledobject_and_triggers() {
+        let mut s = sample_spec();
+        s.config.autoscaling = Some(Autoscaling {
+            mode: "keda".into(),
+            hpa: None,
+            keda: Some(KedaConfig {
+                min_replica_count: 0,
+                max_replica_count: 4,
+                polling_interval: Some(30),
+                cooldown_period: Some(300),
+                triggers: vec![
+                    KedaTrigger {
+                        kind: "cron".into(),
+                        cron: Some(CronTrigger {
+                            start: "0 8 * * *".into(),
+                            end: "0 20 * * *".into(),
+                            desired_replicas: 3,
+                            timezone: "UTC".into(),
+                        }),
+                        prometheus: None,
+                        raw_override: None,
+                    },
+                    KedaTrigger {
+                        kind: "raw".into(),
+                        cron: None,
+                        prometheus: None,
+                        raw_override: Some(json!({"type":"kafka","metadata":{"topic":"t"}})),
+                    },
+                ],
+                fallback_raw: None,
+            }),
+        });
+        let so = trino_scaled_object(&s).unwrap();
+        assert_eq!(so["apiVersion"], "keda.sh/v1alpha1");
+        assert_eq!(so["kind"], "ScaledObject");
+        assert_eq!(
+            so["spec"]["scaleTargetRef"]["name"],
+            format!("{}-worker", s.name)
+        );
+        assert_eq!(so["spec"]["minReplicaCount"], 0);
+        assert_eq!(so["spec"]["maxReplicaCount"], 4);
+        assert_eq!(so["spec"]["triggers"][0]["type"], "cron");
+        assert_eq!(
+            so["spec"]["triggers"][0]["metadata"]["desiredReplicas"],
+            "3"
+        ); // KEDA wants strings
+        assert_eq!(so["spec"]["triggers"][1]["type"], "kafka"); // raw verbatim
+        assert!(trino_hpa(&s).is_none());
+    }
+    #[test]
+    fn worker_omits_replicas_when_autoscaling() {
+        let mut s = sample_spec();
+        s.config.autoscaling = Some(Autoscaling {
+            mode: "hpa".into(),
+            hpa: Some(HpaConfig {
+                max_replicas: 3,
+                ..Default::default()
+            }),
+            keda: None,
+        });
+        let w = trino_deployment(&s, Role::Worker);
+        assert!(w["spec"].get("replicas").is_none() || w["spec"]["replicas"].is_null());
+        // coordinator still has replicas:
+        assert!(trino_deployment(&s, Role::Coordinator)["spec"]["replicas"].is_number());
+        // and with no autoscaling the worker keeps replicas:
+        let mut s2 = sample_spec();
+        assert!(trino_deployment(&s2, Role::Worker)["spec"]["replicas"].is_number());
+        let _ = &mut s2;
+    }
     #[test]
     fn coordinator_jvm_uses_fixed_heap() {
         let j = jvm_config(&sample_spec().config.coordinator);
@@ -1799,6 +2072,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provision_applies_autoscaler_and_delete_removes_both() {
+        use crate::kube_client::FakeKube;
+        let kube = std::sync::Arc::new(FakeKube::default());
+        let p = TrinoProvisioner::new(kube.clone());
+        let mut s = sample_spec();
+        s.config.autoscaling = Some(Autoscaling {
+            mode: "hpa".into(),
+            hpa: Some(HpaConfig {
+                max_replicas: 3,
+                ..Default::default()
+            }),
+            keda: None,
+        });
+        p.provision(&s).await.unwrap();
+        assert!(kube
+            .applied
+            .lock()
+            .unwrap()
+            .contains_key(&format!("HorizontalPodAutoscaler/{}-worker", s.name)));
+
+        p.delete(&s.namespace, &s.name).await.unwrap();
+        // delete is best-effort for BOTH kinds regardless of mode:
+        let d = kube.deleted.lock().unwrap();
+        assert!(d.contains(&format!("HorizontalPodAutoscaler/{}-worker", s.name)));
+        assert!(d.iter().any(|x| x.starts_with("ScaledObject/")));
+    }
+
+    #[tokio::test]
     async fn provision_applies_all_objects() {
         use crate::kube_client::FakeKube;
         let kube = std::sync::Arc::new(FakeKube::default());
@@ -1824,6 +2125,6 @@ mod tests {
         let p = TrinoProvisioner::new(kube.clone());
         p.delete("egret-engines", "demo").await.unwrap();
         let d = kube.deleted.lock().unwrap();
-        assert_eq!(d.len(), 7); // 2 deployments, service, 2 configmaps, secret, ingress
+        assert_eq!(d.len(), 9); // 2 deployments, service, 2 configmaps, secret, ingress, hpa, scaledobject
     }
 }

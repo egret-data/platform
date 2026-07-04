@@ -303,6 +303,67 @@ pub struct IngressReq {
     pub annotations: BTreeMap<String, String>,
 }
 
+// ── autoscaling carriers (kube-free mirrors of the orchestrator types) ───────────
+// Structured-common + raw-override pattern (1.5.3): raw JSON passes through, so
+// no secret resolution and they map straight through in `build_provision_req`.
+
+/// A KEDA cron trigger (mirrors orchestrator `CronTrigger`).
+#[derive(Clone, Default)]
+pub struct CronTriggerReq {
+    pub start: String,
+    pub end: String,
+    pub desired_replicas: u32,
+    pub timezone: String,
+}
+
+/// A KEDA prometheus trigger (mirrors orchestrator `PrometheusTrigger`).
+#[derive(Clone, Default)]
+pub struct PrometheusTriggerReq {
+    pub server_address: String,
+    pub metric_name: String,
+    pub query: String,
+    pub threshold: String,
+}
+
+/// One KEDA trigger: a structured `cron`/`prometheus` or a raw override, keyed by
+/// `kind` (mirrors orchestrator `KedaTrigger`).
+#[derive(Clone, Default)]
+pub struct KedaTriggerReq {
+    pub kind: String,
+    pub cron: Option<CronTriggerReq>,
+    pub prometheus: Option<PrometheusTriggerReq>,
+    pub raw_override: Option<serde_json::Value>,
+}
+
+/// KEDA ScaledObject config (mirrors orchestrator `KedaConfig`).
+#[derive(Clone, Default)]
+pub struct KedaConfigReq {
+    pub min_replica_count: u32,
+    pub max_replica_count: u32,
+    pub polling_interval: Option<u32>,
+    pub cooldown_period: Option<u32>,
+    pub triggers: Vec<KedaTriggerReq>,
+    pub fallback_raw: Option<serde_json::Value>,
+}
+
+/// Native HPA config (mirrors orchestrator `HpaConfig`).
+#[derive(Clone, Default)]
+pub struct HpaConfigReq {
+    pub max_replicas: u32,
+    pub target_cpu_percent: Option<u32>,
+    pub target_memory_percent: Option<u32>,
+    pub behavior_raw: Option<serde_json::Value>,
+}
+
+/// Worker autoscaling: mode-exclusive HPA or KEDA (mirrors orchestrator
+/// `Autoscaling`).
+#[derive(Clone, Default)]
+pub struct AutoscalingReq {
+    pub mode: String,
+    pub hpa: Option<HpaConfigReq>,
+    pub keda: Option<KedaConfigReq>,
+}
+
 /// Fuller Trino config surface, split per-role, kube-free (mirrors the
 /// orchestrator `TrinoConfig`).
 #[derive(Clone, Default)]
@@ -323,6 +384,7 @@ pub struct TrinoConfigReq {
     /// `auth` (which carries `secretRef`, not hashes) in [`build_provision_req`].
     pub auth: Option<AuthReq>,
     pub ingress: Option<IngressReq>,
+    pub autoscaling: Option<AutoscalingReq>,
     // ── pod & scheduling (cluster-wide) ──────────────────────────────────────
     pub image_pull_secrets: Vec<String>,
     pub image_pull_policy: Option<String>,
@@ -1190,6 +1252,7 @@ fn trino_config_from_json(v: &serde_json::Value) -> TrinoConfigReq {
         // secretRef}], jwt} wire body (secret → bcrypt). Ingress has no secrets.
         auth: None,
         ingress: parse_ingress(&v["ingress"]),
+        autoscaling: parse_autoscaling(&v["autoscaling"]),
         // ── pod & scheduling (cluster-wide) — k8s object names / raw JSON, no
         //    secret resolution, so parsed straight from the wire here. ────────
         image_pull_secrets: v["imagePullSecrets"]
@@ -1229,6 +1292,92 @@ fn parse_ingress(v: &serde_json::Value) -> Option<IngressReq> {
         host: v["host"].as_str().unwrap_or_default().to_string(),
         tls_secret: v["tlsSecret"].as_str().map(Into::into),
         annotations: str_map(&v["annotations"]),
+    })
+}
+
+/// Parse the `autoscaling { mode, hpa{...}, keda{...} }` wire object; `None` when
+/// absent. All raw fields carry opaque JSON through with no secret resolution.
+fn parse_autoscaling(v: &serde_json::Value) -> Option<AutoscalingReq> {
+    if !v.is_object() {
+        return None;
+    }
+    Some(AutoscalingReq {
+        mode: v["mode"].as_str().unwrap_or_default().to_string(),
+        hpa: parse_hpa_config(&v["hpa"]),
+        keda: parse_keda_config(&v["keda"]),
+    })
+}
+
+/// Parse the `hpa { maxReplicas, targetCpuPercent, targetMemoryPercent,
+/// behaviorRaw }` wire object; `None` when absent.
+fn parse_hpa_config(v: &serde_json::Value) -> Option<HpaConfigReq> {
+    if !v.is_object() {
+        return None;
+    }
+    Some(HpaConfigReq {
+        max_replicas: v["maxReplicas"].as_u64().unwrap_or(0) as u32,
+        target_cpu_percent: v["targetCpuPercent"].as_u64().map(|n| n as u32),
+        target_memory_percent: v["targetMemoryPercent"].as_u64().map(|n| n as u32),
+        behavior_raw: v.get("behaviorRaw").filter(|r| !r.is_null()).cloned(),
+    })
+}
+
+/// Parse the `keda { minReplicaCount, maxReplicaCount, pollingInterval,
+/// cooldownPeriod, triggers[], fallbackRaw }` wire object; `None` when absent.
+fn parse_keda_config(v: &serde_json::Value) -> Option<KedaConfigReq> {
+    if !v.is_object() {
+        return None;
+    }
+    Some(KedaConfigReq {
+        min_replica_count: v["minReplicaCount"].as_u64().unwrap_or(0) as u32,
+        max_replica_count: v["maxReplicaCount"].as_u64().unwrap_or(0) as u32,
+        polling_interval: v["pollingInterval"].as_u64().map(|n| n as u32),
+        cooldown_period: v["cooldownPeriod"].as_u64().map(|n| n as u32),
+        triggers: parse_keda_triggers(&v["triggers"]),
+        fallback_raw: v.get("fallbackRaw").filter(|r| !r.is_null()).cloned(),
+    })
+}
+
+/// Parse the `triggers[]` wire array of `{kind, cron, prometheus, rawOverride}`.
+fn parse_keda_triggers(v: &serde_json::Value) -> Vec<KedaTriggerReq> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .map(|t| KedaTriggerReq {
+                    kind: t["kind"].as_str().unwrap_or_default().to_string(),
+                    cron: parse_cron_trigger(&t["cron"]),
+                    prometheus: parse_prometheus_trigger(&t["prometheus"]),
+                    raw_override: t.get("rawOverride").filter(|r| !r.is_null()).cloned(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse a `{start, end, desiredReplicas, timezone}` cron trigger; `None` when absent.
+fn parse_cron_trigger(v: &serde_json::Value) -> Option<CronTriggerReq> {
+    if !v.is_object() {
+        return None;
+    }
+    Some(CronTriggerReq {
+        start: v["start"].as_str().unwrap_or_default().to_string(),
+        end: v["end"].as_str().unwrap_or_default().to_string(),
+        desired_replicas: v["desiredReplicas"].as_u64().unwrap_or(0) as u32,
+        timezone: v["timezone"].as_str().unwrap_or_default().to_string(),
+    })
+}
+
+/// Parse a `{serverAddress, metricName, query, threshold}` prometheus trigger;
+/// `None` when absent.
+fn parse_prometheus_trigger(v: &serde_json::Value) -> Option<PrometheusTriggerReq> {
+    if !v.is_object() {
+        return None;
+    }
+    Some(PrometheusTriggerReq {
+        server_address: v["serverAddress"].as_str().unwrap_or_default().to_string(),
+        metric_name: v["metricName"].as_str().unwrap_or_default().to_string(),
+        query: v["query"].as_str().unwrap_or_default().to_string(),
+        threshold: v["threshold"].as_str().unwrap_or_default().to_string(),
     })
 }
 

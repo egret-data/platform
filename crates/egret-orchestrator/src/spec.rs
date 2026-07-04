@@ -246,6 +246,61 @@ pub struct Ingress {
     pub annotations: BTreeMap<String, String>,
 }
 
+/// A KEDA cron trigger's fields (structured-common).
+#[derive(Clone, Debug, Default)]
+pub struct CronTrigger {
+    pub start: String,
+    pub end: String,
+    pub desired_replicas: u32,
+    pub timezone: String,
+}
+
+/// A KEDA prometheus trigger's fields (structured-common).
+#[derive(Clone, Debug, Default)]
+pub struct PrometheusTrigger {
+    pub server_address: String,
+    pub metric_name: String,
+    pub query: String,
+    pub threshold: String,
+}
+
+/// One KEDA ScaledObject trigger: a structured kind plus a raw-override escape hatch.
+#[derive(Clone, Debug, Default)]
+pub struct KedaTrigger {
+    pub kind: String,
+    pub cron: Option<CronTrigger>,
+    pub prometheus: Option<PrometheusTrigger>,
+    pub raw_override: Option<Value>,
+}
+
+/// KEDA ScaledObject config: replica bounds, timing, triggers, raw fallback.
+#[derive(Clone, Debug, Default)]
+pub struct KedaConfig {
+    pub min_replica_count: u32,
+    pub max_replica_count: u32,
+    pub polling_interval: Option<u32>,
+    pub cooldown_period: Option<u32>,
+    pub triggers: Vec<KedaTrigger>,
+    pub fallback_raw: Option<Value>,
+}
+
+/// Native HPA config: max replicas, CPU/memory targets, raw behavior override.
+#[derive(Clone, Debug, Default)]
+pub struct HpaConfig {
+    pub max_replicas: u32,
+    pub target_cpu_percent: Option<u32>,
+    pub target_memory_percent: Option<u32>,
+    pub behavior_raw: Option<Value>,
+}
+
+/// Worker autoscaling: mode-exclusive native HPA or KEDA ScaledObject.
+#[derive(Clone, Debug, Default)]
+pub struct Autoscaling {
+    pub mode: String,
+    pub hpa: Option<HpaConfig>,
+    pub keda: Option<KedaConfig>,
+}
+
 /// Fuller Trino config surface, split per-role (coordinator/worker independent).
 #[derive(Clone, Debug, Default)]
 pub struct TrinoConfig {
@@ -278,6 +333,7 @@ pub struct TrinoConfig {
     pub revision_history_limit: Option<u32>,
     pub progress_deadline_seconds: Option<u32>,
     pub share_process_namespace: Option<bool>,
+    pub autoscaling: Option<Autoscaling>,
 }
 
 /// One catalog rendered as `<name>.properties`. `properties` may contain

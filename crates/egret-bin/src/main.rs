@@ -604,6 +604,73 @@ impl EgretEngineProvisioner {
         }
     }
 
+    /// Map an `AutoscalingReq` onto the orchestrator `Autoscaling`.
+    fn autoscaling_from(a: &egret_controlplane::AutoscalingReq) -> egret_orchestrator::Autoscaling {
+        egret_orchestrator::Autoscaling {
+            mode: a.mode.clone(),
+            hpa: a.hpa.as_ref().map(Self::hpa_config_from),
+            keda: a.keda.as_ref().map(Self::keda_config_from),
+        }
+    }
+
+    /// Map an `HpaConfigReq` onto the orchestrator `HpaConfig`.
+    fn hpa_config_from(h: &egret_controlplane::HpaConfigReq) -> egret_orchestrator::HpaConfig {
+        egret_orchestrator::HpaConfig {
+            max_replicas: h.max_replicas,
+            target_cpu_percent: h.target_cpu_percent,
+            target_memory_percent: h.target_memory_percent,
+            behavior_raw: h.behavior_raw.clone(),
+        }
+    }
+
+    /// Map a `KedaConfigReq` onto the orchestrator `KedaConfig`.
+    fn keda_config_from(k: &egret_controlplane::KedaConfigReq) -> egret_orchestrator::KedaConfig {
+        egret_orchestrator::KedaConfig {
+            min_replica_count: k.min_replica_count,
+            max_replica_count: k.max_replica_count,
+            polling_interval: k.polling_interval,
+            cooldown_period: k.cooldown_period,
+            triggers: k.triggers.iter().map(Self::keda_trigger_from).collect(),
+            fallback_raw: k.fallback_raw.clone(),
+        }
+    }
+
+    /// Map a `KedaTriggerReq` onto the orchestrator `KedaTrigger`.
+    fn keda_trigger_from(
+        t: &egret_controlplane::KedaTriggerReq,
+    ) -> egret_orchestrator::KedaTrigger {
+        egret_orchestrator::KedaTrigger {
+            kind: t.kind.clone(),
+            cron: t.cron.as_ref().map(Self::cron_trigger_from),
+            prometheus: t.prometheus.as_ref().map(Self::prometheus_trigger_from),
+            raw_override: t.raw_override.clone(),
+        }
+    }
+
+    /// Map a `CronTriggerReq` onto the orchestrator `CronTrigger`.
+    fn cron_trigger_from(
+        c: &egret_controlplane::CronTriggerReq,
+    ) -> egret_orchestrator::CronTrigger {
+        egret_orchestrator::CronTrigger {
+            start: c.start.clone(),
+            end: c.end.clone(),
+            desired_replicas: c.desired_replicas,
+            timezone: c.timezone.clone(),
+        }
+    }
+
+    /// Map a `PrometheusTriggerReq` onto the orchestrator `PrometheusTrigger`.
+    fn prometheus_trigger_from(
+        p: &egret_controlplane::PrometheusTriggerReq,
+    ) -> egret_orchestrator::PrometheusTrigger {
+        egret_orchestrator::PrometheusTrigger {
+            server_address: p.server_address.clone(),
+            metric_name: p.metric_name.clone(),
+            query: p.query.clone(),
+            threshold: p.threshold.clone(),
+        }
+    }
+
     fn spec_from(req: &egret_controlplane::EngineProvisionReq) -> egret_orchestrator::EngineSpec {
         let cfg = &req.config;
         egret_orchestrator::EngineSpec {
@@ -727,6 +794,7 @@ impl EgretEngineProvisioner {
                 revision_history_limit: cfg.revision_history_limit,
                 progress_deadline_seconds: cfg.progress_deadline_seconds,
                 share_process_namespace: cfg.share_process_namespace,
+                autoscaling: cfg.autoscaling.as_ref().map(Self::autoscaling_from),
             },
             catalogs: req
                 .catalogs
