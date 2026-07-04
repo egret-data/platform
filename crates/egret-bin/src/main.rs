@@ -389,11 +389,17 @@ impl egret_controlplane::WarehouseProvisioner for LakekeeperProvisioner {
 /// status back out.
 struct EgretEngineProvisioner {
     inner: std::sync::Arc<egret_orchestrator::TrinoProvisioner>,
+    /// The same KubeClient the `TrinoProvisioner` holds, kept here so the
+    /// kube-free `coordinator_request` seam can reach it directly.
+    kube: std::sync::Arc<dyn egret_orchestrator::KubeClient>,
 }
 
 impl EgretEngineProvisioner {
-    fn new(inner: std::sync::Arc<egret_orchestrator::TrinoProvisioner>) -> Self {
-        Self { inner }
+    fn new(
+        inner: std::sync::Arc<egret_orchestrator::TrinoProvisioner>,
+        kube: std::sync::Arc<dyn egret_orchestrator::KubeClient>,
+    ) -> Self {
+        Self { inner, kube }
     }
 
     /// Map a single control-plane `ProbeReq` onto the orchestrator `Probe`
@@ -584,6 +590,20 @@ impl egret_controlplane::EngineProvisioner for EgretEngineProvisioner {
         egret_orchestrator::EngineProvisioner::delete(self.inner.as_ref(), namespace, name)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    async fn coordinator_request(
+        &self,
+        namespace: &str,
+        service: &str,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: Option<Vec<u8>>,
+    ) -> anyhow::Result<(u16, Vec<u8>)> {
+        self.kube
+            .coordinator_request(namespace, service, method, path, headers, body)
+            .await
     }
 }
 
@@ -1232,9 +1252,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         };
         match kube {
             Some(k) => {
-                let trino = egret_orchestrator::TrinoProvisioner::new(std::sync::Arc::new(k));
+                let kube: std::sync::Arc<dyn egret_orchestrator::KubeClient> =
+                    std::sync::Arc::new(k);
+                let trino = egret_orchestrator::TrinoProvisioner::new(kube.clone());
                 Some(std::sync::Arc::new(EgretEngineProvisioner::new(
                     std::sync::Arc::new(trino),
+                    kube,
                 )))
             }
             None => {

@@ -254,6 +254,20 @@ pub trait EngineProvisioner: Send + Sync {
     async fn status(&self, namespace: &str, name: &str) -> Result<EngineLiveStatus, String>;
     async fn update(&self, req: &EngineProvisionReq) -> Result<(), String>;
     async fn delete(&self, namespace: &str, name: &str) -> Result<(), String>;
+
+    /// Issue a raw HTTP request to a Trino coordinator `Service` and return
+    /// `(status, body)`. Kube-free seam over `KubeClient::coordinator_request`
+    /// (Service DNS in-cluster / kube API-server proxy in dev); non-2xx statuses
+    /// are returned as-is for the caller to map.
+    async fn coordinator_request(
+        &self,
+        namespace: &str,
+        service: &str,
+        method: &str,
+        path: &str,
+        headers: &[(String, String)],
+        body: Option<Vec<u8>>,
+    ) -> anyhow::Result<(u16, Vec<u8>)>;
 }
 
 pub fn router() -> Router<CpState> {

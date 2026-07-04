@@ -543,6 +543,17 @@ impl egret_controlplane::EngineProvisioner for FakeEngineProvisioner {
     async fn delete(&self, _ns: &str, _name: &str) -> Result<(), String> {
         Ok(())
     }
+    async fn coordinator_request(
+        &self,
+        _namespace: &str,
+        _service: &str,
+        _method: &str,
+        _path: &str,
+        _headers: &[(String, String)],
+        _body: Option<Vec<u8>>,
+    ) -> anyhow::Result<(u16, Vec<u8>)> {
+        Ok((200, b"[]".to_vec()))
+    }
 }
 
 #[tokio::test]
