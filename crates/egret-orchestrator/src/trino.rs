@@ -451,6 +451,49 @@ fn security_context_json(sc: &crate::spec::SecurityContext) -> Value {
     Value::Object(out)
 }
 
+/// Render a [`MiniContainer`] to k8s JSON. A `raw_override` wins verbatim;
+/// otherwise build `{name, image}` plus optional `command`/`args`/`env`/
+/// `volumeMounts`, omitting any empty collection.
+fn container_json(c: &crate::spec::MiniContainer) -> Value {
+    if let Some(raw) = &c.raw_override {
+        return raw.clone();
+    }
+    let mut out = serde_json::Map::new();
+    out.insert("name".into(), json!(c.name));
+    out.insert("image".into(), json!(c.image));
+    if !c.command.is_empty() {
+        out.insert("command".into(), json!(c.command));
+    }
+    if !c.args.is_empty() {
+        out.insert("args".into(), json!(c.args));
+    }
+    if !c.env.is_empty() {
+        let env: Vec<Value> = c
+            .env
+            .iter()
+            .map(|(k, v)| json!({ "name": k, "value": v }))
+            .collect();
+        out.insert("env".into(), Value::Array(env));
+    }
+    if !c.volume_mounts.is_empty() {
+        let vms: Vec<Value> = c
+            .volume_mounts
+            .iter()
+            .map(|m| {
+                let mut o = serde_json::Map::new();
+                o.insert("name".into(), json!(m.name));
+                o.insert("mountPath".into(), json!(m.mount_path));
+                if let Some(sp) = &m.sub_path {
+                    o.insert("subPath".into(), json!(sp));
+                }
+                Value::Object(o)
+            })
+            .collect();
+        out.insert("volumeMounts".into(), Value::Array(vms));
+    }
+    Value::Object(out)
+}
+
 pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
     let app = format!("{}-{}", spec.name, role.suffix());
     let (rc, jvm_file, cfg_file, replicas) = if role.is_coord() {
@@ -557,6 +600,48 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
     if let Some(sc) = &spec.config.container_security_context {
         container["securityContext"] = security_context_json(sc);
     }
+    // Cluster-wide extra env sources: prepend user ConfigMap/Secret refs ahead of
+    // the base `-env` secret (kept last so the container still loads it).
+    if !spec.config.env_from.is_empty() {
+        let mut sources: Vec<Value> = spec
+            .config
+            .env_from
+            .iter()
+            .flat_map(|ef| {
+                let mut v = Vec::new();
+                if let Some(cm) = &ef.config_map_ref {
+                    v.push(json!({ "configMapRef": { "name": cm } }));
+                }
+                if let Some(sec) = &ef.secret_ref {
+                    v.push(json!({ "secretRef": { "name": sec } }));
+                }
+                v
+            })
+            .collect();
+        if let Some(existing) = container["envFrom"].as_array() {
+            sources.extend(existing.iter().cloned());
+        }
+        container["envFrom"] = Value::Array(sources);
+    }
+    // Cluster-wide config/secret file mounts: a volumeMount per entry on the main
+    // container (the matching volume is added to the pod spec below).
+    for m in spec
+        .config
+        .config_mounts
+        .iter()
+        .chain(&spec.config.secret_mounts)
+    {
+        let mut o = serde_json::Map::new();
+        o.insert("name".into(), json!(m.name));
+        o.insert("mountPath".into(), json!(m.mount_path));
+        if let Some(sp) = &m.sub_path {
+            o.insert("subPath".into(), json!(sp));
+        }
+        container["volumeMounts"]
+            .as_array_mut()
+            .unwrap()
+            .push(Value::Object(o));
+    }
 
     // pod-spec: worker graceful shutdown adds a preStop + terminationGracePeriodSeconds.
     let mut pod_spec = json!({
@@ -660,6 +745,45 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
     }
     if let Some(sc) = &spec.config.pod_security_context {
         pod_spec["securityContext"] = security_context_json(sc);
+    }
+
+    // Cluster-wide init/sidecar containers + config/secret volumes.
+    if !spec.config.init_containers.is_empty() {
+        pod_spec["initContainers"] = Value::Array(
+            spec.config
+                .init_containers
+                .iter()
+                .map(container_json)
+                .collect(),
+        );
+    }
+    for sc in &spec.config.sidecar_containers {
+        pod_spec["containers"]
+            .as_array_mut()
+            .unwrap()
+            .push(container_json(sc));
+    }
+    for m in &spec.config.config_mounts {
+        let mut inner = serde_json::Map::new();
+        inner.insert("name".into(), json!(m.name));
+        if let Some(dm) = m.default_mode {
+            inner.insert("defaultMode".into(), json!(dm));
+        }
+        pod_spec["volumes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "name": m.name, "configMap": Value::Object(inner) }));
+    }
+    for m in &spec.config.secret_mounts {
+        let mut inner = serde_json::Map::new();
+        inner.insert("secretName".into(), json!(m.name));
+        if let Some(dm) = m.default_mode {
+            inner.insert("defaultMode".into(), json!(dm));
+        }
+        pod_spec["volumes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "name": m.name, "secret": Value::Object(inner) }));
     }
 
     let mut deployment = json!({
@@ -1574,6 +1698,76 @@ mod tests {
         assert_eq!(d["spec"]["revisionHistoryLimit"], 3);
         assert_eq!(d["spec"]["progressDeadlineSeconds"], 600);
         assert_eq!(d["metadata"]["annotations"]["team"], "data");
+    }
+
+    #[test]
+    fn containers_envfrom_mounts_render_and_gs_preserved() {
+        let mut s = sample_spec();
+        // worker graceful shutdown sets a grace period we must not clobber:
+        s.config.worker.base.termination_grace_seconds = Some(30); // must lose to graceful shutdown
+        s.config.worker.graceful_shutdown = Some(GracefulShutdown {
+            enabled: true,
+            grace_period_seconds: 240,
+        });
+        s.config.init_containers = vec![MiniContainer {
+            name: "wait".into(),
+            image: "busybox".into(),
+            command: vec!["sh".into(), "-c".into()],
+            args: vec!["echo hi".into()],
+            ..Default::default()
+        }];
+        s.config.sidecar_containers = vec![MiniContainer {
+            name: "raw-side".into(),
+            image: "".into(),
+            raw_override: Some(json!({"name":"exporter","image":"prom/exporter"})),
+            ..Default::default()
+        }];
+        s.config.env_from = vec![EnvFromSource {
+            config_map_ref: Some("shared-env".into()),
+            secret_ref: None,
+        }];
+        s.config.config_mounts = vec![ObjectMount {
+            name: "extra-cm".into(),
+            mount_path: "/etc/extra".into(),
+            sub_path: None,
+            default_mode: None,
+        }];
+        s.config.secret_mounts = vec![ObjectMount {
+            name: "kt".into(),
+            mount_path: "/etc/krb".into(),
+            sub_path: Some("krb5.keytab".into()),
+            default_mode: Some(0o400),
+        }];
+        let d = trino_deployment(&s, Role::Worker);
+        let ps = &d["spec"]["template"]["spec"];
+        assert_eq!(ps["initContainers"][0]["name"], "wait");
+        assert!(ps["containers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["name"] == "exporter")); // sidecar raw appended
+        assert_eq!(
+            ps["containers"][0]["envFrom"][0]["configMapRef"]["name"],
+            "shared-env"
+        );
+        assert!(ps["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["name"] == "extra-cm" && v["configMap"]["name"] == "extra-cm"));
+        assert!(ps["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["secret"]["secretName"] == "kt"));
+        let vm = &ps["containers"][0]["volumeMounts"];
+        assert!(vm
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["mountPath"] == "/etc/krb" && m["subPath"] == "krb5.keytab"));
+        // graceful shutdown grace period preserved (worker GS uses its own value, not 30):
+        assert_ne!(ps["terminationGracePeriodSeconds"], 30);
     }
 
     #[tokio::test]
