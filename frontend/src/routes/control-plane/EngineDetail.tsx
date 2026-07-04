@@ -75,6 +75,7 @@ import { PodSection } from "./config/PodSection";
 import { PlacementSection } from "./config/PlacementSection";
 import { ContainersMountsSection } from "./config/ContainersMountsSection";
 import { ValidityProvider } from "./config/validityRegistry";
+import { ReviewChangesDialog } from "./config/ReviewChangesDialog";
 import { EngineAutoscaling } from "./EngineAutoscaling";
 import { EngineSecurity } from "./EngineSecurity";
 import EngineMonitor from "./EngineMonitor";
@@ -219,12 +220,16 @@ function EngineTabs({
 function SaveBar({
   cfg,
   disabled = false,
+  review = false,
 }: {
   cfg: EngineConfigForm;
   /** Extra disable condition (e.g. an invalid raw-JSON override) on top of `!dirty || saving`. */
   disabled?: boolean;
+  /** Show the Review-changes button (diffs built vs stored trinoConfig). */
+  review?: boolean;
 }) {
   const { error, saved, dirty, saving, save } = cfg;
+  const [reviewOpen, setReviewOpen] = useState(false);
   return (
     <div className="space-y-4">
       {error && <p className="text-sm text-destructive">{error}</p>}
@@ -235,7 +240,25 @@ function SaveBar({
         </p>
       )}
 
-      <div className="flex justify-end">
+      <div className="flex justify-end gap-2">
+        {review && (
+          <>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setReviewOpen(true)}
+              disabled={!dirty}
+            >
+              Review changes
+            </Button>
+            <ReviewChangesDialog
+              before={cfg.storedTrinoConfig ?? {}}
+              after={cfg.builtTrinoConfig}
+              open={reviewOpen}
+              onOpenChange={setReviewOpen}
+            />
+          </>
+        )}
         <Button
           type="button"
           onClick={save}
@@ -576,7 +599,7 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
             </ValidityProvider>
           </div>
 
-          <SaveBar cfg={cfg} disabled={rawInvalid} />
+          <SaveBar cfg={cfg} disabled={rawInvalid} review />
         </div>
       </CardContent>
     </Card>

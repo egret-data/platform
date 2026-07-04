@@ -688,6 +688,10 @@ export interface EngineConfigForm {
   save: () => void; // builds the payload + saveMutation.mutate; sets error on throw
   // Per-section non-default counts for nav badges, from the current built payload.
   sectionCounts: Record<string, number>;
+  // The freshly-built PUT payload — `after` for the review-changes diff.
+  builtTrinoConfig: TrinoConfig;
+  // The stored engine spec's trinoConfig — `before` for the review-changes diff.
+  storedTrinoConfig: TrinoConfig | undefined;
 }
 
 /**
@@ -1300,5 +1304,7 @@ export function useEngineConfigForm(
     saved: saveMutation.isSuccess,
     save,
     sectionCounts: sectionCountsValue,
+    builtTrinoConfig,
+    storedTrinoConfig: tc,
   };
 }
