@@ -596,6 +596,106 @@ async fn create_and_get_engine() {
     assert_eq!(status, StatusCode::OK, "get engine; body={j}");
     assert_eq!(j["status"]["phase"], "running", "live phase; body={j}");
     assert_eq!(j["status"]["pods"][0]["ready"], true, "pod ready; body={j}");
+    // The wizard inputs seeded a per-role trinoConfig on the spec.
+    assert_eq!(
+        j["spec"]["trinoConfig"]["coordinator"]["replicas"], 1,
+        "seeded coordinator replicas; body={j}"
+    );
+    assert_eq!(
+        j["spec"]["trinoConfig"]["worker"]["replicas"], 2,
+        "seeded worker replicas; body={j}"
+    );
+    assert_eq!(
+        j["spec"]["trinoConfig"]["coordinator"]["resources"]["cpuLimit"], "2",
+        "seeded coordinator cpu limit; body={j}"
+    );
+}
+
+#[tokio::test]
+async fn update_engine_per_role_trino_config_roundtrips() {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_update_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    // Create with the simple wizard.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name,
+                "warehouseId": wh_id,
+                "coordinatorReplicas": 1,
+                "workerReplicas": 1,
+                "cpuMin": "1",
+                "cpuMax": "2",
+                "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // PUT a full per-role trinoConfig (coordinator heap + worker graceful shutdown).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(serde_json::json!({
+                "name": name,
+                "warehouseId": wh_id,
+                "coordinatorReplicas": 1,
+                "workerReplicas": 1,
+                "cpuMin": "1",
+                "cpuMax": "2",
+                "memory": "4Gi",
+                "trinoConfig": {
+                    "coordinator": { "replicas": 1, "heap": { "maxSize": "3G" } },
+                    "worker": {
+                        "replicas": 1,
+                        "gracefulShutdown": { "enabled": true, "gracePeriodSeconds": 30 }
+                    }
+                }
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "update engine; body={j}");
+
+    // GET reflects the persisted per-role config.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("/engines/{engine_id}"), &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "get engine; body={j}");
+    assert_eq!(
+        j["spec"]["trinoConfig"]["coordinator"]["heap"]["maxSize"], "3G",
+        "coordinator heap round-trips; body={j}"
+    );
+    assert_eq!(
+        j["spec"]["trinoConfig"]["worker"]["gracefulShutdown"]["enabled"], true,
+        "worker graceful shutdown round-trips; body={j}"
+    );
+    assert_eq!(
+        j["spec"]["trinoConfig"]["worker"]["gracefulShutdown"]["gracePeriodSeconds"], 30,
+        "worker grace period round-trips; body={j}"
+    );
 }
 
 #[tokio::test]

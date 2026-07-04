@@ -484,13 +484,64 @@ export interface EngineStatus {
   pods: { name: string; phase: string; ready: boolean }[];
 }
 
-/** Optional fuller Trino config surface, sent under `trinoConfig` on the engine body. */
-export interface TrinoConfig {
-  jvmHeap?: string;
-  queryMaxMemory?: string;
+/** A Kubernetes liveness/readiness/startup probe (all fields optional; numbers). */
+export interface Probe {
+  initialDelaySeconds?: number;
+  periodSeconds?: number;
+  timeoutSeconds?: number;
+  failureThreshold?: number;
+  successThreshold?: number;
+}
+
+/** JVM heap sizing: fixed (`maxSize`/`minSize`) XOR percent (`maxPercent`/`initialPercent`). */
+export interface HeapConfig {
+  maxSize?: string;
+  minSize?: string;
+  maxPercent?: number;
+  initialPercent?: number;
+}
+
+/** CPU/memory requests + limits (Kubernetes resource strings, e.g. "1" / "2Gi"). */
+export interface RoleResources {
+  cpuRequest?: string;
+  cpuLimit?: string;
+  memRequest?: string;
+  memLimit?: string;
+}
+
+/** Per-role config block shared by coordinator + worker. */
+export interface RoleConfig {
+  replicas?: number;
+  resources?: RoleResources;
+  heap?: HeapConfig;
   queryMaxMemoryPerNode?: string;
+  additionalJvmConfig?: string[];
+  probes?: {
+    liveness?: Probe;
+    readiness?: Probe;
+    startup?: Probe;
+  };
+}
+
+/** Worker role config: a `RoleConfig` plus optional graceful shutdown. */
+export type WorkerRoleConfig = RoleConfig & {
+  gracefulShutdown?: {
+    enabled: boolean;
+    gracePeriodSeconds: number;
+  };
+};
+
+/**
+ * Fuller per-role Trino config surface, stored/sent under `trinoConfig`.
+ * Cluster-wide knobs live at the top level; sizing/JVM/probes are per role.
+ */
+export interface TrinoConfig {
+  queryMaxMemory?: string;
+  logLevel?: string;
   configProperties?: Record<string, string>;
   env?: Record<string, string>;
+  coordinator: RoleConfig;
+  worker: WorkerRoleConfig;
 }
 
 export interface CreateEngineInput {

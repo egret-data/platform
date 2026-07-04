@@ -46,28 +46,88 @@ pub struct CatalogReq {
     pub env: BTreeMap<String, String>,
 }
 
-/// Fuller Trino config surface, kube-free (mirrors the orchestrator `TrinoConfig`).
+/// JVM heap sizing for a role: either a fixed size (`-Xmx`) or a RAM percentage.
+/// Kube-free mirror of the orchestrator `HeapConfig`.
+#[derive(Clone, Default)]
+pub struct HeapReq {
+    pub max_size: Option<String>,
+    pub min_size: Option<String>,
+    pub max_percent: Option<u8>,
+    pub initial_percent: Option<u8>,
+}
+
+/// CPU/memory requests + limits for a role (mirrors orchestrator `RoleResources`).
+#[derive(Clone, Default)]
+pub struct RoleResourcesReq {
+    pub cpu_request: Option<String>,
+    pub cpu_limit: Option<String>,
+    pub mem_request: Option<String>,
+    pub mem_limit: Option<String>,
+}
+
+/// A single probe's tunable fields (mirrors orchestrator `Probe`).
+#[derive(Clone, Default)]
+pub struct ProbeReq {
+    pub initial_delay_seconds: Option<u32>,
+    pub period_seconds: Option<u32>,
+    pub timeout_seconds: Option<u32>,
+    pub failure_threshold: Option<u32>,
+    pub success_threshold: Option<u32>,
+}
+
+/// The three probe kinds for a role (mirrors orchestrator `Probes`).
+#[derive(Clone, Default)]
+pub struct ProbesReq {
+    pub liveness: Option<ProbeReq>,
+    pub readiness: Option<ProbeReq>,
+    pub startup: Option<ProbeReq>,
+}
+
+/// Per-role config shared by coordinator and worker (mirrors `RoleConfig`).
+#[derive(Clone, Default)]
+pub struct RoleConfigReq {
+    pub replicas: u32,
+    pub resources: RoleResourcesReq,
+    pub heap: HeapReq,
+    pub query_max_memory_per_node: Option<String>,
+    pub additional_jvm_config: Vec<String>,
+    pub probes: ProbesReq,
+}
+
+/// Worker graceful-shutdown drain settings (mirrors `GracefulShutdown`).
+#[derive(Clone, Default)]
+pub struct GracefulShutdownReq {
+    pub enabled: bool,
+    pub grace_period_seconds: u32,
+}
+
+/// Worker role: base role config plus optional graceful shutdown.
+#[derive(Clone, Default)]
+pub struct WorkerRoleConfigReq {
+    pub base: RoleConfigReq,
+    pub graceful_shutdown: Option<GracefulShutdownReq>,
+}
+
+/// Fuller Trino config surface, split per-role, kube-free (mirrors the
+/// orchestrator `TrinoConfig`).
 #[derive(Clone, Default)]
 pub struct TrinoConfigReq {
-    pub jvm_heap: Option<String>,
     pub query_max_memory: Option<String>,
-    pub query_max_memory_per_node: Option<String>,
+    pub log_level: Option<String>,
     pub config_properties: BTreeMap<String, String>,
     pub env: BTreeMap<String, String>,
+    pub coordinator: RoleConfigReq,
+    pub worker: WorkerRoleConfigReq,
 }
 
 /// Resolved provisioning request handed to egret-bin (no k8s types here). The
 /// route has already resolved every catalog into flat properties + env and the
-/// config surface into [`TrinoConfigReq`].
+/// config surface into [`TrinoConfigReq`] (which now carries per-role replicas +
+/// resources, so no flat replica/resource fields live here anymore).
 pub struct EngineProvisionReq {
     pub name: String,
     pub namespace: String,
     pub image_version: String,
-    pub coordinator_replicas: u32,
-    pub worker_replicas: u32,
-    pub cpu_min: String,
-    pub cpu_max: String,
-    pub memory: String,
     pub catalogs: Vec<CatalogReq>,
     pub config: TrinoConfigReq,
 }
@@ -125,9 +185,11 @@ struct CreateEngineBody {
     cpu_min: String,
     cpu_max: String,
     memory: String,
-    /// Optional fuller config surface, stored under `spec["trinoConfig"]`. Wire
-    /// shape: `{ jvmHeap, queryMaxMemory, queryMaxMemoryPerNode, configProperties,
-    /// env }`.
+    /// Optional full per-role config surface, stored under `spec["trinoConfig"]`.
+    /// Wire shape: `{ queryMaxMemory, logLevel, configProperties, env,
+    /// coordinator{replicas, resources, heap, queryMaxMemoryPerNode,
+    /// additionalJvmConfig, probes}, worker{... , gracefulShutdown} }`. On create
+    /// the simple wizard fields seed this; `update` sends the full per-role block.
     #[serde(default)]
     trino_config: Option<serde_json::Value>,
 }
@@ -353,11 +415,6 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
     for (i, c) in cats.iter().enumerate() {
         catalogs.push(build_catalog_req(st, engine, c, &format!("C{i}")).await?);
     }
-    let cfg = engine
-        .spec
-        .get("trinoConfig")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
     Ok(EngineProvisionReq {
         name: engine.name.clone(),
         namespace: engine.namespace.clone(),
@@ -365,32 +422,168 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
             .as_str()
             .unwrap_or(DEFAULT_IMAGE_VERSION)
             .into(),
-        coordinator_replicas: engine.spec["coordinatorReplicas"].as_u64().unwrap_or(1) as u32,
-        worker_replicas: engine.spec["workerReplicas"].as_u64().unwrap_or(1) as u32,
-        cpu_min: engine.spec["cpuMin"].as_str().unwrap_or("1").into(),
-        cpu_max: engine.spec["cpuMax"].as_str().unwrap_or("2").into(),
-        memory: engine.spec["memory"].as_str().unwrap_or("4Gi").into(),
         catalogs,
-        config: trino_config_from_json(&cfg),
+        config: build_trino_config(&engine.spec),
     })
 }
 
-fn trino_config_from_json(v: &serde_json::Value) -> TrinoConfigReq {
-    let map = |k: &str| -> BTreeMap<String, String> {
-        v[k].as_object()
-            .map(|o| {
-                o.iter()
-                    .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+/// Collect a `{ "k": "v", ... }` JSON object into a `BTreeMap<String, String>`
+/// (non-string values are dropped).
+fn str_map(v: &serde_json::Value) -> BTreeMap<String, String> {
+    v.as_object()
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_heap(v: &serde_json::Value) -> HeapReq {
+    HeapReq {
+        max_size: v["maxSize"].as_str().map(Into::into),
+        min_size: v["minSize"].as_str().map(Into::into),
+        max_percent: v["maxPercent"].as_u64().map(|n| n as u8),
+        initial_percent: v["initialPercent"].as_u64().map(|n| n as u8),
+    }
+}
+
+fn parse_resources(v: &serde_json::Value) -> RoleResourcesReq {
+    RoleResourcesReq {
+        cpu_request: v["cpuRequest"].as_str().map(Into::into),
+        cpu_limit: v["cpuLimit"].as_str().map(Into::into),
+        mem_request: v["memRequest"].as_str().map(Into::into),
+        mem_limit: v["memLimit"].as_str().map(Into::into),
+    }
+}
+
+/// A probe carrier only when the wire object is present (so an unset probe stays
+/// `None` and the orchestrator applies its default).
+fn parse_probe(v: &serde_json::Value) -> Option<ProbeReq> {
+    if !v.is_object() {
+        return None;
+    }
+    Some(ProbeReq {
+        initial_delay_seconds: v["initialDelaySeconds"].as_u64().map(|n| n as u32),
+        period_seconds: v["periodSeconds"].as_u64().map(|n| n as u32),
+        timeout_seconds: v["timeoutSeconds"].as_u64().map(|n| n as u32),
+        failure_threshold: v["failureThreshold"].as_u64().map(|n| n as u32),
+        success_threshold: v["successThreshold"].as_u64().map(|n| n as u32),
+    })
+}
+
+fn parse_probes(v: &serde_json::Value) -> ProbesReq {
+    ProbesReq {
+        liveness: parse_probe(&v["liveness"]),
+        readiness: parse_probe(&v["readiness"]),
+        startup: parse_probe(&v["startup"]),
+    }
+}
+
+fn parse_role(v: &serde_json::Value, default_replicas: u32) -> RoleConfigReq {
+    RoleConfigReq {
+        replicas: v["replicas"]
+            .as_u64()
+            .map(|n| n as u32)
+            .unwrap_or(default_replicas),
+        resources: parse_resources(&v["resources"]),
+        heap: parse_heap(&v["heap"]),
+        query_max_memory_per_node: v["queryMaxMemoryPerNode"].as_str().map(Into::into),
+        additional_jvm_config: v["additionalJvmConfig"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        probes: parse_probes(&v["probes"]),
+    }
+}
+
+/// Read `engine.spec["trinoConfig"]`. If it already carries a per-role
+/// `coordinator` block (Phase 1.5.1 shape), parse it directly; otherwise
+/// synthesise the per-role config from the old flat Phase-1.5 spec fields
+/// (back-compat for engines provisioned before this reshape).
+fn build_trino_config(spec: &serde_json::Value) -> TrinoConfigReq {
+    let tc = &spec["trinoConfig"];
+    if tc["coordinator"].is_object() {
+        return trino_config_from_json(tc);
+    }
+    // ── back-compat: old flat spec ──────────────────────────────────────────
+    let resources = RoleResourcesReq {
+        cpu_request: spec["cpuMin"].as_str().map(Into::into),
+        cpu_limit: spec["cpuMax"].as_str().map(Into::into),
+        mem_request: spec["memory"].as_str().map(Into::into),
+        mem_limit: spec["memory"].as_str().map(Into::into),
+    };
+    let heap = HeapReq {
+        max_size: tc["jvmHeap"].as_str().map(Into::into),
+        ..Default::default()
+    };
+    let qmpn = tc["queryMaxMemoryPerNode"].as_str().map(String::from);
+    let coordinator = RoleConfigReq {
+        replicas: spec["coordinatorReplicas"].as_u64().unwrap_or(1) as u32,
+        resources: resources.clone(),
+        heap: heap.clone(),
+        query_max_memory_per_node: qmpn.clone(),
+        ..Default::default()
+    };
+    let worker_base = RoleConfigReq {
+        replicas: spec["workerReplicas"].as_u64().unwrap_or(1) as u32,
+        resources,
+        heap,
+        query_max_memory_per_node: qmpn,
+        ..Default::default()
     };
     TrinoConfigReq {
-        jvm_heap: v["jvmHeap"].as_str().map(Into::into),
+        query_max_memory: tc["queryMaxMemory"].as_str().map(Into::into),
+        log_level: None,
+        config_properties: str_map(&tc["configProperties"]),
+        env: str_map(&tc["env"]),
+        coordinator,
+        worker: WorkerRoleConfigReq {
+            base: worker_base,
+            graceful_shutdown: None,
+        },
+    }
+}
+
+/// Seed a per-role `trinoConfig` wire value from the simple create wizard: both
+/// roles get the same cpuMin/cpuMax/memory resources; replicas come from the body.
+fn seed_trino_config(b: &CreateEngineBody) -> serde_json::Value {
+    let resources = serde_json::json!({
+        "cpuRequest": b.cpu_min,
+        "cpuLimit": b.cpu_max,
+        "memRequest": b.memory,
+        "memLimit": b.memory,
+    });
+    serde_json::json!({
+        "coordinator": { "replicas": b.coordinator_replicas, "resources": resources },
+        "worker": { "replicas": b.worker_replicas, "resources": resources },
+    })
+}
+
+/// Parse the nested per-role `trinoConfig` wire shape (camelCase) into carriers.
+fn trino_config_from_json(v: &serde_json::Value) -> TrinoConfigReq {
+    let worker_v = &v["worker"];
+    let graceful_shutdown = {
+        let g = &worker_v["gracefulShutdown"];
+        g.is_object().then(|| GracefulShutdownReq {
+            enabled: g["enabled"].as_bool().unwrap_or(false),
+            grace_period_seconds: g["gracePeriodSeconds"].as_u64().unwrap_or(0) as u32,
+        })
+    };
+    TrinoConfigReq {
         query_max_memory: v["queryMaxMemory"].as_str().map(Into::into),
-        query_max_memory_per_node: v["queryMaxMemoryPerNode"].as_str().map(Into::into),
-        config_properties: map("configProperties"),
-        env: map("env"),
+        log_level: v["logLevel"].as_str().map(Into::into),
+        config_properties: str_map(&v["configProperties"]),
+        env: str_map(&v["env"]),
+        coordinator: parse_role(&v["coordinator"], 1),
+        worker: WorkerRoleConfigReq {
+            base: parse_role(worker_v, 1),
+            graceful_shutdown,
+        },
     }
 }
 
@@ -512,9 +705,19 @@ async fn create_engine(
         "memory": b.memory,
         "imageVersion": image_version,
     });
-    if let Some(tc) = &b.trino_config {
-        spec["trinoConfig"] = tc.clone();
+    // Seed the per-role trinoConfig from the wizard inputs (both roles share the
+    // cpuMin/cpuMax/memory resources; replicas come from the body). Any
+    // per-role block supplied in the body overlays these seeded defaults.
+    let mut trino_config = seed_trino_config(&b);
+    if let (Some(seed), Some(supplied)) = (
+        trino_config.as_object_mut(),
+        b.trino_config.as_ref().and_then(|v| v.as_object()),
+    ) {
+        for (k, v) in supplied {
+            seed.insert(k.clone(), v.clone());
+        }
     }
+    spec["trinoConfig"] = trino_config;
     let engine = match st
         .storage
         .create_engine(&b.name, "trino", &namespace, wh.id, &spec)

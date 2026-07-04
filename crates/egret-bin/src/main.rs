@@ -396,24 +396,66 @@ impl EgretEngineProvisioner {
         Self { inner }
     }
 
+    /// Map a single control-plane `ProbeReq` onto the orchestrator `Probe`
+    /// (field-for-field; both are pure option carriers).
+    fn probe_from(p: &egret_controlplane::ProbeReq) -> egret_orchestrator::Probe {
+        egret_orchestrator::Probe {
+            initial_delay_seconds: p.initial_delay_seconds,
+            period_seconds: p.period_seconds,
+            timeout_seconds: p.timeout_seconds,
+            failure_threshold: p.failure_threshold,
+            success_threshold: p.success_threshold,
+        }
+    }
+
+    /// Map a per-role `RoleConfigReq` onto the orchestrator `RoleConfig`,
+    /// reused for the coordinator and the worker's base config.
+    fn role_from(r: &egret_controlplane::RoleConfigReq) -> egret_orchestrator::RoleConfig {
+        egret_orchestrator::RoleConfig {
+            replicas: r.replicas,
+            resources: egret_orchestrator::RoleResources {
+                cpu_request: r.resources.cpu_request.clone(),
+                cpu_limit: r.resources.cpu_limit.clone(),
+                mem_request: r.resources.mem_request.clone(),
+                mem_limit: r.resources.mem_limit.clone(),
+            },
+            heap: egret_orchestrator::HeapConfig {
+                max_size: r.heap.max_size.clone(),
+                min_size: r.heap.min_size.clone(),
+                max_percent: r.heap.max_percent,
+                initial_percent: r.heap.initial_percent,
+            },
+            query_max_memory_per_node: r.query_max_memory_per_node.clone(),
+            additional_jvm_config: r.additional_jvm_config.clone(),
+            probes: egret_orchestrator::Probes {
+                liveness: r.probes.liveness.as_ref().map(Self::probe_from),
+                readiness: r.probes.readiness.as_ref().map(Self::probe_from),
+                startup: r.probes.startup.as_ref().map(Self::probe_from),
+            },
+        }
+    }
+
     fn spec_from(req: &egret_controlplane::EngineProvisionReq) -> egret_orchestrator::EngineSpec {
+        let cfg = &req.config;
         egret_orchestrator::EngineSpec {
             name: req.name.clone(),
             namespace: req.namespace.clone(),
             image_version: req.image_version.clone(),
-            coordinator_replicas: req.coordinator_replicas,
-            worker_replicas: req.worker_replicas,
-            resources: egret_orchestrator::Resources {
-                cpu_min: req.cpu_min.clone(),
-                cpu_max: req.cpu_max.clone(),
-                memory: req.memory.clone(),
-            },
             config: egret_orchestrator::TrinoConfig {
-                jvm_heap: req.config.jvm_heap.clone(),
-                query_max_memory: req.config.query_max_memory.clone(),
-                query_max_memory_per_node: req.config.query_max_memory_per_node.clone(),
-                config_properties: req.config.config_properties.clone(),
-                env: req.config.env.clone(),
+                query_max_memory: cfg.query_max_memory.clone(),
+                log_level: cfg.log_level.clone(),
+                config_properties: cfg.config_properties.clone(),
+                env: cfg.env.clone(),
+                coordinator: Self::role_from(&cfg.coordinator),
+                worker: egret_orchestrator::WorkerRoleConfig {
+                    base: Self::role_from(&cfg.worker.base),
+                    graceful_shutdown: cfg.worker.graceful_shutdown.as_ref().map(|g| {
+                        egret_orchestrator::GracefulShutdown {
+                            enabled: g.enabled,
+                            grace_period_seconds: g.grace_period_seconds,
+                        }
+                    }),
+                },
             },
             catalogs: req
                 .catalogs

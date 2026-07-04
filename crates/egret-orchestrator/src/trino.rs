@@ -4,7 +4,7 @@
 
 use crate::kube_client::KubeClient;
 use crate::provisioner::EngineProvisioner;
-use crate::spec::{EngineSpec, EngineStatus, PodStatus};
+use crate::spec::{EngineSpec, EngineStatus, PodStatus, RoleConfig};
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -27,51 +27,86 @@ impl Role {
     }
 }
 
-fn jvm_config(spec: &EngineSpec) -> String {
-    let heap = spec.config.jvm_heap.clone().unwrap_or_else(|| "1G".into());
-    [
-        "-server",
-        &format!("-Xmx{heap}"),
-        &format!("-Xms{heap}"),
-        "-XX:+UseG1GC",
-        "-XX:G1HeapRegionSize=32M",
-        "-XX:+ExplicitGCInvokesConcurrent",
-        "-XX:+HeapDumpOnOutOfMemoryError",
-        "-XX:+ExitOnOutOfMemoryError",
-        "-XX:-OmitStackTraceInFastThrow",
-        "-Djdk.attach.allowAttachSelf=true",
-    ]
-    .join("\n")
-        + "\n"
+fn jvm_config(role: &RoleConfig) -> String {
+    let mut lines = vec!["-server".to_string()];
+    if let Some(sz) = &role.heap.max_size {
+        lines.push(format!("-Xmx{sz}"));
+        lines.push(format!(
+            "-Xms{}",
+            role.heap.min_size.clone().unwrap_or_else(|| sz.clone())
+        ));
+    } else if let Some(pct) = role.heap.max_percent {
+        lines.push(format!("-XX:MaxRAMPercentage={pct}"));
+        if let Some(ip) = role.heap.initial_percent {
+            lines.push(format!("-XX:InitialRAMPercentage={ip}"));
+        }
+    } else {
+        lines.push("-Xmx1G".into());
+        lines.push("-Xms1G".into());
+    }
+    lines.extend([
+        "-XX:+UseG1GC".into(),
+        "-XX:G1HeapRegionSize=32M".into(),
+        "-XX:+ExplicitGCInvokesConcurrent".into(),
+        "-XX:+HeapDumpOnOutOfMemoryError".into(),
+        "-XX:+ExitOnOutOfMemoryError".into(),
+        "-XX:-OmitStackTraceInFastThrow".into(),
+        "-Djdk.attach.allowAttachSelf=true".into(),
+    ]);
+    lines.extend(role.additional_jvm_config.iter().cloned());
+    lines.join("\n") + "\n"
 }
 
 fn config_properties(spec: &EngineSpec, coord: bool) -> String {
+    let cfg = &spec.config;
+    let role = if coord {
+        &cfg.coordinator
+    } else {
+        &cfg.worker.base
+    };
     let mut out = String::new();
     if coord {
         out.push_str("coordinator=true\n");
-        let inc = spec.worker_replicas == 0;
+        // The coordinator IS the discovery server, so it announces to itself
+        // over localhost (robust at startup). Workers reach it via its Service.
+        let inc = cfg.worker.base.replicas == 0;
         out.push_str(&format!("node-scheduler.include-coordinator={inc}\n"));
-    } else {
-        out.push_str("coordinator=false\n");
-    }
-    out.push_str("http-server.http.port=8080\n");
-    // The coordinator IS the discovery server, so it announces to itself over
-    // localhost (robust at startup). Workers reach the coordinator via its Service.
-    if coord {
         out.push_str("discovery.uri=http://localhost:8080\n");
     } else {
+        out.push_str("coordinator=false\n");
         out.push_str(&format!("discovery.uri=http://{}-trino:8080\n", spec.name));
     }
-    if let Some(v) = &spec.config.query_max_memory {
+    out.push_str("http-server.http.port=8080\n");
+    if let Some(v) = &cfg.query_max_memory {
         out.push_str(&format!("query.max-memory={v}\n"));
     }
-    if let Some(v) = &spec.config.query_max_memory_per_node {
+    if let Some(v) = &role.query_max_memory_per_node {
         out.push_str(&format!("query.max-memory-per-node={v}\n"));
     }
-    for (k, v) in &spec.config.config_properties {
+    if !coord {
+        if let Some(gs) = &cfg.worker.graceful_shutdown {
+            if gs.enabled {
+                out.push_str(&format!(
+                    "shutdown.grace-period={}s\n",
+                    gs.grace_period_seconds
+                ));
+            }
+        }
+    }
+    for (k, v) in &cfg.config_properties {
         out.push_str(&format!("{k}={v}\n"));
     }
     out
+}
+
+fn log_properties(spec: &EngineSpec) -> String {
+    format!(
+        "io.trino={}\n",
+        spec.config
+            .log_level
+            .clone()
+            .unwrap_or_else(|| "INFO".into())
+    )
 }
 
 pub fn trino_config_map(spec: &EngineSpec) -> Value {
@@ -82,8 +117,10 @@ pub fn trino_config_map(spec: &EngineSpec) -> Value {
         "data": {
             "config-coordinator.properties": config_properties(spec, true),
             "config-worker.properties": config_properties(spec, false),
-            "jvm.config": jvm_config(spec),
+            "jvm-coordinator.config": jvm_config(&spec.config.coordinator),
+            "jvm-worker.config": jvm_config(&spec.config.worker.base),
             "node.properties": "node.environment=egret\nnode.data-dir=/data/trino\n",
+            "log.properties": log_properties(spec),
         }
     })
 }
@@ -133,18 +170,123 @@ fn config_checksum(spec: &EngineSpec) -> String {
     format!("{:016x}", h.finish())
 }
 
+/// Render a k8s probe as `httpGet /v1/info` on 8080, merging any provided
+/// fields over defaults (readiness defaults are more generous than liveness).
+fn probe_json(defaults_ready: bool, p: Option<&crate::spec::Probe>) -> Value {
+    let (mut init, mut period, mut timeout, mut fail, mut succ) = if defaults_ready {
+        (15u32, 10, 5, 12, 1)
+    } else {
+        (10, 10, 5, 3, 1)
+    };
+    if let Some(p) = p {
+        if let Some(v) = p.initial_delay_seconds {
+            init = v;
+        }
+        if let Some(v) = p.period_seconds {
+            period = v;
+        }
+        if let Some(v) = p.timeout_seconds {
+            timeout = v;
+        }
+        if let Some(v) = p.failure_threshold {
+            fail = v;
+        }
+        if let Some(v) = p.success_threshold {
+            succ = v;
+        }
+    }
+    json!({ "httpGet": { "path": "/v1/info", "port": 8080 },
+            "initialDelaySeconds": init, "periodSeconds": period, "timeoutSeconds": timeout,
+            "failureThreshold": fail, "successThreshold": succ })
+}
+
 pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
     let app = format!("{}-{}", spec.name, role.suffix());
-    let cfg_file = if role.is_coord() {
-        "config-coordinator.properties"
+    let (rc, jvm_file, cfg_file, replicas) = if role.is_coord() {
+        (
+            &spec.config.coordinator,
+            "jvm-coordinator.config",
+            "config-coordinator.properties",
+            spec.config.coordinator.replicas,
+        )
     } else {
-        "config-worker.properties"
+        (
+            &spec.config.worker.base,
+            "jvm-worker.config",
+            "config-worker.properties",
+            spec.config.worker.base.replicas,
+        )
     };
-    let replicas = if role.is_coord() {
-        spec.coordinator_replicas
-    } else {
-        spec.worker_replicas
-    };
+
+    // resources: only include a side if any of its values are set.
+    let mut requests = serde_json::Map::new();
+    let mut limits = serde_json::Map::new();
+    if let Some(v) = &rc.resources.cpu_request {
+        requests.insert("cpu".into(), json!(v));
+    }
+    if let Some(v) = &rc.resources.mem_request {
+        requests.insert("memory".into(), json!(v));
+    }
+    if let Some(v) = &rc.resources.cpu_limit {
+        limits.insert("cpu".into(), json!(v));
+    }
+    if let Some(v) = &rc.resources.mem_limit {
+        limits.insert("memory".into(), json!(v));
+    }
+    let mut resources = serde_json::Map::new();
+    if !requests.is_empty() {
+        resources.insert("requests".into(), Value::Object(requests));
+    }
+    if !limits.is_empty() {
+        resources.insert("limits".into(), Value::Object(limits));
+    }
+
+    // probes: readiness always (generous default), liveness/startup only if configured.
+    let mut container = json!({
+        "name": "trino",
+        "image": format!("trinodb/trino:{}", spec.image_version),
+        "ports": [{ "containerPort": 8080 }],
+        "envFrom": [{ "secretRef": { "name": format!("{}-env", spec.name) } }],
+        "resources": Value::Object(resources),
+        "readinessProbe": probe_json(true, rc.probes.readiness.as_ref()),
+        "volumeMounts": [
+            { "name": "config", "mountPath": "/etc/trino/config.properties", "subPath": cfg_file },
+            { "name": "config", "mountPath": "/etc/trino/jvm.config", "subPath": jvm_file },
+            { "name": "config", "mountPath": "/etc/trino/node.properties", "subPath": "node.properties" },
+            { "name": "config", "mountPath": "/etc/trino/log.properties", "subPath": "log.properties" },
+            { "name": "catalogs", "mountPath": "/etc/trino/catalog" },
+            { "name": "data", "mountPath": "/data/trino" }
+        ]
+    });
+    if let Some(p) = rc.probes.liveness.as_ref() {
+        container["livenessProbe"] = probe_json(false, Some(p));
+    }
+    if let Some(p) = rc.probes.startup.as_ref() {
+        container["startupProbe"] = probe_json(false, Some(p));
+    }
+
+    // pod-spec: worker graceful shutdown adds a preStop + terminationGracePeriodSeconds.
+    let mut pod_spec = json!({
+        "containers": [container],
+        "volumes": [
+            { "name": "config", "configMap": { "name": format!("{}-config", spec.name) } },
+            { "name": "catalogs", "configMap": { "name": format!("{}-catalogs", spec.name) } },
+            { "name": "data", "emptyDir": {} }
+        ]
+    });
+    if !role.is_coord() {
+        if let Some(gs) = &spec.config.worker.graceful_shutdown {
+            if gs.enabled {
+                let grace = gs.grace_period_seconds;
+                let term = std::cmp::max(grace * 2, grace + 30);
+                pod_spec["terminationGracePeriodSeconds"] = json!(term);
+                let cmd = "curl -s -X PUT -d '\"SHUTTING_DOWN\"' -H 'Content-type: application/json' -H 'X-Trino-User: admin' http://localhost:8080/v1/info/state\ntail --pid=1 -f /dev/null".to_string();
+                pod_spec["containers"][0]["lifecycle"] =
+                    json!({ "preStop": { "exec": { "command": ["/bin/sh", "-c", cmd] } } });
+            }
+        }
+    }
+
     json!({
         "apiVersion": "apps/v1", "kind": "Deployment",
         "metadata": { "name": app, "namespace": spec.namespace,
@@ -155,32 +297,7 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
             "template": {
                 "metadata": { "labels": { "app": app, "app.kubernetes.io/instance": spec.name, "egret/engine": spec.name },
                               "annotations": { "egret/config-checksum": config_checksum(spec) } },
-                "spec": {
-                    "containers": [{
-                        "name": "trino",
-                        "image": format!("trinodb/trino:{}", spec.image_version),
-                        "ports": [{ "containerPort": 8080 }],
-                        "envFrom": [{ "secretRef": { "name": format!("{}-env", spec.name) } }],
-                        "resources": {
-                            "requests": { "cpu": spec.resources.cpu_min, "memory": spec.resources.memory },
-                            "limits": { "cpu": spec.resources.cpu_max, "memory": spec.resources.memory }
-                        },
-                        "readinessProbe": { "httpGet": { "path": "/v1/info", "port": 8080 },
-                            "initialDelaySeconds": 15, "periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 12 },
-                        "volumeMounts": [
-                            { "name": "config", "mountPath": "/etc/trino/config.properties", "subPath": cfg_file },
-                            { "name": "config", "mountPath": "/etc/trino/jvm.config", "subPath": "jvm.config" },
-                            { "name": "config", "mountPath": "/etc/trino/node.properties", "subPath": "node.properties" },
-                            { "name": "catalogs", "mountPath": "/etc/trino/catalog" },
-                            { "name": "data", "mountPath": "/data/trino" }
-                        ]
-                    }],
-                    "volumes": [
-                        { "name": "config", "configMap": { "name": format!("{}-config", spec.name) } },
-                        { "name": "catalogs", "configMap": { "name": format!("{}-catalogs", spec.name) } },
-                        { "name": "data", "emptyDir": {} }
-                    ]
-                }
+                "spec": pod_spec
             }
         }
     })
@@ -306,7 +423,19 @@ mod tests {
     use crate::spec::*;
     use std::collections::BTreeMap;
 
+    fn role(replicas: u32) -> RoleConfig {
+        RoleConfig {
+            replicas,
+            ..Default::default()
+        }
+    }
     fn sample_spec() -> EngineSpec {
+        let mut coord = role(1);
+        coord.heap.max_size = Some("2G".into());
+        coord.query_max_memory_per_node = Some("1GB".into());
+        let mut worker = role(2);
+        worker.heap.max_percent = Some(80);
+        worker.additional_jvm_config = vec!["-XX:MaxHeapFreeRatio=100".into()];
         let mut props = BTreeMap::new();
         props.insert("iceberg.catalog.type".into(), "rest".into());
         props.insert(
@@ -317,32 +446,67 @@ mod tests {
             "iceberg.rest-catalog.oauth2.credential".into(),
             "${ENV:EGRET_C0}".into(),
         );
-        let mut env = BTreeMap::new();
-        env.insert("EGRET_C0".into(), "id:secret".into());
+        let mut cat_env = BTreeMap::new();
+        cat_env.insert("EGRET_C0".into(), "id:secret".into());
         EngineSpec {
             name: "demo".into(),
             namespace: "egret-engines".into(),
             image_version: "470".into(),
-            coordinator_replicas: 1,
-            worker_replicas: 2,
-            resources: Resources {
-                cpu_min: "1".into(),
-                cpu_max: "2".into(),
-                memory: "4Gi".into(),
-            },
             config: TrinoConfig {
-                jvm_heap: Some("2G".into()),
-                query_max_memory: Some("3GB".into()),
-                query_max_memory_per_node: None,
+                query_max_memory: Some("4GB".into()),
+                log_level: Some("DEBUG".into()),
                 config_properties: BTreeMap::new(),
                 env: BTreeMap::new(),
+                coordinator: coord,
+                worker: WorkerRoleConfig {
+                    base: worker,
+                    graceful_shutdown: Some(GracefulShutdown {
+                        enabled: true,
+                        grace_period_seconds: 120,
+                    }),
+                },
             },
             catalogs: vec![CatalogSpec {
                 name: "egret".into(),
                 properties: props,
-                env,
+                env: cat_env,
             }],
         }
+    }
+
+    #[test]
+    fn coordinator_jvm_uses_fixed_heap() {
+        let j = jvm_config(&sample_spec().config.coordinator);
+        assert!(j.contains("-Xmx2G"));
+        assert!(!j.contains("MaxRAMPercentage"));
+    }
+    #[test]
+    fn worker_jvm_uses_percent_and_extra_flags() {
+        let s = sample_spec();
+        let j = jvm_config(&s.config.worker.base);
+        assert!(j.contains("-XX:MaxRAMPercentage=80"));
+        assert!(!j.contains("-Xmx"));
+        assert!(j.contains("-XX:MaxHeapFreeRatio=100"));
+    }
+    #[test]
+    fn config_properties_per_role_memory_and_shutdown() {
+        let s = sample_spec();
+        let cm = trino_config_map(&s);
+        let cc = cm["data"]["config-coordinator.properties"]
+            .as_str()
+            .unwrap();
+        assert!(cc.contains("query.max-memory=4GB"));
+        assert!(cc.contains("query.max-memory-per-node=1GB"));
+        let wc = cm["data"]["config-worker.properties"].as_str().unwrap();
+        assert!(wc.contains("shutdown.grace-period=120s"));
+    }
+    #[test]
+    fn log_properties_carries_level() {
+        let cm = trino_config_map(&sample_spec());
+        assert!(cm["data"]["log.properties"]
+            .as_str()
+            .unwrap()
+            .contains("io.trino=DEBUG"));
     }
 
     #[test]
@@ -359,10 +523,6 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("node-scheduler.include-coordinator=false"));
-        assert!(data["config-coordinator.properties"]
-            .as_str()
-            .unwrap()
-            .contains("query.max-memory=3GB"));
         // Coordinator announces to itself; workers reach it via the Service.
         assert!(data["config-coordinator.properties"]
             .as_str()
@@ -376,7 +536,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("discovery.uri=http://demo-trino:8080"));
-        assert!(data["jvm.config"].as_str().unwrap().contains("-Xmx2G"));
+        assert!(data["jvm-coordinator.config"]
+            .as_str()
+            .unwrap()
+            .contains("-Xmx2G"));
         assert!(data["node.properties"]
             .as_str()
             .unwrap()
@@ -386,7 +549,7 @@ mod tests {
     #[test]
     fn single_node_includes_coordinator() {
         let mut s = sample_spec();
-        s.worker_replicas = 0;
+        s.config.worker.base.replicas = 0;
         let cm = trino_config_map(&s);
         assert!(cm["data"]["config-coordinator.properties"]
             .as_str()
@@ -436,6 +599,60 @@ mod tests {
         assert_eq!(s["metadata"]["name"], "demo-trino");
         assert_eq!(s["spec"]["selector"]["app"], "demo-coordinator");
         assert_eq!(s["spec"]["ports"][0]["port"], 8080);
+    }
+
+    #[test]
+    fn deployment_resources_split_requests_limits() {
+        let mut s = sample_spec();
+        s.config.coordinator.resources = RoleResources {
+            cpu_request: Some("1".into()),
+            cpu_limit: Some("2".into()),
+            mem_request: Some("2Gi".into()),
+            mem_limit: Some("4Gi".into()),
+        };
+        let d = trino_deployment(&s, Role::Coordinator);
+        let res = &d["spec"]["template"]["spec"]["containers"][0]["resources"];
+        assert_eq!(res["requests"]["cpu"], "1");
+        assert_eq!(res["limits"]["cpu"], "2");
+        assert_eq!(res["requests"]["memory"], "2Gi");
+        assert_eq!(res["limits"]["memory"], "4Gi");
+    }
+    #[test]
+    fn deployment_renders_custom_probes() {
+        let mut s = sample_spec();
+        s.config.coordinator.probes.readiness = Some(Probe {
+            timeout_seconds: Some(7),
+            failure_threshold: Some(20),
+            ..Default::default()
+        });
+        s.config.coordinator.probes.liveness = Some(Probe {
+            initial_delay_seconds: Some(60),
+            ..Default::default()
+        });
+        let d = trino_deployment(&s, Role::Coordinator);
+        let c = &d["spec"]["template"]["spec"]["containers"][0];
+        assert_eq!(c["readinessProbe"]["timeoutSeconds"], 7);
+        assert_eq!(c["readinessProbe"]["failureThreshold"], 20);
+        assert_eq!(c["livenessProbe"]["httpGet"]["path"], "/v1/info");
+        assert_eq!(c["livenessProbe"]["initialDelaySeconds"], 60);
+    }
+    #[test]
+    fn worker_graceful_shutdown_prestop_and_termination() {
+        let d = trino_deployment(&sample_spec(), Role::Worker);
+        let spec = &d["spec"]["template"]["spec"];
+        // termination >= 2 * gracePeriod (120) => 240
+        assert_eq!(spec["terminationGracePeriodSeconds"], 240);
+        let cmd = spec["containers"][0]["lifecycle"]["preStop"]["exec"]["command"][2]
+            .as_str()
+            .unwrap();
+        assert!(cmd.contains("SHUTTING_DOWN"));
+        assert!(cmd.contains("/v1/info/state"));
+        assert!(cmd.contains("tail --pid=1"));
+    }
+    #[test]
+    fn coordinator_has_no_prestop() {
+        let d = trino_deployment(&sample_spec(), Role::Coordinator);
+        assert!(d["spec"]["template"]["spec"]["containers"][0]["lifecycle"].is_null());
     }
 
     #[tokio::test]
