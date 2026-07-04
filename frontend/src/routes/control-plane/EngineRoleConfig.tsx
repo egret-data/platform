@@ -10,6 +10,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Switch } from "@/components/ui/switch";
+import { ConfigSection } from "./config/ConfigSection";
+import { FieldLabel } from "./config/FieldLabel";
+import { QuantityInput } from "./config/QuantityInput";
 import {
   type ProbeForm,
   type RoleForm,
@@ -83,9 +86,11 @@ function ProbeEditor({
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
           {PROBE_FIELDS.map((f) => (
             <div key={f.key} className="space-y-1.5">
-              <Label htmlFor={`${idPrefix}-${f.key}`} className="text-xs">
-                {f.label}
-              </Label>
+              <FieldLabel
+                fieldKey={`probe.${f.key}`}
+                label={f.label}
+                htmlFor={`${idPrefix}-${f.key}`}
+              />
               <Input
                 id={`${idPrefix}-${f.key}`}
                 type="number"
@@ -107,82 +112,78 @@ function RoleConfigEditor({
   value,
   onChange,
   idPrefix,
+  keyPrefix,
 }: {
   value: RoleForm;
   onChange: (next: RoleForm) => void;
   idPrefix: string;
+  keyPrefix: "coordinator" | "worker";
 }) {
   const set = <K extends keyof RoleForm>(key: K, v: RoleForm[K]) =>
     onChange({ ...value, [key]: v });
 
   return (
     <div className="space-y-5">
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-        <div className="space-y-1.5">
-          <Label htmlFor={`${idPrefix}-replicas`}>Replicas</Label>
-          <Input
-            id={`${idPrefix}-replicas`}
-            type="number"
-            min={0}
-            value={value.replicas}
-            placeholder="1"
-            onChange={(e) => set("replicas", e.target.value)}
-          />
-        </div>
-      </div>
-
-      <div className="space-y-2">
-        <Label>Resources</Label>
+      <ConfigSection
+        title="Replicas & resources"
+        description="Pod count and the Kubernetes CPU/memory request and limit for each pod."
+        docsUrl="https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/"
+      >
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <div className="space-y-1.5">
-            <Label htmlFor={`${idPrefix}-cpu-req`} className="text-xs">
-              CPU request
-            </Label>
+            <FieldLabel
+              fieldKey={`${keyPrefix}.replicas`}
+              label="Replicas"
+              htmlFor={`${idPrefix}-replicas`}
+            />
             <Input
-              id={`${idPrefix}-cpu-req`}
-              value={value.cpuRequest}
+              id={`${idPrefix}-replicas`}
+              type="number"
+              min={0}
+              value={value.replicas}
               placeholder="1"
-              onChange={(e) => set("cpuRequest", e.target.value)}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor={`${idPrefix}-cpu-lim`} className="text-xs">
-              CPU limit
-            </Label>
-            <Input
-              id={`${idPrefix}-cpu-lim`}
-              value={value.cpuLimit}
-              placeholder="2"
-              onChange={(e) => set("cpuLimit", e.target.value)}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor={`${idPrefix}-mem-req`} className="text-xs">
-              Memory request
-            </Label>
-            <Input
-              id={`${idPrefix}-mem-req`}
-              value={value.memRequest}
-              placeholder="2Gi"
-              onChange={(e) => set("memRequest", e.target.value)}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor={`${idPrefix}-mem-lim`} className="text-xs">
-              Memory limit
-            </Label>
-            <Input
-              id={`${idPrefix}-mem-lim`}
-              value={value.memLimit}
-              placeholder="4Gi"
-              onChange={(e) => set("memLimit", e.target.value)}
+              onChange={(e) => set("replicas", e.target.value)}
             />
           </div>
         </div>
-      </div>
 
-      <div className="space-y-2">
-        <Label>JVM heap</Label>
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <QuantityInput
+            fieldKey={`${keyPrefix}.resources.cpu`}
+            label="CPU request"
+            value={value.cpuRequest}
+            placeholder="1"
+            onChange={(v) => set("cpuRequest", v)}
+          />
+          <QuantityInput
+            fieldKey={`${keyPrefix}.resources.cpu`}
+            label="CPU limit"
+            value={value.cpuLimit}
+            placeholder="2"
+            onChange={(v) => set("cpuLimit", v)}
+          />
+          <QuantityInput
+            fieldKey={`${keyPrefix}.resources.memory`}
+            label="Memory request"
+            value={value.memRequest}
+            placeholder="2Gi"
+            onChange={(v) => set("memRequest", v)}
+          />
+          <QuantityInput
+            fieldKey={`${keyPrefix}.resources.memory`}
+            label="Memory limit"
+            value={value.memLimit}
+            placeholder="4Gi"
+            onChange={(v) => set("memLimit", v)}
+          />
+        </div>
+      </ConfigSection>
+
+      <ConfigSection
+        title="JVM heap"
+        description="Size the JVM heap as a fixed value (-Xmx/-Xms) or as a percentage of the pod memory limit."
+        docsUrl="https://trino.io/docs/current/installation/deployment.html#jvm-config"
+      >
         <RadioGroup
           className="flex gap-6"
           value={value.heapMode}
@@ -203,35 +204,29 @@ function RoleConfigEditor({
         </RadioGroup>
         {value.heapMode === "fixed" ? (
           <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-1.5">
-              <Label htmlFor={`${idPrefix}-heap-max`} className="text-xs">
-                Max size (-Xmx)
-              </Label>
-              <Input
-                id={`${idPrefix}-heap-max`}
-                value={value.maxSize}
-                placeholder="2G"
-                onChange={(e) => set("maxSize", e.target.value)}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor={`${idPrefix}-heap-min`} className="text-xs">
-                Min size (-Xms)
-              </Label>
-              <Input
-                id={`${idPrefix}-heap-min`}
-                value={value.minSize}
-                placeholder="2G"
-                onChange={(e) => set("minSize", e.target.value)}
-              />
-            </div>
+            <QuantityInput
+              fieldKey={`${keyPrefix}.heap.maxSize`}
+              label="Max size (-Xmx)"
+              value={value.maxSize}
+              placeholder="2G"
+              onChange={(v) => set("maxSize", v)}
+            />
+            <QuantityInput
+              fieldKey={`${keyPrefix}.heap.minSize`}
+              label="Min size (-Xms)"
+              value={value.minSize}
+              placeholder="2G"
+              onChange={(v) => set("minSize", v)}
+            />
           </div>
         ) : (
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-1.5">
-              <Label htmlFor={`${idPrefix}-heap-maxpct`} className="text-xs">
-                Max RAM percent
-              </Label>
+              <FieldLabel
+                fieldKey={`${keyPrefix}.heap.maxPercent`}
+                label="Max RAM percent"
+                htmlFor={`${idPrefix}-heap-maxpct`}
+              />
               <Input
                 id={`${idPrefix}-heap-maxpct`}
                 type="number"
@@ -243,9 +238,11 @@ function RoleConfigEditor({
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor={`${idPrefix}-heap-initpct`} className="text-xs">
-                Initial RAM percent
-              </Label>
+              <FieldLabel
+                fieldKey={`${keyPrefix}.heap.initialPercent`}
+                label="Initial RAM percent"
+                htmlFor={`${idPrefix}-heap-initpct`}
+              />
               <Input
                 id={`${idPrefix}-heap-initpct`}
                 type="number"
@@ -258,43 +255,48 @@ function RoleConfigEditor({
             </div>
           </div>
         )}
-      </div>
+      </ConfigSection>
 
-      <div className="grid grid-cols-2 gap-4">
-        <div className="space-y-1.5">
-          <Label htmlFor={`${idPrefix}-qmmpn`}>Query max memory / node</Label>
-          <Input
-            id={`${idPrefix}-qmmpn`}
+      <ConfigSection
+        title="Query memory"
+        description="Per-node query memory limits for this role."
+        docsUrl="https://trino.io/docs/current/admin/properties-resource-management.html"
+      >
+        <div className="grid grid-cols-2 gap-4">
+          <QuantityInput
+            fieldKey="queryMaxMemoryPerNode"
+            label="Query max memory / node"
             value={value.queryMaxMemoryPerNode}
             placeholder="1GB"
-            onChange={(e) => set("queryMaxMemoryPerNode", e.target.value)}
+            onChange={(v) => set("queryMaxMemoryPerNode", v)}
           />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor={`${idPrefix}-hhpn`}>Heap headroom / node</Label>
-          <Input
-            id={`${idPrefix}-hhpn`}
+          <QuantityInput
+            fieldKey="memoryHeapHeadroomPerNode"
+            label="Heap headroom / node"
             value={value.heapHeadroomPerNode}
             placeholder="2GB"
-            onChange={(e) => set("heapHeadroomPerNode", e.target.value)}
+            onChange={(v) => set("heapHeadroomPerNode", v)}
           />
         </div>
-      </div>
+      </ConfigSection>
 
-      <div className="space-y-1.5">
-        <Label>Additional JVM config</Label>
-        <p className="text-xs text-muted-foreground">
-          Extra lines appended to <code>jvm.config</code>.
-        </p>
+      <ConfigSection
+        title="Additional JVM config"
+        description="Extra lines appended to jvm.config."
+        docsUrl="https://trino.io/docs/current/installation/deployment.html#jvm-config"
+      >
         <StringListEditor
           rows={value.additionalJvmConfig}
           onChange={(rows) => set("additionalJvmConfig", rows)}
           placeholder="-XX:MaxHeapFreeRatio=100"
         />
-      </div>
+      </ConfigSection>
 
-      <div className="space-y-2">
-        <Label>Probes</Label>
+      <ConfigSection
+        title="Health probes"
+        description="Kubernetes liveness, readiness, and startup probe timings."
+        docsUrl="https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#configuring-probes"
+      >
         <div className="space-y-2">
           <ProbeEditor
             label="Liveness"
@@ -315,7 +317,7 @@ function RoleConfigEditor({
             onChange={(p) => set("startup", p)}
           />
         </div>
-      </div>
+      </ConfigSection>
     </div>
   );
 }
@@ -346,20 +348,35 @@ export function EngineRoleConfig({
   const idPrefix = role === "coordinator" ? "ced-coord" : "ced-worker";
 
   if (role === "coordinator") {
-    return <RoleConfigEditor idPrefix={idPrefix} value={value} onChange={onChange} />;
+    return (
+      <RoleConfigEditor
+        idPrefix={idPrefix}
+        keyPrefix="coordinator"
+        value={value}
+        onChange={onChange}
+      />
+    );
   }
 
   return (
     <div className="space-y-5">
-      <RoleConfigEditor idPrefix={idPrefix} value={value} onChange={onChange} />
-      <div className="space-y-3 rounded-lg border p-4">
+      <RoleConfigEditor
+        idPrefix={idPrefix}
+        keyPrefix="worker"
+        value={value}
+        onChange={onChange}
+      />
+      <ConfigSection
+        title="Graceful shutdown"
+        description="Drain in-flight queries before a worker terminates."
+        docsUrl="https://trino.io/docs/current/admin/graceful-shutdown.html"
+      >
         <div className="flex items-center justify-between gap-4">
-          <div className="space-y-0.5">
-            <Label htmlFor="ced-gs-enabled">Graceful shutdown</Label>
-            <p className="text-xs text-muted-foreground">
-              Drain in-flight queries before a worker terminates.
-            </p>
-          </div>
+          <FieldLabel
+            fieldKey="worker.gracefulShutdown"
+            label="Enable graceful shutdown"
+            htmlFor="ced-gs-enabled"
+          />
           <Switch
             id="ced-gs-enabled"
             checked={gsEnabled}
@@ -368,7 +385,11 @@ export function EngineRoleConfig({
         </div>
         {gsEnabled && (
           <div className="space-y-1.5">
-            <Label htmlFor="ced-gs-grace">Grace period (s)</Label>
+            <FieldLabel
+              fieldKey="worker.gracePeriod"
+              label="Grace period (s)"
+              htmlFor="ced-gs-grace"
+            />
             <Input
               id="ced-gs-grace"
               type="number"
@@ -379,7 +400,7 @@ export function EngineRoleConfig({
             />
           </div>
         )}
-      </div>
+      </ConfigSection>
     </div>
   );
 }

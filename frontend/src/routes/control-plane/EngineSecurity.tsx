@@ -14,6 +14,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { ConfigSection } from "./config/ConfigSection";
+import { FieldLabel } from "./config/FieldLabel";
 import { type Kv, KeyValueEditor } from "./EngineResourceGroups";
 import type { PasswordUserForm } from "./useEngineConfigForm";
 
@@ -70,22 +72,13 @@ export function EngineSecurity(props: {
   });
 
   return (
-    <div className="space-y-5 rounded-lg border p-4">
-      <div className="space-y-0.5">
-        <Label className="text-base">Exposure &amp; auth</Label>
-        <p className="text-xs text-muted-foreground">
-          Authenticate clients and expose the coordinator outside the
-          cluster.
-        </p>
-      </div>
-
+    <div className="space-y-5">
       {/* Password users */}
-      <div className="space-y-2">
-        <Label>Password users</Label>
-        <p className="text-xs text-muted-foreground">
-          Each user signs in with a username and the password held in
-          the selected egret secret (hashed server-side).
-        </p>
+      <ConfigSection
+        title="Password users"
+        description="Each user signs in with a username and the password held in the selected egret secret (hashed server-side)."
+        docsUrl="https://trino.io/docs/current/security/password-file.html"
+      >
         <div className="space-y-2">
           {passwordUsers.map((row, i) => (
             <div key={i} className="flex items-center gap-2">
@@ -159,18 +152,20 @@ export function EngineSecurity(props: {
             Add user
           </Button>
         </div>
-      </div>
+      </ConfigSection>
 
       {/* JWT */}
-      <div className="space-y-3">
+      <ConfigSection
+        title="JWT authentication"
+        description="Also accept egret-issued JWTs (e.g. from notebooks) as client credentials."
+        docsUrl="https://trino.io/docs/current/security/jwt.html"
+      >
         <div className="flex items-center justify-between gap-4">
-          <div className="space-y-0.5">
-            <Label htmlFor="ced-jwt-enabled">Accept egret JWT</Label>
-            <p className="text-xs text-muted-foreground">
-              Also accept egret-issued JWTs (e.g. from notebooks) as
-              client credentials.
-            </p>
-          </div>
+          <FieldLabel
+            fieldKey="jwtEnabled"
+            label="Accept egret JWT"
+            htmlFor="ced-jwt-enabled"
+          />
           <Switch
             id="ced-jwt-enabled"
             checked={jwtEnabled}
@@ -180,7 +175,11 @@ export function EngineSecurity(props: {
         {jwtEnabled && (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
-              <Label htmlFor="ced-jwt-jwks">JWKS URI</Label>
+              <FieldLabel
+                fieldKey="jwksUri"
+                label="JWKS URI"
+                htmlFor="ced-jwt-jwks"
+              />
               <Input
                 id="ced-jwt-jwks"
                 value={jwksUri}
@@ -189,7 +188,11 @@ export function EngineSecurity(props: {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="ced-jwt-aud">Required audience</Label>
+              <FieldLabel
+                fieldKey="requiredAudience"
+                label="Required audience"
+                htmlFor="ced-jwt-aud"
+              />
               <Input
                 id="ced-jwt-aud"
                 value={requiredAudience}
@@ -199,18 +202,20 @@ export function EngineSecurity(props: {
             </div>
           </div>
         )}
-      </div>
+      </ConfigSection>
 
       {/* Ingress */}
-      <div className="space-y-3">
+      <ConfigSection
+        title="Ingress exposure"
+        description="Create a Kubernetes Ingress for the coordinator. TLS terminates at the ingress."
+        docsUrl="https://kubernetes.io/docs/concepts/services-networking/ingress/"
+      >
         <div className="flex items-center justify-between gap-4">
-          <div className="space-y-0.5">
-            <Label htmlFor="ced-ing-enabled">Expose via ingress</Label>
-            <p className="text-xs text-muted-foreground">
-              Create a Kubernetes Ingress for the coordinator. TLS
-              terminates at the ingress.
-            </p>
-          </div>
+          <FieldLabel
+            fieldKey="ingressEnabled"
+            label="Expose via ingress"
+            htmlFor="ced-ing-enabled"
+          />
           <Switch
             id="ced-ing-enabled"
             checked={ingressEnabled}
@@ -221,7 +226,11 @@ export function EngineSecurity(props: {
           <div className="space-y-4">
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
-                <Label htmlFor="ced-ing-host">Host</Label>
+                <FieldLabel
+                  fieldKey="ingress.host"
+                  label="Host"
+                  htmlFor="ced-ing-host"
+                />
                 <Input
                   id="ced-ing-host"
                   value={ingressHost}
@@ -230,7 +239,11 @@ export function EngineSecurity(props: {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="ced-ing-class">Ingress class</Label>
+                <FieldLabel
+                  fieldKey="ingress.className"
+                  label="Ingress class"
+                  htmlFor="ced-ing-class"
+                />
                 <Input
                   id="ced-ing-class"
                   value={ingressClassName}
@@ -240,7 +253,11 @@ export function EngineSecurity(props: {
               </div>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="ced-ing-tls">TLS secret</Label>
+              <FieldLabel
+                fieldKey="ingress.tlsSecret"
+                label="TLS secret"
+                htmlFor="ced-ing-tls"
+              />
               <Input
                 id="ced-ing-tls"
                 value={ingressTlsSecret}
@@ -270,7 +287,7 @@ export function EngineSecurity(props: {
             )}
           </div>
         )}
-      </div>
+      </ConfigSection>
     </div>
   );
 }

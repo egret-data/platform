@@ -478,19 +478,14 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
 
               {section === "workload" && (
                 <div className="space-y-5">
-                  <div className="rounded-lg border p-4">
-                    <ResourceGroupsSection
-                      value={resourceGroups}
-                      onChange={setResourceGroups}
-                    />
-                  </div>
-
-                  <div className="rounded-lg border p-4">
-                    <SessionPropertiesSection
-                      value={sessionRules}
-                      onChange={setSessionRules}
-                    />
-                  </div>
+                  <ResourceGroupsSection
+                    value={resourceGroups}
+                    onChange={setResourceGroups}
+                  />
+                  <SessionPropertiesSection
+                    value={sessionRules}
+                    onChange={setSessionRules}
+                  />
                 </div>
               )}
 

@@ -39,6 +39,24 @@ export const fieldHelp: Record<string, FieldHelp> = {
       "https://trino.io/docs/current/admin/properties-resource-management.html",
     unit: "size",
   },
+  "coordinator.heap.minSize": {
+    help: "Fixed JVM initial heap (-Xms) for the coordinator. Usually set equal to the max size.",
+    docsUrl:
+      "https://trino.io/docs/current/installation/deployment.html#jvm-config",
+    unit: "size",
+  },
+  "coordinator.heap.maxPercent": {
+    help: "JVM MaxRAMPercentage — cap the max heap at this percent of the pod memory limit.",
+    docsUrl:
+      "https://trino.io/docs/current/installation/deployment.html#jvm-config",
+    unit: "count",
+  },
+  "coordinator.heap.initialPercent": {
+    help: "JVM InitialRAMPercentage — size the initial heap at this percent of the pod memory limit.",
+    docsUrl:
+      "https://trino.io/docs/current/installation/deployment.html#jvm-config",
+    unit: "count",
+  },
 
   // --- Worker ---
   "worker.replicas": {
@@ -64,10 +82,33 @@ export const fieldHelp: Record<string, FieldHelp> = {
       "https://trino.io/docs/current/admin/properties-resource-management.html",
     unit: "size",
   },
+  "worker.heap.minSize": {
+    help: "Fixed JVM initial heap (-Xms) for each worker. Usually set equal to the max size.",
+    docsUrl:
+      "https://trino.io/docs/current/installation/deployment.html#jvm-config",
+    unit: "size",
+  },
+  "worker.heap.maxPercent": {
+    help: "JVM MaxRAMPercentage — cap the max heap at this percent of the pod memory limit.",
+    docsUrl:
+      "https://trino.io/docs/current/installation/deployment.html#jvm-config",
+    unit: "count",
+  },
+  "worker.heap.initialPercent": {
+    help: "JVM InitialRAMPercentage — size the initial heap at this percent of the pod memory limit.",
+    docsUrl:
+      "https://trino.io/docs/current/installation/deployment.html#jvm-config",
+    unit: "count",
+  },
   "worker.gracefulShutdown": {
     help: "Drain the worker before termination so in-flight queries finish instead of failing on scale-down.",
     docsUrl: "https://trino.io/docs/current/admin/graceful-shutdown.html",
     unit: "duration",
+  },
+  "worker.gracePeriod": {
+    help: "Seconds to wait for in-flight queries to drain before the worker pod is terminated.",
+    docsUrl: "https://trino.io/docs/current/admin/graceful-shutdown.html",
+    unit: "count",
   },
 
   // --- Workload / resource management ---
@@ -147,10 +188,101 @@ export const fieldHelp: Record<string, FieldHelp> = {
     unit: "count",
   },
 
+  // --- Probes (shared across liveness/readiness/startup) ---
+  "probe.initialDelaySeconds": {
+    help: "Seconds after the container starts before the probe is first run.",
+    docsUrl:
+      "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#configuring-probes",
+    unit: "count",
+  },
+  "probe.periodSeconds": {
+    help: "How often (in seconds) the probe is run.",
+    docsUrl:
+      "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#configuring-probes",
+    unit: "count",
+  },
+  "probe.timeoutSeconds": {
+    help: "Seconds after which the probe times out and counts as a failure.",
+    docsUrl:
+      "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#configuring-probes",
+    unit: "count",
+  },
+  "probe.failureThreshold": {
+    help: "Consecutive failures before the container is considered unhealthy and restarted/unready.",
+    docsUrl:
+      "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#configuring-probes",
+    unit: "count",
+  },
+  "probe.successThreshold": {
+    help: "Consecutive successes required to mark the probe healthy after a failure.",
+    docsUrl:
+      "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#configuring-probes",
+    unit: "count",
+  },
+
+  // --- General ---
+  "logLevel": {
+    help: "Root logger level applied to the Trino server (INFO, DEBUG, WARN, ERROR).",
+    docsUrl:
+      "https://trino.io/docs/current/installation/deployment.html#log-levels",
+  },
+
+  // --- Reliability ---
+  "faultTolerantEnabled": {
+    help: "Turn on fault-tolerant execution so failed tasks/queries retry, spooling exchange data to S3 storage.",
+    docsUrl:
+      "https://trino.io/docs/current/admin/fault-tolerant-execution.html",
+  },
+  "exchangeStorage": {
+    help: "The S3-compatible storage connection used to spool exchange data between stages.",
+    docsUrl:
+      "https://trino.io/docs/current/admin/fault-tolerant-execution.html#exchange-manager",
+  },
+  "exchangePrefix": {
+    help: "Key prefix (directory) within the exchange storage bucket where spooled data is written.",
+    docsUrl:
+      "https://trino.io/docs/current/admin/fault-tolerant-execution.html#exchange-manager",
+  },
+
   // --- Security ---
   "authenticationType": {
     help: "How clients authenticate to the coordinator (e.g. PASSWORD, OAUTH2, JWT, CERTIFICATE, KERBEROS).",
     docsUrl:
       "https://trino.io/docs/current/security/authentication-types.html",
+  },
+  "passwordUsers": {
+    help: "Username + egret-secret password pairs authenticated via Trino's file-based password authenticator.",
+    docsUrl:
+      "https://trino.io/docs/current/security/password-file.html",
+  },
+  "jwtEnabled": {
+    help: "Also accept egret-issued JWTs (e.g. from notebooks) as client credentials via JWT authentication.",
+    docsUrl: "https://trino.io/docs/current/security/jwt.html",
+  },
+  "jwksUri": {
+    help: "URL of the JWKS endpoint whose public keys verify incoming JWT signatures.",
+    docsUrl: "https://trino.io/docs/current/security/jwt.html#jwks",
+  },
+  "requiredAudience": {
+    help: "If set, only JWTs whose audience (aud) claim matches this value are accepted.",
+    docsUrl: "https://trino.io/docs/current/security/jwt.html",
+  },
+  "ingressEnabled": {
+    help: "Create a Kubernetes Ingress for the coordinator so clients reach it outside the cluster.",
+    docsUrl: "https://kubernetes.io/docs/concepts/services-networking/ingress/",
+  },
+  "ingress.host": {
+    help: "Hostname routed to the coordinator by the Ingress (e.g. trino.example.com).",
+    docsUrl: "https://kubernetes.io/docs/concepts/services-networking/ingress/",
+  },
+  "ingress.className": {
+    help: "IngressClass that selects which ingress controller serves this Ingress (e.g. nginx).",
+    docsUrl:
+      "https://kubernetes.io/docs/concepts/services-networking/ingress/#ingress-class",
+  },
+  "ingress.tlsSecret": {
+    help: "Kubernetes TLS secret used to terminate HTTPS at the ingress for the host.",
+    docsUrl:
+      "https://kubernetes.io/docs/concepts/services-networking/ingress/#tls",
   },
 };

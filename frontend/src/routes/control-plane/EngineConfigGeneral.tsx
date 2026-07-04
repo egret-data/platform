@@ -1,5 +1,3 @@
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -7,6 +5,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { ConfigSection } from "./config/ConfigSection";
+import { FieldLabel } from "./config/FieldLabel";
+import { QuantityInput } from "./config/QuantityInput";
 import { type Kv, KeyValueEditor } from "./EngineResourceGroups";
 
 const LOG_LEVELS = ["INFO", "DEBUG", "WARN", "ERROR"] as const;
@@ -37,52 +38,59 @@ export function EngineConfigGeneral(props: {
   } = props;
 
   return (
-    <>
-      <div className="grid grid-cols-2 gap-4">
-        <div className="space-y-1.5">
-          <Label htmlFor="ced-qmm">Query max memory</Label>
-          <Input
-            id="ced-qmm"
+    <div className="space-y-5">
+      <ConfigSection
+        title="Query & logging"
+        description="Cluster-wide query memory ceiling and the server log level."
+        docsUrl="https://trino.io/docs/current/admin/properties-resource-management.html"
+      >
+        <div className="grid grid-cols-2 gap-4">
+          <QuantityInput
+            fieldKey="queryMaxMemory"
+            label="Query max memory"
             value={queryMaxMemory}
-            onChange={(e) => setQueryMaxMemory(e.target.value)}
+            onChange={setQueryMaxMemory}
             placeholder="4GB"
           />
+          <div className="space-y-1.5">
+            <FieldLabel
+              fieldKey="logLevel"
+              label="Log level"
+              htmlFor="ced-log-level"
+            />
+            <Select value={logLevel} onValueChange={setLogLevel}>
+              <SelectTrigger id="ced-log-level" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {LOG_LEVELS.map((lvl) => (
+                  <SelectItem key={lvl} value={lvl}>
+                    {lvl}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
         </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="ced-log-level">Log level</Label>
-          <Select value={logLevel} onValueChange={setLogLevel}>
-            <SelectTrigger id="ced-log-level" className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {LOG_LEVELS.map((lvl) => (
-                <SelectItem key={lvl} value={lvl}>
-                  {lvl}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
+      </ConfigSection>
 
-      <div className="space-y-1.5">
-        <Label>Config properties</Label>
-        <p className="text-xs text-muted-foreground">
-          Raw <code>config.properties</code> key/value pairs (both roles).
-        </p>
+      <ConfigSection
+        title="Config properties"
+        description="Raw config.properties key/value pairs (both roles)."
+        docsUrl="https://trino.io/docs/current/admin/properties.html"
+      >
         <KeyValueEditor
           rows={configProps}
           onChange={setConfigProps}
           keyPlaceholder="query.max-run-time"
           valuePlaceholder="1h"
         />
-      </div>
+      </ConfigSection>
 
-      <div className="space-y-1.5">
-        <Label>Environment variables</Label>
-        <p className="text-xs text-muted-foreground">
-          Extra env applied to both coordinator and worker pods.
-        </p>
+      <ConfigSection
+        title="Environment variables"
+        description="Extra env applied to both coordinator and worker pods."
+      >
         <KeyValueEditor
           rows={env}
           onChange={setEnv}
@@ -90,7 +98,7 @@ export function EngineConfigGeneral(props: {
           valuePlaceholder="value"
           addLabel="Add variable"
         />
-      </div>
-    </>
+      </ConfigSection>
+    </div>
   );
 }

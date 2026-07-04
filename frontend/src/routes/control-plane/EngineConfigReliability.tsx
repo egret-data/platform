@@ -3,7 +3,6 @@ import { useQuery } from "@tanstack/react-query";
 import { type Storage, listStorage } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -12,6 +11,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { ConfigSection } from "./config/ConfigSection";
+import { FieldLabel } from "./config/FieldLabel";
 
 /**
  * Cluster-wide "Reliability" config: fault-tolerant execution — retry policy,
@@ -45,15 +46,17 @@ export function EngineConfigReliability(props: {
   });
 
   return (
-    <div className="space-y-3 rounded-lg border p-4">
+    <ConfigSection
+      title="Fault-tolerant execution"
+      description="Retry failed tasks/queries, spooling exchange data to an S3 storage connection."
+      docsUrl="https://trino.io/docs/current/admin/fault-tolerant-execution.html"
+    >
       <div className="flex items-center justify-between gap-4">
-        <div className="space-y-0.5">
-          <Label htmlFor="ced-ft-enabled">Fault-tolerant execution</Label>
-          <p className="text-xs text-muted-foreground">
-            Retry failed tasks/queries, spooling exchange data to an S3 storage
-            connection.
-          </p>
-        </div>
+        <FieldLabel
+          fieldKey="faultTolerantEnabled"
+          label="Enable fault-tolerant execution"
+          htmlFor="ced-ft-enabled"
+        />
         <Switch
           id="ced-ft-enabled"
           checked={ftEnabled}
@@ -63,7 +66,11 @@ export function EngineConfigReliability(props: {
       {ftEnabled && (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           <div className="space-y-1.5">
-            <Label htmlFor="ced-ft-retry">Retry policy</Label>
+            <FieldLabel
+              fieldKey="retryPolicy"
+              label="Retry policy"
+              htmlFor="ced-ft-retry"
+            />
             <Select
               value={retryPolicy}
               onValueChange={(v) => setRetryPolicy(v as "TASK" | "QUERY")}
@@ -78,7 +85,11 @@ export function EngineConfigReliability(props: {
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="ced-ft-storage">Exchange storage</Label>
+            <FieldLabel
+              fieldKey="exchangeStorage"
+              label="Exchange storage"
+              htmlFor="ced-ft-storage"
+            />
             <Select
               value={exchangeStorageConnId}
               onValueChange={setExchangeStorageConnId}
@@ -102,7 +113,11 @@ export function EngineConfigReliability(props: {
             </Select>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="ced-ft-prefix">Exchange prefix</Label>
+            <FieldLabel
+              fieldKey="exchangePrefix"
+              label="Exchange prefix"
+              htmlFor="ced-ft-prefix"
+            />
             <Input
               id="ced-ft-prefix"
               value={exchangePrefix}
@@ -112,6 +127,6 @@ export function EngineConfigReliability(props: {
           </div>
         </div>
       )}
-    </div>
+    </ConfigSection>
   );
 }
