@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
@@ -493,6 +493,94 @@ function formToAutoscaling(
   return undefined;
 }
 
+// ── non-default section counts ───────────────────────────────────────────────
+
+/**
+ * Count how many field-groups are configured per Configuration section, from
+ * the already-built (omit-empty) `trinoConfig`. Each group counts 1 when it is
+ * present/non-empty, so a nav badge reads "how many field-groups configured".
+ *
+ * Counting rule for the per-role scheduling fields (nodeSelector, tolerations,
+ * affinity, topologySpread, terminationGraceSeconds, additionalExposedPorts):
+ * they are counted ONLY under `placement`, NOT under `coordinator`/`worker`.
+ * Coordinator/Worker count replicas/resources/heap/probes/JVM/per-node-memory
+ * only, keeping those badges meaningful (no double-count with Placement).
+ */
+export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
+  const present = (v: unknown): boolean =>
+    v !== undefined && v !== null;
+
+  // Coordinator/Worker core (sizing/JVM/probes) — excludes scheduling fields.
+  const roleCoreCount = (rc: RoleConfig | undefined): number =>
+    rc
+      ? [
+          rc.replicas,
+          rc.resources,
+          rc.heap,
+          rc.probes,
+          rc.queryMaxMemoryPerNode,
+          rc.heapHeadroomPerNode,
+          rc.additionalJvmConfig,
+        ].filter(present).length
+      : 0;
+
+  // Per-role scheduling fields — counted under Placement only.
+  const rolePlacementCount = (rc: RoleConfig | undefined): number =>
+    rc
+      ? [
+          rc.nodeSelector,
+          rc.tolerations,
+          rc.affinity,
+          rc.topologySpread,
+          rc.terminationGraceSeconds,
+          rc.additionalExposedPorts,
+        ].filter(present).length
+      : 0;
+
+  const coordinator: RoleConfig | undefined = cfg.coordinator;
+  const worker = cfg.worker;
+
+  return {
+    general: [
+      cfg.queryMaxMemory,
+      // logLevel is always present in the built payload; only count non-default.
+      cfg.logLevel !== undefined && cfg.logLevel !== "INFO" ? cfg.logLevel : undefined,
+      cfg.configProperties,
+      cfg.env,
+    ].filter(present).length,
+    coordinator: roleCoreCount(coordinator),
+    worker: roleCoreCount(worker) + (present(worker?.gracefulShutdown) ? 1 : 0),
+    workload: [cfg.resourceGroups, cfg.sessionProperties].filter(present).length,
+    reliability: [cfg.faultTolerant].filter(present).length,
+    advanced: [
+      cfg.eventListener,
+      cfg.additionalNodeProperties,
+      cfg.additionalLogProperties,
+    ].filter(present).length,
+    pod: [
+      cfg.serviceAccount,
+      cfg.imagePullSecrets,
+      cfg.imagePullPolicy,
+      cfg.podSecurityContext,
+      cfg.containerSecurityContext,
+      cfg.deploymentStrategy,
+      cfg.deploymentAnnotations,
+      cfg.revisionHistoryLimit,
+      cfg.progressDeadlineSeconds,
+      cfg.shareProcessNamespace,
+    ].filter(present).length,
+    placement: rolePlacementCount(coordinator) + rolePlacementCount(worker),
+    containersMounts: [
+      cfg.initContainers,
+      cfg.sidecarContainers,
+      cfg.envFrom,
+      cfg.configMounts,
+      cfg.secretMounts,
+    ].filter(present).length,
+    autoscaling: [cfg.autoscaling].filter(present).length,
+  };
+}
+
 // ── hook ─────────────────────────────────────────────────────────────────────
 
 export interface EngineConfigForm {
@@ -598,6 +686,8 @@ export interface EngineConfigForm {
   saving: boolean;
   saved: boolean; // last save succeeded (drives the transient "Saved" banner)
   save: () => void; // builds the payload + saveMutation.mutate; sets error on throw
+  // Per-section non-default counts for nav badges, from the current built payload.
+  sectionCounts: Record<string, number>;
 }
 
 /**
@@ -747,9 +837,17 @@ export function useEngineConfigForm(
 
   const [dirty, setDirty] = useState(false);
   const skipDirty = useRef(true); // skip the initial mount + every prefill
+  // Latest `dirty`, readable inside the prefill effect without a stale closure.
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
 
   // Keep inputs in sync when the polled engine changes (e.g. an external update).
   useEffect(() => {
+    // Guard: never clobber in-progress edits. A 5s status poll re-renders with a
+    // new (identical) `engine.spec`; without this the reset would discard unsaved
+    // edits. First-load prefill + external updates while clean (dirty=false) still
+    // apply.
+    if (dirtyRef.current) return;
     const next = engine.spec.trinoConfig;
     setQueryMaxMemory(next?.queryMaxMemory ?? "");
     setLogLevel(next?.logLevel ?? "INFO");
@@ -884,9 +982,10 @@ export function useEngineConfigForm(
     },
   });
 
-  async function save() {
-    setError(null);
-
+  // Build the omit-empty `trinoConfig` payload from the current form state. This
+  // block was moved verbatim from `save()`; its output is byte-identical. It is
+  // memoised so `sectionCounts` (nav badges) can read it without rebuilding.
+  const builtTrinoConfig = useMemo<TrinoConfig>(() => {
     const trinoConfig: TrinoConfig = {
       coordinator: formToRole(coordinator),
       worker: formToRole(worker),
@@ -1029,6 +1128,63 @@ export function useEngineConfigForm(
     const autoscaling = formToAutoscaling(autoscaleMode, autoscaleHpa, autoscaleKeda);
     if (autoscaling) trinoConfig.autoscaling = autoscaling;
 
+    return trinoConfig;
+  }, [
+    coordinator,
+    worker,
+    queryMaxMemory,
+    logLevel,
+    configProps,
+    env,
+    eventListener,
+    nodeProps,
+    logProps,
+    ftEnabled,
+    retryPolicy,
+    exchangeStorageConnId,
+    exchangePrefix,
+    resourceGroups,
+    sessionRules,
+    gsEnabled,
+    gracePeriod,
+    passwordUsers,
+    jwtEnabled,
+    jwksUri,
+    requiredAudience,
+    ingressEnabled,
+    ingressHost,
+    ingressClassName,
+    ingressTlsSecret,
+    ingressAnnotations,
+    serviceAccount,
+    imagePullSecrets,
+    imagePullPolicy,
+    podSecurityContext,
+    containerSecurityContext,
+    initContainers,
+    sidecarContainers,
+    envFrom,
+    configMounts,
+    secretMounts,
+    deploymentStrategy,
+    deploymentAnnotations,
+    revisionHistoryLimit,
+    progressDeadlineSeconds,
+    shareProcessNamespace,
+    autoscaleMode,
+    autoscaleHpa,
+    autoscaleKeda,
+  ]);
+
+  const sectionCountsValue = useMemo(
+    () => sectionCounts(builtTrinoConfig),
+    [builtTrinoConfig],
+  );
+
+  async function save() {
+    setError(null);
+    const trinoConfig = builtTrinoConfig;
+
     // The wizard-era required fields still ride along; replicas now come from
     // the per-role editor, resources fall back to the stored flat values.
     const input: CreateEngineInput = {
@@ -1143,5 +1299,6 @@ export function useEngineConfigForm(
     saving: saveMutation.isPending,
     saved: saveMutation.isSuccess,
     save,
+    sectionCounts: sectionCountsValue,
   };
 }
