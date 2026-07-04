@@ -142,6 +142,12 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
             }
         }
     }
+    // Trino REQUIRES a coordinator<->worker shared secret whenever any client
+    // authentication is enabled (it refuses to start otherwise). Both roles must
+    // carry the same value; egret injects it via the env Secret.
+    if cfg.auth.as_ref().and_then(|a| auth_type(a)).is_some() {
+        out.push_str("internal-communication.shared-secret=${ENV:TRINO_INTERNAL_SECRET}\n");
+    }
     out
 }
 

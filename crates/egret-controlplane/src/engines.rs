@@ -522,6 +522,14 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
     // Resolve the RAW auth block (password secrets → bcrypt hashes, JWKS default),
     // mirroring the fault-tolerant storage resolution. Ingress is parsed inline.
     config.auth = resolve_auth(st, &engine.spec["trinoConfig"]).await?;
+    // Trino requires a coordinator<->worker shared secret whenever auth is enabled.
+    // Derive a stable per-engine value (both roles read it from the env Secret).
+    if config.auth.is_some() {
+        config.env.insert(
+            "TRINO_INTERNAL_SECRET".into(),
+            format!("egret-internal-{}", engine.id),
+        );
+    }
     Ok(EngineProvisionReq {
         name: engine.name.clone(),
         namespace: engine.namespace.clone(),
