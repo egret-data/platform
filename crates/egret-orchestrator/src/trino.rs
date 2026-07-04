@@ -1034,6 +1034,14 @@ impl TrinoProvisioner {
         if let Some(ing) = trino_ingress(spec) {
             self.kube.apply(&ing).await?;
         }
+        // Autoscaling owns the worker Deployment's replica count. Each renderer
+        // returns Some only for its matching mode, so at most one is applied.
+        if let Some(h) = trino_hpa(spec) {
+            self.kube.apply(&h).await?;
+        }
+        if let Some(so) = trino_scaled_object(spec) {
+            self.kube.apply(&so).await?;
+        }
         Ok(())
     }
 }
@@ -1086,6 +1094,34 @@ impl EngineProvisioner for TrinoProvisioner {
                 )
                 .await;
         }
+        // Likewise, `apply_all` only applies the autoscaler for the current mode.
+        // Best-effort delete the stale object when autoscaling is off or the mode
+        // switched, so HPA↔KEDA↔off never leaves an orphaned scaler behind.
+        let worker = format!("{}-worker", spec.name);
+        let hpa = || {
+            self.kube.delete(
+                "autoscaling/v2",
+                "HorizontalPodAutoscaler",
+                &spec.namespace,
+                &worker,
+            )
+        };
+        let so = || {
+            self.kube
+                .delete("keda.sh/v1alpha1", "ScaledObject", &spec.namespace, &worker)
+        };
+        match spec.config.autoscaling.as_ref().map(|a| a.mode.as_str()) {
+            Some("hpa") => {
+                let _ = so().await;
+            }
+            Some("keda") => {
+                let _ = hpa().await;
+            }
+            _ => {
+                let _ = hpa().await;
+                let _ = so().await;
+            }
+        }
         Ok(())
     }
     async fn delete(&self, namespace: &str, name: &str) -> anyhow::Result<()> {
@@ -1131,6 +1167,26 @@ impl EngineProvisioner for TrinoProvisioner {
                 "Ingress",
                 namespace,
                 &format!("{name}-trino"),
+            )
+            .await;
+        // Best-effort delete BOTH autoscalers regardless of mode; harmless when
+        // the object was never applied.
+        let _ = self
+            .kube
+            .delete(
+                "autoscaling/v2",
+                "HorizontalPodAutoscaler",
+                namespace,
+                &format!("{name}-worker"),
+            )
+            .await;
+        let _ = self
+            .kube
+            .delete(
+                "keda.sh/v1alpha1",
+                "ScaledObject",
+                namespace,
+                &format!("{name}-worker"),
             )
             .await;
         Ok(())
@@ -2016,6 +2072,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provision_applies_autoscaler_and_delete_removes_both() {
+        use crate::kube_client::FakeKube;
+        let kube = std::sync::Arc::new(FakeKube::default());
+        let p = TrinoProvisioner::new(kube.clone());
+        let mut s = sample_spec();
+        s.config.autoscaling = Some(Autoscaling {
+            mode: "hpa".into(),
+            hpa: Some(HpaConfig {
+                max_replicas: 3,
+                ..Default::default()
+            }),
+            keda: None,
+        });
+        p.provision(&s).await.unwrap();
+        assert!(kube
+            .applied
+            .lock()
+            .unwrap()
+            .contains_key(&format!("HorizontalPodAutoscaler/{}-worker", s.name)));
+
+        p.delete(&s.namespace, &s.name).await.unwrap();
+        // delete is best-effort for BOTH kinds regardless of mode:
+        let d = kube.deleted.lock().unwrap();
+        assert!(d.contains(&format!("HorizontalPodAutoscaler/{}-worker", s.name)));
+        assert!(d.iter().any(|x| x.starts_with("ScaledObject/")));
+    }
+
+    #[tokio::test]
     async fn provision_applies_all_objects() {
         use crate::kube_client::FakeKube;
         let kube = std::sync::Arc::new(FakeKube::default());
@@ -2041,6 +2125,6 @@ mod tests {
         let p = TrinoProvisioner::new(kube.clone());
         p.delete("egret-engines", "demo").await.unwrap();
         let d = kube.deleted.lock().unwrap();
-        assert_eq!(d.len(), 7); // 2 deployments, service, 2 configmaps, secret, ingress
+        assert_eq!(d.len(), 9); // 2 deployments, service, 2 configmaps, secret, ingress, hpa, scaledobject
     }
 }
