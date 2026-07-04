@@ -72,6 +72,7 @@ async fn setup_full(
         browser,
         engine_provisioner,
         engine_egret_url: "http://egret:8080".into(),
+        engine_jwks_uri: "https://idp/jwks".into(),
     });
 
     Some(Fixture {
@@ -854,6 +855,146 @@ async fn update_engine_resource_groups_and_fault_tolerant() {
         resp.status(),
         StatusCode::BAD_REQUEST,
         "dangling resource-group selector must 400"
+    );
+}
+
+/// Create a global named secret holding `value`; returns its id.
+async fn seed_secret(f: &Fixture, value: &str) -> Uuid {
+    let secrets = egret_secrets::WorkspaceSecretStore::new(
+        f.db.clone(),
+        egret_secrets::SecretStore::new(
+            f.db.clone(),
+            Some(egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("crypto")),
+        ),
+    );
+    secrets
+        .create(
+            None,
+            &format!("pw-secret-{}", Uuid::new_v4().simple()),
+            None,
+            value,
+        )
+        .await
+        .expect("create password secret")
+}
+
+#[tokio::test]
+async fn update_engine_auth_and_ingress() {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_auth_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let secret_id = seed_secret(&f, "s3cret").await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    // Create with the simple wizard.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // PUT auth (password user `bob` → seeded secret) + ingress → 200. The control
+    // plane resolves the secret + bcrypts it for provisioning; the spec persists
+    // the RAW secretRef.
+    let put_body = serde_json::json!({
+        "name": name, "warehouseId": wh_id,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+        "trinoConfig": {
+            "coordinator": { "replicas": 1 },
+            "worker": { "replicas": 1 },
+            "auth": {
+                "passwordUsers": [{ "username": "bob", "secretRef": secret_id }],
+                "jwt": { "requiredAudience": "trino" }
+            },
+            "ingress": { "enabled": true, "className": "nginx", "host": "h.local" }
+        }
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(put_body),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "update engine auth+ingress; body={j}"
+    );
+
+    // GET reflects the usernames + host — but NOT the plaintext password.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("/engines/{engine_id}"), &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "get engine; body={j}");
+    assert_eq!(
+        j["spec"]["trinoConfig"]["auth"]["passwordUsers"][0]["username"], "bob",
+        "auth username round-trips; body={j}"
+    );
+    assert_eq!(
+        j["spec"]["trinoConfig"]["ingress"]["host"], "h.local",
+        "ingress host round-trips; body={j}"
+    );
+    let raw = j["spec"]["trinoConfig"].to_string();
+    assert!(
+        !raw.contains("s3cret"),
+        "plaintext password must not be persisted; body={j}"
+    );
+
+    // PUT with a bogus secretRef → 400 (secret cannot be resolved for bcrypt).
+    let bad_body = serde_json::json!({
+        "name": name, "warehouseId": wh_id,
+        "coordinatorReplicas": 1, "workerReplicas": 1,
+        "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+        "trinoConfig": {
+            "coordinator": { "replicas": 1 },
+            "worker": { "replicas": 1 },
+            "auth": {
+                "passwordUsers": [{ "username": "bob", "secretRef": Uuid::new_v4() }]
+            }
+        }
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(bad_body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "bogus password secretRef must 400"
     );
 }
 

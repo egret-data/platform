@@ -1237,6 +1237,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             .public_url
             .clone()
             .unwrap_or_else(|| "http://egret:8080".to_string()),
+        // Placeholder; Task 5 derives the real default engine JWKS URI from config.
+        engine_jwks_uri: String::new(),
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).

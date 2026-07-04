@@ -18,10 +18,10 @@ mod warehouses;
 
 pub use auth::require_platform_admin;
 pub use engines::{
-    CatalogReq, EngineLiveStatus, EnginePod, EngineProvisionReq, EngineProvisioner,
-    FaultTolerantReq, GracefulShutdownReq, HeapReq, ProbeReq, ProbesReq, ResourceGroupReq,
-    ResourceGroupsReq, ResourceSelectorReq, RoleConfigReq, RoleResourcesReq, SessionRuleReq,
-    TrinoConfigReq, WorkerRoleConfigReq,
+    AuthReq, CatalogReq, EngineLiveStatus, EnginePod, EngineProvisionReq, EngineProvisioner,
+    FaultTolerantReq, GracefulShutdownReq, HeapReq, IngressReq, JwtReq, PasswordEntryReq, ProbeReq,
+    ProbesReq, ResourceGroupReq, ResourceGroupsReq, ResourceSelectorReq, RoleConfigReq,
+    RoleResourcesReq, SessionRuleReq, TrinoConfigReq, WorkerRoleConfigReq,
 };
 pub use error::CpError;
 pub use warehouses::{
@@ -59,6 +59,10 @@ pub struct CpState {
     /// In-cluster URL Trino pods use to reach egret's REST catalog + token
     /// endpoint (e.g. `http://egret:8080`); populated from config in egret-bin.
     pub engine_egret_url: String,
+    /// Default JWKS URI for a Trino JWT authenticator when the engine's auth
+    /// block omits one (e.g. Keycloak `.../protocol/openid-connect/certs`);
+    /// populated from config in egret-bin (Task 5). Tests set a dummy value.
+    pub engine_jwks_uri: String,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.
