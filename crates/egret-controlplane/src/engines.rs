@@ -1642,6 +1642,14 @@ fn client_row_id(config: &serde_json::Value) -> Option<Uuid> {
         .and_then(|s| Uuid::parse_str(s).ok())
 }
 
+/// Whether the client referenced by `clientRowId` was minted by us (and should
+/// be revoked when the catalog is removed). Defaults to `true` — missing or
+/// non-`false` means minted — so it's a no-op for existing rows and only an
+/// explicit `"mintedClient": false` opts a client out of revoke-on-remove.
+fn is_minted_client(config: &serde_json::Value) -> bool {
+    config.get("mintedClient").and_then(|v| v.as_bool()) != Some(false)
+}
+
 async fn create_engine(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -1928,6 +1936,20 @@ async fn add_catalog(
 
     // For an egret-warehouse catalog, resolve the warehouse + endpoint and mint a
     // fresh client (same as the primary); other kinds store the body as-is.
+    //
+    // `config.clientId` (optional): run the catalog under the ROLE/grants of an
+    // EXISTING Catalog Client of this warehouse, instead of the shared
+    // `engine_default` role. `CatalogClient` never exposes a retrievable secret
+    // (`client_secret` is generated once in `create_client` and only its argon2
+    // hash is persisted — see `CatalogClient`/`CreatedClient` in
+    // `egret-catalog/src/service/embedded.rs`), so we can't just reuse the
+    // referenced client's credential directly. Instead we look up the chosen
+    // client to read its `catalog_role_id`, validate it belongs to `wh`, and
+    // mint a FRESH client under that same role. The new client is therefore
+    // still ours (auto-created, its credential lives only on this catalog row),
+    // so `mintedClient` stays `true` and revoke-on-remove in `remove_catalog`
+    // still applies — the feature only changes which ROLE the minted client
+    // inherits, not who "owns" the minted client.
     let (config, secret_ref, minted_client): (serde_json::Value, Option<Uuid>, Option<Uuid>) = if b
         .kind
         == "egret-warehouse"
@@ -1954,7 +1976,35 @@ async fn add_catalog(
             .await?
             .ok_or_else(|| CpError::BadRequest("unknown storage connection".into()))?;
         let s3_endpoint = sc.endpoint.unwrap_or_default();
-        let role_id = ensure_engine_role(&st, wh.id).await?;
+
+        // Optional `config.clientId`: inherit that client's role instead of the
+        // default engine role. Validated to belong to `wh` via `list_clients`.
+        let client_id_param = match b.config.get("clientId") {
+            Some(serde_json::Value::Null) | None => None,
+            Some(v) => Some(
+                v.as_str()
+                    .and_then(|s| Uuid::parse_str(s).ok())
+                    .ok_or_else(|| {
+                        CpError::BadRequest("config.clientId must be a UUID string".into())
+                    })?,
+            ),
+        };
+        let role_id = match client_id_param {
+            Some(cid) => {
+                st.storage
+                    .list_clients(wh.id)
+                    .await?
+                    .into_iter()
+                    .find(|c| c.id == cid)
+                    .ok_or_else(|| {
+                        CpError::BadRequest(
+                            "config.clientId does not reference a client of this warehouse".into(),
+                        )
+                    })?
+                    .catalog_role_id
+            }
+            None => ensure_engine_role(&st, wh.id).await?,
+        };
         let client = st
             .storage
             .create_client(&NewClient {
@@ -1970,6 +2020,7 @@ async fn add_catalog(
             "s3_endpoint": s3_endpoint,
             "credential": format!("{}:{}", client.client_id, client.client_secret),
             "clientRowId": client.id,
+            "mintedClient": true,
         });
         (cfg, None, Some(client.id))
     } else {
@@ -2064,8 +2115,16 @@ async fn remove_catalog(
     }
     st.storage.delete_engine_catalog(cat.id).await?;
     // Best-effort: retire a minted Catalog Client (egret-warehouse catalogs).
+    // Gated on `mintedClient` so a client we did NOT mint (config explicitly
+    // sets `mintedClient: false`) is never revoked out from under its owner.
+    // `add_catalog` always mints its own client today (even when inheriting an
+    // existing client's role via `config.clientId`), so this is always `true`
+    // in practice — the guard exists for forward-compat with a future
+    // "adopt an existing client verbatim" path.
     if let Some(clientid) = client_row_id(&cat.config) {
-        let _ = st.storage.revoke_client(clientid).await;
+        if is_minted_client(&cat.config) {
+            let _ = st.storage.revoke_client(clientid).await;
+        }
     }
     // Re-render + roll.
     let req = build_provision_req(&st, &engine).await?;

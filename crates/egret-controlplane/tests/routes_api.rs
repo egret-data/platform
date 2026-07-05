@@ -1541,6 +1541,276 @@ async fn engine_catalog_routes() {
     );
 }
 
+/// `config.clientId`: adding an egret-warehouse catalog under an existing
+/// client's role must succeed, store `clientRowId` pointing at a NEWLY minted
+/// client (never the referenced one — see `add_catalog`'s doc comment: a
+/// `CatalogClient`'s secret is write-once and not retrievable, so "use an
+/// existing client" mints a fresh client under that client's role instead of
+/// reusing it verbatim) with `mintedClient: true`, and removing the catalog
+/// must revoke that MINTED client, not the user's original one.
+#[tokio::test]
+async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_cat_clientid_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    // Seed a pre-existing, user-owned client on a custom (non-default) role.
+    let catalog_store = egret_catalog::CatalogStore::new(f.db.clone());
+    let wh = catalog_store
+        .get_warehouse(wh_id)
+        .await
+        .expect("get warehouse")
+        .expect("warehouse exists");
+    let role = catalog_store
+        .create_role(
+            wh_id,
+            "readonly_analyst",
+            "external",
+            Some("read-only role"),
+        )
+        .await
+        .expect("create role");
+    let existing_client = catalog_store
+        .create_client(&egret_catalog::service::embedded::NewClient {
+            name: "pre-existing-client".into(),
+            consumer_type: "external".into(),
+            workspace_id: wh.workspace_id,
+            warehouse_id: wh_id,
+            catalog_role_id: role.id,
+        })
+        .await
+        .expect("create existing client");
+
+    // Create the engine (auto-wires the primary egret-warehouse catalog).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name,
+                "warehouseId": wh_id,
+                "coordinatorReplicas": 1,
+                "workerReplicas": 1,
+                "cpuMin": "1",
+                "cpuMax": "2",
+                "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // POST an egret-warehouse catalog with config.clientId → 201.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/catalogs"),
+            &token,
+            Some(serde_json::json!({
+                "name": "governed",
+                "kind": "egret-warehouse",
+                "config": { "warehouseId": wh_id, "clientId": existing_client.id },
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "add catalog w/ clientId; body={j}"
+    );
+    let cat_id = j["id"].as_str().expect("catalog id").to_string();
+
+    // GET the catalog detail: clientRowId must be a NEW client (not the
+    // referenced one), and mintedClient defaults true (harmless to expose).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/catalogs/{cat_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "get catalog detail; body={j}");
+    assert_eq!(j["config"]["mintedClient"], true, "mintedClient; body={j}");
+    // credential/clientRowId are redacted from the HTTP response; inspect the
+    // stored row directly via the storage layer instead.
+    let stored = catalog_store
+        .list_engine_catalogs(Uuid::parse_str(&engine_id).unwrap())
+        .await
+        .expect("list engine catalogs")
+        .into_iter()
+        .find(|c| c.id.to_string() == cat_id)
+        .expect("stored catalog row");
+    let minted_client_row_id = stored.config["clientRowId"]
+        .as_str()
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .expect("clientRowId present");
+    assert_ne!(
+        minted_client_row_id, existing_client.id,
+        "a fresh client must be minted, not the referenced one reused"
+    );
+    // The minted client inherited the referenced client's role.
+    let minted_row = catalog_store
+        .list_clients(wh_id)
+        .await
+        .expect("list clients")
+        .into_iter()
+        .find(|c| c.id == minted_client_row_id)
+        .expect("minted client row exists");
+    assert_eq!(
+        minted_row.catalog_role_id, role.id,
+        "minted client inherits the referenced client's role"
+    );
+
+    // DELETE the catalog → the MINTED client is revoked, the user's original
+    // client is untouched.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/engines/{engine_id}/catalogs/{cat_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "delete catalog");
+
+    let remaining = catalog_store
+        .list_clients(wh_id)
+        .await
+        .expect("list clients after delete");
+    assert!(
+        !remaining.iter().any(|c| c.id == minted_client_row_id),
+        "minted client must be revoked on catalog removal"
+    );
+    assert!(
+        remaining.iter().any(|c| c.id == existing_client.id),
+        "the user's pre-existing client must NOT be revoked"
+    );
+}
+
+/// An invalid or foreign `config.clientId` (not belonging to the target
+/// warehouse) must 400, not silently fall back to the default role or 500.
+#[tokio::test]
+async fn add_catalog_with_foreign_client_id_400() {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_cat_bad_clientid_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let other_wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    // A client that belongs to a DIFFERENT warehouse.
+    let catalog_store = egret_catalog::CatalogStore::new(f.db.clone());
+    let other_wh = catalog_store
+        .get_warehouse(other_wh_id)
+        .await
+        .expect("get warehouse")
+        .expect("warehouse exists");
+    let role = catalog_store
+        .create_role(other_wh_id, "other_role", "external", None)
+        .await
+        .expect("create role");
+    let foreign_client = catalog_store
+        .create_client(&egret_catalog::service::embedded::NewClient {
+            name: "foreign-client".into(),
+            consumer_type: "external".into(),
+            workspace_id: other_wh.workspace_id,
+            warehouse_id: other_wh_id,
+            catalog_role_id: role.id,
+        })
+        .await
+        .expect("create foreign client");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name,
+                "warehouseId": wh_id,
+                "coordinatorReplicas": 1,
+                "workerReplicas": 1,
+                "cpuMin": "1",
+                "cpuMax": "2",
+                "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // A foreign clientId (belongs to a different warehouse) → 400.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/catalogs"),
+            &token,
+            Some(serde_json::json!({
+                "name": "governed",
+                "kind": "egret-warehouse",
+                "config": { "warehouseId": wh_id, "clientId": foreign_client.id },
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "foreign clientId must 400"
+    );
+
+    // A malformed (non-UUID) clientId → 400.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/catalogs"),
+            &token,
+            Some(serde_json::json!({
+                "name": "governed2",
+                "kind": "egret-warehouse",
+                "config": { "warehouseId": wh_id, "clientId": "not-a-uuid" },
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "malformed clientId must 400"
+    );
+}
+
 #[tokio::test]
 async fn create_engine_unprovisioned_warehouse_400() {
     let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
