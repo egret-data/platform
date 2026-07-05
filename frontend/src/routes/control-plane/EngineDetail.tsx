@@ -966,6 +966,9 @@ function AddCatalogDialog({
                           : ""
                     }
                     onValueChange={(v) => {
+                      // Switching connector changes the applicable property set,
+                      // so clear any properties entered for the previous one.
+                      setGenericProps([]);
                       if (v === "__other__") {
                         setCustomConnector(true);
                         setConnectorName("");
@@ -998,6 +1001,7 @@ function AddCatalogDialog({
                 <div className="space-y-1.5">
                   <Label>Properties</Label>
                   <KeyedPropertyList
+                    key={customConnector ? "__custom__" : connectorName || "__none__"}
                     catalog={connectorByName[connectorName]?.props ?? []}
                     catalogByKey={Object.fromEntries(
                       (connectorByName[connectorName]?.props ?? []).map((p) => [
