@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -39,12 +39,15 @@ export default function PodTerminalDialog({
   pod: string | null;
   onOpenChange: (open: boolean) => void;
 }) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  // Callback ref via state: the terminal is created only once the container
+  // node has actually attached to the DOM. Using a plain useRef races the
+  // effect against Radix's dialog-content mount (the ref can still be null when
+  // the effect first runs, and it never retries) — keying the effect on the
+  // attached node fixes that deterministically.
+  const [container, setContainer] = useState<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (pod == null) return;
-    const container = containerRef.current;
-    if (!container) return;
+    if (pod == null || !container) return;
 
     const term = new Terminal({
       convertEol: true,
@@ -112,7 +115,7 @@ export default function PodTerminalDialog({
       ws.close();
       term.dispose();
     };
-  }, [engineId, pod]);
+  }, [engineId, pod, container]);
 
   return (
     <Dialog open={pod != null} onOpenChange={onOpenChange}>
@@ -123,7 +126,7 @@ export default function PodTerminalDialog({
         </DialogHeader>
 
         <div className="h-[60vh] w-full overflow-hidden rounded-md bg-[#0a0a0a] p-2">
-          <div ref={containerRef} className="h-full w-full" />
+          <div ref={setContainer} className="h-full w-full" />
         </div>
       </DialogContent>
     </Dialog>
