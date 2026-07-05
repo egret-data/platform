@@ -591,6 +591,9 @@ export interface EngineConfigForm {
   setLogLevel: (v: string) => void;
   configProps: Kv[];
   setConfigProps: Dispatch<SetStateAction<Kv[]>>;
+  // Guided read/write over the raw `configProps` map (known Trino properties).
+  getProp: (key: string) => string;
+  setProp: (key: string, value: string) => void;
   env: Kv[];
   setEnv: Dispatch<SetStateAction<Kv[]>>;
   // advanced raw
@@ -1185,6 +1188,16 @@ export function useEngineConfigForm(
     [builtTrinoConfig],
   );
 
+  // Guided helpers over the raw config.properties map: read a known key's value
+  // (or "") and upsert it (blank value removes the entry). The payload shape is
+  // unchanged — values still live in `configProps` → `trinoConfig.configProperties`.
+  const getProp = (key: string) => configProps.find((kv) => kv.key === key)?.value ?? "";
+  const setProp = (key: string, value: string) =>
+    setConfigProps((prev) => {
+      const rest = prev.filter((kv) => kv.key !== key);
+      return value.trim() === "" ? rest : [...rest, { key, value }];
+    });
+
   async function save() {
     setError(null);
     const trinoConfig = builtTrinoConfig;
@@ -1216,6 +1229,8 @@ export function useEngineConfigForm(
     setLogLevel,
     configProps,
     setConfigProps,
+    getProp,
+    setProp,
     env,
     setEnv,
     eventListener,
