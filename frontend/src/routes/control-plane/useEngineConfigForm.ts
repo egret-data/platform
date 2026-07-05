@@ -29,6 +29,7 @@ import {
   recordToKv,
   sessionRulesToForm,
 } from "./EngineResourceGroups";
+import { knownProperties } from "./config/knownProperties";
 
 // Re-exported so config sub-tab components (Tasks 2-5) can import from the hook.
 export type { SessionRuleForm };
@@ -540,6 +541,14 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
   const coordinator: RoleConfig | undefined = cfg.coordinator;
   const worker = cfg.worker;
 
+  // Guided known-property sections: count how many of a section's known keys
+  // are set (non-empty) in the raw config.properties map.
+  const props = cfg.configProperties ?? {};
+  const knownSectionCount = (section: string): number =>
+    knownProperties.filter(
+      (p) => p.section === section && (props[p.key] ?? "").trim() !== "",
+    ).length;
+
   return {
     general: [
       cfg.queryMaxMemory,
@@ -552,6 +561,10 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
     worker: roleCoreCount(worker) + (present(worker?.gracefulShutdown) ? 1 : 0),
     workload: [cfg.resourceGroups, cfg.sessionProperties].filter(present).length,
     reliability: [cfg.faultTolerant].filter(present).length,
+    queryMemory: knownSectionCount("queryMemory"),
+    spilling: knownSectionCount("spilling"),
+    execution: knownSectionCount("execution"),
+    sqlWebUi: knownSectionCount("sqlWebUi"),
     advanced: [
       cfg.eventListener,
       cfg.additionalNodeProperties,

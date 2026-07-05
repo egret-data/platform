@@ -74,6 +74,10 @@ import { EngineConfigAdvanced } from "./EngineConfigAdvanced";
 import { PodSection } from "./config/PodSection";
 import { PlacementSection } from "./config/PlacementSection";
 import { ContainersMountsSection } from "./config/ContainersMountsSection";
+import { QueryMemorySection } from "./config/QueryMemorySection";
+import { SpillingSection } from "./config/SpillingSection";
+import { ExecutionOptimizerSection } from "./config/ExecutionOptimizerSection";
+import { SqlWebUiSection } from "./config/SqlWebUiSection";
 import { ValidityProvider } from "./config/validityRegistry";
 import { ReviewChangesDialog } from "./config/ReviewChangesDialog";
 import { EngineAutoscaling } from "./EngineAutoscaling";
@@ -333,6 +337,10 @@ const CONFIG_NAV: { key: string; label: string }[] = [
   { key: "worker", label: "Worker" },
   { key: "workload", label: "Workload" },
   { key: "reliability", label: "Reliability" },
+  { key: "queryMemory", label: "Query & Memory" },
+  { key: "spilling", label: "Spilling" },
+  { key: "execution", label: "Execution & Optimizer" },
+  { key: "sqlWebUi", label: "SQL & Web UI" },
   { key: "advanced", label: "Advanced" },
   { key: "pod", label: "Pod" },
   { key: "placement", label: "Placement" },
@@ -412,6 +420,8 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
     setAutoscaleHpa,
     autoscaleKeda,
     setAutoscaleKeda,
+    getProp,
+    setProp,
     sectionCounts,
   } = cfg;
 
@@ -523,6 +533,22 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
                   exchangePrefix={exchangePrefix}
                   setExchangePrefix={setExchangePrefix}
                 />
+              )}
+
+              {section === "queryMemory" && (
+                <QueryMemorySection getProp={getProp} setProp={setProp} />
+              )}
+
+              {section === "spilling" && (
+                <SpillingSection getProp={getProp} setProp={setProp} />
+              )}
+
+              {section === "execution" && (
+                <ExecutionOptimizerSection getProp={getProp} setProp={setProp} />
+              )}
+
+              {section === "sqlWebUi" && (
+                <SqlWebUiSection getProp={getProp} setProp={setProp} />
               )}
 
               {section === "advanced" && (
