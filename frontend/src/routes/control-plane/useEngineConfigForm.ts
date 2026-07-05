@@ -501,11 +501,13 @@ function formToAutoscaling(
  * the already-built (omit-empty) `trinoConfig`. Each group counts 1 when it is
  * present/non-empty, so a nav badge reads "how many field-groups configured".
  *
- * Counting rule for the per-role scheduling fields (nodeSelector, tolerations,
- * affinity, topologySpread, terminationGraceSeconds, additionalExposedPorts):
- * they are counted ONLY under `placement`, NOT under `coordinator`/`worker`.
- * Coordinator/Worker count replicas/resources/heap/probes/JVM/per-node-memory
- * only, keeping those badges meaningful (no double-count with Placement).
+ * The badges map to the five nav sections: `properties` (set keys across the
+ * config/node/log maps + queryMaxMemory + non-default logLevel + eventListener),
+ * `resources` (coordinator/worker sizing + env), `workload` (resource groups +
+ * session + fault-tolerant), `scheduling` (pod + per-role placement + containers/
+ * mounts), and `scaling` (autoscaling). Per-role scheduling fields count under
+ * `scheduling`; per-role sizing (replicas/resources/heap/probes/JVM/per-node
+ * memory) counts under `resources` — no field-group is double-counted.
  */
 export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
   const present = (v: unknown): boolean =>
@@ -549,51 +551,59 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
       (p) => p.section === section && (props[p.key] ?? "").trim() !== "",
     ).length;
 
+  const keyCount = (r: Record<string, string> | undefined): number =>
+    r ? Object.keys(r).length : 0;
+
+  // Properties: every set key across the three raw property maps, plus the
+  // three structured "Common" fields (queryMaxMemory / non-default logLevel /
+  // event-listener) that live alongside the list.
+  const propertiesCount =
+    keyCount(cfg.configProperties) +
+    keyCount(cfg.additionalNodeProperties) +
+    keyCount(cfg.additionalLogProperties) +
+    (present(cfg.queryMaxMemory) ? 1 : 0) +
+    (cfg.logLevel !== undefined && cfg.logLevel !== "INFO" ? 1 : 0) +
+    (keyCount(cfg.eventListener) > 0 ? 1 : 0);
+
+  // Pod-level (cluster-wide) scheduling field-groups.
+  const podCount = [
+    cfg.serviceAccount,
+    cfg.imagePullSecrets,
+    cfg.imagePullPolicy,
+    cfg.podSecurityContext,
+    cfg.containerSecurityContext,
+    cfg.deploymentStrategy,
+    cfg.deploymentAnnotations,
+    cfg.revisionHistoryLimit,
+    cfg.progressDeadlineSeconds,
+    cfg.shareProcessNamespace,
+  ].filter(present).length;
+
+  const containersMountsCount = [
+    cfg.initContainers,
+    cfg.sidecarContainers,
+    cfg.envFrom,
+    cfg.configMounts,
+    cfg.secretMounts,
+  ].filter(present).length;
+
   return {
-    general: [
-      cfg.queryMaxMemory,
-      // logLevel is always present in the built payload; only count non-default.
-      cfg.logLevel !== undefined && cfg.logLevel !== "INFO" ? cfg.logLevel : undefined,
-      cfg.configProperties,
-      cfg.env,
-    ].filter(present).length,
-    coordinator: roleCoreCount(coordinator),
-    worker: roleCoreCount(worker) + (present(worker?.gracefulShutdown) ? 1 : 0),
-    workload: [cfg.resourceGroups, cfg.sessionProperties].filter(present).length,
-    reliability:
-      [cfg.faultTolerant].filter(present).length +
-      knownSectionCount("reliability"),
-    queryMemory: knownSectionCount("queryMemory"),
-    spilling: knownSectionCount("spilling"),
-    execution: knownSectionCount("execution"),
-    sqlWebUi: knownSectionCount("sqlWebUi"),
-    advanced:
-      [
-        cfg.eventListener,
-        cfg.additionalNodeProperties,
-        cfg.additionalLogProperties,
-      ].filter(present).length + knownSectionCount("advanced"),
-    pod: [
-      cfg.serviceAccount,
-      cfg.imagePullSecrets,
-      cfg.imagePullPolicy,
-      cfg.podSecurityContext,
-      cfg.containerSecurityContext,
-      cfg.deploymentStrategy,
-      cfg.deploymentAnnotations,
-      cfg.revisionHistoryLimit,
-      cfg.progressDeadlineSeconds,
-      cfg.shareProcessNamespace,
-    ].filter(present).length,
-    placement: rolePlacementCount(coordinator) + rolePlacementCount(worker),
-    containersMounts: [
-      cfg.initContainers,
-      cfg.sidecarContainers,
-      cfg.envFrom,
-      cfg.configMounts,
-      cfg.secretMounts,
-    ].filter(present).length,
-    autoscaling: [cfg.autoscaling].filter(present).length,
+    properties: propertiesCount,
+    resources:
+      roleCoreCount(coordinator) +
+      roleCoreCount(worker) +
+      (present(worker?.gracefulShutdown) ? 1 : 0) +
+      (present(cfg.env) ? 1 : 0),
+    workload:
+      [cfg.resourceGroups, cfg.sessionProperties, cfg.faultTolerant].filter(
+        present,
+      ).length + knownSectionCount("reliability"),
+    scheduling:
+      podCount +
+      rolePlacementCount(coordinator) +
+      rolePlacementCount(worker) +
+      containersMountsCount,
+    scaling: [cfg.autoscaling].filter(present).length,
   };
 }
 
@@ -607,9 +617,9 @@ export interface EngineConfigForm {
   setLogLevel: (v: string) => void;
   configProps: Kv[];
   setConfigProps: Dispatch<SetStateAction<Kv[]>>;
-  // Guided read/write over the raw `configProps` map (known Trino properties).
-  getProp: (key: string) => string;
-  setProp: (key: string, value: string) => void;
+  // Guided read/write over a raw property map, routed by config file.
+  getProp: (file: "config" | "node" | "log", key: string) => string;
+  setProp: (file: "config" | "node" | "log", key: string, value: string) => void;
   env: Kv[];
   setEnv: Dispatch<SetStateAction<Kv[]>>;
   // advanced raw
@@ -1204,15 +1214,24 @@ export function useEngineConfigForm(
     [builtTrinoConfig],
   );
 
-  // Guided helpers over the raw config.properties map: read a known key's value
-  // (or "") and upsert it (blank value removes the entry). The payload shape is
-  // unchanged — values still live in `configProps` → `trinoConfig.configProperties`.
-  const getProp = (key: string) => configProps.find((kv) => kv.key === key)?.value ?? "";
-  const setProp = (key: string, value: string) =>
-    setConfigProps((prev) => {
+  // Guided helpers over a raw property map, routed by config file: read a key's
+  // value (or "") and upsert it (blank value removes the entry). The payload
+  // shape is unchanged — values still live in the corresponding Kv[] state.
+  const mapFor = (file: "config" | "node" | "log") =>
+    file === "node"
+      ? ([nodeProps, setNodeProps] as const)
+      : file === "log"
+        ? ([logProps, setLogProps] as const)
+        : ([configProps, setConfigProps] as const);
+  const getProp = (file: "config" | "node" | "log", key: string) =>
+    mapFor(file)[0].find((kv) => kv.key === key)?.value ?? "";
+  const setProp = (file: "config" | "node" | "log", key: string, value: string) => {
+    const set = mapFor(file)[1];
+    set((prev) => {
       const rest = prev.filter((kv) => kv.key !== key);
       return value.trim() === "" ? rest : [...rest, { key, value }];
     });
+  };
 
   async function save() {
     setError(null);

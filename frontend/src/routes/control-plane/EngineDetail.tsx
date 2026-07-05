@@ -1,14 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  ArrowLeft,
-  ChevronDown,
-  Loader2,
-  Plus,
-  Server,
-  Trash2,
-} from "lucide-react";
+import { ArrowLeft, Loader2, Plus, Server, Trash2 } from "lucide-react";
 
 import {
   type AddCatalogInput,
@@ -46,7 +39,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { PropertySearch } from "./config/PropertySearch";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -67,25 +59,19 @@ import {
 import {
   type Kv,
   KeyValueEditor,
-  ResourceGroupsSection,
-  SessionPropertiesSection,
   kvToRecord,
 } from "./EngineResourceGroups";
 import {
   useEngineConfigForm,
   type EngineConfigForm,
 } from "./useEngineConfigForm";
-import { EngineRoleConfig } from "./EngineRoleConfig";
-import { EngineConfigGeneral } from "./EngineConfigGeneral";
-import { EngineConfigReliability } from "./EngineConfigReliability";
-import { EngineConfigAdvanced } from "./EngineConfigAdvanced";
-import { PodSection } from "./config/PodSection";
-import { PlacementSection } from "./config/PlacementSection";
-import { ContainersMountsSection } from "./config/ContainersMountsSection";
-import { QueryMemorySection } from "./config/QueryMemorySection";
-import { SpillingSection } from "./config/SpillingSection";
-import { ExecutionOptimizerSection } from "./config/ExecutionOptimizerSection";
-import { SqlWebUiSection } from "./config/SqlWebUiSection";
+import { ConfigSection } from "./config/ConfigSection";
+import { FieldLabel } from "./config/FieldLabel";
+import { QuantityInput } from "./config/QuantityInput";
+import { PropertiesSection } from "./config/PropertiesSection";
+import { ResourcesSection } from "./config/ResourcesSection";
+import { WorkloadSection } from "./config/WorkloadSection";
+import { SchedulingSection } from "./config/SchedulingSection";
 import { ValidityProvider } from "./config/validityRegistry";
 import { ReviewChangesDialog } from "./config/ReviewChangesDialog";
 import { EngineAutoscaling } from "./EngineAutoscaling";
@@ -337,117 +323,88 @@ function StatusCard({ status }: { status: EngineStatus }) {
 // Per-role config form model + serialization lives in `useEngineConfigForm.ts`;
 // the per-role editor UI lives in `EngineRoleConfig.tsx`.
 
-// Configuration left-nav sections (label + `section` key). The former combined
-// "Pod & Scheduling" item is split into Pod / Placement / Containers & Mounts.
-// Left-nav sections grouped into collapsible groups. Every key must match a
-// section rendered in the content pane below; grouping is purely visual.
-const NAV_GROUPS: { label: string; sections: { key: string; label: string }[] }[] =
-  [
-    { label: "Basics", sections: [{ key: "general", label: "General" }] },
-    {
-      label: "Roles",
-      sections: [
-        { key: "coordinator", label: "Coordinator" },
-        { key: "worker", label: "Worker" },
-      ],
-    },
-    {
-      label: "Workload & Tuning",
-      sections: [
-        { key: "workload", label: "Workload" },
-        { key: "reliability", label: "Reliability" },
-        { key: "queryMemory", label: "Query & Memory" },
-        { key: "spilling", label: "Spilling" },
-        { key: "execution", label: "Execution & Optimizer" },
-        { key: "sqlWebUi", label: "SQL & Web UI" },
-      ],
-    },
-    {
-      label: "Pods & Scheduling",
-      sections: [
-        { key: "pod", label: "Pod" },
-        { key: "placement", label: "Placement" },
-        { key: "containersMounts", label: "Containers & Mounts" },
-        { key: "autoscaling", label: "Autoscaling" },
-      ],
-    },
-    { label: "Advanced", sections: [{ key: "advanced", label: "Advanced" }] },
-  ];
+// Configuration left-nav sections — a flat 5-item list. Each key matches a
+// branch in the content pane below.
+const NAV_ITEMS: { key: string; label: string }[] = [
+  { key: "properties", label: "Properties" },
+  { key: "resources", label: "Resources" },
+  { key: "workload", label: "Workload" },
+  { key: "scheduling", label: "Scheduling" },
+  { key: "scaling", label: "Scaling" },
+];
 
-function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
+const LOG_LEVELS = ["INFO", "DEBUG", "WARN", "ERROR"] as const;
+
+/**
+ * The "Common" structured properties that live alongside the raw properties
+ * list but are NOT part of the config/node/log maps: the query memory ceiling,
+ * the server log level, and the raw `event-listener.properties`. Rendered above
+ * `PropertiesSection` under the Properties nav item.
+ */
+function CommonPropertiesSection({ cfg }: { cfg: EngineConfigForm }) {
   const {
     queryMaxMemory,
     setQueryMaxMemory,
     logLevel,
     setLogLevel,
-    configProps,
-    setConfigProps,
-    env,
-    setEnv,
     eventListener,
     setEventListener,
-    nodeProps,
-    setNodeProps,
-    logProps,
-    setLogProps,
-    ftEnabled,
-    setFtEnabled,
-    retryPolicy,
-    setRetryPolicy,
-    exchangeStorageConnId,
-    setExchangeStorageConnId,
-    exchangePrefix,
-    setExchangePrefix,
-    coordinator,
-    setCoordinator,
-    worker,
-    setWorker,
-    gsEnabled,
-    setGsEnabled,
-    gracePeriod,
-    setGracePeriod,
-    resourceGroups,
-    setResourceGroups,
-    sessionRules,
-    setSessionRules,
-    initContainers,
-    setInitContainers,
-    sidecarContainers,
-    setSidecarContainers,
-    serviceAccount,
-    setServiceAccount,
-    imagePullSecrets,
-    setImagePullSecrets,
-    imagePullPolicy,
-    setImagePullPolicy,
-    podSecurityContext,
-    setPodSecurityContext,
-    containerSecurityContext,
-    setContainerSecurityContext,
-    envFrom,
-    setEnvFrom,
-    configMounts,
-    setConfigMounts,
-    secretMounts,
-    setSecretMounts,
-    deploymentStrategy,
-    setDeploymentStrategy,
-    deploymentAnnotations,
-    setDeploymentAnnotations,
-    revisionHistoryLimit,
-    setRevisionHistoryLimit,
-    progressDeadlineSeconds,
-    setProgressDeadlineSeconds,
-    shareProcessNamespace,
-    setShareProcessNamespace,
+  } = cfg;
+  return (
+    <ConfigSection
+      title="Common"
+      description="Cluster-wide query memory ceiling, server log level, and event-listener.properties."
+      docsUrl="https://trino.io/docs/current/admin/properties-resource-management.html"
+    >
+      <div className="grid grid-cols-2 gap-4">
+        <QuantityInput
+          fieldKey="queryMaxMemory"
+          label="Query max memory"
+          value={queryMaxMemory}
+          onChange={setQueryMaxMemory}
+          placeholder="4GB"
+        />
+        <div className="space-y-1.5">
+          <FieldLabel
+            fieldKey="logLevel"
+            label="Log level"
+            htmlFor="ced-log-level"
+          />
+          <Select value={logLevel} onValueChange={setLogLevel}>
+            <SelectTrigger id="ced-log-level" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {LOG_LEVELS.map((lvl) => (
+                <SelectItem key={lvl} value={lvl}>
+                  {lvl}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      <div className="space-y-1.5">
+        <Label>Event listener</Label>
+        <KeyValueEditor
+          rows={eventListener}
+          onChange={setEventListener}
+          keyPlaceholder="event-listener.name"
+          valuePlaceholder="http"
+        />
+      </div>
+    </ConfigSection>
+  );
+}
+
+function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
+  const {
     autoscaleMode,
     setAutoscaleMode,
     autoscaleHpa,
     setAutoscaleHpa,
     autoscaleKeda,
     setAutoscaleKeda,
-    getProp,
-    setProp,
     sectionCounts,
   } = cfg;
 
@@ -457,29 +414,7 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
   const [rawInvalid, setRawInvalid] = useState(false);
 
   // Active left-nav section.
-  const [section, setSection] = useState("general");
-
-  // Which nav groups are expanded. Initialise so the group containing the
-  // current section is open (plus "Basics").
-  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>(() => {
-    const initial: Record<string, boolean> = { Basics: true };
-    for (const group of NAV_GROUPS) {
-      if (group.sections.some((s) => s.key === section)) {
-        initial[group.label] = true;
-      }
-    }
-    return initial;
-  });
-
-  // Select a section AND open the group that contains it, so a jump (from the
-  // nav or PropertySearch) into a collapsed group reveals the active item.
-  const selectSection = (key: string) => {
-    setSection(key);
-    const group = NAV_GROUPS.find((g) => g.sections.some((s) => s.key === key));
-    if (group) {
-      setOpenGroups((prev) => ({ ...prev, [group.label]: true }));
-    }
-  };
+  const [section, setSection] = useState("properties");
 
   // Non-default field count per nav item (drives the badges).
   const countFor = (key: string): number => sectionCounts[key] ?? 0;
@@ -487,240 +422,67 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
   return (
     <Card>
       <CardHeader>
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="space-y-1.5">
-            <CardTitle className="text-lg">Configuration</CardTitle>
-            <CardDescription>
-              Cluster-wide, coordinator, and worker Trino config. Saving
-              re-provisions the engine.
-            </CardDescription>
-          </div>
-          <PropertySearch onJump={selectSection} />
+        <div className="space-y-1.5">
+          <CardTitle className="text-lg">Configuration</CardTitle>
+          <CardDescription>
+            Cluster-wide, coordinator, and worker Trino config. Saving
+            re-provisions the engine.
+          </CardDescription>
         </div>
       </CardHeader>
       <CardContent>
         <div className="space-y-4">
           <div className="flex flex-col gap-4 md:flex-row">
             <nav className="shrink-0 space-y-1 md:w-48">
-              {NAV_GROUPS.map((group) => {
-                const open = openGroups[group.label] ?? false;
-                const groupCount = group.sections.reduce(
-                  (sum, s) => sum + countFor(s.key),
-                  0,
-                );
+              {NAV_ITEMS.map((item) => {
+                const count = countFor(item.key);
+                const active = section === item.key;
                 return (
-                  <div key={group.label}>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setOpenGroups((prev) => ({
-                          ...prev,
-                          [group.label]: !open,
-                        }))
-                      }
-                      aria-expanded={open}
-                      className="flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm font-medium transition-colors hover:bg-muted"
-                    >
-                      <span className="flex items-center gap-2">
-                        <ChevronDown
-                          className={`h-4 w-4 text-muted-foreground transition-transform ${
-                            open ? "" : "-rotate-90"
-                          }`}
-                        />
-                        {group.label}
-                      </span>
-                      {groupCount > 0 && (
-                        <Badge variant="secondary" className="ml-2">
-                          {groupCount}
-                        </Badge>
-                      )}
-                    </button>
-                    {open && (
-                      <div className="mt-1 space-y-1 pl-4">
-                        {group.sections.map((item) => {
-                          const count = countFor(item.key);
-                          const active = section === item.key;
-                          return (
-                            <button
-                              key={item.key}
-                              type="button"
-                              onClick={() => selectSection(item.key)}
-                              className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-muted ${
-                                active
-                                  ? "bg-muted font-medium"
-                                  : "text-muted-foreground"
-                              }`}
-                            >
-                              <span>{item.label}</span>
-                              {count > 0 && (
-                                <Badge variant="secondary" className="ml-2">
-                                  {count}
-                                </Badge>
-                              )}
-                            </button>
-                          );
-                        })}
-                      </div>
+                  <button
+                    key={item.key}
+                    type="button"
+                    onClick={() => setSection(item.key)}
+                    className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-muted ${
+                      active ? "bg-muted font-medium" : "text-muted-foreground"
+                    }`}
+                  >
+                    <span>{item.label}</span>
+                    {count > 0 && (
+                      <Badge variant="secondary" className="ml-2">
+                        {count}
+                      </Badge>
                     )}
-                  </div>
+                  </button>
                 );
               })}
             </nav>
 
             <ValidityProvider onAnyInvalidChange={setRawInvalid}>
-             <div className="min-w-0 flex-1">
-              {section === "general" && (
-                <EngineConfigGeneral
-                  queryMaxMemory={queryMaxMemory}
-                  setQueryMaxMemory={setQueryMaxMemory}
-                  logLevel={logLevel}
-                  setLogLevel={setLogLevel}
-                  configProps={configProps}
-                  setConfigProps={setConfigProps}
-                  env={env}
-                  setEnv={setEnv}
-                />
-              )}
+              <div className="min-w-0 flex-1">
+                {section === "properties" && (
+                  <div className="space-y-5">
+                    <CommonPropertiesSection cfg={cfg} />
+                    <PropertiesSection cfg={cfg} />
+                  </div>
+                )}
 
-              {section === "coordinator" && (
-                <EngineRoleConfig
-                  role="coordinator"
-                  value={coordinator}
-                  onChange={setCoordinator}
-                />
-              )}
+                {section === "resources" && <ResourcesSection cfg={cfg} />}
 
-              {section === "worker" && (
-                <div className="space-y-5">
-                  <EngineRoleConfig
-                    role="worker"
-                    value={worker}
-                    onChange={setWorker}
-                    gsEnabled={gsEnabled}
-                    onGsEnabledChange={setGsEnabled}
-                    gracePeriod={gracePeriod}
-                    onGracePeriodChange={setGracePeriod}
+                {section === "workload" && <WorkloadSection cfg={cfg} />}
+
+                {section === "scheduling" && <SchedulingSection cfg={cfg} />}
+
+                {section === "scaling" && (
+                  <EngineAutoscaling
+                    mode={autoscaleMode}
+                    setMode={setAutoscaleMode}
+                    hpa={autoscaleHpa}
+                    setHpa={setAutoscaleHpa}
+                    keda={autoscaleKeda}
+                    setKeda={setAutoscaleKeda}
                   />
-                </div>
-              )}
-
-              {section === "workload" && (
-                <div className="space-y-5">
-                  <ResourceGroupsSection
-                    value={resourceGroups}
-                    onChange={setResourceGroups}
-                  />
-                  <SessionPropertiesSection
-                    value={sessionRules}
-                    onChange={setSessionRules}
-                  />
-                </div>
-              )}
-
-              {section === "reliability" && (
-                <EngineConfigReliability
-                  ftEnabled={ftEnabled}
-                  setFtEnabled={setFtEnabled}
-                  retryPolicy={retryPolicy}
-                  setRetryPolicy={setRetryPolicy}
-                  exchangeStorageConnId={exchangeStorageConnId}
-                  setExchangeStorageConnId={setExchangeStorageConnId}
-                  exchangePrefix={exchangePrefix}
-                  setExchangePrefix={setExchangePrefix}
-                  getProp={getProp}
-                  setProp={setProp}
-                />
-              )}
-
-              {section === "queryMemory" && (
-                <QueryMemorySection getProp={getProp} setProp={setProp} />
-              )}
-
-              {section === "spilling" && (
-                <SpillingSection getProp={getProp} setProp={setProp} />
-              )}
-
-              {section === "execution" && (
-                <ExecutionOptimizerSection getProp={getProp} setProp={setProp} />
-              )}
-
-              {section === "sqlWebUi" && (
-                <SqlWebUiSection getProp={getProp} setProp={setProp} />
-              )}
-
-              {section === "advanced" && (
-                <EngineConfigAdvanced
-                  eventListener={eventListener}
-                  setEventListener={setEventListener}
-                  nodeProps={nodeProps}
-                  setNodeProps={setNodeProps}
-                  logProps={logProps}
-                  setLogProps={setLogProps}
-                  getProp={getProp}
-                  setProp={setProp}
-                />
-              )}
-
-              {section === "pod" && (
-                <PodSection
-                  serviceAccount={serviceAccount}
-                  setServiceAccount={setServiceAccount}
-                  imagePullSecrets={imagePullSecrets}
-                  setImagePullSecrets={setImagePullSecrets}
-                  imagePullPolicy={imagePullPolicy}
-                  setImagePullPolicy={setImagePullPolicy}
-                  podSecurityContext={podSecurityContext}
-                  setPodSecurityContext={setPodSecurityContext}
-                  containerSecurityContext={containerSecurityContext}
-                  setContainerSecurityContext={setContainerSecurityContext}
-                  deploymentStrategy={deploymentStrategy}
-                  setDeploymentStrategy={setDeploymentStrategy}
-                  deploymentAnnotations={deploymentAnnotations}
-                  setDeploymentAnnotations={setDeploymentAnnotations}
-                  revisionHistoryLimit={revisionHistoryLimit}
-                  setRevisionHistoryLimit={setRevisionHistoryLimit}
-                  progressDeadlineSeconds={progressDeadlineSeconds}
-                  setProgressDeadlineSeconds={setProgressDeadlineSeconds}
-                  shareProcessNamespace={shareProcessNamespace}
-                  setShareProcessNamespace={setShareProcessNamespace}
-                />
-              )}
-
-              {section === "placement" && (
-                <PlacementSection
-                  coordinator={coordinator}
-                  setCoordinator={setCoordinator}
-                  worker={worker}
-                  setWorker={setWorker}
-                />
-              )}
-
-              {section === "containersMounts" && (
-                <ContainersMountsSection
-                  initContainers={initContainers}
-                  setInitContainers={setInitContainers}
-                  sidecarContainers={sidecarContainers}
-                  setSidecarContainers={setSidecarContainers}
-                  envFrom={envFrom}
-                  setEnvFrom={setEnvFrom}
-                  configMounts={configMounts}
-                  setConfigMounts={setConfigMounts}
-                  secretMounts={secretMounts}
-                  setSecretMounts={setSecretMounts}
-                />
-              )}
-
-              {section === "autoscaling" && (
-                <EngineAutoscaling
-                  mode={autoscaleMode}
-                  setMode={setAutoscaleMode}
-                  hpa={autoscaleHpa}
-                  setHpa={setAutoscaleHpa}
-                  keda={autoscaleKeda}
-                  setKeda={setAutoscaleKeda}
-                />
-              )}
-             </div>
+                )}
+              </div>
             </ValidityProvider>
           </div>
 
