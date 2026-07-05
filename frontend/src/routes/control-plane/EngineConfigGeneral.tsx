@@ -7,6 +7,7 @@ import {
 } from "@/components/ui/select";
 import { ConfigSection } from "./config/ConfigSection";
 import { FieldLabel } from "./config/FieldLabel";
+import { knownPropertyKeys } from "./config/knownProperties";
 import { QuantityInput } from "./config/QuantityInput";
 import { type Kv, KeyValueEditor } from "./EngineResourceGroups";
 
@@ -76,12 +77,17 @@ export function EngineConfigGeneral(props: {
 
       <ConfigSection
         title="Config properties"
-        description="Raw config.properties key/value pairs (both roles)."
+        description="Raw config.properties key/value pairs (both roles). Properties with a guided field in the tuning sections are managed there and hidden here."
         docsUrl="https://trino.io/docs/current/admin/properties.html"
       >
         <KeyValueEditor
-          rows={configProps}
-          onChange={setConfigProps}
+          rows={configProps.filter((kv) => !knownPropertyKeys.has(kv.key))}
+          onChange={(next) =>
+            setConfigProps([
+              ...configProps.filter((kv) => knownPropertyKeys.has(kv.key)),
+              ...next,
+            ])
+          }
           keyPlaceholder="query.max-run-time"
           valuePlaceholder="1h"
         />

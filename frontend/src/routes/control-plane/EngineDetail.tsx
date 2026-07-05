@@ -39,6 +39,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { PropertySearch } from "./config/PropertySearch";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -74,6 +75,10 @@ import { EngineConfigAdvanced } from "./EngineConfigAdvanced";
 import { PodSection } from "./config/PodSection";
 import { PlacementSection } from "./config/PlacementSection";
 import { ContainersMountsSection } from "./config/ContainersMountsSection";
+import { QueryMemorySection } from "./config/QueryMemorySection";
+import { SpillingSection } from "./config/SpillingSection";
+import { ExecutionOptimizerSection } from "./config/ExecutionOptimizerSection";
+import { SqlWebUiSection } from "./config/SqlWebUiSection";
 import { ValidityProvider } from "./config/validityRegistry";
 import { ReviewChangesDialog } from "./config/ReviewChangesDialog";
 import { EngineAutoscaling } from "./EngineAutoscaling";
@@ -333,6 +338,10 @@ const CONFIG_NAV: { key: string; label: string }[] = [
   { key: "worker", label: "Worker" },
   { key: "workload", label: "Workload" },
   { key: "reliability", label: "Reliability" },
+  { key: "queryMemory", label: "Query & Memory" },
+  { key: "spilling", label: "Spilling" },
+  { key: "execution", label: "Execution & Optimizer" },
+  { key: "sqlWebUi", label: "SQL & Web UI" },
   { key: "advanced", label: "Advanced" },
   { key: "pod", label: "Pod" },
   { key: "placement", label: "Placement" },
@@ -412,6 +421,8 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
     setAutoscaleHpa,
     autoscaleKeda,
     setAutoscaleKeda,
+    getProp,
+    setProp,
     sectionCounts,
   } = cfg;
 
@@ -429,11 +440,16 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-lg">Configuration</CardTitle>
-        <CardDescription>
-          Cluster-wide, coordinator, and worker Trino config. Saving re-provisions
-          the engine.
-        </CardDescription>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="space-y-1.5">
+            <CardTitle className="text-lg">Configuration</CardTitle>
+            <CardDescription>
+              Cluster-wide, coordinator, and worker Trino config. Saving
+              re-provisions the engine.
+            </CardDescription>
+          </div>
+          <PropertySearch onJump={setSection} />
+        </div>
       </CardHeader>
       <CardContent>
         <div className="space-y-4">
@@ -522,7 +538,25 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
                   setExchangeStorageConnId={setExchangeStorageConnId}
                   exchangePrefix={exchangePrefix}
                   setExchangePrefix={setExchangePrefix}
+                  getProp={getProp}
+                  setProp={setProp}
                 />
+              )}
+
+              {section === "queryMemory" && (
+                <QueryMemorySection getProp={getProp} setProp={setProp} />
+              )}
+
+              {section === "spilling" && (
+                <SpillingSection getProp={getProp} setProp={setProp} />
+              )}
+
+              {section === "execution" && (
+                <ExecutionOptimizerSection getProp={getProp} setProp={setProp} />
+              )}
+
+              {section === "sqlWebUi" && (
+                <SqlWebUiSection getProp={getProp} setProp={setProp} />
               )}
 
               {section === "advanced" && (
@@ -533,6 +567,8 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
                   setNodeProps={setNodeProps}
                   logProps={logProps}
                   setLogProps={setLogProps}
+                  getProp={getProp}
+                  setProp={setProp}
                 />
               )}
 

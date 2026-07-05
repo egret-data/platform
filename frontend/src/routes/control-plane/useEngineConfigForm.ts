@@ -29,6 +29,7 @@ import {
   recordToKv,
   sessionRulesToForm,
 } from "./EngineResourceGroups";
+import { knownProperties } from "./config/knownProperties";
 
 // Re-exported so config sub-tab components (Tasks 2-5) can import from the hook.
 export type { SessionRuleForm };
@@ -540,6 +541,14 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
   const coordinator: RoleConfig | undefined = cfg.coordinator;
   const worker = cfg.worker;
 
+  // Guided known-property sections: count how many of a section's known keys
+  // are set (non-empty) in the raw config.properties map.
+  const props = cfg.configProperties ?? {};
+  const knownSectionCount = (section: string): number =>
+    knownProperties.filter(
+      (p) => p.section === section && (props[p.key] ?? "").trim() !== "",
+    ).length;
+
   return {
     general: [
       cfg.queryMaxMemory,
@@ -551,12 +560,19 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
     coordinator: roleCoreCount(coordinator),
     worker: roleCoreCount(worker) + (present(worker?.gracefulShutdown) ? 1 : 0),
     workload: [cfg.resourceGroups, cfg.sessionProperties].filter(present).length,
-    reliability: [cfg.faultTolerant].filter(present).length,
-    advanced: [
-      cfg.eventListener,
-      cfg.additionalNodeProperties,
-      cfg.additionalLogProperties,
-    ].filter(present).length,
+    reliability:
+      [cfg.faultTolerant].filter(present).length +
+      knownSectionCount("reliability"),
+    queryMemory: knownSectionCount("queryMemory"),
+    spilling: knownSectionCount("spilling"),
+    execution: knownSectionCount("execution"),
+    sqlWebUi: knownSectionCount("sqlWebUi"),
+    advanced:
+      [
+        cfg.eventListener,
+        cfg.additionalNodeProperties,
+        cfg.additionalLogProperties,
+      ].filter(present).length + knownSectionCount("advanced"),
     pod: [
       cfg.serviceAccount,
       cfg.imagePullSecrets,
@@ -591,6 +607,9 @@ export interface EngineConfigForm {
   setLogLevel: (v: string) => void;
   configProps: Kv[];
   setConfigProps: Dispatch<SetStateAction<Kv[]>>;
+  // Guided read/write over the raw `configProps` map (known Trino properties).
+  getProp: (key: string) => string;
+  setProp: (key: string, value: string) => void;
   env: Kv[];
   setEnv: Dispatch<SetStateAction<Kv[]>>;
   // advanced raw
@@ -1185,6 +1204,16 @@ export function useEngineConfigForm(
     [builtTrinoConfig],
   );
 
+  // Guided helpers over the raw config.properties map: read a known key's value
+  // (or "") and upsert it (blank value removes the entry). The payload shape is
+  // unchanged — values still live in `configProps` → `trinoConfig.configProperties`.
+  const getProp = (key: string) => configProps.find((kv) => kv.key === key)?.value ?? "";
+  const setProp = (key: string, value: string) =>
+    setConfigProps((prev) => {
+      const rest = prev.filter((kv) => kv.key !== key);
+      return value.trim() === "" ? rest : [...rest, { key, value }];
+    });
+
   async function save() {
     setError(null);
     const trinoConfig = builtTrinoConfig;
@@ -1216,6 +1245,8 @@ export function useEngineConfigForm(
     setLogLevel,
     configProps,
     setConfigProps,
+    getProp,
+    setProp,
     env,
     setEnv,
     eventListener,

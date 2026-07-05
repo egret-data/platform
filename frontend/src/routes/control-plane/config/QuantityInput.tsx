@@ -30,19 +30,28 @@ export function QuantityInput({
   value,
   onChange,
   placeholder,
+  help,
+  docsUrl,
 }: {
   fieldKey?: string;
   label: string;
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
+  help?: string;
+  docsUrl?: string;
 }) {
   const unit = fieldKey ? fieldHelp[fieldKey]?.unit : undefined;
   const invalid = value !== "" && !isValidQuantity(value);
 
   return (
     <div className="space-y-1.5">
-      <FieldLabel fieldKey={fieldKey} label={label} />
+      <FieldLabel
+        fieldKey={fieldKey}
+        label={label}
+        help={help}
+        docsUrl={docsUrl}
+      />
       <Input
         value={value}
         onChange={(e) => onChange(e.target.value)}

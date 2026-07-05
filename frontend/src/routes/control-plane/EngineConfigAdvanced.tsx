@@ -1,4 +1,6 @@
 import { ConfigSection } from "./config/ConfigSection";
+import { PropertyField } from "./config/PropertyField";
+import { knownProperties } from "./config/knownProperties";
 import { type Kv, KeyValueEditor } from "./EngineResourceGroups";
 
 /**
@@ -12,6 +14,8 @@ export function EngineConfigAdvanced(props: {
   setNodeProps: React.Dispatch<React.SetStateAction<Kv[]>>;
   logProps: Kv[];
   setLogProps: React.Dispatch<React.SetStateAction<Kv[]>>;
+  getProp: (k: string) => string;
+  setProp: (k: string, v: string) => void;
 }) {
   const {
     eventListener,
@@ -20,10 +24,31 @@ export function EngineConfigAdvanced(props: {
     setNodeProps,
     logProps,
     setLogProps,
+    getProp,
+    setProp,
   } = props;
 
   return (
     <div className="space-y-5">
+      <ConfigSection
+        title="Server logging"
+        description="Server log output format for the coordinator and workers."
+        docsUrl="https://trino.io/docs/current/installation/deployment.html#log-levels"
+      >
+        <div className="space-y-4">
+          {knownProperties
+            .filter((p) => p.section === "advanced")
+            .map((prop) => (
+              <PropertyField
+                key={prop.key}
+                prop={prop}
+                value={getProp(prop.key)}
+                onChange={(v) => setProp(prop.key, v)}
+              />
+            ))}
+        </div>
+      </ConfigSection>
+
       <ConfigSection
         title="Event listener"
         description="Raw event-listener.properties key/value pairs."
