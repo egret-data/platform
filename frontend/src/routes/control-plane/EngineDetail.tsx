@@ -86,6 +86,7 @@ import { QueryMemorySection } from "./config/QueryMemorySection";
 import { SpillingSection } from "./config/SpillingSection";
 import { ExecutionOptimizerSection } from "./config/ExecutionOptimizerSection";
 import { SqlWebUiSection } from "./config/SqlWebUiSection";
+import { PropertiesSection } from "./config/PropertiesSection";
 import { ValidityProvider } from "./config/validityRegistry";
 import { ReviewChangesDialog } from "./config/ReviewChangesDialog";
 import { EngineAutoscaling } from "./EngineAutoscaling";
@@ -343,7 +344,13 @@ function StatusCard({ status }: { status: EngineStatus }) {
 // section rendered in the content pane below; grouping is purely visual.
 const NAV_GROUPS: { label: string; sections: { key: string; label: string }[] }[] =
   [
-    { label: "Basics", sections: [{ key: "general", label: "General" }] },
+    {
+      label: "Basics",
+      sections: [
+        { key: "properties", label: "Properties" },
+        { key: "general", label: "General" },
+      ],
+    },
     {
       label: "Roles",
       sections: [
@@ -569,6 +576,8 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
 
             <ValidityProvider onAnyInvalidChange={setRawInvalid}>
              <div className="min-w-0 flex-1">
+              {section === "properties" && <PropertiesSection cfg={cfg} />}
+
               {section === "general" && (
                 <EngineConfigGeneral
                   queryMaxMemory={queryMaxMemory}
