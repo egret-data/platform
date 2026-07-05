@@ -470,7 +470,7 @@ pub fn router() -> Router<CpState> {
         )
         .route(
             "/engines/{id}/catalogs/{cid}",
-            get(get_catalog).delete(remove_catalog),
+            get(get_catalog).put(update_catalog).delete(remove_catalog),
         )
         // Native Trino monitor (query list / detail / kill / cluster).
         .merge(crate::monitor::routes())
@@ -594,6 +594,17 @@ fn redact_catalog_config(kind: &str, mut config: serde_json::Value) -> serde_jso
 struct AddCatalogBody {
     name: String,
     kind: String,
+    #[serde(default)]
+    config: serde_json::Value,
+    #[serde(default)]
+    secret_ref: Option<Uuid>,
+}
+
+/// `PUT /engines/{id}/catalogs/{cid}` body: replaces the stored `config` +
+/// `secret_ref` in full (not a partial patch).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCatalogBody {
     #[serde(default)]
     config: serde_json::Value,
     #[serde(default)]
@@ -1997,6 +2008,68 @@ async fn remove_catalog(
         }
     }
     Ok(StatusCode::OK)
+}
+
+async fn update_catalog(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, cid)): Path<(Uuid, Uuid)>,
+    Json(b): Json<UpdateCatalogBody>,
+) -> Result<Json<EngineCatalogDto>, CpError> {
+    require_platform_admin(&p)?;
+    let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let prev = st
+        .storage
+        .get_engine_catalog(cid)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    // Guard against cross-engine updates via a mismatched path.
+    if prev.engine_id != engine.id {
+        return Err(CpError::NotFound);
+    }
+    if prev.is_primary {
+        return Err(CpError::BadRequest(
+            "cannot edit the primary catalog".into(),
+        ));
+    }
+    if prev.kind == "egret-warehouse" {
+        return Err(CpError::BadRequest(
+            "egret-warehouse catalogs are managed and not editable".into(),
+        ));
+    }
+
+    // Persist the new config, then re-provision. If re-provisioning fails, restore
+    // the previous config/secret so the stored row never leads the running cluster.
+    let updated = st
+        .storage
+        .update_engine_catalog(cid, &b.config, b.secret_ref)
+        .await?
+        .ok_or(CpError::NotFound)?;
+
+    let restore = |st: CpState, prev: EngineCatalog| async move {
+        let _ = st
+            .storage
+            .update_engine_catalog(prev.id, &prev.config, prev.secret_ref)
+            .await;
+    };
+
+    let req = match build_provision_req(&st, &engine).await {
+        Ok(r) => r,
+        Err(e) => {
+            restore(st.clone(), prev).await;
+            return Err(e);
+        }
+    };
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        restore(st.clone(), prev).await;
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    if let Err(msg) = prov.update(&req).await {
+        restore(st.clone(), prev).await;
+        return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
+    }
+
+    Ok(Json(updated.into()))
 }
 
 #[cfg(test)]
