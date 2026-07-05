@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Loader2, Plus, Server, Trash2 } from "lucide-react";
+import { ArrowLeft, Loader2, Plus, RotateCw, Server, Trash2 } from "lucide-react";
 
 import {
   type Engine,
@@ -13,9 +13,20 @@ import {
   getEngine,
   getEngineCatalog,
   listEngineCatalogs,
+  restartEngine,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -259,15 +270,42 @@ function StatusCard({
   status: EngineStatus;
   engineId: string;
 }) {
+  const queryClient = useQueryClient();
   const [logsPod, setLogsPod] = useState<string | null>(null);
+  const [restartOpen, setRestartOpen] = useState(false);
+
+  const restartMutation = useMutation<void, ApiError, string>({
+    mutationFn: restartEngine,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["cp", "engine", engineId] });
+      setRestartOpen(false);
+    },
+  });
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-lg">Status</CardTitle>
-        <CardDescription>
-          {status.message ?? `Phase: ${status.phase}`}
-        </CardDescription>
+        <div className="flex items-start justify-between gap-3">
+          <div className="space-y-1.5">
+            <CardTitle className="text-lg">Status</CardTitle>
+            <CardDescription>
+              {status.message ?? `Phase: ${status.phase}`}
+            </CardDescription>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setRestartOpen(true)}
+            disabled={restartMutation.isPending}
+          >
+            {restartMutation.isPending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <RotateCw className="h-4 w-4" />
+            )}
+            Restart
+          </Button>
+        </div>
       </CardHeader>
       <CardContent>
         <Table>
@@ -326,6 +364,34 @@ function StatusCard({
         pod={logsPod}
         onOpenChange={(o) => !o && setLogsPod(null)}
       />
+
+      <AlertDialog open={restartOpen} onOpenChange={setRestartOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Restart engine?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This rolls the coordinator and worker pods; running queries are
+              interrupted.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-white hover:bg-destructive/90"
+              onClick={(e) => {
+                e.preventDefault();
+                restartMutation.mutate(engineId);
+              }}
+              disabled={restartMutation.isPending}
+            >
+              {restartMutation.isPending && (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              )}
+              Restart
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Card>
   );
 }

@@ -785,6 +785,10 @@ export async function deleteEngine(id: string): Promise<void> {
   await apiFetch(`/control-plane/engines/${id}`, { method: "DELETE" });
 }
 
+export async function restartEngine(id: string): Promise<void> {
+  await apiFetch(`/control-plane/engines/${id}/restart`, { method: "POST" });
+}
+
 // ── Engine monitor (native Trino monitor / control-plane) ────────────────────
 
 /**
