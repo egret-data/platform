@@ -720,6 +720,9 @@ function AddCatalogDialog({
   const [secretRef, setSecretRef] = useState("");
   // generic
   const [connectorName, setConnectorName] = useState("");
+  // True once the user explicitly picks "Other (custom)…", so the empty initial
+  // state shows the placeholder rather than pre-selecting the custom option.
+  const [customConnector, setCustomConnector] = useState(false);
   const [genericProps, setGenericProps] = useState<Kv[]>([]);
 
   useEffect(() => {
@@ -737,6 +740,7 @@ function AddCatalogDialog({
     setUser("");
     setSecretRef("");
     setConnectorName("");
+    setCustomConnector(false);
     setGenericProps([]);
     addMutation.reset();
   }
@@ -955,13 +959,21 @@ function AddCatalogDialog({
                   <Label htmlFor="cat-connector">Connector</Label>
                   <Select
                     value={
-                      connectorByName[connectorName]
-                        ? connectorName
-                        : "__other__"
+                      customConnector
+                        ? "__other__"
+                        : connectorByName[connectorName]
+                          ? connectorName
+                          : ""
                     }
-                    onValueChange={(v) =>
-                      setConnectorName(v === "__other__" ? "" : v)
-                    }
+                    onValueChange={(v) => {
+                      if (v === "__other__") {
+                        setCustomConnector(true);
+                        setConnectorName("");
+                      } else {
+                        setCustomConnector(false);
+                        setConnectorName(v);
+                      }
+                    }}
                   >
                     <SelectTrigger id="cat-connector" className="w-full">
                       <SelectValue placeholder="Select a connector" />
@@ -975,7 +987,7 @@ function AddCatalogDialog({
                       <SelectItem value="__other__">Other (custom)…</SelectItem>
                     </SelectContent>
                   </Select>
-                  {!connectorByName[connectorName] && (
+                  {customConnector && (
                     <Input
                       value={connectorName}
                       onChange={(e) => setConnectorName(e.target.value)}
