@@ -66,6 +66,7 @@ import { EngineAutoscaling } from "./EngineAutoscaling";
 import { EngineSecurity } from "./EngineSecurity";
 import EngineMonitor from "./EngineMonitor";
 import PodLogsDialog from "./PodLogsDialog";
+import PodTerminalDialog from "./PodTerminalDialog";
 
 type EngineWithStatus = Omit<Engine, "status"> & { status: EngineStatus };
 
@@ -274,6 +275,8 @@ function StatusCard({
 }) {
   const queryClient = useQueryClient();
   const [logsPod, setLogsPod] = useState<string | null>(null);
+  const [execPod, setExecPod] = useState<string | null>(null);
+  const [execConfirmPod, setExecConfirmPod] = useState<string | null>(null);
   const [restartOpen, setRestartOpen] = useState(false);
 
   const restartMutation = useMutation<void, ApiError, string>({
@@ -353,6 +356,13 @@ function StatusCard({
                     >
                       Logs
                     </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setExecConfirmPod(pod.name)}
+                    >
+                      Exec
+                    </Button>
                   </TableCell>
                 </TableRow>
               ))
@@ -366,6 +376,39 @@ function StatusCard({
         pod={logsPod}
         onOpenChange={(o) => !o && setLogsPod(null)}
       />
+
+      <PodTerminalDialog
+        engineId={engineId}
+        pod={execPod}
+        onOpenChange={(o) => !o && setExecPod(null)}
+      />
+
+      <AlertDialog
+        open={execConfirmPod != null}
+        onOpenChange={(o) => !o && setExecConfirmPod(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Open shell into {execConfirmPod}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Open an interactive shell into {execConfirmPod}? This runs
+              commands inside the running pod.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                setExecPod(execConfirmPod);
+                setExecConfirmPod(null);
+              }}
+            >
+              Open shell
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={restartOpen} onOpenChange={setRestartOpen}>
         <AlertDialogContent>
