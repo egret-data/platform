@@ -185,6 +185,7 @@ function EngineTabs({
     <Tabs defaultValue="overview" className="space-y-5">
       <TabsList>
         <TabsTrigger value="overview">Overview</TabsTrigger>
+        <TabsTrigger value="catalogs">Catalogs</TabsTrigger>
         <TabsTrigger value="configuration">Configuration</TabsTrigger>
         <TabsTrigger value="security">Security &amp; Exposure</TabsTrigger>
         <TabsTrigger value="monitor">Monitor</TabsTrigger>
@@ -192,8 +193,11 @@ function EngineTabs({
 
       <TabsContent value="overview" className="space-y-5">
         <StatusCard status={engine.status} />
-        <CatalogsCard engine={engine} />
         <DangerCard engine={engine} />
+      </TabsContent>
+
+      <TabsContent value="catalogs">
+        <CatalogsCard engine={engine} />
       </TabsContent>
 
       <TabsContent value="configuration">
