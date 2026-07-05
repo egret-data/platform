@@ -9,6 +9,7 @@ import { ConfigSection } from "./config/ConfigSection";
 import { FieldLabel } from "./config/FieldLabel";
 import { knownPropertyKeys } from "./config/knownProperties";
 import { QuantityInput } from "./config/QuantityInput";
+import { trinoPropertyNames } from "./config/trinoPropertyNames";
 import { type Kv, KeyValueEditor } from "./EngineResourceGroups";
 
 const LOG_LEVELS = ["INFO", "DEBUG", "WARN", "ERROR"] as const;
@@ -82,12 +83,16 @@ export function EngineConfigGeneral(props: {
       >
         <KeyValueEditor
           rows={configProps.filter((kv) => !knownPropertyKeys.has(kv.key))}
-          onChange={(next) =>
+          keySuggestions={trinoPropertyNames.filter(
+            (p) => !knownPropertyKeys.has(p.key),
+          )}
+          onChange={(next) => {
+            const custom = next.filter((kv) => !knownPropertyKeys.has(kv.key));
             setConfigProps([
               ...configProps.filter((kv) => knownPropertyKeys.has(kv.key)),
-              ...next,
-            ])
-          }
+              ...custom,
+            ]);
+          }}
           keyPlaceholder="query.max-run-time"
           valuePlaceholder="1h"
         />
