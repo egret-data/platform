@@ -622,6 +622,9 @@ export interface EngineConfigForm {
   // Guided read/write over a raw property map, routed by config file.
   getProp: (file: "config" | "node" | "log", key: string) => string;
   setProp: (file: "config" | "node" | "log", key: string, value: string) => void;
+  // Guided read/write over the event-listener property map.
+  getEventListenerProp: (key: string) => string;
+  setEventListenerProp: (key: string, value: string) => void;
   env: Kv[];
   setEnv: Dispatch<SetStateAction<Kv[]>>;
   // advanced raw
@@ -1241,6 +1244,13 @@ export function useEngineConfigForm(
       return value.trim() === "" ? rest : [...rest, { key, value }];
     });
   };
+  const getEventListenerProp = (key: string) =>
+    eventListener.find((kv) => kv.key === key)?.value ?? "";
+  const setEventListenerProp = (key: string, value: string) =>
+    setEventListener((prev) => {
+      const rest = prev.filter((kv) => kv.key !== key);
+      return value.trim() === "" ? rest : [...rest, { key, value }];
+    });
 
   async function save() {
     setError(null);
@@ -1275,6 +1285,8 @@ export function useEngineConfigForm(
     setConfigProps,
     getProp,
     setProp,
+    getEventListenerProp,
+    setEventListenerProp,
     env,
     setEnv,
     eventListener,

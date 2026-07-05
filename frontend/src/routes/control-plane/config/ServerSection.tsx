@@ -1,4 +1,3 @@
-import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -6,11 +5,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { KeyValueEditor } from "../EngineResourceGroups";
 import { EngineConfigReliability } from "../EngineConfigReliability";
 import type { EngineConfigForm } from "../useEngineConfigForm";
 import { ConfigSection } from "./ConfigSection";
+import {
+  eventListenerCatalog,
+  eventListenerCatalogByKey,
+} from "./eventListenerCatalog";
 import { FieldLabel } from "./FieldLabel";
+import { KeyedPropertyList } from "./KeyedPropertyList";
 import { PropertyList } from "./PropertyList";
 import { QuantityInput } from "./QuantityInput";
 
@@ -29,7 +32,6 @@ export function ServerSection({ cfg }: { cfg: EngineConfigForm }) {
     logLevel,
     setLogLevel,
     eventListener,
-    setEventListener,
     configProps,
     nodeProps,
     logProps,
@@ -103,12 +105,12 @@ export function ServerSection({ cfg }: { cfg: EngineConfigForm }) {
         title="Event listener"
         description="Raw event-listener.properties."
       >
-        <Label className="sr-only">Event listener</Label>
-        <KeyValueEditor
-          rows={eventListener}
-          onChange={setEventListener}
-          keyPlaceholder="event-listener.name"
-          valuePlaceholder="http"
+        <KeyedPropertyList
+          catalog={eventListenerCatalog}
+          catalogByKey={eventListenerCatalogByKey}
+          presentKeys={eventListener.map((kv) => kv.key)}
+          getValue={(k) => cfg.getEventListenerProp(k)}
+          setValue={(k, v) => cfg.setEventListenerProp(k, v)}
         />
       </ConfigSection>
 
