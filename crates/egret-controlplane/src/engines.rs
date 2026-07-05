@@ -487,6 +487,7 @@ pub fn router() -> Router<CpState> {
             "/engines/{id}/catalogs/{cid}",
             get(get_catalog).put(update_catalog).delete(remove_catalog),
         )
+        .route("/engines/{id}/catalogs/{cid}/test", post(test_catalog))
         .route("/engines/{id}/pods/{pod}/logs", get(pod_logs))
         .route("/engines/{id}/restart", post(restart_engine))
         // Native Trino monitor (query list / detail / kill / cluster).
@@ -2117,6 +2118,144 @@ async fn get_catalog(
         is_primary: cat.is_primary,
         secret_ref: cat.secret_ref,
         config: redact_catalog_config(&cat.kind, cat.config.clone()),
+    }))
+}
+
+/// `POST /engines/{id}/catalogs/{cid}/test` payload.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogTestDto {
+    ok: bool,
+    message: String,
+}
+
+/// Bound on the `/v1/statement` submit-then-poll loop: a hung/misbehaving
+/// coordinator must not block the request forever.
+const CATALOG_TEST_MAX_POLLS: u32 = 50;
+
+/// Quote a catalog name as a SQL identifier, doubling any embedded `"` — the
+/// name is admin-controlled (not user free-text end to end), but this keeps
+/// the statement well-formed regardless.
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Extract `nextUri`'s path (+ query) for [`crate::monitor::coordinator_call`],
+/// which takes a path relative to the coordinator, not a full URL.
+fn next_uri_path(next_uri: &str) -> String {
+    match reqwest::Url::parse(next_uri) {
+        Ok(u) => match u.query() {
+            Some(q) => format!("{}?{q}", u.path()),
+            None => u.path().to_string(),
+        },
+        Err(_) => next_uri.to_string(),
+    }
+}
+
+/// Render a non-2xx coordinator response as a test-result message.
+fn coordinator_error_message(code: u16, body: &[u8]) -> String {
+    format!(
+        "coordinator returned {code}: {}",
+        String::from_utf8_lossy(body).trim()
+    )
+}
+
+/// `POST /engines/{id}/catalogs/{cid}/test` — "test connection": runs
+/// `SHOW SCHEMAS FROM "<catalog>"` against the engine's Trino coordinator via
+/// the native-monitor coordinator proxy ([`crate::monitor::coordinator_call`],
+/// same service name + auth headers as query monitoring) and reports whether
+/// the query reaches `FINISHED`. Submits `POST /v1/statement`, then follows
+/// `nextUri` (GET) until a terminal state, an `error` object, or
+/// [`CATALOG_TEST_MAX_POLLS`] iterations are exhausted (→ `ok:false`,
+/// "timed out"). Never returns a transport/coordinator-shape failure as an
+/// HTTP error status — those map to `ok:false` with an explanatory message —
+/// EXCEPT when the coordinator itself is unreachable or kubernetes isn't
+/// configured, which surface as the usual `CpError` (mirrors the other
+/// coordinator-proxied routes in this file and in `monitor.rs`).
+async fn test_catalog(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, cid)): Path<(Uuid, Uuid)>,
+) -> Result<Json<CatalogTestDto>, CpError> {
+    require_platform_admin(&p)?;
+    let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let cat = st
+        .storage
+        .get_engine_catalog(cid)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    if cat.engine_id != engine.id {
+        return Err(CpError::NotFound);
+    }
+
+    let sql = format!("SHOW SCHEMAS FROM {}", quote_ident(&cat.name));
+    let (code, body) = crate::monitor::coordinator_call(
+        &st,
+        &engine,
+        "POST",
+        "/v1/statement",
+        Some(sql.into_bytes()),
+    )
+    .await?;
+    if !(200..300).contains(&code) {
+        return Ok(Json(CatalogTestDto {
+            ok: false,
+            message: coordinator_error_message(code, &body),
+        }));
+    }
+    let mut v: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return Ok(Json(CatalogTestDto {
+                ok: false,
+                message: "coordinator returned a non-JSON response".into(),
+            }))
+        }
+    };
+
+    for _ in 0..=CATALOG_TEST_MAX_POLLS {
+        if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
+            return Ok(Json(CatalogTestDto {
+                ok: false,
+                message: err["message"]
+                    .as_str()
+                    .unwrap_or("query failed")
+                    .to_string(),
+            }));
+        }
+        let state = v["stats"]["state"].as_str().unwrap_or("");
+        let Some(next_uri) = v["nextUri"].as_str() else {
+            return Ok(Json(CatalogTestDto {
+                ok: state == "FINISHED",
+                message: if state == "FINISHED" {
+                    "ok".into()
+                } else {
+                    format!("query ended in state {state}")
+                },
+            }));
+        };
+        let path = next_uri_path(next_uri);
+        let (code, body) =
+            crate::monitor::coordinator_call(&st, &engine, "GET", &path, None).await?;
+        if !(200..300).contains(&code) {
+            return Ok(Json(CatalogTestDto {
+                ok: false,
+                message: coordinator_error_message(code, &body),
+            }));
+        }
+        v = match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(_) => {
+                return Ok(Json(CatalogTestDto {
+                    ok: false,
+                    message: "coordinator returned a non-JSON response".into(),
+                }))
+            }
+        };
+    }
+    Ok(Json(CatalogTestDto {
+        ok: false,
+        message: "timed out".into(),
     }))
 }
 

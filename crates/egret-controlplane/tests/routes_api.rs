@@ -715,6 +715,152 @@ async fn monitor_queries_maps_list_and_maps_bad_gateway() {
     );
 }
 
+/// `POST /engines/{id}/catalogs/{cid}/test`: a canned `FINISHED` (no `nextUri`,
+/// no `error`) reports `ok:true`; a canned `error` body reports `ok:false` with
+/// the message surfaced; a non-2xx coordinator response reports `ok:false`
+/// with a status/body summary (NOT a 502 — this route always answers 200 with
+/// its verdict in the body); a catalog id from a different engine 404s.
+///
+/// LIMITATION: `MonitorFakeProvisioner` holds a single canned `(status, body)`
+/// shared across every `coordinator_request` call, so it cannot return a
+/// first response with `nextUri` and then a different second response — this
+/// test therefore only exercises the immediate-terminal (no `nextUri`) path
+/// through `test_catalog`'s poll loop, not a multi-hop `nextUri` chase.
+#[tokio::test]
+async fn test_catalog_reports_ok_error_and_non_2xx() {
+    let fake = MonitorFakeProvisioner::default();
+    let Some(f) = setup_full(None, Some(Arc::new(fake.clone()))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_catalog_test_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    // Create the engine (auto-wires the primary egret-warehouse catalog).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // Fetch the auto-wired primary catalog id.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/catalogs"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list catalogs; body={j}");
+    let cat_id = j[0]["id"].as_str().expect("catalog id").to_string();
+
+    let test_uri = format!("/engines/{engine_id}/catalogs/{cat_id}/test");
+
+    // A canned FINISHED response with no nextUri/error → ok:true.
+    fake.set(200, br#"{"id":"q1","stats":{"state":"FINISHED"}}"#);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &test_uri, &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "test catalog; body={j}");
+    assert_eq!(j["ok"], true, "finished with no error → ok; body={j}");
+
+    // A canned error body → ok:false + the error message surfaced verbatim.
+    fake.set(
+        200,
+        br#"{"id":"q2","stats":{"state":"FAILED"},"error":{"message":"catalog not found"}}"#,
+    );
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &test_uri, &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "test catalog error; body={j}");
+    assert_eq!(j["ok"], false, "error body → not ok; body={j}");
+    assert_eq!(
+        j["message"], "catalog not found",
+        "error message surfaced; body={j}"
+    );
+
+    // A non-2xx coordinator response → ok:false with a status/body summary,
+    // never a 502 (this route's contract is always 200 + a verdict body).
+    fake.set(503, b"<html>service unavailable</html>");
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &test_uri, &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "test catalog non-2xx; body={j}");
+    assert_eq!(j["ok"], false, "non-2xx → not ok; body={j}");
+    assert!(
+        j["message"].as_str().unwrap().contains("503"),
+        "message surfaces coordinator status; body={j}"
+    );
+
+    // A catalog id that belongs to a DIFFERENT engine must 404 (ownership guard).
+    let other_name = format!("trino-{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": other_name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create other engine; body={j}");
+    let other_engine_id = j["id"].as_str().expect("other engine id").to_string();
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{other_engine_id}/catalogs/{cat_id}/test"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "catalog from a different engine must 404"
+    );
+}
+
 #[tokio::test]
 async fn create_and_get_engine() {
     let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
