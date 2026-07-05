@@ -124,6 +124,9 @@ export function CatalogForm({
   );
 
   const readOnlyWarehouse = mode === "edit" && kind === "egret-warehouse";
+  // tpch / tpcds carry no configurable properties, so editing one is a no-op.
+  const noEditableConfig =
+    mode === "edit" && (kind === "tpch" || kind === "tpcds");
 
   function isValid(): boolean {
     if (mode === "add" && !name.trim()) return false;
@@ -470,13 +473,19 @@ export function CatalogForm({
         </>
       )}
 
+      {noEditableConfig && (
+        <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
+          This catalog has no configurable properties.
+        </div>
+      )}
+
       {error && (
         <Alert variant="destructive">
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
-      {!readOnlyWarehouse && (
+      {!readOnlyWarehouse && !noEditableConfig && (
         <div className="flex justify-end">
           <Button type="submit" disabled={pending || !isValid()}>
             {pending && <Loader2 className="h-4 w-4 animate-spin" />}
