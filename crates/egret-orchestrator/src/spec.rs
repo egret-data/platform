@@ -318,6 +318,9 @@ pub struct TrinoConfig {
     pub fault_tolerant: Option<FaultTolerant>,
     pub auth: Option<Auth>,
     pub ingress: Option<Ingress>,
+    /// Full container image (registry/repository:tag). When None, the renderer
+    /// falls back to `trinodb/trino:{image_version}`.
+    pub image: Option<String>,
     pub image_pull_secrets: Vec<String>,
     pub image_pull_policy: Option<String>,
     pub service_account: Option<String>,

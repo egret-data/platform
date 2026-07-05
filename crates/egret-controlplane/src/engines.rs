@@ -386,6 +386,9 @@ pub struct TrinoConfigReq {
     pub ingress: Option<IngressReq>,
     pub autoscaling: Option<AutoscalingReq>,
     // ── pod & scheduling (cluster-wide) ──────────────────────────────────────
+    /// Full container image (registry/repository:tag). When None, the renderer
+    /// falls back to `trinodb/trino:{image_version}`.
+    pub image: Option<String>,
     pub image_pull_secrets: Vec<String>,
     pub image_pull_policy: Option<String>,
     pub service_account: Option<String>,
@@ -1105,6 +1108,7 @@ fn build_trino_config(spec: &serde_json::Value) -> TrinoConfigReq {
             base: worker_base,
             graceful_shutdown: None,
         },
+        image: None,
         ..Default::default()
     }
 }
@@ -1255,6 +1259,7 @@ fn trino_config_from_json(v: &serde_json::Value) -> TrinoConfigReq {
         autoscaling: parse_autoscaling(&v["autoscaling"]),
         // ── pod & scheduling (cluster-wide) — k8s object names / raw JSON, no
         //    secret resolution, so parsed straight from the wire here. ────────
+        image: v["image"].as_str().map(Into::into),
         image_pull_secrets: v["imagePullSecrets"]
             .as_array()
             .map(|a| {

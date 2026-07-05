@@ -570,7 +570,11 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
     // probes: readiness always (generous default), liveness/startup only if configured.
     let mut container = json!({
         "name": "trino",
-        "image": format!("trinodb/trino:{}", spec.image_version),
+        "image": spec
+            .config
+            .image
+            .clone()
+            .unwrap_or_else(|| format!("trinodb/trino:{}", spec.image_version)),
         "ports": [{ "containerPort": 8080 }],
         "envFrom": [{ "secretRef": { "name": format!("{}-env", spec.name) } }],
         "resources": Value::Object(resources),
@@ -1377,6 +1381,25 @@ mod tests {
         assert!(cc.contains("query.max-memory-per-node=1GB"));
         let wc = cm["data"]["config-worker.properties"].as_str().unwrap();
         assert!(wc.contains("shutdown.grace-period=120s"));
+    }
+    #[test]
+    fn image_override_and_default() {
+        // Default: repository is trinodb/trino, tag is image_version.
+        let s = sample_spec();
+        let d = trino_deployment(&s, Role::Coordinator);
+        assert_eq!(
+            d["spec"]["template"]["spec"]["containers"][0]["image"],
+            "trinodb/trino:470"
+        );
+
+        // Override: full image string wins verbatim.
+        let mut s2 = sample_spec();
+        s2.config.image = Some("ghcr.io/acme/trino:471-patched".into());
+        let d2 = trino_deployment(&s2, Role::Coordinator);
+        assert_eq!(
+            d2["spec"]["template"]["spec"]["containers"][0]["image"],
+            "ghcr.io/acme/trino:471-patched"
+        );
     }
     #[test]
     fn auth_config_password_and_jwt() {

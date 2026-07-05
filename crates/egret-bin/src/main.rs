@@ -750,6 +750,7 @@ impl EgretEngineProvisioner {
                     tls_secret: i.tls_secret.clone(),
                     annotations: i.annotations.clone(),
                 }),
+                image: cfg.image.clone(),
                 image_pull_secrets: cfg.image_pull_secrets.clone(),
                 image_pull_policy: cfg.image_pull_policy.clone(),
                 service_account: cfg.service_account.clone(),
