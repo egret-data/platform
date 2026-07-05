@@ -607,9 +607,9 @@ export interface EngineConfigForm {
   setLogLevel: (v: string) => void;
   configProps: Kv[];
   setConfigProps: Dispatch<SetStateAction<Kv[]>>;
-  // Guided read/write over the raw `configProps` map (known Trino properties).
-  getProp: (key: string) => string;
-  setProp: (key: string, value: string) => void;
+  // Guided read/write over a raw property map, routed by config file.
+  getProp: (file: "config" | "node" | "log", key: string) => string;
+  setProp: (file: "config" | "node" | "log", key: string, value: string) => void;
   env: Kv[];
   setEnv: Dispatch<SetStateAction<Kv[]>>;
   // advanced raw
@@ -1204,15 +1204,24 @@ export function useEngineConfigForm(
     [builtTrinoConfig],
   );
 
-  // Guided helpers over the raw config.properties map: read a known key's value
-  // (or "") and upsert it (blank value removes the entry). The payload shape is
-  // unchanged — values still live in `configProps` → `trinoConfig.configProperties`.
-  const getProp = (key: string) => configProps.find((kv) => kv.key === key)?.value ?? "";
-  const setProp = (key: string, value: string) =>
-    setConfigProps((prev) => {
+  // Guided helpers over a raw property map, routed by config file: read a key's
+  // value (or "") and upsert it (blank value removes the entry). The payload
+  // shape is unchanged — values still live in the corresponding Kv[] state.
+  const mapFor = (file: "config" | "node" | "log") =>
+    file === "node"
+      ? ([nodeProps, setNodeProps] as const)
+      : file === "log"
+        ? ([logProps, setLogProps] as const)
+        : ([configProps, setConfigProps] as const);
+  const getProp = (file: "config" | "node" | "log", key: string) =>
+    mapFor(file)[0].find((kv) => kv.key === key)?.value ?? "";
+  const setProp = (file: "config" | "node" | "log", key: string, value: string) => {
+    const set = mapFor(file)[1];
+    set((prev) => {
       const rest = prev.filter((kv) => kv.key !== key);
       return value.trim() === "" ? rest : [...rest, { key, value }];
     });
+  };
 
   async function save() {
     setError(null);

@@ -10,8 +10,8 @@ export function SpillingSection({
   getProp,
   setProp,
 }: {
-  getProp: (k: string) => string;
-  setProp: (k: string, v: string) => void;
+  getProp: (file: "config" | "node" | "log", k: string) => string;
+  setProp: (file: "config" | "node" | "log", k: string, v: string) => void;
 }) {
   return (
     <ConfigSection
@@ -26,8 +26,8 @@ export function SpillingSection({
             <PropertyField
               key={prop.key}
               prop={prop}
-              value={getProp(prop.key)}
-              onChange={(v) => setProp(prop.key, v)}
+              value={getProp("config", prop.key)}
+              onChange={(v) => setProp("config", prop.key, v)}
             />
           ))}
       </div>
