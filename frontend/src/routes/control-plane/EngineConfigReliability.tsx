@@ -13,6 +13,8 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { ConfigSection } from "./config/ConfigSection";
 import { FieldLabel } from "./config/FieldLabel";
+import { PropertyField } from "./config/PropertyField";
+import { knownProperties } from "./config/knownProperties";
 
 /**
  * Cluster-wide "Reliability" config: fault-tolerant execution — retry policy,
@@ -27,6 +29,8 @@ export function EngineConfigReliability(props: {
   setExchangeStorageConnId: (v: string) => void;
   exchangePrefix: string;
   setExchangePrefix: (v: string) => void;
+  getProp: (k: string) => string;
+  setProp: (k: string, v: string) => void;
 }) {
   const {
     ftEnabled,
@@ -37,6 +41,8 @@ export function EngineConfigReliability(props: {
     setExchangeStorageConnId,
     exchangePrefix,
     setExchangePrefix,
+    getProp,
+    setProp,
   } = props;
 
   const storage = useQuery<Storage[], ApiError>({
@@ -46,6 +52,7 @@ export function EngineConfigReliability(props: {
   });
 
   return (
+    <div className="space-y-5">
     <ConfigSection
       title="Fault-tolerant execution"
       description="Retry failed tasks/queries, spooling exchange data to an S3 storage connection."
@@ -128,5 +135,25 @@ export function EngineConfigReliability(props: {
         </div>
       )}
     </ConfigSection>
+
+      <ConfigSection
+        title="Retry limits"
+        description="Per-policy retry attempt caps applied when fault-tolerant execution is enabled."
+        docsUrl="https://trino.io/docs/current/admin/fault-tolerant-execution.html"
+      >
+        <div className="space-y-4">
+          {knownProperties
+            .filter((p) => p.section === "reliability")
+            .map((prop) => (
+              <PropertyField
+                key={prop.key}
+                prop={prop}
+                value={getProp(prop.key)}
+                onChange={(v) => setProp(prop.key, v)}
+              />
+            ))}
+        </div>
+      </ConfigSection>
+    </div>
   );
 }

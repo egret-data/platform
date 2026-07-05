@@ -560,16 +560,19 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
     coordinator: roleCoreCount(coordinator),
     worker: roleCoreCount(worker) + (present(worker?.gracefulShutdown) ? 1 : 0),
     workload: [cfg.resourceGroups, cfg.sessionProperties].filter(present).length,
-    reliability: [cfg.faultTolerant].filter(present).length,
+    reliability:
+      [cfg.faultTolerant].filter(present).length +
+      knownSectionCount("reliability"),
     queryMemory: knownSectionCount("queryMemory"),
     spilling: knownSectionCount("spilling"),
     execution: knownSectionCount("execution"),
     sqlWebUi: knownSectionCount("sqlWebUi"),
-    advanced: [
-      cfg.eventListener,
-      cfg.additionalNodeProperties,
-      cfg.additionalLogProperties,
-    ].filter(present).length,
+    advanced:
+      [
+        cfg.eventListener,
+        cfg.additionalNodeProperties,
+        cfg.additionalLogProperties,
+      ].filter(present).length + knownSectionCount("advanced"),
     pod: [
       cfg.serviceAccount,
       cfg.imagePullSecrets,

@@ -532,6 +532,8 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
                   setExchangeStorageConnId={setExchangeStorageConnId}
                   exchangePrefix={exchangePrefix}
                   setExchangePrefix={setExchangePrefix}
+                  getProp={getProp}
+                  setProp={setProp}
                 />
               )}
 
@@ -559,6 +561,8 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
                   setNodeProps={setNodeProps}
                   logProps={logProps}
                   setLogProps={setLogProps}
+                  getProp={getProp}
+                  setProp={setProp}
                 />
               )}
 
