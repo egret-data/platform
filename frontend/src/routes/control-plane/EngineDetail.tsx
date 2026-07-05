@@ -39,6 +39,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { PropertySearch } from "./config/PropertySearch";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -439,11 +440,16 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-lg">Configuration</CardTitle>
-        <CardDescription>
-          Cluster-wide, coordinator, and worker Trino config. Saving re-provisions
-          the engine.
-        </CardDescription>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="space-y-1.5">
+            <CardTitle className="text-lg">Configuration</CardTitle>
+            <CardDescription>
+              Cluster-wide, coordinator, and worker Trino config. Saving
+              re-provisions the engine.
+            </CardDescription>
+          </div>
+          <PropertySearch onJump={setSection} />
+        </div>
       </CardHeader>
       <CardContent>
         <div className="space-y-4">
