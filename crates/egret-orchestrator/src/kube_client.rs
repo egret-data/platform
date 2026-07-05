@@ -57,6 +57,20 @@ pub trait KubeClient: Send + Sync {
     /// changes the pod template and triggers a roll (same effect as
     /// `kubectl rollout restart deployment/<name>`).
     async fn restart_deployment(&self, namespace: &str, name: &str) -> anyhow::Result<()>;
+
+    /// Exec `command` inside `pod` (kube's "exec" subresource — a WebSocket
+    /// protocol, hence the `ws` kube feature) and return the live
+    /// `AttachedProcess`: stdin/stdout streams plus a terminal-resize sender,
+    /// for the caller to bridge onto e.g. a browser WebSocket. Requested with
+    /// `tty(true)` + `stderr(false)` (stderr must be off when tty is on — the
+    /// pty merges stderr into stdout). Not implemented by `FakeKube`: exec is
+    /// smoke-tested against a real cluster, not unit-tested.
+    async fn exec(
+        &self,
+        namespace: &str,
+        pod: &str,
+        command: &[String],
+    ) -> anyhow::Result<kube::api::AttachedProcess>;
 }
 
 /// In-memory fake for unit tests: records applied/deleted objects.
@@ -146,6 +160,15 @@ impl KubeClient for FakeKube {
             .unwrap()
             .push((namespace.to_string(), name.to_string()));
         Ok(())
+    }
+
+    async fn exec(
+        &self,
+        _namespace: &str,
+        _pod: &str,
+        _command: &[String],
+    ) -> anyhow::Result<kube::api::AttachedProcess> {
+        anyhow::bail!("exec not supported in fake kube")
     }
 }
 
@@ -351,6 +374,27 @@ impl KubeClient for LiveKube {
         api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
             .await?;
         Ok(())
+    }
+
+    async fn exec(
+        &self,
+        namespace: &str,
+        pod: &str,
+        command: &[String],
+    ) -> anyhow::Result<kube::api::AttachedProcess> {
+        use k8s_openapi::api::core::v1::Pod;
+        use kube::api::{Api, AttachParams};
+
+        let api: Api<Pod> = Api::namespaced(self.client.clone(), namespace);
+        // stderr must be off when tty is on (kube-rs would otherwise reject the
+        // request): the pty already merges stderr into stdout.
+        let ap = AttachParams::default()
+            .stdin(true)
+            .stdout(true)
+            .stderr(false)
+            .tty(true);
+        let attached = api.exec(pod, command.to_vec(), &ap).await?;
+        Ok(attached)
     }
 }
 

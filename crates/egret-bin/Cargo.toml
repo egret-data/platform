@@ -34,6 +34,9 @@ egret-bi.workspace = true
 egret-notebook.workspace = true
 egret-kernel.workspace = true
 egret-orchestrator.workspace = true
+# `EgretEngineProvisioner::exec` names `kube::api::AttachedProcess` explicitly
+# to satisfy the `egret_controlplane::EngineProvisioner` trait signature.
+kube.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

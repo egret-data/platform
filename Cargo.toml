@@ -75,7 +75,7 @@ egret-machine-idp = { path = "crates/egret-machine-idp" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies"] }
 mysql_async = { version = "0.34", default-features = false, features = ["default-rustls"] }
 testcontainers = "0.23"
-kube = { version = "0.99", features = ["client", "runtime", "derive"] }
+kube = { version = "0.99", features = ["client", "runtime", "derive", "ws"] }
 k8s-openapi = { version = "0.24", features = ["latest"] }
 
 # Vendored mysql_async: patched to support StarRocks' JWT/OIDC auth-switch

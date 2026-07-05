@@ -894,6 +894,15 @@ impl egret_controlplane::EngineProvisioner for EgretEngineProvisioner {
             .pod_logs(namespace, pod, container, tail_lines, previous)
             .await
     }
+
+    async fn exec(
+        &self,
+        namespace: &str,
+        pod: &str,
+        command: &[String],
+    ) -> anyhow::Result<kube::api::AttachedProcess> {
+        self.kube.exec(namespace, pod, command).await
+    }
 }
 
 /// Reads catalog structure (namespaces/tables/schema) from the embedded

@@ -577,6 +577,14 @@ impl egret_controlplane::EngineProvisioner for FakeEngineProvisioner {
     ) -> anyhow::Result<String> {
         Ok(format!("logs for {pod} (fake)\n"))
     }
+    async fn exec(
+        &self,
+        _namespace: &str,
+        _pod: &str,
+        _command: &[String],
+    ) -> anyhow::Result<kube::api::AttachedProcess> {
+        anyhow::bail!("exec not supported in fake provisioner")
+    }
 }
 
 /// Engine provisioner fake whose `coordinator_request` returns a canned
@@ -637,6 +645,14 @@ impl egret_controlplane::EngineProvisioner for MonitorFakeProvisioner {
         _previous: bool,
     ) -> anyhow::Result<String> {
         Ok(format!("logs for {pod} (fake)\n"))
+    }
+    async fn exec(
+        &self,
+        _namespace: &str,
+        _pod: &str,
+        _command: &[String],
+    ) -> anyhow::Result<kube::api::AttachedProcess> {
+        anyhow::bail!("exec not supported in fake provisioner")
     }
 }
 
@@ -991,6 +1007,18 @@ async fn pod_logs_known_pod_ok_unknown_pod_404() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND, "unknown pod must 404");
 }
+
+// NOTE: no `pod_exec` route test here. `axum::extract::ws::WebSocketUpgrade`'s
+// `FromRequestParts` unconditionally rejects with 426 Upgrade Required unless
+// `hyper::upgrade::OnUpgrade` is present in the request extensions — an
+// extension only a real hyper connection ever inserts. `tower::ServiceExt::
+// oneshot`-driven requests (as used throughout this file) never have it, so a
+// WS-upgrade request 426s before the handler body (and therefore the
+// ownership guard) ever runs, regardless of pod name — there is no way to
+// distinguish "unknown pod" from "known pod" through this harness. The guard
+// itself is the exact same construct as `pod_logs`'s (already covered by
+// `pod_logs_known_pod_ok_unknown_pod_404` above), so its correctness is not
+// unverified — only the WS-specific wiring around it is untested here.
 
 /// `POST /engines/{id}/restart` rolls the engine's pods without changing
 /// config: the route calls `EngineProvisioner::restart` with the engine's

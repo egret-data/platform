@@ -10,18 +10,25 @@
 //! env}` [`CatalogReq`], and [`build_provision_req`] assembles the full
 //! [`EngineProvisionReq`]. The actual k8s work lives behind the
 //! [`EngineProvisioner`] trait, implemented in egret-bin over `egret-orchestrator`
-//! so this crate never depends on kube (mirrors `WarehouseProvisioner`).
+//! so this crate stays kube-free EXCEPT for one seam: [`EngineProvisioner::exec`]
+//! returns a `kube::api::AttachedProcess` so [`bridge_exec`] can pump it onto a
+//! browser WebSocket (see the trait doc for why).
 
 use std::collections::BTreeMap;
 
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
 use egret_catalog::service::embedded::{GrantInput, NewClient};
 use egret_catalog::service::{Engine, EngineCatalog};
+use futures_util::sink::SinkExt;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
 use crate::auth::require_platform_admin;
@@ -470,6 +477,28 @@ pub trait EngineProvisioner: Send + Sync {
         tail_lines: i64,
         previous: bool,
     ) -> anyhow::Result<String>;
+
+    /// Exec `command` inside `pod` and return the live `AttachedProcess` for
+    /// [`bridge_exec`] to pump onto a browser WebSocket.
+    ///
+    /// UNLIKE every other seam on this trait, this one is NOT kube-free:
+    /// `kube::api::AttachedProcess` (stdin/stdout streams + a terminal-resize
+    /// sender) is threaded straight through instead of being translated into a
+    /// kube-free carrier type. Rationale: the WS bridge has to live somewhere
+    /// that can drive both an axum `WebSocket` and the kube attach handle, and
+    /// this crate already owns the axum router. The alternative — moving the
+    /// bridge into egret-bin and having this trait expose a higher-level
+    /// `exec_ws(WebSocket)` — would couple this crate's trait to axum's
+    /// `WebSocket` type instead, which is no better. Since egret-bin and
+    /// egret-orchestrator both already depend on `kube`, accepting the
+    /// `kube::api::AttachedProcess` type here (and the `kube` dependency it
+    /// drags into this crate's `Cargo.toml`) is the least-bad coupling.
+    async fn exec(
+        &self,
+        namespace: &str,
+        pod: &str,
+        command: &[String],
+    ) -> anyhow::Result<kube::api::AttachedProcess>;
 }
 
 pub fn router() -> Router<CpState> {
@@ -489,6 +518,7 @@ pub fn router() -> Router<CpState> {
         )
         .route("/engines/{id}/catalogs/{cid}/test", post(test_catalog))
         .route("/engines/{id}/pods/{pod}/logs", get(pod_logs))
+        .route("/engines/{id}/pods/{pod}/exec", get(pod_exec))
         .route("/engines/{id}/restart", post(restart_engine))
         // Native Trino monitor (query list / detail / kill / cluster).
         .merge(crate::monitor::routes())
@@ -2416,6 +2446,146 @@ async fn pod_logs(
         .await
         .map_err(|e| CpError::BadRequest(format!("read logs: {e}")))?;
     Ok(Json(PodLogsDto { logs }))
+}
+
+// ── pod exec (websocket) ─────────────────────────────────────────────────────
+
+/// A control message sent by the browser terminal over the same WS channel as
+/// stdin bytes. Any WS **text** message that parses as `{"resize":{"cols":N,
+/// "rows":M}}` is a resize; every other text/binary message is raw stdin. Kept
+/// as a top-level, explicit JSON shape (rather than e.g. sniffing for a magic
+/// byte) so the frontend contract is simple and stable.
+#[derive(Deserialize)]
+struct ExecCtrlMsg {
+    resize: Option<ExecResize>,
+}
+
+#[derive(Deserialize)]
+struct ExecResize {
+    cols: u16,
+    rows: u16,
+}
+
+/// `GET /engines/{id}/pods/{pod}/exec` — upgrades to a WebSocket and bridges it
+/// to a `/bin/sh` session inside the pod via `EngineProvisioner::exec`. Same
+/// ownership guard as [`pod_logs`]: the pod must be one of the engine's live
+/// pods, checked BEFORE the WS upgrade so an unknown pod 404s instead of
+/// upgrading and failing inside the socket.
+async fn pod_exec(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, pod)): Path<(Uuid, String)>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, CpError> {
+    require_platform_admin(&p)?;
+    let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let Some(prov) = st.engine_provisioner.clone() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    // Ownership: the pod must be one of this engine's live pods (same guard as
+    // pod_logs), so one platform admin can't exec into an arbitrary pod by
+    // guessing a name.
+    let status = prov
+        .status(&engine.namespace, &engine.name)
+        .await
+        .map_err(CpError::BadRequest)?;
+    if !status.pods.iter().any(|pp| pp.name == pod) {
+        return Err(CpError::NotFound);
+    }
+    let namespace = engine.namespace.clone();
+    let engine_name = engine.name.clone();
+    let user = p.email.clone();
+    tracing::info!(engine = %engine_name, pod = %pod, user = %user, "pod exec session opening");
+    Ok(ws.on_upgrade(move |socket| async move {
+        bridge_exec(prov, &namespace, &pod, socket).await;
+        tracing::info!(engine = %engine_name, pod = %pod, user = %user, "pod exec session closed");
+    }))
+}
+
+/// Pump bytes between the browser `WebSocket` and a `/bin/sh` session attached
+/// via `EngineProvisioner::exec`. Browser `Text`/`Binary` messages become
+/// stdin, EXCEPT a `Text` message that parses as [`ExecCtrlMsg`] with a
+/// `resize` field, which instead resizes the pty via
+/// `AttachedProcess::terminal_size()`. Pod stdout bytes become WS `Binary`
+/// frames. Exits on WS close, stdout EOF, or a stdin/stdout I/O error; any
+/// `EngineProvisioner::exec` failure (e.g. `FakeKube`'s
+/// "exec not supported") is sent back as one WS text frame before closing.
+async fn bridge_exec(
+    prov: Arc<dyn EngineProvisioner>,
+    namespace: &str,
+    pod: &str,
+    mut socket: WebSocket,
+) {
+    let mut attached = match prov.exec(namespace, pod, &["/bin/sh".to_string()]).await {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = socket
+                .send(Message::Text(format!("exec failed: {e}").into()))
+                .await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
+    let mut stdin = attached.stdin();
+    let mut stdout = attached.stdout();
+    let mut resize = attached.terminal_size();
+    let mut buf = [0u8; 8192];
+
+    loop {
+        tokio::select! {
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Binary(data))) => {
+                        let Some(w) = stdin.as_mut() else { break };
+                        if w.write_all(&data).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        let resized = match serde_json::from_str::<ExecCtrlMsg>(&text) {
+                            Ok(ExecCtrlMsg { resize: Some(sz) }) => {
+                                if let Some(tx) = resize.as_mut() {
+                                    let _ = tx
+                                        .send(kube::api::TerminalSize {
+                                            width: sz.cols,
+                                            height: sz.rows,
+                                        })
+                                        .await;
+                                }
+                                true
+                            }
+                            _ => false,
+                        };
+                        if !resized {
+                            let Some(w) = stdin.as_mut() else { break };
+                            if w.write_all(text.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+            n = async {
+                match stdout.as_mut() {
+                    Some(r) => r.read(&mut buf).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match n {
+                    Ok(0) | Err(_) => break, // stdout EOF or read error
+                    Ok(n) => {
+                        if socket.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let _ = socket.close().await;
 }
 
 #[cfg(test)]
