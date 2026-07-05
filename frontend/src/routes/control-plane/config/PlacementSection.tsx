@@ -59,7 +59,7 @@ const WHEN_UNSATISFIABLE = ["DoNotSchedule", "ScheduleAnyway"];
  * provider). Both roles stay mounted so an invalid override in either role
  * blocks Save regardless of the selected tab.
  */
-function RolePlacementEditor({
+export function RolePlacementEditor({
   idPrefix,
   rawId,
   form,
