@@ -1,7 +1,14 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Loader2, Plus, Server, Trash2 } from "lucide-react";
+import {
+  ArrowLeft,
+  ChevronDown,
+  Loader2,
+  Plus,
+  Server,
+  Trash2,
+} from "lucide-react";
 
 import {
   type AddCatalogInput,
@@ -332,22 +339,40 @@ function StatusCard({ status }: { status: EngineStatus }) {
 
 // Configuration left-nav sections (label + `section` key). The former combined
 // "Pod & Scheduling" item is split into Pod / Placement / Containers & Mounts.
-const CONFIG_NAV: { key: string; label: string }[] = [
-  { key: "general", label: "General" },
-  { key: "coordinator", label: "Coordinator" },
-  { key: "worker", label: "Worker" },
-  { key: "workload", label: "Workload" },
-  { key: "reliability", label: "Reliability" },
-  { key: "queryMemory", label: "Query & Memory" },
-  { key: "spilling", label: "Spilling" },
-  { key: "execution", label: "Execution & Optimizer" },
-  { key: "sqlWebUi", label: "SQL & Web UI" },
-  { key: "advanced", label: "Advanced" },
-  { key: "pod", label: "Pod" },
-  { key: "placement", label: "Placement" },
-  { key: "containersMounts", label: "Containers & Mounts" },
-  { key: "autoscaling", label: "Autoscaling" },
-];
+// Left-nav sections grouped into collapsible groups. Every key must match a
+// section rendered in the content pane below; grouping is purely visual.
+const NAV_GROUPS: { label: string; sections: { key: string; label: string }[] }[] =
+  [
+    { label: "Basics", sections: [{ key: "general", label: "General" }] },
+    {
+      label: "Roles",
+      sections: [
+        { key: "coordinator", label: "Coordinator" },
+        { key: "worker", label: "Worker" },
+      ],
+    },
+    {
+      label: "Workload & Tuning",
+      sections: [
+        { key: "workload", label: "Workload" },
+        { key: "reliability", label: "Reliability" },
+        { key: "queryMemory", label: "Query & Memory" },
+        { key: "spilling", label: "Spilling" },
+        { key: "execution", label: "Execution & Optimizer" },
+        { key: "sqlWebUi", label: "SQL & Web UI" },
+      ],
+    },
+    {
+      label: "Pods & Scheduling",
+      sections: [
+        { key: "pod", label: "Pod" },
+        { key: "placement", label: "Placement" },
+        { key: "containersMounts", label: "Containers & Mounts" },
+        { key: "autoscaling", label: "Autoscaling" },
+      ],
+    },
+    { label: "Advanced", sections: [{ key: "advanced", label: "Advanced" }] },
+  ];
 
 function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
   const {
@@ -434,6 +459,28 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
   // Active left-nav section.
   const [section, setSection] = useState("general");
 
+  // Which nav groups are expanded. Initialise so the group containing the
+  // current section is open (plus "Basics").
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>(() => {
+    const initial: Record<string, boolean> = { Basics: true };
+    for (const group of NAV_GROUPS) {
+      if (group.sections.some((s) => s.key === section)) {
+        initial[group.label] = true;
+      }
+    }
+    return initial;
+  });
+
+  // Select a section AND open the group that contains it, so a jump (from the
+  // nav or PropertySearch) into a collapsed group reveals the active item.
+  const selectSection = (key: string) => {
+    setSection(key);
+    const group = NAV_GROUPS.find((g) => g.sections.some((s) => s.key === key));
+    if (group) {
+      setOpenGroups((prev) => ({ ...prev, [group.label]: true }));
+    }
+  };
+
   // Non-default field count per nav item (drives the badges).
   const countFor = (key: string): number => sectionCounts[key] ?? 0;
 
@@ -448,32 +495,74 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
               re-provisions the engine.
             </CardDescription>
           </div>
-          <PropertySearch onJump={setSection} />
+          <PropertySearch onJump={selectSection} />
         </div>
       </CardHeader>
       <CardContent>
         <div className="space-y-4">
           <div className="flex flex-col gap-4 md:flex-row">
             <nav className="shrink-0 space-y-1 md:w-48">
-              {CONFIG_NAV.map((item) => {
-                const count = countFor(item.key);
-                const active = section === item.key;
+              {NAV_GROUPS.map((group) => {
+                const open = openGroups[group.label] ?? false;
+                const groupCount = group.sections.reduce(
+                  (sum, s) => sum + countFor(s.key),
+                  0,
+                );
                 return (
-                  <button
-                    key={item.key}
-                    type="button"
-                    onClick={() => setSection(item.key)}
-                    className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-muted ${
-                      active ? "bg-muted font-medium" : "text-muted-foreground"
-                    }`}
-                  >
-                    <span>{item.label}</span>
-                    {count > 0 && (
-                      <Badge variant="secondary" className="ml-2">
-                        {count}
-                      </Badge>
+                  <div key={group.label}>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOpenGroups((prev) => ({
+                          ...prev,
+                          [group.label]: !open,
+                        }))
+                      }
+                      aria-expanded={open}
+                      className="flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm font-medium transition-colors hover:bg-muted"
+                    >
+                      <span className="flex items-center gap-2">
+                        <ChevronDown
+                          className={`h-4 w-4 text-muted-foreground transition-transform ${
+                            open ? "" : "-rotate-90"
+                          }`}
+                        />
+                        {group.label}
+                      </span>
+                      {groupCount > 0 && (
+                        <Badge variant="secondary" className="ml-2">
+                          {groupCount}
+                        </Badge>
+                      )}
+                    </button>
+                    {open && (
+                      <div className="mt-1 space-y-1 pl-4">
+                        {group.sections.map((item) => {
+                          const count = countFor(item.key);
+                          const active = section === item.key;
+                          return (
+                            <button
+                              key={item.key}
+                              type="button"
+                              onClick={() => selectSection(item.key)}
+                              className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-muted ${
+                                active
+                                  ? "bg-muted font-medium"
+                                  : "text-muted-foreground"
+                              }`}
+                            >
+                              <span>{item.label}</span>
+                              {count > 0 && (
+                                <Badge variant="secondary" className="ml-2">
+                                  {count}
+                                </Badge>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
                     )}
-                  </button>
+                  </div>
                 );
               })}
             </nav>

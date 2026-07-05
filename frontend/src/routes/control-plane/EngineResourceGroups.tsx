@@ -1,4 +1,5 @@
 import { Plus, Trash2 } from "lucide-react";
+import { useState } from "react";
 
 import type { Group, Selector, SessionRule } from "@/api/controlPlane";
 import { Button } from "@/components/ui/button";
@@ -23,6 +24,68 @@ export function kvToRecord(rows: Kv[]): Record<string, string> {
   return out;
 }
 
+/** A key `<Input>` that, when given suggestions, shows a filtering dropdown. */
+function SuggestKeyInput({
+  value,
+  placeholder,
+  onChange,
+  suggestions,
+}: {
+  value: string;
+  placeholder?: string;
+  onChange: (key: string) => void;
+  suggestions: { key: string; help?: string }[];
+}) {
+  const [focused, setFocused] = useState(false);
+  const query = value.trim().toLowerCase();
+  const matches = query
+    ? suggestions
+        .filter(
+          (s) =>
+            s.key.toLowerCase().includes(query) &&
+            s.key.toLowerCase() !== query,
+        )
+        .slice(0, 8)
+    : [];
+  const open = focused && matches.length > 0;
+  return (
+    <div className="relative w-full">
+      <Input
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        onFocus={() => setFocused(true)}
+        onBlur={() => window.setTimeout(() => setFocused(false), 120)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") setFocused(false);
+        }}
+      />
+      {open && (
+        <ul className="absolute left-0 right-0 top-full z-10 mt-1 max-h-64 overflow-auto rounded-md border bg-popover p-1 shadow-md">
+          {matches.map((s) => (
+            <li key={s.key}>
+              <button
+                type="button"
+                className="flex w-full flex-col items-start rounded-sm px-2 py-1 text-left hover:bg-accent"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  onChange(s.key);
+                  setFocused(false);
+                }}
+              >
+                <span className="font-mono text-sm">{s.key}</span>
+                {s.help && (
+                  <span className="text-xs text-muted-foreground">{s.help}</span>
+                )}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 /** A small list of {key,value} input rows with add/remove. */
 export function KeyValueEditor({
   rows,
@@ -30,26 +93,39 @@ export function KeyValueEditor({
   keyPlaceholder = "key",
   valuePlaceholder = "value",
   addLabel = "Add property",
+  keySuggestions,
 }: {
   rows: Kv[];
   onChange: (rows: Kv[]) => void;
   keyPlaceholder?: string;
   valuePlaceholder?: string;
   addLabel?: string;
+  keySuggestions?: { key: string; help?: string }[];
 }) {
   return (
     <div className="space-y-2">
       {rows.map((row, i) => (
         <div key={i} className="flex items-center gap-2">
-          <Input
-            value={row.key}
-            placeholder={keyPlaceholder}
-            onChange={(e) =>
-              onChange(
-                rows.map((r, j) => (j === i ? { ...r, key: e.target.value } : r)),
-              )
-            }
-          />
+          {keySuggestions ? (
+            <SuggestKeyInput
+              value={row.key}
+              placeholder={keyPlaceholder}
+              suggestions={keySuggestions}
+              onChange={(key) =>
+                onChange(rows.map((r, j) => (j === i ? { ...r, key } : r)))
+              }
+            />
+          ) : (
+            <Input
+              value={row.key}
+              placeholder={keyPlaceholder}
+              onChange={(e) =>
+                onChange(
+                  rows.map((r, j) => (j === i ? { ...r, key: e.target.value } : r)),
+                )
+              }
+            />
+          )}
           <Input
             value={row.value}
             placeholder={valuePlaceholder}
