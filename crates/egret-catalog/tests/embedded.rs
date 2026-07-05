@@ -206,3 +206,73 @@ async fn create_list_delete_engine_catalogs_cascade() {
         .unwrap()
         .is_none());
 }
+
+#[tokio::test]
+async fn update_engine_catalog_reflects_in_get() {
+    let Some(store) = common::store().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    let ws = common::seed_workspace(&store).await;
+
+    let sc = store
+        .create_storage_conn(&StorageConnInput {
+            name: format!("upd-store-{}", Uuid::new_v4().simple()),
+            purpose: None,
+            provider: "s3".into(),
+            endpoint: Some("http://localhost:9000".into()),
+            region: "us-east-1".into(),
+            bucket: "warehouse".into(),
+            key_prefix: None,
+            access_key: "egret".into(),
+            secret_ref: None,
+            path_style: true,
+        })
+        .await
+        .unwrap();
+
+    let wh_name = format!("upd-wh-{}", Uuid::new_v4().simple());
+    let wh = store.create_warehouse(&wh_name, ws, sc.id).await.unwrap();
+
+    let eng_name = format!("upd-eng-{}", Uuid::new_v4().simple());
+    let spec = serde_json::json!({ "coordinatorReplicas": 1, "workerReplicas": 2 });
+    let engine = store
+        .create_engine(&eng_name, "trino", "egret-engines", wh.id, &spec)
+        .await
+        .unwrap();
+
+    let catalog = store
+        .create_engine_catalog(
+            engine.id,
+            "tpch",
+            "tpch",
+            &serde_json::json!({}),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(catalog.config, serde_json::json!({}));
+    assert_eq!(catalog.secret_ref, None);
+
+    let new_config = serde_json::json!({ "connector.name": "tpch" });
+    let new_secret_ref = Uuid::new_v4();
+    let updated = store
+        .update_engine_catalog(catalog.id, &new_config, Some(new_secret_ref))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.config, new_config);
+    assert_eq!(updated.secret_ref, Some(new_secret_ref));
+
+    let got = store.get_engine_catalog(catalog.id).await.unwrap().unwrap();
+    assert_eq!(got.config, new_config);
+    assert_eq!(got.secret_ref, Some(new_secret_ref));
+
+    // updating a non-existent id returns None rather than erroring
+    assert!(store
+        .update_engine_catalog(Uuid::new_v4(), &new_config, None)
+        .await
+        .unwrap()
+        .is_none());
+}
