@@ -8,8 +8,13 @@ import {
 import { fieldHelp } from "./fieldHelp";
 
 /**
- * A form label that, when the field has a `fieldHelp` entry, appends an info
- * icon with a tooltip explaining the field plus (when present) a docs link.
+ * A form label that, when the field has help text, appends an info icon with a
+ * tooltip explaining the field plus (when present) a docs link.
+ *
+ * Help can be supplied inline via the `help`/`docsUrl` props (used for
+ * catalog-driven fields such as the tuning `knownProperties`); when they are
+ * absent it falls back to the `fieldHelp[fieldKey]` map. This lets ad-hoc keys
+ * carry help without an entry in `fieldHelp.ts`.
  *
  * Relies on the app-wide `TooltipProvider` in `AppShell`.
  */
@@ -17,12 +22,19 @@ export function FieldLabel({
   fieldKey,
   label,
   htmlFor,
+  help: inlineHelp,
+  docsUrl: inlineDocsUrl,
 }: {
   fieldKey?: string;
   label: string;
   htmlFor?: string;
+  help?: string;
+  docsUrl?: string;
 }) {
-  const help = fieldKey ? fieldHelp[fieldKey] : undefined;
+  const mapped = fieldKey ? fieldHelp[fieldKey] : undefined;
+  const help = inlineHelp
+    ? { help: inlineHelp, docsUrl: inlineDocsUrl, unit: undefined }
+    : mapped;
 
   return (
     <div className="flex items-center gap-1.5">
