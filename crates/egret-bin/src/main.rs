@@ -854,6 +854,20 @@ impl egret_controlplane::EngineProvisioner for EgretEngineProvisioner {
             .map_err(|e| e.to_string())
     }
 
+    async fn restart(&self, namespace: &str, name: &str) -> Result<(), String> {
+        // Roll BOTH Deployments directly via KubeClient (bypassing the
+        // TrinoProvisioner render/apply path entirely) so this never touches
+        // config — same seam as coordinator_request/pod_logs below.
+        self.kube
+            .restart_deployment(namespace, &format!("{name}-coordinator"))
+            .await
+            .map_err(|e| e.to_string())?;
+        self.kube
+            .restart_deployment(namespace, &format!("{name}-worker"))
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn coordinator_request(
         &self,
         namespace: &str,

@@ -51,6 +51,12 @@ pub trait KubeClient: Send + Sync {
         tail_lines: i64,
         previous: bool,
     ) -> anyhow::Result<String>;
+
+    /// Force a rollout of a Deployment WITHOUT changing its rendered config:
+    /// patches the pod-template's `egret/restarted-at` annotation to now, which
+    /// changes the pod template and triggers a roll (same effect as
+    /// `kubectl rollout restart deployment/<name>`).
+    async fn restart_deployment(&self, namespace: &str, name: &str) -> anyhow::Result<()>;
 }
 
 /// In-memory fake for unit tests: records applied/deleted objects.
@@ -61,6 +67,8 @@ pub struct FakeKube {
     pub coordinator_calls: Mutex<Vec<(String, String)>>,
     /// Canned `(status, body)` returned by `coordinator_request`.
     pub coordinator_response: Mutex<(u16, Vec<u8>)>,
+    /// `(namespace, name)` per `restart_deployment` call.
+    pub restarted: Mutex<Vec<(String, String)>>,
 }
 
 impl Default for FakeKube {
@@ -70,6 +78,7 @@ impl Default for FakeKube {
             deleted: Mutex::new(Vec::new()),
             coordinator_calls: Mutex::new(Vec::new()),
             coordinator_response: Mutex::new((200, Vec::new())),
+            restarted: Mutex::new(Vec::new()),
         }
     }
 }
@@ -129,6 +138,14 @@ impl KubeClient for FakeKube {
         _previous: bool,
     ) -> anyhow::Result<String> {
         Ok(format!("logs for {pod} (fake)\n"))
+    }
+
+    async fn restart_deployment(&self, namespace: &str, name: &str) -> anyhow::Result<()> {
+        self.restarted
+            .lock()
+            .unwrap()
+            .push((namespace.to_string(), name.to_string()));
+        Ok(())
     }
 }
 
@@ -312,6 +329,29 @@ impl KubeClient for LiveKube {
         let logs = api.logs(pod, &lp).await?;
         Ok(logs)
     }
+
+    async fn restart_deployment(&self, namespace: &str, name: &str) -> anyhow::Result<()> {
+        use k8s_openapi::api::apps::v1::Deployment;
+        use kube::api::{Api, Patch, PatchParams};
+
+        let api: Api<Deployment> = Api::namespaced(self.client.clone(), namespace);
+        let ts = chrono::Utc::now().to_rfc3339();
+        // A JSON merge patch of just the pod-template annotation is exactly what
+        // `kubectl rollout restart` does: it changes the pod template (without
+        // touching config) so the Deployment controller rolls the pods.
+        let patch = serde_json::json!({
+            "spec": {
+                "template": {
+                    "metadata": {
+                        "annotations": { "egret/restarted-at": ts }
+                    }
+                }
+            }
+        });
+        api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -338,6 +378,28 @@ mod tests {
         assert_eq!(
             k.coordinator_calls.lock().unwrap()[0],
             ("GET".to_string(), "/v1/query".to_string())
+        );
+    }
+
+    /// A restart rolls BOTH the `{name}-coordinator` and `{name}-worker`
+    /// Deployments (the naming convention `TrinoProvisioner`/`trino.rs` use),
+    /// each recorded as its own `restart_deployment` call.
+    #[tokio::test]
+    async fn fake_kube_restart_deployment_records_coordinator_and_worker() {
+        let k = FakeKube::default();
+        k.restart_deployment("egret-engines", "demo-coordinator")
+            .await
+            .unwrap();
+        k.restart_deployment("egret-engines", "demo-worker")
+            .await
+            .unwrap();
+        let calls = k.restarted.lock().unwrap();
+        assert_eq!(
+            *calls,
+            vec![
+                ("egret-engines".to_string(), "demo-coordinator".to_string()),
+                ("egret-engines".to_string(), "demo-worker".to_string()),
+            ]
         );
     }
 }

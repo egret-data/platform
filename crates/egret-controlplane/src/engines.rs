@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
 use egret_catalog::service::embedded::{GrantInput, NewClient};
@@ -440,6 +440,12 @@ pub trait EngineProvisioner: Send + Sync {
     async fn update(&self, req: &EngineProvisionReq) -> Result<(), String>;
     async fn delete(&self, namespace: &str, name: &str) -> Result<(), String>;
 
+    /// Roll the coordinator + worker pods WITHOUT changing config (like
+    /// `kubectl rollout restart`). A plain `update` with an unchanged spec is a
+    /// no-op (the rendered manifest's config-checksum is identical), so this is
+    /// a distinct seam over `KubeClient::restart_deployment`.
+    async fn restart(&self, namespace: &str, name: &str) -> Result<(), String>;
+
     /// Issue a raw HTTP request to a Trino coordinator `Service` and return
     /// `(status, body)`. Kube-free seam over `KubeClient::coordinator_request`
     /// (Service DNS in-cluster / kube API-server proxy in dev); non-2xx statuses
@@ -482,6 +488,7 @@ pub fn router() -> Router<CpState> {
             get(get_catalog).put(update_catalog).delete(remove_catalog),
         )
         .route("/engines/{id}/pods/{pod}/logs", get(pod_logs))
+        .route("/engines/{id}/restart", post(restart_engine))
         // Native Trino monitor (query list / detail / kill / cluster).
         .merge(crate::monitor::routes())
 }
@@ -1897,6 +1904,27 @@ async fn delete_engine(
         }
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /engines/{id}/restart` — roll the coordinator + worker pods without
+/// changing config (like `kubectl rollout restart`). Unlike `update`, this
+/// always forces a roll: `prov.restart` patches a fresh timestamp annotation
+/// onto both Deployments' pod templates regardless of whether the rendered
+/// config changed.
+async fn restart_engine(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, CpError> {
+    require_platform_admin(&p)?;
+    let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    prov.restart(&engine.namespace, &engine.name)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("engine restart failed: {e}")))?;
+    Ok(StatusCode::OK)
 }
 
 // ── catalog sub-routes ───────────────────────────────────────────────────────────

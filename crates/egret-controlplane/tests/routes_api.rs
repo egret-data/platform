@@ -515,7 +515,13 @@ async fn browse_non_admin_forbidden() {
 
 // ── Engines ────────────────────────────────────────────────────────────────────
 
-struct FakeEngineProvisioner;
+/// Engine provisioner fake. `restarted` records `(namespace, name)` pairs from
+/// `restart` calls (shared via `Arc` so a test can hold onto the fake and
+/// inspect it after the request completes, mirroring `MonitorFakeProvisioner`).
+#[derive(Clone, Default)]
+struct FakeEngineProvisioner {
+    restarted: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+}
 
 #[async_trait::async_trait]
 impl egret_controlplane::EngineProvisioner for FakeEngineProvisioner {
@@ -541,6 +547,13 @@ impl egret_controlplane::EngineProvisioner for FakeEngineProvisioner {
         Ok(())
     }
     async fn delete(&self, _ns: &str, _name: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn restart(&self, ns: &str, name: &str) -> Result<(), String> {
+        self.restarted
+            .lock()
+            .unwrap()
+            .push((ns.to_string(), name.to_string()));
         Ok(())
     }
     async fn coordinator_request(
@@ -599,6 +612,9 @@ impl egret_controlplane::EngineProvisioner for MonitorFakeProvisioner {
         Ok(())
     }
     async fn delete(&self, _ns: &str, _name: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn restart(&self, _ns: &str, _name: &str) -> Result<(), String> {
         Ok(())
     }
     async fn coordinator_request(
@@ -701,7 +717,7 @@ async fn monitor_queries_maps_list_and_maps_bad_gateway() {
 
 #[tokio::test]
 async fn create_and_get_engine() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -768,7 +784,7 @@ async fn create_and_get_engine() {
 
 #[tokio::test]
 async fn pod_logs_known_pod_ok_unknown_pod_404() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -830,9 +846,93 @@ async fn pod_logs_known_pod_ok_unknown_pod_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND, "unknown pod must 404");
 }
 
+/// `POST /engines/{id}/restart` rolls the engine's pods without changing
+/// config: the route calls `EngineProvisioner::restart` with the engine's
+/// namespace + name (from which the real egret-bin adapter derives BOTH the
+/// `{name}-coordinator` and `{name}-worker` Deployment names — see
+/// `fake_kube_restart_deployment_records_coordinator_and_worker` in
+/// `egret-orchestrator` for that fan-out). An unknown engine id is a 404.
+#[tokio::test]
+async fn restart_engine_calls_provisioner_unknown_404() {
+    let fake = FakeEngineProvisioner::default();
+    let Some(f) = setup_full(None, Some(Arc::new(fake.clone()))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_restart_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+    let namespace = j["namespace"]
+        .as_str()
+        .expect("engine namespace")
+        .to_string();
+
+    // Restart the known engine → 200, and the fake provisioner recorded the
+    // call with the engine's namespace + name.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/restart"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "restart known engine");
+    assert_eq!(
+        *fake.restarted.lock().unwrap(),
+        vec![(namespace, name)],
+        "restart recorded with engine namespace + name"
+    );
+
+    // An unknown engine id is a 404, not a pass-through to the provisioner.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{}/restart", Uuid::new_v4()),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "unknown engine must 404"
+    );
+    assert_eq!(
+        fake.restarted.lock().unwrap().len(),
+        1,
+        "unknown-engine 404 must not call the provisioner"
+    );
+}
+
 #[tokio::test]
 async fn update_engine_per_role_trino_config_roundtrips() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -954,7 +1054,7 @@ async fn seed_exchange_storage_conn(f: &Fixture) -> Uuid {
 
 #[tokio::test]
 async fn update_engine_resource_groups_and_fault_tolerant() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1098,7 +1198,7 @@ async fn seed_secret(f: &Fixture, value: &str) -> Uuid {
 
 #[tokio::test]
 async fn update_engine_auth_and_ingress() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1218,7 +1318,7 @@ async fn update_engine_auth_and_ingress() {
 
 #[tokio::test]
 async fn update_engine_pod_scheduling_roundtrips() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1311,7 +1411,7 @@ async fn update_engine_pod_scheduling_roundtrips() {
 
 #[tokio::test]
 async fn update_engine_autoscaling_roundtrips() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1435,7 +1535,7 @@ async fn update_engine_autoscaling_roundtrips() {
 
 #[tokio::test]
 async fn engine_catalog_routes() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1550,7 +1650,7 @@ async fn engine_catalog_routes() {
 /// must revoke that MINTED client, not the user's original one.
 #[tokio::test]
 async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1712,7 +1812,7 @@ async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
 /// warehouse) must 400, not silently fall back to the default role or 500.
 #[tokio::test]
 async fn add_catalog_with_foreign_client_id_400() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1813,7 +1913,7 @@ async fn add_catalog_with_foreign_client_id_400() {
 
 #[tokio::test]
 async fn create_engine_unprovisioned_warehouse_400() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
