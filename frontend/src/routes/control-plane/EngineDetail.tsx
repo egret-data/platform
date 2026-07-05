@@ -56,15 +56,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  type Kv,
-  KeyValueEditor,
-  kvToRecord,
-} from "./EngineResourceGroups";
+import { type Kv, kvToRecord } from "./EngineResourceGroups";
 import {
   useEngineConfigForm,
   type EngineConfigForm,
 } from "./useEngineConfigForm";
+import { connectorByName, connectors } from "./config/connectorCatalog";
+import { KeyedPropertyList } from "./config/KeyedPropertyList";
 import { ImageSection } from "./config/ImageSection";
 import { ServerSection } from "./config/ServerSection";
 import { CoordinatorSection } from "./config/CoordinatorSection";
@@ -159,7 +157,9 @@ export default function EngineDetail() {
           </AlertDescription>
         </Alert>
       ) : !data ? (
-        <p className="py-14 text-center text-sm text-muted-foreground">Loading…</p>
+        <p className="py-14 text-center text-sm text-muted-foreground">
+          Loading…
+        </p>
       ) : (
         <EngineTabs engine={data} engineId={id} />
       )}
@@ -301,7 +301,9 @@ function StatusCard({ status }: { status: EngineStatus }) {
             ) : (
               status.pods.map((pod) => (
                 <TableRow key={pod.name}>
-                  <TableCell className="font-mono text-xs">{pod.name}</TableCell>
+                  <TableCell className="font-mono text-xs">
+                    {pod.name}
+                  </TableCell>
                   <TableCell>
                     <Badge variant={phaseVariant(pod.phase)}>{pod.phase}</Badge>
                   </TableCell>
@@ -422,7 +424,9 @@ function ConfigurationTab({
                       podSecurityContext={cfg.podSecurityContext}
                       setPodSecurityContext={cfg.setPodSecurityContext}
                       containerSecurityContext={cfg.containerSecurityContext}
-                      setContainerSecurityContext={cfg.setContainerSecurityContext}
+                      setContainerSecurityContext={
+                        cfg.setContainerSecurityContext
+                      }
                       deploymentStrategy={cfg.deploymentStrategy}
                       setDeploymentStrategy={cfg.setDeploymentStrategy}
                       deploymentAnnotations={cfg.deploymentAnnotations}
@@ -430,7 +434,9 @@ function ConfigurationTab({
                       revisionHistoryLimit={cfg.revisionHistoryLimit}
                       setRevisionHistoryLimit={cfg.setRevisionHistoryLimit}
                       progressDeadlineSeconds={cfg.progressDeadlineSeconds}
-                      setProgressDeadlineSeconds={cfg.setProgressDeadlineSeconds}
+                      setProgressDeadlineSeconds={
+                        cfg.setProgressDeadlineSeconds
+                      }
                       shareProcessNamespace={cfg.shareProcessNamespace}
                       setShareProcessNamespace={cfg.setShareProcessNamespace}
                       env={cfg.env}
@@ -946,22 +952,59 @@ function AddCatalogDialog({
             {kind === "generic" && (
               <>
                 <div className="space-y-1.5">
-                  <Label htmlFor="cat-connector">Connector name</Label>
-                  <Input
-                    id="cat-connector"
-                    value={connectorName}
-                    onChange={(e) => setConnectorName(e.target.value)}
-                    placeholder="e.g. mysql"
-                    required
-                  />
+                  <Label htmlFor="cat-connector">Connector</Label>
+                  <Select
+                    value={
+                      connectorByName[connectorName]
+                        ? connectorName
+                        : "__other__"
+                    }
+                    onValueChange={(v) =>
+                      setConnectorName(v === "__other__" ? "" : v)
+                    }
+                  >
+                    <SelectTrigger id="cat-connector" className="w-full">
+                      <SelectValue placeholder="Select a connector" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {connectors.map((c) => (
+                        <SelectItem key={c.name} value={c.name}>
+                          {c.label}
+                        </SelectItem>
+                      ))}
+                      <SelectItem value="__other__">Other (custom)…</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {!connectorByName[connectorName] && (
+                    <Input
+                      value={connectorName}
+                      onChange={(e) => setConnectorName(e.target.value)}
+                      placeholder="e.g. redshift"
+                    />
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   <Label>Properties</Label>
-                  <KeyValueEditor
-                    rows={genericProps}
-                    onChange={setGenericProps}
-                    keyPlaceholder="connection-url"
-                    valuePlaceholder="jdbc:mysql://…"
+                  <KeyedPropertyList
+                    catalog={connectorByName[connectorName]?.props ?? []}
+                    catalogByKey={Object.fromEntries(
+                      (connectorByName[connectorName]?.props ?? []).map((p) => [
+                        p.key,
+                        p,
+                      ]),
+                    )}
+                    presentKeys={genericProps.map((kv) => kv.key)}
+                    getValue={(k) =>
+                      genericProps.find((kv) => kv.key === k)?.value ?? ""
+                    }
+                    setValue={(k, v) =>
+                      setGenericProps((prev) => {
+                        const rest = prev.filter((kv) => kv.key !== k);
+                        return v.trim() === ""
+                          ? rest
+                          : [...rest, { key: k, value: v }];
+                      })
+                    }
                   />
                 </div>
               </>
@@ -982,8 +1025,13 @@ function AddCatalogDialog({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={addMutation.isPending || !isValid()}>
-              {addMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+            <Button
+              type="submit"
+              disabled={addMutation.isPending || !isValid()}
+            >
+              {addMutation.isPending && (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              )}
               Add catalog
             </Button>
           </DialogFooter>
@@ -1006,8 +1054,8 @@ function DangerCard({ engine }: { engine: EngineWithStatus }) {
       <CardHeader>
         <CardTitle className="text-lg">Danger zone</CardTitle>
         <CardDescription>
-          Deleting this engine tears down its Kubernetes resources. This cannot be
-          undone.
+          Deleting this engine tears down its Kubernetes resources. This cannot
+          be undone.
         </CardDescription>
       </CardHeader>
       <CardContent>
