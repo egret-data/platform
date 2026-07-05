@@ -123,6 +123,20 @@ export function CatalogForm({
   // tpch / tpcds carry no configurable properties, so editing one is a no-op.
   const noEditableConfig =
     mode === "edit" && (kind === "tpch" || kind === "tpcds");
+  // A catalog stored in the v1 config shape ({host,port,…} old postgres, or
+  // {connectorName,properties,secretProperty} old generic). The v2 editor only
+  // understands {properties, secretProperties}, so editing a legacy row would
+  // silently drop its config on save — make it read-only instead. tpch/tpcds
+  // have empty config with no `properties` key too, but are handled above; the
+  // `!noEditableConfig` guard keeps them out of this flag.
+  const legacyFormat =
+    mode === "edit" &&
+    kind !== "egret-warehouse" &&
+    !noEditableConfig &&
+    (kind === "generic" ||
+      (initial?.config != null &&
+        typeof initial.config === "object" &&
+        !("properties" in (initial.config as object))));
 
   // Set a plain-value property — clears the same key from `secrets` so the
   // two maps stay disjoint (SecretOrValueList relies on this invariant).
@@ -203,7 +217,13 @@ export function CatalogForm({
     const config: Record<string, unknown> =
       kind === "egret-warehouse"
         ? { warehouseId }
-        : { properties: values, secretProperties: secrets };
+        : {
+            properties: values,
+            // Drop rows toggled to "secret" but left unpicked (empty id).
+            secretProperties: Object.fromEntries(
+              Object.entries(secrets).filter(([, id]) => id !== ""),
+            ),
+          };
 
     try {
       if (mode === "add") {
@@ -334,7 +354,14 @@ export function CatalogForm({
           </div>
         ))}
 
-      {kind !== "egret-warehouse" && !noEditableConfig && (
+      {legacyFormat && (
+        <div className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
+          This catalog uses an older configuration format. Remove and re-add it
+          to edit its properties.
+        </div>
+      )}
+
+      {kind !== "egret-warehouse" && !noEditableConfig && !legacyFormat && (
         <div className="space-y-1.5">
           <Label>Properties</Label>
           <SecretOrValueList
@@ -364,7 +391,7 @@ export function CatalogForm({
         </Alert>
       )}
 
-      {!readOnlyWarehouse && !noEditableConfig && (
+      {!readOnlyWarehouse && !noEditableConfig && !legacyFormat && (
         <div className="flex justify-end">
           <Button type="submit" disabled={pending || !isValid()}>
             {pending && <Loader2 className="h-4 w-4 animate-spin" />}
