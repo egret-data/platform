@@ -892,3 +892,24 @@ export function updateEngineCatalog(
     body: JSON.stringify(input),
   });
 }
+
+// ── Engine pod logs (control-plane) ──────────────────────────────────────────
+
+export interface PodLogs {
+  logs: string;
+}
+
+export function getPodLogs(
+  id: string,
+  pod: string,
+  opts: { tail?: number; previous?: boolean; container?: string } = {},
+): Promise<PodLogs> {
+  const qs = new URLSearchParams();
+  if (opts.tail != null) qs.set("tail", String(opts.tail));
+  if (opts.previous) qs.set("previous", "true");
+  if (opts.container) qs.set("container", opts.container);
+  const q = qs.toString();
+  return apiJson<PodLogs>(
+    `/control-plane/engines/${id}/pods/${encodeURIComponent(pod)}/logs${q ? `?${q}` : ""}`,
+  );
+}

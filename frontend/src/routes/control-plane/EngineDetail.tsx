@@ -52,6 +52,7 @@ import { ReviewChangesDialog } from "./config/ReviewChangesDialog";
 import { EngineAutoscaling } from "./EngineAutoscaling";
 import { EngineSecurity } from "./EngineSecurity";
 import EngineMonitor from "./EngineMonitor";
+import PodLogsDialog from "./PodLogsDialog";
 
 type EngineWithStatus = Omit<Engine, "status"> & { status: EngineStatus };
 
@@ -169,7 +170,7 @@ function EngineTabs({
       </TabsList>
 
       <TabsContent value="overview" className="space-y-5">
-        <StatusCard status={engine.status} />
+        <StatusCard status={engine.status} engineId={engineId} />
         <DangerCard engine={engine} />
       </TabsContent>
 
@@ -251,7 +252,15 @@ function SaveBar({
   );
 }
 
-function StatusCard({ status }: { status: EngineStatus }) {
+function StatusCard({
+  status,
+  engineId,
+}: {
+  status: EngineStatus;
+  engineId: string;
+}) {
+  const [logsPod, setLogsPod] = useState<string | null>(null);
+
   return (
     <Card>
       <CardHeader>
@@ -267,13 +276,16 @@ function StatusCard({ status }: { status: EngineStatus }) {
               <TableHead>Pod</TableHead>
               <TableHead>Phase</TableHead>
               <TableHead>Ready</TableHead>
+              <TableHead className="text-right">
+                <span className="sr-only">Actions</span>
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {status.pods.length === 0 ? (
               <TableRow className="hover:bg-transparent">
                 <TableCell
-                  colSpan={3}
+                  colSpan={4}
                   className="py-10 text-center text-muted-foreground"
                 >
                   No pods yet.
@@ -293,12 +305,27 @@ function StatusCard({ status }: { status: EngineStatus }) {
                       {pod.ready ? "Ready" : "Not ready"}
                     </Badge>
                   </TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setLogsPod(pod.name)}
+                    >
+                      Logs
+                    </Button>
+                  </TableCell>
                 </TableRow>
               ))
             )}
           </TableBody>
         </Table>
       </CardContent>
+
+      <PodLogsDialog
+        engineId={engineId}
+        pod={logsPod}
+        onOpenChange={(o) => !o && setLogsPod(null)}
+      />
     </Card>
   );
 }
