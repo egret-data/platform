@@ -453,6 +453,17 @@ pub trait EngineProvisioner: Send + Sync {
         headers: &[(String, String)],
         body: Option<Vec<u8>>,
     ) -> anyhow::Result<(u16, Vec<u8>)>;
+
+    /// Tail a pod's logs. Kube-free seam over `KubeClient::pod_logs`; bounded by
+    /// `tail_lines` (the route clamps this before calling in).
+    async fn pod_logs(
+        &self,
+        namespace: &str,
+        pod: &str,
+        container: Option<&str>,
+        tail_lines: i64,
+        previous: bool,
+    ) -> anyhow::Result<String>;
 }
 
 pub fn router() -> Router<CpState> {
@@ -470,6 +481,7 @@ pub fn router() -> Router<CpState> {
             "/engines/{id}/catalogs/{cid}",
             get(get_catalog).put(update_catalog).delete(remove_catalog),
         )
+        .route("/engines/{id}/pods/{pod}/logs", get(pod_logs))
         // Native Trino monitor (query list / detail / kill / cluster).
         .merge(crate::monitor::routes())
 }
@@ -2125,6 +2137,59 @@ async fn update_catalog(
     }
 
     Ok(Json(updated.into()))
+}
+
+// ── pod logs ─────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct PodLogsQuery {
+    tail: Option<i64>,
+    previous: Option<bool>,
+    container: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PodLogsDto {
+    logs: String,
+}
+
+/// `GET /engines/{id}/pods/{pod}/logs?tail=&previous=&container=` — bounded tail
+/// of a pod's logs. The pod must belong to the engine (verified against the live
+/// pod list from `EngineProvisioner::status`), so one platform admin can't read
+/// an arbitrary pod's logs by guessing a name.
+async fn pod_logs(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, pod)): Path<(Uuid, String)>,
+    axum::extract::Query(q): axum::extract::Query<PodLogsQuery>,
+) -> Result<Json<PodLogsDto>, CpError> {
+    require_platform_admin(&p)?;
+    let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    // Ownership: the pod must be one of this engine's live pods.
+    let status = prov
+        .status(&engine.namespace, &engine.name)
+        .await
+        .map_err(CpError::BadRequest)?;
+    if !status.pods.iter().any(|pp| pp.name == pod) {
+        return Err(CpError::NotFound);
+    }
+    let tail = q.tail.unwrap_or(1000).clamp(1, 5000);
+    let logs = prov
+        .pod_logs(
+            &engine.namespace,
+            &pod,
+            q.container.as_deref(),
+            tail,
+            q.previous.unwrap_or(false),
+        )
+        .await
+        .map_err(|e| CpError::BadRequest(format!("read logs: {e}")))?;
+    Ok(Json(PodLogsDto { logs }))
 }
 
 #[cfg(test)]

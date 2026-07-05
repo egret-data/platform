@@ -867,6 +867,19 @@ impl egret_controlplane::EngineProvisioner for EgretEngineProvisioner {
             .coordinator_request(namespace, service, method, path, headers, body)
             .await
     }
+
+    async fn pod_logs(
+        &self,
+        namespace: &str,
+        pod: &str,
+        container: Option<&str>,
+        tail_lines: i64,
+        previous: bool,
+    ) -> anyhow::Result<String> {
+        self.kube
+            .pod_logs(namespace, pod, container, tail_lines, previous)
+            .await
+    }
 }
 
 /// Reads catalog structure (namespaces/tables/schema) from the embedded

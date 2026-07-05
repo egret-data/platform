@@ -39,6 +39,18 @@ pub trait KubeClient: Send + Sync {
         headers: &[(String, String)],
         body: Option<Vec<u8>>,
     ) -> anyhow::Result<(u16, Vec<u8>)>;
+
+    /// Tail a pod's (optionally previous-container's) logs, bounded to
+    /// `tail_lines`. `container` selects a specific container when the pod has
+    /// more than one; `None` picks the pod's sole container.
+    async fn pod_logs(
+        &self,
+        namespace: &str,
+        pod: &str,
+        container: Option<&str>,
+        tail_lines: i64,
+        previous: bool,
+    ) -> anyhow::Result<String>;
 }
 
 /// In-memory fake for unit tests: records applied/deleted objects.
@@ -106,6 +118,17 @@ impl KubeClient for FakeKube {
             .unwrap()
             .push((method.to_string(), path.to_string()));
         Ok(self.coordinator_response.lock().unwrap().clone())
+    }
+
+    async fn pod_logs(
+        &self,
+        _namespace: &str,
+        pod: &str,
+        _container: Option<&str>,
+        _tail_lines: i64,
+        _previous: bool,
+    ) -> anyhow::Result<String> {
+        Ok(format!("logs for {pod} (fake)\n"))
     }
 }
 
@@ -266,6 +289,28 @@ impl KubeClient for LiveKube {
             let bytes = resp.into_body().collect_bytes().await?.to_vec();
             Ok((status, bytes))
         }
+    }
+
+    async fn pod_logs(
+        &self,
+        namespace: &str,
+        pod: &str,
+        container: Option<&str>,
+        tail_lines: i64,
+        previous: bool,
+    ) -> anyhow::Result<String> {
+        use k8s_openapi::api::core::v1::Pod;
+        use kube::api::{Api, LogParams};
+
+        let api: Api<Pod> = Api::namespaced(self.client.clone(), namespace);
+        let lp = LogParams {
+            container: container.map(str::to_string),
+            tail_lines: Some(tail_lines),
+            previous,
+            ..Default::default()
+        };
+        let logs = api.logs(pod, &lp).await?;
+        Ok(logs)
     }
 }
 

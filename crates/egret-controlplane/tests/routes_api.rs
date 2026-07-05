@@ -554,6 +554,16 @@ impl egret_controlplane::EngineProvisioner for FakeEngineProvisioner {
     ) -> anyhow::Result<(u16, Vec<u8>)> {
         Ok((200, b"[]".to_vec()))
     }
+    async fn pod_logs(
+        &self,
+        _namespace: &str,
+        pod: &str,
+        _container: Option<&str>,
+        _tail_lines: i64,
+        _previous: bool,
+    ) -> anyhow::Result<String> {
+        Ok(format!("logs for {pod} (fake)\n"))
+    }
 }
 
 /// Engine provisioner fake whose `coordinator_request` returns a canned
@@ -601,6 +611,16 @@ impl egret_controlplane::EngineProvisioner for MonitorFakeProvisioner {
         _body: Option<Vec<u8>>,
     ) -> anyhow::Result<(u16, Vec<u8>)> {
         Ok(self.response.lock().unwrap().clone())
+    }
+    async fn pod_logs(
+        &self,
+        _namespace: &str,
+        pod: &str,
+        _container: Option<&str>,
+        _tail_lines: i64,
+        _previous: bool,
+    ) -> anyhow::Result<String> {
+        Ok(format!("logs for {pod} (fake)\n"))
     }
 }
 
@@ -744,6 +764,70 @@ async fn create_and_get_engine() {
         j["spec"]["trinoConfig"]["coordinator"]["resources"]["cpuLimit"], "2",
         "seeded coordinator cpu limit; body={j}"
     );
+}
+
+#[tokio::test]
+async fn pod_logs_known_pod_ok_unknown_pod_404() {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_pod_logs_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // The fake provisioner's `status` reports a single pod named "coordinator-0".
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/pods/coordinator-0/logs"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "known pod logs; body={j}");
+    assert_eq!(
+        j["logs"], "logs for coordinator-0 (fake)\n",
+        "canned logs; body={j}"
+    );
+
+    // A pod name that isn't in the engine's live pod list is a 404, not a
+    // pass-through to the kube client.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/pods/not-my-pod/logs"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "unknown pod must 404");
 }
 
 #[tokio::test]
