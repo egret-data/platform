@@ -61,11 +61,12 @@ test("raw property maps + queryMaxMemory + eventListener count under server", ()
 });
 
 it("counts image fields under the image section", () => {
-  const counts = sectionCounts({
+  const cfg: TrinoConfig = {
     coordinator: {},
     worker: {},
     image: "ghcr.io/acme/trino:471",
     imagePullPolicy: "Always",
-  } as unknown as TrinoConfig);
+  };
+  const counts = sectionCounts(cfg);
   expect(counts.image).toBe(2);
 });

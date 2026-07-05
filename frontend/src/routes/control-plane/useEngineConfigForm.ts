@@ -501,13 +501,20 @@ function formToAutoscaling(
  * the already-built (omit-empty) `trinoConfig`. Each group counts 1 when it is
  * present/non-empty, so a nav badge reads "how many field-groups configured".
  *
- * The badges map to the five nav sections: `properties` (set keys across the
- * config/node/log maps + queryMaxMemory + non-default logLevel + eventListener),
- * `resources` (coordinator/worker sizing + env), `workload` (resource groups +
- * session + fault-tolerant), `scheduling` (pod + per-role placement + containers/
- * mounts), and `scaling` (autoscaling). Per-role scheduling fields count under
- * `scheduling`; per-role sizing (replicas/resources/heap/probes/JVM/per-node
- * memory) counts under `resources` — no field-group is double-counted.
+ * The badges map to the seven nav sections (mirroring the Trino Helm chart):
+ * `image` (the container image string + imagePullPolicy + imagePullSecrets),
+ * `server` (set keys across the config/node/log property maps + queryMaxMemory +
+ * non-default logLevel + eventListener + fault-tolerant execution/exchange +
+ * reliability known-properties), `coordinator` (coordinator sizing/JVM/probes +
+ * placement), `worker` (same core + placement + graceful shutdown), `workload`
+ * (resource groups + session properties), `pod` (cluster-wide pod/deployment
+ * fields + env + init/sidecar containers + config/secret mounts), and
+ * `autoscaling` (autoscaling).
+ *
+ * Fault-tolerant execution intentionally counts under `server` (not `workload`),
+ * per the plan. Per-role placement fields count under that role's own section
+ * (`coordinator`/`worker`) alongside its sizing — no field-group is
+ * double-counted.
  */
 export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
   const present = (v: unknown): boolean =>
@@ -909,9 +916,9 @@ export function useEngineConfigForm(
     setIngressTlsSecret(next?.ingress?.tlsSecret ?? "");
     setIngressAnnotations(recordToKv(next?.ingress?.annotations));
     setServiceAccount(next?.serviceAccount ?? "");
+    setImage(next?.image ?? "");
     setImagePullSecrets(next?.imagePullSecrets ? [...next.imagePullSecrets] : []);
     setImagePullPolicy(next?.imagePullPolicy ?? "");
-    setImage(next?.image ?? "");
     setPodSecurityContext(
       next?.podSecurityContext
         ? { ...next.podSecurityContext }
