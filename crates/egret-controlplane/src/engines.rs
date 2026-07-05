@@ -733,10 +733,32 @@ async fn build_catalog_req(
                     .unwrap_or_default()
                     .into(),
             );
+            // A generic catalog may source ONE property (default connection-password)
+            // from an egret secret; the rest render verbatim.
+            let secret_prop = cat.config["secretProperty"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("connection-password")
+                .to_string();
             if let Some(obj) = cat.config["properties"].as_object() {
                 for (k, v) in obj {
+                    // Skip the secret-backed property from the verbatim pass so it is not
+                    // double-emitted (the secret injects it below).
+                    if cat.secret_ref.is_some() && *k == secret_prop {
+                        continue;
+                    }
                     props.insert(k.clone(), v.as_str().unwrap_or_default().into());
                 }
+            }
+            if let Some(ref_id) = cat.secret_ref {
+                let var = format!("GEN_{env_prefix}");
+                props.insert(secret_prop, format!("${{ENV:{var}}}"));
+                let val = st
+                    .secrets
+                    .resolve_plaintext(None, ref_id)
+                    .await
+                    .map_err(|e| CpError::BadRequest(format!("resolve secret: {e}")))?;
+                env.insert(var, val);
             }
         }
         other => {
@@ -2166,5 +2188,127 @@ mod tests {
         // Non-warehouse kinds pass through untouched.
         let pg = serde_json::json!({"host": "db", "user": "u"});
         assert_eq!(redact_catalog_config("postgresql", pg.clone()), pg);
+    }
+
+    // ── build_catalog_req: generic connector + secret sourcing ──────────────
+
+    fn generic_catalog(config: serde_json::Value, secret_ref: Option<Uuid>) -> EngineCatalog {
+        EngineCatalog {
+            id: Uuid::new_v4(),
+            engine_id: Uuid::new_v4(),
+            name: "gen".into(),
+            kind: "generic".into(),
+            config,
+            secret_ref,
+            is_primary: false,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn dummy_engine() -> Engine {
+        Engine {
+            id: Uuid::new_v4(),
+            name: "e".into(),
+            r#type: "trino".into(),
+            namespace: "egret-engines".into(),
+            warehouse_id: Uuid::new_v4(),
+            spec: serde_json::json!({}),
+            status: "pending".into(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// Build a real `CpState` against the local dev Postgres (mirrors the
+    /// self-skip pattern used by `tests/routes_api.rs`); `None` when
+    /// `DATABASE_URL` isn't set so this suite doesn't fail in environments
+    /// without a database.
+    async fn test_state() -> Option<CpState> {
+        let dsn = std::env::var("DATABASE_URL").ok()?;
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        db.migrate().await.expect("migrate");
+        let crypto = egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef")
+            .expect("build test crypto");
+        let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
+        let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
+        Some(CpState {
+            storage: egret_catalog::CatalogStore::new(db.clone()),
+            secrets: workspace_secrets,
+            sessions: egret_auth::session::SessionService::new(
+                db.clone(),
+                chrono::Duration::hours(24),
+                chrono::Duration::minutes(60),
+            ),
+            provisioner: None,
+            browser: None,
+            engine_provisioner: None,
+            engine_egret_url: "http://egret:8080".into(),
+            engine_jwks_uri: "https://idp/jwks".into(),
+        })
+    }
+
+    /// WITHOUT a `secret_ref` the generic arm must render exactly as before:
+    /// verbatim properties, no env vars, no `${ENV:...}` placeholders.
+    #[tokio::test]
+    async fn generic_catalog_without_secret_ref_is_verbatim() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping generic_catalog_without_secret_ref_is_verbatim: DATABASE_URL not set"
+            );
+            return;
+        };
+        let cfg = serde_json::json!({
+            "connectorName": "mysql",
+            "properties": {
+                "connection-url": "jdbc:mysql://db:3306/x",
+                "connection-user": "root",
+            }
+        });
+        let cat = generic_catalog(cfg, None);
+        let req = build_catalog_req(&st, &dummy_engine(), &cat, "T0")
+            .await
+            .expect("build_catalog_req");
+
+        assert_eq!(req.properties["connector.name"], "mysql");
+        assert_eq!(req.properties["connection-url"], "jdbc:mysql://db:3306/x");
+        assert_eq!(req.properties["connection-user"], "root");
+        assert!(req.env.is_empty());
+        assert!(!req.properties.values().any(|v| v.contains("${ENV:")));
+    }
+
+    /// WITH a `secret_ref`, the designated property (default
+    /// `connection-password`) is replaced by an `${ENV:...}` placeholder and
+    /// the resolved plaintext lands in `env`, not in `properties`.
+    #[tokio::test]
+    async fn generic_catalog_with_secret_ref_injects_env_var() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping generic_catalog_with_secret_ref_injects_env_var: DATABASE_URL not set"
+            );
+            return;
+        };
+        let secret_name = format!("t_{}", Uuid::new_v4().simple());
+        let secret_id = st
+            .secrets
+            .create(None, &secret_name, None, "s3cr3t")
+            .await
+            .expect("create secret");
+        let cfg = serde_json::json!({
+            "connectorName": "mysql",
+            "properties": {
+                "connection-url": "jdbc:mysql://db:3306/x",
+                "connection-password": "PLACEHOLDER",
+            }
+        });
+        let cat = generic_catalog(cfg, Some(secret_id));
+        let req = build_catalog_req(&st, &dummy_engine(), &cat, "T1")
+            .await
+            .expect("build_catalog_req");
+
+        assert_eq!(req.properties["connection-password"], "${ENV:GEN_T1}");
+        assert_eq!(req.env["GEN_T1"], "s3cr3t");
+        // The plaintext placeholder from `properties` must never leak through.
+        assert!(!req.properties.values().any(|v| v == "PLACEHOLDER"));
     }
 }
