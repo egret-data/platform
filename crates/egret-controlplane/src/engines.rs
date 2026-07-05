@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, get};
+use axum::routing::get;
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
 use egret_catalog::service::embedded::{GrantInput, NewClient};
@@ -468,7 +468,10 @@ pub fn router() -> Router<CpState> {
             "/engines/{id}/catalogs",
             get(list_catalogs).post(add_catalog),
         )
-        .route("/engines/{id}/catalogs/{cid}", delete(remove_catalog))
+        .route(
+            "/engines/{id}/catalogs/{cid}",
+            get(get_catalog).delete(remove_catalog),
+        )
         // Native Trino monitor (query list / detail / kill / cluster).
         .merge(crate::monitor::routes())
 }
@@ -546,6 +549,7 @@ struct EngineCatalogDto {
     name: String,
     kind: String,
     is_primary: bool,
+    secret_ref: Option<Uuid>,
 }
 impl From<EngineCatalog> for EngineCatalogDto {
     fn from(c: EngineCatalog) -> Self {
@@ -554,8 +558,35 @@ impl From<EngineCatalog> for EngineCatalogDto {
             name: c.name,
             kind: c.kind,
             is_primary: c.is_primary,
+            secret_ref: c.secret_ref,
         }
     }
+}
+
+/// `GET /engines/{id}/catalogs/{cid}` payload: full stored config + secretRef,
+/// with system-minted secret material redacted (see [`redact_catalog_config`]).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EngineCatalogDetailDto {
+    id: Uuid,
+    name: String,
+    kind: String,
+    is_primary: bool,
+    secret_ref: Option<Uuid>,
+    config: serde_json::Value,
+}
+
+/// Strip system-minted secret material from a catalog config before returning it
+/// to clients. egret-warehouse configs carry a client credential; nothing else
+/// should ever be exposed.
+fn redact_catalog_config(kind: &str, mut config: serde_json::Value) -> serde_json::Value {
+    if kind == "egret-warehouse" {
+        if let Some(obj) = config.as_object_mut() {
+            obj.remove("credential");
+            obj.remove("clientRowId");
+        }
+    }
+    config
 }
 
 #[derive(Deserialize)]
@@ -1907,6 +1938,31 @@ async fn add_catalog(
     Ok((StatusCode::CREATED, Json(cat.into())))
 }
 
+async fn get_catalog(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, cid)): Path<(Uuid, Uuid)>,
+) -> Result<Json<EngineCatalogDetailDto>, CpError> {
+    require_platform_admin(&p)?;
+    let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let cat = st
+        .storage
+        .get_engine_catalog(cid)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    if cat.engine_id != engine.id {
+        return Err(CpError::NotFound);
+    }
+    Ok(Json(EngineCatalogDetailDto {
+        id: cat.id,
+        name: cat.name.clone(),
+        kind: cat.kind.clone(),
+        is_primary: cat.is_primary,
+        secret_ref: cat.secret_ref,
+        config: redact_catalog_config(&cat.kind, cat.config.clone()),
+    }))
+}
+
 async fn remove_catalog(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -2022,5 +2078,20 @@ mod tests {
         let mut auth: Option<AuthReq> = None;
         inject_monitor_user(&mut auth, Uuid::new_v4()).unwrap();
         assert!(auth.is_none());
+    }
+
+    #[test]
+    fn redact_strips_warehouse_credential() {
+        let cfg = serde_json::json!({
+            "warehouse": "wh1", "s3_endpoint": "http://minio:9000",
+            "credential": "id:secret", "clientRowId": "abc"
+        });
+        let out = redact_catalog_config("egret-warehouse", cfg);
+        assert!(out.get("credential").is_none());
+        assert!(out.get("clientRowId").is_none());
+        assert_eq!(out["warehouse"], "wh1");
+        // Non-warehouse kinds pass through untouched.
+        let pg = serde_json::json!({"host": "db", "user": "u"});
+        assert_eq!(redact_catalog_config("postgresql", pg.clone()), pg);
     }
 }
