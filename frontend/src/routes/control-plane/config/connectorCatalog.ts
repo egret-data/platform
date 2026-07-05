@@ -31,6 +31,26 @@ const DELTA_LAKE_DOCS =
   "https://trino.io/docs/current/connector/delta-lake.html";
 const KAFKA_DOCS = "https://trino.io/docs/current/connector/kafka.html";
 const MONGODB_DOCS = "https://trino.io/docs/current/connector/mongodb.html";
+const ORACLE_DOCS = "https://trino.io/docs/current/connector/oracle.html";
+const REDSHIFT_DOCS = "https://trino.io/docs/current/connector/redshift.html";
+const MARIADB_DOCS = "https://trino.io/docs/current/connector/mariadb.html";
+const SINGLESTORE_DOCS =
+  "https://trino.io/docs/current/connector/singlestore.html";
+const SNOWFLAKE_DOCS = "https://trino.io/docs/current/connector/snowflake.html";
+const DRUID_DOCS = "https://trino.io/docs/current/connector/druid.html";
+const IGNITE_DOCS = "https://trino.io/docs/current/connector/ignite.html";
+const PHOENIX5_DOCS = "https://trino.io/docs/current/connector/phoenix5.html";
+const CASSANDRA_DOCS =
+  "https://trino.io/docs/current/connector/cassandra.html";
+const ELASTICSEARCH_DOCS =
+  "https://trino.io/docs/current/connector/elasticsearch.html";
+const REDIS_DOCS = "https://trino.io/docs/current/connector/redis.html";
+const PROMETHEUS_DOCS =
+  "https://trino.io/docs/current/connector/prometheus.html";
+const MEMORY_DOCS = "https://trino.io/docs/current/connector/memory.html";
+const BIGQUERY_DOCS = "https://trino.io/docs/current/connector/bigquery.html";
+const GOOGLESHEETS_DOCS =
+  "https://trino.io/docs/current/connector/googlesheets.html";
 
 export const connectors: Connector[] = [
   {
@@ -497,6 +517,468 @@ export const connectors: Connector[] = [
         default: "_schema",
         help: "Name of the collection storing explicit table schema definitions.",
         docsUrl: MONGODB_DOCS,
+      },
+    ],
+  },
+  {
+    name: "hudi",
+    label: "Hudi",
+    props: [],
+  },
+  {
+    name: "oracle",
+    label: "Oracle",
+    props: [
+      {
+        key: "connection-url",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "JDBC connection URL for the Oracle server.",
+        docsUrl: ORACLE_DOCS,
+      },
+      {
+        key: "connection-user",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Username to connect to Oracle with.",
+        docsUrl: ORACLE_DOCS,
+      },
+      {
+        key: "connection-password",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Password to connect to Oracle with.",
+        docsUrl: ORACLE_DOCS,
+      },
+      {
+        key: "case-insensitive-name-matching",
+        group: "Mapping",
+        file: "config",
+        type: "boolean",
+        default: "false",
+        help: "Match schema and table names case-insensitively.",
+        docsUrl: ORACLE_DOCS,
+      },
+    ],
+  },
+  {
+    name: "redshift",
+    label: "Redshift",
+    props: [
+      {
+        key: "connection-url",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "JDBC connection URL for the Redshift cluster.",
+        docsUrl: REDSHIFT_DOCS,
+      },
+      {
+        key: "connection-user",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Username to connect to Redshift with.",
+        docsUrl: REDSHIFT_DOCS,
+      },
+      {
+        key: "connection-password",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Password to connect to Redshift with.",
+        docsUrl: REDSHIFT_DOCS,
+      },
+      {
+        key: "case-insensitive-name-matching",
+        group: "Mapping",
+        file: "config",
+        type: "boolean",
+        default: "false",
+        help: "Match schema and table names case-insensitively.",
+        docsUrl: REDSHIFT_DOCS,
+      },
+    ],
+  },
+  {
+    name: "mariadb",
+    label: "MariaDB",
+    props: [
+      {
+        key: "connection-url",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "JDBC connection URL for the MariaDB server.",
+        docsUrl: MARIADB_DOCS,
+      },
+      {
+        key: "connection-user",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Username to connect to MariaDB with.",
+        docsUrl: MARIADB_DOCS,
+      },
+      {
+        key: "connection-password",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Password to connect to MariaDB with.",
+        docsUrl: MARIADB_DOCS,
+      },
+      {
+        key: "case-insensitive-name-matching",
+        group: "Mapping",
+        file: "config",
+        type: "boolean",
+        default: "false",
+        help: "Match schema and table names case-insensitively.",
+        docsUrl: MARIADB_DOCS,
+      },
+    ],
+  },
+  {
+    name: "singlestore",
+    label: "SingleStore",
+    props: [
+      {
+        key: "connection-url",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "JDBC connection URL for the SingleStore server.",
+        docsUrl: SINGLESTORE_DOCS,
+      },
+      {
+        key: "connection-user",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Username to connect to SingleStore with.",
+        docsUrl: SINGLESTORE_DOCS,
+      },
+      {
+        key: "connection-password",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Password to connect to SingleStore with.",
+        docsUrl: SINGLESTORE_DOCS,
+      },
+      {
+        key: "case-insensitive-name-matching",
+        group: "Mapping",
+        file: "config",
+        type: "boolean",
+        default: "false",
+        help: "Match schema and table names case-insensitively.",
+        docsUrl: SINGLESTORE_DOCS,
+      },
+    ],
+  },
+  {
+    name: "snowflake",
+    label: "Snowflake",
+    props: [
+      {
+        key: "connection-url",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "JDBC connection URL for the Snowflake account.",
+        docsUrl: SNOWFLAKE_DOCS,
+      },
+      {
+        key: "connection-user",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Username to connect to Snowflake with.",
+        docsUrl: SNOWFLAKE_DOCS,
+      },
+      {
+        key: "connection-password",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Password to connect to Snowflake with.",
+        docsUrl: SNOWFLAKE_DOCS,
+      },
+    ],
+  },
+  {
+    name: "druid",
+    label: "Druid",
+    props: [
+      {
+        key: "connection-url",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "JDBC connection URL for the Druid broker.",
+        docsUrl: DRUID_DOCS,
+      },
+      {
+        key: "connection-user",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Username to connect to Druid with.",
+        docsUrl: DRUID_DOCS,
+      },
+      {
+        key: "connection-password",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Password to connect to Druid with.",
+        docsUrl: DRUID_DOCS,
+      },
+    ],
+  },
+  {
+    name: "ignite",
+    label: "Ignite",
+    props: [
+      {
+        key: "connection-url",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "JDBC connection URL for the Ignite cluster.",
+        docsUrl: IGNITE_DOCS,
+      },
+      {
+        key: "connection-user",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Username to connect to Ignite with.",
+        docsUrl: IGNITE_DOCS,
+      },
+      {
+        key: "connection-password",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Password to connect to Ignite with.",
+        docsUrl: IGNITE_DOCS,
+      },
+    ],
+  },
+  {
+    name: "phoenix5",
+    label: "Phoenix",
+    props: [
+      {
+        key: "connection-url",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "JDBC connection URL for the Phoenix cluster (zookeeper quorum).",
+        docsUrl: PHOENIX5_DOCS,
+      },
+    ],
+  },
+  {
+    name: "cassandra",
+    label: "Cassandra",
+    props: [
+      {
+        key: "cassandra.contact-points",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Comma-separated list of Cassandra contact-point hostnames.",
+        docsUrl: CASSANDRA_DOCS,
+      },
+      {
+        key: "cassandra.load-policy.dc-aware.local-dc",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Name of the local Cassandra datacenter to prefer for query routing.",
+        docsUrl: CASSANDRA_DOCS,
+      },
+    ],
+  },
+  {
+    name: "elasticsearch",
+    label: "Elasticsearch",
+    props: [
+      {
+        key: "elasticsearch.host",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Hostname of the Elasticsearch cluster to connect to.",
+        docsUrl: ELASTICSEARCH_DOCS,
+      },
+      {
+        key: "elasticsearch.port",
+        group: "Connection",
+        file: "config",
+        type: "number",
+        default: "9200",
+        help: "Port of the Elasticsearch cluster to connect to.",
+        docsUrl: ELASTICSEARCH_DOCS,
+      },
+      {
+        key: "elasticsearch.default-schema-name",
+        group: "Mapping",
+        file: "config",
+        type: "string",
+        default: "default",
+        help: "Schema name under which Elasticsearch indexes are exposed as tables.",
+        docsUrl: ELASTICSEARCH_DOCS,
+      },
+    ],
+  },
+  {
+    name: "opensearch",
+    label: "OpenSearch",
+    props: [],
+  },
+  {
+    name: "redis",
+    label: "Redis",
+    props: [
+      {
+        key: "redis.table-names",
+        group: "Tables",
+        file: "config",
+        type: "string",
+        help: "Comma-separated list of Redis key groups exposed as tables.",
+        docsUrl: REDIS_DOCS,
+      },
+      {
+        key: "redis.nodes",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Comma-separated list of Redis node hostname:port pairs.",
+        docsUrl: REDIS_DOCS,
+      },
+    ],
+  },
+  {
+    name: "kinesis",
+    label: "Kinesis",
+    props: [],
+  },
+  {
+    name: "prometheus",
+    label: "Prometheus",
+    props: [
+      {
+        key: "prometheus.uri",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Base URI of the Prometheus server to query.",
+        docsUrl: PROMETHEUS_DOCS,
+      },
+      {
+        key: "prometheus.query.chunk.size.duration",
+        group: "Query",
+        file: "config",
+        type: "duration",
+        default: "1d",
+        help: "Time-range chunk size used when splitting up Prometheus queries.",
+        docsUrl: PROMETHEUS_DOCS,
+      },
+      {
+        key: "prometheus.max.query.range.duration",
+        group: "Query",
+        file: "config",
+        type: "duration",
+        default: "21d",
+        help: "Maximum time range permitted for a single Prometheus query.",
+        docsUrl: PROMETHEUS_DOCS,
+      },
+    ],
+  },
+  {
+    name: "tpch",
+    label: "TPC-H",
+    props: [],
+  },
+  {
+    name: "tpcds",
+    label: "TPC-DS",
+    props: [],
+  },
+  {
+    name: "blackhole",
+    label: "Blackhole",
+    props: [],
+  },
+  {
+    name: "memory",
+    label: "Memory",
+    props: [
+      {
+        key: "memory.max-data-per-node",
+        group: "Storage",
+        file: "config",
+        type: "size",
+        default: "128MB",
+        help: "Maximum amount of data the memory connector may hold per worker node.",
+        docsUrl: MEMORY_DOCS,
+      },
+    ],
+  },
+  {
+    name: "jmx",
+    label: "JMX",
+    props: [],
+  },
+  {
+    name: "bigquery",
+    label: "BigQuery",
+    props: [
+      {
+        key: "bigquery.project-id",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Google Cloud project ID that hosts the BigQuery data to query.",
+        docsUrl: BIGQUERY_DOCS,
+      },
+      {
+        key: "bigquery.credentials-key",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Base64-encoded Google Cloud service account credentials.",
+        docsUrl: BIGQUERY_DOCS,
+      },
+    ],
+  },
+  {
+    name: "googlesheets",
+    label: "Google Sheets",
+    props: [
+      {
+        key: "gsheets.credentials-path",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Path to the Google API service account JSON key file.",
+        docsUrl: GOOGLESHEETS_DOCS,
+      },
+      {
+        key: "gsheets.metadata-sheet-id",
+        group: "Connection",
+        file: "config",
+        type: "string",
+        help: "Sheet ID of the metadata sheet mapping table names to sheet URLs.",
+        docsUrl: GOOGLESHEETS_DOCS,
       },
     ],
   },
