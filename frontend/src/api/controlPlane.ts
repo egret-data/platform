@@ -847,6 +847,11 @@ export interface EngineCatalog {
   name: string;
   kind: string;
   isPrimary: boolean;
+  secretRef?: string | null;
+}
+
+export interface EngineCatalogDetail extends EngineCatalog {
+  config: Record<string, unknown>;
 }
 
 export interface AddCatalogInput {
@@ -870,4 +875,20 @@ export function addEngineCatalog(id: string, input: AddCatalogInput): Promise<En
 
 export async function deleteEngineCatalog(id: string, cid: string): Promise<void> {
   await apiFetch(`/control-plane/engines/${id}/catalogs/${cid}`, { method: "DELETE" });
+}
+
+export function getEngineCatalog(id: string, cid: string): Promise<EngineCatalogDetail> {
+  return apiJson<EngineCatalogDetail>(`/control-plane/engines/${id}/catalogs/${cid}`);
+}
+
+export function updateEngineCatalog(
+  id: string,
+  cid: string,
+  input: { config: Record<string, unknown>; secretRef?: string | null },
+): Promise<EngineCatalog> {
+  return apiJson<EngineCatalog>(`/control-plane/engines/${id}/catalogs/${cid}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
 }
