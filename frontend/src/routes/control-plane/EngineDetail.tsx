@@ -62,6 +62,7 @@ import {
   type EngineConfigForm,
 } from "./useEngineConfigForm";
 import { connectorByName, connectors } from "./config/connectorCatalog";
+import { CATALOG_KINDS } from "./config/catalogKinds";
 import { KeyedPropertyList } from "./config/KeyedPropertyList";
 import { ImageSection } from "./config/ImageSection";
 import { ServerSection } from "./config/ServerSection";
@@ -672,14 +673,6 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
     </Card>
   );
 }
-
-const CATALOG_KINDS: { value: string; label: string }[] = [
-  { value: "egret-warehouse", label: "Egret warehouse" },
-  { value: "postgresql", label: "PostgreSQL" },
-  { value: "tpch", label: "TPC-H" },
-  { value: "tpcds", label: "TPC-DS" },
-  { value: "generic", label: "Generic connector" },
-];
 
 function AddCatalogDialog({
   engineId,
