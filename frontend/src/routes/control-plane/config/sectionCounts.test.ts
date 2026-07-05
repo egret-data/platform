@@ -1,7 +1,7 @@
 import { sectionCounts } from "../useEngineConfigForm";
 import type { TrinoConfig } from "@/api/controlPlane";
 
-test("counts non-default field-groups per section (5 keys)", () => {
+test("counts non-default field-groups per section (7 keys)", () => {
   const cfg: TrinoConfig = {
     coordinator: { replicas: 2 },
     worker: {},
@@ -9,38 +9,43 @@ test("counts non-default field-groups per section (5 keys)", () => {
   };
   const counts = sectionCounts(cfg);
   expect(Object.keys(counts).sort()).toEqual([
-    "properties",
-    "resources",
-    "scaling",
-    "scheduling",
+    "autoscaling",
+    "coordinator",
+    "image",
+    "pod",
+    "server",
+    "worker",
     "workload",
   ]);
-  // coordinator replicas → resources; autoscaling → scaling.
-  expect(counts.resources).toBe(1);
-  expect(counts.scaling).toBe(1);
-  expect(counts.properties).toBe(0);
+  // coordinator replicas → coordinator; autoscaling → autoscaling.
+  expect(counts.coordinator).toBe(1);
+  expect(counts.autoscaling).toBe(1);
+  expect(counts.image).toBe(0);
+  expect(counts.server).toBe(0);
+  expect(counts.worker).toBe(0);
   expect(counts.workload).toBe(0);
-  expect(counts.scheduling).toBe(0);
+  expect(counts.pod).toBe(0);
 });
 
-test("per-role sizing counts under resources, scheduling fields under scheduling", () => {
+test("per-role sizing and placement fields both count under that role's own section", () => {
   const cfg: TrinoConfig = {
     coordinator: { nodeSelector: { disk: "ssd" }, resources: { cpuLimit: "4" } },
     worker: {},
   };
   const counts = sectionCounts(cfg);
-  // resources counts the coordinator sizing; nodeSelector counts under scheduling.
-  expect(counts.resources).toBe(1);
-  expect(counts.scheduling).toBe(1);
+  // Coordinator sizing (resources) and placement (nodeSelector) both count
+  // under the coordinator's own section now.
+  expect(counts.coordinator).toBe(2);
+  expect(counts.worker).toBe(0);
 });
 
-test("logLevel INFO is default and not counted; other levels count under properties", () => {
+test("logLevel INFO is default and not counted; other levels count under server", () => {
   const base: TrinoConfig = { coordinator: {}, worker: {} };
-  expect(sectionCounts({ ...base, logLevel: "INFO" }).properties).toBe(0);
-  expect(sectionCounts({ ...base, logLevel: "DEBUG" }).properties).toBe(1);
+  expect(sectionCounts({ ...base, logLevel: "INFO" }).server).toBe(0);
+  expect(sectionCounts({ ...base, logLevel: "DEBUG" }).server).toBe(1);
 });
 
-test("raw property maps + queryMaxMemory + eventListener count under properties", () => {
+test("raw property maps + queryMaxMemory + eventListener count under server", () => {
   const cfg: TrinoConfig = {
     coordinator: {},
     worker: {},
@@ -52,5 +57,15 @@ test("raw property maps + queryMaxMemory + eventListener count under properties"
   };
   const counts = sectionCounts(cfg);
   // 2 config + 1 node + 1 log map keys + queryMaxMemory + eventListener = 6.
-  expect(counts.properties).toBe(6);
+  expect(counts.server).toBe(6);
+});
+
+it("counts image fields under the image section", () => {
+  const counts = sectionCounts({
+    coordinator: {},
+    worker: {},
+    image: "ghcr.io/acme/trino:471",
+    imagePullPolicy: "Always",
+  } as unknown as TrinoConfig);
+  expect(counts.image).toBe(2);
 });

@@ -687,6 +687,7 @@ export interface TrinoConfig {
   };
   // Cluster-wide pod & scheduling (Phase 1.5.3): pod-shape/placement knobs
   // applied to both coordinator & worker Deployments.
+  image?: string;
   imagePullSecrets?: string[];
   imagePullPolicy?: "Always" | "IfNotPresent" | "Never";
   serviceAccount?: string;

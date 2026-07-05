@@ -568,8 +568,6 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
   // Pod-level (cluster-wide) scheduling field-groups.
   const podCount = [
     cfg.serviceAccount,
-    cfg.imagePullSecrets,
-    cfg.imagePullPolicy,
     cfg.podSecurityContext,
     cfg.containerSecurityContext,
     cfg.deploymentStrategy,
@@ -588,22 +586,19 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
   ].filter(present).length;
 
   return {
-    properties: propertiesCount,
-    resources:
-      roleCoreCount(coordinator) +
+    image:
+      (present(cfg.image) ? 1 : 0) +
+      (present(cfg.imagePullPolicy) ? 1 : 0) +
+      ((cfg.imagePullSecrets?.length ?? 0) > 0 ? 1 : 0),
+    server: propertiesCount + (present(cfg.faultTolerant) ? 1 : 0) + knownSectionCount("reliability"),
+    coordinator: roleCoreCount(coordinator) + rolePlacementCount(coordinator),
+    worker:
       roleCoreCount(worker) +
-      (present(worker?.gracefulShutdown) ? 1 : 0) +
-      (present(cfg.env) ? 1 : 0),
-    workload:
-      [cfg.resourceGroups, cfg.sessionProperties, cfg.faultTolerant].filter(
-        present,
-      ).length + knownSectionCount("reliability"),
-    scheduling:
-      podCount +
-      rolePlacementCount(coordinator) +
       rolePlacementCount(worker) +
-      containersMountsCount,
-    scaling: [cfg.autoscaling].filter(present).length,
+      (present(worker?.gracefulShutdown) ? 1 : 0),
+    workload: [cfg.resourceGroups, cfg.sessionProperties].filter(present).length,
+    pod: podCount + (present(cfg.env) ? 1 : 0) + containersMountsCount,
+    autoscaling: [cfg.autoscaling].filter(present).length,
   };
 }
 
@@ -674,6 +669,8 @@ export interface EngineConfigForm {
   // pod & scheduling (cluster-wide)
   serviceAccount: string;
   setServiceAccount: (v: string) => void;
+  image: string;
+  setImage: (v: string) => void;
   imagePullSecrets: string[];
   setImagePullSecrets: Dispatch<SetStateAction<string[]>>;
   imagePullPolicy: string;
@@ -809,6 +806,7 @@ export function useEngineConfigForm(
 
   // Pod & scheduling (cluster-wide).
   const [serviceAccount, setServiceAccount] = useState(tc?.serviceAccount ?? "");
+  const [image, setImage] = useState(tc?.image ?? "");
   const [imagePullSecrets, setImagePullSecrets] = useState<string[]>(
     tc?.imagePullSecrets ? [...tc.imagePullSecrets] : [],
   );
@@ -913,6 +911,7 @@ export function useEngineConfigForm(
     setServiceAccount(next?.serviceAccount ?? "");
     setImagePullSecrets(next?.imagePullSecrets ? [...next.imagePullSecrets] : []);
     setImagePullPolicy(next?.imagePullPolicy ?? "");
+    setImage(next?.image ?? "");
     setPodSecurityContext(
       next?.podSecurityContext
         ? { ...next.podSecurityContext }
@@ -988,6 +987,7 @@ export function useEngineConfigForm(
     ingressTlsSecret,
     ingressAnnotations,
     serviceAccount,
+    image,
     imagePullSecrets,
     imagePullPolicy,
     podSecurityContext,
@@ -1096,6 +1096,7 @@ export function useEngineConfigForm(
     // Pod & scheduling (cluster-wide) — same omit-empty style: skip empty
     // arrays/objects/blanks so an untouched engine's payload is unchanged.
     if (serviceAccount.trim()) trinoConfig.serviceAccount = serviceAccount.trim();
+    if (image.trim()) trinoConfig.image = image.trim();
     const pullSecrets = imagePullSecrets.map((s) => s.trim()).filter(Boolean);
     if (pullSecrets.length) trinoConfig.imagePullSecrets = pullSecrets;
     if (imagePullPolicy)
@@ -1190,6 +1191,7 @@ export function useEngineConfigForm(
     ingressTlsSecret,
     ingressAnnotations,
     serviceAccount,
+    image,
     imagePullSecrets,
     imagePullPolicy,
     podSecurityContext,
@@ -1314,6 +1316,8 @@ export function useEngineConfigForm(
     setIngressAnnotations,
     serviceAccount,
     setServiceAccount,
+    image,
+    setImage,
     imagePullSecrets,
     setImagePullSecrets,
     imagePullPolicy,
