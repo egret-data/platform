@@ -65,13 +65,13 @@ import {
   useEngineConfigForm,
   type EngineConfigForm,
 } from "./useEngineConfigForm";
-import { ConfigSection } from "./config/ConfigSection";
-import { FieldLabel } from "./config/FieldLabel";
-import { QuantityInput } from "./config/QuantityInput";
-import { PropertiesSection } from "./config/PropertiesSection";
-import { ResourcesSection } from "./config/ResourcesSection";
+import { ImageSection } from "./config/ImageSection";
+import { ServerSection } from "./config/ServerSection";
+import { CoordinatorSection } from "./config/CoordinatorSection";
+import { WorkerSection } from "./config/WorkerSection";
 import { WorkloadSection } from "./config/WorkloadSection";
-import { SchedulingSection } from "./config/SchedulingSection";
+import { PodSection } from "./config/PodSection";
+import { ContainersMountsSection } from "./config/ContainersMountsSection";
 import { ValidityProvider } from "./config/validityRegistry";
 import { ReviewChangesDialog } from "./config/ReviewChangesDialog";
 import { EngineAutoscaling } from "./EngineAutoscaling";
@@ -197,7 +197,7 @@ function EngineTabs({
       </TabsContent>
 
       <TabsContent value="configuration">
-        <ConfigurationTab cfg={cfg} />
+        <ConfigurationTab cfg={cfg} imageVersion={engine.spec.imageVersion} />
       </TabsContent>
 
       <TabsContent value="security">
@@ -323,81 +323,26 @@ function StatusCard({ status }: { status: EngineStatus }) {
 // Per-role config form model + serialization lives in `useEngineConfigForm.ts`;
 // the per-role editor UI lives in `EngineRoleConfig.tsx`.
 
-// Configuration left-nav sections — a flat 5-item list. Each key matches a
-// branch in the content pane below.
+// Configuration left-nav sections — a flat 7-item list mirroring the Trino
+// chart's top-level blocks. Each key matches a branch in the content pane
+// below.
 const NAV_ITEMS: { key: string; label: string }[] = [
-  { key: "properties", label: "Properties" },
-  { key: "resources", label: "Resources" },
+  { key: "image", label: "Image" },
+  { key: "server", label: "Server" },
+  { key: "coordinator", label: "Coordinator" },
+  { key: "worker", label: "Worker" },
   { key: "workload", label: "Workload" },
-  { key: "scheduling", label: "Scheduling" },
-  { key: "scaling", label: "Scaling" },
+  { key: "pod", label: "Pod & Containers" },
+  { key: "autoscaling", label: "Autoscaling" },
 ];
 
-const LOG_LEVELS = ["INFO", "DEBUG", "WARN", "ERROR"] as const;
-
-/**
- * The "Common" structured properties that live alongside the raw properties
- * list but are NOT part of the config/node/log maps: the query memory ceiling,
- * the server log level, and the raw `event-listener.properties`. Rendered above
- * `PropertiesSection` under the Properties nav item.
- */
-function CommonPropertiesSection({ cfg }: { cfg: EngineConfigForm }) {
-  const {
-    queryMaxMemory,
-    setQueryMaxMemory,
-    logLevel,
-    setLogLevel,
-    eventListener,
-    setEventListener,
-  } = cfg;
-  return (
-    <ConfigSection
-      title="Common"
-      description="Cluster-wide query memory ceiling, server log level, and event-listener.properties."
-      docsUrl="https://trino.io/docs/current/admin/properties-resource-management.html"
-    >
-      <div className="grid grid-cols-2 gap-4">
-        <QuantityInput
-          fieldKey="queryMaxMemory"
-          label="Query max memory"
-          value={queryMaxMemory}
-          onChange={setQueryMaxMemory}
-          placeholder="4GB"
-        />
-        <div className="space-y-1.5">
-          <FieldLabel
-            fieldKey="logLevel"
-            label="Log level"
-            htmlFor="ced-log-level"
-          />
-          <Select value={logLevel} onValueChange={setLogLevel}>
-            <SelectTrigger id="ced-log-level" className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {LOG_LEVELS.map((lvl) => (
-                <SelectItem key={lvl} value={lvl}>
-                  {lvl}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-      <div className="space-y-1.5">
-        <Label>Event listener</Label>
-        <KeyValueEditor
-          rows={eventListener}
-          onChange={setEventListener}
-          keyPlaceholder="event-listener.name"
-          valuePlaceholder="http"
-        />
-      </div>
-    </ConfigSection>
-  );
-}
-
-function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
+function ConfigurationTab({
+  cfg,
+  imageVersion,
+}: {
+  cfg: EngineConfigForm;
+  imageVersion: string;
+}) {
   const {
     autoscaleMode,
     setAutoscaleMode,
@@ -414,7 +359,7 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
   const [rawInvalid, setRawInvalid] = useState(false);
 
   // Active left-nav section.
-  const [section, setSection] = useState("properties");
+  const [section, setSection] = useState("image");
 
   // Non-default field count per nav item (drives the badges).
   const countFor = (key: string): number => sectionCounts[key] ?? 0;
@@ -459,20 +404,53 @@ function ConfigurationTab({ cfg }: { cfg: EngineConfigForm }) {
 
             <ValidityProvider onAnyInvalidChange={setRawInvalid}>
               <div className="min-w-0 flex-1">
-                {section === "properties" && (
+                {section === "image" && (
+                  <ImageSection
+                    cfg={cfg}
+                    defaultImage={`trinodb/trino:${imageVersion}`}
+                  />
+                )}
+                {section === "server" && <ServerSection cfg={cfg} />}
+                {section === "coordinator" && <CoordinatorSection cfg={cfg} />}
+                {section === "worker" && <WorkerSection cfg={cfg} />}
+                {section === "workload" && <WorkloadSection cfg={cfg} />}
+                {section === "pod" && (
                   <div className="space-y-5">
-                    <CommonPropertiesSection cfg={cfg} />
-                    <PropertiesSection cfg={cfg} />
+                    <PodSection
+                      serviceAccount={cfg.serviceAccount}
+                      setServiceAccount={cfg.setServiceAccount}
+                      podSecurityContext={cfg.podSecurityContext}
+                      setPodSecurityContext={cfg.setPodSecurityContext}
+                      containerSecurityContext={cfg.containerSecurityContext}
+                      setContainerSecurityContext={cfg.setContainerSecurityContext}
+                      deploymentStrategy={cfg.deploymentStrategy}
+                      setDeploymentStrategy={cfg.setDeploymentStrategy}
+                      deploymentAnnotations={cfg.deploymentAnnotations}
+                      setDeploymentAnnotations={cfg.setDeploymentAnnotations}
+                      revisionHistoryLimit={cfg.revisionHistoryLimit}
+                      setRevisionHistoryLimit={cfg.setRevisionHistoryLimit}
+                      progressDeadlineSeconds={cfg.progressDeadlineSeconds}
+                      setProgressDeadlineSeconds={cfg.setProgressDeadlineSeconds}
+                      shareProcessNamespace={cfg.shareProcessNamespace}
+                      setShareProcessNamespace={cfg.setShareProcessNamespace}
+                      env={cfg.env}
+                      setEnv={cfg.setEnv}
+                    />
+                    <ContainersMountsSection
+                      initContainers={cfg.initContainers}
+                      setInitContainers={cfg.setInitContainers}
+                      sidecarContainers={cfg.sidecarContainers}
+                      setSidecarContainers={cfg.setSidecarContainers}
+                      envFrom={cfg.envFrom}
+                      setEnvFrom={cfg.setEnvFrom}
+                      configMounts={cfg.configMounts}
+                      setConfigMounts={cfg.setConfigMounts}
+                      secretMounts={cfg.secretMounts}
+                      setSecretMounts={cfg.setSecretMounts}
+                    />
                   </div>
                 )}
-
-                {section === "resources" && <ResourcesSection cfg={cfg} />}
-
-                {section === "workload" && <WorkloadSection cfg={cfg} />}
-
-                {section === "scheduling" && <SchedulingSection cfg={cfg} />}
-
-                {section === "scaling" && (
+                {section === "autoscaling" && (
                   <EngineAutoscaling
                     mode={autoscaleMode}
                     setMode={setAutoscaleMode}
