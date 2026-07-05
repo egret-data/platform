@@ -1,22 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Loader2, Plus, Server, Trash2 } from "lucide-react";
 
 import {
-  type AddCatalogInput,
   type Engine,
   type EngineCatalog,
+  type EngineCatalogDetail,
   type EngineStatus,
-  type Secret,
-  type Warehouse,
-  addEngineCatalog,
   deleteEngine,
   deleteEngineCatalog,
   getEngine,
+  getEngineCatalog,
   listEngineCatalogs,
-  listSecrets,
-  listWarehouses,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -30,23 +26,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Table,
@@ -56,14 +35,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { type Kv, kvToRecord } from "./EngineResourceGroups";
+import { CatalogForm } from "./CatalogForm";
 import {
   useEngineConfigForm,
   type EngineConfigForm,
 } from "./useEngineConfigForm";
-import { connectorByName, connectors } from "./config/connectorCatalog";
-import { CATALOG_KINDS } from "./config/catalogKinds";
-import { KeyedPropertyList } from "./config/KeyedPropertyList";
 import { ImageSection } from "./config/ImageSection";
 import { ServerSection } from "./config/ServerSection";
 import { CoordinatorSection } from "./config/CoordinatorSection";
@@ -544,6 +520,14 @@ function SecurityTab({ cfg }: { cfg: EngineConfigForm }) {
 }
 
 // ── Catalogs ─────────────────────────────────────────────────────────────────
+//
+// Config-style master-detail (mirrors ConfigurationTab's left-nav layout):
+// the left nav lists catalogs + a sentinel "add" entry; the right pane hosts
+// either the add form or an edit form for whichever catalog is selected.
+
+/** Sentinel `selected` value that shows the add-catalog form instead of an
+ * existing catalog's detail. */
+const ADD_CATALOG = "add";
 
 function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
   const queryClient = useQueryClient();
@@ -552,41 +536,70 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
     queryFn: () => listEngineCatalogs(engine.id),
     retry: false,
   });
+  const rows = catalogs.data ?? [];
 
-  const [addOpen, setAddOpen] = useState(false);
-  const [removeTarget, setRemoveTarget] = useState<EngineCatalog | null>(null);
+  const [selected, setSelected] = useState<string>(ADD_CATALOG);
+  const [removeOpen, setRemoveOpen] = useState(false);
 
-  const invalidate = () =>
+  // Tracks whether we've applied the initial "default to the first catalog"
+  // selection yet, and the previous set of catalog ids (to detect a
+  // newly-added catalog after an add-triggered refetch).
+  const didInitRef = useRef(false);
+  const prevIdsRef = useRef<Set<string> | null>(null);
+
+  useEffect(() => {
+    if (!catalogs.data) return;
+    const ids = new Set(catalogs.data.map((c) => c.id));
+
+    if (!didInitRef.current) {
+      didInitRef.current = true;
+      setSelected(catalogs.data.length > 0 ? catalogs.data[0].id : ADD_CATALOG);
+    } else if (selected === ADD_CATALOG) {
+      // After adding, prefer selecting the catalog that just appeared.
+      const added = prevIdsRef.current
+        ? catalogs.data.find((c) => !prevIdsRef.current!.has(c.id))
+        : undefined;
+      if (added) setSelected(added.id);
+    } else if (!ids.has(selected)) {
+      // The selected catalog was removed (or is stale) — fall back.
+      setSelected(catalogs.data[0]?.id ?? ADD_CATALOG);
+    }
+
+    prevIdsRef.current = ids;
+  }, [catalogs.data, selected]);
+
+  const invalidateList = () =>
     queryClient.invalidateQueries({
       queryKey: ["cp", "engine-catalogs", engine.id],
     });
+  const invalidateDetail = () =>
+    queryClient.invalidateQueries({
+      queryKey: ["cp", "engine-catalog", engine.id, selected],
+    });
+
+  const detail = useQuery<EngineCatalogDetail, ApiError>({
+    queryKey: ["cp", "engine-catalog", engine.id, selected],
+    queryFn: () => getEngineCatalog(engine.id, selected),
+    enabled: selected !== ADD_CATALOG,
+    retry: false,
+  });
 
   const removeMutation = useMutation<void, ApiError, string>({
     mutationFn: (cid) => deleteEngineCatalog(engine.id, cid),
     onSuccess: () => {
-      invalidate();
-      setRemoveTarget(null);
+      invalidateList();
+      setRemoveOpen(false);
     },
   });
-
-  const rows = catalogs.data ?? [];
 
   return (
     <Card>
       <CardHeader>
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1.5">
-            <CardTitle className="text-lg">Catalogs</CardTitle>
-            <CardDescription>
-              Data sources this engine can query. Adding or removing a catalog
-              rolls the pods to reload.
-            </CardDescription>
-          </div>
-          <Button onClick={() => setAddOpen(true)}>
-            <Plus className="h-4 w-4" />
-            Add catalog
-          </Button>
-        </div>
+        <CardTitle className="text-lg">Catalogs</CardTitle>
+        <CardDescription>
+          Data sources this engine can query. Adding, editing, or removing a
+          catalog rolls the pods to reload.
+        </CardDescription>
       </CardHeader>
       <CardContent>
         {catalogs.isError ? (
@@ -595,462 +608,116 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
               {catalogs.error?.message ?? "Failed to load catalogs."}
             </AlertDescription>
           </Alert>
+        ) : !catalogs.data ? (
+          <p className="py-10 text-center text-sm text-muted-foreground">
+            Loading…
+          </p>
         ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead>Kind</TableHead>
-                <TableHead className="text-right">
-                  <span className="sr-only">Actions</span>
-                </TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.length === 0 ? (
-                <TableRow className="hover:bg-transparent">
-                  <TableCell
-                    colSpan={3}
-                    className="py-10 text-center text-muted-foreground"
+          <div className="flex flex-col gap-4 md:flex-row">
+            <nav className="shrink-0 space-y-1 md:w-56">
+              {rows.map((cat) => {
+                const active = selected === cat.id;
+                return (
+                  <button
+                    key={cat.id}
+                    type="button"
+                    onClick={() => setSelected(cat.id)}
+                    className={`flex w-full flex-col gap-0.5 rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-muted ${
+                      active ? "bg-muted font-medium" : "text-muted-foreground"
+                    }`}
                   >
-                    {catalogs.isLoading ? "Loading…" : "No catalogs yet."}
-                  </TableCell>
-                </TableRow>
+                    <span className="flex w-full items-center justify-between gap-2">
+                      <span className="truncate">{cat.name}</span>
+                      <span className="flex shrink-0 gap-1">
+                        {cat.isPrimary && (
+                          <Badge variant="secondary">primary</Badge>
+                        )}
+                        {cat.secretRef && (
+                          <Badge variant="secondary">secret</Badge>
+                        )}
+                      </span>
+                    </span>
+                    <span className="text-xs font-normal text-muted-foreground">
+                      {cat.kind}
+                    </span>
+                  </button>
+                );
+              })}
+
+              <div className="border-t pt-1">
+                <button
+                  type="button"
+                  onClick={() => setSelected(ADD_CATALOG)}
+                  className={`flex w-full items-center gap-1.5 rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-muted ${
+                    selected === ADD_CATALOG
+                      ? "bg-muted font-medium"
+                      : "text-muted-foreground"
+                  }`}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Add catalog
+                </button>
+              </div>
+            </nav>
+
+            <div className="min-w-0 flex-1">
+              {selected === ADD_CATALOG ? (
+                <CatalogForm
+                  mode="add"
+                  engineId={engine.id}
+                  onSubmitted={invalidateList}
+                />
+              ) : detail.isError ? (
+                <Alert variant="destructive">
+                  <AlertDescription>
+                    {detail.error?.message ?? "Failed to load catalog."}
+                  </AlertDescription>
+                </Alert>
+              ) : !detail.data ? (
+                <p className="text-sm text-muted-foreground">Loading…</p>
               ) : (
-                rows.map((cat) => (
-                  <TableRow key={cat.id}>
-                    <TableCell className="font-medium">
-                      {cat.name}
-                      {cat.isPrimary && (
-                        <Badge variant="secondary" className="ml-2">
-                          primary
-                        </Badge>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="secondary">{cat.kind}</Badge>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {!cat.isPrimary && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="text-muted-foreground"
-                          onClick={() => setRemoveTarget(cat)}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                          Remove
-                        </Button>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))
+                <div className="space-y-4">
+                  <CatalogForm
+                    key={selected}
+                    mode="edit"
+                    engineId={engine.id}
+                    initial={detail.data}
+                    onSubmitted={() => {
+                      invalidateList();
+                      invalidateDetail();
+                    }}
+                  />
+                  {!detail.data.isPrimary && (
+                    <div className="flex justify-end border-t pt-4">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-muted-foreground"
+                        onClick={() => setRemoveOpen(true)}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                        Remove
+                      </Button>
+                    </div>
+                  )}
+                </div>
               )}
-            </TableBody>
-          </Table>
+            </div>
+          </div>
         )}
       </CardContent>
 
-      <AddCatalogDialog
-        engineId={engine.id}
-        open={addOpen}
-        onOpenChange={setAddOpen}
-        onAdded={invalidate}
-      />
-
       <ConfirmDeleteDialog
-        open={removeTarget !== null}
-        onOpenChange={(next) => {
-          if (!next) setRemoveTarget(null);
-        }}
-        title={`Remove «${removeTarget?.name ?? ""}»?`}
+        open={removeOpen}
+        onOpenChange={setRemoveOpen}
+        title={`Remove «${detail.data?.name ?? ""}»?`}
         description="This catalog will be removed and the engine will roll to reload. This cannot be undone."
         confirmText="remove"
         onConfirm={() => {
-          if (removeTarget) removeMutation.mutate(removeTarget.id);
+          if (selected !== ADD_CATALOG) removeMutation.mutate(selected);
         }}
       />
     </Card>
-  );
-}
-
-function AddCatalogDialog({
-  engineId,
-  open,
-  onOpenChange,
-  onAdded,
-}: {
-  engineId: string;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onAdded: () => void;
-}) {
-  const warehouses = useQuery<Warehouse[], ApiError>({
-    queryKey: ["cp", "warehouses"],
-    queryFn: listWarehouses,
-    retry: false,
-    enabled: open,
-  });
-  const secrets = useQuery<Secret[], ApiError>({
-    queryKey: ["cp", "secrets"],
-    queryFn: listSecrets,
-    retry: false,
-    enabled: open,
-  });
-
-  const addMutation = useMutation<EngineCatalog, ApiError, AddCatalogInput>({
-    mutationFn: (input) => addEngineCatalog(engineId, input),
-    onSuccess: () => onAdded(),
-  });
-
-  const [name, setName] = useState("");
-  const [kind, setKind] = useState("egret-warehouse");
-  const [error, setError] = useState<string | null>(null);
-
-  // egret-warehouse
-  const [warehouseId, setWarehouseId] = useState("");
-  // postgresql
-  const [host, setHost] = useState("");
-  const [port, setPort] = useState("5432");
-  const [database, setDatabase] = useState("");
-  const [user, setUser] = useState("");
-  const [secretRef, setSecretRef] = useState("");
-  // generic
-  const [connectorName, setConnectorName] = useState("");
-  // True once the user explicitly picks "Other (custom)…", so the empty initial
-  // state shows the placeholder rather than pre-selecting the custom option.
-  const [customConnector, setCustomConnector] = useState(false);
-  const [genericProps, setGenericProps] = useState<Kv[]>([]);
-
-  useEffect(() => {
-    if (open) reset();
-  }, [open]);
-
-  function reset() {
-    setName("");
-    setKind("egret-warehouse");
-    setError(null);
-    setWarehouseId("");
-    setHost("");
-    setPort("5432");
-    setDatabase("");
-    setUser("");
-    setSecretRef("");
-    setConnectorName("");
-    setCustomConnector(false);
-    setGenericProps([]);
-    addMutation.reset();
-  }
-
-  function handleOpenChange(next: boolean) {
-    if (!next) reset();
-    onOpenChange(next);
-  }
-
-  // Only provisioned warehouses (embedded catalog id resolved) can back a catalog.
-  const provisioned = (warehouses.data ?? []).filter(
-    (w) => w.lakekeeperWarehouseId,
-  );
-
-  function isValid(): boolean {
-    if (!name.trim()) return false;
-    switch (kind) {
-      case "egret-warehouse":
-        return warehouseId !== "";
-      case "postgresql":
-        return (
-          host.trim() !== "" &&
-          database.trim() !== "" &&
-          user.trim() !== "" &&
-          secretRef !== ""
-        );
-      case "generic":
-        return connectorName.trim() !== "";
-      default:
-        return true; // tpch / tpcds only need a name
-    }
-  }
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-
-    let config: Record<string, unknown> = {};
-    let ref: string | undefined;
-    switch (kind) {
-      case "egret-warehouse":
-        config = { warehouseId };
-        break;
-      case "postgresql":
-        config = {
-          host: host.trim(),
-          port: Number(port),
-          database: database.trim(),
-          user: user.trim(),
-        };
-        ref = secretRef || undefined;
-        break;
-      case "generic":
-        config = {
-          connectorName: connectorName.trim(),
-          properties: kvToRecord(genericProps),
-        };
-        break;
-      default:
-        config = {};
-    }
-
-    const input: AddCatalogInput = {
-      name: name.trim(),
-      kind,
-      config,
-      secretRef: ref ?? null,
-    };
-
-    try {
-      await addMutation.mutateAsync(input);
-      handleOpenChange(false);
-    } catch (err) {
-      setError((err as ApiError).message ?? "Failed to add catalog.");
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent>
-        <form onSubmit={handleSubmit}>
-          <DialogHeader>
-            <DialogTitle>Add catalog</DialogTitle>
-            <DialogDescription>
-              Attach a data source to this engine. The engine rolls to load it.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="my-4 space-y-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="cat-name">Name</Label>
-              <Input
-                id="cat-name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. warehouse2"
-                required
-                autoFocus
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="cat-kind">Kind</Label>
-              <Select value={kind} onValueChange={setKind}>
-                <SelectTrigger id="cat-kind" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {CATALOG_KINDS.map((k) => (
-                    <SelectItem key={k.value} value={k.value}>
-                      {k.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            {kind === "egret-warehouse" && (
-              <div className="space-y-1.5">
-                <Label htmlFor="cat-warehouse">Warehouse</Label>
-                <Select value={warehouseId} onValueChange={setWarehouseId}>
-                  <SelectTrigger id="cat-warehouse" className="w-full">
-                    <SelectValue placeholder="Select a warehouse" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {provisioned.length === 0 ? (
-                      <SelectItem value="__none__" disabled>
-                        No provisioned warehouses
-                      </SelectItem>
-                    ) : (
-                      provisioned.map((w) => (
-                        <SelectItem key={w.id} value={w.id}>
-                          {w.name}
-                        </SelectItem>
-                      ))
-                    )}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-
-            {kind === "postgresql" && (
-              <>
-                <div className="grid grid-cols-3 gap-4">
-                  <div className="col-span-2 space-y-1.5">
-                    <Label htmlFor="cat-host">Host</Label>
-                    <Input
-                      id="cat-host"
-                      value={host}
-                      onChange={(e) => setHost(e.target.value)}
-                      placeholder="pg.internal"
-                      required
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="cat-port">Port</Label>
-                    <Input
-                      id="cat-port"
-                      type="number"
-                      value={port}
-                      onChange={(e) => setPort(e.target.value)}
-                      placeholder="5432"
-                      required
-                    />
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="cat-database">Database</Label>
-                    <Input
-                      id="cat-database"
-                      value={database}
-                      onChange={(e) => setDatabase(e.target.value)}
-                      placeholder="analytics"
-                      required
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="cat-user">User</Label>
-                    <Input
-                      id="cat-user"
-                      value={user}
-                      onChange={(e) => setUser(e.target.value)}
-                      placeholder="trino"
-                      required
-                    />
-                  </div>
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="cat-secret">Password secret</Label>
-                  <Select value={secretRef} onValueChange={setSecretRef}>
-                    <SelectTrigger id="cat-secret" className="w-full">
-                      <SelectValue placeholder="Select a secret" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {(secrets.data ?? []).length === 0 ? (
-                        <SelectItem value="__none__" disabled>
-                          No secrets
-                        </SelectItem>
-                      ) : (
-                        (secrets.data ?? []).map((s) => (
-                          <SelectItem key={s.id} value={s.id}>
-                            {s.name}
-                          </SelectItem>
-                        ))
-                      )}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </>
-            )}
-
-            {kind === "generic" && (
-              <>
-                <div className="space-y-1.5">
-                  <Label htmlFor="cat-connector">Connector</Label>
-                  <Select
-                    value={
-                      customConnector
-                        ? "__other__"
-                        : connectorByName[connectorName]
-                          ? connectorName
-                          : ""
-                    }
-                    onValueChange={(v) => {
-                      // Switching connector changes the applicable property set,
-                      // so clear any properties entered for the previous one.
-                      setGenericProps([]);
-                      if (v === "__other__") {
-                        setCustomConnector(true);
-                        setConnectorName("");
-                      } else {
-                        setCustomConnector(false);
-                        setConnectorName(v);
-                      }
-                    }}
-                  >
-                    <SelectTrigger id="cat-connector" className="w-full">
-                      <SelectValue placeholder="Select a connector" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {connectors.map((c) => (
-                        <SelectItem key={c.name} value={c.name}>
-                          {c.label}
-                        </SelectItem>
-                      ))}
-                      <SelectItem value="__other__">Other (custom)…</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  {customConnector && (
-                    <Input
-                      value={connectorName}
-                      onChange={(e) => setConnectorName(e.target.value)}
-                      placeholder="e.g. redshift"
-                    />
-                  )}
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Properties</Label>
-                  <KeyedPropertyList
-                    key={customConnector ? "__custom__" : connectorName || "__none__"}
-                    catalog={connectorByName[connectorName]?.props ?? []}
-                    catalogByKey={Object.fromEntries(
-                      (connectorByName[connectorName]?.props ?? []).map((p) => [
-                        p.key,
-                        p,
-                      ]),
-                    )}
-                    presentKeys={genericProps.map((kv) => kv.key)}
-                    getValue={(k) =>
-                      genericProps.find((kv) => kv.key === k)?.value ?? ""
-                    }
-                    setValue={(k, v) =>
-                      setGenericProps((prev) => {
-                        const rest = prev.filter((kv) => kv.key !== k);
-                        return v.trim() === ""
-                          ? rest
-                          : [...rest, { key: k, value: v }];
-                      })
-                    }
-                  />
-                </div>
-              </>
-            )}
-
-            {error && (
-              <Alert variant="destructive">
-                <AlertDescription>{error}</AlertDescription>
-              </Alert>
-            )}
-          </div>
-
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => handleOpenChange(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              disabled={addMutation.isPending || !isValid()}
-            >
-              {addMutation.isPending && (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              )}
-              Add catalog
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
   );
 }
 
