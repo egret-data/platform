@@ -897,6 +897,20 @@ export function updateEngineCatalog(
   });
 }
 
+/** Result of a "test connection" run — always 200; `ok` reflects whether the
+ * catalog actually answered a query on the engine's coordinator. */
+export interface CatalogTestResult {
+  ok: boolean;
+  message: string;
+}
+
+export function testEngineCatalog(id: string, cid: string): Promise<CatalogTestResult> {
+  return apiJson<CatalogTestResult>(
+    `/control-plane/engines/${id}/catalogs/${cid}/test`,
+    { method: "POST" },
+  );
+}
+
 // ── Engine pod logs (control-plane) ──────────────────────────────────────────
 
 export interface PodLogs {

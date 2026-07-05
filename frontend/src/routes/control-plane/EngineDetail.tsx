@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Loader2, Plus, RotateCw, Server, Trash2 } from "lucide-react";
 
 import {
+  type CatalogTestResult,
   type Engine,
   type EngineCatalog,
   type EngineCatalogDetail,
@@ -14,6 +15,7 @@ import {
   getEngineCatalog,
   listEngineCatalogs,
   restartEngine,
+  testEngineCatalog,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -622,6 +624,74 @@ function SecurityTab({ cfg }: { cfg: EngineConfigForm }) {
  * existing catalog's detail. */
 const ADD_CATALOG = "add";
 
+/**
+ * "Test connection" + Remove footer for an existing catalog's detail pane.
+ * Rendered with `key={selected}` by the caller so switching catalogs mounts
+ * a fresh instance (and thus a fresh mutation) instead of carrying over the
+ * previous catalog's test result.
+ */
+function CatalogTestSection({
+  engineId,
+  cid,
+  onRemove,
+}: {
+  engineId: string;
+  cid: string;
+  onRemove: () => void;
+}) {
+  const testMutation = useMutation<CatalogTestResult, ApiError, void>({
+    mutationFn: () => testEngineCatalog(engineId, cid),
+  });
+
+  return (
+    <div className="space-y-3 border-t pt-4">
+      <div className="flex items-center justify-between gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => testMutation.mutate()}
+          disabled={testMutation.isPending}
+        >
+          {testMutation.isPending && (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          )}
+          Test connection
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-muted-foreground"
+          onClick={onRemove}
+        >
+          <Trash2 className="h-4 w-4" />
+          Remove
+        </Button>
+      </div>
+
+      {testMutation.data?.ok && (
+        <Alert>
+          <AlertDescription className="text-emerald-600">
+            Connection OK
+          </AlertDescription>
+        </Alert>
+      )}
+      {testMutation.data && !testMutation.data.ok && (
+        <Alert variant="destructive">
+          <AlertDescription>{testMutation.data.message}</AlertDescription>
+        </Alert>
+      )}
+      {testMutation.isError && (
+        <Alert variant="destructive">
+          <AlertDescription>
+            {testMutation.error?.message ?? "Test failed."}
+          </AlertDescription>
+        </Alert>
+      )}
+    </div>
+  );
+}
+
 function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
   const queryClient = useQueryClient();
   const catalogs = useQuery<EngineCatalog[], ApiError>({
@@ -781,17 +851,12 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
                     }}
                   />
                   {!detail.data.isPrimary && (
-                    <div className="flex justify-end border-t pt-4">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-muted-foreground"
-                        onClick={() => setRemoveOpen(true)}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                        Remove
-                      </Button>
-                    </div>
+                    <CatalogTestSection
+                      key={selected}
+                      engineId={engine.id}
+                      cid={selected}
+                      onRemove={() => setRemoveOpen(true)}
+                    />
                   )}
                 </div>
               )}
