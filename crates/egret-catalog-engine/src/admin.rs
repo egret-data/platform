@@ -272,7 +272,7 @@ pub async fn list_tasks(
                 .and_then(|v| v.as_str().map(str::to_string))
                 .unwrap_or_else(|| format!("{:?}", t.queue_name)),
             entity: t.entity_name.map(|n| n.join(".")),
-            status: serde_json::to_value(&t.status)
+            status: serde_json::to_value(t.status)
                 .ok()
                 .and_then(|v| v.as_str().map(str::to_string))
                 .unwrap_or_else(|| format!("{:?}", t.status)),

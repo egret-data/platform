@@ -336,6 +336,23 @@ impl CatalogStore {
         .await?)
     }
 
+    pub async fn update_engine_catalog(
+        &self,
+        id: Uuid,
+        config: &serde_json::Value,
+        secret_ref: Option<Uuid>,
+    ) -> Result<Option<EngineCatalog>, CatalogError> {
+        Ok(sqlx::query_as::<_, EngineCatalog>(
+            "UPDATE engine_catalogs SET config = $2, secret_ref = $3 WHERE id = $1 \
+             RETURNING id, engine_id, name, kind, config, secret_ref, is_primary, created_at",
+        )
+        .bind(id)
+        .bind(config)
+        .bind(secret_ref)
+        .fetch_optional(self.pool())
+        .await?)
+    }
+
     pub async fn delete_engine_catalog(&self, id: Uuid) -> Result<(), CatalogError> {
         sqlx::query("DELETE FROM engine_catalogs WHERE id = $1")
             .bind(id)

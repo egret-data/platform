@@ -1,4 +1,3 @@
-import { useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { Plus, Trash2 } from "lucide-react";
 
@@ -12,7 +11,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { KeyValueEditor } from "../EngineResourceGroups";
 import type {
   ContainerPortForm,
@@ -21,7 +19,6 @@ import type {
   TolerationForm,
   TopologySpreadForm,
 } from "../useEngineConfigForm";
-import { ConfigSection } from "./ConfigSection";
 import { RawJsonField } from "./RawJsonField";
 import { SELECT_NONE } from "./podEditors";
 
@@ -56,10 +53,12 @@ const WHEN_UNSATISFIABLE = ["DoNotSchedule", "ScheduleAnyway"];
  * affinity / termination grace / extra ports) editing one role's `RoleForm`
  * slice. The affinity raw-JSON override is text-in-form; it is bridged to the
  * shared `RawJsonField` (which reports its own validity to the surrounding
- * provider). Both roles stay mounted so an invalid override in either role
- * blocks Save regardless of the selected tab.
+ * provider). Rendered once per role from the Coordinator/Worker sections; only
+ * the active section is mounted, so its raw-override validity gates Save while
+ * that section is shown. An invalid override left in the non-active role is not
+ * persisted as broken — it is dropped at build time (`textToRaw` → undefined).
  */
-function RolePlacementEditor({
+export function RolePlacementEditor({
   idPrefix,
   rawId,
   form,
@@ -492,58 +491,3 @@ function RolePlacementEditor({
   );
 }
 
-// ── section props ────────────────────────────────────────────────────────────
-
-export interface PlacementSectionProps {
-  coordinator: RoleForm;
-  setCoordinator: Dispatch<SetStateAction<RoleForm>>;
-  worker: RoleForm;
-  setWorker: Dispatch<SetStateAction<RoleForm>>;
-}
-
-/**
- * "Placement" config: per-role (coordinator / worker) node selector, tolerations,
- * topology spread, affinity, termination grace, and extra ports. A tab toggles
- * which role is visible, but both role editors stay mounted so an invalid
- * affinity raw override in either role blocks Save.
- */
-export function PlacementSection({
-  coordinator,
-  setCoordinator,
-  worker,
-  setWorker,
-}: PlacementSectionProps) {
-  const [role, setRole] = useState<"coordinator" | "worker">("coordinator");
-
-  return (
-    <ConfigSection
-      title="Per-role placement"
-      description="Node selector, tolerations, topology spread & affinity applied to the selected role's Deployment."
-    >
-      <Tabs value={role} onValueChange={(v) => setRole(v as typeof role)}>
-        <TabsList>
-          <TabsTrigger value="coordinator">Coordinator</TabsTrigger>
-          <TabsTrigger value="worker">Worker</TabsTrigger>
-        </TabsList>
-      </Tabs>
-      {/* Both roles stay mounted (only the active one is shown) so both
-          affinity raw-override fields register their validity. */}
-      <div className={role === "coordinator" ? "pt-4" : "hidden"}>
-        <RolePlacementEditor
-          idPrefix="ps-coord"
-          rawId="placement.coordinator.affinity.raw"
-          form={coordinator}
-          onChange={setCoordinator}
-        />
-      </div>
-      <div className={role === "worker" ? "pt-4" : "hidden"}>
-        <RolePlacementEditor
-          idPrefix="ps-worker"
-          rawId="placement.worker.affinity.raw"
-          form={worker}
-          onChange={setWorker}
-        />
-      </div>
-    </ConfigSection>
-  );
-}

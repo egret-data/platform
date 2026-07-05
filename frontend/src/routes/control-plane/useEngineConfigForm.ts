@@ -501,13 +501,20 @@ function formToAutoscaling(
  * the already-built (omit-empty) `trinoConfig`. Each group counts 1 when it is
  * present/non-empty, so a nav badge reads "how many field-groups configured".
  *
- * The badges map to the five nav sections: `properties` (set keys across the
- * config/node/log maps + queryMaxMemory + non-default logLevel + eventListener),
- * `resources` (coordinator/worker sizing + env), `workload` (resource groups +
- * session + fault-tolerant), `scheduling` (pod + per-role placement + containers/
- * mounts), and `scaling` (autoscaling). Per-role scheduling fields count under
- * `scheduling`; per-role sizing (replicas/resources/heap/probes/JVM/per-node
- * memory) counts under `resources` — no field-group is double-counted.
+ * The badges map to the seven nav sections (mirroring the Trino Helm chart):
+ * `image` (the container image string + imagePullPolicy + imagePullSecrets),
+ * `server` (set keys across the config/node/log property maps + queryMaxMemory +
+ * non-default logLevel + eventListener + fault-tolerant execution/exchange +
+ * reliability known-properties), `coordinator` (coordinator sizing/JVM/probes +
+ * placement), `worker` (same core + placement + graceful shutdown), `workload`
+ * (resource groups + session properties), `pod` (cluster-wide pod/deployment
+ * fields + env + init/sidecar containers + config/secret mounts), and
+ * `autoscaling` (autoscaling).
+ *
+ * Fault-tolerant execution intentionally counts under `server` (not `workload`),
+ * per the plan. Per-role placement fields count under that role's own section
+ * (`coordinator`/`worker`) alongside its sizing — no field-group is
+ * double-counted.
  */
 export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
   const present = (v: unknown): boolean =>
@@ -568,8 +575,6 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
   // Pod-level (cluster-wide) scheduling field-groups.
   const podCount = [
     cfg.serviceAccount,
-    cfg.imagePullSecrets,
-    cfg.imagePullPolicy,
     cfg.podSecurityContext,
     cfg.containerSecurityContext,
     cfg.deploymentStrategy,
@@ -588,22 +593,19 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
   ].filter(present).length;
 
   return {
-    properties: propertiesCount,
-    resources:
-      roleCoreCount(coordinator) +
+    image:
+      (present(cfg.image) ? 1 : 0) +
+      (present(cfg.imagePullPolicy) ? 1 : 0) +
+      ((cfg.imagePullSecrets?.length ?? 0) > 0 ? 1 : 0),
+    server: propertiesCount + (present(cfg.faultTolerant) ? 1 : 0) + knownSectionCount("reliability"),
+    coordinator: roleCoreCount(coordinator) + rolePlacementCount(coordinator),
+    worker:
       roleCoreCount(worker) +
-      (present(worker?.gracefulShutdown) ? 1 : 0) +
-      (present(cfg.env) ? 1 : 0),
-    workload:
-      [cfg.resourceGroups, cfg.sessionProperties, cfg.faultTolerant].filter(
-        present,
-      ).length + knownSectionCount("reliability"),
-    scheduling:
-      podCount +
-      rolePlacementCount(coordinator) +
       rolePlacementCount(worker) +
-      containersMountsCount,
-    scaling: [cfg.autoscaling].filter(present).length,
+      (present(worker?.gracefulShutdown) ? 1 : 0),
+    workload: [cfg.resourceGroups, cfg.sessionProperties].filter(present).length,
+    pod: podCount + (present(cfg.env) ? 1 : 0) + containersMountsCount,
+    autoscaling: [cfg.autoscaling].filter(present).length,
   };
 }
 
@@ -620,6 +622,9 @@ export interface EngineConfigForm {
   // Guided read/write over a raw property map, routed by config file.
   getProp: (file: "config" | "node" | "log", key: string) => string;
   setProp: (file: "config" | "node" | "log", key: string, value: string) => void;
+  // Guided read/write over the event-listener property map.
+  getEventListenerProp: (key: string) => string;
+  setEventListenerProp: (key: string, value: string) => void;
   env: Kv[];
   setEnv: Dispatch<SetStateAction<Kv[]>>;
   // advanced raw
@@ -674,6 +679,8 @@ export interface EngineConfigForm {
   // pod & scheduling (cluster-wide)
   serviceAccount: string;
   setServiceAccount: (v: string) => void;
+  image: string;
+  setImage: (v: string) => void;
   imagePullSecrets: string[];
   setImagePullSecrets: Dispatch<SetStateAction<string[]>>;
   imagePullPolicy: string;
@@ -809,6 +816,7 @@ export function useEngineConfigForm(
 
   // Pod & scheduling (cluster-wide).
   const [serviceAccount, setServiceAccount] = useState(tc?.serviceAccount ?? "");
+  const [image, setImage] = useState(tc?.image ?? "");
   const [imagePullSecrets, setImagePullSecrets] = useState<string[]>(
     tc?.imagePullSecrets ? [...tc.imagePullSecrets] : [],
   );
@@ -911,6 +919,7 @@ export function useEngineConfigForm(
     setIngressTlsSecret(next?.ingress?.tlsSecret ?? "");
     setIngressAnnotations(recordToKv(next?.ingress?.annotations));
     setServiceAccount(next?.serviceAccount ?? "");
+    setImage(next?.image ?? "");
     setImagePullSecrets(next?.imagePullSecrets ? [...next.imagePullSecrets] : []);
     setImagePullPolicy(next?.imagePullPolicy ?? "");
     setPodSecurityContext(
@@ -988,6 +997,7 @@ export function useEngineConfigForm(
     ingressTlsSecret,
     ingressAnnotations,
     serviceAccount,
+    image,
     imagePullSecrets,
     imagePullPolicy,
     podSecurityContext,
@@ -1096,6 +1106,7 @@ export function useEngineConfigForm(
     // Pod & scheduling (cluster-wide) — same omit-empty style: skip empty
     // arrays/objects/blanks so an untouched engine's payload is unchanged.
     if (serviceAccount.trim()) trinoConfig.serviceAccount = serviceAccount.trim();
+    if (image.trim()) trinoConfig.image = image.trim();
     const pullSecrets = imagePullSecrets.map((s) => s.trim()).filter(Boolean);
     if (pullSecrets.length) trinoConfig.imagePullSecrets = pullSecrets;
     if (imagePullPolicy)
@@ -1190,6 +1201,7 @@ export function useEngineConfigForm(
     ingressTlsSecret,
     ingressAnnotations,
     serviceAccount,
+    image,
     imagePullSecrets,
     imagePullPolicy,
     podSecurityContext,
@@ -1232,6 +1244,13 @@ export function useEngineConfigForm(
       return value.trim() === "" ? rest : [...rest, { key, value }];
     });
   };
+  const getEventListenerProp = (key: string) =>
+    eventListener.find((kv) => kv.key === key)?.value ?? "";
+  const setEventListenerProp = (key: string, value: string) =>
+    setEventListener((prev) => {
+      const rest = prev.filter((kv) => kv.key !== key);
+      return value.trim() === "" ? rest : [...rest, { key, value }];
+    });
 
   async function save() {
     setError(null);
@@ -1266,6 +1285,8 @@ export function useEngineConfigForm(
     setConfigProps,
     getProp,
     setProp,
+    getEventListenerProp,
+    setEventListenerProp,
     env,
     setEnv,
     eventListener,
@@ -1314,6 +1335,8 @@ export function useEngineConfigForm(
     setIngressAnnotations,
     serviceAccount,
     setServiceAccount,
+    image,
+    setImage,
     imagePullSecrets,
     setImagePullSecrets,
     imagePullPolicy,

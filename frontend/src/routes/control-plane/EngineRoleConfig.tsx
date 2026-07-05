@@ -1,4 +1,4 @@
-import { ChevronDown, Plus, Trash2 } from "lucide-react";
+import { ChevronDown, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -12,6 +12,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Switch } from "@/components/ui/switch";
 import { ConfigSection } from "./config/ConfigSection";
 import { FieldLabel } from "./config/FieldLabel";
+import { JvmFlagPicker } from "./config/JvmFlagPicker";
 import { QuantityInput } from "./config/QuantityInput";
 import {
   type ProbeForm,
@@ -23,10 +24,12 @@ function StringListEditor({
   rows,
   onChange,
   placeholder,
+  addControl,
 }: {
   rows: string[];
   onChange: (rows: string[]) => void;
   placeholder?: string;
+  addControl: React.ReactNode;
 }) {
   return (
     <div className="space-y-2">
@@ -51,15 +54,7 @@ function StringListEditor({
           </Button>
         </div>
       ))}
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={() => onChange([...rows, ""])}
-      >
-        <Plus className="h-4 w-4" />
-        Add JVM flag
-      </Button>
+      {addControl}
     </div>
   );
 }
@@ -289,6 +284,13 @@ function RoleConfigEditor({
           rows={value.additionalJvmConfig}
           onChange={(rows) => set("additionalJvmConfig", rows)}
           placeholder="-XX:MaxHeapFreeRatio=100"
+          addControl={
+            <JvmFlagPicker
+              onAdd={(flag) =>
+                set("additionalJvmConfig", [...value.additionalJvmConfig, flag])
+              }
+            />
+          }
         />
       </ConfigSection>
 

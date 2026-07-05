@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, get};
+use axum::routing::get;
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
 use egret_catalog::service::embedded::{GrantInput, NewClient};
@@ -34,8 +34,6 @@ const DEFAULT_IMAGE_VERSION: &str = "470";
 const DEFAULT_NAMESPACE: &str = "egret-engines";
 /// Shared per-warehouse role that engine Catalog Clients are bound to.
 const ENGINE_ROLE_NAME: &str = "engine";
-/// Catalog kinds the translation layer understands.
-const CATALOG_KINDS: [&str; 5] = ["egret-warehouse", "postgresql", "tpch", "tpcds", "generic"];
 
 /// One catalog rendered flat for the orchestrator (`<name>.properties` + env).
 /// `properties` may contain `${ENV:VAR}` references resolved from `env`.
@@ -386,6 +384,9 @@ pub struct TrinoConfigReq {
     pub ingress: Option<IngressReq>,
     pub autoscaling: Option<AutoscalingReq>,
     // ── pod & scheduling (cluster-wide) ──────────────────────────────────────
+    /// Full container image (registry/repository:tag). When None, the renderer
+    /// falls back to `trinodb/trino:{image_version}`.
+    pub image: Option<String>,
     pub image_pull_secrets: Vec<String>,
     pub image_pull_policy: Option<String>,
     pub service_account: Option<String>,
@@ -465,7 +466,10 @@ pub fn router() -> Router<CpState> {
             "/engines/{id}/catalogs",
             get(list_catalogs).post(add_catalog),
         )
-        .route("/engines/{id}/catalogs/{cid}", delete(remove_catalog))
+        .route(
+            "/engines/{id}/catalogs/{cid}",
+            get(get_catalog).put(update_catalog).delete(remove_catalog),
+        )
         // Native Trino monitor (query list / detail / kill / cluster).
         .merge(crate::monitor::routes())
 }
@@ -543,6 +547,7 @@ struct EngineCatalogDto {
     name: String,
     kind: String,
     is_primary: bool,
+    secret_ref: Option<Uuid>,
 }
 impl From<EngineCatalog> for EngineCatalogDto {
     fn from(c: EngineCatalog) -> Self {
@@ -551,8 +556,35 @@ impl From<EngineCatalog> for EngineCatalogDto {
             name: c.name,
             kind: c.kind,
             is_primary: c.is_primary,
+            secret_ref: c.secret_ref,
         }
     }
+}
+
+/// `GET /engines/{id}/catalogs/{cid}` payload: full stored config + secretRef,
+/// with system-minted secret material redacted (see [`redact_catalog_config`]).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EngineCatalogDetailDto {
+    id: Uuid,
+    name: String,
+    kind: String,
+    is_primary: bool,
+    secret_ref: Option<Uuid>,
+    config: serde_json::Value,
+}
+
+/// Strip system-minted secret material from a catalog config before returning it
+/// to clients. egret-warehouse configs carry a client credential; nothing else
+/// should ever be exposed.
+fn redact_catalog_config(kind: &str, mut config: serde_json::Value) -> serde_json::Value {
+    if kind == "egret-warehouse" {
+        if let Some(obj) = config.as_object_mut() {
+            obj.remove("credential");
+            obj.remove("clientRowId");
+        }
+    }
+    config
 }
 
 #[derive(Deserialize)]
@@ -560,6 +592,17 @@ impl From<EngineCatalog> for EngineCatalogDto {
 struct AddCatalogBody {
     name: String,
     kind: String,
+    #[serde(default)]
+    config: serde_json::Value,
+    #[serde(default)]
+    secret_ref: Option<Uuid>,
+}
+
+/// `PUT /engines/{id}/catalogs/{cid}` body: replaces the stored `config` +
+/// `secret_ref` in full (not a partial patch).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCatalogBody {
     #[serde(default)]
     config: serde_json::Value,
     #[serde(default)]
@@ -648,56 +691,29 @@ async fn build_catalog_req(
                 .to_string();
             env.insert(cred_var, cred);
         }
-        "postgresql" => {
-            props.insert("connector.name".into(), "postgresql".into());
-            props.insert(
-                "connection-url".into(),
-                format!(
-                    "jdbc:postgresql://{}:{}/{}",
-                    cat.config["host"].as_str().unwrap_or_default(),
-                    cat.config["port"].as_i64().unwrap_or(5432),
-                    cat.config["database"].as_str().unwrap_or_default()
-                ),
-            );
-            props.insert(
-                "connection-user".into(),
-                cat.config["user"].as_str().unwrap_or_default().into(),
-            );
-            let pw_var = format!("PG_{env_prefix}");
-            props.insert("connection-password".into(), format!("${{ENV:{pw_var}}}"));
-            if let Some(ref_id) = cat.secret_ref {
-                let pw = st
+        _ => {
+            // Connector-first (v2): the stored `kind` IS the Trino connector
+            // name and `config = { properties, secretProperties }`. Plaintext
+            // properties render verbatim; each `secretProperties` entry gets
+            // its own `${ENV:CAT_<prefix>_<n>}` placeholder resolved below.
+            // `catalog_props_and_secrets` also carries the back-compat shim
+            // for v1 rows (old `postgresql` host/port, old `generic`
+            // connectorName/secretProperty).
+            let (connector, plain, secrets) = catalog_props_and_secrets(cat);
+            props.insert("connector.name".into(), connector);
+            for (k, v) in plain {
+                props.insert(k, v);
+            }
+            for (n, (k, secret_id)) in secrets.into_iter().enumerate() {
+                let var = format!("CAT_{env_prefix}_{n}");
+                props.insert(k, format!("${{ENV:{var}}}"));
+                let val = st
                     .secrets
-                    .resolve_plaintext(None, ref_id)
+                    .resolve_plaintext(None, secret_id)
                     .await
                     .map_err(|e| CpError::BadRequest(format!("resolve secret: {e}")))?;
-                env.insert(pw_var, pw);
+                env.insert(var, val);
             }
-        }
-        "tpch" => {
-            props.insert("connector.name".into(), "tpch".into());
-        }
-        "tpcds" => {
-            props.insert("connector.name".into(), "tpcds".into());
-        }
-        "generic" => {
-            props.insert(
-                "connector.name".into(),
-                cat.config["connectorName"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .into(),
-            );
-            if let Some(obj) = cat.config["properties"].as_object() {
-                for (k, v) in obj {
-                    props.insert(k.clone(), v.as_str().unwrap_or_default().into());
-                }
-            }
-        }
-        other => {
-            return Err(CpError::BadRequest(format!(
-                "unknown catalog kind: {other}"
-            )))
         }
     }
     Ok(CatalogReq {
@@ -705,6 +721,89 @@ async fn build_catalog_req(
         properties: props,
         env,
     })
+}
+
+/// Connector name + (plaintext props, secret-backed props) resolved from a
+/// stored catalog's config; see [`catalog_props_and_secrets`].
+type CatalogPropsAndSecrets = (String, Vec<(String, String)>, Vec<(String, Uuid)>);
+
+/// Resolve a catalog's connector name + (plaintext props, secret-backed props)
+/// from its stored config. Supports the v2 shape
+/// `{ properties, secretProperties }` and back-compat for v1 rows
+/// (old `postgresql` host/port and old `generic` connectorName/secretProperty).
+fn catalog_props_and_secrets(cat: &EngineCatalog) -> CatalogPropsAndSecrets {
+    let cfg = &cat.config;
+    // ── legacy postgres (kind == "postgresql", config.host present, no v2 properties)
+    if cat.kind == "postgresql" && cfg.get("properties").is_none() && cfg.get("host").is_some() {
+        let mut plain = vec![
+            (
+                "connection-url".to_string(),
+                format!(
+                    "jdbc:postgresql://{}:{}/{}",
+                    cfg["host"].as_str().unwrap_or_default(),
+                    cfg["port"].as_i64().unwrap_or(5432),
+                    cfg["database"].as_str().unwrap_or_default()
+                ),
+            ),
+            (
+                "connection-user".to_string(),
+                cfg["user"].as_str().unwrap_or_default().to_string(),
+            ),
+        ];
+        let mut secrets = vec![];
+        if let Some(id) = cat.secret_ref {
+            secrets.push(("connection-password".to_string(), id));
+        } else {
+            plain.push(("connection-password".to_string(), String::new()));
+        }
+        return ("postgresql".to_string(), plain, secrets);
+    }
+    // ── connector name: v2 uses kind; legacy generic used config.connectorName
+    let connector = if cat.kind == "generic" {
+        cfg["connectorName"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        cat.kind.clone()
+    };
+    // ── secret-backed properties
+    let mut secrets: Vec<(String, Uuid)> = vec![];
+    // v2: config.secretProperties = { prop: "<uuid>" }
+    if let Some(obj) = cfg.get("secretProperties").and_then(|v| v.as_object()) {
+        for (k, v) in obj {
+            if let Some(id) = v.as_str().and_then(|s| Uuid::parse_str(s).ok()) {
+                secrets.push((k.clone(), id));
+            }
+        }
+    }
+    // legacy generic single-secret: config.secretProperty + cat.secret_ref,
+    // defaulting the property name to "connection-password" (matching the
+    // old generic arm's default) when the row predates `secretProperty`.
+    if secrets.is_empty() && cat.kind == "generic" {
+        if let Some(id) = cat.secret_ref {
+            let prop = cfg
+                .get("secretProperty")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("connection-password")
+                .to_string();
+            secrets.push((prop, id));
+        }
+    }
+    let secret_keys: std::collections::HashSet<&str> =
+        secrets.iter().map(|(k, _)| k.as_str()).collect();
+    // ── plaintext properties (skip any key that is secret-backed)
+    let mut plain: Vec<(String, String)> = vec![];
+    if let Some(obj) = cfg.get("properties").and_then(|v| v.as_object()) {
+        for (k, v) in obj {
+            if secret_keys.contains(k.as_str()) {
+                continue;
+            }
+            plain.push((k.clone(), v.as_str().unwrap_or_default().to_string()));
+        }
+    }
+    (connector, plain, secrets)
 }
 
 /// Build the full provisioning request from the engine + its stored catalogs + config.
@@ -1105,6 +1204,7 @@ fn build_trino_config(spec: &serde_json::Value) -> TrinoConfigReq {
             base: worker_base,
             graceful_shutdown: None,
         },
+        image: None,
         ..Default::default()
     }
 }
@@ -1255,6 +1355,7 @@ fn trino_config_from_json(v: &serde_json::Value) -> TrinoConfigReq {
         autoscaling: parse_autoscaling(&v["autoscaling"]),
         // ── pod & scheduling (cluster-wide) — k8s object names / raw JSON, no
         //    secret resolution, so parsed straight from the wire here. ────────
+        image: v["image"].as_str().map(Into::into),
         image_pull_secrets: v["imagePullSecrets"]
             .as_array()
             .map(|a| {
@@ -1805,11 +1906,12 @@ async fn add_catalog(
 ) -> Result<(StatusCode, Json<EngineCatalogDto>), CpError> {
     require_platform_admin(&p)?;
     let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
-    if !CATALOG_KINDS.contains(&b.kind.as_str()) {
-        return Err(CpError::BadRequest(format!(
-            "unknown catalog kind: {}",
-            b.kind
-        )));
+    // The stored `kind` IS the Trino connector name (or `egret-warehouse`); the
+    // control-plane no longer gates on a fixed enum — any non-blank kind is a
+    // valid connector. The frontend's own catalog-kind list (a UX hint, not a
+    // gate) lives separately in `frontend/src/routes/control-plane/config/catalogKinds.ts`.
+    if b.kind.trim().is_empty() {
+        return Err(CpError::BadRequest("catalog kind is required".into()));
     }
 
     // For an egret-warehouse catalog, resolve the warehouse + endpoint and mint a
@@ -1902,6 +2004,31 @@ async fn add_catalog(
     Ok((StatusCode::CREATED, Json(cat.into())))
 }
 
+async fn get_catalog(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, cid)): Path<(Uuid, Uuid)>,
+) -> Result<Json<EngineCatalogDetailDto>, CpError> {
+    require_platform_admin(&p)?;
+    let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let cat = st
+        .storage
+        .get_engine_catalog(cid)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    if cat.engine_id != engine.id {
+        return Err(CpError::NotFound);
+    }
+    Ok(Json(EngineCatalogDetailDto {
+        id: cat.id,
+        name: cat.name.clone(),
+        kind: cat.kind.clone(),
+        is_primary: cat.is_primary,
+        secret_ref: cat.secret_ref,
+        config: redact_catalog_config(&cat.kind, cat.config.clone()),
+    }))
+}
+
 async fn remove_catalog(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -1936,6 +2063,68 @@ async fn remove_catalog(
         }
     }
     Ok(StatusCode::OK)
+}
+
+async fn update_catalog(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, cid)): Path<(Uuid, Uuid)>,
+    Json(b): Json<UpdateCatalogBody>,
+) -> Result<Json<EngineCatalogDto>, CpError> {
+    require_platform_admin(&p)?;
+    let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let prev = st
+        .storage
+        .get_engine_catalog(cid)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    // Guard against cross-engine updates via a mismatched path.
+    if prev.engine_id != engine.id {
+        return Err(CpError::NotFound);
+    }
+    if prev.is_primary {
+        return Err(CpError::BadRequest(
+            "cannot edit the primary catalog".into(),
+        ));
+    }
+    if prev.kind == "egret-warehouse" {
+        return Err(CpError::BadRequest(
+            "egret-warehouse catalogs are managed and not editable".into(),
+        ));
+    }
+
+    // Persist the new config, then re-provision. If re-provisioning fails, restore
+    // the previous config/secret so the stored row never leads the running cluster.
+    let updated = st
+        .storage
+        .update_engine_catalog(cid, &b.config, b.secret_ref)
+        .await?
+        .ok_or(CpError::NotFound)?;
+
+    let restore = |st: CpState, prev: EngineCatalog| async move {
+        let _ = st
+            .storage
+            .update_engine_catalog(prev.id, &prev.config, prev.secret_ref)
+            .await;
+    };
+
+    let req = match build_provision_req(&st, &engine).await {
+        Ok(r) => r,
+        Err(e) => {
+            restore(st.clone(), prev).await;
+            return Err(e);
+        }
+    };
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        restore(st.clone(), prev).await;
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    if let Err(msg) = prov.update(&req).await {
+        restore(st.clone(), prev).await;
+        return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
+    }
+
+    Ok(Json(updated.into()))
 }
 
 #[cfg(test)]
@@ -2017,5 +2206,365 @@ mod tests {
         let mut auth: Option<AuthReq> = None;
         inject_monitor_user(&mut auth, Uuid::new_v4()).unwrap();
         assert!(auth.is_none());
+    }
+
+    #[test]
+    fn redact_strips_warehouse_credential() {
+        let cfg = serde_json::json!({
+            "warehouse": "wh1", "s3_endpoint": "http://minio:9000",
+            "credential": "id:secret", "clientRowId": "abc"
+        });
+        let out = redact_catalog_config("egret-warehouse", cfg);
+        assert!(out.get("credential").is_none());
+        assert!(out.get("clientRowId").is_none());
+        assert_eq!(out["warehouse"], "wh1");
+        // Non-warehouse kinds pass through untouched.
+        let pg = serde_json::json!({"host": "db", "user": "u"});
+        assert_eq!(redact_catalog_config("postgresql", pg.clone()), pg);
+    }
+
+    // ── build_catalog_req: generic connector + secret sourcing ──────────────
+
+    fn generic_catalog(config: serde_json::Value, secret_ref: Option<Uuid>) -> EngineCatalog {
+        EngineCatalog {
+            id: Uuid::new_v4(),
+            engine_id: Uuid::new_v4(),
+            name: "gen".into(),
+            kind: "generic".into(),
+            config,
+            secret_ref,
+            is_primary: false,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn dummy_engine() -> Engine {
+        Engine {
+            id: Uuid::new_v4(),
+            name: "e".into(),
+            r#type: "trino".into(),
+            namespace: "egret-engines".into(),
+            warehouse_id: Uuid::new_v4(),
+            spec: serde_json::json!({}),
+            status: "pending".into(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// Build a real `CpState` against the local dev Postgres (mirrors the
+    /// self-skip pattern used by `tests/routes_api.rs`); `None` when
+    /// `DATABASE_URL` isn't set so this suite doesn't fail in environments
+    /// without a database.
+    async fn test_state() -> Option<CpState> {
+        let dsn = std::env::var("DATABASE_URL").ok()?;
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        db.migrate().await.expect("migrate");
+        let crypto = egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef")
+            .expect("build test crypto");
+        let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
+        let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
+        Some(CpState {
+            storage: egret_catalog::CatalogStore::new(db.clone()),
+            secrets: workspace_secrets,
+            sessions: egret_auth::session::SessionService::new(
+                db.clone(),
+                chrono::Duration::hours(24),
+                chrono::Duration::minutes(60),
+            ),
+            provisioner: None,
+            browser: None,
+            engine_provisioner: None,
+            engine_egret_url: "http://egret:8080".into(),
+            engine_jwks_uri: "https://idp/jwks".into(),
+        })
+    }
+
+    /// WITHOUT a `secret_ref` the generic arm must render exactly as before:
+    /// verbatim properties, no env vars, no `${ENV:...}` placeholders.
+    #[tokio::test]
+    async fn generic_catalog_without_secret_ref_is_verbatim() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping generic_catalog_without_secret_ref_is_verbatim: DATABASE_URL not set"
+            );
+            return;
+        };
+        let cfg = serde_json::json!({
+            "connectorName": "mysql",
+            "properties": {
+                "connection-url": "jdbc:mysql://db:3306/x",
+                "connection-user": "root",
+            }
+        });
+        let cat = generic_catalog(cfg, None);
+        let req = build_catalog_req(&st, &dummy_engine(), &cat, "T0")
+            .await
+            .expect("build_catalog_req");
+
+        assert_eq!(req.properties["connector.name"], "mysql");
+        assert_eq!(req.properties["connection-url"], "jdbc:mysql://db:3306/x");
+        assert_eq!(req.properties["connection-user"], "root");
+        assert!(req.env.is_empty());
+        assert!(!req.properties.values().any(|v| v.contains("${ENV:")));
+    }
+
+    /// WITH a `secret_ref`, the designated property (default
+    /// `connection-password`) is replaced by an `${ENV:...}` placeholder and
+    /// the resolved plaintext lands in `env`, not in `properties`.
+    #[tokio::test]
+    async fn generic_catalog_with_secret_ref_injects_env_var() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping generic_catalog_with_secret_ref_injects_env_var: DATABASE_URL not set"
+            );
+            return;
+        };
+        let secret_name = format!("t_{}", Uuid::new_v4().simple());
+        let secret_id = st
+            .secrets
+            .create(None, &secret_name, None, "s3cr3t")
+            .await
+            .expect("create secret");
+        let cfg = serde_json::json!({
+            "connectorName": "mysql",
+            "properties": {
+                "connection-url": "jdbc:mysql://db:3306/x",
+                "connection-password": "PLACEHOLDER",
+            }
+        });
+        let cat = generic_catalog(cfg, Some(secret_id));
+        let req = build_catalog_req(&st, &dummy_engine(), &cat, "T1")
+            .await
+            .expect("build_catalog_req");
+
+        // Env var naming is now the uniform `CAT_<prefix>_<n>` scheme (was
+        // `GEN_<prefix>`), shared by the v2 arm and this legacy shim path.
+        assert_eq!(req.properties["connection-password"], "${ENV:CAT_T1_0}");
+        assert_eq!(req.env["CAT_T1_0"], "s3cr3t");
+        // The plaintext placeholder from `properties` must never leak through.
+        assert!(!req.properties.values().any(|v| v == "PLACEHOLDER"));
+    }
+
+    // ── build_catalog_req: v2 connector-first shape + v1 back-compat shim ───
+
+    /// Build a catalog row of an arbitrary `kind` (v2 rows use the connector
+    /// name itself as `kind`, e.g. "mysql").
+    fn catalog_of(
+        kind: &str,
+        config: serde_json::Value,
+        secret_ref: Option<Uuid>,
+    ) -> EngineCatalog {
+        EngineCatalog {
+            id: Uuid::new_v4(),
+            engine_id: Uuid::new_v4(),
+            name: "cat".into(),
+            kind: kind.into(),
+            config,
+            secret_ref,
+            is_primary: false,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// (a) v2 connector row: `kind` IS the connector name, one secret-backed
+    /// property resolves to `${ENV:CAT_<prefix>_0}` + a matching `env` entry;
+    /// the plaintext password never appears in `properties`.
+    #[tokio::test]
+    async fn v2_connector_single_secret_property() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping v2_connector_single_secret_property: DATABASE_URL not set");
+            return;
+        };
+        let secret_id = st
+            .secrets
+            .create(
+                None,
+                &format!("t_{}", Uuid::new_v4().simple()),
+                None,
+                "sekret",
+            )
+            .await
+            .expect("create secret");
+        let cfg = serde_json::json!({
+            "properties": {"connection-url": "jdbc:mysql://h"},
+            "secretProperties": {"connection-password": secret_id.to_string()},
+        });
+        let cat = catalog_of("mysql", cfg, None);
+        let req = build_catalog_req(&st, &dummy_engine(), &cat, "P0")
+            .await
+            .expect("build_catalog_req");
+
+        assert_eq!(req.properties["connector.name"], "mysql");
+        assert_eq!(req.properties["connection-url"], "jdbc:mysql://h");
+        assert_eq!(req.properties["connection-password"], "${ENV:CAT_P0_0}");
+        assert_eq!(req.env["CAT_P0_0"], "sekret");
+        assert!(!req.properties.values().any(|v| v == "sekret"));
+    }
+
+    /// (b) v2 connector row with TWO `secretProperties`: two distinct
+    /// `${ENV:CAT_<prefix>_n}` placeholders and two matching `env` entries.
+    /// Assert set membership since insertion order (a JSON object) is not
+    /// guaranteed.
+    #[tokio::test]
+    async fn v2_connector_two_secret_properties() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping v2_connector_two_secret_properties: DATABASE_URL not set");
+            return;
+        };
+        let secret_a = st
+            .secrets
+            .create(
+                None,
+                &format!("a_{}", Uuid::new_v4().simple()),
+                None,
+                "val-a",
+            )
+            .await
+            .expect("create secret a");
+        let secret_b = st
+            .secrets
+            .create(
+                None,
+                &format!("b_{}", Uuid::new_v4().simple()),
+                None,
+                "val-b",
+            )
+            .await
+            .expect("create secret b");
+        let cfg = serde_json::json!({
+            "properties": {"connection-url": "jdbc:snowflake://h"},
+            "secretProperties": {
+                "connection-password": secret_a.to_string(),
+                "connection-token": secret_b.to_string(),
+            },
+        });
+        let cat = catalog_of("snowflake", cfg, None);
+        let req = build_catalog_req(&st, &dummy_engine(), &cat, "P1")
+            .await
+            .expect("build_catalog_req");
+
+        let vars: std::collections::HashSet<&str> = ["CAT_P1_0", "CAT_P1_1"].into_iter().collect();
+        assert!(vars.contains(
+            req.properties["connection-password"]
+                .trim_start_matches("${ENV:")
+                .trim_end_matches('}')
+        ));
+        assert!(vars.contains(
+            req.properties["connection-token"]
+                .trim_start_matches("${ENV:")
+                .trim_end_matches('}')
+        ));
+        assert_ne!(
+            req.properties["connection-password"],
+            req.properties["connection-token"]
+        );
+        let resolved: std::collections::HashSet<&str> =
+            req.env.values().map(|s| s.as_str()).collect();
+        assert!(resolved.contains("val-a"));
+        assert!(resolved.contains("val-b"));
+        assert_eq!(req.env.len(), 2);
+    }
+
+    /// (c) v2 connector row with only `properties`, no `secretProperties`:
+    /// verbatim passthrough, empty env (parity with the old no-secret path).
+    #[tokio::test]
+    async fn v2_connector_no_secrets_is_verbatim() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping v2_connector_no_secrets_is_verbatim: DATABASE_URL not set");
+            return;
+        };
+        let cfg = serde_json::json!({
+            "properties": {"connection-url": "jdbc:mysql://h", "connection-user": "root"},
+        });
+        let cat = catalog_of("mysql", cfg, None);
+        let req = build_catalog_req(&st, &dummy_engine(), &cat, "P2")
+            .await
+            .expect("build_catalog_req");
+
+        assert_eq!(req.properties["connector.name"], "mysql");
+        assert_eq!(req.properties["connection-url"], "jdbc:mysql://h");
+        assert_eq!(req.properties["connection-user"], "root");
+        assert!(req.env.is_empty());
+        assert!(!req.properties.values().any(|v| v.contains("${ENV:")));
+    }
+
+    /// (d) legacy `generic` row (kind="generic", config.connectorName +
+    /// config.secretProperty + top-level secret_ref) still routes through the
+    /// shim to the same connector.name + `${ENV:...}` shape.
+    #[tokio::test]
+    async fn legacy_generic_row_still_resolves() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping legacy_generic_row_still_resolves: DATABASE_URL not set");
+            return;
+        };
+        let secret_id = st
+            .secrets
+            .create(
+                None,
+                &format!("t_{}", Uuid::new_v4().simple()),
+                None,
+                "legacy-pw",
+            )
+            .await
+            .expect("create secret");
+        let cfg = serde_json::json!({
+            "connectorName": "mysql",
+            "properties": {
+                "connection-url": "jdbc:mysql://db:3306/x",
+                "connection-password": "PLACEHOLDER",
+            },
+            "secretProperty": "connection-password",
+        });
+        let cat = generic_catalog(cfg, Some(secret_id));
+        let req = build_catalog_req(&st, &dummy_engine(), &cat, "P3")
+            .await
+            .expect("build_catalog_req");
+
+        assert_eq!(req.properties["connector.name"], "mysql");
+        assert_eq!(req.properties["connection-password"], "${ENV:CAT_P3_0}");
+        assert_eq!(req.env["CAT_P3_0"], "legacy-pw");
+        assert!(!req.properties.values().any(|v| v == "PLACEHOLDER"));
+    }
+
+    /// (e) legacy `postgresql` row (kind="postgresql", config.host/port/user,
+    /// top-level secret_ref) still builds a `connection-url` and a
+    /// secret-backed `connection-password`.
+    #[tokio::test]
+    async fn legacy_postgres_row_still_resolves() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping legacy_postgres_row_still_resolves: DATABASE_URL not set");
+            return;
+        };
+        let secret_id = st
+            .secrets
+            .create(
+                None,
+                &format!("t_{}", Uuid::new_v4().simple()),
+                None,
+                "pgpw",
+            )
+            .await
+            .expect("create secret");
+        let cfg = serde_json::json!({
+            "host": "db.internal",
+            "port": 5432,
+            "database": "mydb",
+            "user": "svc",
+        });
+        let cat = catalog_of("postgresql", cfg, Some(secret_id));
+        let req = build_catalog_req(&st, &dummy_engine(), &cat, "P4")
+            .await
+            .expect("build_catalog_req");
+
+        assert_eq!(req.properties["connector.name"], "postgresql");
+        assert_eq!(
+            req.properties["connection-url"],
+            "jdbc:postgresql://db.internal:5432/mydb"
+        );
+        assert_eq!(req.properties["connection-user"], "svc");
+        assert_eq!(req.properties["connection-password"], "${ENV:CAT_P4_0}");
+        assert_eq!(req.env["CAT_P4_0"], "pgpw");
     }
 }

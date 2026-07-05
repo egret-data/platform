@@ -1,8 +1,6 @@
 import type { Dispatch, SetStateAction } from "react";
-import { Plus, Trash2 } from "lucide-react";
 
 import type { DeploymentStrategy, SecurityContext } from "@/api/controlPlane";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -88,10 +86,8 @@ function SecurityContextEditor({
 export interface PodSectionProps {
   serviceAccount: string;
   setServiceAccount: (v: string) => void;
-  imagePullSecrets: string[];
-  setImagePullSecrets: Dispatch<SetStateAction<string[]>>;
-  imagePullPolicy: string;
-  setImagePullPolicy: (v: string) => void;
+  env: Kv[];
+  setEnv: Dispatch<SetStateAction<Kv[]>>;
   podSecurityContext: SecurityContext;
   setPodSecurityContext: Dispatch<SetStateAction<SecurityContext>>;
   containerSecurityContext: SecurityContext;
@@ -110,16 +106,14 @@ export interface PodSectionProps {
 
 /**
  * "Pod" config: cluster-wide pod-shape knobs applied to both the coordinator &
- * worker Deployments — service account, image pull, pod & container security
+ * worker Deployments — service account, env vars, pod & container security
  * contexts, the Deployment rollout strategy, and shared-PID namespace.
  */
 export function PodSection({
   serviceAccount,
   setServiceAccount,
-  imagePullSecrets,
-  setImagePullSecrets,
-  imagePullPolicy,
-  setImagePullPolicy,
+  env,
+  setEnv,
   podSecurityContext,
   setPodSecurityContext,
   containerSecurityContext,
@@ -138,78 +132,30 @@ export function PodSection({
   return (
     <div className="space-y-5">
       <ConfigSection
-        title="Service account & image pull"
+        title="Service account & environment"
         description="Applied to both the coordinator and worker pods."
       >
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <div className="space-y-1.5">
-            <Label htmlFor="ps-sa">Service account</Label>
-            <Input
-              id="ps-sa"
-              value={serviceAccount}
-              placeholder="default"
-              onChange={(e) => setServiceAccount(e.target.value)}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="ps-pullpolicy">Image pull policy</Label>
-            <Select
-              value={imagePullPolicy || SELECT_NONE}
-              onValueChange={(v) => setImagePullPolicy(v === SELECT_NONE ? "" : v)}
-            >
-              <SelectTrigger id="ps-pullpolicy" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={SELECT_NONE}>(default)</SelectItem>
-                <SelectItem value="Always">Always</SelectItem>
-                <SelectItem value="IfNotPresent">IfNotPresent</SelectItem>
-                <SelectItem value="Never">Never</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="ps-sa">Service account</Label>
+          <Input
+            id="ps-sa"
+            value={serviceAccount}
+            placeholder="default"
+            onChange={(e) => setServiceAccount(e.target.value)}
+          />
         </div>
-
         <div className="space-y-2">
-          <Label>Image pull secrets</Label>
+          <Label>Environment variables</Label>
           <p className="text-xs text-muted-foreground">
-            Names of Kubernetes <code>docker-registry</code> secrets in the engine
-            namespace.
+            Extra env applied to both coordinator and worker pods.
           </p>
-          {imagePullSecrets.map((s, i) => (
-            <div key={i} className="flex items-center gap-2">
-              <Input
-                value={s}
-                placeholder="regcred"
-                onChange={(e) =>
-                  setImagePullSecrets(
-                    imagePullSecrets.map((v, j) => (j === i ? e.target.value : v)),
-                  )
-                }
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="shrink-0 text-muted-foreground"
-                onClick={() =>
-                  setImagePullSecrets(imagePullSecrets.filter((_, j) => j !== i))
-                }
-                aria-label="Remove secret"
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
-            </div>
-          ))}
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => setImagePullSecrets([...imagePullSecrets, ""])}
-          >
-            <Plus className="h-4 w-4" />
-            Add secret
-          </Button>
+          <KeyValueEditor
+            rows={env}
+            onChange={setEnv}
+            keyPlaceholder="MY_VAR"
+            valuePlaceholder="value"
+            addLabel="Add variable"
+          />
         </div>
       </ConfigSection>
 
