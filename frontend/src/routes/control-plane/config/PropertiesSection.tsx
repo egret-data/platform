@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import type { EngineConfigForm } from "../useEngineConfigForm";
 import { ConfigSection } from "./ConfigSection";
 import { PropertyField } from "./PropertyField";
-import { trinoCatalog, trinoCatalogByKey } from "./trinoCatalog";
+import { type TrinoProp, trinoCatalog, trinoCatalogByKey } from "./trinoCatalog";
 
 type PropFile = "config" | "node" | "log";
 
@@ -23,11 +23,18 @@ const MAX_ADD_RESULTS = 30;
 
 /**
  * The add-from-catalog combobox: an `<Input>` whose typed text filters the full
- * `trinoCatalog` by key/help. Selecting a result adds a row via `setProp` (with
- * the catalog `default` as its initial value); pressing Enter on text that
- * matches no catalog key adds an empty `config` row with that free-text key.
+ * `trinoCatalog` by key/help. Selecting a result adds a row (via `onAddCatalog`,
+ * which shows an editable row even when the property has no default); pressing
+ * Enter on text that matches no catalog key adds an empty `config` row with that
+ * free-text key (via `onAddCustom`).
  */
-function AddProperty({ cfg }: { cfg: EngineConfigForm }) {
+function AddProperty({
+  onAddCatalog,
+  onAddCustom,
+}: {
+  onAddCatalog: (prop: TrinoProp) => void;
+  onAddCustom: (key: string) => void;
+}) {
   const [query, setQuery] = useState("");
   const [focused, setFocused] = useState(false);
 
@@ -46,7 +53,7 @@ function AddProperty({ cfg }: { cfg: EngineConfigForm }) {
   const selectProp = (key: string) => {
     const p = trinoCatalogByKey[key];
     if (!p) return;
-    cfg.setProp(p.file, p.key, p.default ?? "");
+    onAddCatalog(p);
     setQuery("");
     setFocused(false);
   };
@@ -59,7 +66,7 @@ function AddProperty({ cfg }: { cfg: EngineConfigForm }) {
       selectProp(key);
       return;
     }
-    cfg.setProp("config", key, "");
+    onAddCustom(key);
     setQuery("");
     setFocused(false);
   };
@@ -127,10 +134,12 @@ function PropertyRow({
   cfg,
   file,
   keyName,
+  onRemove,
 }: {
   cfg: EngineConfigForm;
   file: PropFile;
   keyName: string;
+  onRemove: () => void;
 }) {
   const cat = trinoCatalogByKey[keyName];
   return (
@@ -170,7 +179,7 @@ function PropertyRow({
         variant="ghost"
         size="icon"
         className="mt-1 shrink-0 text-muted-foreground"
-        onClick={() => cfg.setProp(file, keyName, "")}
+        onClick={onRemove}
         aria-label={`Remove ${keyName}`}
       >
         <Trash2 className="h-4 w-4" />
@@ -185,16 +194,51 @@ function PropertyRow({
  * with its file. A search box filters by key; each row renders a typed editor
  * (via the Trino catalog) or a plain value input for custom keys, plus a remove
  * button. The "Add property" combobox searches the full catalog (or adds a
- * free-text custom key). All writes route through `cfg.setProp(file, key, …)`,
- * so the three payload maps stay correct.
+ * free-text custom key). All value writes route through `cfg.setProp(file, key,
+ * …)`, so the three payload maps stay correct.
+ *
+ * Newly-added keys are also tracked locally in `added`, so a property with no
+ * default (or a custom key) still shows an empty, editable row even though it is
+ * not yet in the underlying map (`setProp` drops blank values). Once a value is
+ * typed the key enters the map and its `added` duplicate is filtered out.
  */
 export function PropertiesSection({ cfg }: { cfg: EngineConfigForm }) {
   const [search, setSearch] = useState("");
+  // Locally-tracked keys added via the combobox that may not yet be in a map
+  // (no default / custom / not-yet-filled). De-duped against the maps below.
+  const [added, setAdded] = useState<{ file: PropFile; key: string }[]>([]);
 
-  const rows: { file: PropFile; key: string }[] = [
+  const addKey = (file: PropFile, key: string) =>
+    setAdded((prev) =>
+      prev.some((a) => a.file === file && a.key === key)
+        ? prev
+        : [...prev, { file, key }],
+    );
+
+  const addCatalog = (prop: TrinoProp) => {
+    addKey(prop.file, prop.key);
+    if ((prop.default ?? "").trim() !== "")
+      cfg.setProp(prop.file, prop.key, prop.default as string);
+  };
+
+  const addCustom = (key: string) => addKey("config", key);
+
+  const removeRow = (file: PropFile, key: string) => {
+    cfg.setProp(file, key, "");
+    setAdded((prev) => prev.filter((a) => !(a.file === file && a.key === key)));
+  };
+
+  // Row list = union of the three maps + any `added` key not already in its map,
+  // de-duplicated by (file, key), preferring the map entry.
+  const mapRows: { file: PropFile; key: string }[] = [
     ...cfg.configProps.map((kv) => ({ file: "config" as const, key: kv.key })),
     ...cfg.nodeProps.map((kv) => ({ file: "node" as const, key: kv.key })),
     ...cfg.logProps.map((kv) => ({ file: "log" as const, key: kv.key })),
+  ];
+  const inMap = new Set(mapRows.map((r) => `${r.file}:${r.key}`));
+  const rows = [
+    ...mapRows,
+    ...added.filter((a) => !inMap.has(`${a.file}:${a.key}`)),
   ];
 
   const s = search.trim().toLowerCase();
@@ -234,13 +278,14 @@ export function PropertiesSection({ cfg }: { cfg: EngineConfigForm }) {
               cfg={cfg}
               file={r.file}
               keyName={r.key}
+              onRemove={() => removeRow(r.file, r.key)}
             />
           ))}
         </div>
       )}
 
       <div className="border-t pt-4">
-        <AddProperty cfg={cfg} />
+        <AddProperty onAddCatalog={addCatalog} onAddCustom={addCustom} />
       </div>
     </ConfigSection>
   );
