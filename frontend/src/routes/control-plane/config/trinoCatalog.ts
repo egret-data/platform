@@ -1375,6 +1375,77 @@ export const trinoCatalog: TrinoProp[] = [
         "https://trino.io/docs/current/installation/deployment.html#node-properties",
     },
   ]),
+
+  // ── Per-logger levels (log.properties) ───────────────────────────────────
+  // `log.properties` maps a Java package/logger name to a level. Logger names
+  // are open-ended (any package works via the "add custom key" path); these are
+  // the common Trino roots operators reach for. The value is a level enum.
+  ...section("../installation/deployment", "Logging levels", "log", [
+    {
+      key: "io.trino",
+      type: "enum",
+      enumOptions: ["DEBUG", "INFO", "WARN", "ERROR"],
+      help: "Root Trino logger level (affects most server logging).",
+      docsUrl:
+        "https://trino.io/docs/current/installation/deployment.html#log-levels",
+    },
+    {
+      key: "io.trino.execution",
+      type: "enum",
+      enumOptions: ["DEBUG", "INFO", "WARN", "ERROR"],
+      help: "Query scheduling and execution engine logging.",
+      docsUrl:
+        "https://trino.io/docs/current/installation/deployment.html#log-levels",
+    },
+    {
+      key: "io.trino.server",
+      type: "enum",
+      enumOptions: ["DEBUG", "INFO", "WARN", "ERROR"],
+      help: "HTTP server / coordinator startup and request logging.",
+      docsUrl:
+        "https://trino.io/docs/current/installation/deployment.html#log-levels",
+    },
+    {
+      key: "io.trino.security",
+      type: "enum",
+      enumOptions: ["DEBUG", "INFO", "WARN", "ERROR"],
+      help: "Authentication, authorization and access-control logging.",
+      docsUrl:
+        "https://trino.io/docs/current/installation/deployment.html#log-levels",
+    },
+    {
+      key: "io.trino.event",
+      type: "enum",
+      enumOptions: ["DEBUG", "INFO", "WARN", "ERROR"],
+      help: "Query-completion event / event-listener logging.",
+      docsUrl:
+        "https://trino.io/docs/current/installation/deployment.html#log-levels",
+    },
+    {
+      key: "io.trino.plugin.hive",
+      type: "enum",
+      enumOptions: ["DEBUG", "INFO", "WARN", "ERROR"],
+      help: "Hive connector logging.",
+      docsUrl:
+        "https://trino.io/docs/current/installation/deployment.html#log-levels",
+    },
+    {
+      key: "io.trino.plugin.iceberg",
+      type: "enum",
+      enumOptions: ["DEBUG", "INFO", "WARN", "ERROR"],
+      help: "Iceberg connector logging.",
+      docsUrl:
+        "https://trino.io/docs/current/installation/deployment.html#log-levels",
+    },
+    {
+      key: "io.trino.plugin.jdbc",
+      type: "enum",
+      enumOptions: ["DEBUG", "INFO", "WARN", "ERROR"],
+      help: "Shared JDBC connector logging (PostgreSQL, MySQL, …).",
+      docsUrl:
+        "https://trino.io/docs/current/installation/deployment.html#log-levels",
+    },
+  ]),
 ];
 
 export const trinoCatalogByKey: Record<string, TrinoProp> = Object.fromEntries(
