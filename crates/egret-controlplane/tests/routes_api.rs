@@ -2231,3 +2231,115 @@ async fn platform_admin_can_list_policies_by_type() {
 
     authz.delete_service(svc.id).await.expect("cleanup service");
 }
+
+/// Proves the Task 6 auto-bind primitives at the STORE level (no live
+/// Kubernetes `EngineProvisioner` needed): a fresh authz profile bound via
+/// `CatalogStore::set_engine_authz_service` round-trips through
+/// `list_engines`, and the bound engine surfaces under its profile on
+/// `GET /policies/services`.
+#[tokio::test]
+async fn platform_admin_autobind_engine_to_new_profile() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "autobind_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+
+    let catalog = egret_catalog::CatalogStore::new(f.db.clone());
+    let authz = egret_authz::AuthzStore::new(f.db.clone());
+
+    // Mirrors the `create_engine` auto-bind "create" branch: seed the Trino
+    // service-def (required FK for `create_service`), then create a fresh
+    // profile named after the engine.
+    egret_authz::seed_trino(&authz)
+        .await
+        .expect("seed trino def");
+
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let engine = catalog
+        .create_engine(
+            &engine_name,
+            "trino",
+            "egret-engines",
+            wh_id,
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("create engine");
+    assert_eq!(
+        engine.authz_service_id, None,
+        "engine starts unbound before auto-bind"
+    );
+
+    let svc = authz
+        .create_service(&engine_name, "trino", &serde_json::json!({}))
+        .await
+        .expect("create service");
+
+    catalog
+        .set_engine_authz_service(engine.id, Some(svc.id))
+        .await
+        .expect("bind engine to profile");
+
+    let engines = catalog.list_engines().await.expect("list engines");
+    let bound = engines
+        .iter()
+        .find(|e| e.id == engine.id)
+        .expect("engine present");
+    assert_eq!(
+        bound.authz_service_id,
+        Some(svc.id),
+        "authz_service_id round-trips through list_engines"
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/policies/services", &token, None))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list profiles; body={body}");
+    let arr = body.as_array().expect("array body");
+    let profile = arr
+        .iter()
+        .find(|p| p["id"] == serde_json::json!(svc.id))
+        .unwrap_or_else(|| panic!("profile {} not found; body={body}", svc.id));
+    let profile_engines = profile["engines"].as_array().expect("engines array");
+    assert!(
+        profile_engines
+            .iter()
+            .any(|e| e["id"] == serde_json::json!(engine.id)),
+        "bound engine should appear under its profile; body={body}"
+    );
+
+    catalog
+        .delete_engine(engine.id)
+        .await
+        .expect("cleanup engine");
+    authz.delete_service(svc.id).await.expect("cleanup service");
+}
+
+/// The Policies routes are platform-admin-gated (spec §5): a non-admin session
+/// must be Forbidden (403), and the gate runs before any store read.
+#[tokio::test]
+async fn non_admin_cannot_list_policies() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "policies_plain", false).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/policies?service=whatever", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a non platform-admin must not list policies"
+    );
+}
