@@ -33,6 +33,7 @@ import ControlPlaneStorage from "@/routes/control-plane/ControlPlaneStorage";
 import StorageBrowser from "@/routes/control-plane/StorageBrowser";
 import ControlPlaneSecrets from "@/routes/control-plane/ControlPlaneSecrets";
 import Policies from "@/routes/control-plane/Policies";
+import PolicyEditorPage from "@/routes/control-plane/PolicyEditorPage";
 import Warehouses from "@/routes/control-plane/Warehouses";
 import WarehouseDetail from "@/routes/control-plane/WarehouseDetail";
 
@@ -91,6 +92,8 @@ function ControlPlaneRoutes() {
           <Route path="storage/:id/browse" element={<StorageBrowser />} />
           <Route path="secrets" element={<ControlPlaneSecrets />} />
           <Route path="policies" element={<Policies />} />
+          <Route path="policies/:service/:kind/new" element={<PolicyEditorPage />} />
+          <Route path="policies/:service/:kind/:id" element={<PolicyEditorPage />} />
           <Route path="users" element={<Placeholder title="Users" />} />
           <Route path="*" element={<Navigate to="workspaces" replace />} />
         </Routes>

@@ -5,6 +5,12 @@ import { describe, it, expect, vi } from "vitest";
 import { setPolicyEnabled } from "@/api/policies";
 import Policies from "../Policies";
 
+const navigate = vi.fn();
+vi.mock("react-router-dom", async () => {
+  const actual = await vi.importActual<typeof import("react-router-dom")>("react-router-dom");
+  return { ...actual, useNavigate: () => navigate };
+});
+
 vi.mock("@/api/policies", () => ({
   listProfiles: () => Promise.resolve([
     { id: 1, name: "trino", type: "trino", policy_version: 3, engines: [{ id: "e1", name: "prod", status: "running" }] },
@@ -14,32 +20,12 @@ vi.mock("@/api/policies", () => ({
       resource_path: "iceberg.sales.orders.*", principals: ["analysts"], permissions: ["select"], is_enabled: true,
       description: "grants select to analysts", labels: ["pii"] },
   ]),
-  createPolicy: vi.fn(() => Promise.resolve({ id: 99 })),
-  updatePolicy: vi.fn(() => Promise.resolve({ id: 42 })),
   deletePolicy: vi.fn(() => Promise.resolve(undefined)),
   setPolicyEnabled: vi.fn(() => Promise.resolve()),
-  getPolicy: vi.fn(() => Promise.resolve({
-    name: "allow-analysts",
-    isEnabled: true,
-    resources: {
-      catalog: { values: ["iceberg"] },
-      schema: { values: ["sales"] },
-      table: { values: ["orders"] },
-      column: { values: ["*"] },
-    },
-    policyItems: [{ users: [], groups: ["analysts"], accesses: [{ type: "select" }] }],
-    denyPolicyItems: [],
-  })),
-  getServiceDef: vi.fn(() => Promise.resolve({ accessTypes: [{ name: "select" }] })),
-  listPrincipals: vi.fn(() => Promise.resolve([])),
   getTrinoConfig: vi.fn(() => Promise.resolve([
     { name: "access-control.properties", content: "access-control.name=ranger" },
     { name: "ranger-trino-security.xml", content: "<configuration/>" },
   ])),
-  MASK_TYPES: [
-    { name: "MASK_HASH", label: "Hash" },
-    { name: "CUSTOM", label: "Custom expression" },
-  ],
 }));
 
 function wrap(ui: React.ReactNode) {
@@ -54,12 +40,20 @@ describe("Policies page", () => {
     expect(await screen.findByText("iceberg.sales.orders.*")).toBeInTheDocument();
   });
 
-  it("opens the access policy editor on New policy", async () => {
+  it("navigates to the full-page editor on New policy", async () => {
     const user = userEvent.setup();
     wrap(<Policies />);
     await screen.findByText("allow-analysts");
     await user.click(await screen.findByRole("button", { name: /new policy/i }));
-    expect(await screen.findByText(/new access policy/i)).toBeInTheDocument();
+    expect(navigate).toHaveBeenCalledWith("/control-plane/policies/trino/access/new");
+  });
+
+  it("navigates to the full-page editor on Edit", async () => {
+    const user = userEvent.setup();
+    wrap(<Policies />);
+    await screen.findByText("allow-analysts");
+    await user.click(await screen.findByRole("button", { name: /edit allow-analysts/i }));
+    expect(navigate).toHaveBeenCalledWith("/control-plane/policies/trino/access/42");
   });
 
   it("renders a Delete action for each access policy row", async () => {
@@ -91,7 +85,7 @@ describe("Policies page", () => {
     expect(setPolicyEnabled).toHaveBeenCalledWith(42, false);
   });
 
-  it("shows New policy on the masking tab and opens the masking editor", async () => {
+  it("navigates to the masking editor on the masking tab", async () => {
     const user = userEvent.setup();
     wrap(<Policies />);
     await screen.findByText("allow-analysts");
@@ -99,6 +93,6 @@ describe("Policies page", () => {
     const newButton = await screen.findByRole("button", { name: /new policy/i });
     expect(newButton).toBeInTheDocument();
     await user.click(newButton);
-    expect(await screen.findByText(/new masking policy/i)).toBeInTheDocument();
+    expect(navigate).toHaveBeenCalledWith("/control-plane/policies/trino/masking/new");
   });
 });

@@ -1,9 +1,10 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, Pencil, Plus, ShieldCheck, Trash2 } from "lucide-react";
 import {
-  type Profile, type PolicySummary, type AccessPolicyInput, type MaskingPolicyInput, type RowFilterPolicyInput,
-  listProfiles, listPolicies, deletePolicy, getPolicy, setPolicyEnabled,
+  type Profile, type PolicySummary,
+  listProfiles, listPolicies, deletePolicy, setPolicyEnabled,
 } from "@/api/policies";
 import { ApiError } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -15,9 +16,6 @@ import { Switch } from "@/components/ui/switch";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
-import { AccessPolicyDialog } from "@/components/policy/AccessPolicyDialog";
-import { MaskingPolicyDialog } from "@/components/policy/MaskingPolicyDialog";
-import { RowFilterPolicyDialog } from "@/components/policy/RowFilterPolicyDialog";
 import { TrinoConfigDialog } from "@/components/policy/TrinoConfigDialog";
 
 const TYPES = [
@@ -26,87 +24,8 @@ const TYPES = [
   { key: "rowfilter", label: "Row-filter" },
 ] as const;
 
-// Inverse of the backend's access_to_ranger_json: turns a raw Ranger policy
-// body (as returned by GET /control-plane/policies/:id) back into the shape
-// the AccessPolicyDialog editor works with.
-function toInput(service: string, body: Record<string, any>): AccessPolicyInput {
-  const lvl = (k: string) => ({
-    values: body?.resources?.[k]?.values ?? [],
-    isExcludes: !!body?.resources?.[k]?.isExcludes,
-    isRecursive: !!body?.resources?.[k]?.isRecursive,
-  });
-  const map = (arr: any[], effect: "allow" | "deny") =>
-    (arr ?? []).map((it: any) => ({
-      users: it.users ?? [],
-      groups: it.groups ?? [],
-      accesses: (it.accesses ?? []).map((a: any) => a.type),
-      effect,
-    }));
-  const items = [...map(body.policyItems, "allow"), ...map(body.denyPolicyItems, "deny")];
-  const allowExceptions = map(body.allowExceptions, "allow");
-  const denyExceptions = map(body.denyExceptions, "deny");
-  return {
-    name: String(body.name ?? ""),
-    service,
-    isEnabled: body.isEnabled !== false,
-    resources: { catalog: lvl("catalog"), schema: lvl("schema"), table: lvl("table"), column: lvl("column") },
-    items: items.length ? items : [{ users: [], groups: [], accesses: [], effect: "allow" }],
-    allowExceptions,
-    denyExceptions,
-    isDenyAllElse: body.isDenyAllElse === true,
-    description: String(body.description ?? ""),
-    labels: body.policyLabels ?? [],
-  };
-}
-
-function maskingToInput(service: string, body: Record<string, any>): MaskingPolicyInput {
-  const lvl = (k: string) => ({
-    values: body?.resources?.[k]?.values ?? [],
-    isExcludes: !!body?.resources?.[k]?.isExcludes,
-    isRecursive: !!body?.resources?.[k]?.isRecursive,
-  });
-  const items = (body.dataMaskPolicyItems ?? []).map((it: any) => ({
-    users: it.users ?? [],
-    groups: it.groups ?? [],
-    maskType: it.dataMaskInfo?.dataMaskType ?? "MASK_HASH",
-    valueExpr: it.dataMaskInfo?.valueExpr,
-  }));
-  return {
-    kind: "masking",
-    name: String(body.name ?? ""),
-    service,
-    isEnabled: body.isEnabled !== false,
-    resources: { catalog: lvl("catalog"), schema: lvl("schema"), table: lvl("table"), column: lvl("column") },
-    items: items.length ? items : [{ users: [], groups: [], maskType: "MASK_HASH" }],
-    description: String(body.description ?? ""),
-    labels: body.labels ?? [],
-  };
-}
-
-function rowfilterToInput(service: string, body: Record<string, any>): RowFilterPolicyInput {
-  const lvl = (k: string) => ({
-    values: body?.resources?.[k]?.values ?? [],
-    isExcludes: !!body?.resources?.[k]?.isExcludes,
-    isRecursive: !!body?.resources?.[k]?.isRecursive,
-  });
-  const items = (body.rowFilterPolicyItems ?? []).map((it: any) => ({
-    users: it.users ?? [],
-    groups: it.groups ?? [],
-    filterExpr: it.rowFilterInfo?.filterExpr ?? "",
-  }));
-  return {
-    kind: "rowfilter",
-    name: String(body.name ?? ""),
-    service,
-    isEnabled: body.isEnabled !== false,
-    resources: { catalog: lvl("catalog"), schema: lvl("schema"), table: lvl("table") },
-    items: items.length ? items : [{ users: [], groups: [], filterExpr: "" }],
-    description: String(body.description ?? ""),
-    labels: body.labels ?? [],
-  };
-}
-
 export default function Policies() {
+  const navigate = useNavigate();
   const profiles = useQuery<Profile[], ApiError>({
     queryKey: ["control-plane", "profiles"],
     queryFn: listProfiles,
@@ -127,10 +46,7 @@ export default function Policies() {
   const rows = policies.data ?? [];
 
   const queryClient = useQueryClient();
-  const [editorOpen, setEditorOpen] = useState(false);
-  const [editing, setEditing] = useState<{ id: number; input: any } | undefined>(undefined);
   const [deleteTarget, setDeleteTarget] = useState<PolicySummary | null>(null);
-  const [editError, setEditError] = useState<string | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
 
   const del = useMutation({
@@ -146,24 +62,13 @@ export default function Policies() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] }),
   });
 
-  const openNew = () => { setEditError(null); setEditing(undefined); setEditorOpen(true); };
-  const openEdit = async (id: number) => {
-    setEditError(null);
-    try {
-      const body = await getPolicy(id) as Record<string, unknown>;
-      const input = policyType === "masking" ? maskingToInput(activeService!, body)
-        : policyType === "rowfilter" ? rowfilterToInput(activeService!, body)
-        : toInput(activeService!, body);
-      setEditing({ id, input });
-      setEditorOpen(true);
-    } catch (e) {
-      setEditError(e instanceof Error ? e.message : "Failed to load policy");
-    }
+  const goToNew = () => {
+    if (!activeService) return;
+    navigate(`/control-plane/policies/${encodeURIComponent(activeService)}/${policyType}/new`);
   };
-
-  const selectType = (t: (typeof TYPES)[number]["key"]) => {
-    setPolicyType(t);
-    setEditorOpen(false);
+  const goToEdit = (id: number) => {
+    if (!activeService) return;
+    navigate(`/control-plane/policies/${encodeURIComponent(activeService)}/${policyType}/${id}`);
   };
 
   return (
@@ -174,17 +79,11 @@ export default function Policies() {
           <h1 className="text-xl font-semibold">Policies</h1>
         </div>
         {activeService && (
-          <Button size="sm" onClick={openNew}>
+          <Button size="sm" onClick={goToNew}>
             <Plus className="mr-1 h-4 w-4" /> New policy
           </Button>
         )}
       </div>
-
-      {editError && (
-        <Alert variant="destructive">
-          <AlertDescription>{editError}</AlertDescription>
-        </Alert>
-      )}
 
       <Card>
         <CardHeader>
@@ -233,7 +132,7 @@ export default function Policies() {
             type="button"
             role="tab"
             aria-selected={policyType === t.key}
-            onClick={() => selectType(t.key)}
+            onClick={() => setPolicyType(t.key)}
             className={`px-3 py-2 text-sm ${policyType === t.key ? "border-b-2 border-primary font-medium" : "text-muted-foreground"}`}
           >
             {t.label}
@@ -286,7 +185,7 @@ export default function Policies() {
               </TableCell>
               <TableCell className="text-right">
                 <div className="flex justify-end gap-1">
-                  <Button variant="ghost" size="icon" aria-label={`Edit ${r.name}`} onClick={() => openEdit(r.id)}>
+                  <Button variant="ghost" size="icon" aria-label={`Edit ${r.name}`} onClick={() => goToEdit(r.id)}>
                     <Pencil className="h-4 w-4" />
                   </Button>
                   <Button variant="ghost" size="icon" aria-label={`Delete ${r.name}`} onClick={() => setDeleteTarget(r)}>
@@ -314,33 +213,6 @@ export default function Policies() {
         </TableBody>
       </Table>
 
-      {activeService && policyType === "access" && (
-        <AccessPolicyDialog
-          open={editorOpen}
-          service={activeService}
-          initial={editing}
-          onOpenChange={setEditorOpen}
-          onSaved={() => queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] })}
-        />
-      )}
-      {activeService && policyType === "masking" && (
-        <MaskingPolicyDialog
-          open={editorOpen}
-          service={activeService}
-          initial={editing}
-          onOpenChange={setEditorOpen}
-          onSaved={() => queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] })}
-        />
-      )}
-      {activeService && policyType === "rowfilter" && (
-        <RowFilterPolicyDialog
-          open={editorOpen}
-          service={activeService}
-          initial={editing}
-          onOpenChange={setEditorOpen}
-          onSaved={() => queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] })}
-        />
-      )}
       {activeService && (
         <TrinoConfigDialog open={configOpen} service={activeService} onOpenChange={setConfigOpen} />
       )}
