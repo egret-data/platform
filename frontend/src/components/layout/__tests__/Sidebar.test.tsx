@@ -55,7 +55,6 @@ describe("Sidebar – workspace zones", () => {
       "Pipelines",
       "Workflows",
       "Alerts",
-      "Policies",
       "Data Lineage",
       "Engines",
     ]) {
@@ -74,6 +73,11 @@ describe("Sidebar – workspace zones", () => {
     for (const label of ["Code IDE", "Query Audit", "Data Quality"]) {
       expect(screen.queryByRole("link", { name: label })).not.toBeInTheDocument();
     }
+  });
+
+  test("Policies moved out of Explore's Data Governance group", () => {
+    renderSidebar("/explore/eng/sql-lab");
+    expect(screen.queryByRole("link", { name: "Policies" })).not.toBeInTheDocument();
   });
 
   test("items link to /explore/:ws/<slug>", () => {
@@ -137,5 +141,16 @@ describe("Sidebar – Control Plane group", () => {
     for (const gone of ["Resources", "Monitoring", "Platform Policies"]) {
       expect(screen.queryByRole("link", { name: gone })).not.toBeInTheDocument();
     }
+  });
+});
+
+describe("Sidebar – Control Plane Data Governance group", () => {
+  test("renders the Policies item at /control-plane/policies", () => {
+    renderSidebar("/control-plane/workspaces");
+    expect(screen.getByText("Data Governance")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Policies" })).toHaveAttribute(
+      "href",
+      "/control-plane/policies",
+    );
   });
 });
