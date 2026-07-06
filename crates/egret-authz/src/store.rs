@@ -232,6 +232,19 @@ impl AuthzStore {
         .ok_or_else(|| AuthzError::NotFound(format!("policy {id}")))
     }
 
+    /// All policies for a service (enabled and disabled), newest first — the
+    /// admin list view. Returns typed rows; unlike `enabled_policies_for_service`
+    /// this does not inject id/version into the body (the caller/summary does that).
+    pub async fn list_policies(&self, service_id: i64) -> Result<Vec<PolicyRow>, AuthzError> {
+        Ok(sqlx::query_as::<_, PolicyRow>(
+            r#"SELECT id, service_id, name, policy_jsonb, enabled, version
+               FROM authz_policies WHERE service_id = $1 ORDER BY id DESC"#,
+        )
+        .bind(service_id)
+        .fetch_all(&self.db.pool)
+        .await?)
+    }
+
     /// Enabled policies of a service (for download assembly).
     pub async fn enabled_policies_for_service(
         &self,
