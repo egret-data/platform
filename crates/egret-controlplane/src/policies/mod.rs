@@ -321,6 +321,12 @@ async fn create_policy(
     let svc = st.authz.get_service(&input.service).await?;
     let body = access_to_ranger_json(&input);
     let id = st.authz.create_policy(svc.id, &input.name, &body).await?;
+    if !input.is_enabled {
+        // create_policy inserts with enabled=true (DB default); reflect the form's toggle.
+        st.authz
+            .update_policy(id, &input.name, &body, false)
+            .await?;
+    }
     Ok(Json(json!({ "id": id })))
 }
 

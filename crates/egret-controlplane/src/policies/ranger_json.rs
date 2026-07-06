@@ -4,6 +4,13 @@
 //! P2 covers policyType 0 (access) only; masking/row-filter come in P3.
 //!
 //! Called by the create/update handlers in `policies/mod.rs`.
+//!
+//! NOTE: this serializer is lossy for policies NOT authored by egret's editor.
+//! It always emits `roles: []`, `delegateAdmin: false`, empty allow/deny
+//! exceptions, `isAllowed: true` per access, and `serviceType: "trino"`. Editing
+//! a foreign/Ranger-native policy through the UI therefore drops those fields.
+//! P2 is trino-only + egret-authored by design; revisit if importing external
+//! Ranger policies becomes a requirement.
 
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
