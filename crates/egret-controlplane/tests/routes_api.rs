@@ -2654,3 +2654,110 @@ async fn admin_can_list_principals() {
         "expected at least one user principal; body={body}"
     );
 }
+
+/// P4 Task 4: `GET /policies/resource-lookup` returns distinct values used in
+/// the service's existing policies, filtered by parent-level match.
+#[tokio::test]
+async fn platform_admin_can_lookup_resource_values() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "resource_lookup_admin", true).await;
+
+    let authz = egret_authz::AuthzStore::new(f.db.clone());
+    egret_authz::seed_trino(&authz)
+        .await
+        .expect("seed trino def");
+    let svc_name = format!("trino-{}", Uuid::new_v4().simple());
+    let svc = authz
+        .create_service(&svc_name, "trino", &serde_json::json!({}))
+        .await
+        .expect("create service");
+    authz
+        .create_policy(
+            svc.id,
+            "allow-analysts-select",
+            &serde_json::json!({
+                "name": "allow-analysts-select",
+                "policyType": 0,
+                "resources": {
+                    "catalog": {"values": ["iceberg"]},
+                    "schema":  {"values": ["sales"]}
+                },
+                "policyItems": [
+                    {"users": ["alice"], "accesses": [{"type": "select"}]}
+                ]
+            }),
+        )
+        .await
+        .expect("create policy");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/policies/resource-lookup?service={svc_name}&level=schema&catalog=iceberg"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "resource-lookup; body={body}");
+    let arr = body.as_array().expect("array body");
+    assert!(
+        arr.iter().any(|v| v == "sales"),
+        "expected 'sales' in schema suggestions; body={body}"
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/policies/resource-lookup?service={svc_name}&level=schema&catalog=other"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "resource-lookup; body={body}");
+    let arr = body.as_array().expect("array body");
+    assert!(
+        !arr.iter().any(|v| v == "sales"),
+        "parent-filter mismatch should exclude 'sales'; body={body}"
+    );
+
+    authz.delete_service(svc.id).await.expect("cleanup service");
+}
+
+/// The `resource-lookup` route is platform-admin-gated like every other
+/// `/policies` route.
+#[tokio::test]
+async fn non_admin_cannot_lookup_resource_values() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "resource_lookup_plain", false).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            "/policies/resource-lookup?service=whatever&level=catalog",
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a non platform-admin must not use resource-lookup"
+    );
+}

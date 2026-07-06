@@ -196,7 +196,101 @@ pub fn router() -> Router<CpState> {
             get(trino_config),
         )
         .route("/policies/service-def/{name}", get(get_service_def))
+        .route("/policies/resource-lookup", get(resource_lookup))
         .route("/principals", get(list_principals))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResourceLookupQuery {
+    pub service: String,
+    pub level: String, // catalog | schema | table | column
+    #[serde(default)]
+    pub catalog: Option<String>,
+    #[serde(default)]
+    pub schema: Option<String>,
+    #[serde(default)]
+    pub table: Option<String>,
+    #[serde(default)]
+    pub q: Option<String>,
+}
+
+/// The `values` array of one resource-level entry (e.g. `resources.schema.values`).
+fn values_at(res: Option<&serde_json::Map<String, Value>>, k: &str) -> Vec<String> {
+    res.and_then(|r| r.get(k))
+        .and_then(|v| v.get("values"))
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// GET /policies/resource-lookup — suggestions for one resource level.
+/// catalog: engine-catalog names of engines bound to the profile + values used
+/// in the service's existing policies. schema/table/column: distinct values used
+/// in the service's policies, filtered so parent levels match.
+async fn resource_lookup(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Query(qp): Query<ResourceLookupQuery>,
+) -> Result<Json<Vec<String>>, CpError> {
+    require_platform_admin(&p)?;
+    let svc = st.authz.get_service(&qp.service).await?;
+    let mut out: Vec<String> = Vec::new();
+
+    if qp.level == "catalog" {
+        if let Ok(engines) = st.storage.list_engines().await {
+            for e in engines
+                .iter()
+                .filter(|e| e.authz_service_id == Some(svc.id))
+            {
+                if let Ok(cats) = st.storage.list_engine_catalogs(e.id).await {
+                    for c in cats {
+                        if !out.contains(&c.name) {
+                            out.push(c.name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for row in st.authz.list_policies(svc.id).await? {
+        let res = row.policy_jsonb.get("resources").and_then(Value::as_object);
+        let parent_ok = |k: &str, want: &Option<String>| -> bool {
+            match want {
+                None => true,
+                Some(w) => values_at(res, k).iter().any(|v| v == w || v == "*"),
+            }
+        };
+        if qp.level != "catalog" && !parent_ok("catalog", &qp.catalog) {
+            continue;
+        }
+        if (qp.level == "table" || qp.level == "column") && !parent_ok("schema", &qp.schema) {
+            continue;
+        }
+        if qp.level == "column" && !parent_ok("table", &qp.table) {
+            continue;
+        }
+        for v in values_at(res, &qp.level) {
+            if v != "*" && !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    }
+
+    if let Some(q) =
+        qp.q.as_deref()
+            .map(str::to_lowercase)
+            .filter(|s| !s.is_empty())
+    {
+        out.retain(|v| v.to_lowercase().contains(&q));
+    }
+    out.sort();
+    out.truncate(50);
+    Ok(Json(out))
 }
 
 /// GET /policies?service=&type=&q= — policy summaries for one profile, filtered.
