@@ -2516,12 +2516,15 @@ async fn bridge_exec(
     pod: &str,
     mut socket: WebSocket,
 ) {
-    // Prefer an interactive bash (the trinodb/trino image ships it); fall back to
-    // sh for any pod that lacks bash, so exec never breaks.
+    // Give an interactive `bash` (the trinodb/trino image ships it), like
+    // `kubectl exec -it <pod> -- bash`, falling back to `sh` only when bash is
+    // absent. The bash/sh existence probe redirects ITS OWN stderr (not the
+    // exec'd shell's), so command stderr still flows to the TTY. `TERM` is set
+    // so full-screen tools (less, vi, top) render correctly in xterm.js.
     let shell = [
         "/bin/sh".to_string(),
         "-c".to_string(),
-        "exec bash 2>/dev/null || exec sh".to_string(),
+        "export TERM=xterm-256color; if command -v bash >/dev/null 2>&1; then exec bash; else exec sh; fi".to_string(),
     ];
     let mut attached = match prov.exec(namespace, pod, &shell).await {
         Ok(a) => a,
