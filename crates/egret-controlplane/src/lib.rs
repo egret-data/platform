@@ -13,6 +13,7 @@ mod auth;
 mod engines;
 mod error;
 pub mod monitor;
+mod policies;
 mod secrets;
 mod storage;
 mod warehouses;
@@ -29,6 +30,7 @@ pub use engines::{
     WorkerRoleConfigReq,
 };
 pub use error::CpError;
+pub use policies::{summarize_policy, PolicySummary};
 pub use warehouses::{
     BrowseColumn, BrowseDeletedTabular, BrowseNamespace, BrowsePartition, BrowseSearchResult,
     BrowseSnapshot, BrowseSort, BrowseTableDetail, BrowseTabular, BrowseTask,
