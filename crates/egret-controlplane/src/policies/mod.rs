@@ -154,6 +154,10 @@ pub fn router() -> Router<CpState> {
                 .delete(delete_policy_handler),
         )
         .route("/policies/services", get(list_profiles))
+        .route(
+            "/policies/services/{service}/trino-config",
+            get(trino_config),
+        )
         .route("/policies/service-def/{name}", get(get_service_def))
         .route("/principals", get(list_principals))
 }
@@ -233,6 +237,58 @@ async fn list_profiles(
         })
         .collect();
     Ok(Json(profiles))
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConfigFile {
+    pub name: String,
+    pub content: String,
+}
+
+/// GET /policies/services/{service}/trino-config — the two files a Trino
+/// coordinator needs to enforce this profile via the native ranger plugin.
+async fn trino_config(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(service): Path<String>,
+) -> Result<Json<Vec<ConfigFile>>, CpError> {
+    require_platform_admin(&p)?;
+    let _ = st.authz.get_service(&service).await?; // 404 if the profile doesn't exist
+    let base = st.engine_egret_url.trim_end_matches('/');
+
+    let props = format!(
+        "access-control.name=ranger\n\
+         ranger.service.name={service}\n\
+         ranger.plugin.config.resource=ranger-trino-security.xml\n"
+    );
+    let xml = format!(
+        "<?xml version=\"1.0\"?>\n\
+         <?xml-stylesheet type=\"text/xsl\" href=\"configuration.xsl\"?>\n\
+         <configuration>\n\
+         \x20 <property>\n\
+         \x20   <name>ranger.plugin.trino.policy.rest.url</name>\n\
+         \x20   <value>{base}</value>\n\
+         \x20 </property>\n\
+         \x20 <property>\n\
+         \x20   <name>ranger.plugin.trino.service.name</name>\n\
+         \x20   <value>{service}</value>\n\
+         \x20 </property>\n\
+         \x20 <property>\n\
+         \x20   <name>ranger.plugin.trino.policy.pollIntervalMs</name>\n\
+         \x20   <value>30000</value>\n\
+         \x20 </property>\n\
+         </configuration>\n"
+    );
+    Ok(Json(vec![
+        ConfigFile {
+            name: "access-control.properties".into(),
+            content: props,
+        },
+        ConfigFile {
+            name: "ranger-trino-security.xml".into(),
+            content: xml,
+        },
+    ]))
 }
 
 /// GET /policies/service-def/{name} — the def slices the editor renders from.

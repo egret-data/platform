@@ -2507,6 +2507,60 @@ async fn admin_can_create_masking_and_rowfilter_policies() {
     authz.delete_service(svc.id).await.expect("cleanup service");
 }
 
+/// P3 Task 3: `GET /policies/services/{service}/trino-config` renders the
+/// access-control.properties + ranger-trino-security.xml bundle a Trino
+/// coordinator needs for the native ranger plugin.
+#[tokio::test]
+async fn admin_gets_trino_config_for_profile() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cfg", true).await;
+
+    let authz = egret_authz::AuthzStore::new(f.db.clone());
+    egret_authz::seed_trino(&authz)
+        .await
+        .expect("seed trino def");
+    let svc_name = format!("trino-{}", Uuid::new_v4().simple());
+    let svc = authz
+        .create_service(&svc_name, "trino", &serde_json::json!({}))
+        .await
+        .expect("create service");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/policies/services/{svc_name}/trino-config"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "trino-config; body={body}");
+    let files = body.as_array().expect("array body");
+    assert_eq!(files.len(), 2);
+    assert!(files
+        .iter()
+        .any(|f| f["name"] == "access-control.properties"
+            && f["content"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("ranger.service.name={svc_name}"))));
+    assert!(files
+        .iter()
+        .any(|f| f["name"] == "ranger-trino-security.xml"
+            && f["content"]
+                .as_str()
+                .unwrap()
+                .contains("ranger.plugin.trino.policy.rest.url")));
+
+    authz.delete_service(svc.id).await.expect("cleanup service");
+}
+
 /// P2 Task 3: `GET /principals` sources egret users (and groups) for the
 /// policy picker. `session_for` creates a `platform_admin` user, so at least
 /// one user principal always exists.
