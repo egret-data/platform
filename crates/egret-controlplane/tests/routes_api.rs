@@ -2414,6 +2414,99 @@ async fn admin_can_create_and_delete_access_policy() {
     authz.delete_service(svc.id).await.expect("cleanup service");
 }
 
+/// P3 Task 2: the same `POST /policies` / `PUT /policies/{id}` endpoints
+/// dispatch on `kind` to create Masking and Row-filter policies too.
+#[tokio::test]
+async fn admin_can_create_masking_and_rowfilter_policies() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "mrf", true).await;
+
+    let authz = egret_authz::AuthzStore::new(f.db.clone());
+    egret_authz::seed_trino(&authz)
+        .await
+        .expect("seed trino def");
+    let svc_name = format!("trino-{}", Uuid::new_v4().simple());
+    let svc = authz
+        .create_service(&svc_name, "trino", &serde_json::json!({}))
+        .await
+        .expect("create service");
+
+    let mask = serde_json::json!({
+        "kind": "masking", "name": "m1", "service": svc_name, "isEnabled": true,
+        "resources": {"catalog": {"values": ["c"]}, "schema": {"values": ["s"]},
+                       "table": {"values": ["t"]}, "column": {"values": ["email"]}},
+        "items": [{"groups": ["pii"], "maskType": "MASK_HASH"}]
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/policies", &token, Some(mask)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "create masking policy; body={body}");
+
+    let rf = serde_json::json!({
+        "kind": "rowfilter", "name": "r1", "service": svc_name, "isEnabled": true,
+        "resources": {"catalog": {"values": ["c"]}, "schema": {"values": ["s"]},
+                       "table": {"values": ["t"]}},
+        "items": [{"users": ["bob"], "filterExpr": "country = 'US'"}]
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/policies", &token, Some(rf)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "create rowfilter policy; body={body}"
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/policies?service={svc_name}&type=masking"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (_, masking_list) = into_json(resp).await;
+    assert_eq!(
+        masking_list.as_array().expect("array body").len(),
+        1,
+        "expected exactly one masking summary; body={masking_list}"
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/policies?service={svc_name}&type=rowfilter"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (_, rf_list) = into_json(resp).await;
+    assert_eq!(
+        rf_list.as_array().expect("array body").len(),
+        1,
+        "expected exactly one rowfilter summary; body={rf_list}"
+    );
+
+    authz.delete_service(svc.id).await.expect("cleanup service");
+}
+
 /// P2 Task 3: `GET /principals` sources egret users (and groups) for the
 /// policy picker. `session_for` creates a `platform_admin` user, so at least
 /// one user principal always exists.

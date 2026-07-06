@@ -19,8 +19,8 @@ use crate::auth::require_platform_admin;
 use crate::error::CpError;
 use crate::CpState;
 pub use ranger_json::{
-    access_to_ranger_json, editor_to_ranger_json, masking_to_ranger_json, rowfilter_to_ranger_json,
-    AccessPolicyInput, MaskingPolicyInput, RangerPolicy, RowFilterPolicyInput,
+    editor_to_ranger_json, masking_to_ranger_json, rowfilter_to_ranger_json, MaskingPolicyInput,
+    RangerPolicy, RowFilterPolicyInput,
 };
 
 /// Human-readable name for a Ranger `policyType` integer.
@@ -311,42 +311,45 @@ async fn list_principals(
     Ok(Json(out))
 }
 
-/// POST /policies — create an Access policy from the editor form.
+/// POST /policies — create an Access/Masking/Row-filter policy (by `kind`).
+///
+/// Missing `kind` defaults to "access" (see `editor_to_ranger_json`), so the
+/// P2 editor form — which never sent `kind` — stays wire-compatible.
 async fn create_policy(
     State(st): State<CpState>,
     Auth(p): Auth,
-    Json(input): Json<AccessPolicyInput>,
+    Json(v): Json<Value>,
 ) -> Result<Json<Value>, CpError> {
     require_platform_admin(&p)?;
-    if input.name.trim().is_empty() {
+    let pol = editor_to_ranger_json(&v).map_err(CpError::BadRequest)?;
+    if pol.name.trim().is_empty() {
         return Err(CpError::BadRequest("policy name is required".into()));
     }
-    let svc = st.authz.get_service(&input.service).await?;
-    let body = access_to_ranger_json(&input);
-    let id = st.authz.create_policy(svc.id, &input.name, &body).await?;
-    if !input.is_enabled {
+    let svc = st.authz.get_service(&pol.service).await?;
+    let id = st.authz.create_policy(svc.id, &pol.name, &pol.body).await?;
+    if !pol.is_enabled {
         // create_policy inserts with enabled=true (DB default); reflect the form's toggle.
         st.authz
-            .update_policy(id, &input.name, &body, false)
+            .update_policy(id, &pol.name, &pol.body, false)
             .await?;
     }
     Ok(Json(json!({ "id": id })))
 }
 
-/// PUT /policies/{id} — replace an Access policy's body.
+/// PUT /policies/{id} — replace a policy's body (any kind).
 async fn update_policy(
     State(st): State<CpState>,
     Auth(p): Auth,
     Path(id): Path<i64>,
-    Json(input): Json<AccessPolicyInput>,
+    Json(v): Json<Value>,
 ) -> Result<Json<Value>, CpError> {
     require_platform_admin(&p)?;
-    if input.name.trim().is_empty() {
+    let pol = editor_to_ranger_json(&v).map_err(CpError::BadRequest)?;
+    if pol.name.trim().is_empty() {
         return Err(CpError::BadRequest("policy name is required".into()));
     }
-    let body = access_to_ranger_json(&input);
     st.authz
-        .update_policy(id, &input.name, &body, input.is_enabled)
+        .update_policy(id, &pol.name, &pol.body, pol.is_enabled)
         .await?;
     Ok(Json(json!({ "id": id })))
 }
