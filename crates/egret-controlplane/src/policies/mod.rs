@@ -52,6 +52,8 @@ pub struct PolicySummary {
     pub principals: Vec<String>,
     pub permissions: Vec<String>,
     pub is_enabled: bool,
+    pub description: String,
+    pub labels: Vec<String>,
 }
 
 /// Parse a stored Ranger policy body into a `PolicySummary`.
@@ -74,27 +76,44 @@ pub fn summarize_policy(id: i64, service: &str, enabled: bool, body: &Value) -> 
         .collect::<Vec<_>>()
         .join(".");
 
-    // principals + permissions collected across this kind's items.
+    // principals + permissions, unioned across every item bucket this kind can
+    // populate. Access policies (0) can carry entries in any of allow/deny
+    // items and allow/deny exceptions — a deny-only or exceptions-only policy
+    // must still surface its principals/permissions, not just policyItems.
+    // Masking/row-filter keep their single item array.
+    let ik = item_key(policy_type);
+    let buckets: &[&str] = if policy_type == 0 {
+        &[
+            "policyItems",
+            "denyPolicyItems",
+            "allowExceptions",
+            "denyExceptions",
+        ]
+    } else {
+        std::slice::from_ref(&ik)
+    };
     let mut principals: Vec<String> = Vec::new();
     let mut permissions: Vec<String> = Vec::new();
-    if let Some(items) = body.get(item_key(policy_type)).and_then(Value::as_array) {
-        for it in items {
-            for key in ["users", "groups", "roles"] {
-                if let Some(arr) = it.get(key).and_then(Value::as_array) {
-                    for v in arr {
-                        if let Some(s) = v.as_str() {
-                            if !principals.contains(&s.to_string()) {
-                                principals.push(s.to_string());
+    for bk in buckets {
+        if let Some(items) = body.get(*bk).and_then(Value::as_array) {
+            for it in items {
+                for key in ["users", "groups", "roles"] {
+                    if let Some(arr) = it.get(key).and_then(Value::as_array) {
+                        for v in arr {
+                            if let Some(s) = v.as_str() {
+                                if !principals.contains(&s.to_string()) {
+                                    principals.push(s.to_string());
+                                }
                             }
                         }
                     }
                 }
-            }
-            if let Some(acc) = it.get("accesses").and_then(Value::as_array) {
-                for a in acc {
-                    if let Some(t) = a.get("type").and_then(Value::as_str) {
-                        if !permissions.contains(&t.to_string()) {
-                            permissions.push(t.to_string());
+                if let Some(acc) = it.get("accesses").and_then(Value::as_array) {
+                    for a in acc {
+                        if let Some(t) = a.get("type").and_then(Value::as_str) {
+                            if !permissions.contains(&t.to_string()) {
+                                permissions.push(t.to_string());
+                            }
                         }
                     }
                 }
@@ -115,6 +134,20 @@ pub fn summarize_policy(id: i64, service: &str, enabled: bool, body: &Value) -> 
         principals,
         permissions,
         is_enabled: enabled,
+        description: body
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        labels: body
+            .get("policyLabels")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 

@@ -475,6 +475,25 @@ mod tests {
     }
 
     #[test]
+    fn summary_unions_deny_and_exception_principals() {
+        let body = json!({
+            "name":"deny-only","policyType":0,
+            "resources":{"catalog":{"values":["iceberg"]}},
+            "policyItems":[],
+            "denyPolicyItems":[{"groups":["contractors"],"accesses":[{"type":"select"}]}],
+            "allowExceptions":[{"users":["alice"],"accesses":[{"type":"insert"}]}],
+            "description":"d","policyLabels":["l1"]
+        });
+        let s = summarize_policy(1, "trino", true, &body);
+        assert!(s.principals.contains(&"contractors".to_string()));
+        assert!(s.principals.contains(&"alice".to_string()));
+        assert!(s.permissions.contains(&"select".to_string()));
+        assert!(s.permissions.contains(&"insert".to_string()));
+        assert_eq!(s.description, "d");
+        assert_eq!(s.labels, vec!["l1".to_string()]);
+    }
+
+    #[test]
     fn dispatcher_routes_by_kind() {
         let acc = editor_to_ranger_json(&json!({"kind":"access","name":"a","service":"trino",
             "resources":{"catalog":{"values":["c"]}},"items":[]}))
