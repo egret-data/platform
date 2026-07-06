@@ -1,20 +1,52 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { ShieldCheck } from "lucide-react";
-import { type Profile, type PolicySummary, listProfiles, listPolicies } from "@/api/policies";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Pencil, Plus, ShieldCheck, Trash2 } from "lucide-react";
+import {
+  type Profile, type PolicySummary, type AccessPolicyInput,
+  listProfiles, listPolicies, deletePolicy, getPolicy,
+} from "@/api/policies";
 import { ApiError } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
+import { AccessPolicyDialog } from "@/components/policy/AccessPolicyDialog";
 
 const TYPES = [
   { key: "access", label: "Access" },
   { key: "masking", label: "Masking" },
   { key: "rowfilter", label: "Row-filter" },
 ] as const;
+
+// Inverse of the backend's access_to_ranger_json: turns a raw Ranger policy
+// body (as returned by GET /control-plane/policies/:id) back into the shape
+// the AccessPolicyDialog editor works with.
+function toInput(service: string, body: Record<string, any>): AccessPolicyInput {
+  const lvl = (k: string) => ({
+    values: body?.resources?.[k]?.values ?? [],
+    isExcludes: !!body?.resources?.[k]?.isExcludes,
+    isRecursive: !!body?.resources?.[k]?.isRecursive,
+  });
+  const map = (arr: any[], effect: "allow" | "deny") =>
+    (arr ?? []).map((it: any) => ({
+      users: it.users ?? [],
+      groups: it.groups ?? [],
+      accesses: (it.accesses ?? []).map((a: any) => a.type),
+      effect,
+    }));
+  const items = [...map(body.policyItems, "allow"), ...map(body.denyPolicyItems, "deny")];
+  return {
+    name: String(body.name ?? ""),
+    service,
+    isEnabled: body.isEnabled !== false,
+    resources: { catalog: lvl("catalog"), schema: lvl("schema"), table: lvl("table"), column: lvl("column") },
+    items: items.length ? items : [{ users: [], groups: [], accesses: [], effect: "allow" }],
+  };
+}
 
 export default function Policies() {
   const profiles = useQuery<Profile[], ApiError>({
@@ -36,11 +68,37 @@ export default function Policies() {
 
   const rows = policies.data ?? [];
 
+  const queryClient = useQueryClient();
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editing, setEditing] = useState<{ id: number; input: AccessPolicyInput } | undefined>(undefined);
+  const [deleteTarget, setDeleteTarget] = useState<PolicySummary | null>(null);
+
+  const del = useMutation({
+    mutationFn: (id: number) => deletePolicy(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] }),
+  });
+
+  const openNew = () => { setEditing(undefined); setEditorOpen(true); };
+  const openEdit = async (id: number) => {
+    const body = await getPolicy(id);
+    setEditing({ id, input: toInput(activeService!, body) });
+    setEditorOpen(true);
+  };
+
+  const isAccessTab = policyType === "access";
+
   return (
     <div className="space-y-4 p-6">
-      <div className="flex items-center gap-2">
-        <ShieldCheck className="h-5 w-5" />
-        <h1 className="text-xl font-semibold">Policies</h1>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="h-5 w-5" />
+          <h1 className="text-xl font-semibold">Policies</h1>
+        </div>
+        {activeService && isAccessTab && (
+          <Button size="sm" onClick={openNew}>
+            <Plus className="mr-1 h-4 w-4" /> New policy
+          </Button>
+        )}
       </div>
 
       <Card>
@@ -99,6 +157,7 @@ export default function Policies() {
             <TableHead>Principals</TableHead>
             <TableHead>Permissions</TableHead>
             <TableHead>Enabled</TableHead>
+            <TableHead className="text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -113,11 +172,23 @@ export default function Policies() {
                   {r.is_enabled ? "enabled" : "disabled"}
                 </Badge>
               </TableCell>
+              <TableCell className="text-right">
+                {isAccessTab && (
+                  <div className="flex justify-end gap-1">
+                    <Button variant="ghost" size="icon" aria-label={`Edit ${r.name}`} onClick={() => openEdit(r.id)}>
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                    <Button variant="ghost" size="icon" aria-label={`Delete ${r.name}`} onClick={() => setDeleteTarget(r)}>
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                )}
+              </TableCell>
             </TableRow>
           ))}
           {rows.length === 0 && (
             <TableRow className="hover:bg-transparent">
-              <TableCell colSpan={5} className="text-center text-muted-foreground">
+              <TableCell colSpan={6} className="text-center text-muted-foreground">
                 {policies.isError ? (
                   <span className="text-destructive">
                     {policies.error?.message ?? "Failed to load policies."}
@@ -132,6 +203,30 @@ export default function Policies() {
           )}
         </TableBody>
       </Table>
+
+      {activeService && (
+        <AccessPolicyDialog
+          open={editorOpen}
+          service={activeService}
+          initial={editing}
+          onOpenChange={setEditorOpen}
+          onSaved={() => queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] })}
+        />
+      )}
+
+      <ConfirmDeleteDialog
+        open={deleteTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) setDeleteTarget(null);
+        }}
+        title={deleteTarget ? `Delete "${deleteTarget.name}"?` : "Delete policy?"}
+        description="This policy will be permanently removed from Ranger."
+        confirmText="delete"
+        onConfirm={() => {
+          if (deleteTarget) del.mutate(deleteTarget.id);
+          setDeleteTarget(null);
+        }}
+      />
     </div>
   );
 }
