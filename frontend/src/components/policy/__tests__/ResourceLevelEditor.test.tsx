@@ -16,6 +16,7 @@ describe("ResourceLevelEditor", () => {
     wrap(<ResourceLevelEditor label="Schema" level="schema" service="trino" parents={{}}
       value={{ values: ["sales"], isExcludes: false, isRecursive: false }} onChange={onChange} />);
     expect(screen.getByText("sales")).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Advanced Schema"));
     fireEvent.click(screen.getByLabelText("Exclude Schema"));
     expect(onChange).toHaveBeenCalled();
   });

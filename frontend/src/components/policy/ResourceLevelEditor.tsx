@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { X } from "lucide-react";
+import { Settings2, X } from "lucide-react";
 import { type ResourceLevel, resourceLookup } from "@/api/policies";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -35,20 +35,37 @@ export function ResourceLevelEditor({ label, level, service, parents, value, onC
 
   return (
     <div className="space-y-1">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2">
         <label className="text-sm font-medium">{label}</label>
-        <div className="flex items-center gap-3 text-xs text-muted-foreground">
-          <span className="flex items-center gap-1">
-            <Switch aria-label={`Exclude ${label}`} checked={!!value.isExcludes}
-              onCheckedChange={(c) => onChange({ ...value, isExcludes: c })} />
-            Exclude
-          </span>
-          <span className="flex items-center gap-1">
-            <Switch aria-label={`Recursive ${label}`} checked={!!value.isRecursive}
-              onCheckedChange={(c) => onChange({ ...value, isRecursive: c })} />
-            Recursive
-          </span>
-        </div>
+        <Popover>
+          <PopoverTrigger asChild>
+            <button type="button" aria-label={`Advanced ${label}`}
+              className={`inline-flex h-6 items-center gap-1 rounded px-1.5 text-xs ${
+                value.isExcludes || value.isRecursive ? "text-primary" : "text-muted-foreground"
+              } hover:bg-accent`}>
+              <Settings2 className="h-3.5 w-3.5" />
+              {(value.isExcludes || value.isRecursive) && <span className="h-1.5 w-1.5 rounded-full bg-primary" />}
+            </button>
+          </PopoverTrigger>
+          <PopoverContent align="end" className="w-56 space-y-3 p-3" onOpenAutoFocus={(e) => e.preventDefault()}>
+            <div className="flex items-center justify-between">
+              <div className="text-sm">
+                <div className="font-medium">Exclude</div>
+                <div className="text-xs text-muted-foreground">Match everything except these values</div>
+              </div>
+              <Switch aria-label={`Exclude ${label}`} checked={!!value.isExcludes}
+                onCheckedChange={(c) => onChange({ ...value, isExcludes: c })} />
+            </div>
+            <div className="flex items-center justify-between">
+              <div className="text-sm">
+                <div className="font-medium">Recursive</div>
+                <div className="text-xs text-muted-foreground">Apply to child resources</div>
+              </div>
+              <Switch aria-label={`Recursive ${label}`} checked={!!value.isRecursive}
+                onCheckedChange={(c) => onChange({ ...value, isRecursive: c })} />
+            </div>
+          </PopoverContent>
+        </Popover>
       </div>
       <div className="flex flex-wrap gap-1">
         {value.values.map((v) => (
