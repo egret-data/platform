@@ -152,6 +152,7 @@ pub fn router() -> Router<CpState> {
         )
         .route("/policies/services", get(list_profiles))
         .route("/policies/service-def/{name}", get(get_service_def))
+        .route("/principals", get(list_principals))
 }
 
 /// GET /policies?service=&type=&q= — policy summaries for one profile, filtered.
@@ -239,6 +240,72 @@ async fn get_service_def(
 ) -> Result<Json<Value>, CpError> {
     require_platform_admin(&p)?;
     Ok(Json(st.authz.get_service_def(&name).await?.def_jsonb))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PrincipalQuery {
+    #[serde(default)]
+    pub q: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>, // "user" | "group"
+}
+
+/// One egret identity offered by the policy picker.
+#[derive(Debug, Serialize)]
+pub struct Principal {
+    pub kind: &'static str,
+    /// The value written into the policy (user email / group name).
+    pub name: String,
+    /// Display label.
+    pub label: String,
+}
+
+/// GET /principals?q=&kind= — egret users + groups for the policy picker.
+///
+/// Correctness note: the user principal `name` is the user's `email`; if a
+/// deployment's Trino/Ranger group-mapping keys identities on something else
+/// (e.g. a username), the admin must free-type the correct value instead.
+async fn list_principals(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Query(qp): Query<PrincipalQuery>,
+) -> Result<Json<Vec<Principal>>, CpError> {
+    require_platform_admin(&p)?;
+    let q = qp.q.unwrap_or_default().to_lowercase();
+    let want_users = qp.kind.as_deref() != Some("group");
+    let want_groups = qp.kind.as_deref() != Some("user");
+    let mut out: Vec<Principal> = Vec::new();
+    if want_users {
+        for u in st.users.list(200, 0).await.map_err(|_| CpError::Internal)? {
+            let name = u.email.clone();
+            let label = if u.name.is_empty() {
+                u.email.clone()
+            } else {
+                u.name.clone()
+            };
+            if q.is_empty() || name.to_lowercase().contains(&q) || label.to_lowercase().contains(&q)
+            {
+                out.push(Principal {
+                    kind: "user",
+                    name,
+                    label,
+                });
+            }
+        }
+    }
+    if want_groups {
+        for g in st.groups.list(200).await.map_err(|_| CpError::Internal)? {
+            if q.is_empty() || g.name.to_lowercase().contains(&q) {
+                out.push(Principal {
+                    kind: "group",
+                    name: g.name.clone(),
+                    label: g.name,
+                });
+            }
+        }
+    }
+    out.truncate(50);
+    Ok(Json(out))
 }
 
 /// POST /policies — create an Access policy from the editor form.

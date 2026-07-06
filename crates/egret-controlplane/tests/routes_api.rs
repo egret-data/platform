@@ -67,6 +67,8 @@ async fn setup_full(
     let app = control_plane_router().with_state(CpState {
         storage: egret_catalog::CatalogStore::new(db.clone()),
         authz: egret_authz::AuthzStore::new(db.clone()),
+        users: users.clone(),
+        groups: egret_auth::groups::GroupRepo::new(db.clone()),
         secrets: workspace_secrets,
         sessions: sessions.clone(),
         provisioner: None,
@@ -2410,4 +2412,30 @@ async fn admin_can_create_and_delete_access_policy() {
     );
 
     authz.delete_service(svc.id).await.expect("cleanup service");
+}
+
+/// P2 Task 3: `GET /principals` sources egret users (and groups) for the
+/// policy picker. `session_for` creates a `platform_admin` user, so at least
+/// one user principal always exists.
+#[tokio::test]
+async fn admin_can_list_principals() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "principals", true).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/principals?q=", &token, None))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list principals; body={body}");
+    let arr = body.as_array().expect("array body");
+    assert!(
+        arr.iter().any(|p| p["kind"] == "user"),
+        "expected at least one user principal; body={body}"
+    );
 }

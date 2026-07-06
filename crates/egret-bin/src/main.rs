@@ -1581,6 +1581,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let control_plane = Some(egret_controlplane::CpState {
         storage: egret_catalog::CatalogStore::new(db.clone()),
         authz: egret_authz::AuthzStore::new(db.clone()),
+        users: egret_auth::users::UserRepo::new(db.clone()),
+        groups: egret_auth::groups::GroupRepo::new(db.clone()),
         secrets: workspace_secrets.clone(),
         sessions: sessions.clone(),
         provisioner: catalog_provisioner,
