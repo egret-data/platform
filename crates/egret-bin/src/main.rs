@@ -1580,6 +1580,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // management. The warehouse provisioner (above) creates lakekeeper warehouses.
     let control_plane = Some(egret_controlplane::CpState {
         storage: egret_catalog::CatalogStore::new(db.clone()),
+        authz: egret_authz::AuthzStore::new(db.clone()),
         secrets: workspace_secrets.clone(),
         sessions: sessions.clone(),
         provisioner: catalog_provisioner,

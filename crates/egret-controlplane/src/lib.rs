@@ -47,6 +47,9 @@ use std::sync::Arc;
 pub struct CpState {
     /// Global storage-connection registry (`storage_connections`).
     pub storage: CatalogStore,
+    /// Shared Ranger policy store (`authz_*`), the same store the machine-facing
+    /// `/service` router writes. Used by the read-only Policies endpoints.
+    pub authz: egret_authz::AuthzStore,
     /// Named secret layer, used in GLOBAL scope (`None` workspace) here.
     pub secrets: WorkspaceSecretStore,
     /// Session service backing the `Auth` extractor.

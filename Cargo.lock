@@ -2596,6 +2596,7 @@ dependencies = [
  "bytes",
  "chrono",
  "egret-auth",
+ "egret-authz",
  "egret-catalog",
  "egret-core",
  "egret-metastore",

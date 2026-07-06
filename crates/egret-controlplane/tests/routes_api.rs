@@ -66,6 +66,7 @@ async fn setup_full(
 
     let app = control_plane_router().with_state(CpState {
         storage: egret_catalog::CatalogStore::new(db.clone()),
+        authz: egret_authz::AuthzStore::new(db.clone()),
         secrets: workspace_secrets,
         sessions: sessions.clone(),
         provisioner: None,

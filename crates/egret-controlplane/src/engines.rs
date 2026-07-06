@@ -2851,6 +2851,7 @@ mod tests {
         let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
         Some(CpState {
             storage: egret_catalog::CatalogStore::new(db.clone()),
+            authz: egret_authz::AuthzStore::new(db.clone()),
             secrets: workspace_secrets,
             sessions: egret_auth::session::SessionService::new(
                 db.clone(),
