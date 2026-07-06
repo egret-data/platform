@@ -83,6 +83,15 @@ export function AccessPolicyDialog({ open, service, initial, onOpenChange, onSav
               onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} />
           </div>
 
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={form.isEnabled}
+              onChange={(e) => setForm((f) => ({ ...f, isEnabled: e.target.checked }))}
+            />
+            Enabled
+          </label>
+
           <div className="grid grid-cols-2 gap-3">
             {(["catalog", "schema", "table", "column"] as const).map((k) => (
               <div key={k} className="space-y-1">

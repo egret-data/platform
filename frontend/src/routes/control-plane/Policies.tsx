@@ -72,17 +72,23 @@ export default function Policies() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<{ id: number; input: AccessPolicyInput } | undefined>(undefined);
   const [deleteTarget, setDeleteTarget] = useState<PolicySummary | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
 
   const del = useMutation({
     mutationFn: (id: number) => deletePolicy(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] }),
   });
 
-  const openNew = () => { setEditing(undefined); setEditorOpen(true); };
+  const openNew = () => { setEditError(null); setEditing(undefined); setEditorOpen(true); };
   const openEdit = async (id: number) => {
-    const body = await getPolicy(id);
-    setEditing({ id, input: toInput(activeService!, body) });
-    setEditorOpen(true);
+    setEditError(null);
+    try {
+      const body = await getPolicy(id);
+      setEditing({ id, input: toInput(activeService!, body) });
+      setEditorOpen(true);
+    } catch (e) {
+      setEditError(e instanceof Error ? e.message : "Failed to load policy");
+    }
   };
 
   const isAccessTab = policyType === "access";
@@ -100,6 +106,12 @@ export default function Policies() {
           </Button>
         )}
       </div>
+
+      {editError && (
+        <Alert variant="destructive">
+          <AlertDescription>{editError}</AlertDescription>
+        </Alert>
+      )}
 
       <Card>
         <CardHeader>
