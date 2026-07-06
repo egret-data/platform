@@ -12,10 +12,10 @@
 //! P2 is trino-only + egret-authored by design; revisit if importing external
 //! Ranger policies becomes a requirement.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct ResourceLevel {
     #[serde(default)]
     pub values: Vec<String>,
@@ -25,7 +25,7 @@ pub struct ResourceLevel {
     pub is_recursive: bool,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct EditorResources {
     #[serde(default)]
     pub catalog: ResourceLevel,
@@ -114,6 +114,187 @@ pub fn access_to_ranger_json(input: &AccessPolicyInput) -> Value {
     })
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct MaskItemInput {
+    #[serde(default)]
+    pub users: Vec<String>,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    #[serde(default, rename = "maskType")]
+    pub mask_type: String,
+    #[serde(default, rename = "valueExpr", skip_serializing_if = "Option::is_none")]
+    pub value_expr: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct MaskingPolicyInput {
+    #[serde(default = "kind_masking")]
+    pub kind: String,
+    pub name: String,
+    pub service: String,
+    #[serde(default = "default_true", rename = "isEnabled")]
+    pub is_enabled: bool,
+    #[serde(default)]
+    pub resources: EditorResources,
+    #[serde(default)]
+    pub items: Vec<MaskItemInput>,
+}
+
+fn kind_masking() -> String {
+    "masking".to_string()
+}
+
+fn mask_item_obj(it: &MaskItemInput) -> Value {
+    let mut info = Map::new();
+    info.insert("dataMaskType".into(), Value::from(it.mask_type.clone()));
+    if it.mask_type == "CUSTOM" {
+        if let Some(expr) = &it.value_expr {
+            info.insert("valueExpr".into(), Value::from(expr.clone()));
+        }
+    }
+    json!({
+        "users": it.users, "groups": it.groups, "roles": [],
+        "accesses": [{ "type": "select", "isAllowed": true }],
+        "dataMaskInfo": Value::Object(info),
+    })
+}
+
+/// Render a `MaskingPolicyInput` into a Ranger policyType-1 (masking) body.
+pub fn masking_to_ranger_json(input: &MaskingPolicyInput) -> Value {
+    let mut resources = Map::new();
+    for (key, level) in [
+        ("catalog", &input.resources.catalog),
+        ("schema", &input.resources.schema),
+        ("table", &input.resources.table),
+        ("column", &input.resources.column),
+    ] {
+        if !level.values.is_empty() {
+            resources.insert(key.to_string(), resource_obj(level));
+        }
+    }
+    json!({
+        "name": input.name, "service": input.service, "serviceType": "trino",
+        "policyType": 1, "isEnabled": input.is_enabled,
+        "resources": Value::Object(resources),
+        "dataMaskPolicyItems": input.items.iter().map(mask_item_obj).collect::<Vec<_>>(),
+        "policyItems": [], "denyPolicyItems": [],
+    })
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RowFilterItemInput {
+    #[serde(default)]
+    pub users: Vec<String>,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    #[serde(default, rename = "filterExpr")]
+    pub filter_expr: String,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct RowFilterResources {
+    #[serde(default)]
+    pub catalog: ResourceLevel,
+    #[serde(default)]
+    pub schema: ResourceLevel,
+    #[serde(default)]
+    pub table: ResourceLevel,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RowFilterPolicyInput {
+    #[serde(default = "kind_rowfilter")]
+    pub kind: String,
+    pub name: String,
+    pub service: String,
+    #[serde(default = "default_true", rename = "isEnabled")]
+    pub is_enabled: bool,
+    #[serde(default)]
+    pub resources: RowFilterResources,
+    #[serde(default)]
+    pub items: Vec<RowFilterItemInput>,
+}
+
+fn kind_rowfilter() -> String {
+    "rowfilter".to_string()
+}
+
+fn rowfilter_item_obj(it: &RowFilterItemInput) -> Value {
+    json!({
+        "users": it.users, "groups": it.groups, "roles": [],
+        "accesses": [{ "type": "select", "isAllowed": true }],
+        "rowFilterInfo": { "filterExpr": it.filter_expr },
+    })
+}
+
+/// Render a `RowFilterPolicyInput` into a Ranger policyType-2 (row-filter) body.
+pub fn rowfilter_to_ranger_json(input: &RowFilterPolicyInput) -> Value {
+    let mut resources = Map::new();
+    for (key, level) in [
+        ("catalog", &input.resources.catalog),
+        ("schema", &input.resources.schema),
+        ("table", &input.resources.table),
+    ] {
+        if !level.values.is_empty() {
+            resources.insert(key.to_string(), resource_obj(level));
+        }
+    }
+    json!({
+        "name": input.name, "service": input.service, "serviceType": "trino",
+        "policyType": 2, "isEnabled": input.is_enabled,
+        "resources": Value::Object(resources),
+        "rowFilterPolicyItems": input.items.iter().map(rowfilter_item_obj).collect::<Vec<_>>(),
+        "policyItems": [], "denyPolicyItems": [],
+    })
+}
+
+/// A serialized policy plus the metadata the handlers need to store it.
+pub struct RangerPolicy {
+    pub name: String,
+    pub service: String,
+    pub is_enabled: bool,
+    pub body: Value,
+}
+
+/// Dispatch an editor form (`{kind, ...}`) to the right serializer. Missing
+/// `kind` defaults to "access" so P2 clients stay wire-compatible.
+pub fn editor_to_ranger_json(v: &Value) -> Result<RangerPolicy, String> {
+    let kind = v.get("kind").and_then(Value::as_str).unwrap_or("access");
+    match kind {
+        "access" => {
+            let inp: AccessPolicyInput =
+                serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+            Ok(RangerPolicy {
+                name: inp.name.clone(),
+                service: inp.service.clone(),
+                is_enabled: inp.is_enabled,
+                body: access_to_ranger_json(&inp),
+            })
+        }
+        "masking" => {
+            let inp: MaskingPolicyInput =
+                serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+            Ok(RangerPolicy {
+                name: inp.name.clone(),
+                service: inp.service.clone(),
+                is_enabled: inp.is_enabled,
+                body: masking_to_ranger_json(&inp),
+            })
+        }
+        "rowfilter" => {
+            let inp: RowFilterPolicyInput =
+                serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+            Ok(RangerPolicy {
+                name: inp.name.clone(),
+                service: inp.service.clone(),
+                is_enabled: inp.is_enabled,
+                body: rowfilter_to_ranger_json(&inp),
+            })
+        }
+        other => Err(format!("unknown policy kind: {other}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +353,79 @@ mod tests {
         let body = access_to_ranger_json(&inp);
         assert!(body["resources"].get("column").is_none());
         assert!(body["resources"].get("catalog").is_some());
+    }
+
+    fn masking_sample() -> MaskingPolicyInput {
+        serde_json::from_value(json!({
+            "kind": "masking", "name": "mask-email", "service": "trino", "isEnabled": true,
+            "resources": {"catalog":{"values":["iceberg"]},"schema":{"values":["sales"]},
+                          "table":{"values":["users"]},"column":{"values":["email"]}},
+            "items": [{"users":["alice"],"groups":["pii"],"maskType":"MASK_HASH"}]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn serializes_masking_policy() {
+        let body = masking_to_ranger_json(&masking_sample());
+        assert_eq!(body["policyType"], 1);
+        assert_eq!(body["resources"]["column"]["values"][0], "email");
+        let items = body["dataMaskPolicyItems"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["dataMaskInfo"]["dataMaskType"], "MASK_HASH");
+        assert_eq!(items[0]["accesses"][0]["type"], "select");
+        assert_eq!(items[0]["users"][0], "alice");
+        let s = crate::summarize_policy(1, "trino", true, &body);
+        assert_eq!(s.policy_type, "masking");
+        assert_eq!(s.resource_path, "iceberg.sales.users.email");
+    }
+
+    #[test]
+    fn serializes_masking_custom_value_expr() {
+        let mut inp = masking_sample();
+        inp.items[0].mask_type = "CUSTOM".into();
+        inp.items[0].value_expr = Some("substr({col},1,2)".into());
+        let body = masking_to_ranger_json(&inp);
+        assert_eq!(
+            body["dataMaskPolicyItems"][0]["dataMaskInfo"]["valueExpr"],
+            "substr({col},1,2)"
+        );
+    }
+
+    fn rowfilter_sample() -> RowFilterPolicyInput {
+        serde_json::from_value(json!({
+            "kind": "rowfilter", "name": "us-only", "service": "trino", "isEnabled": true,
+            "resources": {"catalog":{"values":["iceberg"]},"schema":{"values":["sales"]},"table":{"values":["orders"]}},
+            "items": [{"groups":["analysts"],"filterExpr":"country = 'US'"}]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn serializes_rowfilter_policy() {
+        let body = rowfilter_to_ranger_json(&rowfilter_sample());
+        assert_eq!(body["policyType"], 2);
+        assert!(body["resources"].get("column").is_none());
+        let items = body["rowFilterPolicyItems"].as_array().unwrap();
+        assert_eq!(items[0]["rowFilterInfo"]["filterExpr"], "country = 'US'");
+        assert_eq!(items[0]["groups"][0], "analysts");
+        let s = crate::summarize_policy(2, "trino", true, &body);
+        assert_eq!(s.policy_type, "rowfilter");
+        assert_eq!(s.resource_path, "iceberg.sales.orders");
+    }
+
+    #[test]
+    fn dispatcher_routes_by_kind() {
+        let acc = editor_to_ranger_json(&json!({"kind":"access","name":"a","service":"trino",
+            "resources":{"catalog":{"values":["c"]}},"items":[]}))
+        .unwrap();
+        assert_eq!(acc.body["policyType"], 0);
+        assert_eq!(acc.name, "a");
+        let m = editor_to_ranger_json(&serde_json::to_value(masking_sample()).unwrap()).unwrap();
+        assert_eq!(m.body["policyType"], 1);
+        let d =
+            editor_to_ranger_json(&json!({"name":"x","service":"trino","resources":{},"items":[]}))
+                .unwrap();
+        assert_eq!(d.body["policyType"], 0);
     }
 }

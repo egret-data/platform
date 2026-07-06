@@ -18,7 +18,10 @@ use serde_json::{json, Value};
 use crate::auth::require_platform_admin;
 use crate::error::CpError;
 use crate::CpState;
-pub use ranger_json::{access_to_ranger_json, AccessPolicyInput};
+pub use ranger_json::{
+    access_to_ranger_json, editor_to_ranger_json, masking_to_ranger_json, rowfilter_to_ranger_json,
+    AccessPolicyInput, MaskingPolicyInput, RangerPolicy, RowFilterPolicyInput,
+};
 
 /// Human-readable name for a Ranger `policyType` integer.
 fn policy_type_name(t: i64) -> &'static str {

@@ -30,7 +30,10 @@ pub use engines::{
     WorkerRoleConfigReq,
 };
 pub use error::CpError;
-pub use policies::{summarize_policy, PolicySummary};
+pub use policies::{
+    editor_to_ranger_json, masking_to_ranger_json, rowfilter_to_ranger_json, summarize_policy,
+    MaskingPolicyInput, PolicySummary, RangerPolicy, RowFilterPolicyInput,
+};
 pub use warehouses::{
     BrowseColumn, BrowseDeletedTabular, BrowseNamespace, BrowsePartition, BrowseSearchResult,
     BrowseSnapshot, BrowseSort, BrowseTableDetail, BrowseTabular, BrowseTask,
