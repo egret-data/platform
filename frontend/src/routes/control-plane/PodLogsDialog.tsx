@@ -71,11 +71,14 @@ export default function PodLogsDialog({
     ws.binaryType = "arraybuffer";
 
     let closedMarkerWritten = false;
+    // One streaming decoder for the whole stream, so a multi-byte UTF-8
+    // character split across two WS frames is reassembled, not mangled.
+    const decoder = new TextDecoder();
 
     ws.onmessage = (e) => {
       const text =
         e.data instanceof ArrayBuffer
-          ? new TextDecoder().decode(new Uint8Array(e.data))
+          ? decoder.decode(new Uint8Array(e.data), { stream: true })
           : String(e.data);
       setFollowText((prev) => (prev + text).slice(-200000));
     };
