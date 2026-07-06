@@ -9,6 +9,7 @@ vi.mock("@/api/policies", async (orig) => ({
   createPolicy: (i: unknown) => createPolicy(i),
   updatePolicy: vi.fn(() => Promise.resolve({ id: 1 })),
   listPrincipals: () => Promise.resolve([]),
+  resourceLookup: () => Promise.resolve([]),
 }));
 
 function wrap(ui: React.ReactNode) {
@@ -20,7 +21,13 @@ describe("MaskingPolicyDialog", () => {
   it("creates a masking policy", async () => {
     wrap(<MaskingPolicyDialog open service="trino" onOpenChange={() => {}} onSaved={() => {}} />);
     fireEvent.change(await screen.findByLabelText("Policy name"), { target: { value: "m1" } });
-    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "email" } });
+
+    // The four ResourceLevelEditors share the same placeholder; order is
+    // catalog, schema, table, column.
+    const columnInput = screen.getAllByPlaceholderText("value or * (Enter to add)")[3];
+    fireEvent.change(columnInput, { target: { value: "email" } });
+    fireEvent.keyDown(columnInput, { key: "Enter" });
+
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
     await waitFor(() => expect(createPolicy).toHaveBeenCalled());
     const arg = createPolicy.mock.calls[0][0] as { kind: string; resources: { column: { values: string[] } } };

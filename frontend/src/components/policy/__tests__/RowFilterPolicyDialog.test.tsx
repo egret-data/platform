@@ -9,6 +9,7 @@ vi.mock("@/api/policies", async (orig) => ({
   createPolicy: (i: unknown) => createPolicy(i),
   updatePolicy: vi.fn(() => Promise.resolve({ id: 1 })),
   listPrincipals: () => Promise.resolve([]),
+  resourceLookup: () => Promise.resolve([]),
 }));
 
 function wrap(ui: React.ReactNode) {

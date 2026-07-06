@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, it, expect, vi } from "vitest";
+import { setPolicyEnabled } from "@/api/policies";
 import Policies from "../Policies";
 
 vi.mock("@/api/policies", () => ({
@@ -10,11 +11,13 @@ vi.mock("@/api/policies", () => ({
   ]),
   listPolicies: () => Promise.resolve([
     { id: 42, name: "allow-analysts", service: "trino", policy_type: "access",
-      resource_path: "iceberg.sales.orders.*", principals: ["analysts"], permissions: ["select"], is_enabled: true },
+      resource_path: "iceberg.sales.orders.*", principals: ["analysts"], permissions: ["select"], is_enabled: true,
+      description: "grants select to analysts", labels: ["pii"] },
   ]),
   createPolicy: vi.fn(() => Promise.resolve({ id: 99 })),
   updatePolicy: vi.fn(() => Promise.resolve({ id: 42 })),
   deletePolicy: vi.fn(() => Promise.resolve(undefined)),
+  setPolicyEnabled: vi.fn(() => Promise.resolve()),
   getPolicy: vi.fn(() => Promise.resolve({
     name: "allow-analysts",
     isEnabled: true,
@@ -71,6 +74,21 @@ describe("Policies page", () => {
     await screen.findByText("allow-analysts");
     await user.click(await screen.findByRole("button", { name: /download trino config/i }));
     expect(await screen.findByRole("heading", { name: /trino config/i })).toBeInTheDocument();
+  });
+
+  it("renders a label badge for the policy row", async () => {
+    wrap(<Policies />);
+    expect(await screen.findByText("allow-analysts")).toBeInTheDocument();
+    expect(screen.getByText("pii")).toBeInTheDocument();
+  });
+
+  it("calls setPolicyEnabled when the enable toggle is clicked", async () => {
+    const user = userEvent.setup();
+    wrap(<Policies />);
+    await screen.findByText("allow-analysts");
+    const toggle = screen.getByRole("switch", { name: /toggle allow-analysts/i });
+    await user.click(toggle);
+    expect(setPolicyEnabled).toHaveBeenCalledWith(42, false);
   });
 
   it("shows New policy on the masking tab and opens the masking editor", async () => {

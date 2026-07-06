@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, Pencil, Plus, ShieldCheck, Trash2 } from "lucide-react";
 import {
   type Profile, type PolicySummary, type AccessPolicyInput, type MaskingPolicyInput, type RowFilterPolicyInput,
-  listProfiles, listPolicies, deletePolicy, getPolicy,
+  listProfiles, listPolicies, deletePolicy, getPolicy, setPolicyEnabled,
 } from "@/api/policies";
 import { ApiError } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import { Switch } from "@/components/ui/switch";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
@@ -137,6 +138,14 @@ export default function Policies() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] }),
   });
 
+  const [togglingId, setTogglingId] = useState<number | null>(null);
+  const toggleEnabled = useMutation({
+    mutationFn: ({ id, enabled }: { id: number; enabled: boolean }) => setPolicyEnabled(id, enabled),
+    onMutate: ({ id }) => setTogglingId(id),
+    onSettled: () => setTogglingId(null),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] }),
+  });
+
   const openNew = () => { setEditError(null); setEditing(undefined); setEditorOpen(true); };
   const openEdit = async (id: number) => {
     setEditError(null);
@@ -239,6 +248,7 @@ export default function Policies() {
             <TableHead>Resource</TableHead>
             <TableHead>Principals</TableHead>
             <TableHead>Permissions</TableHead>
+            <TableHead>Labels</TableHead>
             <TableHead>Enabled</TableHead>
             <TableHead className="text-right">Actions</TableHead>
           </TableRow>
@@ -246,14 +256,33 @@ export default function Policies() {
         <TableBody>
           {rows.map((r) => (
             <TableRow key={r.id}>
-              <TableCell className="font-medium">{r.name}</TableCell>
+              <TableCell className="font-medium">
+                {r.name}
+                {r.description && (
+                  <div className="text-xs font-normal text-muted-foreground">{r.description}</div>
+                )}
+              </TableCell>
               <TableCell className="font-mono text-xs">{r.resource_path}</TableCell>
               <TableCell>{r.principals.join(", ")}</TableCell>
               <TableCell>{r.permissions.join(", ")}</TableCell>
               <TableCell>
-                <Badge variant={r.is_enabled ? "secondary" : "outline"}>
-                  {r.is_enabled ? "enabled" : "disabled"}
-                </Badge>
+                {r.labels && r.labels.length > 0 ? (
+                  <div className="flex flex-wrap gap-1">
+                    {r.labels.map((l) => (
+                      <Badge key={l} variant="secondary">{l}</Badge>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="text-muted-foreground">—</span>
+                )}
+              </TableCell>
+              <TableCell>
+                <Switch
+                  aria-label={`toggle ${r.name}`}
+                  checked={r.is_enabled}
+                  disabled={toggleEnabled.isPending && togglingId === r.id}
+                  onCheckedChange={(c) => toggleEnabled.mutate({ id: r.id, enabled: c })}
+                />
               </TableCell>
               <TableCell className="text-right">
                 <div className="flex justify-end gap-1">
@@ -269,7 +298,7 @@ export default function Policies() {
           ))}
           {rows.length === 0 && (
             <TableRow className="hover:bg-transparent">
-              <TableCell colSpan={6} className="text-center text-muted-foreground">
+              <TableCell colSpan={7} className="text-center text-muted-foreground">
                 {policies.isError ? (
                   <span className="text-destructive">
                     {policies.error?.message ?? "Failed to load policies."}
