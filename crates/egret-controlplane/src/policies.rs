@@ -5,8 +5,16 @@
 //! 0 = access (`policyItems`), 1 = masking (`dataMaskPolicyItems`),
 //! 2 = row-filter (`rowFilterPolicyItems`). P1 is read-only.
 
-use serde::Serialize;
+use axum::extract::{Path, Query, State};
+use axum::routing::get;
+use axum::{Json, Router};
+use egret_auth::principal::Auth;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::auth::require_platform_admin;
+use crate::error::CpError;
+use crate::CpState;
 
 /// Human-readable name for a Ranger `policyType` integer.
 fn policy_type_name(t: i64) -> &'static str {
@@ -101,6 +109,127 @@ pub fn summarize_policy(id: i64, service: &str, enabled: bool, body: &Value) -> 
         permissions,
         is_enabled: enabled,
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListQuery {
+    pub service: String,
+    #[serde(default)]
+    pub r#type: Option<String>, // access | masking | rowfilter
+    #[serde(default)]
+    pub q: Option<String>,
+}
+
+/// A profile (Ranger service) + the engine(s) that link to it.
+#[derive(Debug, Serialize)]
+pub struct ProfileDto {
+    pub id: i64,
+    pub name: String,
+    pub r#type: String,
+    pub policy_version: i64,
+    pub engines: Vec<ProfileEngine>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProfileEngine {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub status: String,
+}
+
+pub fn router() -> Router<CpState> {
+    Router::new()
+        .route("/policies", get(list_policies))
+        .route("/policies/{id}", get(get_policy))
+        .route("/policies/services", get(list_profiles))
+        .route("/policies/service-def/{name}", get(get_service_def))
+}
+
+/// GET /policies?service=&type=&q= — policy summaries for one profile, filtered.
+async fn list_policies(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Query(qp): Query<ListQuery>,
+) -> Result<Json<Vec<PolicySummary>>, CpError> {
+    require_platform_admin(&p)?;
+    let svc = st.authz.get_service(&qp.service).await?;
+    let mut out: Vec<PolicySummary> = st
+        .authz
+        .list_policies(svc.id)
+        .await?
+        .into_iter()
+        .map(|r| summarize_policy(r.id, &svc.name, r.enabled, &r.policy_jsonb))
+        .collect();
+    if let Some(t) = qp.r#type.as_deref() {
+        out.retain(|s| s.policy_type == t);
+    }
+    if let Some(q) =
+        qp.q.as_deref()
+            .map(str::to_lowercase)
+            .filter(|s| !s.is_empty())
+    {
+        out.retain(|s| {
+            s.name.to_lowercase().contains(&q) || s.resource_path.to_lowercase().contains(&q)
+        });
+    }
+    Ok(Json(out))
+}
+
+/// GET /policies/{id} — the raw stored Ranger body (with id + isEnabled), for detail.
+async fn get_policy(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, CpError> {
+    require_platform_admin(&p)?;
+    let row = st.authz.get_policy(id).await?;
+    let mut body = row.policy_jsonb;
+    if let Value::Object(m) = &mut body {
+        m.insert("id".into(), Value::from(row.id));
+        m.insert("isEnabled".into(), Value::from(row.enabled));
+    }
+    Ok(Json(body))
+}
+
+/// GET /policies/services — profiles + the engine(s) that link to each.
+async fn list_profiles(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+) -> Result<Json<Vec<ProfileDto>>, CpError> {
+    require_platform_admin(&p)?;
+    let engines = st.storage.list_engines().await?;
+    let profiles = st
+        .authz
+        .list_services()
+        .await?
+        .into_iter()
+        .map(|s| ProfileDto {
+            engines: engines
+                .iter()
+                .filter(|e| e.authz_service_id == Some(s.id))
+                .map(|e| ProfileEngine {
+                    id: e.id,
+                    name: e.name.clone(),
+                    status: e.status.clone(),
+                })
+                .collect(),
+            id: s.id,
+            name: s.name,
+            r#type: s.r#type,
+            policy_version: s.policy_version,
+        })
+        .collect();
+    Ok(Json(profiles))
+}
+
+/// GET /policies/service-def/{name} — the def slices the editor renders from.
+async fn get_service_def(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, CpError> {
+    require_platform_admin(&p)?;
+    Ok(Json(st.authz.get_service_def(&name).await?.def_jsonb))
 }
 
 #[cfg(test)]

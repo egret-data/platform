@@ -2173,3 +2173,61 @@ async fn browse_unprovisioned_warehouse_empty() {
     );
     assert_eq!(j, serde_json::json!([]), "should be empty array; body={j}");
 }
+
+#[tokio::test]
+async fn platform_admin_can_list_policies_by_type() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "policies_admin", true).await;
+
+    let authz = egret_authz::AuthzStore::new(f.db.clone());
+    egret_authz::seed_trino(&authz)
+        .await
+        .expect("seed trino def");
+    let svc_name = format!("trino-{}", Uuid::new_v4().simple());
+    let svc = authz
+        .create_service(&svc_name, "trino", &serde_json::json!({}))
+        .await
+        .expect("create service");
+    authz
+        .create_policy(
+            svc.id,
+            "allow-analysts-select",
+            &serde_json::json!({
+                "name": "allow-analysts-select",
+                "policyType": 0,
+                "resources": {
+                    "catalog": {"values": ["iceberg"]},
+                    "schema":  {"values": ["sales"]},
+                    "table":   {"values": ["orders"]},
+                    "column":  {"values": ["*"]}
+                },
+                "policyItems": [
+                    {"users": ["alice"], "groups": ["analysts"], "accesses": [{"type": "select"}]}
+                ]
+            }),
+        )
+        .await
+        .expect("create policy");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/policies?service={svc_name}&type=access"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list policies; body={body}");
+    let arr = body.as_array().expect("array body");
+    assert_eq!(arr.len(), 1, "expected exactly one summary; body={body}");
+    assert_eq!(arr[0]["policy_type"], serde_json::json!("access"));
+
+    authz.delete_service(svc.id).await.expect("cleanup service");
+}

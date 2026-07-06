@@ -90,4 +90,5 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(secrets::router())
         .merge(warehouses::router())
         .merge(engines::router())
+        .merge(policies::router())
 }
