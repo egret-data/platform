@@ -5,6 +5,8 @@
 //! 0 = access (`policyItems`), 1 = masking (`dataMaskPolicyItems`),
 //! 2 = row-filter (`rowFilterPolicyItems`). P1 is read-only.
 
+mod ranger_json;
+
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -15,6 +17,9 @@ use serde_json::Value;
 use crate::auth::require_platform_admin;
 use crate::error::CpError;
 use crate::CpState;
+// Unused until P2 Task 2 wires the create/update endpoints that call these.
+#[allow(unused_imports)]
+pub use ranger_json::{access_to_ranger_json, AccessPolicyInput};
 
 /// Human-readable name for a Ranger `policyType` integer.
 fn policy_type_name(t: i64) -> &'static str {
