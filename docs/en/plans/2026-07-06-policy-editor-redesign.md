@@ -83,3 +83,25 @@ Keep it `RequireGlobalAdmin`-gated by living under `ControlPlaneRoutes`.
 - **Goal coverage:** full-page route (Tasks 2,3) ✓; engine-style Cards + FieldLabel + space-y-5 (Task 2) ✓; decluttered resource (Exclude/Recursive → Advanced popover) (Task 1) ✓; retire the cramped modal (Task 3) ✓; all 3 kinds unified (Task 2) ✓.
 - **Behavior parity:** the page must preserve ALL P4 capability (exceptions, deny-all-else, description, labels, multi-value/exclude/recursive resources, mask types + CUSTOM, filter expr, enabled) — it's a re-layout, not a feature cut.
 - **Open confirmations:** keep the `type="text"` fix on inputs; keep `getServiceDef(service)` (backend already resolves service→def); the exact reverse-map field reads (allowExceptions/denyExceptions/isDenyAllElse/policyLabels) copy from the current dialogs verbatim.
+
+---
+
+## Revision — proper drill-down IA (user feedback: flat selector was wrong)
+
+Ranger's IA (from `ranger/.../ServiceManager/ServiceDefinitions.jsx` + `ServiceDefinition.jsx`): a services-grouped landing → click a service → PolicyListing (type tabs) → click a policy → edit form. egret must mirror this, engine-consistent (`ControlPlaneEngines` = Card+Table with per-row Links; `EngineDetail` = header Card + Tabs).
+
+**Three levels:**
+- **L1 Profiles landing** `/control-plane/policies` — `Card` + `Table` of profiles: Name (Link → detail), Type `Badge`, Engines bound, policy_version, "Download Trino config". (Rewrite `Policies.tsx`; drop the profile-selector buttons + type tabs + policy table — those move to L2.)
+- **L2 Profile detail** `/control-plane/policies/:service` — new `ProfileDetailPage.tsx`: header `Card` (profile name + type + bound engines + Download config + back link) + `Tabs` (Access/Masking/Row-filter), each tab = the policy `Table` (Name/Resource/Principals/Permissions/Labels/Enabled toggle/Actions) + "New policy". Edit → editor; Delete inline (`ConfirmDeleteDialog`); enable `Switch` inline.
+- **L3 Policy editor** `/control-plane/policies/:service/:kind/:id` + `/new` — `PolicyEditorPage` (built in RD-2); change its back link to the profile detail `/control-plane/policies/:service`.
+
+### RD-5: Profiles landing (rewrite `Policies.tsx`)
+Card+Table of profiles (from `listProfiles()`); Name → `Link` to `/control-plane/policies/${name}`; Type badge; Engines (names); Version; a `TrinoConfigDialog` trigger per row (or in detail). Remove the type-tabs/policy-table/selector/enable-toggle/delete from this file (they move to L2). Update its test to assert the profiles table + navigation.
+
+### RD-6: Profile detail (`ProfileDetailPage.tsx`, route `/policies/:service`)
+EngineDetail-style: header `Card` (profile name, type `Badge`, bound engines, "Download Trino config" button + `TrinoConfigDialog`, back link to `/control-plane/policies`) + `Tabs` Access/Masking/Row-filter; each tab renders the policy table (move the current list table + `setPolicyEnabled` toggle + Labels + `ConfirmDeleteDialog` delete + `listPolicies(service,type)` query here) + a "New policy" button → `navigate(/control-plane/policies/${service}/${kind}/new)`; row Edit → `/…/${service}/${kind}/${id}`. Test it.
+
+### RD-7: Routing + editor back-link
+`App.tsx`: add `<Route path="policies/:service" element={<ProfileDetailPage/>} />` (keep landing + editor routes). `PolicyEditorPage`: back link/cancel → `/control-plane/policies/${service}`. Update tests.
+
+### RD-8: gate + browser smoke of the full drill-down (landing → profile → policy editor).
