@@ -30,6 +30,12 @@ const TAIL_OPTIONS = [200, 1000, 5000] as const;
  * Fetches `GET .../pods/{pod}/logs` (tail/previous-scoped) and renders it in a
  * scrollable `<pre>`. Open state is driven by `pod !== null` — the caller owns
  * the selected-pod state and clears it via `onOpenChange(false)`.
+ *
+ * A "Follow" toggle switches to realtime tailing: it opens
+ * `GET .../pods/{pod}/logs/follow?tail=N` as a WebSocket (binary frames, decoded
+ * as text and appended — same shape as `PodTerminalDialog`'s exec bridge) and
+ * pauses the snapshot query + the previous/refresh controls, which don't apply
+ * to a live stream.
  */
 export default function PodLogsDialog({
   engineId,
@@ -42,19 +48,58 @@ export default function PodLogsDialog({
 }) {
   const [tail, setTail] = useState(1000);
   const [previous, setPrevious] = useState(false);
+  const [follow, setFollow] = useState(false);
+  const [followText, setFollowText] = useState("");
   const preRef = useRef<HTMLPreElement | null>(null);
 
   const logs = useQuery<PodLogs, ApiError>({
     queryKey: ["cp", "pod-logs", engineId, pod, tail, previous],
     queryFn: () => getPodLogs(engineId, pod!, { tail, previous }),
-    enabled: pod != null,
+    enabled: pod != null && !follow,
     retry: false,
   });
 
-  // Jump to the tail (most recent lines) whenever the logs (re)load.
+  // Stream `logs/follow` while `follow` is on, appending decoded chunks.
+  useEffect(() => {
+    if (!follow || pod == null) return;
+
+    setFollowText("");
+
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const url = `${proto}//${location.host}/api/control-plane/engines/${engineId}/pods/${encodeURIComponent(pod)}/logs/follow?tail=${tail}`;
+    const ws = new WebSocket(url);
+    ws.binaryType = "arraybuffer";
+
+    let closedMarkerWritten = false;
+
+    ws.onmessage = (e) => {
+      const text =
+        e.data instanceof ArrayBuffer
+          ? new TextDecoder().decode(new Uint8Array(e.data))
+          : String(e.data);
+      setFollowText((prev) => (prev + text).slice(-200000));
+    };
+
+    const onCloseOrError = () => {
+      if (closedMarkerWritten) return;
+      closedMarkerWritten = true;
+      setFollowText((prev) => prev + "\n[stream closed]\n");
+    };
+    ws.onclose = onCloseOrError;
+    ws.onerror = onCloseOrError;
+
+    return () => {
+      ws.onmessage = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      ws.close();
+    };
+  }, [engineId, pod, follow, tail]);
+
+  // Jump to the tail (most recent lines) whenever the logs (re)load or grow.
   useEffect(() => {
     if (preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight;
-  }, [logs.data]);
+  }, [logs.data, followText]);
 
   return (
     <Dialog open={pod != null} onOpenChange={onOpenChange}>
@@ -83,33 +128,43 @@ export default function PodLogsDialog({
             </Select>
 
             <label className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Switch checked={previous} onCheckedChange={setPrevious} />
+              <Switch
+                checked={previous}
+                onCheckedChange={setPrevious}
+                disabled={follow}
+              />
               Previous container
             </label>
 
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="ml-auto"
-              onClick={() => logs.refetch()}
-              disabled={logs.isFetching}
-            >
-              {logs.isFetching ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <RefreshCw className="h-4 w-4" />
-              )}
-              Refresh
-            </Button>
+            <div className="ml-auto flex items-center gap-3">
+              <label className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Switch checked={follow} onCheckedChange={setFollow} />
+                Follow
+              </label>
+
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => logs.refetch()}
+                disabled={follow || logs.isFetching}
+              >
+                {logs.isFetching ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4" />
+                )}
+                Refresh
+              </Button>
+            </div>
           </div>
 
-          {logs.isLoading ? (
+          {!follow && logs.isLoading ? (
             <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" />
               Loading…
             </div>
-          ) : logs.isError ? (
+          ) : !follow && logs.isError ? (
             <Alert variant="destructive">
               <AlertDescription>
                 {logs.error?.message ?? "Failed to load logs."}
@@ -120,7 +175,15 @@ export default function PodLogsDialog({
               ref={preRef}
               className="max-h-[60vh] overflow-auto rounded-md bg-muted p-3 font-mono text-xs whitespace-pre-wrap"
             >
-              {logs.data?.logs ? (
+              {follow ? (
+                followText ? (
+                  followText
+                ) : (
+                  <span className="text-muted-foreground">
+                    (waiting for output…)
+                  </span>
+                )
+              ) : logs.data?.logs ? (
                 logs.data.logs
               ) : (
                 <span className="text-muted-foreground">(no output)</span>
