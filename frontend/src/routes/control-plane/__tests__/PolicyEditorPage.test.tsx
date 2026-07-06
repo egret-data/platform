@@ -74,7 +74,9 @@ describe("PolicyEditorPage", () => {
     expect(arg.resources.catalog.values).toEqual(["iceberg"]);
     expect(updatePolicy).not.toHaveBeenCalled();
 
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith("/control-plane/policies"));
+    await waitFor(() =>
+      expect(navigate).toHaveBeenCalledWith("/control-plane/policies/trino"),
+    );
   });
 
   it("hides the Deny tab when 'Deny all else' is enabled", async () => {

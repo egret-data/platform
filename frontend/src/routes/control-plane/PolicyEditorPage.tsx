@@ -296,11 +296,13 @@ export default function PolicyEditorPage() {
   });
   const accessTypes = def.data?.accessTypes?.map((a) => a.name) ?? DEFAULT_ACCESS_TYPES;
 
+  const profileUrl = `/control-plane/policies/${encodeURIComponent(service)}`;
+
   const save = useMutation<{ id: number }, ApiError>({
     mutationFn: () => (id ? updatePolicy(Number(id), form) : createPolicy(form)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
-      navigate("/control-plane/policies");
+      navigate(profileUrl);
     },
   });
 
@@ -308,7 +310,7 @@ export default function PolicyEditorPage() {
     mutationFn: () => deletePolicy(Number(id)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
-      navigate("/control-plane/policies");
+      navigate(profileUrl);
     },
   });
 
@@ -380,11 +382,11 @@ export default function PolicyEditorPage() {
   return (
     <div className="mx-auto max-w-4xl space-y-5 p-6">
       <Link
-        to="/control-plane/policies"
+        to={profileUrl}
         className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
       >
         <ArrowLeft className="h-4 w-4" />
-        Policies
+        {service || "Policies"}
       </Link>
 
       <Card className="overflow-hidden">
@@ -424,7 +426,7 @@ export default function PolicyEditorPage() {
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => navigate("/control-plane/policies")}
+              onClick={() => navigate(profileUrl)}
             >
               Cancel
             </Button>
