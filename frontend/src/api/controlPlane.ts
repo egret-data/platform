@@ -785,6 +785,10 @@ export async function deleteEngine(id: string): Promise<void> {
   await apiFetch(`/control-plane/engines/${id}`, { method: "DELETE" });
 }
 
+export async function restartEngine(id: string): Promise<void> {
+  await apiFetch(`/control-plane/engines/${id}/restart`, { method: "POST" });
+}
+
 // ── Engine monitor (native Trino monitor / control-plane) ────────────────────
 
 /**
@@ -891,4 +895,39 @@ export function updateEngineCatalog(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
+}
+
+/** Result of a "test connection" run — always 200; `ok` reflects whether the
+ * catalog actually answered a query on the engine's coordinator. */
+export interface CatalogTestResult {
+  ok: boolean;
+  message: string;
+}
+
+export function testEngineCatalog(id: string, cid: string): Promise<CatalogTestResult> {
+  return apiJson<CatalogTestResult>(
+    `/control-plane/engines/${id}/catalogs/${cid}/test`,
+    { method: "POST" },
+  );
+}
+
+// ── Engine pod logs (control-plane) ──────────────────────────────────────────
+
+export interface PodLogs {
+  logs: string;
+}
+
+export function getPodLogs(
+  id: string,
+  pod: string,
+  opts: { tail?: number; previous?: boolean; container?: string } = {},
+): Promise<PodLogs> {
+  const qs = new URLSearchParams();
+  if (opts.tail != null) qs.set("tail", String(opts.tail));
+  if (opts.previous) qs.set("previous", "true");
+  if (opts.container) qs.set("container", opts.container);
+  const q = qs.toString();
+  return apiJson<PodLogs>(
+    `/control-plane/engines/${id}/pods/${encodeURIComponent(pod)}/logs${q ? `?${q}` : ""}`,
+  );
 }

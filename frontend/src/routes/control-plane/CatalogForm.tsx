@@ -4,11 +4,13 @@ import { Loader2 } from "lucide-react";
 
 import {
   type AddCatalogInput,
+  type CatalogClient,
   type EngineCatalog,
   type EngineCatalogDetail,
   type Secret,
   type Warehouse,
   addEngineCatalog,
+  listClients,
   listSecrets,
   listWarehouses,
   updateEngineCatalog,
@@ -29,6 +31,10 @@ import { connectorByName, connectors } from "./config/connectorCatalog";
 import { SecretOrValueList } from "./config/SecretOrValueList";
 
 const OTHER_SENTINEL = "__other__";
+// shadcn Select can't use "" as a SelectItem value, but "" (no clientId — mint a
+// dedicated client under the default engine role) is the valid default state.
+// Map that state to this sentinel in the Select and back to "" in onValueChange.
+const DEFAULT_CLIENT_SENTINEL = "__default__";
 
 export interface CatalogFormProps {
   mode: "add" | "edit";
@@ -84,6 +90,16 @@ export function CatalogForm({
 
   // egret-warehouse (add only — edit is read-only, config is system-managed)
   const [warehouseId, setWarehouseId] = useState("");
+  // "" = default (auto-create a dedicated client under the engine's default
+  // role); otherwise the id of an existing client of `warehouseId` whose role
+  // the newly-minted client should inherit (see handleSubmit).
+  const [clientId, setClientId] = useState("");
+  const clientsQuery = useQuery<CatalogClient[], ApiError>({
+    queryKey: ["cp", "warehouse-clients", warehouseId],
+    queryFn: () => listClients(warehouseId),
+    enabled: warehouseId !== "",
+    retry: false,
+  });
 
   // All other connectors: uniform property/secret maps, keyed by property
   // name. Kept disjoint — a key lives in exactly one of the two maps.
@@ -176,11 +192,20 @@ export function CatalogForm({
     });
   }
 
+  function handleWarehouseChange(v: string) {
+    // The client list is scoped to the warehouse, so a client picked for the
+    // previous warehouse is meaningless here — reset to the default.
+    setWarehouseId(v);
+    setClientId("");
+  }
+
   function handleConnectorChange(v: string) {
     // Switching connector changes the applicable property set, so clear any
     // properties/secrets entered for the previous one.
     setValues({});
     setSecrets({});
+    setWarehouseId("");
+    setClientId("");
     if (v === OTHER_SENTINEL) {
       setCustomConnector(true);
       setKind("");
@@ -205,6 +230,7 @@ export function CatalogForm({
     setCustomConnector(false);
     setError(null);
     setWarehouseId("");
+    setClientId("");
     setValues({});
     setSecrets({});
     addMutation.reset();
@@ -216,7 +242,9 @@ export function CatalogForm({
 
     const config: Record<string, unknown> =
       kind === "egret-warehouse"
-        ? { warehouseId }
+        ? clientId
+          ? { warehouseId, clientId }
+          : { warehouseId }
         : {
             properties: values,
             // Drop rows toggled to "secret" but left unpicked (empty id).
@@ -331,26 +359,59 @@ export function CatalogForm({
             </p>
           </div>
         ) : (
-          <div className="space-y-1.5">
-            <Label htmlFor="cat-warehouse">Warehouse</Label>
-            <Select value={warehouseId} onValueChange={setWarehouseId}>
-              <SelectTrigger id="cat-warehouse" className="w-full">
-                <SelectValue placeholder="Select a warehouse" />
-              </SelectTrigger>
-              <SelectContent>
-                {provisioned.length === 0 ? (
-                  <SelectItem value="__none__" disabled>
-                    No provisioned warehouses
-                  </SelectItem>
-                ) : (
-                  provisioned.map((w) => (
-                    <SelectItem key={w.id} value={w.id}>
-                      {w.name}
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="cat-warehouse">Warehouse</Label>
+              <Select value={warehouseId} onValueChange={handleWarehouseChange}>
+                <SelectTrigger id="cat-warehouse" className="w-full">
+                  <SelectValue placeholder="Select a warehouse" />
+                </SelectTrigger>
+                <SelectContent>
+                  {provisioned.length === 0 ? (
+                    <SelectItem value="__none__" disabled>
+                      No provisioned warehouses
                     </SelectItem>
-                  ))
-                )}
-              </SelectContent>
-            </Select>
+                  ) : (
+                    provisioned.map((w) => (
+                      <SelectItem key={w.id} value={w.id}>
+                        {w.name}
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="cat-client">Client</Label>
+              <Select
+                value={clientId === "" ? DEFAULT_CLIENT_SENTINEL : clientId}
+                onValueChange={(v) =>
+                  setClientId(v === DEFAULT_CLIENT_SENTINEL ? "" : v)
+                }
+                disabled={warehouseId === ""}
+              >
+                <SelectTrigger id="cat-client" className="w-full">
+                  <SelectValue placeholder="Select a warehouse first" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={DEFAULT_CLIENT_SENTINEL}>
+                    Create a dedicated client (default)
+                  </SelectItem>
+                  {(clientsQuery.data ?? []).map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Selecting a client runs this catalog under that client&rsquo;s
+                role — a new dedicated client is minted under the same role.
+                The default mints a dedicated client under the engine&rsquo;s
+                default role instead.
+              </p>
+            </div>
           </div>
         ))}
 

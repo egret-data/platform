@@ -205,7 +205,12 @@ async fn try_ingress(
 /// Issue one coordinator request, preferring the engine's public Ingress URL
 /// when it has one and falling back to the internal kube-free seam otherwise or
 /// on a transport error. Transport errors map to a 502.
-async fn coordinator_call(
+///
+/// `pub(crate)` so [`crate::engines::test_catalog`] can drive the raw Trino
+/// `/v1/statement` submit-then-poll protocol with the SAME service-name +
+/// header + ingress-preference behavior as the native monitor, instead of
+/// duplicating it.
+pub(crate) async fn coordinator_call(
     st: &CpState,
     engine: &Engine,
     method: &str,

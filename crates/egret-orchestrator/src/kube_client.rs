@@ -1,9 +1,17 @@
 //! Kubernetes access seam. Kept behind a trait so tests can inject a fake and
 //! kube-rs stays out of the templating + provisioning logic.
 
+use bytes::Bytes;
+use futures_util::Stream;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::pin::Pin;
 use std::sync::Mutex;
+
+/// A boxed stream of raw log-byte chunks, as read off a following (`follow:
+/// true`) pod-log request. Returned by [`KubeClient::pod_logs_stream`] and
+/// pumped onto a browser WebSocket by the control-plane's log-follow route.
+pub type PodLogStream = Pin<Box<dyn Stream<Item = anyhow::Result<Bytes>> + Send>>;
 
 /// Minimal k8s surface egret needs. `apply` is server-side-apply of one resource
 /// identified by (apiVersion, kind, namespace, name); `delete` removes it; the
@@ -39,6 +47,51 @@ pub trait KubeClient: Send + Sync {
         headers: &[(String, String)],
         body: Option<Vec<u8>>,
     ) -> anyhow::Result<(u16, Vec<u8>)>;
+
+    /// Tail a pod's (optionally previous-container's) logs, bounded to
+    /// `tail_lines`. `container` selects a specific container when the pod has
+    /// more than one; `None` picks the pod's sole container.
+    async fn pod_logs(
+        &self,
+        namespace: &str,
+        pod: &str,
+        container: Option<&str>,
+        tail_lines: i64,
+        previous: bool,
+    ) -> anyhow::Result<String>;
+
+    /// Open a live-following stream (`follow: true`) of a pod's log bytes —
+    /// the `kubectl logs -f` equivalent of [`pod_logs`](Self::pod_logs)'s
+    /// one-shot tail. `tail_lines` still bounds the backlog replayed before
+    /// new lines start arriving. The caller (the control-plane's
+    /// `pod_logs_follow` WS route) pumps chunks onto a browser WebSocket as
+    /// they arrive; this is a ONE-directional stream (pod -> browser).
+    async fn pod_logs_stream(
+        &self,
+        namespace: &str,
+        pod: &str,
+        tail_lines: i64,
+    ) -> anyhow::Result<PodLogStream>;
+
+    /// Force a rollout of a Deployment WITHOUT changing its rendered config:
+    /// patches the pod-template's `egret/restarted-at` annotation to now, which
+    /// changes the pod template and triggers a roll (same effect as
+    /// `kubectl rollout restart deployment/<name>`).
+    async fn restart_deployment(&self, namespace: &str, name: &str) -> anyhow::Result<()>;
+
+    /// Exec `command` inside `pod` (kube's "exec" subresource — a WebSocket
+    /// protocol, hence the `ws` kube feature) and return the live
+    /// `AttachedProcess`: stdin/stdout streams plus a terminal-resize sender,
+    /// for the caller to bridge onto e.g. a browser WebSocket. Requested with
+    /// `tty(true)` + `stderr(false)` (stderr must be off when tty is on — the
+    /// pty merges stderr into stdout). Not implemented by `FakeKube`: exec is
+    /// smoke-tested against a real cluster, not unit-tested.
+    async fn exec(
+        &self,
+        namespace: &str,
+        pod: &str,
+        command: &[String],
+    ) -> anyhow::Result<kube::api::AttachedProcess>;
 }
 
 /// In-memory fake for unit tests: records applied/deleted objects.
@@ -49,6 +102,8 @@ pub struct FakeKube {
     pub coordinator_calls: Mutex<Vec<(String, String)>>,
     /// Canned `(status, body)` returned by `coordinator_request`.
     pub coordinator_response: Mutex<(u16, Vec<u8>)>,
+    /// `(namespace, name)` per `restart_deployment` call.
+    pub restarted: Mutex<Vec<(String, String)>>,
 }
 
 impl Default for FakeKube {
@@ -58,6 +113,7 @@ impl Default for FakeKube {
             deleted: Mutex::new(Vec::new()),
             coordinator_calls: Mutex::new(Vec::new()),
             coordinator_response: Mutex::new((200, Vec::new())),
+            restarted: Mutex::new(Vec::new()),
         }
     }
 }
@@ -106,6 +162,45 @@ impl KubeClient for FakeKube {
             .unwrap()
             .push((method.to_string(), path.to_string()));
         Ok(self.coordinator_response.lock().unwrap().clone())
+    }
+
+    async fn pod_logs(
+        &self,
+        _namespace: &str,
+        pod: &str,
+        _container: Option<&str>,
+        _tail_lines: i64,
+        _previous: bool,
+    ) -> anyhow::Result<String> {
+        Ok(format!("logs for {pod} (fake)\n"))
+    }
+
+    async fn pod_logs_stream(
+        &self,
+        _namespace: &str,
+        _pod: &str,
+        _tail_lines: i64,
+    ) -> anyhow::Result<PodLogStream> {
+        Ok(Box::pin(futures_util::stream::once(async {
+            Ok(Bytes::from_static(b"fake log line\n"))
+        })))
+    }
+
+    async fn restart_deployment(&self, namespace: &str, name: &str) -> anyhow::Result<()> {
+        self.restarted
+            .lock()
+            .unwrap()
+            .push((namespace.to_string(), name.to_string()));
+        Ok(())
+    }
+
+    async fn exec(
+        &self,
+        _namespace: &str,
+        _pod: &str,
+        _command: &[String],
+    ) -> anyhow::Result<kube::api::AttachedProcess> {
+        anyhow::bail!("exec not supported in fake kube")
     }
 }
 
@@ -267,11 +362,117 @@ impl KubeClient for LiveKube {
             Ok((status, bytes))
         }
     }
+
+    async fn pod_logs(
+        &self,
+        namespace: &str,
+        pod: &str,
+        container: Option<&str>,
+        tail_lines: i64,
+        previous: bool,
+    ) -> anyhow::Result<String> {
+        use k8s_openapi::api::core::v1::Pod;
+        use kube::api::{Api, LogParams};
+
+        let api: Api<Pod> = Api::namespaced(self.client.clone(), namespace);
+        let lp = LogParams {
+            container: container.map(str::to_string),
+            tail_lines: Some(tail_lines),
+            previous,
+            ..Default::default()
+        };
+        let logs = api.logs(pod, &lp).await?;
+        Ok(logs)
+    }
+
+    async fn pod_logs_stream(
+        &self,
+        namespace: &str,
+        pod: &str,
+        tail_lines: i64,
+    ) -> anyhow::Result<PodLogStream> {
+        use futures_util::StreamExt;
+        use k8s_openapi::api::core::v1::Pod;
+        use kube::api::{Api, LogParams};
+        use tokio_util::compat::FuturesAsyncReadCompatExt;
+        use tokio_util::io::ReaderStream;
+
+        let api: Api<Pod> = Api::namespaced(self.client.clone(), namespace);
+        let lp = LogParams {
+            follow: true,
+            tail_lines: Some(tail_lines),
+            ..Default::default()
+        };
+        // `log_stream` returns `impl futures::AsyncBufRead` (the `futures`
+        // crate's trait, not tokio's); `.compat()` bridges it to
+        // `tokio::io::AsyncRead` so `ReaderStream` can turn it into a
+        // `Stream<Item = io::Result<Bytes>>`.
+        let reader = api.log_stream(pod, &lp).await?.compat();
+        let stream = ReaderStream::new(reader).map(|r| r.map_err(anyhow::Error::from));
+        Ok(Box::pin(stream))
+    }
+
+    async fn restart_deployment(&self, namespace: &str, name: &str) -> anyhow::Result<()> {
+        use k8s_openapi::api::apps::v1::Deployment;
+        use kube::api::{Api, Patch, PatchParams};
+
+        let api: Api<Deployment> = Api::namespaced(self.client.clone(), namespace);
+        let ts = chrono::Utc::now().to_rfc3339();
+        // A JSON merge patch of just the pod-template annotation is exactly what
+        // `kubectl rollout restart` does: it changes the pod template (without
+        // touching config) so the Deployment controller rolls the pods.
+        let patch = serde_json::json!({
+            "spec": {
+                "template": {
+                    "metadata": {
+                        "annotations": { "egret/restarted-at": ts }
+                    }
+                }
+            }
+        });
+        api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await?;
+        Ok(())
+    }
+
+    async fn exec(
+        &self,
+        namespace: &str,
+        pod: &str,
+        command: &[String],
+    ) -> anyhow::Result<kube::api::AttachedProcess> {
+        use k8s_openapi::api::core::v1::Pod;
+        use kube::api::{Api, AttachParams};
+
+        let api: Api<Pod> = Api::namespaced(self.client.clone(), namespace);
+        // stderr must be off when tty is on (kube-rs would otherwise reject the
+        // request): the pty already merges stderr into stdout.
+        let ap = AttachParams::default()
+            .stdin(true)
+            .stdout(true)
+            .stderr(false)
+            .tty(true);
+        let attached = api.exec(pod, command.to_vec(), &ap).await?;
+        Ok(attached)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
+
+    #[tokio::test]
+    async fn fake_kube_pod_logs_stream_yields_canned_line() {
+        let k = FakeKube::default();
+        let mut stream = k
+            .pod_logs_stream("egret-engines", "demo-coordinator-0", 1000)
+            .await
+            .unwrap();
+        let chunk = stream.next().await.unwrap().unwrap();
+        assert_eq!(chunk, Bytes::from_static(b"fake log line\n"));
+        assert!(stream.next().await.is_none(), "fake stream is single-shot");
+    }
 
     #[tokio::test]
     async fn fake_kube_coordinator_request_records() {
@@ -293,6 +494,28 @@ mod tests {
         assert_eq!(
             k.coordinator_calls.lock().unwrap()[0],
             ("GET".to_string(), "/v1/query".to_string())
+        );
+    }
+
+    /// A restart rolls BOTH the `{name}-coordinator` and `{name}-worker`
+    /// Deployments (the naming convention `TrinoProvisioner`/`trino.rs` use),
+    /// each recorded as its own `restart_deployment` call.
+    #[tokio::test]
+    async fn fake_kube_restart_deployment_records_coordinator_and_worker() {
+        let k = FakeKube::default();
+        k.restart_deployment("egret-engines", "demo-coordinator")
+            .await
+            .unwrap();
+        k.restart_deployment("egret-engines", "demo-worker")
+            .await
+            .unwrap();
+        let calls = k.restarted.lock().unwrap();
+        assert_eq!(
+            *calls,
+            vec![
+                ("egret-engines".to_string(), "demo-coordinator".to_string()),
+                ("egret-engines".to_string(), "demo-worker".to_string()),
+            ]
         );
     }
 }

@@ -854,6 +854,20 @@ impl egret_controlplane::EngineProvisioner for EgretEngineProvisioner {
             .map_err(|e| e.to_string())
     }
 
+    async fn restart(&self, namespace: &str, name: &str) -> Result<(), String> {
+        // Roll BOTH Deployments directly via KubeClient (bypassing the
+        // TrinoProvisioner render/apply path entirely) so this never touches
+        // config — same seam as coordinator_request/pod_logs below.
+        self.kube
+            .restart_deployment(namespace, &format!("{name}-coordinator"))
+            .await
+            .map_err(|e| e.to_string())?;
+        self.kube
+            .restart_deployment(namespace, &format!("{name}-worker"))
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn coordinator_request(
         &self,
         namespace: &str,
@@ -866,6 +880,39 @@ impl egret_controlplane::EngineProvisioner for EgretEngineProvisioner {
         self.kube
             .coordinator_request(namespace, service, method, path, headers, body)
             .await
+    }
+
+    async fn pod_logs(
+        &self,
+        namespace: &str,
+        pod: &str,
+        container: Option<&str>,
+        tail_lines: i64,
+        previous: bool,
+    ) -> anyhow::Result<String> {
+        self.kube
+            .pod_logs(namespace, pod, container, tail_lines, previous)
+            .await
+    }
+
+    async fn pod_logs_stream(
+        &self,
+        namespace: &str,
+        pod: &str,
+        tail_lines: i64,
+    ) -> anyhow::Result<
+        std::pin::Pin<Box<dyn futures_util::Stream<Item = anyhow::Result<bytes::Bytes>> + Send>>,
+    > {
+        self.kube.pod_logs_stream(namespace, pod, tail_lines).await
+    }
+
+    async fn exec(
+        &self,
+        namespace: &str,
+        pod: &str,
+        command: &[String],
+    ) -> anyhow::Result<kube::api::AttachedProcess> {
+        self.kube.exec(namespace, pod, command).await
     }
 }
 

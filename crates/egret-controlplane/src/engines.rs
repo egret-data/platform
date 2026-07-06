@@ -10,18 +10,28 @@
 //! env}` [`CatalogReq`], and [`build_provision_req`] assembles the full
 //! [`EngineProvisionReq`]. The actual k8s work lives behind the
 //! [`EngineProvisioner`] trait, implemented in egret-bin over `egret-orchestrator`
-//! so this crate never depends on kube (mirrors `WarehouseProvisioner`).
+//! so this crate stays kube-free EXCEPT for one seam: [`EngineProvisioner::exec`]
+//! returns a `kube::api::AttachedProcess` so [`bridge_exec`] can pump it onto a
+//! browser WebSocket (see the trait doc for why).
 
 use std::collections::BTreeMap;
 
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::response::Response;
+use axum::routing::{get, post};
 use axum::{Json, Router};
+use bytes::Bytes;
 use egret_auth::principal::Auth;
 use egret_catalog::service::embedded::{GrantInput, NewClient};
 use egret_catalog::service::{Engine, EngineCatalog};
+use futures_util::sink::SinkExt;
+use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::pin::Pin;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
 use crate::auth::require_platform_admin;
@@ -440,6 +450,12 @@ pub trait EngineProvisioner: Send + Sync {
     async fn update(&self, req: &EngineProvisionReq) -> Result<(), String>;
     async fn delete(&self, namespace: &str, name: &str) -> Result<(), String>;
 
+    /// Roll the coordinator + worker pods WITHOUT changing config (like
+    /// `kubectl rollout restart`). A plain `update` with an unchanged spec is a
+    /// no-op (the rendered manifest's config-checksum is identical), so this is
+    /// a distinct seam over `KubeClient::restart_deployment`.
+    async fn restart(&self, namespace: &str, name: &str) -> Result<(), String>;
+
     /// Issue a raw HTTP request to a Trino coordinator `Service` and return
     /// `(status, body)`. Kube-free seam over `KubeClient::coordinator_request`
     /// (Service DNS in-cluster / kube API-server proxy in dev); non-2xx statuses
@@ -453,6 +469,51 @@ pub trait EngineProvisioner: Send + Sync {
         headers: &[(String, String)],
         body: Option<Vec<u8>>,
     ) -> anyhow::Result<(u16, Vec<u8>)>;
+
+    /// Tail a pod's logs. Kube-free seam over `KubeClient::pod_logs`; bounded by
+    /// `tail_lines` (the route clamps this before calling in).
+    async fn pod_logs(
+        &self,
+        namespace: &str,
+        pod: &str,
+        container: Option<&str>,
+        tail_lines: i64,
+        previous: bool,
+    ) -> anyhow::Result<String>;
+
+    /// Open a live-following stream of a pod's log bytes (`kubectl logs -f`
+    /// equivalent). Kube-free seam over `KubeClient::pod_logs_stream`; the
+    /// `pod_logs_follow` WS route pumps chunks from this stream onto a
+    /// browser WebSocket as they arrive — a ONE-directional stream (pod ->
+    /// browser), unlike [`exec`](Self::exec)'s bidirectional bridge.
+    async fn pod_logs_stream(
+        &self,
+        namespace: &str,
+        pod: &str,
+        tail_lines: i64,
+    ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<Bytes>> + Send>>>;
+
+    /// Exec `command` inside `pod` and return the live `AttachedProcess` for
+    /// [`bridge_exec`] to pump onto a browser WebSocket.
+    ///
+    /// UNLIKE every other seam on this trait, this one is NOT kube-free:
+    /// `kube::api::AttachedProcess` (stdin/stdout streams + a terminal-resize
+    /// sender) is threaded straight through instead of being translated into a
+    /// kube-free carrier type. Rationale: the WS bridge has to live somewhere
+    /// that can drive both an axum `WebSocket` and the kube attach handle, and
+    /// this crate already owns the axum router. The alternative — moving the
+    /// bridge into egret-bin and having this trait expose a higher-level
+    /// `exec_ws(WebSocket)` — would couple this crate's trait to axum's
+    /// `WebSocket` type instead, which is no better. Since egret-bin and
+    /// egret-orchestrator both already depend on `kube`, accepting the
+    /// `kube::api::AttachedProcess` type here (and the `kube` dependency it
+    /// drags into this crate's `Cargo.toml`) is the least-bad coupling.
+    async fn exec(
+        &self,
+        namespace: &str,
+        pod: &str,
+        command: &[String],
+    ) -> anyhow::Result<kube::api::AttachedProcess>;
 }
 
 pub fn router() -> Router<CpState> {
@@ -470,6 +531,11 @@ pub fn router() -> Router<CpState> {
             "/engines/{id}/catalogs/{cid}",
             get(get_catalog).put(update_catalog).delete(remove_catalog),
         )
+        .route("/engines/{id}/catalogs/{cid}/test", post(test_catalog))
+        .route("/engines/{id}/pods/{pod}/logs", get(pod_logs))
+        .route("/engines/{id}/pods/{pod}/logs/follow", get(pod_logs_follow))
+        .route("/engines/{id}/pods/{pod}/exec", get(pod_exec))
+        .route("/engines/{id}/restart", post(restart_engine))
         // Native Trino monitor (query list / detail / kill / cluster).
         .merge(crate::monitor::routes())
 }
@@ -1630,6 +1696,14 @@ fn client_row_id(config: &serde_json::Value) -> Option<Uuid> {
         .and_then(|s| Uuid::parse_str(s).ok())
 }
 
+/// Whether the client referenced by `clientRowId` was minted by us (and should
+/// be revoked when the catalog is removed). Defaults to `true` — missing or
+/// non-`false` means minted — so it's a no-op for existing rows and only an
+/// explicit `"mintedClient": false` opts a client out of revoke-on-remove.
+fn is_minted_client(config: &serde_json::Value) -> bool {
+    config.get("mintedClient").and_then(|v| v.as_bool()) != Some(false)
+}
+
 async fn create_engine(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -1879,6 +1953,27 @@ async fn delete_engine(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /engines/{id}/restart` — roll the coordinator + worker pods without
+/// changing config (like `kubectl rollout restart`). Unlike `update`, this
+/// always forces a roll: `prov.restart` patches a fresh timestamp annotation
+/// onto both Deployments' pod templates regardless of whether the rendered
+/// config changed.
+async fn restart_engine(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, CpError> {
+    require_platform_admin(&p)?;
+    let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    prov.restart(&engine.namespace, &engine.name)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("engine restart failed: {e}")))?;
+    Ok(StatusCode::OK)
+}
+
 // ── catalog sub-routes ───────────────────────────────────────────────────────────
 
 async fn list_catalogs(
@@ -1916,6 +2011,20 @@ async fn add_catalog(
 
     // For an egret-warehouse catalog, resolve the warehouse + endpoint and mint a
     // fresh client (same as the primary); other kinds store the body as-is.
+    //
+    // `config.clientId` (optional): run the catalog under the ROLE/grants of an
+    // EXISTING Catalog Client of this warehouse, instead of the shared
+    // `engine_default` role. `CatalogClient` never exposes a retrievable secret
+    // (`client_secret` is generated once in `create_client` and only its argon2
+    // hash is persisted — see `CatalogClient`/`CreatedClient` in
+    // `egret-catalog/src/service/embedded.rs`), so we can't just reuse the
+    // referenced client's credential directly. Instead we look up the chosen
+    // client to read its `catalog_role_id`, validate it belongs to `wh`, and
+    // mint a FRESH client under that same role. The new client is therefore
+    // still ours (auto-created, its credential lives only on this catalog row),
+    // so `mintedClient` stays `true` and revoke-on-remove in `remove_catalog`
+    // still applies — the feature only changes which ROLE the minted client
+    // inherits, not who "owns" the minted client.
     let (config, secret_ref, minted_client): (serde_json::Value, Option<Uuid>, Option<Uuid>) = if b
         .kind
         == "egret-warehouse"
@@ -1942,7 +2051,35 @@ async fn add_catalog(
             .await?
             .ok_or_else(|| CpError::BadRequest("unknown storage connection".into()))?;
         let s3_endpoint = sc.endpoint.unwrap_or_default();
-        let role_id = ensure_engine_role(&st, wh.id).await?;
+
+        // Optional `config.clientId`: inherit that client's role instead of the
+        // default engine role. Validated to belong to `wh` via `list_clients`.
+        let client_id_param = match b.config.get("clientId") {
+            Some(serde_json::Value::Null) | None => None,
+            Some(v) => Some(
+                v.as_str()
+                    .and_then(|s| Uuid::parse_str(s).ok())
+                    .ok_or_else(|| {
+                        CpError::BadRequest("config.clientId must be a UUID string".into())
+                    })?,
+            ),
+        };
+        let role_id = match client_id_param {
+            Some(cid) => {
+                st.storage
+                    .list_clients(wh.id)
+                    .await?
+                    .into_iter()
+                    .find(|c| c.id == cid)
+                    .ok_or_else(|| {
+                        CpError::BadRequest(
+                            "config.clientId does not reference a client of this warehouse".into(),
+                        )
+                    })?
+                    .catalog_role_id
+            }
+            None => ensure_engine_role(&st, wh.id).await?,
+        };
         let client = st
             .storage
             .create_client(&NewClient {
@@ -1958,6 +2095,7 @@ async fn add_catalog(
             "s3_endpoint": s3_endpoint,
             "credential": format!("{}:{}", client.client_id, client.client_secret),
             "clientRowId": client.id,
+            "mintedClient": true,
         });
         (cfg, None, Some(client.id))
     } else {
@@ -2029,6 +2167,144 @@ async fn get_catalog(
     }))
 }
 
+/// `POST /engines/{id}/catalogs/{cid}/test` payload.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogTestDto {
+    ok: bool,
+    message: String,
+}
+
+/// Bound on the `/v1/statement` submit-then-poll loop: a hung/misbehaving
+/// coordinator must not block the request forever.
+const CATALOG_TEST_MAX_POLLS: u32 = 50;
+
+/// Quote a catalog name as a SQL identifier, doubling any embedded `"` — the
+/// name is admin-controlled (not user free-text end to end), but this keeps
+/// the statement well-formed regardless.
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Extract `nextUri`'s path (+ query) for [`crate::monitor::coordinator_call`],
+/// which takes a path relative to the coordinator, not a full URL.
+fn next_uri_path(next_uri: &str) -> String {
+    match reqwest::Url::parse(next_uri) {
+        Ok(u) => match u.query() {
+            Some(q) => format!("{}?{q}", u.path()),
+            None => u.path().to_string(),
+        },
+        Err(_) => next_uri.to_string(),
+    }
+}
+
+/// Render a non-2xx coordinator response as a test-result message.
+fn coordinator_error_message(code: u16, body: &[u8]) -> String {
+    format!(
+        "coordinator returned {code}: {}",
+        String::from_utf8_lossy(body).trim()
+    )
+}
+
+/// `POST /engines/{id}/catalogs/{cid}/test` — "test connection": runs
+/// `SHOW SCHEMAS FROM "<catalog>"` against the engine's Trino coordinator via
+/// the native-monitor coordinator proxy ([`crate::monitor::coordinator_call`],
+/// same service name + auth headers as query monitoring) and reports whether
+/// the query reaches `FINISHED`. Submits `POST /v1/statement`, then follows
+/// `nextUri` (GET) until a terminal state, an `error` object, or
+/// [`CATALOG_TEST_MAX_POLLS`] iterations are exhausted (→ `ok:false`,
+/// "timed out"). Never returns a transport/coordinator-shape failure as an
+/// HTTP error status — those map to `ok:false` with an explanatory message —
+/// EXCEPT when the coordinator itself is unreachable or kubernetes isn't
+/// configured, which surface as the usual `CpError` (mirrors the other
+/// coordinator-proxied routes in this file and in `monitor.rs`).
+async fn test_catalog(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, cid)): Path<(Uuid, Uuid)>,
+) -> Result<Json<CatalogTestDto>, CpError> {
+    require_platform_admin(&p)?;
+    let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let cat = st
+        .storage
+        .get_engine_catalog(cid)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    if cat.engine_id != engine.id {
+        return Err(CpError::NotFound);
+    }
+
+    let sql = format!("SHOW SCHEMAS FROM {}", quote_ident(&cat.name));
+    let (code, body) = crate::monitor::coordinator_call(
+        &st,
+        &engine,
+        "POST",
+        "/v1/statement",
+        Some(sql.into_bytes()),
+    )
+    .await?;
+    if !(200..300).contains(&code) {
+        return Ok(Json(CatalogTestDto {
+            ok: false,
+            message: coordinator_error_message(code, &body),
+        }));
+    }
+    let mut v: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return Ok(Json(CatalogTestDto {
+                ok: false,
+                message: "coordinator returned a non-JSON response".into(),
+            }))
+        }
+    };
+
+    for _ in 0..=CATALOG_TEST_MAX_POLLS {
+        if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
+            return Ok(Json(CatalogTestDto {
+                ok: false,
+                message: err["message"]
+                    .as_str()
+                    .unwrap_or("query failed")
+                    .to_string(),
+            }));
+        }
+        let state = v["stats"]["state"].as_str().unwrap_or("");
+        let Some(next_uri) = v["nextUri"].as_str() else {
+            return Ok(Json(CatalogTestDto {
+                ok: state == "FINISHED",
+                message: if state == "FINISHED" {
+                    "ok".into()
+                } else {
+                    format!("query ended in state {state}")
+                },
+            }));
+        };
+        let path = next_uri_path(next_uri);
+        let (code, body) =
+            crate::monitor::coordinator_call(&st, &engine, "GET", &path, None).await?;
+        if !(200..300).contains(&code) {
+            return Ok(Json(CatalogTestDto {
+                ok: false,
+                message: coordinator_error_message(code, &body),
+            }));
+        }
+        v = match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(_) => {
+                return Ok(Json(CatalogTestDto {
+                    ok: false,
+                    message: "coordinator returned a non-JSON response".into(),
+                }))
+            }
+        };
+    }
+    Ok(Json(CatalogTestDto {
+        ok: false,
+        message: "timed out".into(),
+    }))
+}
+
 async fn remove_catalog(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -2052,8 +2328,16 @@ async fn remove_catalog(
     }
     st.storage.delete_engine_catalog(cat.id).await?;
     // Best-effort: retire a minted Catalog Client (egret-warehouse catalogs).
+    // Gated on `mintedClient` so a client we did NOT mint (config explicitly
+    // sets `mintedClient: false`) is never revoked out from under its owner.
+    // `add_catalog` always mints its own client today (even when inheriting an
+    // existing client's role via `config.clientId`), so this is always `true`
+    // in practice — the guard exists for forward-compat with a future
+    // "adopt an existing client verbatim" path.
     if let Some(clientid) = client_row_id(&cat.config) {
-        let _ = st.storage.revoke_client(clientid).await;
+        if is_minted_client(&cat.config) {
+            let _ = st.storage.revoke_client(clientid).await;
+        }
     }
     // Re-render + roll.
     let req = build_provision_req(&st, &engine).await?;
@@ -2125,6 +2409,305 @@ async fn update_catalog(
     }
 
     Ok(Json(updated.into()))
+}
+
+// ── pod logs ─────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct PodLogsQuery {
+    tail: Option<i64>,
+    previous: Option<bool>,
+    container: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PodLogsDto {
+    logs: String,
+}
+
+/// `GET /engines/{id}/pods/{pod}/logs?tail=&previous=&container=` — bounded tail
+/// of a pod's logs. The pod must belong to the engine (verified against the live
+/// pod list from `EngineProvisioner::status`), so one platform admin can't read
+/// an arbitrary pod's logs by guessing a name.
+async fn pod_logs(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, pod)): Path<(Uuid, String)>,
+    axum::extract::Query(q): axum::extract::Query<PodLogsQuery>,
+) -> Result<Json<PodLogsDto>, CpError> {
+    require_platform_admin(&p)?;
+    let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    // Ownership: the pod must be one of this engine's live pods.
+    let status = prov
+        .status(&engine.namespace, &engine.name)
+        .await
+        .map_err(CpError::BadRequest)?;
+    if !status.pods.iter().any(|pp| pp.name == pod) {
+        return Err(CpError::NotFound);
+    }
+    let tail = q.tail.unwrap_or(1000).clamp(1, 5000);
+    let logs = prov
+        .pod_logs(
+            &engine.namespace,
+            &pod,
+            q.container.as_deref(),
+            tail,
+            q.previous.unwrap_or(false),
+        )
+        .await
+        .map_err(|e| CpError::BadRequest(format!("read logs: {e}")))?;
+    Ok(Json(PodLogsDto { logs }))
+}
+
+// ── pod logs, live-following (websocket) ────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct PodLogsFollowQuery {
+    tail: Option<i64>,
+}
+
+/// `GET /engines/{id}/pods/{pod}/logs/follow?tail=` — upgrades to a WebSocket
+/// and streams the pod's logs as they arrive (`kubectl logs -f` equivalent),
+/// a ONE-directional stream (pod -> browser), unlike [`pod_exec`]'s
+/// bidirectional bridge. Same ownership guard as [`pod_logs`]/[`pod_exec`]:
+/// the pod must be one of the engine's live pods, checked BEFORE the WS
+/// upgrade so an unknown pod 404s instead of upgrading and failing inside
+/// the socket.
+async fn pod_logs_follow(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, pod)): Path<(Uuid, String)>,
+    axum::extract::Query(q): axum::extract::Query<PodLogsFollowQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, CpError> {
+    require_platform_admin(&p)?;
+    let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let Some(prov) = st.engine_provisioner.clone() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    // Ownership: the pod must be one of this engine's live pods (same guard
+    // as pod_logs/pod_exec), so one platform admin can't follow an arbitrary
+    // pod's logs by guessing a name.
+    let status = prov
+        .status(&engine.namespace, &engine.name)
+        .await
+        .map_err(CpError::BadRequest)?;
+    if !status.pods.iter().any(|pp| pp.name == pod) {
+        return Err(CpError::NotFound);
+    }
+    let namespace = engine.namespace.clone();
+    let engine_name = engine.name.clone();
+    let user = p.email.clone();
+    let tail = q.tail.unwrap_or(1000).clamp(1, 5000);
+    tracing::info!(engine = %engine_name, pod = %pod, user = %user, "pod log follow session opening");
+    Ok(ws.on_upgrade(move |socket| async move {
+        bridge_log_follow(prov, &namespace, &pod, tail, socket).await;
+        tracing::info!(engine = %engine_name, pod = %pod, user = %user, "pod log follow session closed");
+    }))
+}
+
+/// Pump log byte chunks from `EngineProvisioner::pod_logs_stream` onto the
+/// browser `WebSocket` as `Binary` frames, as they arrive. This is a
+/// ONE-directional stream (pod -> browser): the only thing read back off the
+/// socket is a `Close`, purely to stop the pump when the client disconnects
+/// — there is no stdin to forward, unlike [`bridge_exec`]. Exits on stream
+/// end/error, WS close, or a WS send error.
+async fn bridge_log_follow(
+    prov: Arc<dyn EngineProvisioner>,
+    namespace: &str,
+    pod: &str,
+    tail_lines: i64,
+    mut socket: WebSocket,
+) {
+    let mut stream = match prov.pod_logs_stream(namespace, pod, tail_lines).await {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = socket
+                .send(Message::Text(format!("log stream failed: {e}").into()))
+                .await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
+
+    loop {
+        tokio::select! {
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(_)) => break,
+                    Some(Ok(_)) => {} // ignore any other inbound frame (no stdin on this stream)
+                }
+            }
+            chunk = stream.next() => {
+                match chunk {
+                    Some(Ok(bytes)) => {
+                        if socket.send(Message::Binary(bytes)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Err(_)) | None => break, // stream error or EOF
+                }
+            }
+        }
+    }
+    let _ = socket.close().await;
+}
+
+// ── pod exec (websocket) ─────────────────────────────────────────────────────
+
+/// A control message sent by the browser terminal over the same WS channel as
+/// stdin bytes. Any WS **text** message that parses as `{"resize":{"cols":N,
+/// "rows":M}}` is a resize; every other text/binary message is raw stdin. Kept
+/// as a top-level, explicit JSON shape (rather than e.g. sniffing for a magic
+/// byte) so the frontend contract is simple and stable.
+#[derive(Deserialize)]
+struct ExecCtrlMsg {
+    resize: Option<ExecResize>,
+}
+
+#[derive(Deserialize)]
+struct ExecResize {
+    cols: u16,
+    rows: u16,
+}
+
+/// `GET /engines/{id}/pods/{pod}/exec` — upgrades to a WebSocket and bridges it
+/// to a `/bin/sh` session inside the pod via `EngineProvisioner::exec`. Same
+/// ownership guard as [`pod_logs`]: the pod must be one of the engine's live
+/// pods, checked BEFORE the WS upgrade so an unknown pod 404s instead of
+/// upgrading and failing inside the socket.
+async fn pod_exec(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, pod)): Path<(Uuid, String)>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, CpError> {
+    require_platform_admin(&p)?;
+    let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let Some(prov) = st.engine_provisioner.clone() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    // Ownership: the pod must be one of this engine's live pods (same guard as
+    // pod_logs), so one platform admin can't exec into an arbitrary pod by
+    // guessing a name.
+    let status = prov
+        .status(&engine.namespace, &engine.name)
+        .await
+        .map_err(CpError::BadRequest)?;
+    if !status.pods.iter().any(|pp| pp.name == pod) {
+        return Err(CpError::NotFound);
+    }
+    let namespace = engine.namespace.clone();
+    let engine_name = engine.name.clone();
+    let user = p.email.clone();
+    tracing::info!(engine = %engine_name, pod = %pod, user = %user, "pod exec session opening");
+    Ok(ws.on_upgrade(move |socket| async move {
+        bridge_exec(prov, &namespace, &pod, socket).await;
+        tracing::info!(engine = %engine_name, pod = %pod, user = %user, "pod exec session closed");
+    }))
+}
+
+/// Pump bytes between the browser `WebSocket` and a `/bin/sh` session attached
+/// via `EngineProvisioner::exec`. Browser `Text`/`Binary` messages become
+/// stdin, EXCEPT a `Text` message that parses as [`ExecCtrlMsg`] with a
+/// `resize` field, which instead resizes the pty via
+/// `AttachedProcess::terminal_size()`. Pod stdout bytes become WS `Binary`
+/// frames. Exits on WS close, stdout EOF, or a stdin/stdout I/O error; any
+/// `EngineProvisioner::exec` failure (e.g. `FakeKube`'s
+/// "exec not supported") is sent back as one WS text frame before closing.
+async fn bridge_exec(
+    prov: Arc<dyn EngineProvisioner>,
+    namespace: &str,
+    pod: &str,
+    mut socket: WebSocket,
+) {
+    // Give an interactive `bash` (the trinodb/trino image ships it), like
+    // `kubectl exec -it <pod> -- bash`, falling back to `sh` only when bash is
+    // absent. The bash/sh existence probe redirects ITS OWN stderr (not the
+    // exec'd shell's), so command stderr still flows to the TTY. `TERM` is set
+    // so full-screen tools (less, vi, top) render correctly in xterm.js.
+    let shell = [
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        "export TERM=xterm-256color; if command -v bash >/dev/null 2>&1; then exec bash; else exec sh; fi".to_string(),
+    ];
+    let mut attached = match prov.exec(namespace, pod, &shell).await {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = socket
+                .send(Message::Text(format!("exec failed: {e}").into()))
+                .await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
+    let mut stdin = attached.stdin();
+    let mut stdout = attached.stdout();
+    let mut resize = attached.terminal_size();
+    let mut buf = [0u8; 8192];
+
+    loop {
+        tokio::select! {
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Binary(data))) => {
+                        let Some(w) = stdin.as_mut() else { break };
+                        if w.write_all(&data).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        let resized = match serde_json::from_str::<ExecCtrlMsg>(&text) {
+                            Ok(ExecCtrlMsg { resize: Some(sz) }) => {
+                                if let Some(tx) = resize.as_mut() {
+                                    let _ = tx
+                                        .send(kube::api::TerminalSize {
+                                            width: sz.cols,
+                                            height: sz.rows,
+                                        })
+                                        .await;
+                                }
+                                true
+                            }
+                            _ => false,
+                        };
+                        if !resized {
+                            let Some(w) = stdin.as_mut() else { break };
+                            if w.write_all(text.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => break,
+                }
+            }
+            n = async {
+                match stdout.as_mut() {
+                    Some(r) => r.read(&mut buf).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match n {
+                    Ok(0) | Err(_) => break, // stdout EOF or read error
+                    Ok(n) => {
+                        if socket.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let _ = socket.close().await;
 }
 
 #[cfg(test)]

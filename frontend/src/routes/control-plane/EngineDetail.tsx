@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Loader2, Plus, Server, Trash2 } from "lucide-react";
+import { ArrowLeft, Loader2, Plus, RotateCw, Server, Trash2 } from "lucide-react";
 
 import {
+  type CatalogTestResult,
   type Engine,
   type EngineCatalog,
   type EngineCatalogDetail,
@@ -13,9 +14,21 @@ import {
   getEngine,
   getEngineCatalog,
   listEngineCatalogs,
+  restartEngine,
+  testEngineCatalog,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -52,6 +65,8 @@ import { ReviewChangesDialog } from "./config/ReviewChangesDialog";
 import { EngineAutoscaling } from "./EngineAutoscaling";
 import { EngineSecurity } from "./EngineSecurity";
 import EngineMonitor from "./EngineMonitor";
+import PodLogsDialog from "./PodLogsDialog";
+import PodTerminalDialog from "./PodTerminalDialog";
 
 type EngineWithStatus = Omit<Engine, "status"> & { status: EngineStatus };
 
@@ -169,7 +184,7 @@ function EngineTabs({
       </TabsList>
 
       <TabsContent value="overview" className="space-y-5">
-        <StatusCard status={engine.status} />
+        <StatusCard status={engine.status} engineId={engineId} />
         <DangerCard engine={engine} />
       </TabsContent>
 
@@ -251,14 +266,51 @@ function SaveBar({
   );
 }
 
-function StatusCard({ status }: { status: EngineStatus }) {
+function StatusCard({
+  status,
+  engineId,
+}: {
+  status: EngineStatus;
+  engineId: string;
+}) {
+  const queryClient = useQueryClient();
+  const [logsPod, setLogsPod] = useState<string | null>(null);
+  const [execPod, setExecPod] = useState<string | null>(null);
+  const [execConfirmPod, setExecConfirmPod] = useState<string | null>(null);
+  const [restartOpen, setRestartOpen] = useState(false);
+
+  const restartMutation = useMutation<void, ApiError, string>({
+    mutationFn: restartEngine,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["cp", "engine", engineId] });
+      setRestartOpen(false);
+    },
+  });
+
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-lg">Status</CardTitle>
-        <CardDescription>
-          {status.message ?? `Phase: ${status.phase}`}
-        </CardDescription>
+        <div className="flex items-start justify-between gap-3">
+          <div className="space-y-1.5">
+            <CardTitle className="text-lg">Status</CardTitle>
+            <CardDescription>
+              {status.message ?? `Phase: ${status.phase}`}
+            </CardDescription>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setRestartOpen(true)}
+            disabled={restartMutation.isPending}
+          >
+            {restartMutation.isPending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <RotateCw className="h-4 w-4" />
+            )}
+            Restart
+          </Button>
+        </div>
       </CardHeader>
       <CardContent>
         <Table>
@@ -267,13 +319,16 @@ function StatusCard({ status }: { status: EngineStatus }) {
               <TableHead>Pod</TableHead>
               <TableHead>Phase</TableHead>
               <TableHead>Ready</TableHead>
+              <TableHead className="text-right">
+                <span className="sr-only">Actions</span>
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {status.pods.length === 0 ? (
               <TableRow className="hover:bg-transparent">
                 <TableCell
-                  colSpan={3}
+                  colSpan={4}
                   className="py-10 text-center text-muted-foreground"
                 >
                   No pods yet.
@@ -293,12 +348,95 @@ function StatusCard({ status }: { status: EngineStatus }) {
                       {pod.ready ? "Ready" : "Not ready"}
                     </Badge>
                   </TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setLogsPod(pod.name)}
+                    >
+                      Logs
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setExecConfirmPod(pod.name)}
+                    >
+                      Exec
+                    </Button>
+                  </TableCell>
                 </TableRow>
               ))
             )}
           </TableBody>
         </Table>
       </CardContent>
+
+      <PodLogsDialog
+        engineId={engineId}
+        pod={logsPod}
+        onOpenChange={(o) => !o && setLogsPod(null)}
+      />
+
+      <PodTerminalDialog
+        engineId={engineId}
+        pod={execPod}
+        onOpenChange={(o) => !o && setExecPod(null)}
+      />
+
+      <AlertDialog
+        open={execConfirmPod != null}
+        onOpenChange={(o) => !o && setExecConfirmPod(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Open shell into {execConfirmPod}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Open an interactive shell into {execConfirmPod}? This runs
+              commands inside the running pod.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                setExecPod(execConfirmPod);
+                setExecConfirmPod(null);
+              }}
+            >
+              Open shell
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={restartOpen} onOpenChange={setRestartOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Restart engine?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This rolls the coordinator and worker pods; running queries are
+              interrupted.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-white hover:bg-destructive/90"
+              onClick={(e) => {
+                e.preventDefault();
+                restartMutation.mutate(engineId);
+              }}
+              disabled={restartMutation.isPending}
+            >
+              {restartMutation.isPending && (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              )}
+              Restart
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Card>
   );
 }
@@ -529,6 +667,74 @@ function SecurityTab({ cfg }: { cfg: EngineConfigForm }) {
  * existing catalog's detail. */
 const ADD_CATALOG = "add";
 
+/**
+ * "Test connection" + Remove footer for an existing catalog's detail pane.
+ * Rendered with `key={selected}` by the caller so switching catalogs mounts
+ * a fresh instance (and thus a fresh mutation) instead of carrying over the
+ * previous catalog's test result.
+ */
+function CatalogTestSection({
+  engineId,
+  cid,
+  onRemove,
+}: {
+  engineId: string;
+  cid: string;
+  onRemove: () => void;
+}) {
+  const testMutation = useMutation<CatalogTestResult, ApiError, void>({
+    mutationFn: () => testEngineCatalog(engineId, cid),
+  });
+
+  return (
+    <div className="space-y-3 border-t pt-4">
+      <div className="flex items-center justify-between gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => testMutation.mutate()}
+          disabled={testMutation.isPending}
+        >
+          {testMutation.isPending && (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          )}
+          Test connection
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="text-muted-foreground"
+          onClick={onRemove}
+        >
+          <Trash2 className="h-4 w-4" />
+          Remove
+        </Button>
+      </div>
+
+      {testMutation.data?.ok && (
+        <Alert>
+          <AlertDescription className="text-emerald-600">
+            Connection OK
+          </AlertDescription>
+        </Alert>
+      )}
+      {testMutation.data && !testMutation.data.ok && (
+        <Alert variant="destructive">
+          <AlertDescription>{testMutation.data.message}</AlertDescription>
+        </Alert>
+      )}
+      {testMutation.isError && (
+        <Alert variant="destructive">
+          <AlertDescription>
+            {testMutation.error?.message ?? "Test failed."}
+          </AlertDescription>
+        </Alert>
+      )}
+    </div>
+  );
+}
+
 function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
   const queryClient = useQueryClient();
   const catalogs = useQuery<EngineCatalog[], ApiError>({
@@ -688,17 +894,12 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
                     }}
                   />
                   {!detail.data.isPrimary && (
-                    <div className="flex justify-end border-t pt-4">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="text-muted-foreground"
-                        onClick={() => setRemoveOpen(true)}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                        Remove
-                      </Button>
-                    </div>
+                    <CatalogTestSection
+                      key={selected}
+                      engineId={engine.id}
+                      cid={selected}
+                      onRemove={() => setRemoveOpen(true)}
+                    />
                   )}
                 </div>
               )}

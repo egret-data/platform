@@ -515,7 +515,13 @@ async fn browse_non_admin_forbidden() {
 
 // ── Engines ────────────────────────────────────────────────────────────────────
 
-struct FakeEngineProvisioner;
+/// Engine provisioner fake. `restarted` records `(namespace, name)` pairs from
+/// `restart` calls (shared via `Arc` so a test can hold onto the fake and
+/// inspect it after the request completes, mirroring `MonitorFakeProvisioner`).
+#[derive(Clone, Default)]
+struct FakeEngineProvisioner {
+    restarted: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+}
 
 #[async_trait::async_trait]
 impl egret_controlplane::EngineProvisioner for FakeEngineProvisioner {
@@ -543,6 +549,13 @@ impl egret_controlplane::EngineProvisioner for FakeEngineProvisioner {
     async fn delete(&self, _ns: &str, _name: &str) -> Result<(), String> {
         Ok(())
     }
+    async fn restart(&self, ns: &str, name: &str) -> Result<(), String> {
+        self.restarted
+            .lock()
+            .unwrap()
+            .push((ns.to_string(), name.to_string()));
+        Ok(())
+    }
     async fn coordinator_request(
         &self,
         _namespace: &str,
@@ -553,6 +566,36 @@ impl egret_controlplane::EngineProvisioner for FakeEngineProvisioner {
         _body: Option<Vec<u8>>,
     ) -> anyhow::Result<(u16, Vec<u8>)> {
         Ok((200, b"[]".to_vec()))
+    }
+    async fn pod_logs(
+        &self,
+        _namespace: &str,
+        pod: &str,
+        _container: Option<&str>,
+        _tail_lines: i64,
+        _previous: bool,
+    ) -> anyhow::Result<String> {
+        Ok(format!("logs for {pod} (fake)\n"))
+    }
+    async fn pod_logs_stream(
+        &self,
+        _namespace: &str,
+        _pod: &str,
+        _tail_lines: i64,
+    ) -> anyhow::Result<
+        std::pin::Pin<Box<dyn futures_util::Stream<Item = anyhow::Result<bytes::Bytes>> + Send>>,
+    > {
+        Ok(Box::pin(futures_util::stream::once(async {
+            Ok(bytes::Bytes::from_static(b"fake log line\n"))
+        })))
+    }
+    async fn exec(
+        &self,
+        _namespace: &str,
+        _pod: &str,
+        _command: &[String],
+    ) -> anyhow::Result<kube::api::AttachedProcess> {
+        anyhow::bail!("exec not supported in fake provisioner")
     }
 }
 
@@ -591,6 +634,9 @@ impl egret_controlplane::EngineProvisioner for MonitorFakeProvisioner {
     async fn delete(&self, _ns: &str, _name: &str) -> Result<(), String> {
         Ok(())
     }
+    async fn restart(&self, _ns: &str, _name: &str) -> Result<(), String> {
+        Ok(())
+    }
     async fn coordinator_request(
         &self,
         _namespace: &str,
@@ -601,6 +647,36 @@ impl egret_controlplane::EngineProvisioner for MonitorFakeProvisioner {
         _body: Option<Vec<u8>>,
     ) -> anyhow::Result<(u16, Vec<u8>)> {
         Ok(self.response.lock().unwrap().clone())
+    }
+    async fn pod_logs(
+        &self,
+        _namespace: &str,
+        pod: &str,
+        _container: Option<&str>,
+        _tail_lines: i64,
+        _previous: bool,
+    ) -> anyhow::Result<String> {
+        Ok(format!("logs for {pod} (fake)\n"))
+    }
+    async fn pod_logs_stream(
+        &self,
+        _namespace: &str,
+        _pod: &str,
+        _tail_lines: i64,
+    ) -> anyhow::Result<
+        std::pin::Pin<Box<dyn futures_util::Stream<Item = anyhow::Result<bytes::Bytes>> + Send>>,
+    > {
+        Ok(Box::pin(futures_util::stream::once(async {
+            Ok(bytes::Bytes::from_static(b"fake log line\n"))
+        })))
+    }
+    async fn exec(
+        &self,
+        _namespace: &str,
+        _pod: &str,
+        _command: &[String],
+    ) -> anyhow::Result<kube::api::AttachedProcess> {
+        anyhow::bail!("exec not supported in fake provisioner")
     }
 }
 
@@ -679,9 +755,155 @@ async fn monitor_queries_maps_list_and_maps_bad_gateway() {
     );
 }
 
+/// `POST /engines/{id}/catalogs/{cid}/test`: a canned `FINISHED` (no `nextUri`,
+/// no `error`) reports `ok:true`; a canned `error` body reports `ok:false` with
+/// the message surfaced; a non-2xx coordinator response reports `ok:false`
+/// with a status/body summary (NOT a 502 — this route always answers 200 with
+/// its verdict in the body); a catalog id from a different engine 404s.
+///
+/// LIMITATION: `MonitorFakeProvisioner` holds a single canned `(status, body)`
+/// shared across every `coordinator_request` call, so it cannot return a
+/// first response with `nextUri` and then a different second response — this
+/// test therefore only exercises the immediate-terminal (no `nextUri`) path
+/// through `test_catalog`'s poll loop, not a multi-hop `nextUri` chase.
+#[tokio::test]
+async fn test_catalog_reports_ok_error_and_non_2xx() {
+    let fake = MonitorFakeProvisioner::default();
+    let Some(f) = setup_full(None, Some(Arc::new(fake.clone()))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_catalog_test_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    // Create the engine (auto-wires the primary egret-warehouse catalog).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // Fetch the auto-wired primary catalog id.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/catalogs"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list catalogs; body={j}");
+    let cat_id = j[0]["id"].as_str().expect("catalog id").to_string();
+
+    let test_uri = format!("/engines/{engine_id}/catalogs/{cat_id}/test");
+
+    // A canned FINISHED response with no nextUri/error → ok:true.
+    fake.set(200, br#"{"id":"q1","stats":{"state":"FINISHED"}}"#);
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &test_uri, &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "test catalog; body={j}");
+    assert_eq!(j["ok"], true, "finished with no error → ok; body={j}");
+
+    // A canned error body → ok:false + the error message surfaced verbatim.
+    fake.set(
+        200,
+        br#"{"id":"q2","stats":{"state":"FAILED"},"error":{"message":"catalog not found"}}"#,
+    );
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &test_uri, &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "test catalog error; body={j}");
+    assert_eq!(j["ok"], false, "error body → not ok; body={j}");
+    assert_eq!(
+        j["message"], "catalog not found",
+        "error message surfaced; body={j}"
+    );
+
+    // A non-2xx coordinator response → ok:false with a status/body summary,
+    // never a 502 (this route's contract is always 200 + a verdict body).
+    fake.set(503, b"<html>service unavailable</html>");
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &test_uri, &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "test catalog non-2xx; body={j}");
+    assert_eq!(j["ok"], false, "non-2xx → not ok; body={j}");
+    assert!(
+        j["message"].as_str().unwrap().contains("503"),
+        "message surfaces coordinator status; body={j}"
+    );
+
+    // A catalog id that belongs to a DIFFERENT engine must 404 (ownership guard).
+    let other_name = format!("trino-{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": other_name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create other engine; body={j}");
+    let other_engine_id = j["id"].as_str().expect("other engine id").to_string();
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{other_engine_id}/catalogs/{cat_id}/test"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "catalog from a different engine must 404"
+    );
+}
+
 #[tokio::test]
 async fn create_and_get_engine() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -747,8 +969,168 @@ async fn create_and_get_engine() {
 }
 
 #[tokio::test]
+async fn pod_logs_known_pod_ok_unknown_pod_404() {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_pod_logs_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // The fake provisioner's `status` reports a single pod named "coordinator-0".
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/pods/coordinator-0/logs"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "known pod logs; body={j}");
+    assert_eq!(
+        j["logs"], "logs for coordinator-0 (fake)\n",
+        "canned logs; body={j}"
+    );
+
+    // A pod name that isn't in the engine's live pod list is a 404, not a
+    // pass-through to the kube client.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/pods/not-my-pod/logs"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "unknown pod must 404");
+}
+
+// NOTE: no `pod_exec` route test here. `axum::extract::ws::WebSocketUpgrade`'s
+// `FromRequestParts` unconditionally rejects with 426 Upgrade Required unless
+// `hyper::upgrade::OnUpgrade` is present in the request extensions — an
+// extension only a real hyper connection ever inserts. `tower::ServiceExt::
+// oneshot`-driven requests (as used throughout this file) never have it, so a
+// WS-upgrade request 426s before the handler body (and therefore the
+// ownership guard) ever runs, regardless of pod name — there is no way to
+// distinguish "unknown pod" from "known pod" through this harness. The guard
+// itself is the exact same construct as `pod_logs`'s (already covered by
+// `pod_logs_known_pod_ok_unknown_pod_404` above), so its correctness is not
+// unverified — only the WS-specific wiring around it is untested here.
+
+/// `POST /engines/{id}/restart` rolls the engine's pods without changing
+/// config: the route calls `EngineProvisioner::restart` with the engine's
+/// namespace + name (from which the real egret-bin adapter derives BOTH the
+/// `{name}-coordinator` and `{name}-worker` Deployment names — see
+/// `fake_kube_restart_deployment_records_coordinator_and_worker` in
+/// `egret-orchestrator` for that fan-out). An unknown engine id is a 404.
+#[tokio::test]
+async fn restart_engine_calls_provisioner_unknown_404() {
+    let fake = FakeEngineProvisioner::default();
+    let Some(f) = setup_full(None, Some(Arc::new(fake.clone()))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_restart_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+    let namespace = j["namespace"]
+        .as_str()
+        .expect("engine namespace")
+        .to_string();
+
+    // Restart the known engine → 200, and the fake provisioner recorded the
+    // call with the engine's namespace + name.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/restart"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "restart known engine");
+    assert_eq!(
+        *fake.restarted.lock().unwrap(),
+        vec![(namespace, name)],
+        "restart recorded with engine namespace + name"
+    );
+
+    // An unknown engine id is a 404, not a pass-through to the provisioner.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{}/restart", Uuid::new_v4()),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "unknown engine must 404"
+    );
+    assert_eq!(
+        fake.restarted.lock().unwrap().len(),
+        1,
+        "unknown-engine 404 must not call the provisioner"
+    );
+}
+
+#[tokio::test]
 async fn update_engine_per_role_trino_config_roundtrips() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -870,7 +1252,7 @@ async fn seed_exchange_storage_conn(f: &Fixture) -> Uuid {
 
 #[tokio::test]
 async fn update_engine_resource_groups_and_fault_tolerant() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1014,7 +1396,7 @@ async fn seed_secret(f: &Fixture, value: &str) -> Uuid {
 
 #[tokio::test]
 async fn update_engine_auth_and_ingress() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1134,7 +1516,7 @@ async fn update_engine_auth_and_ingress() {
 
 #[tokio::test]
 async fn update_engine_pod_scheduling_roundtrips() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1227,7 +1609,7 @@ async fn update_engine_pod_scheduling_roundtrips() {
 
 #[tokio::test]
 async fn update_engine_autoscaling_roundtrips() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1351,7 +1733,7 @@ async fn update_engine_autoscaling_roundtrips() {
 
 #[tokio::test]
 async fn engine_catalog_routes() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1457,9 +1839,279 @@ async fn engine_catalog_routes() {
     );
 }
 
+/// `config.clientId`: adding an egret-warehouse catalog under an existing
+/// client's role must succeed, store `clientRowId` pointing at a NEWLY minted
+/// client (never the referenced one — see `add_catalog`'s doc comment: a
+/// `CatalogClient`'s secret is write-once and not retrievable, so "use an
+/// existing client" mints a fresh client under that client's role instead of
+/// reusing it verbatim) with `mintedClient: true`, and removing the catalog
+/// must revoke that MINTED client, not the user's original one.
+#[tokio::test]
+async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_cat_clientid_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    // Seed a pre-existing, user-owned client on a custom (non-default) role.
+    let catalog_store = egret_catalog::CatalogStore::new(f.db.clone());
+    let wh = catalog_store
+        .get_warehouse(wh_id)
+        .await
+        .expect("get warehouse")
+        .expect("warehouse exists");
+    let role = catalog_store
+        .create_role(
+            wh_id,
+            "readonly_analyst",
+            "external",
+            Some("read-only role"),
+        )
+        .await
+        .expect("create role");
+    let existing_client = catalog_store
+        .create_client(&egret_catalog::service::embedded::NewClient {
+            name: "pre-existing-client".into(),
+            consumer_type: "external".into(),
+            workspace_id: wh.workspace_id,
+            warehouse_id: wh_id,
+            catalog_role_id: role.id,
+        })
+        .await
+        .expect("create existing client");
+
+    // Create the engine (auto-wires the primary egret-warehouse catalog).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name,
+                "warehouseId": wh_id,
+                "coordinatorReplicas": 1,
+                "workerReplicas": 1,
+                "cpuMin": "1",
+                "cpuMax": "2",
+                "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // POST an egret-warehouse catalog with config.clientId → 201.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/catalogs"),
+            &token,
+            Some(serde_json::json!({
+                "name": "governed",
+                "kind": "egret-warehouse",
+                "config": { "warehouseId": wh_id, "clientId": existing_client.id },
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "add catalog w/ clientId; body={j}"
+    );
+    let cat_id = j["id"].as_str().expect("catalog id").to_string();
+
+    // GET the catalog detail: clientRowId must be a NEW client (not the
+    // referenced one), and mintedClient defaults true (harmless to expose).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/catalogs/{cat_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "get catalog detail; body={j}");
+    assert_eq!(j["config"]["mintedClient"], true, "mintedClient; body={j}");
+    // credential/clientRowId are redacted from the HTTP response; inspect the
+    // stored row directly via the storage layer instead.
+    let stored = catalog_store
+        .list_engine_catalogs(Uuid::parse_str(&engine_id).unwrap())
+        .await
+        .expect("list engine catalogs")
+        .into_iter()
+        .find(|c| c.id.to_string() == cat_id)
+        .expect("stored catalog row");
+    let minted_client_row_id = stored.config["clientRowId"]
+        .as_str()
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .expect("clientRowId present");
+    assert_ne!(
+        minted_client_row_id, existing_client.id,
+        "a fresh client must be minted, not the referenced one reused"
+    );
+    // The minted client inherited the referenced client's role.
+    let minted_row = catalog_store
+        .list_clients(wh_id)
+        .await
+        .expect("list clients")
+        .into_iter()
+        .find(|c| c.id == minted_client_row_id)
+        .expect("minted client row exists");
+    assert_eq!(
+        minted_row.catalog_role_id, role.id,
+        "minted client inherits the referenced client's role"
+    );
+
+    // DELETE the catalog → the MINTED client is revoked, the user's original
+    // client is untouched.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/engines/{engine_id}/catalogs/{cat_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "delete catalog");
+
+    let remaining = catalog_store
+        .list_clients(wh_id)
+        .await
+        .expect("list clients after delete");
+    assert!(
+        !remaining.iter().any(|c| c.id == minted_client_row_id),
+        "minted client must be revoked on catalog removal"
+    );
+    assert!(
+        remaining.iter().any(|c| c.id == existing_client.id),
+        "the user's pre-existing client must NOT be revoked"
+    );
+}
+
+/// An invalid or foreign `config.clientId` (not belonging to the target
+/// warehouse) must 400, not silently fall back to the default role or 500.
+#[tokio::test]
+async fn add_catalog_with_foreign_client_id_400() {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_cat_bad_clientid_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let other_wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+
+    // A client that belongs to a DIFFERENT warehouse.
+    let catalog_store = egret_catalog::CatalogStore::new(f.db.clone());
+    let other_wh = catalog_store
+        .get_warehouse(other_wh_id)
+        .await
+        .expect("get warehouse")
+        .expect("warehouse exists");
+    let role = catalog_store
+        .create_role(other_wh_id, "other_role", "external", None)
+        .await
+        .expect("create role");
+    let foreign_client = catalog_store
+        .create_client(&egret_catalog::service::embedded::NewClient {
+            name: "foreign-client".into(),
+            consumer_type: "external".into(),
+            workspace_id: other_wh.workspace_id,
+            warehouse_id: other_wh_id,
+            catalog_role_id: role.id,
+        })
+        .await
+        .expect("create foreign client");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name,
+                "warehouseId": wh_id,
+                "coordinatorReplicas": 1,
+                "workerReplicas": 1,
+                "cpuMin": "1",
+                "cpuMax": "2",
+                "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // A foreign clientId (belongs to a different warehouse) → 400.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/catalogs"),
+            &token,
+            Some(serde_json::json!({
+                "name": "governed",
+                "kind": "egret-warehouse",
+                "config": { "warehouseId": wh_id, "clientId": foreign_client.id },
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "foreign clientId must 400"
+    );
+
+    // A malformed (non-UUID) clientId → 400.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/catalogs"),
+            &token,
+            Some(serde_json::json!({
+                "name": "governed2",
+                "kind": "egret-warehouse",
+                "config": { "warehouseId": wh_id, "clientId": "not-a-uuid" },
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "malformed clientId must 400"
+    );
+}
+
 #[tokio::test]
 async fn create_engine_unprovisioned_warehouse_400() {
-    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner))).await else {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
