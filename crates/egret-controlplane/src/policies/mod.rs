@@ -186,6 +186,10 @@ pub fn router() -> Router<CpState> {
                 .put(update_policy)
                 .delete(delete_policy_handler),
         )
+        .route(
+            "/policies/{id}/enabled",
+            axum::routing::put(set_policy_enabled),
+        )
         .route("/policies/services", get(list_profiles))
         .route(
             "/policies/services/{service}/trino-config",
@@ -451,6 +455,23 @@ async fn delete_policy_handler(
 ) -> Result<StatusCode, CpError> {
     require_platform_admin(&p)?;
     st.authz.delete_policy(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EnabledBody {
+    pub enabled: bool,
+}
+
+/// PUT /policies/{id}/enabled — toggle a policy's enabled flag.
+async fn set_policy_enabled(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<i64>,
+    Json(b): Json<EnabledBody>,
+) -> Result<StatusCode, CpError> {
+    require_platform_admin(&p)?;
+    st.authz.set_policy_enabled(id, b.enabled).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

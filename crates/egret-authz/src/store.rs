@@ -200,6 +200,35 @@ impl AuthzStore {
         Ok(())
     }
 
+    /// Flip a policy's enabled flag without rewriting its body; bumps versions.
+    pub async fn set_policy_enabled(&self, id: i64, enabled: bool) -> Result<(), AuthzError> {
+        let mut tx = self.db.pool.begin().await?;
+        let svc: Option<i64> =
+            sqlx::query_scalar::<_, i64>(r#"SELECT service_id FROM authz_policies WHERE id = $1"#)
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let Some(service_id) = svc else {
+            tx.rollback().await?;
+            return Err(AuthzError::NotFound(format!("policy id {id}")));
+        };
+        sqlx::query(
+            r#"UPDATE authz_policies SET enabled=$2, version=version+1, updated_at=now() WHERE id=$1"#,
+        )
+        .bind(id)
+        .bind(enabled)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"UPDATE authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
+        )
+        .bind(service_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn delete_policy(&self, id: i64) -> Result<(), AuthzError> {
         let mut tx = self.db.pool.begin().await?;
         let svc: Option<i64> = sqlx::query_scalar::<_, i64>(

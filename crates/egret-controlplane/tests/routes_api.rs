@@ -2414,6 +2414,74 @@ async fn admin_can_create_and_delete_access_policy() {
     authz.delete_service(svc.id).await.expect("cleanup service");
 }
 
+/// P4 Task 3: `PUT /policies/{id}/enabled` toggles `enabled` without touching
+/// the stored body, and `GET /policies/{id}` reflects the new `isEnabled`.
+#[tokio::test]
+async fn admin_can_toggle_policy_enabled() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "toggle", true).await;
+
+    let authz = egret_authz::AuthzStore::new(f.db.clone());
+    egret_authz::seed_trino(&authz)
+        .await
+        .expect("seed trino def");
+    let svc_name = format!("trino-{}", Uuid::new_v4().simple());
+    let svc = authz
+        .create_service(&svc_name, "trino", &serde_json::json!({}))
+        .await
+        .expect("create service");
+
+    let create = serde_json::json!({
+        "name": "p-toggle", "service": svc_name, "isEnabled": true,
+        "resources": {"catalog": {"values": ["iceberg"]}},
+        "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/policies", &token, Some(create)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "create policy; body={body}");
+    let id = body["id"].as_i64().expect("id in response");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/policies/{id}/enabled"),
+            &token,
+            Some(serde_json::json!({ "enabled": false })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "toggle policy enabled should return 204"
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("/policies/{id}"), &token, None))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "get policy; body={body}");
+    assert_eq!(
+        body["isEnabled"], false,
+        "policy should be disabled; body={body}"
+    );
+
+    authz.delete_service(svc.id).await.expect("cleanup service");
+}
+
 /// P3 Task 2: the same `POST /policies` / `PUT /policies/{id}` endpoints
 /// dispatch on `kind` to create Masking and Row-filter policies too.
 #[tokio::test]
