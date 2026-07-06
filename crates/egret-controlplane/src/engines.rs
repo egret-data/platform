@@ -2830,6 +2830,7 @@ mod tests {
             warehouse_id: Uuid::new_v4(),
             spec: serde_json::json!({}),
             status: "pending".into(),
+            authz_service_id: None,
             created_at: chrono::Utc::now(),
         }
     }

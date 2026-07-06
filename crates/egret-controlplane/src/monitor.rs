@@ -340,6 +340,7 @@ mod tests {
             warehouse_id: Uuid::nil(),
             spec,
             status: "running".into(),
+            authz_service_id: None,
             created_at: chrono::Utc::now(),
         }
     }
