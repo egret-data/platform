@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Loader2, RefreshCw } from "lucide-react";
 
@@ -42,6 +42,7 @@ export default function PodLogsDialog({
 }) {
   const [tail, setTail] = useState(1000);
   const [previous, setPrevious] = useState(false);
+  const preRef = useRef<HTMLPreElement | null>(null);
 
   const logs = useQuery<PodLogs, ApiError>({
     queryKey: ["cp", "pod-logs", engineId, pod, tail, previous],
@@ -49,6 +50,11 @@ export default function PodLogsDialog({
     enabled: pod != null,
     retry: false,
   });
+
+  // Jump to the tail (most recent lines) whenever the logs (re)load.
+  useEffect(() => {
+    if (preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight;
+  }, [logs.data]);
 
   return (
     <Dialog open={pod != null} onOpenChange={onOpenChange}>
@@ -110,7 +116,10 @@ export default function PodLogsDialog({
               </AlertDescription>
             </Alert>
           ) : (
-            <pre className="max-h-[60vh] overflow-auto rounded-md bg-muted p-3 font-mono text-xs whitespace-pre-wrap">
+            <pre
+              ref={preRef}
+              className="max-h-[60vh] overflow-auto rounded-md bg-muted p-3 font-mono text-xs whitespace-pre-wrap"
+            >
               {logs.data?.logs ? (
                 logs.data.logs
               ) : (

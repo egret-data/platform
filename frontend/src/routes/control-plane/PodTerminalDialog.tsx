@@ -122,7 +122,7 @@ export default function PodTerminalDialog({
       <DialogContent className="max-w-4xl">
         <DialogHeader>
           <DialogTitle className="font-mono text-sm">{pod}</DialogTitle>
-          <DialogDescription>Interactive shell (/bin/sh).</DialogDescription>
+          <DialogDescription>Interactive shell (bash).</DialogDescription>
         </DialogHeader>
 
         <div className="h-[60vh] w-full overflow-hidden rounded-md bg-[#0a0a0a] p-2">

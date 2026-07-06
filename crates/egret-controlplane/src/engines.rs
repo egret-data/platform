@@ -2516,7 +2516,14 @@ async fn bridge_exec(
     pod: &str,
     mut socket: WebSocket,
 ) {
-    let mut attached = match prov.exec(namespace, pod, &["/bin/sh".to_string()]).await {
+    // Prefer an interactive bash (the trinodb/trino image ships it); fall back to
+    // sh for any pod that lacks bash, so exec never breaks.
+    let shell = [
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        "exec bash 2>/dev/null || exec sh".to_string(),
+    ];
+    let mut attached = match prov.exec(namespace, pod, &shell).await {
         Ok(a) => a,
         Err(e) => {
             let _ = socket
