@@ -31,6 +31,8 @@ function blankInput(service: string): AccessPolicyInput {
     name: "", service, isEnabled: true,
     resources: { catalog: emptyLevel(), schema: emptyLevel(), table: emptyLevel(), column: emptyLevel() },
     items: [emptyItem()],
+    allowExceptions: [], denyExceptions: [], isDenyAllElse: false,
+    description: "", labels: [],
   };
 }
 

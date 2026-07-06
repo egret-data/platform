@@ -11,6 +11,8 @@ export interface PolicySummary {
   principals: string[];
   permissions: string[];
   is_enabled: boolean;
+  description: string;
+  labels: string[];
 }
 
 export interface ProfileEngine {
@@ -47,6 +49,11 @@ export interface AccessPolicyInput {
   isEnabled: boolean;
   resources: { catalog: ResourceLevel; schema: ResourceLevel; table: ResourceLevel; column: ResourceLevel };
   items: AccessItem[];
+  allowExceptions: AccessItem[];
+  denyExceptions: AccessItem[];
+  isDenyAllElse: boolean;
+  description: string;
+  labels: string[];
 }
 
 export interface Principal { kind: "user" | "group"; name: string; label: string; }
@@ -77,6 +84,8 @@ export interface MaskingPolicyInput {
   name: string; service: string; isEnabled: boolean;
   resources: { catalog: ResourceLevel; schema: ResourceLevel; table: ResourceLevel; column: ResourceLevel };
   items: MaskItem[];
+  description: string;
+  labels: string[];
 }
 export interface RowFilterItem { users: string[]; groups: string[]; filterExpr: string; }
 export interface RowFilterPolicyInput {
@@ -84,6 +93,8 @@ export interface RowFilterPolicyInput {
   name: string; service: string; isEnabled: boolean;
   resources: { catalog: ResourceLevel; schema: ResourceLevel; table: ResourceLevel };
   items: RowFilterItem[];
+  description: string;
+  labels: string[];
 }
 export type PolicyInput = (AccessPolicyInput & { kind: "access" }) | MaskingPolicyInput | RowFilterPolicyInput;
 
@@ -117,4 +128,24 @@ export function updatePolicy(id: number, input: PolicyInput): Promise<{ id: numb
 
 export function deletePolicy(id: number): Promise<void> {
   return apiFetch(`/control-plane/policies/${id}`, { method: "DELETE" }).then(() => undefined);
+}
+
+export function resourceLookup(
+  service: string,
+  level: "catalog" | "schema" | "table" | "column",
+  parents: { catalog?: string; schema?: string; table?: string } = {},
+  q = "",
+): Promise<string[]> {
+  const p = new URLSearchParams({ service, level });
+  if (parents.catalog) p.set("catalog", parents.catalog);
+  if (parents.schema) p.set("schema", parents.schema);
+  if (parents.table) p.set("table", parents.table);
+  if (q) p.set("q", q);
+  return apiJson<string[]>(`/control-plane/policies/resource-lookup?${p.toString()}`);
+}
+
+export function setPolicyEnabled(id: number, enabled: boolean): Promise<void> {
+  return apiFetch(`/control-plane/policies/${id}/enabled`, {
+    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled }),
+  }).then(() => undefined);
 }

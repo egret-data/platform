@@ -33,6 +33,7 @@ function blankInput(service: string): MaskingPolicyInput {
     name: "", service, isEnabled: true,
     resources: { catalog: emptyLevel(), schema: emptyLevel(), table: emptyLevel(), column: emptyLevel() },
     items: [emptyItem()],
+    description: "", labels: [],
   };
 }
 

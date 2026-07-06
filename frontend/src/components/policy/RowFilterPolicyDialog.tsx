@@ -32,6 +32,7 @@ function blankInput(service: string): RowFilterPolicyInput {
     name: "", service, isEnabled: true,
     resources: { catalog: emptyLevel(), schema: emptyLevel(), table: emptyLevel() },
     items: [emptyItem()],
+    description: "", labels: [],
   };
 }
 

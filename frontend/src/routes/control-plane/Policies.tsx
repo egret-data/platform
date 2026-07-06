@@ -42,12 +42,19 @@ function toInput(service: string, body: Record<string, any>): AccessPolicyInput 
       effect,
     }));
   const items = [...map(body.policyItems, "allow"), ...map(body.denyPolicyItems, "deny")];
+  const allowExceptions = map(body.allowExceptions, "allow");
+  const denyExceptions = map(body.denyExceptions, "deny");
   return {
     name: String(body.name ?? ""),
     service,
     isEnabled: body.isEnabled !== false,
     resources: { catalog: lvl("catalog"), schema: lvl("schema"), table: lvl("table"), column: lvl("column") },
     items: items.length ? items : [{ users: [], groups: [], accesses: [], effect: "allow" }],
+    allowExceptions,
+    denyExceptions,
+    isDenyAllElse: body.isDenyAllElse === true,
+    description: String(body.description ?? ""),
+    labels: body.policyLabels ?? [],
   };
 }
 
@@ -70,6 +77,8 @@ function maskingToInput(service: string, body: Record<string, any>): MaskingPoli
     isEnabled: body.isEnabled !== false,
     resources: { catalog: lvl("catalog"), schema: lvl("schema"), table: lvl("table"), column: lvl("column") },
     items: items.length ? items : [{ users: [], groups: [], maskType: "MASK_HASH" }],
+    description: String(body.description ?? ""),
+    labels: body.labels ?? [],
   };
 }
 
@@ -91,6 +100,8 @@ function rowfilterToInput(service: string, body: Record<string, any>): RowFilter
     isEnabled: body.isEnabled !== false,
     resources: { catalog: lvl("catalog"), schema: lvl("schema"), table: lvl("table") },
     items: items.length ? items : [{ users: [], groups: [], filterExpr: "" }],
+    description: String(body.description ?? ""),
+    labels: body.labels ?? [],
   };
 }
 
