@@ -8,17 +8,16 @@
 mod ranger_json;
 
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::auth::require_platform_admin;
 use crate::error::CpError;
 use crate::CpState;
-// Unused until P2 Task 2 wires the create/update endpoints that call these.
-#[allow(unused_imports)]
 pub use ranger_json::{access_to_ranger_json, AccessPolicyInput};
 
 /// Human-readable name for a Ranger `policyType` integer.
@@ -144,8 +143,13 @@ pub struct ProfileEngine {
 
 pub fn router() -> Router<CpState> {
     Router::new()
-        .route("/policies", get(list_policies))
-        .route("/policies/{id}", get(get_policy))
+        .route("/policies", get(list_policies).post(create_policy))
+        .route(
+            "/policies/{id}",
+            get(get_policy)
+                .put(update_policy)
+                .delete(delete_policy_handler),
+        )
         .route("/policies/services", get(list_profiles))
         .route("/policies/service-def/{name}", get(get_service_def))
 }
@@ -235,6 +239,51 @@ async fn get_service_def(
 ) -> Result<Json<Value>, CpError> {
     require_platform_admin(&p)?;
     Ok(Json(st.authz.get_service_def(&name).await?.def_jsonb))
+}
+
+/// POST /policies — create an Access policy from the editor form.
+async fn create_policy(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Json(input): Json<AccessPolicyInput>,
+) -> Result<Json<Value>, CpError> {
+    require_platform_admin(&p)?;
+    if input.name.trim().is_empty() {
+        return Err(CpError::BadRequest("policy name is required".into()));
+    }
+    let svc = st.authz.get_service(&input.service).await?;
+    let body = access_to_ranger_json(&input);
+    let id = st.authz.create_policy(svc.id, &input.name, &body).await?;
+    Ok(Json(json!({ "id": id })))
+}
+
+/// PUT /policies/{id} — replace an Access policy's body.
+async fn update_policy(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<i64>,
+    Json(input): Json<AccessPolicyInput>,
+) -> Result<Json<Value>, CpError> {
+    require_platform_admin(&p)?;
+    if input.name.trim().is_empty() {
+        return Err(CpError::BadRequest("policy name is required".into()));
+    }
+    let body = access_to_ranger_json(&input);
+    st.authz
+        .update_policy(id, &input.name, &body, input.is_enabled)
+        .await?;
+    Ok(Json(json!({ "id": id })))
+}
+
+/// DELETE /policies/{id}
+async fn delete_policy_handler(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, CpError> {
+    require_platform_admin(&p)?;
+    st.authz.delete_policy(id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]

@@ -3,10 +3,7 @@
 //! Ranger policy body stored verbatim in `authz_policies.policy_jsonb`.
 //! P2 covers policyType 0 (access) only; masking/row-filter come in P3.
 //!
-//! Only unit-tested for now — the create/update endpoints that call
-//! `access_to_ranger_json` land in P2 Task 2, so `cargo clippy` would
-//! otherwise flag this module as dead code until then.
-#![allow(dead_code)]
+//! Called by the create/update handlers in `policies/mod.rs`.
 
 use serde::Deserialize;
 use serde_json::{json, Map, Value};

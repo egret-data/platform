@@ -2343,3 +2343,71 @@ async fn non_admin_cannot_list_policies() {
         "a non platform-admin must not list policies"
     );
 }
+
+/// P2 Task 2: a platform admin can POST a new Access policy from the editor
+/// form, see it in the list, then DELETE it.
+#[tokio::test]
+async fn admin_can_create_and_delete_access_policy() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "crud", true).await;
+
+    let authz = egret_authz::AuthzStore::new(f.db.clone());
+    egret_authz::seed_trino(&authz)
+        .await
+        .expect("seed trino def");
+    let svc_name = format!("trino-{}", Uuid::new_v4().simple());
+    let svc = authz
+        .create_service(&svc_name, "trino", &serde_json::json!({}))
+        .await
+        .expect("create service");
+
+    let create = serde_json::json!({
+        "name": "p-create", "service": svc_name, "isEnabled": true,
+        "resources": {"catalog": {"values": ["iceberg"]}},
+        "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/policies", &token, Some(create)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "create policy; body={body}");
+    let id = body["id"].as_i64().expect("id in response");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/policies?service={svc_name}&type=access"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (_, list) = into_json(resp).await;
+    assert_eq!(
+        list.as_array().expect("array body").len(),
+        1,
+        "expected exactly one summary; body={list}"
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &format!("/policies/{id}"), &token, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "delete policy should return 204"
+    );
+
+    authz.delete_service(svc.id).await.expect("cleanup service");
+}
