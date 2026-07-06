@@ -15,6 +15,13 @@ tracing.workspace = true
 reqwest.workspace = true
 http.workspace = true
 chrono.workspace = true
+# For `KubeClient::pod_logs_stream`: `futures_util::Stream`/`StreamExt` bound
+# the boxed byte-chunk stream; `bytes::Bytes` is the chunk type; `tokio-util`'s
+# `io::ReaderStream` turns kube's `log_stream` (a `futures::AsyncBufRead`,
+# bridged to `tokio::io::AsyncRead` via the `compat` feature) into that stream.
+futures-util.workspace = true
+bytes.workspace = true
+tokio-util = { workspace = true, features = ["io", "compat"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

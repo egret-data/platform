@@ -2486,6 +2486,7 @@ dependencies = [
  "axum",
  "axum-extra 0.10.3",
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "clap",
  "egret-auth",
@@ -2508,6 +2509,7 @@ dependencies = [
  "egret-server",
  "egret-storage",
  "egret-workspace",
+ "futures-util",
  "kube 0.99.0",
  "reqwest 0.12.28",
  "rustls",
@@ -2591,6 +2593,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bcrypt",
+ "bytes",
  "chrono",
  "egret-auth",
  "egret-catalog",
@@ -2790,7 +2793,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytes",
  "chrono",
+ "futures-util",
  "http 1.4.2",
  "k8s-openapi 0.24.0",
  "kube 0.99.0",
@@ -2798,6 +2803,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -7978,6 +7984,7 @@ checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "pin-project-lite",
  "slab",

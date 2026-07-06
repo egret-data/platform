@@ -46,6 +46,7 @@ tokio-util = "0.7"
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
 futures-channel = "0.3"
+bytes = "1"
 axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }

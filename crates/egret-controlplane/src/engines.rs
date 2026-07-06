@@ -22,11 +22,14 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use bytes::Bytes;
 use egret_auth::principal::Auth;
 use egret_catalog::service::embedded::{GrantInput, NewClient};
 use egret_catalog::service::{Engine, EngineCatalog};
 use futures_util::sink::SinkExt;
+use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
@@ -478,6 +481,18 @@ pub trait EngineProvisioner: Send + Sync {
         previous: bool,
     ) -> anyhow::Result<String>;
 
+    /// Open a live-following stream of a pod's log bytes (`kubectl logs -f`
+    /// equivalent). Kube-free seam over `KubeClient::pod_logs_stream`; the
+    /// `pod_logs_follow` WS route pumps chunks from this stream onto a
+    /// browser WebSocket as they arrive — a ONE-directional stream (pod ->
+    /// browser), unlike [`exec`](Self::exec)'s bidirectional bridge.
+    async fn pod_logs_stream(
+        &self,
+        namespace: &str,
+        pod: &str,
+        tail_lines: i64,
+    ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<Bytes>> + Send>>>;
+
     /// Exec `command` inside `pod` and return the live `AttachedProcess` for
     /// [`bridge_exec`] to pump onto a browser WebSocket.
     ///
@@ -518,6 +533,7 @@ pub fn router() -> Router<CpState> {
         )
         .route("/engines/{id}/catalogs/{cid}/test", post(test_catalog))
         .route("/engines/{id}/pods/{pod}/logs", get(pod_logs))
+        .route("/engines/{id}/pods/{pod}/logs/follow", get(pod_logs_follow))
         .route("/engines/{id}/pods/{pod}/exec", get(pod_exec))
         .route("/engines/{id}/restart", post(restart_engine))
         // Native Trino monitor (query list / detail / kill / cluster).
@@ -2446,6 +2462,102 @@ async fn pod_logs(
         .await
         .map_err(|e| CpError::BadRequest(format!("read logs: {e}")))?;
     Ok(Json(PodLogsDto { logs }))
+}
+
+// ── pod logs, live-following (websocket) ────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct PodLogsFollowQuery {
+    tail: Option<i64>,
+}
+
+/// `GET /engines/{id}/pods/{pod}/logs/follow?tail=` — upgrades to a WebSocket
+/// and streams the pod's logs as they arrive (`kubectl logs -f` equivalent),
+/// a ONE-directional stream (pod -> browser), unlike [`pod_exec`]'s
+/// bidirectional bridge. Same ownership guard as [`pod_logs`]/[`pod_exec`]:
+/// the pod must be one of the engine's live pods, checked BEFORE the WS
+/// upgrade so an unknown pod 404s instead of upgrading and failing inside
+/// the socket.
+async fn pod_logs_follow(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, pod)): Path<(Uuid, String)>,
+    axum::extract::Query(q): axum::extract::Query<PodLogsFollowQuery>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, CpError> {
+    require_platform_admin(&p)?;
+    let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let Some(prov) = st.engine_provisioner.clone() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    // Ownership: the pod must be one of this engine's live pods (same guard
+    // as pod_logs/pod_exec), so one platform admin can't follow an arbitrary
+    // pod's logs by guessing a name.
+    let status = prov
+        .status(&engine.namespace, &engine.name)
+        .await
+        .map_err(CpError::BadRequest)?;
+    if !status.pods.iter().any(|pp| pp.name == pod) {
+        return Err(CpError::NotFound);
+    }
+    let namespace = engine.namespace.clone();
+    let engine_name = engine.name.clone();
+    let user = p.email.clone();
+    let tail = q.tail.unwrap_or(1000).clamp(1, 5000);
+    tracing::info!(engine = %engine_name, pod = %pod, user = %user, "pod log follow session opening");
+    Ok(ws.on_upgrade(move |socket| async move {
+        bridge_log_follow(prov, &namespace, &pod, tail, socket).await;
+        tracing::info!(engine = %engine_name, pod = %pod, user = %user, "pod log follow session closed");
+    }))
+}
+
+/// Pump log byte chunks from `EngineProvisioner::pod_logs_stream` onto the
+/// browser `WebSocket` as `Binary` frames, as they arrive. This is a
+/// ONE-directional stream (pod -> browser): the only thing read back off the
+/// socket is a `Close`, purely to stop the pump when the client disconnects
+/// — there is no stdin to forward, unlike [`bridge_exec`]. Exits on stream
+/// end/error, WS close, or a WS send error.
+async fn bridge_log_follow(
+    prov: Arc<dyn EngineProvisioner>,
+    namespace: &str,
+    pod: &str,
+    tail_lines: i64,
+    mut socket: WebSocket,
+) {
+    let mut stream = match prov.pod_logs_stream(namespace, pod, tail_lines).await {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = socket
+                .send(Message::Text(format!("log stream failed: {e}").into()))
+                .await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
+
+    loop {
+        tokio::select! {
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(_)) => break,
+                    Some(Ok(_)) => {} // ignore any other inbound frame (no stdin on this stream)
+                }
+            }
+            chunk = stream.next() => {
+                match chunk {
+                    Some(Ok(bytes)) => {
+                        if socket.send(Message::Binary(bytes)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Err(_)) | None => break, // stream error or EOF
+                }
+            }
+        }
+    }
+    let _ = socket.close().await;
 }
 
 // ── pod exec (websocket) ─────────────────────────────────────────────────────

@@ -25,9 +25,13 @@ uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-# For `SinkExt` (`WebSocket::send`/`close`, `TerminalSize` mpsc sender) used by
-# the pod-exec WS bridge in `engines.rs`.
+# For `SinkExt`/`StreamExt` (`WebSocket::send`/`close`/`recv`, `TerminalSize`
+# mpsc sender, and the log-follow byte stream) used by the pod-exec and
+# pod-logs-follow WS bridges in `engines.rs`.
 futures-util.workspace = true
+# Chunk type of `EngineProvisioner::pod_logs_stream` (matches
+# `WebSocket::Message::Binary`'s `Bytes` payload one-for-one).
+bytes.workspace = true
 # Only used for the `EngineProvisioner::exec` return type
 # (`kube::api::AttachedProcess`) — the WS bridge in `engines.rs` needs the live
 # attach handle. Every other seam on the trait stays kube-free; see the module

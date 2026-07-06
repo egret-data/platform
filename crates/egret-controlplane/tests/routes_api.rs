@@ -577,6 +577,18 @@ impl egret_controlplane::EngineProvisioner for FakeEngineProvisioner {
     ) -> anyhow::Result<String> {
         Ok(format!("logs for {pod} (fake)\n"))
     }
+    async fn pod_logs_stream(
+        &self,
+        _namespace: &str,
+        _pod: &str,
+        _tail_lines: i64,
+    ) -> anyhow::Result<
+        std::pin::Pin<Box<dyn futures_util::Stream<Item = anyhow::Result<bytes::Bytes>> + Send>>,
+    > {
+        Ok(Box::pin(futures_util::stream::once(async {
+            Ok(bytes::Bytes::from_static(b"fake log line\n"))
+        })))
+    }
     async fn exec(
         &self,
         _namespace: &str,
@@ -645,6 +657,18 @@ impl egret_controlplane::EngineProvisioner for MonitorFakeProvisioner {
         _previous: bool,
     ) -> anyhow::Result<String> {
         Ok(format!("logs for {pod} (fake)\n"))
+    }
+    async fn pod_logs_stream(
+        &self,
+        _namespace: &str,
+        _pod: &str,
+        _tail_lines: i64,
+    ) -> anyhow::Result<
+        std::pin::Pin<Box<dyn futures_util::Stream<Item = anyhow::Result<bytes::Bytes>> + Send>>,
+    > {
+        Ok(Box::pin(futures_util::stream::once(async {
+            Ok(bytes::Bytes::from_static(b"fake log line\n"))
+        })))
     }
     async fn exec(
         &self,

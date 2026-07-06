@@ -1,9 +1,17 @@
 //! Kubernetes access seam. Kept behind a trait so tests can inject a fake and
 //! kube-rs stays out of the templating + provisioning logic.
 
+use bytes::Bytes;
+use futures_util::Stream;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::pin::Pin;
 use std::sync::Mutex;
+
+/// A boxed stream of raw log-byte chunks, as read off a following (`follow:
+/// true`) pod-log request. Returned by [`KubeClient::pod_logs_stream`] and
+/// pumped onto a browser WebSocket by the control-plane's log-follow route.
+pub type PodLogStream = Pin<Box<dyn Stream<Item = anyhow::Result<Bytes>> + Send>>;
 
 /// Minimal k8s surface egret needs. `apply` is server-side-apply of one resource
 /// identified by (apiVersion, kind, namespace, name); `delete` removes it; the
@@ -51,6 +59,19 @@ pub trait KubeClient: Send + Sync {
         tail_lines: i64,
         previous: bool,
     ) -> anyhow::Result<String>;
+
+    /// Open a live-following stream (`follow: true`) of a pod's log bytes —
+    /// the `kubectl logs -f` equivalent of [`pod_logs`](Self::pod_logs)'s
+    /// one-shot tail. `tail_lines` still bounds the backlog replayed before
+    /// new lines start arriving. The caller (the control-plane's
+    /// `pod_logs_follow` WS route) pumps chunks onto a browser WebSocket as
+    /// they arrive; this is a ONE-directional stream (pod -> browser).
+    async fn pod_logs_stream(
+        &self,
+        namespace: &str,
+        pod: &str,
+        tail_lines: i64,
+    ) -> anyhow::Result<PodLogStream>;
 
     /// Force a rollout of a Deployment WITHOUT changing its rendered config:
     /// patches the pod-template's `egret/restarted-at` annotation to now, which
@@ -152,6 +173,17 @@ impl KubeClient for FakeKube {
         _previous: bool,
     ) -> anyhow::Result<String> {
         Ok(format!("logs for {pod} (fake)\n"))
+    }
+
+    async fn pod_logs_stream(
+        &self,
+        _namespace: &str,
+        _pod: &str,
+        _tail_lines: i64,
+    ) -> anyhow::Result<PodLogStream> {
+        Ok(Box::pin(futures_util::stream::once(async {
+            Ok(Bytes::from_static(b"fake log line\n"))
+        })))
     }
 
     async fn restart_deployment(&self, namespace: &str, name: &str) -> anyhow::Result<()> {
@@ -353,6 +385,33 @@ impl KubeClient for LiveKube {
         Ok(logs)
     }
 
+    async fn pod_logs_stream(
+        &self,
+        namespace: &str,
+        pod: &str,
+        tail_lines: i64,
+    ) -> anyhow::Result<PodLogStream> {
+        use futures_util::StreamExt;
+        use k8s_openapi::api::core::v1::Pod;
+        use kube::api::{Api, LogParams};
+        use tokio_util::compat::FuturesAsyncReadCompatExt;
+        use tokio_util::io::ReaderStream;
+
+        let api: Api<Pod> = Api::namespaced(self.client.clone(), namespace);
+        let lp = LogParams {
+            follow: true,
+            tail_lines: Some(tail_lines),
+            ..Default::default()
+        };
+        // `log_stream` returns `impl futures::AsyncBufRead` (the `futures`
+        // crate's trait, not tokio's); `.compat()` bridges it to
+        // `tokio::io::AsyncRead` so `ReaderStream` can turn it into a
+        // `Stream<Item = io::Result<Bytes>>`.
+        let reader = api.log_stream(pod, &lp).await?.compat();
+        let stream = ReaderStream::new(reader).map(|r| r.map_err(anyhow::Error::from));
+        Ok(Box::pin(stream))
+    }
+
     async fn restart_deployment(&self, namespace: &str, name: &str) -> anyhow::Result<()> {
         use k8s_openapi::api::apps::v1::Deployment;
         use kube::api::{Api, Patch, PatchParams};
@@ -401,6 +460,19 @@ impl KubeClient for LiveKube {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
+
+    #[tokio::test]
+    async fn fake_kube_pod_logs_stream_yields_canned_line() {
+        let k = FakeKube::default();
+        let mut stream = k
+            .pod_logs_stream("egret-engines", "demo-coordinator-0", 1000)
+            .await
+            .unwrap();
+        let chunk = stream.next().await.unwrap().unwrap();
+        assert_eq!(chunk, Bytes::from_static(b"fake log line\n"));
+        assert!(stream.next().await.is_none(), "fake stream is single-shot");
+    }
 
     #[tokio::test]
     async fn fake_kube_coordinator_request_records() {

@@ -895,6 +895,17 @@ impl egret_controlplane::EngineProvisioner for EgretEngineProvisioner {
             .await
     }
 
+    async fn pod_logs_stream(
+        &self,
+        namespace: &str,
+        pod: &str,
+        tail_lines: i64,
+    ) -> anyhow::Result<
+        std::pin::Pin<Box<dyn futures_util::Stream<Item = anyhow::Result<bytes::Bytes>> + Send>>,
+    > {
+        self.kube.pod_logs_stream(namespace, pod, tail_lines).await
+    }
+
     async fn exec(
         &self,
         namespace: &str,
