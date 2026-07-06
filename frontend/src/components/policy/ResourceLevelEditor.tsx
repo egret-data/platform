@@ -62,7 +62,10 @@ export function ResourceLevelEditor({ label, level, service, parents, value, onC
       </div>
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
-          <Input placeholder="value or * (Enter to add)" value={q} onFocus={() => setOpen(true)}
+          {/* type="text" must be explicit: Radix PopoverTrigger's own `type="button"` wins the
+              Slot prop-merge unless the child sets `type` itself, which would silently turn
+              this into a non-editable input[type=button]. */}
+          <Input type="text" placeholder="value or * (Enter to add)" value={q} onFocus={() => setOpen(true)}
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(q); } }} />
         </PopoverTrigger>

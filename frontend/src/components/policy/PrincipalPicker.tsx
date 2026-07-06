@@ -57,7 +57,11 @@ export function PrincipalPicker({ users, groups, onChange }: Props) {
       </div>
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
+          {/* type="text" must be explicit: Radix PopoverTrigger's own `type="button"` wins the
+              Slot prop-merge unless the child sets `type` itself, which would silently turn
+              this into a non-editable input[type=button]. */}
           <Input
+            type="text"
             placeholder="Add user or group…"
             value={q}
             onFocus={() => setOpen(true)}
