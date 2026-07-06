@@ -29,6 +29,14 @@ vi.mock("@/api/policies", () => ({
   })),
   getServiceDef: vi.fn(() => Promise.resolve({ accessTypes: [{ name: "select" }] })),
   listPrincipals: vi.fn(() => Promise.resolve([])),
+  getTrinoConfig: vi.fn(() => Promise.resolve([
+    { name: "access-control.properties", content: "access-control.name=ranger" },
+    { name: "ranger-trino-security.xml", content: "<configuration/>" },
+  ])),
+  MASK_TYPES: [
+    { name: "MASK_HASH", label: "Hash" },
+    { name: "CUSTOM", label: "Custom expression" },
+  ],
 }));
 
 function wrap(ui: React.ReactNode) {
@@ -55,5 +63,24 @@ describe("Policies page", () => {
     wrap(<Policies />);
     await screen.findByText("allow-analysts");
     expect(screen.getByRole("button", { name: /delete allow-analysts/i })).toBeInTheDocument();
+  });
+
+  it("opens the Trino config dialog on Download Trino config", async () => {
+    const user = userEvent.setup();
+    wrap(<Policies />);
+    await screen.findByText("allow-analysts");
+    await user.click(await screen.findByRole("button", { name: /download trino config/i }));
+    expect(await screen.findByRole("heading", { name: /trino config/i })).toBeInTheDocument();
+  });
+
+  it("shows New policy on the masking tab and opens the masking editor", async () => {
+    const user = userEvent.setup();
+    wrap(<Policies />);
+    await screen.findByText("allow-analysts");
+    await user.click(screen.getByRole("tab", { name: /masking/i }));
+    const newButton = await screen.findByRole("button", { name: /new policy/i });
+    expect(newButton).toBeInTheDocument();
+    await user.click(newButton);
+    expect(await screen.findByText(/new masking policy/i)).toBeInTheDocument();
   });
 });
