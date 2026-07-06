@@ -50,7 +50,8 @@ export function AccessPolicyDialog({ open, service, initial, onOpenChange, onSav
 
   const qc = useQueryClient();
   const save = useMutation<{ id: number }, ApiError>({
-    mutationFn: () => (initial ? updatePolicy(initial.id, form) : createPolicy(form)),
+    mutationFn: () =>
+      (initial ? updatePolicy(initial.id, { ...form, kind: "access" }) : createPolicy({ ...form, kind: "access" })),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["control-plane", "policies"] });
       onSaved();
