@@ -66,6 +66,16 @@ pub struct AccessPolicyInput {
     pub resources: EditorResources,
     #[serde(default)]
     pub items: Vec<AccessItemInput>,
+    #[serde(default, rename = "allowExceptions")]
+    pub allow_exceptions: Vec<AccessItemInput>,
+    #[serde(default, rename = "denyExceptions")]
+    pub deny_exceptions: Vec<AccessItemInput>,
+    #[serde(default, rename = "isDenyAllElse")]
+    pub is_deny_all_else: bool,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 fn resource_obj(l: &ResourceLevel) -> Value {
@@ -99,18 +109,32 @@ pub fn access_to_ranger_json(input: &AccessPolicyInput) -> Value {
     }
     let (allow, deny): (Vec<_>, Vec<_>) = input.items.iter().partition(|it| it.effect != "deny");
     let policy_items: Vec<Value> = allow.iter().map(|it| item_obj(it)).collect();
-    let deny_items: Vec<Value> = deny.iter().map(|it| item_obj(it)).collect();
+    let deny_all = input.is_deny_all_else;
+    let deny_items: Vec<Value> = if deny_all {
+        vec![]
+    } else {
+        deny.iter().map(|it| item_obj(it)).collect()
+    };
+    let deny_exc: Vec<Value> = if deny_all {
+        vec![]
+    } else {
+        input.deny_exceptions.iter().map(item_obj).collect()
+    };
+    let allow_exc: Vec<Value> = input.allow_exceptions.iter().map(item_obj).collect();
     json!({
         "name": input.name,
         "service": input.service,
         "serviceType": "trino",
         "policyType": 0,
         "isEnabled": input.is_enabled,
+        "description": input.description,
+        "policyLabels": input.labels,
         "resources": Value::Object(resources),
         "policyItems": policy_items,
         "denyPolicyItems": deny_items,
-        "allowExceptions": [],
-        "denyExceptions": [],
+        "allowExceptions": allow_exc,
+        "denyExceptions": deny_exc,
+        "isDenyAllElse": deny_all,
     })
 }
 
@@ -138,6 +162,10 @@ pub struct MaskingPolicyInput {
     pub resources: EditorResources,
     #[serde(default)]
     pub items: Vec<MaskItemInput>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 fn kind_masking() -> String {
@@ -175,6 +203,7 @@ pub fn masking_to_ranger_json(input: &MaskingPolicyInput) -> Value {
     json!({
         "name": input.name, "service": input.service, "serviceType": "trino",
         "policyType": 1, "isEnabled": input.is_enabled,
+        "description": input.description, "policyLabels": input.labels,
         "resources": Value::Object(resources),
         "dataMaskPolicyItems": input.items.iter().map(mask_item_obj).collect::<Vec<_>>(),
         "policyItems": [], "denyPolicyItems": [],
@@ -213,6 +242,10 @@ pub struct RowFilterPolicyInput {
     pub resources: RowFilterResources,
     #[serde(default)]
     pub items: Vec<RowFilterItemInput>,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 fn kind_rowfilter() -> String {
@@ -242,6 +275,7 @@ pub fn rowfilter_to_ranger_json(input: &RowFilterPolicyInput) -> Value {
     json!({
         "name": input.name, "service": input.service, "serviceType": "trino",
         "policyType": 2, "isEnabled": input.is_enabled,
+        "description": input.description, "policyLabels": input.labels,
         "resources": Value::Object(resources),
         "rowFilterPolicyItems": input.items.iter().map(rowfilter_item_obj).collect::<Vec<_>>(),
         "policyItems": [], "denyPolicyItems": [],
@@ -412,6 +446,32 @@ mod tests {
         let s = crate::summarize_policy(2, "trino", true, &body);
         assert_eq!(s.policy_type, "rowfilter");
         assert_eq!(s.resource_path, "iceberg.sales.orders");
+    }
+
+    #[test]
+    fn access_serializes_exceptions_and_deny_all_else() {
+        let inp: AccessPolicyInput = serde_json::from_value(json!({
+            "kind":"access","name":"p","service":"trino","isEnabled":true,
+            "description":"analysts read","labels":["pii","sales"],
+            "resources":{"catalog":{"values":["iceberg"],"isExcludes":false,"isRecursive":false},
+                         "schema":{"values":["sales"]},"table":{"values":["a","b"]},"column":{"values":["*"]}},
+            "items":[{"users":["alice"],"accesses":["select"],"effect":"allow"}],
+            "allowExceptions":[{"groups":["contractors"],"accesses":["select"]}],
+            "isDenyAllElse":true,
+            "denyExceptions":[{"users":["x"],"accesses":["select"]}]
+        })).unwrap();
+        let b = access_to_ranger_json(&inp);
+        assert_eq!(b["policyType"], 0);
+        assert_eq!(b["description"], "analysts read");
+        assert_eq!(b["policyLabels"][0], "pii");
+        assert_eq!(
+            b["resources"]["table"]["values"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(b["allowExceptions"][0]["groups"][0], "contractors");
+        assert_eq!(b["isDenyAllElse"], true);
+        assert!(b["denyPolicyItems"].as_array().unwrap().is_empty());
+        assert!(b["denyExceptions"].as_array().unwrap().is_empty());
     }
 
     #[test]
