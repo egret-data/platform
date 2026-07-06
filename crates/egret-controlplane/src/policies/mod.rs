@@ -423,13 +423,20 @@ async fn trino_config(
 }
 
 /// GET /policies/service-def/{name} — the def slices the editor renders from.
+/// The frontend passes a SERVICE name; resolve it to its service-def (by the
+/// service's `type`). Falls back to treating `name` as a def name directly
+/// (back-compat) when no such service exists.
 async fn get_service_def(
     State(st): State<CpState>,
     Auth(p): Auth,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, CpError> {
     require_platform_admin(&p)?;
-    Ok(Json(st.authz.get_service_def(&name).await?.def_jsonb))
+    let def_name = match st.authz.get_service(&name).await {
+        Ok(svc) => svc.r#type,
+        Err(_) => name,
+    };
+    Ok(Json(st.authz.get_service_def(&def_name).await?.def_jsonb))
 }
 
 #[derive(Debug, Deserialize)]
