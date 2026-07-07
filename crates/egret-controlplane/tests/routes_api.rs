@@ -3665,6 +3665,30 @@ async fn groups_local_and_oidc() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT, "add group member");
 
+    // GET /groups/{id}/members lists the member back (prefill for the
+    // manage-members dialog).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/groups/{group_id}/members"),
+            &admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list group members; body={j}");
+    let members = j.as_array().expect("members array");
+    assert_eq!(members.len(), 1, "one member; body={j}");
+    assert_eq!(
+        members[0]["id"],
+        member_id.to_string(),
+        "member id; body={j}"
+    );
+    assert_eq!(members[0]["email"], member_email, "member email; body={j}");
+
     // DELETE the local group → 204.
     let resp = f
         .app

@@ -38,7 +38,10 @@ pub fn router() -> Router<CpState> {
         .route("/users/{id}/roles/{role_id}", delete(unassign_user_role))
         .route("/groups", get(list_groups).post(create_group))
         .route("/groups/{id}", patch(rename_group).delete(delete_group))
-        .route("/groups/{id}/members", post(add_group_member))
+        .route(
+            "/groups/{id}/members",
+            get(list_group_members).post(add_group_member),
+        )
         .route(
             "/groups/{id}/members/{user_id}",
             delete(remove_group_member),
@@ -331,6 +334,31 @@ async fn delete_group(
         ));
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Serialize)]
+pub struct GroupMemberDto {
+    pub id: Uuid,
+    pub email: String,
+    pub name: String,
+}
+
+/// `GET /groups/{id}/members` — the group's current members, so the admin
+/// console can prefill and diff its manage-members dialog. Read-only, so it
+/// gates on `group:read` rather than `group:manage_members`.
+async fn list_group_members(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<GroupMemberDto>>, CpError> {
+    require_permission(&p, "group:read")?;
+    let members = st.groups.member_users(id).await?;
+    Ok(Json(
+        members
+            .into_iter()
+            .map(|(id, email, name)| GroupMemberDto { id, email, name })
+            .collect(),
+    ))
 }
 
 async fn add_group_member(

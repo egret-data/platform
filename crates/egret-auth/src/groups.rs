@@ -151,6 +151,21 @@ impl GroupRepo {
             .map_err(db_err)
     }
 
+    /// List the member users (id, email, name) of a group, email-ordered —
+    /// used to prefill the admin console's manage-members dialog.
+    pub async fn member_users(&self, group_id: Uuid) -> Result<Vec<(Uuid, String, String)>> {
+        let rows = sqlx::query_as::<_, MemberUserRow>(
+            "SELECT u.id, u.email::text AS email, u.name FROM user_groups ug \
+             JOIN users u ON u.id = ug.user_id \
+             WHERE ug.group_id = $1 ORDER BY u.email",
+        )
+        .bind(group_id)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(rows.into_iter().map(|r| (r.id, r.email, r.name)).collect())
+    }
+
     /// Names of the groups a user directly belongs to (name-ordered), used to
     /// populate the `groups` field of the `GET /users` DTO.
     pub async fn groups_of_user(&self, user_id: UserId) -> Result<Vec<String>> {
@@ -198,6 +213,13 @@ struct GroupWithCountRow {
     name: String,
     source: String,
     member_count: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct MemberUserRow {
+    id: Uuid,
+    email: String,
+    name: String,
 }
 
 fn db_err(e: sqlx::Error) -> egret_core::Error {
