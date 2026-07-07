@@ -104,6 +104,7 @@ impl SessionService {
             user_id: UserId(row.user_id),
             email: row.email,
             platform_roles,
+            permissions: vec![],
         }))
     }
 
