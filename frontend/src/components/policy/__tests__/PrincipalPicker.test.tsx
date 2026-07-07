@@ -4,10 +4,13 @@ import { describe, it, expect, vi } from "vitest";
 import { PrincipalPicker } from "../PrincipalPicker";
 
 vi.mock("@/api/policies", () => ({
-  listPrincipals: () => Promise.resolve([
-    { kind: "user", name: "alice@egret.local", label: "Alice" },
-    { kind: "group", name: "analysts", label: "analysts" },
-  ]),
+  listPrincipals: (_q: string, kind?: "user" | "group") =>
+    Promise.resolve(
+      [
+        { kind: "user", name: "alice@egret.local", label: "Alice" },
+        { kind: "group", name: "analysts", label: "analysts" },
+      ].filter((p) => !kind || p.kind === kind),
+    ),
 }));
 
 function wrap(ui: React.ReactNode) {
