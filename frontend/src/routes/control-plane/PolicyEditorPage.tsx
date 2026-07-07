@@ -6,6 +6,7 @@ import { ArrowLeft, Loader2, Plus, Trash2, X } from "lucide-react";
 import {
   type AccessItem,
   type MaskItem,
+  type ResourceLevel,
   type RowFilterItem,
   type ServiceDef,
   type ServiceDefResource,
@@ -13,7 +14,6 @@ import {
   deletePolicy,
   getPolicy,
   getServiceDef,
-  listPrincipals,
   updatePolicy,
 } from "@/api/policies";
 import { ApiError } from "@/api/client";
@@ -31,11 +31,10 @@ import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { TagCombobox } from "@/components/ui/tag-combobox";
 import { Textarea } from "@/components/ui/textarea";
 import { MaskItemTable } from "@/components/policy/MaskItemTable";
 import { PermissionTable } from "@/components/policy/PermissionTable";
-import { ResourceLevelEditor } from "@/components/policy/ResourceLevelEditor";
+import { ResourceSelector } from "@/components/policy/ResourceSelector";
 import { RowFilterItemTable } from "@/components/policy/RowFilterItemTable";
 import { ConfigSection } from "./config/ConfigSection";
 import { FieldLabel } from "./config/FieldLabel";
@@ -112,8 +111,6 @@ function blankInput(kind: PolicyKind, service: string): any {
     isEnabled: true,
     resources: emptyTableResources(),
     additional: [],
-    resourceMode: "table",
-    trinouser: emptyLevel(),
     items: [emptyAccessItem()],
     allowExceptions: [],
     denyExceptions: [],
@@ -130,14 +127,16 @@ function blankInput(kind: PolicyKind, service: string): any {
  * serializers — ported from `Policies.tsx`'s `toInput`/`maskingToInput`/
  * `rowfilterToInput`, unified behind `kind` instead of three call sites.
  */
-function toFormState(kind: PolicyKind, service: string, body: Record<string, any>): any {
-  const rawLevel = (raw: any) => ({
-    values: raw?.values ?? [],
-    isExcludes: !!raw?.isExcludes,
-    isRecursive: !!raw?.isRecursive,
-  });
-  const lvl = (k: string) => rawLevel(body?.resources?.[k]);
+function rawResourcesToMap(obj: Record<string, any> | undefined | null): Record<string, ResourceLevel> {
+  return Object.fromEntries(
+    Object.entries(obj ?? {}).map(([k, v]) => [
+      k,
+      { values: v?.values ?? [], isExcludes: !!v?.isExcludes, isRecursive: !!v?.isRecursive },
+    ]),
+  );
+}
 
+function toFormState(kind: PolicyKind, service: string, body: Record<string, any>): any {
   if (kind === "masking") {
     const items = (body.dataMaskPolicyItems ?? []).map((it: any) => ({
       users: it.users ?? [],
@@ -150,12 +149,7 @@ function toFormState(kind: PolicyKind, service: string, body: Record<string, any
       name: String(body.name ?? ""),
       service,
       isEnabled: body.isEnabled !== false,
-      resources: {
-        catalog: lvl("catalog"),
-        schema: lvl("schema"),
-        table: lvl("table"),
-        column: lvl("column"),
-      },
+      resources: rawResourcesToMap(body.resources),
       items: items.length ? items : [emptyMaskItem()],
       description: String(body.description ?? ""),
       labels: body.labels ?? [],
@@ -174,7 +168,7 @@ function toFormState(kind: PolicyKind, service: string, body: Record<string, any
       name: String(body.name ?? ""),
       service,
       isEnabled: body.isEnabled !== false,
-      resources: { catalog: lvl("catalog"), schema: lvl("schema"), table: lvl("table") },
+      resources: rawResourcesToMap(body.resources),
       items: items.length ? items : [emptyRowFilterItem()],
       description: String(body.description ?? ""),
       labels: body.labels ?? [],
@@ -192,27 +186,14 @@ function toFormState(kind: PolicyKind, service: string, body: Record<string, any
       effect,
     }));
   const items = [...map(body.policyItems, "allow"), ...map(body.denyPolicyItems, "deny")];
-  const isImp = !!body?.resources?.trinouser;
-  const additional = (body.additionalResources ?? []).map((r: any) => ({
-    catalog: rawLevel(r?.catalog),
-    schema: rawLevel(r?.schema),
-    table: rawLevel(r?.table),
-    column: rawLevel(r?.column),
-  }));
+  const additional = (body.additionalResources ?? []).map(rawResourcesToMap);
   return {
     kind: "access",
     name: String(body.name ?? ""),
     service,
     isEnabled: body.isEnabled !== false,
-    resources: {
-      catalog: lvl("catalog"),
-      schema: lvl("schema"),
-      table: lvl("table"),
-      column: lvl("column"),
-    },
+    resources: rawResourcesToMap(body.resources),
     additional,
-    resourceMode: isImp ? "impersonation" : "table",
-    trinouser: lvl("trinouser"),
     items: items.length ? items : [emptyAccessItem()],
     allowExceptions: map(body.allowExceptions, "allow"),
     denyExceptions: map(body.denyExceptions, "deny"),
@@ -221,54 +202,6 @@ function toFormState(kind: PolicyKind, service: string, body: Record<string, any
     labels: body.policyLabels ?? [],
     isOverride: body.policyPriority === 1,
   };
-}
-
-interface ResourceBlockProps {
-  value: any;
-  onChange: (v: any) => void;
-  service: string;
-  levels: readonly ("catalog" | "schema" | "table" | "column")[];
-  levelFlags: (lvl: string) => ServiceDefResource;
-  missingRequired?: string[];
-}
-
-/**
- * One catalog/schema/table/column resource grid — the primary `resources`
- * block and each `additionalResources` entry both render this, so Ranger's
- * "extra independent resource hierarchy" repeater is just N of these plus a
- * remove button (see the Resource section below).
- */
-function ResourceBlock({
-  value,
-  onChange,
-  service,
-  levels,
-  levelFlags,
-  missingRequired = [],
-}: ResourceBlockProps) {
-  return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-      {levels.map((lvl) => (
-        <ResourceLevelEditor
-          key={lvl}
-          label={lvl[0].toUpperCase() + lvl.slice(1)}
-          level={lvl}
-          service={service}
-          parents={{
-            catalog: value.catalog.values[0],
-            schema: value.schema.values[0],
-            table: value.table.values[0],
-          }}
-          value={value[lvl]}
-          onChange={(v) => onChange({ ...value, [lvl]: v })}
-          excludesSupported={levelFlags(lvl).excludesSupported ?? true}
-          recursiveSupported={levelFlags(lvl).recursiveSupported ?? false}
-          mandatory={levelFlags(lvl).mandatory ?? false}
-          invalid={missingRequired.includes(lvl)}
-        />
-      ))}
-    </div>
-  );
 }
 
 /**
@@ -309,48 +242,35 @@ export default function PolicyEditorPage() {
   const def = useQuery<ServiceDef>({
     queryKey: ["service-def", service],
     queryFn: () => getServiceDef(service),
-    enabled: kind === "access",
     retry: false,
   });
-  const accessTypes = def.data?.accessTypes?.map((a) => a.name) ?? DEFAULT_ACCESS_TYPES;
 
-  // Lookup of per-level resource flags (Exclude/Recursive support, mandatory)
-  // from the fetched Trino service-def. Before the def loads (or for
-  // masking/rowfilter kinds, which don't fetch it), fall back to Trino's
-  // known shape: excludesSupported + mandatory on every level, no recursive
-  // support anywhere — so the UI is sane even without the def in hand.
-  const resFlags = (def.data?.resources ?? []).reduce(
-    (m, r) => {
-      m[r.name] = r;
-      return m;
-    },
-    {} as Record<string, ServiceDefResource>,
-  );
-  const levelFlags = (lvl: string): ServiceDefResource =>
-    resFlags[lvl] ?? { name: lvl, excludesSupported: true, recursiveSupported: false, mandatory: true };
+  // Applicable resource-type defs for the current policy kind: access uses
+  // the top-level hierarchy, masking/rowfilter use their own (Ranger keeps
+  // separate resource defs per policy kind — e.g. masking's may omit levels
+  // access allows, or vice versa).
+  const resDefs: ServiceDefResource[] =
+    kind === "masking"
+      ? (def.data?.dataMaskDef?.resources ?? [])
+      : kind === "rowfilter"
+        ? (def.data?.rowFilterDef?.resources ?? [])
+        : (def.data?.resources ?? []);
+  const resDefByName = (name: string): ServiceDefResource | undefined =>
+    resDefs.find((r) => r.name === name);
+
+  // The selected chain's leaf resource type (reported by ResourceSelector),
+  // used to restrict which access types are offered — e.g. a `trinouser`
+  // leaf only allows "impersonate", a `role` leaf only its own restrictions.
+  const [leaf, setLeaf] = useState<string | null>(null);
+  const leafDef = leaf ? resDefByName(leaf) : undefined;
+  const accessTypes = leafDef?.accessTypeRestrictions?.length
+    ? leafDef.accessTypeRestrictions
+    : (def.data?.accessTypes?.map((a) => a.name) ?? DEFAULT_ACCESS_TYPES);
 
   const profileUrl = `/control-plane/policies/${encodeURIComponent(service)}`;
 
-  // In impersonation mode, "impersonate" is the only valid access type — force
-  // it onto every item/exception at save time regardless of what (if
-  // anything) was set on the form, so a stray empty `accesses: []` never
-  // reaches Ranger.
-  const buildSavePayload = () => {
-    if (kind !== "access" || form.resourceMode !== "impersonation") return form;
-    const forceImpersonate = (it: AccessItem) => ({ ...it, accesses: ["impersonate"] });
-    return {
-      ...form,
-      items: form.items.map(forceImpersonate),
-      allowExceptions: form.allowExceptions.map(forceImpersonate),
-      denyExceptions: form.denyExceptions.map(forceImpersonate),
-    };
-  };
-
   const save = useMutation<{ id: number }, ApiError>({
-    mutationFn: () => {
-      const payload = buildSavePayload();
-      return id ? updatePolicy(Number(id), payload) : createPolicy(payload);
-    },
+    mutationFn: () => (id ? updatePolicy(Number(id), form) : createPolicy(form)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
       navigate(profileUrl);
@@ -373,34 +293,35 @@ export default function PolicyEditorPage() {
   const removeLabel = (l: string) =>
     setForm((f: any) => ({ ...f, labels: f.labels.filter((x: string) => x !== l) }));
 
-  const levels =
-    kind === "rowfilter"
-      ? (["catalog", "schema", "table"] as const)
-      : (["catalog", "schema", "table", "column"] as const);
-
-  const isImpersonation = kind === "access" && form.resourceMode === "impersonation";
-  const isTableResourceMode = kind === "access" && form.resourceMode === "table";
-
-  // Resource levels the current service-def marks mandatory but that are
-  // still empty — blocks Save and drives the per-level "Required" state. In
-  // impersonation mode the only resource is trinouser, so "missing" collapses
-  // to a single synthetic entry when it's empty.
-  const missingRequired: string[] = isImpersonation
-    ? form.trinouser.values.length === 0
-      ? ["trinouser"]
-      : []
-    : levels.filter((lvl) => levelFlags(lvl).mandatory && form.resources[lvl].values.length === 0);
+  // Any resource entry the def marks mandatory but that's still empty —
+  // blocks Save. (Per-field "Required" hint is rendered by ResourceSelector
+  // itself via ResourceLevelEditor's `invalid` prop.)
+  const missingRequired: boolean = Object.entries(form.resources as Record<string, ResourceLevel>).some(
+    ([name, lvl]) => resDefByName(name)?.mandatory && lvl.values.length === 0,
+  );
 
   const kindTitle =
     kind === "masking" ? "Masking" : kind === "rowfilter" ? "Row filter" : "Permissions";
 
+  const TABLE_LEVELS = ["catalog", "schema", "table", "column"];
+
   // At-a-glance summary of the resource being configured, e.g. `iceberg.sales.*.*`
-  // for table mode, or the trinouser value(s) for impersonation mode.
-  const resourcePreview = isImpersonation
-    ? form.trinouser.values.length > 0
-      ? form.trinouser.values.join(", ")
-      : "…"
-    : levels.map((lvl) => form.resources[lvl].values[0] || "…").join(".");
+  // for a catalog/schema/table/column chain, or `role: *` / `trinouser: *`
+  // for a single non-table resource.
+  const resourcePreview = (() => {
+    const keys = Object.keys(form.resources);
+    if (keys.length === 0) return "…";
+    if (keys.every((k) => TABLE_LEVELS.includes(k))) {
+      return TABLE_LEVELS.filter((l) => keys.includes(l))
+        .map((l) => form.resources[l]?.values[0] || "…")
+        .join(".");
+    }
+    if (keys.length === 1) {
+      const k = keys[0];
+      return `${k}: ${form.resources[k].values[0] || "…"}`;
+    }
+    return keys.map((k) => form.resources[k].values[0] || "…").join(".");
+  })();
 
   // Left-nav sections (vertical layout — mirrors EngineDetail's
   // `ConfigurationTab`). The middle section's key is always "rules"; only its
@@ -413,12 +334,9 @@ export default function PolicyEditorPage() {
 
   // Non-default field counts per section, driving the nav badges (same idea
   // as engine config's `sectionCounts`).
-  const resourceCount = isImpersonation
-    ? form.trinouser.values.length > 0
-      ? 1
-      : 0
-    : Object.values(form.resources).filter((l: any) => l.values.length > 0).length +
-      (kind === "access" ? form.additional.length : 0);
+  const resourceCount =
+    Object.values(form.resources).filter((l: any) => l.values.length > 0).length +
+    (kind === "access" ? form.additional.length : 0);
   const rulesCount =
     form.items.length +
     (kind === "access" ? form.allowExceptions.length + form.denyExceptions.length : 0);
@@ -502,7 +420,7 @@ export default function PolicyEditorPage() {
               type="button"
               size="sm"
               onClick={() => save.mutate()}
-              disabled={save.isPending || !form.name.trim() || missingRequired.length > 0}
+              disabled={save.isPending || !form.name.trim() || missingRequired}
             >
               {save.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
               Save
@@ -550,138 +468,71 @@ export default function PolicyEditorPage() {
                   title="Resource"
                   description="The Trino resource this policy applies to. Use * for wildcards."
                 >
-                  {kind === "access" && (
-                    <div className="inline-flex w-fit rounded-md border p-0.5">
-                      {(
-                        [
-                          { key: "table", label: "Table access" },
-                          { key: "impersonation", label: "User impersonation" },
-                        ] as const
-                      ).map((opt) => (
-                        <button
-                          key={opt.key}
-                          type="button"
-                          onClick={() =>
-                            setForm((f: any) => ({ ...f, resourceMode: opt.key }))
-                          }
-                          className={`rounded px-3 py-1.5 text-sm transition-colors ${
-                            form.resourceMode === opt.key
-                              ? "bg-muted font-medium"
-                              : "text-muted-foreground hover:bg-muted/50"
-                          }`}
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
-                    </div>
-                  )}
                   <p className="font-mono text-xs text-muted-foreground">{resourcePreview}</p>
-                  {isImpersonation ? (
-                    <div className="max-w-sm space-y-1">
-                      <label className="text-sm font-medium">Trino user</label>
-                      <div
-                        className={
-                          missingRequired.includes("trinouser")
-                            ? "rounded-md ring-1 ring-destructive"
-                            : undefined
-                        }
-                      >
-                        <TagCombobox
-                          values={form.trinouser.values}
-                          onChange={(vals) =>
-                            setForm((f: any) => ({
-                              ...f,
-                              trinouser: { ...f.trinouser, values: vals },
-                            }))
-                          }
-                          suggest={(q) =>
-                            listPrincipals(q, "user").then((ps) =>
-                              ps.map((p) => ({ value: p.name, label: p.label })),
-                            )
-                          }
-                          queryKey={["principals", "user", "impersonation"]}
-                          placeholder="username or * (Enter to add)"
-                          creatable
-                          ariaLabel="Trino user value"
-                        />
-                      </div>
-                      {missingRequired.includes("trinouser") && (
-                        <p className="text-xs text-destructive">Required</p>
-                      )}
-                      <p className="text-xs text-muted-foreground">
-                        Who may be impersonated (a Trino username, or * for any).
-                      </p>
-                    </div>
-                  ) : (
+                  <ResourceSelector
+                    resourceDefs={resDefs}
+                    service={service}
+                    value={form.resources}
+                    onChange={(r) => setForm((f: any) => ({ ...f, resources: r }))}
+                    onLeafChange={setLeaf}
+                  />
+                  {missingRequired && (
+                    <p className="text-xs text-muted-foreground">
+                      Fill the required resource levels.
+                    </p>
+                  )}
+                  {kind === "access" && (
                     <>
-                      <ResourceBlock
-                        value={form.resources}
-                        onChange={(r) => setForm((f: any) => ({ ...f, resources: r }))}
-                        service={service}
-                        levels={levels}
-                        levelFlags={levelFlags}
-                        missingRequired={missingRequired}
-                      />
-                      {missingRequired.length > 0 && (
-                        <p className="text-xs text-muted-foreground">
-                          Fill the required resource levels.
-                        </p>
-                      )}
-                      {isTableResourceMode && (
-                        <>
-                          {form.additional.map((res: any, i: number) => (
-                            <div key={i} className="mt-4 flex gap-3 border-t pt-4">
-                              <div className="min-w-0 flex-1">
-                                <ResourceBlock
-                                  value={res}
-                                  onChange={(r) =>
-                                    setForm((f: any) => ({
-                                      ...f,
-                                      additional: f.additional.map((a: any, j: number) =>
-                                        j === i ? r : a,
-                                      ),
-                                    }))
-                                  }
-                                  service={service}
-                                  levels={levels}
-                                  levelFlags={levelFlags}
-                                />
-                              </div>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="iconSm"
-                                title="Remove resource"
-                                aria-label={`remove resource ${i}`}
-                                onClick={() =>
-                                  setForm((f: any) => ({
-                                    ...f,
-                                    additional: f.additional.filter(
-                                      (_: unknown, j: number) => j !== i,
-                                    ),
-                                  }))
-                                }
-                              >
-                                <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
-                              </Button>
-                            </div>
-                          ))}
+                      {form.additional.map((res: Record<string, ResourceLevel>, i: number) => (
+                        <div key={i} className="mt-4 flex gap-3 border-t pt-4">
+                          <div className="min-w-0 flex-1">
+                            <ResourceSelector
+                              resourceDefs={resDefs}
+                              service={service}
+                              value={res}
+                              onChange={(r) =>
+                                setForm((f: any) => ({
+                                  ...f,
+                                  additional: f.additional.map((a: any, j: number) =>
+                                    j === i ? r : a,
+                                  ),
+                                }))
+                              }
+                            />
+                          </div>
                           <Button
                             type="button"
-                            variant="outline"
-                            size="sm"
-                            className="mt-4"
+                            variant="ghost"
+                            size="iconSm"
+                            title="Remove resource"
+                            aria-label={`remove resource ${i}`}
                             onClick={() =>
                               setForm((f: any) => ({
                                 ...f,
-                                additional: [...f.additional, emptyTableResources()],
+                                additional: f.additional.filter(
+                                  (_: unknown, j: number) => j !== i,
+                                ),
                               }))
                             }
                           >
-                            <Plus className="mr-1 h-4 w-4" /> Add resource
+                            <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
                           </Button>
-                        </>
-                      )}
+                        </div>
+                      ))}
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="mt-4"
+                        onClick={() =>
+                          setForm((f: any) => ({
+                            ...f,
+                            additional: [...f.additional, {}],
+                          }))
+                        }
+                      >
+                        <Plus className="mr-1 h-4 w-4" /> Add resource
+                      </Button>
                     </>
                   )}
                 </ConfigSection>
@@ -714,7 +565,6 @@ export default function PolicyEditorPage() {
                                 onChange={setAllowItems}
                                 accessTypes={accessTypes}
                                 effect="allow"
-                                impersonation={isImpersonation}
                               />
                               <Accordion type="single" collapsible>
                                 <AccordionItem value="allow-exceptions">
@@ -729,7 +579,6 @@ export default function PolicyEditorPage() {
                                       }
                                       accessTypes={accessTypes}
                                       effect="allow"
-                                      impersonation={isImpersonation}
                                     />
                                   </AccordionContent>
                                 </AccordionItem>
@@ -746,7 +595,6 @@ export default function PolicyEditorPage() {
                                   onChange={setDenyItems}
                                   accessTypes={accessTypes}
                                   effect="deny"
-                                  impersonation={isImpersonation}
                                 />
                                 <Accordion type="single" collapsible>
                                   <AccordionItem value="deny-exceptions">
@@ -761,7 +609,6 @@ export default function PolicyEditorPage() {
                                         }
                                         accessTypes={accessTypes}
                                         effect="deny"
-                                        impersonation={isImpersonation}
                                       />
                                     </AccordionContent>
                                   </AccordionItem>

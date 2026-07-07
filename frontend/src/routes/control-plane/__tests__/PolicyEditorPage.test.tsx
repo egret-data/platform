@@ -27,15 +27,34 @@ vi.mock("@/api/policies", async (orig) => ({
   getServiceDef: () =>
     Promise.resolve({
       accessTypes: [{ name: "select" }, { name: "insert" }],
+      // catalog.schema.table.column hierarchy plus two standalone roots
+      // (role, trinouser) — trinouser restricted to "impersonate" so its
+      // Permissions popover naturally offers only that one option.
       resources: [
         { name: "catalog", excludesSupported: true, mandatory: true },
-        { name: "schema", excludesSupported: true, mandatory: false },
-        { name: "table", excludesSupported: true, mandatory: false },
-        { name: "column", excludesSupported: true, mandatory: false },
+        { name: "schema", parent: "catalog", excludesSupported: true, mandatory: false },
+        { name: "table", parent: "schema", excludesSupported: true, mandatory: false },
+        { name: "column", parent: "table", excludesSupported: true, mandatory: false },
+        { name: "trinouser", accessTypeRestrictions: ["impersonate"] },
+        { name: "role" },
       ],
+      dataMaskDef: {
+        resources: [
+          { name: "catalog", excludesSupported: true, mandatory: true },
+          { name: "schema", parent: "catalog", excludesSupported: true, mandatory: false },
+          { name: "table", parent: "schema", excludesSupported: true, mandatory: false },
+          { name: "column", parent: "table", excludesSupported: true, mandatory: false },
+        ],
+      },
+      rowFilterDef: {
+        resources: [
+          { name: "catalog", excludesSupported: true, mandatory: true },
+          { name: "schema", parent: "catalog", excludesSupported: true, mandatory: false },
+          { name: "table", parent: "schema", excludesSupported: true, mandatory: false },
+        ],
+      },
     }),
-  // Serves both the PrincipalPicker (who gets to impersonate) and the
-  // impersonation resource autocomplete (who may be impersonated).
+  // Serves both the PrincipalPicker and the resource-value autocomplete.
   listPrincipals: () => Promise.resolve([{ kind: "user", name: "bob", label: "bob" }]),
   resourceLookup: () => Promise.resolve([]),
 }));
@@ -124,11 +143,15 @@ describe("PolicyEditorPage", () => {
     wrap(<PolicyEditorPage />);
     await screen.findByLabelText("Policy name");
 
-    // Resource is the default section; only one set of 4 level editors
-    // (the primary block) exists until "Add resource" appends another.
-    expect(screen.getAllByPlaceholderText("value or * (Enter to add)")).toHaveLength(4);
+    // Resource is the default section; the primary block starts with all 4
+    // catalog/schema/table/column levels filled in (the default chain) once
+    // the service-def (which ResourceSelector needs to build the hierarchy)
+    // has loaded. "Add resource" appends a blank entry, which ResourceSelector
+    // defaults to a single catalog level (nothing chosen yet to cascade
+    // further).
+    expect(await screen.findAllByPlaceholderText("value or * (Enter to add)")).toHaveLength(4);
     fireEvent.click(screen.getByRole("button", { name: /add resource/i }));
-    expect(screen.getAllByPlaceholderText("value or * (Enter to add)")).toHaveLength(8);
+    expect(screen.getAllByPlaceholderText("value or * (Enter to add)")).toHaveLength(5);
     expect(screen.getByRole("button", { name: /remove resource/i })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /remove resource/i }));
@@ -173,29 +196,31 @@ describe("PolicyEditorPage", () => {
     expect(screen.getByLabelText("filter 0")).toBeInTheDocument();
   });
 
-  it("saves a user-impersonation policy with resourceMode + trinouser + forced accesses", async () => {
+  it("creates an access policy whose resource type is trinouser, restricting Permissions to 'impersonate'", async () => {
     wrap(<PolicyEditorPage />);
     fireEvent.change(await screen.findByLabelText("Policy name"), {
       target: { value: "allow-impersonate-bob" },
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /user impersonation/i }));
+    // Switch the level-0 resource type from Catalog to Trino user — this
+    // truncates the default catalog/schema/table/column chain down to just
+    // the trinouser leaf.
+    fireEvent.click(screen.getByLabelText("Resource type at level 1"));
+    fireEvent.click(screen.getByRole("option", { name: "Trino user" }));
 
     const trinouserInput = screen.getByLabelText("Trino user value");
     fireEvent.change(trinouserInput, { target: { value: "bob" } });
     fireEvent.keyDown(trinouserInput, { key: "Enter" });
 
-    // Give the allow item a principal so it's a non-empty grant. The
-    // Permissions cell is hidden in impersonation mode (PermissionTable
-    // renders a static "impersonate" badge instead of the picker).
+    // Permissions: since the selected leaf is trinouser, its
+    // accessTypeRestrictions (["impersonate"]) is the only option offered —
+    // no special-cased impersonation UI, just a restricted picker.
     fireEvent.click(screen.getByRole("button", { name: /permissions/i }));
+    fireEvent.click(screen.getByText("Add permissions"));
+    fireEvent.click(screen.getByLabelText("impersonate"));
+    fireEvent.click(screen.getByLabelText("Confirm"));
     fireEvent.change(screen.getByLabelText("user 0"), { target: { value: "alice" } });
     fireEvent.keyDown(screen.getByLabelText("user 0"), { key: "Enter" });
-
-    // The access-type checkbox grid (and its popover) is hidden in
-    // impersonation mode.
-    expect(screen.queryByText("Add permissions")).not.toBeInTheDocument();
-    expect(screen.getByText("impersonate")).toBeInTheDocument();
 
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^save$/i })).not.toBeDisabled(),
@@ -204,14 +229,33 @@ describe("PolicyEditorPage", () => {
     await waitFor(() => expect(createPolicy).toHaveBeenCalled());
 
     const arg = createPolicy.mock.calls[0][0] as {
-      resourceMode: string;
-      trinouser: { values: string[] };
+      resources: Record<string, { values: string[] }>;
       items: { users: string[]; accesses: string[] }[];
     };
-    expect(arg.resourceMode).toBe("impersonation");
-    expect(arg.trinouser.values).toContain("bob");
+    expect(arg.resources.trinouser.values).toContain("bob");
+    expect(Object.keys(arg.resources)).toEqual(["trinouser"]);
     expect(arg.items[0].accesses).toEqual(["impersonate"]);
     expect(updatePolicy).not.toHaveBeenCalled();
+  });
+
+  it("renders the trinouser resource (not empty catalog inputs) when editing an existing trinouser-based policy", async () => {
+    routeParams = { service: "trino", kind: "access", id: "7" };
+    getPolicy.mockResolvedValueOnce({
+      name: "existing-impersonation",
+      isEnabled: true,
+      resources: { trinouser: { values: ["*"] } },
+      policyItems: [],
+      denyPolicyItems: [],
+    });
+
+    wrap(<PolicyEditorPage />);
+    await screen.findByDisplayValue("existing-impersonation");
+
+    // Only one resource-value input renders (the trinouser leaf) — not the
+    // 4-level catalog/schema/table/column chain a fresh policy starts with.
+    expect(await screen.findAllByPlaceholderText("value or * (Enter to add)")).toHaveLength(1);
+    expect(screen.getByText("*")).toBeInTheDocument();
+    expect(screen.getAllByText("Trino user").length).toBeGreaterThan(0);
   });
 
   it("renders the Override switch (unchecked by default) in the Details section", async () => {

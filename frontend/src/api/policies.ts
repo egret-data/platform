@@ -51,23 +51,14 @@ export interface AccessItem {
   effect: "allow" | "deny";
   delegateAdmin?: boolean;
 }
-export interface TableResources {
-  catalog: ResourceLevel;
-  schema: ResourceLevel;
-  table: ResourceLevel;
-  column: ResourceLevel;
-}
 export interface AccessPolicyInput {
   name: string;
   service: string;
   isEnabled: boolean;
-  resources: TableResources;
+  /** Generic resource-type → value map, e.g. `{ catalog: {...}, schema: {...} }` or `{ role: {...} }`. */
+  resources: Record<string, ResourceLevel>;
   /** Additional resource sets (Ranger's "additionalResources") — same shape as `resources`. */
-  additional: TableResources[];
-  /** "table" (catalog/schema/table/column) or "impersonation" (trinouser). */
-  resourceMode: "table" | "impersonation";
-  /** The trinouser resource, used only when resourceMode === "impersonation". */
-  trinouser: ResourceLevel;
+  additional: Record<string, ResourceLevel>[];
   items: AccessItem[];
   allowExceptions: AccessItem[];
   denyExceptions: AccessItem[];
@@ -98,6 +89,10 @@ export interface ServiceDefResource {
 export interface ServiceDef {
   accessTypes?: { name: string; label?: string }[];
   resources?: ServiceDefResource[];
+  /** Def for masking policies — its own resource hierarchy (e.g. catalog/schema/table/column) and mask-type list. */
+  dataMaskDef?: { resources?: ServiceDefResource[]; maskTypes?: { name: string; label?: string }[] };
+  /** Def for row-filter policies — its own resource hierarchy (e.g. catalog/schema/table). */
+  rowFilterDef?: { resources?: ServiceDefResource[] };
   [k: string]: unknown;
 }
 
@@ -119,7 +114,7 @@ export interface MaskItem { users: string[]; groups: string[]; maskType: string;
 export interface MaskingPolicyInput {
   kind: "masking";
   name: string; service: string; isEnabled: boolean;
-  resources: { catalog: ResourceLevel; schema: ResourceLevel; table: ResourceLevel; column: ResourceLevel };
+  resources: Record<string, ResourceLevel>;
   items: MaskItem[];
   description: string;
   labels: string[];
@@ -129,7 +124,7 @@ export interface RowFilterItem { users: string[]; groups: string[]; filterExpr: 
 export interface RowFilterPolicyInput {
   kind: "rowfilter";
   name: string; service: string; isEnabled: boolean;
-  resources: { catalog: ResourceLevel; schema: ResourceLevel; table: ResourceLevel };
+  resources: Record<string, ResourceLevel>;
   items: RowFilterItem[];
   description: string;
   labels: string[];

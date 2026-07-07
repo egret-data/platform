@@ -1,6 +1,5 @@
 import { Plus, Trash2 } from "lucide-react";
 import { type AccessItem, listPrincipals } from "@/api/policies";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -12,8 +11,6 @@ export interface PermissionTableProps {
   onChange: (items: AccessItem[]) => void;
   /** Permission options for the Permissions popover. */
   accessTypes: string[];
-  /** User-impersonation mode: hide the Permissions column contents, show a static "impersonate" chip. */
-  impersonation?: boolean;
   /** Effect applied to rows added via "Add row". Defaults to "allow". */
   effect?: "allow" | "deny";
 }
@@ -35,7 +32,6 @@ export function PermissionTable({
   items,
   onChange,
   accessTypes,
-  impersonation = false,
   effect = "allow",
 }: PermissionTableProps) {
   const setItem = (i: number, next: Partial<AccessItem>) =>
@@ -96,15 +92,11 @@ export function PermissionTable({
                   />
                 </TableCell>
                 <TableCell>
-                  {impersonation ? (
-                    <Badge variant="secondary">impersonate</Badge>
-                  ) : (
-                    <PermissionPickerCell
-                      value={it.accesses}
-                      options={accessTypes}
-                      onChange={(acc) => setItem(i, { accesses: acc })}
-                    />
-                  )}
+                  <PermissionPickerCell
+                    value={it.accesses}
+                    options={accessTypes}
+                    onChange={(acc) => setItem(i, { accesses: acc })}
+                  />
                 </TableCell>
                 <TableCell>
                   <Checkbox
