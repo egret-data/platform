@@ -2892,3 +2892,91 @@ async fn scoped_permission_engines_read_and_create() {
         "a scoped engine:create principal must create; body={body}"
     );
 }
+
+/// Warehouses: `warehouse:read` gates `GET /warehouses`, `warehouse:create`
+/// gates `POST /warehouses`.
+#[tokio::test]
+async fn scoped_permission_warehouses_read_and_create() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    let wrong = session_for_with_permission(&f, "wh_scoped_wrong", "engine:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/warehouses", &wrong, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without warehouse:read must not list warehouses"
+    );
+
+    let reader = session_for_with_permission(&f, "wh_scoped_reader", "warehouse:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/warehouses", &reader, None))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a scoped warehouse:read principal must list warehouses; body={body}"
+    );
+
+    let (ws_id,): (Uuid,) =
+        sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
+            .bind(format!("wh-scoped-ws-{}", Uuid::new_v4().simple()))
+            .bind("Scoped Perm Test Workspace")
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("insert workspace");
+    let (storage_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO storage_connections (name, region, bucket, access_key) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(format!("wh-scoped-sc-{}", Uuid::new_v4().simple()))
+    .bind("us-east-1")
+    .bind("egret-scoped-test")
+    .bind("AKIATEST")
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert storage connection");
+    let wh_body = serde_json::json!({
+        "name": format!("wh-scoped-{}", Uuid::new_v4().simple()),
+        "workspaceId": ws_id,
+        "storageConnectionId": storage_id,
+    });
+
+    // warehouse:read alone must not create.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/warehouses", &reader, Some(wh_body.clone())))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "warehouse:read alone must not create a warehouse"
+    );
+
+    let creator = session_for_with_permission(&f, "wh_scoped_creator", "warehouse:create").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/warehouses", &creator, Some(wh_body)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a scoped warehouse:create principal must create; body={body}"
+    );
+}
