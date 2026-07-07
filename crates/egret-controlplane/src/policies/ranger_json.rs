@@ -25,18 +25,6 @@ pub struct ResourceLevel {
     pub is_recursive: bool,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
-pub struct EditorResources {
-    #[serde(default)]
-    pub catalog: ResourceLevel,
-    #[serde(default)]
-    pub schema: ResourceLevel,
-    #[serde(default)]
-    pub table: ResourceLevel,
-    #[serde(default)]
-    pub column: ResourceLevel,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct AccessItemInput {
     #[serde(default)]
@@ -57,9 +45,6 @@ fn default_effect() -> String {
 fn default_true() -> bool {
     true
 }
-fn default_resource_mode() -> String {
-    "table".to_string()
-}
 
 #[derive(Debug, Deserialize)]
 pub struct AccessPolicyInput {
@@ -68,13 +53,7 @@ pub struct AccessPolicyInput {
     #[serde(default = "default_true", rename = "isEnabled")]
     pub is_enabled: bool,
     #[serde(default)]
-    pub resources: EditorResources,
-    /// "table" (catalog/schema/table/column) or "impersonation" (trinouser).
-    #[serde(default = "default_resource_mode", rename = "resourceMode")]
-    pub resource_mode: String,
-    /// The trinouser resource, used only when resource_mode == "impersonation".
-    #[serde(default)]
-    pub trinouser: ResourceLevel,
+    pub resources: std::collections::BTreeMap<String, ResourceLevel>,
     #[serde(default)]
     pub items: Vec<AccessItemInput>,
     #[serde(default, rename = "allowExceptions")]
@@ -91,29 +70,22 @@ pub struct AccessPolicyInput {
     pub is_override: bool,
     /// Extra independent resource hierarchies (Ranger additionalResources).
     #[serde(default)]
-    pub additional: Vec<EditorResources>,
+    pub additional: Vec<std::collections::BTreeMap<String, ResourceLevel>>,
 }
 
 fn resource_obj(l: &ResourceLevel) -> Value {
     json!({ "values": l.values, "isExcludes": l.is_excludes, "isRecursive": l.is_recursive })
 }
 
-/// Build the catalog/schema/table/column resources map for one resource
-/// hierarchy (used for both the primary `resources` and each entry of
-/// `additionalResources`).
-fn table_resources_map(r: &EditorResources) -> Map<String, Value> {
+/// Build a Ranger `resources` object from a generic map, dropping empty levels.
+fn resources_object(map: &std::collections::BTreeMap<String, ResourceLevel>) -> Value {
     let mut m = Map::new();
-    for (key, level) in [
-        ("catalog", &r.catalog),
-        ("schema", &r.schema),
-        ("table", &r.table),
-        ("column", &r.column),
-    ] {
+    for (name, level) in map {
         if !level.values.is_empty() {
-            m.insert(key.to_string(), resource_obj(level));
+            m.insert(name.clone(), resource_obj(level));
         }
     }
-    m
+    Value::Object(m)
 }
 
 fn item_obj(it: &AccessItemInput) -> Value {
@@ -130,21 +102,13 @@ fn item_obj(it: &AccessItemInput) -> Value {
 
 /// Render an `AccessPolicyInput` into a Ranger policyType-0 JSON body.
 pub fn access_to_ranger_json(input: &AccessPolicyInput) -> Value {
-    let mut resources = Map::new();
-    let mut additional_resources: Vec<Value> = Vec::new();
-    if input.resource_mode == "impersonation" {
-        if !input.trinouser.values.is_empty() {
-            resources.insert("trinouser".to_string(), resource_obj(&input.trinouser));
-        }
-    } else {
-        resources = table_resources_map(&input.resources);
-        additional_resources = input
-            .additional
-            .iter()
-            .map(|r| Value::Object(table_resources_map(r)))
-            .filter(|v| v.as_object().map(|o| !o.is_empty()).unwrap_or(false))
-            .collect();
-    }
+    let resources = resources_object(&input.resources);
+    let additional_resources: Vec<Value> = input
+        .additional
+        .iter()
+        .map(resources_object)
+        .filter(|v| v.as_object().map(|o| !o.is_empty()).unwrap_or(false))
+        .collect();
     let (allow, deny): (Vec<_>, Vec<_>) = input.items.iter().partition(|it| it.effect != "deny");
     let policy_items: Vec<Value> = allow.iter().map(|it| item_obj(it)).collect();
     let deny_all = input.is_deny_all_else;
@@ -167,7 +131,7 @@ pub fn access_to_ranger_json(input: &AccessPolicyInput) -> Value {
         "isEnabled": input.is_enabled,
         "description": input.description,
         "policyLabels": input.labels,
-        "resources": Value::Object(resources),
+        "resources": resources,
         "additionalResources": additional_resources,
         "policyItems": policy_items,
         "denyPolicyItems": deny_items,
@@ -199,7 +163,7 @@ pub struct MaskingPolicyInput {
     #[serde(default = "default_true", rename = "isEnabled")]
     pub is_enabled: bool,
     #[serde(default)]
-    pub resources: EditorResources,
+    pub resources: std::collections::BTreeMap<String, ResourceLevel>,
     #[serde(default)]
     pub items: Vec<MaskItemInput>,
     #[serde(default)]
@@ -231,22 +195,11 @@ fn mask_item_obj(it: &MaskItemInput) -> Value {
 
 /// Render a `MaskingPolicyInput` into a Ranger policyType-1 (masking) body.
 pub fn masking_to_ranger_json(input: &MaskingPolicyInput) -> Value {
-    let mut resources = Map::new();
-    for (key, level) in [
-        ("catalog", &input.resources.catalog),
-        ("schema", &input.resources.schema),
-        ("table", &input.resources.table),
-        ("column", &input.resources.column),
-    ] {
-        if !level.values.is_empty() {
-            resources.insert(key.to_string(), resource_obj(level));
-        }
-    }
     json!({
         "name": input.name, "service": input.service, "serviceType": "trino",
         "policyType": 1, "isEnabled": input.is_enabled,
         "description": input.description, "policyLabels": input.labels,
-        "resources": Value::Object(resources),
+        "resources": resources_object(&input.resources),
         "dataMaskPolicyItems": input.items.iter().map(mask_item_obj).collect::<Vec<_>>(),
         "policyItems": [], "denyPolicyItems": [],
         "policyPriority": if input.is_override { 1 } else { 0 },
@@ -263,16 +216,6 @@ pub struct RowFilterItemInput {
     pub filter_expr: String,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
-pub struct RowFilterResources {
-    #[serde(default)]
-    pub catalog: ResourceLevel,
-    #[serde(default)]
-    pub schema: ResourceLevel,
-    #[serde(default)]
-    pub table: ResourceLevel,
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 pub struct RowFilterPolicyInput {
     #[serde(default = "kind_rowfilter")]
@@ -282,7 +225,7 @@ pub struct RowFilterPolicyInput {
     #[serde(default = "default_true", rename = "isEnabled")]
     pub is_enabled: bool,
     #[serde(default)]
-    pub resources: RowFilterResources,
+    pub resources: std::collections::BTreeMap<String, ResourceLevel>,
     #[serde(default)]
     pub items: Vec<RowFilterItemInput>,
     #[serde(default)]
@@ -307,21 +250,11 @@ fn rowfilter_item_obj(it: &RowFilterItemInput) -> Value {
 
 /// Render a `RowFilterPolicyInput` into a Ranger policyType-2 (row-filter) body.
 pub fn rowfilter_to_ranger_json(input: &RowFilterPolicyInput) -> Value {
-    let mut resources = Map::new();
-    for (key, level) in [
-        ("catalog", &input.resources.catalog),
-        ("schema", &input.resources.schema),
-        ("table", &input.resources.table),
-    ] {
-        if !level.values.is_empty() {
-            resources.insert(key.to_string(), resource_obj(level));
-        }
-    }
     json!({
         "name": input.name, "service": input.service, "serviceType": "trino",
         "policyType": 2, "isEnabled": input.is_enabled,
         "description": input.description, "policyLabels": input.labels,
-        "resources": Value::Object(resources),
+        "resources": resources_object(&input.resources),
         "rowFilterPolicyItems": input.items.iter().map(rowfilter_item_obj).collect::<Vec<_>>(),
         "policyItems": [], "denyPolicyItems": [],
         "policyPriority": if input.is_override { 1 } else { 0 },
@@ -429,7 +362,7 @@ mod tests {
     #[test]
     fn omits_empty_resource_levels() {
         let mut inp = sample();
-        inp.resources.column.values.clear();
+        inp.resources.get_mut("column").unwrap().values.clear();
         let body = access_to_ranger_json(&inp);
         assert!(body["resources"].get("column").is_none());
         assert!(body["resources"].get("catalog").is_some());
@@ -551,13 +484,12 @@ mod tests {
     }
 
     #[test]
-    fn serializes_impersonation_resource_mode() {
+    fn serializes_impersonation_as_generic_resource() {
         let inp: AccessPolicyInput = serde_json::from_value(json!({
             "name": "allow-alice-impersonate-bob",
             "service": "trino",
             "isEnabled": true,
-            "resourceMode": "impersonation",
-            "trinouser": {"values": ["bob"]},
+            "resources": {"trinouser": {"values": ["bob"]}},
             "items": [
                 {"users": ["alice"], "accesses": ["impersonate"], "effect": "allow"}
             ]
@@ -571,8 +503,28 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_table_resource_mode() {
-        // No `resourceMode` in the input — still emits catalog/schema/table/column.
+    fn serializes_arbitrary_non_table_resource_type() {
+        // Any resource-type name works generically — no special-casing needed.
+        let inp: AccessPolicyInput = serde_json::from_value(json!({
+            "name": "allow-role-admin",
+            "service": "trino",
+            "isEnabled": true,
+            "resources": {"role": {"values": ["*"]}},
+            "items": [
+                {"users": ["alice"], "accesses": ["alter"], "effect": "allow"}
+            ]
+        }))
+        .unwrap();
+        let body = access_to_ranger_json(&inp);
+        assert_eq!(body["resources"]["role"]["values"][0], "*");
+        assert!(body["resources"].get("catalog").is_none());
+        assert!(body["resources"].get("schema").is_none());
+        assert!(body["resources"].get("table").is_none());
+        assert!(body["resources"].get("column").is_none());
+    }
+
+    #[test]
+    fn table_resources_still_serialize_when_no_other_type_present() {
         let body = access_to_ranger_json(&sample());
         assert!(body["resources"].get("catalog").is_some());
         assert!(body["resources"].get("trinouser").is_none());
