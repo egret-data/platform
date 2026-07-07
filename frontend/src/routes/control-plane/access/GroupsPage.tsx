@@ -6,13 +6,16 @@ import {
   type AccessGroup,
   type AccessRole,
   type AccessUser,
+  type GroupMember,
   addMember,
   assignGroupRole,
   createGroup,
   deleteGroup,
+  getGroupMembers,
   listGroups,
   listRoles,
   listUsers,
+  removeMember,
   renameGroup,
   unassignGroupRole,
 } from "@/api/access";
@@ -51,6 +54,10 @@ import { usersQueryKey } from "@/routes/control-plane/access/UsersPage";
 
 export const groupsQueryKey = ["control-plane", "access", "groups"] as const;
 const rolesQueryKey = ["control-plane", "access", "roles"] as const;
+
+function groupMembersQueryKey(groupId: string) {
+  return ["control-plane", "access", "group-members", groupId] as const;
+}
 
 const COLUMNS = ["Name", "Source", "Members", "Roles", ""];
 
@@ -435,12 +442,10 @@ function RenameGroupDialog({
 /**
  * Membership management for a local group.
  *
- * `AccessGroup` (the list response) does not include the current member
- * list — only a `memberCount` — so this dialog cannot prefill or diff
- * against existing members. It lets an admin pick users to add; each pick
- * calls `addMember` immediately against the group. Removing an existing
- * member isn't supported from this dialog for the same reason (there's no
- * members-listing endpoint yet to know who to offer for removal).
+ * Prefills the combobox with the group's current members (fetched via
+ * `GET /groups/{id}/members`), then diffs the edited selection against that
+ * fetched set on Save — mirroring `AssignGroupRolesDialog`'s add/remove diff
+ * — so both adding and removing members are supported.
  */
 function ManageMembersDialog({
   group,
@@ -455,16 +460,29 @@ function ManageMembersDialog({
     queryFn: listUsers,
     retry: false,
   });
-  const [added, setAdded] = useState<string[]>([]);
+  const members = useQuery<GroupMember[], ApiError>({
+    queryKey: groupMembersQueryKey(group?.id ?? ""),
+    queryFn: () => getGroupMembers(group!.id),
+    enabled: group !== null,
+    retry: false,
+  });
+  const [selected, setSelected] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (group) {
-      setAdded([]);
       setError(null);
+    } else {
+      setSelected([]);
     }
   }, [group]);
+
+  useEffect(() => {
+    if (group && members.data) {
+      setSelected(members.data.map((m) => m.email));
+    }
+  }, [group, members.data]);
 
   function handleOpenChange(next: boolean) {
     if (!next) setError(null);
@@ -475,17 +493,32 @@ function ManageMembersDialog({
     if (!group) return;
     setError(null);
     setSaving(true);
-    const userByEmail = new Map((users.data ?? []).map((u) => [u.email, u]));
+    const currentMembers = members.data ?? [];
+    // Users not currently in the group are only reachable via the full user
+    // list; current members already carry their own id from the fetch.
+    const userIdByEmail = new Map((users.data ?? []).map((u) => [u.email, u.id]));
+    for (const m of currentMembers) userIdByEmail.set(m.email, m.id);
+    const currentEmails = new Set(currentMembers.map((m) => m.email));
+    const nextEmails = new Set(selected);
+    const toAdd = selected.filter((email) => !currentEmails.has(email));
+    const toRemove = currentMembers
+      .map((m) => m.email)
+      .filter((email) => !nextEmails.has(email));
     let failed = false;
     try {
-      for (const email of added) {
-        const u = userByEmail.get(email);
-        if (u) await addMember(group.id, u.id);
+      for (const email of toAdd) {
+        const userId = userIdByEmail.get(email);
+        if (userId) await addMember(group.id, userId);
+      }
+      for (const email of toRemove) {
+        const userId = userIdByEmail.get(email);
+        if (userId) await removeMember(group.id, userId);
       }
     } catch (err) {
       failed = true;
-      setError((err as ApiError).message ?? "Failed to add members.");
+      setError((err as ApiError).message ?? "Failed to update members.");
     } finally {
+      queryClient.invalidateQueries({ queryKey: groupMembersQueryKey(group.id) });
       queryClient.invalidateQueries({ queryKey: groupsQueryKey });
       setSaving(false);
     }
@@ -498,7 +531,7 @@ function ManageMembersDialog({
         <DialogHeader>
           <DialogTitle>Manage members — {group?.name}</DialogTitle>
           <DialogDescription>
-            Add users to this group. This group currently has{" "}
+            Add or remove members of this group. This group currently has{" "}
             {group?.memberCount ?? 0} member{group?.memberCount === 1 ? "" : "s"}.
           </DialogDescription>
         </DialogHeader>
@@ -510,8 +543,8 @@ function ManageMembersDialog({
             </Alert>
           )}
           <TagCombobox
-            values={added}
-            onChange={setAdded}
+            values={selected}
+            onChange={setSelected}
             suggest={(q) =>
               Promise.resolve(
                 (users.data ?? [])
@@ -524,18 +557,14 @@ function ManageMembersDialog({
             ariaLabel="Add member"
             creatable={false}
           />
-          <p className="text-xs text-muted-foreground">
-            Existing members aren&apos;t listed yet — this adds new members
-            without removing current ones.
-          </p>
         </div>
 
         <DialogFooter>
           <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
             Cancel
           </Button>
-          <Button type="button" onClick={handleSave} disabled={saving || added.length === 0}>
-            Add
+          <Button type="button" onClick={handleSave} disabled={saving}>
+            Save
           </Button>
         </DialogFooter>
       </DialogContent>

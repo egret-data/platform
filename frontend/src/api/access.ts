@@ -20,6 +20,12 @@ export interface AccessGroup {
   roles: string[];
 }
 
+export interface GroupMember {
+  id: string;
+  email: string;
+  name: string;
+}
+
 export interface AccessRole {
   id: string;
   scope: string;
@@ -84,6 +90,10 @@ export function renameGroup(id: string, name: string): Promise<AccessGroup> {
 
 export function deleteGroup(id: string): Promise<void> {
   return apiFetch(`/control-plane/groups/${encodeURIComponent(id)}`, { method: "DELETE" }).then(() => undefined);
+}
+
+export function getGroupMembers(groupId: string): Promise<GroupMember[]> {
+  return apiJson<GroupMember[]>(`/control-plane/groups/${encodeURIComponent(groupId)}/members`);
 }
 
 export function addMember(groupId: string, userId: string): Promise<void> {

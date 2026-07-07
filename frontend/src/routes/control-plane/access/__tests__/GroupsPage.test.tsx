@@ -20,6 +20,11 @@ const ROLES: api.AccessRole[] = [
 
 const USERS: api.AccessUser[] = [
   { id: "u1", email: "alice@example.com", name: "Alice", provider: "local", status: "active", roles: [], groups: [] },
+  { id: "u2", email: "bob@example.com", name: "Bob", provider: "local", status: "active", roles: [], groups: [] },
+];
+
+const GROUP_MEMBERS: api.GroupMember[] = [
+  { id: "u1", email: "alice@example.com", name: "Alice" },
 ];
 
 function renderPage() {
@@ -36,6 +41,7 @@ describe("GroupsPage", () => {
     vi.mocked(api.listGroups).mockResolvedValue(GROUPS);
     vi.mocked(api.listRoles).mockResolvedValue(ROLES);
     vi.mocked(api.listUsers).mockResolvedValue(USERS);
+    vi.mocked(api.getGroupMembers).mockResolvedValue(GROUP_MEMBERS);
   });
 
   test("renders rows from the mocked group list", async () => {
@@ -95,6 +101,33 @@ describe("GroupsPage", () => {
 
     await waitFor(() => expect(api.assignGroupRole).toHaveBeenCalledWith("g1", "r2"));
     await waitFor(() => expect(api.unassignGroupRole).toHaveBeenCalledWith("g1", "r1"));
+  });
+
+  test("Manage members dialog prefills current members and diffs the selection into add/remove calls", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.addMember).mockResolvedValue(undefined);
+    vi.mocked(api.removeMember).mockResolvedValue(undefined);
+
+    renderPage();
+    await screen.findByText("Engineering");
+
+    await user.click(screen.getByRole("button", { name: /Manage members of Engineering/i }));
+    await screen.findByRole("heading", { name: /Manage members/i });
+
+    // Prefilled with the fetched current member (alice), shown as a removable chip.
+    await screen.findByText("alice@example.com");
+
+    // Remove the existing member, add a new one.
+    await user.click(screen.getByRole("button", { name: "remove alice@example.com" }));
+
+    const memberInput = screen.getByLabelText("Add member");
+    fireEvent.click(memberInput.closest('[role="button"]') as HTMLElement);
+    await user.click(await screen.findByText("Bob"));
+
+    await user.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => expect(api.addMember).toHaveBeenCalledWith("g1", "u2"));
+    await waitFor(() => expect(api.removeMember).toHaveBeenCalledWith("g1", "u1"));
   });
 
   test("an oidc group has rename, delete, and manage-members disabled but roles enabled", async () => {
