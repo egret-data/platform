@@ -379,8 +379,14 @@ export default function PolicyEditorPage() {
   const kindTitle =
     kind === "masking" ? "Masking" : kind === "rowfilter" ? "Row filter" : "Permissions";
 
+  // At-a-glance summary of the resource path being configured, e.g.
+  // `iceberg.sales.*.*` — joins each level's first value (or a placeholder).
+  const resourcePreview = levels
+    .map((lvl) => form.resources[lvl].values[0] || "…")
+    .join(".");
+
   return (
-    <div className="mx-auto max-w-4xl space-y-5 p-6">
+    <div className="space-y-5">
       <Link
         to={profileUrl}
         className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
@@ -390,14 +396,14 @@ export default function PolicyEditorPage() {
       </Link>
 
       <Card className="overflow-hidden">
-        <div className="flex flex-wrap items-center gap-3 border-b bg-muted/30 p-5">
-          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/30 p-5">
+          <div className="flex min-w-0 flex-wrap items-center gap-3">
             <Input
               aria-label="Policy name"
               value={form.name}
               placeholder="Policy name"
               onChange={(e) => setForm((f: any) => ({ ...f, name: e.target.value }))}
-              className="h-auto max-w-md border-none bg-transparent px-0 text-lg font-semibold shadow-none focus-visible:ring-0"
+              className="h-9 max-w-sm text-base font-semibold"
             />
             <Badge variant="secondary">{kind}</Badge>
             <div className="flex items-center gap-2">
@@ -449,319 +455,335 @@ export default function PolicyEditorPage() {
         </Alert>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">Details</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-1.5">
-            <FieldLabel label="Description" htmlFor="policy-description" />
-            <Textarea
-              id="policy-description"
-              value={form.description}
-              onChange={(e) => setForm((f: any) => ({ ...f, description: e.target.value }))}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <FieldLabel label="Labels" htmlFor="policy-labels" />
-            {form.labels.length > 0 && (
-              <div className="flex flex-wrap gap-1">
-                {form.labels.map((l: string) => (
-                  <Badge key={l} variant="secondary" className="gap-1">
-                    {l}
-                    <button
-                      type="button"
-                      aria-label={`remove label ${l}`}
-                      onClick={() => removeLabel(l)}
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  </Badge>
-                ))}
-              </div>
-            )}
-            <Input
-              id="policy-labels"
-              placeholder="Add label…"
-              value={labelInput}
-              onChange={(e) => setLabelInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === ",") {
-                  e.preventDefault();
-                  addLabel();
-                }
-              }}
-            />
-          </div>
-        </CardContent>
-      </Card>
+      <Tabs defaultValue="resource" className="space-y-5">
+        <TabsList>
+          <TabsTrigger value="resource">Resource</TabsTrigger>
+          <TabsTrigger value="rules">{kindTitle}</TabsTrigger>
+          <TabsTrigger value="details">Details</TabsTrigger>
+        </TabsList>
 
-      <Card>
-        <CardHeader>
-          <FieldLabel
-            label="Resource"
-            help="The Trino resource this policy applies to. Use * for wildcards."
-          />
-        </CardHeader>
-        <CardContent>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {levels.map((lvl) => (
-              <ResourceLevelEditor
-                key={lvl}
-                label={lvl[0].toUpperCase() + lvl.slice(1)}
-                level={lvl}
-                service={service}
-                parents={{
-                  catalog: form.resources.catalog.values[0],
-                  schema: form.resources.schema.values[0],
-                  table: form.resources.table.values[0],
-                }}
-                value={form.resources[lvl]}
-                onChange={(v) =>
-                  setForm((f: any) => ({ ...f, resources: { ...f.resources, [lvl]: v } }))
-                }
-              />
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-
-      {kind === "access" && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-lg">{kindTitle}</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex items-center justify-between gap-4">
+        <TabsContent value="resource">
+          <Card>
+            <CardHeader>
               <FieldLabel
-                label="Deny everything else not explicitly allowed"
-                htmlFor="deny-all-else"
+                label="Resource"
+                help="The Trino resource this policy applies to. Use * for wildcards."
               />
-              <Switch
-                id="deny-all-else"
-                aria-label="Deny all else"
-                checked={form.isDenyAllElse}
-                onCheckedChange={(c) => setForm((f: any) => ({ ...f, isDenyAllElse: c }))}
-              />
-            </div>
-
-            <Tabs value={tab} onValueChange={(v) => setTab(v as "allow" | "deny")}>
-              <TabsList>
-                <TabsTrigger value="allow">Allow</TabsTrigger>
-                {!form.isDenyAllElse && <TabsTrigger value="deny">Deny</TabsTrigger>}
-              </TabsList>
-
-              <TabsContent value="allow" className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium">Allow items</span>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => addItem("allow")}
-                  >
-                    <Plus className="mr-1 h-4 w-4" /> Add item
-                  </Button>
-                </div>
-                {allowItems.map(({ it, i }) => (
-                  <AccessItemRow
-                    key={i}
-                    item={it}
-                    accessTypes={accessTypes}
-                    removeLabel={`remove allow item ${i}`}
-                    onChange={(next) => setItem(i, next)}
-                    onRemove={() => removeItem(i)}
+              <p className="font-mono text-xs text-muted-foreground">{resourcePreview}</p>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                {levels.map((lvl) => (
+                  <ResourceLevelEditor
+                    key={lvl}
+                    label={lvl[0].toUpperCase() + lvl.slice(1)}
+                    level={lvl}
+                    service={service}
+                    parents={{
+                      catalog: form.resources.catalog.values[0],
+                      schema: form.resources.schema.values[0],
+                      table: form.resources.table.values[0],
+                    }}
+                    value={form.resources[lvl]}
+                    onChange={(v) =>
+                      setForm((f: any) => ({ ...f, resources: { ...f.resources, [lvl]: v } }))
+                    }
                   />
                 ))}
-                <Accordion type="single" collapsible>
-                  <AccordionItem value="exceptions">
-                    <AccordionTrigger>Exceptions</AccordionTrigger>
-                    <AccordionContent className="space-y-3">
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <TabsContent value="rules">
+          {kind === "access" && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg">{kindTitle}</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex items-center justify-between gap-4">
+                  <FieldLabel
+                    label="Deny everything else not explicitly allowed"
+                    htmlFor="deny-all-else"
+                  />
+                  <Switch
+                    id="deny-all-else"
+                    aria-label="Deny all else"
+                    checked={form.isDenyAllElse}
+                    onCheckedChange={(c) => setForm((f: any) => ({ ...f, isDenyAllElse: c }))}
+                  />
+                </div>
+
+                <Tabs value={tab} onValueChange={(v) => setTab(v as "allow" | "deny")}>
+                  <TabsList>
+                    <TabsTrigger value="allow">Allow</TabsTrigger>
+                    {!form.isDenyAllElse && <TabsTrigger value="deny">Deny</TabsTrigger>}
+                  </TabsList>
+
+                  <TabsContent value="allow" className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium">Allow items</span>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => addItem("allow")}
+                      >
+                        <Plus className="mr-1 h-4 w-4" /> Add item
+                      </Button>
+                    </div>
+                    {allowItems.map(({ it, i }) => (
+                      <AccessItemRow
+                        key={i}
+                        item={it}
+                        accessTypes={accessTypes}
+                        removeLabel={`remove allow item ${i}`}
+                        onChange={(next) => setItem(i, next)}
+                        onRemove={() => removeItem(i)}
+                      />
+                    ))}
+                    <Accordion type="single" collapsible>
+                      <AccordionItem value="exceptions">
+                        <AccordionTrigger>Exceptions</AccordionTrigger>
+                        <AccordionContent className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs text-muted-foreground">
+                              Allow exceptions (deny overrides)
+                            </span>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => addException("allowExceptions", "allow")}
+                            >
+                              <Plus className="mr-1 h-4 w-4" /> Add exception
+                            </Button>
+                          </div>
+                          {form.allowExceptions.map((it: AccessItem, i: number) => (
+                            <AccessItemRow
+                              key={i}
+                              item={it}
+                              accessTypes={accessTypes}
+                              removeLabel={`remove allow exception ${i}`}
+                              onChange={(next) => setException("allowExceptions", i, next)}
+                              onRemove={() => removeException("allowExceptions", i)}
+                            />
+                          ))}
+                        </AccordionContent>
+                      </AccordionItem>
+                    </Accordion>
+                  </TabsContent>
+
+                  {!form.isDenyAllElse && (
+                    <TabsContent value="deny" className="space-y-3">
                       <div className="flex items-center justify-between">
-                        <span className="text-xs text-muted-foreground">
-                          Allow exceptions (deny overrides)
-                        </span>
+                        <span className="text-sm font-medium">Deny items</span>
                         <Button
                           type="button"
                           variant="outline"
                           size="sm"
-                          onClick={() => addException("allowExceptions", "allow")}
+                          onClick={() => addItem("deny")}
                         >
-                          <Plus className="mr-1 h-4 w-4" /> Add exception
+                          <Plus className="mr-1 h-4 w-4" /> Add item
                         </Button>
                       </div>
-                      {form.allowExceptions.map((it: AccessItem, i: number) => (
+                      {denyItems.map(({ it, i }) => (
                         <AccessItemRow
                           key={i}
                           item={it}
                           accessTypes={accessTypes}
-                          removeLabel={`remove allow exception ${i}`}
-                          onChange={(next) => setException("allowExceptions", i, next)}
-                          onRemove={() => removeException("allowExceptions", i)}
+                          removeLabel={`remove deny item ${i}`}
+                          onChange={(next) => setItem(i, next)}
+                          onRemove={() => removeItem(i)}
                         />
                       ))}
-                    </AccordionContent>
-                  </AccordionItem>
-                </Accordion>
-              </TabsContent>
+                      <Accordion type="single" collapsible>
+                        <AccordionItem value="exceptions">
+                          <AccordionTrigger>Exceptions</AccordionTrigger>
+                          <AccordionContent className="space-y-3">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs text-muted-foreground">
+                                Deny exceptions (allow overrides)
+                              </span>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => addException("denyExceptions", "deny")}
+                              >
+                                <Plus className="mr-1 h-4 w-4" /> Add exception
+                              </Button>
+                            </div>
+                            {form.denyExceptions.map((it: AccessItem, i: number) => (
+                              <AccessItemRow
+                                key={i}
+                                item={it}
+                                accessTypes={accessTypes}
+                                removeLabel={`remove deny exception ${i}`}
+                                onChange={(next) => setException("denyExceptions", i, next)}
+                                onRemove={() => removeException("denyExceptions", i)}
+                              />
+                            ))}
+                          </AccordionContent>
+                        </AccordionItem>
+                      </Accordion>
+                    </TabsContent>
+                  )}
+                </Tabs>
+              </CardContent>
+            </Card>
+          )}
 
-              {!form.isDenyAllElse && (
-                <TabsContent value="deny" className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium">Deny items</span>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => addItem("deny")}
-                    >
-                      <Plus className="mr-1 h-4 w-4" /> Add item
-                    </Button>
-                  </div>
-                  {denyItems.map(({ it, i }) => (
-                    <AccessItemRow
-                      key={i}
-                      item={it}
-                      accessTypes={accessTypes}
-                      removeLabel={`remove deny item ${i}`}
-                      onChange={(next) => setItem(i, next)}
-                      onRemove={() => removeItem(i)}
+          {kind === "masking" && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg">{kindTitle}</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium">Policy items</span>
+                  <Button type="button" variant="outline" size="sm" onClick={() => addItem()}>
+                    <Plus className="mr-1 h-4 w-4" /> Add item
+                  </Button>
+                </div>
+                {form.items.map((it: MaskItem, i: number) => (
+                  <div key={i} className="space-y-2 rounded-md border p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <Select value={it.maskType} onValueChange={(v) => setItem(i, { maskType: v })}>
+                        <SelectTrigger aria-label={`mask type ${i}`} className="w-56">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {MASK_TYPES.map((m) => (
+                            <SelectItem key={m.name} value={m.name}>
+                              {m.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      {form.items.length > 1 && (
+                        <button
+                          type="button"
+                          aria-label={`remove item ${i}`}
+                          onClick={() => removeItem(i)}
+                        >
+                          <Trash2 className="h-4 w-4 text-muted-foreground" />
+                        </button>
+                      )}
+                    </div>
+                    {it.maskType === "CUSTOM" && (
+                      <Input
+                        aria-label={`value expr ${i}`}
+                        placeholder="cast(... {col} ...) as {type}"
+                        value={it.valueExpr ?? ""}
+                        onChange={(e) => setItem(i, { valueExpr: e.target.value })}
+                      />
+                    )}
+                    <PrincipalPicker
+                      users={it.users}
+                      groups={it.groups}
+                      onChange={(p) => setItem(i, p)}
                     />
-                  ))}
-                  <Accordion type="single" collapsible>
-                    <AccordionItem value="exceptions">
-                      <AccordionTrigger>Exceptions</AccordionTrigger>
-                      <AccordionContent className="space-y-3">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs text-muted-foreground">
-                            Deny exceptions (allow overrides)
-                          </span>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={() => addException("denyExceptions", "deny")}
-                          >
-                            <Plus className="mr-1 h-4 w-4" /> Add exception
-                          </Button>
-                        </div>
-                        {form.denyExceptions.map((it: AccessItem, i: number) => (
-                          <AccessItemRow
-                            key={i}
-                            item={it}
-                            accessTypes={accessTypes}
-                            removeLabel={`remove deny exception ${i}`}
-                            onChange={(next) => setException("denyExceptions", i, next)}
-                            onRemove={() => removeException("denyExceptions", i)}
-                          />
-                        ))}
-                      </AccordionContent>
-                    </AccordionItem>
-                  </Accordion>
-                </TabsContent>
-              )}
-            </Tabs>
-          </CardContent>
-        </Card>
-      )}
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          )}
 
-      {kind === "masking" && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-lg">{kindTitle}</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium">Policy items</span>
-              <Button type="button" variant="outline" size="sm" onClick={() => addItem()}>
-                <Plus className="mr-1 h-4 w-4" /> Add item
-              </Button>
-            </div>
-            {form.items.map((it: MaskItem, i: number) => (
-              <div key={i} className="space-y-2 rounded-md border p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <Select value={it.maskType} onValueChange={(v) => setItem(i, { maskType: v })}>
-                    <SelectTrigger aria-label={`mask type ${i}`} className="w-56">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {MASK_TYPES.map((m) => (
-                        <SelectItem key={m.name} value={m.name}>
-                          {m.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  {form.items.length > 1 && (
-                    <button
-                      type="button"
-                      aria-label={`remove item ${i}`}
-                      onClick={() => removeItem(i)}
-                    >
-                      <Trash2 className="h-4 w-4 text-muted-foreground" />
-                    </button>
-                  )}
+          {kind === "rowfilter" && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg">{kindTitle}</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-medium">Policy items</span>
+                  <Button type="button" variant="outline" size="sm" onClick={() => addItem()}>
+                    <Plus className="mr-1 h-4 w-4" /> Add item
+                  </Button>
                 </div>
-                {it.maskType === "CUSTOM" && (
-                  <Input
-                    aria-label={`value expr ${i}`}
-                    placeholder="cast(... {col} ...) as {type}"
-                    value={it.valueExpr ?? ""}
-                    onChange={(e) => setItem(i, { valueExpr: e.target.value })}
-                  />
+                {form.items.map((it: RowFilterItem, i: number) => (
+                  <div key={i} className="space-y-2 rounded-md border p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <Input
+                        aria-label={`filter ${i}`}
+                        placeholder="e.g. country = 'US'"
+                        value={it.filterExpr}
+                        onChange={(e) => setItem(i, { filterExpr: e.target.value })}
+                      />
+                      {form.items.length > 1 && (
+                        <button
+                          type="button"
+                          aria-label={`remove item ${i}`}
+                          onClick={() => removeItem(i)}
+                        >
+                          <Trash2 className="h-4 w-4 text-muted-foreground" />
+                        </button>
+                      )}
+                    </div>
+                    <PrincipalPicker
+                      users={it.users}
+                      groups={it.groups}
+                      onChange={(p) => setItem(i, p)}
+                    />
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          )}
+        </TabsContent>
+
+        <TabsContent value="details">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg">Details</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-1.5">
+                <FieldLabel label="Description" htmlFor="policy-description" />
+                <Textarea
+                  id="policy-description"
+                  rows={3}
+                  value={form.description}
+                  onChange={(e) => setForm((f: any) => ({ ...f, description: e.target.value }))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <FieldLabel label="Labels" htmlFor="policy-labels" />
+                {form.labels.length > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {form.labels.map((l: string) => (
+                      <Badge key={l} variant="secondary" className="gap-1">
+                        {l}
+                        <button
+                          type="button"
+                          aria-label={`remove label ${l}`}
+                          onClick={() => removeLabel(l)}
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </Badge>
+                    ))}
+                  </div>
                 )}
-                <PrincipalPicker
-                  users={it.users}
-                  groups={it.groups}
-                  onChange={(p) => setItem(i, p)}
+                <Input
+                  id="policy-labels"
+                  placeholder="Add label…"
+                  value={labelInput}
+                  onChange={(e) => setLabelInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === ",") {
+                      e.preventDefault();
+                      addLabel();
+                    }
+                  }}
                 />
               </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
-
-      {kind === "rowfilter" && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-lg">{kindTitle}</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium">Policy items</span>
-              <Button type="button" variant="outline" size="sm" onClick={() => addItem()}>
-                <Plus className="mr-1 h-4 w-4" /> Add item
-              </Button>
-            </div>
-            {form.items.map((it: RowFilterItem, i: number) => (
-              <div key={i} className="space-y-2 rounded-md border p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <Input
-                    aria-label={`filter ${i}`}
-                    placeholder="e.g. country = 'US'"
-                    value={it.filterExpr}
-                    onChange={(e) => setItem(i, { filterExpr: e.target.value })}
-                  />
-                  {form.items.length > 1 && (
-                    <button
-                      type="button"
-                      aria-label={`remove item ${i}`}
-                      onClick={() => removeItem(i)}
-                    >
-                      <Trash2 className="h-4 w-4 text-muted-foreground" />
-                    </button>
-                  )}
-                </div>
-                <PrincipalPicker
-                  users={it.users}
-                  groups={it.groups}
-                  onChange={(p) => setItem(i, p)}
-                />
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
 
       <ConfirmDeleteDialog
         open={deleteOpen}
