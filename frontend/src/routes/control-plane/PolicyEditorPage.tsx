@@ -68,6 +68,11 @@ const ACCESS_TYPE_GROUPS: { label: string; types: string[] }[] = [
 const ALL_GROUPED_ACCESS_TYPES = new Set(ACCESS_TYPE_GROUPS.flatMap((g) => g.types));
 
 const emptyLevel = () => ({ values: [] as string[], isExcludes: false, isRecursive: false });
+const wildcardLevel = () => ({
+  values: ["*"] as string[],
+  isExcludes: false,
+  isRecursive: false,
+});
 const emptyAccessItem = (effect: "allow" | "deny" = "allow"): AccessItem => ({
   users: [],
   groups: [],
@@ -97,9 +102,9 @@ function blankInput(kind: PolicyKind, service: string): any {
       isEnabled: true,
       resources: {
         catalog: emptyLevel(),
-        schema: emptyLevel(),
-        table: emptyLevel(),
-        column: emptyLevel(),
+        schema: wildcardLevel(),
+        table: wildcardLevel(),
+        column: wildcardLevel(),
       },
       items: [emptyMaskItem()],
       description: "",
@@ -113,7 +118,7 @@ function blankInput(kind: PolicyKind, service: string): any {
       name: "",
       service,
       isEnabled: true,
-      resources: { catalog: emptyLevel(), schema: emptyLevel(), table: emptyLevel() },
+      resources: { catalog: emptyLevel(), schema: wildcardLevel(), table: wildcardLevel() },
       items: [emptyRowFilterItem()],
       description: "",
       labels: [],
@@ -127,9 +132,9 @@ function blankInput(kind: PolicyKind, service: string): any {
     isEnabled: true,
     resources: {
       catalog: emptyLevel(),
-      schema: emptyLevel(),
-      table: emptyLevel(),
-      column: emptyLevel(),
+      schema: wildcardLevel(),
+      table: wildcardLevel(),
+      column: wildcardLevel(),
     },
     resourceMode: "table",
     trinouser: emptyLevel(),
