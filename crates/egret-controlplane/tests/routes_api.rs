@@ -2980,3 +2980,76 @@ async fn scoped_permission_warehouses_read_and_create() {
         "a scoped warehouse:create principal must create; body={body}"
     );
 }
+
+/// Storage: `storage:read` gates `GET /storage`, `storage:create` gates
+/// `POST /storage`. A principal with only one of the two must not get the other.
+#[tokio::test]
+async fn scoped_permission_storage_read_and_create() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    let wrong = session_for_with_permission(&f, "storage_scoped_wrong", "secret:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/storage", &wrong, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without storage:read must not list storage"
+    );
+
+    let reader = session_for_with_permission(&f, "storage_scoped_reader", "storage:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/storage", &reader, None))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a scoped storage:read principal must list storage; body={body}"
+    );
+
+    // storage:read alone must not create.
+    let suffix = Uuid::new_v4().simple().to_string();
+    let create_body = serde_json::json!({
+        "name": format!("scoped-store-{suffix}"),
+        "provider": "s3",
+        "region": "us-east-1",
+        "bucket": "egret-scoped-test",
+        "access_key": "AKIATEST",
+        "path_style": true,
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/storage", &reader, Some(create_body.clone())))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "storage:read alone must not create a storage connection"
+    );
+
+    let creator = session_for_with_permission(&f, "storage_scoped_creator", "storage:create").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/storage", &creator, Some(create_body)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a scoped storage:create principal must create; body={body}"
+    );
+}
