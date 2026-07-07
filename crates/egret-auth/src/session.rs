@@ -100,11 +100,12 @@ impl SessionService {
         .map_err(db_err)?;
 
         let platform_roles = self.platform_roles(UserId(row.user_id)).await?;
+        let permissions = self.permissions(UserId(row.user_id)).await?;
         Ok(Some(Principal {
             user_id: UserId(row.user_id),
             email: row.email,
             platform_roles,
-            permissions: vec![],
+            permissions,
         }))
     }
 
@@ -141,6 +142,24 @@ impl SessionService {
         .await
         .map_err(db_err)?;
         Ok(rows.into_iter().map(|(n,)| n).collect())
+    }
+
+    /// Effective permission keys for the user: role_permissions over every role
+    /// assigned directly or via the user's group memberships.
+    async fn permissions(&self, user_id: UserId) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT rp.permission \
+             FROM platform_role_assignments pra \
+             JOIN role_permissions rp ON rp.role_id = pra.role_id \
+             WHERE (pra.principal_type = 'user'  AND pra.principal_id = $1) \
+                OR (pra.principal_type = 'group' AND pra.principal_id IN \
+                       (SELECT group_id FROM user_groups WHERE user_id = $1))",
+        )
+        .bind(user_id.0)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(rows.into_iter().map(|(p,)| p).collect())
     }
 }
 
