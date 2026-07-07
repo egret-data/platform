@@ -1246,15 +1246,19 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .context("connecting to database")?;
     db.migrate().await.context("running migrations on boot")?;
 
-    // Warn (do not fail) if any stored role permission is unknown to the catalog —
-    // catches drift between the DB and egret_core::rbac. In debug builds, fail fast
-    // instead: an unknown role_permissions key almost always means the catalog and a
-    // migration/seed have drifted apart during development, and it's cheaper to catch
-    // that at `cargo run` time than to discover it as a silent dead grant in prod.
-    if let Ok(rows) =
-        sqlx::query_scalar::<_, String>("SELECT DISTINCT permission FROM role_permissions")
-            .fetch_all(&db.pool)
-            .await
+    // Warn (do not fail) if any stored PLATFORM-scope role permission is unknown to the
+    // catalog — catches drift between the DB and egret_core::rbac. In debug builds, fail
+    // fast instead: an unknown key almost always means the catalog and a migration/seed
+    // have drifted apart during development, cheaper to catch at `cargo run` time than as
+    // a silent dead grant in prod. Only platform-scope grants are checked here:
+    // `egret_core::rbac` is the platform vocabulary; workspace-scope roles (ws_*) use a
+    // separate permission vocabulary owned by egret-workspace (dataset/chart/notebook/…).
+    if let Ok(rows) = sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT rp.permission FROM role_permissions rp \
+         JOIN roles r ON r.id = rp.role_id WHERE r.scope = 'platform'",
+    )
+    .fetch_all(&db.pool)
+    .await
     {
         let unknown: Vec<&String> = rows
             .iter()
