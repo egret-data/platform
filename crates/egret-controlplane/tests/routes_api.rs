@@ -115,6 +115,53 @@ async fn session_for(f: &Fixture, tag: &str, platform_admin: bool) -> String {
         .token
 }
 
+/// Create a NON-admin user holding exactly one fine-grained permission key
+/// (via a fresh ad-hoc platform-scoped role), and return its session token.
+/// Exercises the `require_permission` scoped-principal path (as opposed to
+/// `session_for`'s `platform_admin` bypass path): `platform_roles` stays
+/// empty, `permissions` carries only `permission`.
+async fn session_for_with_permission(f: &Fixture, tag: &str, permission: &str) -> String {
+    let email = format!("{tag}_{}@egret.local", Uuid::new_v4().simple());
+    let uid = f
+        .users
+        .insert_local(&email, "Test", "x")
+        .await
+        .expect("insert user");
+
+    let role_name = format!("test_role_{}", Uuid::new_v4().simple());
+    let (role_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO roles (scope, name, description) VALUES ('platform', $1, 'test-only role') \
+         RETURNING id",
+    )
+    .bind(&role_name)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert role");
+
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
+        .bind(role_id)
+        .bind(permission)
+        .execute(&f.db.pool)
+        .await
+        .expect("grant permission");
+
+    sqlx::query(
+        "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
+         VALUES ('user', $1, $2)",
+    )
+    .bind(uid.0)
+    .bind(role_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("assign role");
+
+    f.sessions
+        .create(uid, "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token
+}
+
 fn req(method: &str, uri: &str, token: &str, body: Option<serde_json::Value>) -> HttpRequest<Body> {
     let mut b = HttpRequest::builder()
         .method(method)
@@ -2759,5 +2806,89 @@ async fn non_admin_cannot_lookup_resource_values() {
         resp.status(),
         StatusCode::FORBIDDEN,
         "a non platform-admin must not use resource-lookup"
+    );
+}
+
+// ── P1-T5: fine-grained `require_permission` enforcement ─────────────────────
+//
+// `platform_admin`/blanket-forbidden coverage lives above (per-module, from
+// the `require_platform_admin` era). These prove the NEW `resource:action`
+// gate: a scoped, non-admin principal holding the wrong (or no) permission is
+// Forbidden, and a scoped, non-admin principal holding exactly the right
+// permission succeeds — same as `platform_admin`, without the superuser
+// bypass.
+
+/// Engines: `engine:read` gates `GET /engines`, `engine:create` gates
+/// `POST /engines`.
+#[tokio::test]
+async fn scoped_permission_engines_read_and_create() {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    let wrong = session_for_with_permission(&f, "engine_scoped_wrong", "warehouse:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/engines", &wrong, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without engine:read must not list engines"
+    );
+
+    let reader = session_for_with_permission(&f, "engine_scoped_reader", "engine:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/engines", &reader, None))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a scoped engine:read principal must list engines; body={body}"
+    );
+
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_body = serde_json::json!({
+        "name": format!("trino-{}", Uuid::new_v4().simple()),
+        "warehouseId": wh_id,
+        "coordinatorReplicas": 1,
+        "workerReplicas": 1,
+        "cpuMin": "1",
+        "cpuMax": "2",
+        "memory": "4Gi",
+    });
+
+    // engine:read alone must not create.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/engines", &reader, Some(engine_body.clone())))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "engine:read alone must not create an engine"
+    );
+
+    let creator = session_for_with_permission(&f, "engine_scoped_creator", "engine:create").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/engines", &creator, Some(engine_body)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a scoped engine:create principal must create; body={body}"
     );
 }

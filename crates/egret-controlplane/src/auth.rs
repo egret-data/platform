@@ -22,8 +22,6 @@ pub fn require_platform_admin(principal: &Principal) -> Result<(), CpError> {
 
 /// Gate a control-plane action on a specific permission key.
 /// `platform_admin` always passes (superuser). Others must hold the key.
-// TODO(P1-T5): drop once call sites are migrated to this guard.
-#[allow(dead_code)]
 pub fn require_permission(principal: &Principal, permission: &str) -> Result<(), CpError> {
     if principal.platform_roles.iter().any(|r| r == PLATFORM_ADMIN)
         || principal.permissions.iter().any(|p| p == permission)
