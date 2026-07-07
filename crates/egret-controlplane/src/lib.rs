@@ -9,6 +9,7 @@
 //! The router is nested at `/api/control-plane` in `egret-server`, behind the
 //! same CSRF layer as the other mutating APIs.
 
+mod access;
 mod auth;
 mod engines;
 mod error;
@@ -99,4 +100,5 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(warehouses::router())
         .merge(engines::router())
         .merge(policies::router())
+        .merge(access::router())
 }

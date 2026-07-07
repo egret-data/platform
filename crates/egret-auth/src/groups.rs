@@ -151,6 +151,19 @@ impl GroupRepo {
             .map_err(db_err)
     }
 
+    /// Names of the groups a user directly belongs to (name-ordered), used to
+    /// populate the `groups` field of the `GET /users` DTO.
+    pub async fn groups_of_user(&self, user_id: UserId) -> Result<Vec<String>> {
+        sqlx::query_scalar(
+            "SELECT g.name FROM user_groups ug JOIN groups g ON g.id = ug.group_id \
+             WHERE ug.user_id = $1 ORDER BY g.name",
+        )
+        .bind(user_id.0)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)
+    }
+
     /// Each group with its member count, name-ordered.
     pub async fn list_with_meta(&self) -> Result<Vec<(Group, i64)>> {
         let rows = sqlx::query_as::<_, GroupWithCountRow>(

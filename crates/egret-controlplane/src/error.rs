@@ -21,6 +21,11 @@ pub enum CpError {
     AlreadyExists(String),
     #[error("bad request: {0}")]
     BadRequest(String),
+    /// A state conflict that isn't a duplicate-name/email clash covered by
+    /// `AlreadyExists` — e.g. the last-platform-admin guard or a seeded-role
+    /// delete guard.
+    #[error("conflict: {0}")]
+    Conflict(String),
     /// A named secret is still referenced and cannot be deleted.
     #[error("secret is in use by {0} connection(s)")]
     InUse(i64),
@@ -72,6 +77,23 @@ impl From<AuthzError> for CpError {
     }
 }
 
+/// `egret_core::Error` is what the identity/RBAC repos (`UserRepo`, `GroupRepo`,
+/// `RoleRepo`) return, used by the `access` module.
+impl From<egret_core::Error> for CpError {
+    fn from(e: egret_core::Error) -> Self {
+        match e {
+            egret_core::Error::NotFound(_) => CpError::NotFound,
+            egret_core::Error::Conflict(s) => CpError::Conflict(s),
+            egret_core::Error::InvalidInput(s) => CpError::BadRequest(s),
+            egret_core::Error::Unauthorized | egret_core::Error::Forbidden => CpError::Forbidden,
+            egret_core::Error::TooManyRequests => {
+                CpError::BadRequest("too many requests".to_string())
+            }
+            egret_core::Error::Internal(_) => CpError::Internal,
+        }
+    }
+}
+
 impl IntoResponse for CpError {
     fn into_response(self) -> Response {
         let (status, msg) = match &self {
@@ -79,6 +101,7 @@ impl IntoResponse for CpError {
             CpError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             CpError::AlreadyExists(_) => (StatusCode::CONFLICT, self.to_string()),
             CpError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            CpError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
             CpError::InUse(_) => (StatusCode::CONFLICT, self.to_string()),
             CpError::BadGateway => (StatusCode::BAD_GATEWAY, self.to_string()),
             CpError::Internal => (

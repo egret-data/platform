@@ -39,13 +39,14 @@ impl UserRepo {
     }
 
     /// Insert a local user with a password hash; returns the new id.
+    /// Errors with `Conflict` if a user with the same email already exists.
     pub async fn insert_local(
         &self,
         email: &str,
         name: &str,
         password_hash: &str,
     ) -> Result<UserId> {
-        let id: Uuid = sqlx::query_scalar(
+        let res = sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO users (provider, email, name, password_hash) \
              VALUES ('local', $1, $2, $3) RETURNING id",
         )
@@ -53,9 +54,14 @@ impl UserRepo {
         .bind(name)
         .bind(password_hash)
         .fetch_one(&self.db.pool)
-        .await
-        .map_err(db_err)?;
-        Ok(UserId(id))
+        .await;
+        match res {
+            Ok(id) => Ok(UserId(id)),
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Err(
+                egret_core::Error::Conflict(format!("user already exists: {email}")),
+            ),
+            Err(e) => Err(db_err(e)),
+        }
     }
 
     pub async fn list(&self, limit: i64, offset: i64) -> Result<Vec<User>> {
