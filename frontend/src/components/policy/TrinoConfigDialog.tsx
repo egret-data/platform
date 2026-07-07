@@ -1,0 +1,59 @@
+import { useQuery } from "@tanstack/react-query";
+import { type ConfigFile, getTrinoConfig } from "@/api/policies";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+
+function download(name: string, content: string) {
+  const url = URL.createObjectURL(new Blob([content], { type: "text/plain" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+interface Props {
+  open: boolean;
+  service: string;
+  onOpenChange: (o: boolean) => void;
+}
+
+export function TrinoConfigDialog({ open, service, onOpenChange }: Props) {
+  const cfg = useQuery<ConfigFile[]>({
+    queryKey: ["trino-config", service],
+    queryFn: () => getTrinoConfig(service),
+    enabled: open,
+    retry: false,
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Trino config — {service}</DialogTitle>
+          <DialogDescription>
+            Drop these into the Trino coordinator&apos;s <code>etc/</code>. The native ranger plugin then enforces
+            this profile. (Assumes anonymous <code>/service</code>; a Ranger auth token needs extra proxy setup.)
+          </DialogDescription>
+        </DialogHeader>
+        {(cfg.data ?? []).map((file) => (
+          <div key={file.name} className="space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-sm">{file.name}</span>
+              <Button size="sm" variant="outline" onClick={() => download(file.name, file.content)}>
+                Download
+              </Button>
+            </div>
+            <pre className="overflow-x-auto rounded bg-muted p-2 text-xs">{file.content}</pre>
+          </div>
+        ))}
+      </DialogContent>
+    </Dialog>
+  );
+}

@@ -43,7 +43,6 @@ const EXPLORE_GROUPS: NavGroup[] = [
   {
     heading: "Data Governance",
     items: [
-      { label: "Policies", icon: ShieldCheck },
       { label: "Data Lineage", icon: Share2 },
     ],
   },
@@ -67,6 +66,12 @@ const CONTROL_PLANE_GROUPS: NavGroup[] = [
       { label: "Storage", icon: HardDrive },
       { label: "Secrets", icon: KeyRound },
       { label: "Users", icon: Users },
+    ],
+  },
+  {
+    heading: "Data Governance",
+    items: [
+      { label: "Policies", icon: ShieldCheck },
     ],
   },
 ];

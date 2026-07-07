@@ -32,6 +32,9 @@ import EngineDetail from "@/routes/control-plane/EngineDetail";
 import ControlPlaneStorage from "@/routes/control-plane/ControlPlaneStorage";
 import StorageBrowser from "@/routes/control-plane/StorageBrowser";
 import ControlPlaneSecrets from "@/routes/control-plane/ControlPlaneSecrets";
+import Policies from "@/routes/control-plane/Policies";
+import ProfileDetailPage from "@/routes/control-plane/ProfileDetailPage";
+import PolicyEditorPage from "@/routes/control-plane/PolicyEditorPage";
 import Warehouses from "@/routes/control-plane/Warehouses";
 import WarehouseDetail from "@/routes/control-plane/WarehouseDetail";
 
@@ -67,7 +70,6 @@ function ExploreRoutes() {
           <Route path="pipelines" element={<Placeholder title="Pipelines" />} />
           <Route path="workflows" element={<Placeholder title="Workflows" />} />
           <Route path="alerts" element={<Placeholder title="Alerts" />} />
-          <Route path="policies" element={<Placeholder title="Policies" />} />
           <Route path="data-lineage" element={<Placeholder title="Data Lineage" />} />
           <Route path="*" element={<Navigate to="sql-lab" replace />} />
         </Routes>
@@ -90,6 +92,10 @@ function ControlPlaneRoutes() {
           <Route path="storage" element={<ControlPlaneStorage />} />
           <Route path="storage/:id/browse" element={<StorageBrowser />} />
           <Route path="secrets" element={<ControlPlaneSecrets />} />
+          <Route path="policies" element={<Policies />} />
+          <Route path="policies/:service" element={<ProfileDetailPage />} />
+          <Route path="policies/:service/:kind/new" element={<PolicyEditorPage />} />
+          <Route path="policies/:service/:kind/:id" element={<PolicyEditorPage />} />
           <Route path="users" element={<Placeholder title="Users" />} />
           <Route path="*" element={<Navigate to="workspaces" replace />} />
         </Routes>

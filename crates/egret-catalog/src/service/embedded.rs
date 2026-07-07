@@ -40,6 +40,7 @@ pub struct Engine {
     pub warehouse_id: Uuid,
     pub spec: serde_json::Value,
     pub status: String,
+    pub authz_service_id: Option<i64>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -208,7 +209,7 @@ impl CatalogStore {
     ) -> Result<Engine, CatalogError> {
         sqlx::query_as::<_, Engine>(
             "INSERT INTO engines (name, type, namespace, warehouse_id, spec) VALUES ($1,$2,$3,$4,$5) \
-             RETURNING id, name, type, namespace, warehouse_id, spec, status, created_at",
+             RETURNING id, name, type, namespace, warehouse_id, spec, status, authz_service_id, created_at",
         )
         .bind(name)
         .bind(r#type)
@@ -227,7 +228,7 @@ impl CatalogStore {
 
     pub async fn list_engines(&self) -> Result<Vec<Engine>, CatalogError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, warehouse_id, spec, status, created_at \
+            "SELECT id, name, type, namespace, warehouse_id, spec, status, authz_service_id, created_at \
              FROM engines ORDER BY created_at",
         )
         .fetch_all(self.pool())
@@ -236,7 +237,7 @@ impl CatalogStore {
 
     pub async fn get_engine(&self, id: Uuid) -> Result<Option<Engine>, CatalogError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, warehouse_id, spec, status, created_at \
+            "SELECT id, name, type, namespace, warehouse_id, spec, status, authz_service_id, created_at \
              FROM engines WHERE id = $1",
         )
         .bind(id)
@@ -263,6 +264,20 @@ impl CatalogStore {
         sqlx::query("UPDATE engines SET status = $2 WHERE id = $1")
             .bind(id)
             .bind(status)
+            .execute(self.pool())
+            .await?;
+        Ok(())
+    }
+
+    /// Bind (or detach with `None`) an engine to a Ranger policy profile.
+    pub async fn set_engine_authz_service(
+        &self,
+        id: Uuid,
+        authz_service_id: Option<i64>,
+    ) -> Result<(), CatalogError> {
+        sqlx::query("UPDATE engines SET authz_service_id = $2 WHERE id = $1")
+            .bind(id)
+            .bind(authz_service_id)
             .execute(self.pool())
             .await?;
         Ok(())

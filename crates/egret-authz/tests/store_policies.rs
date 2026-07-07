@@ -99,3 +99,39 @@ async fn policy_crud_bumps_version() {
         egret_authz::AuthzError::NotFound(_)
     ));
 }
+
+#[tokio::test]
+async fn list_policies_returns_all_for_service() {
+    let Some(s) = store().await else {
+        eprintln!("skip");
+        return;
+    };
+    let defname = uniq("trino_lp");
+    let def_id = def_id_from_name(&defname);
+    s.upsert_service_def(def_id, &defname, &json!({"name": defname}))
+        .await
+        .unwrap();
+    let svc = s
+        .create_service(&uniq("svc"), &defname, &json!({}))
+        .await
+        .unwrap();
+
+    let pol = json!({"name": "p1", "service": svc.name.clone()});
+    let pid1 = s.create_policy(svc.id, "p1", &pol).await.unwrap();
+    s.create_policy(svc.id, "p2", &pol).await.unwrap();
+    s.update_policy(pid1, "p1", &pol, false).await.unwrap();
+
+    let rows = s.list_policies(svc.id).await.unwrap();
+    assert_eq!(
+        rows.len(),
+        2,
+        "list_policies should include the disabled policy"
+    );
+    assert_eq!(
+        s.enabled_policies_for_service(svc.id).await.unwrap().len(),
+        1,
+        "enabled_policies_for_service should exclude the disabled policy"
+    );
+
+    s.delete_service(svc.id).await.unwrap();
+}

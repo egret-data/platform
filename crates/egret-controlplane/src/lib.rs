@@ -13,6 +13,7 @@ mod auth;
 mod engines;
 mod error;
 pub mod monitor;
+mod policies;
 mod secrets;
 mod storage;
 mod warehouses;
@@ -29,6 +30,10 @@ pub use engines::{
     WorkerRoleConfigReq,
 };
 pub use error::CpError;
+pub use policies::{
+    editor_to_ranger_json, masking_to_ranger_json, rowfilter_to_ranger_json, summarize_policy,
+    MaskingPolicyInput, PolicySummary, RangerPolicy, RowFilterPolicyInput,
+};
 pub use warehouses::{
     BrowseColumn, BrowseDeletedTabular, BrowseNamespace, BrowsePartition, BrowseSearchResult,
     BrowseSnapshot, BrowseSort, BrowseTableDetail, BrowseTabular, BrowseTask,
@@ -47,6 +52,12 @@ use std::sync::Arc;
 pub struct CpState {
     /// Global storage-connection registry (`storage_connections`).
     pub storage: CatalogStore,
+    /// Shared Ranger policy store (`authz_*`), the same store the machine-facing
+    /// `/service` router writes. Used by the read-only Policies endpoints.
+    pub authz: egret_authz::AuthzStore,
+    /// Identity lookups for the policy principal picker.
+    pub users: egret_auth::users::UserRepo,
+    pub groups: egret_auth::groups::GroupRepo,
     /// Named secret layer, used in GLOBAL scope (`None` workspace) here.
     pub secrets: WorkspaceSecretStore,
     /// Session service backing the `Auth` extractor.
@@ -85,4 +96,5 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(secrets::router())
         .merge(warehouses::router())
         .merge(engines::router())
+        .merge(policies::router())
 }

@@ -561,6 +561,10 @@ struct CreateEngineBody {
     /// the simple wizard fields seed this; `update` sends the full per-role block.
     #[serde(default)]
     trino_config: Option<serde_json::Value>,
+    /// Link the new engine to an EXISTING Ranger profile (authz_services id).
+    /// When omitted, provisioning creates a fresh profile named after the engine.
+    #[serde(default)]
+    authz_service_id: Option<i64>,
 }
 
 /// The provisioning parameters surfaced back to clients (subset of the stored
@@ -1836,6 +1840,52 @@ async fn create_engine(
         )));
     }
 
+    // 8. Auto-bind the engine to a Ranger policy profile: link the admin-chosen
+    // existing service, or create a fresh one named after the engine. Runs ONLY
+    // here on the success path — after provisioning succeeded and every rollback
+    // path above is passed — so a failed provision never creates an orphan
+    // profile and a same-name retry stays clean. Best-effort: a binding failure
+    // must not fail provisioning (the engine still works; the admin can relink
+    // later), so we log and continue.
+    let profile_id: Option<i64> = match b.authz_service_id {
+        Some(sid) => match st.authz.list_services().await {
+            Ok(svcs) if svcs.iter().any(|s| s.id == sid) => Some(sid),
+            Ok(_) => {
+                tracing::warn!(sid, "authz_service_id not found; leaving engine unlinked");
+                None
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "list_services failed during auto-bind");
+                None
+            }
+        },
+        None => {
+            if let Err(e) = egret_authz::seed_trino(&st.authz).await {
+                tracing::warn!(error = %e, "seed_trino failed during auto-bind");
+            }
+            match st
+                .authz
+                .create_service(&b.name, "trino", &serde_json::json!({}))
+                .await
+            {
+                Ok(svc) => Some(svc.id),
+                Err(e) => {
+                    tracing::warn!(error = %e, "create_service failed during auto-bind");
+                    None
+                }
+            }
+        }
+    };
+    if let Some(pid) = profile_id {
+        if let Err(e) = st
+            .storage
+            .set_engine_authz_service(engine.id, Some(pid))
+            .await
+        {
+            tracing::warn!(error = %e, "set_engine_authz_service failed during auto-bind");
+        }
+    }
+
     Ok((StatusCode::CREATED, Json(engine.into())))
 }
 
@@ -2830,6 +2880,7 @@ mod tests {
             warehouse_id: Uuid::new_v4(),
             spec: serde_json::json!({}),
             status: "pending".into(),
+            authz_service_id: None,
             created_at: chrono::Utc::now(),
         }
     }
@@ -2850,6 +2901,9 @@ mod tests {
         let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
         Some(CpState {
             storage: egret_catalog::CatalogStore::new(db.clone()),
+            authz: egret_authz::AuthzStore::new(db.clone()),
+            users: egret_auth::users::UserRepo::new(db.clone()),
+            groups: egret_auth::groups::GroupRepo::new(db.clone()),
             secrets: workspace_secrets,
             sessions: egret_auth::session::SessionService::new(
                 db.clone(),

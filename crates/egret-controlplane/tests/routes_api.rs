@@ -66,6 +66,9 @@ async fn setup_full(
 
     let app = control_plane_router().with_state(CpState {
         storage: egret_catalog::CatalogStore::new(db.clone()),
+        authz: egret_authz::AuthzStore::new(db.clone()),
+        users: users.clone(),
+        groups: egret_auth::groups::GroupRepo::new(db.clone()),
         secrets: workspace_secrets,
         sessions: sessions.clone(),
         provisioner: None,
@@ -2171,4 +2174,590 @@ async fn browse_unprovisioned_warehouse_empty() {
         "unprovisioned warehouse namespaces; body={j}"
     );
     assert_eq!(j, serde_json::json!([]), "should be empty array; body={j}");
+}
+
+#[tokio::test]
+async fn platform_admin_can_list_policies_by_type() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "policies_admin", true).await;
+
+    let authz = egret_authz::AuthzStore::new(f.db.clone());
+    egret_authz::seed_trino(&authz)
+        .await
+        .expect("seed trino def");
+    let svc_name = format!("trino-{}", Uuid::new_v4().simple());
+    let svc = authz
+        .create_service(&svc_name, "trino", &serde_json::json!({}))
+        .await
+        .expect("create service");
+    authz
+        .create_policy(
+            svc.id,
+            "allow-analysts-select",
+            &serde_json::json!({
+                "name": "allow-analysts-select",
+                "policyType": 0,
+                "resources": {
+                    "catalog": {"values": ["iceberg"]},
+                    "schema":  {"values": ["sales"]},
+                    "table":   {"values": ["orders"]},
+                    "column":  {"values": ["*"]}
+                },
+                "policyItems": [
+                    {"users": ["alice"], "groups": ["analysts"], "accesses": [{"type": "select"}]}
+                ]
+            }),
+        )
+        .await
+        .expect("create policy");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/policies?service={svc_name}&type=access"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list policies; body={body}");
+    let arr = body.as_array().expect("array body");
+    assert_eq!(arr.len(), 1, "expected exactly one summary; body={body}");
+    assert_eq!(arr[0]["policy_type"], serde_json::json!("access"));
+
+    authz.delete_service(svc.id).await.expect("cleanup service");
+}
+
+/// Proves the Task 6 auto-bind primitives at the STORE level (no live
+/// Kubernetes `EngineProvisioner` needed): a fresh authz profile bound via
+/// `CatalogStore::set_engine_authz_service` round-trips through
+/// `list_engines`, and the bound engine surfaces under its profile on
+/// `GET /policies/services`.
+#[tokio::test]
+async fn platform_admin_autobind_engine_to_new_profile() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "autobind_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+
+    let catalog = egret_catalog::CatalogStore::new(f.db.clone());
+    let authz = egret_authz::AuthzStore::new(f.db.clone());
+
+    // Mirrors the `create_engine` auto-bind "create" branch: seed the Trino
+    // service-def (required FK for `create_service`), then create a fresh
+    // profile named after the engine.
+    egret_authz::seed_trino(&authz)
+        .await
+        .expect("seed trino def");
+
+    let engine_name = format!("trino-{}", Uuid::new_v4().simple());
+    let engine = catalog
+        .create_engine(
+            &engine_name,
+            "trino",
+            "egret-engines",
+            wh_id,
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("create engine");
+    assert_eq!(
+        engine.authz_service_id, None,
+        "engine starts unbound before auto-bind"
+    );
+
+    let svc = authz
+        .create_service(&engine_name, "trino", &serde_json::json!({}))
+        .await
+        .expect("create service");
+
+    catalog
+        .set_engine_authz_service(engine.id, Some(svc.id))
+        .await
+        .expect("bind engine to profile");
+
+    let engines = catalog.list_engines().await.expect("list engines");
+    let bound = engines
+        .iter()
+        .find(|e| e.id == engine.id)
+        .expect("engine present");
+    assert_eq!(
+        bound.authz_service_id,
+        Some(svc.id),
+        "authz_service_id round-trips through list_engines"
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/policies/services", &token, None))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list profiles; body={body}");
+    let arr = body.as_array().expect("array body");
+    let profile = arr
+        .iter()
+        .find(|p| p["id"] == serde_json::json!(svc.id))
+        .unwrap_or_else(|| panic!("profile {} not found; body={body}", svc.id));
+    let profile_engines = profile["engines"].as_array().expect("engines array");
+    assert!(
+        profile_engines
+            .iter()
+            .any(|e| e["id"] == serde_json::json!(engine.id)),
+        "bound engine should appear under its profile; body={body}"
+    );
+
+    catalog
+        .delete_engine(engine.id)
+        .await
+        .expect("cleanup engine");
+    authz.delete_service(svc.id).await.expect("cleanup service");
+}
+
+/// The Policies routes are platform-admin-gated (spec §5): a non-admin session
+/// must be Forbidden (403), and the gate runs before any store read.
+#[tokio::test]
+async fn non_admin_cannot_list_policies() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "policies_plain", false).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/policies?service=whatever", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a non platform-admin must not list policies"
+    );
+}
+
+/// P2 Task 2: a platform admin can POST a new Access policy from the editor
+/// form, see it in the list, then DELETE it.
+#[tokio::test]
+async fn admin_can_create_and_delete_access_policy() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "crud", true).await;
+
+    let authz = egret_authz::AuthzStore::new(f.db.clone());
+    egret_authz::seed_trino(&authz)
+        .await
+        .expect("seed trino def");
+    let svc_name = format!("trino-{}", Uuid::new_v4().simple());
+    let svc = authz
+        .create_service(&svc_name, "trino", &serde_json::json!({}))
+        .await
+        .expect("create service");
+
+    let create = serde_json::json!({
+        "name": "p-create", "service": svc_name, "isEnabled": true,
+        "resources": {"catalog": {"values": ["iceberg"]}},
+        "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/policies", &token, Some(create)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "create policy; body={body}");
+    let id = body["id"].as_i64().expect("id in response");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/policies?service={svc_name}&type=access"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (_, list) = into_json(resp).await;
+    assert_eq!(
+        list.as_array().expect("array body").len(),
+        1,
+        "expected exactly one summary; body={list}"
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &format!("/policies/{id}"), &token, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "delete policy should return 204"
+    );
+
+    authz.delete_service(svc.id).await.expect("cleanup service");
+}
+
+/// P4 Task 3: `PUT /policies/{id}/enabled` toggles `enabled` without touching
+/// the stored body, and `GET /policies/{id}` reflects the new `isEnabled`.
+#[tokio::test]
+async fn admin_can_toggle_policy_enabled() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "toggle", true).await;
+
+    let authz = egret_authz::AuthzStore::new(f.db.clone());
+    egret_authz::seed_trino(&authz)
+        .await
+        .expect("seed trino def");
+    let svc_name = format!("trino-{}", Uuid::new_v4().simple());
+    let svc = authz
+        .create_service(&svc_name, "trino", &serde_json::json!({}))
+        .await
+        .expect("create service");
+
+    let create = serde_json::json!({
+        "name": "p-toggle", "service": svc_name, "isEnabled": true,
+        "resources": {"catalog": {"values": ["iceberg"]}},
+        "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/policies", &token, Some(create)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "create policy; body={body}");
+    let id = body["id"].as_i64().expect("id in response");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/policies/{id}/enabled"),
+            &token,
+            Some(serde_json::json!({ "enabled": false })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "toggle policy enabled should return 204"
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("/policies/{id}"), &token, None))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "get policy; body={body}");
+    assert_eq!(
+        body["isEnabled"], false,
+        "policy should be disabled; body={body}"
+    );
+
+    authz.delete_service(svc.id).await.expect("cleanup service");
+}
+
+/// P3 Task 2: the same `POST /policies` / `PUT /policies/{id}` endpoints
+/// dispatch on `kind` to create Masking and Row-filter policies too.
+#[tokio::test]
+async fn admin_can_create_masking_and_rowfilter_policies() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "mrf", true).await;
+
+    let authz = egret_authz::AuthzStore::new(f.db.clone());
+    egret_authz::seed_trino(&authz)
+        .await
+        .expect("seed trino def");
+    let svc_name = format!("trino-{}", Uuid::new_v4().simple());
+    let svc = authz
+        .create_service(&svc_name, "trino", &serde_json::json!({}))
+        .await
+        .expect("create service");
+
+    let mask = serde_json::json!({
+        "kind": "masking", "name": "m1", "service": svc_name, "isEnabled": true,
+        "resources": {"catalog": {"values": ["c"]}, "schema": {"values": ["s"]},
+                       "table": {"values": ["t"]}, "column": {"values": ["email"]}},
+        "items": [{"groups": ["pii"], "maskType": "MASK_HASH"}]
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/policies", &token, Some(mask)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "create masking policy; body={body}");
+
+    let rf = serde_json::json!({
+        "kind": "rowfilter", "name": "r1", "service": svc_name, "isEnabled": true,
+        "resources": {"catalog": {"values": ["c"]}, "schema": {"values": ["s"]},
+                       "table": {"values": ["t"]}},
+        "items": [{"users": ["bob"], "filterExpr": "country = 'US'"}]
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/policies", &token, Some(rf)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "create rowfilter policy; body={body}"
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/policies?service={svc_name}&type=masking"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (_, masking_list) = into_json(resp).await;
+    assert_eq!(
+        masking_list.as_array().expect("array body").len(),
+        1,
+        "expected exactly one masking summary; body={masking_list}"
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/policies?service={svc_name}&type=rowfilter"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (_, rf_list) = into_json(resp).await;
+    assert_eq!(
+        rf_list.as_array().expect("array body").len(),
+        1,
+        "expected exactly one rowfilter summary; body={rf_list}"
+    );
+
+    authz.delete_service(svc.id).await.expect("cleanup service");
+}
+
+/// P3 Task 3: `GET /policies/services/{service}/trino-config` renders the
+/// access-control.properties + ranger-trino-security.xml bundle a Trino
+/// coordinator needs for the native ranger plugin.
+#[tokio::test]
+async fn admin_gets_trino_config_for_profile() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cfg", true).await;
+
+    let authz = egret_authz::AuthzStore::new(f.db.clone());
+    egret_authz::seed_trino(&authz)
+        .await
+        .expect("seed trino def");
+    let svc_name = format!("trino-{}", Uuid::new_v4().simple());
+    let svc = authz
+        .create_service(&svc_name, "trino", &serde_json::json!({}))
+        .await
+        .expect("create service");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/policies/services/{svc_name}/trino-config"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "trino-config; body={body}");
+    let files = body.as_array().expect("array body");
+    assert_eq!(files.len(), 2);
+    assert!(files
+        .iter()
+        .any(|f| f["name"] == "access-control.properties"
+            && f["content"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("ranger.service.name={svc_name}"))));
+    assert!(files
+        .iter()
+        .any(|f| f["name"] == "ranger-trino-security.xml"
+            && f["content"]
+                .as_str()
+                .unwrap()
+                .contains("ranger.plugin.trino.policy.rest.url")));
+
+    authz.delete_service(svc.id).await.expect("cleanup service");
+}
+
+/// P2 Task 3: `GET /principals` sources egret users (and groups) for the
+/// policy picker. `session_for` creates a `platform_admin` user, so at least
+/// one user principal always exists.
+#[tokio::test]
+async fn admin_can_list_principals() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "principals", true).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/principals?q=", &token, None))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list principals; body={body}");
+    let arr = body.as_array().expect("array body");
+    assert!(
+        arr.iter().any(|p| p["kind"] == "user"),
+        "expected at least one user principal; body={body}"
+    );
+}
+
+/// P4 Task 4: `GET /policies/resource-lookup` returns distinct values used in
+/// the service's existing policies, filtered by parent-level match.
+#[tokio::test]
+async fn platform_admin_can_lookup_resource_values() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "resource_lookup_admin", true).await;
+
+    let authz = egret_authz::AuthzStore::new(f.db.clone());
+    egret_authz::seed_trino(&authz)
+        .await
+        .expect("seed trino def");
+    let svc_name = format!("trino-{}", Uuid::new_v4().simple());
+    let svc = authz
+        .create_service(&svc_name, "trino", &serde_json::json!({}))
+        .await
+        .expect("create service");
+    authz
+        .create_policy(
+            svc.id,
+            "allow-analysts-select",
+            &serde_json::json!({
+                "name": "allow-analysts-select",
+                "policyType": 0,
+                "resources": {
+                    "catalog": {"values": ["iceberg"]},
+                    "schema":  {"values": ["sales"]}
+                },
+                "policyItems": [
+                    {"users": ["alice"], "accesses": [{"type": "select"}]}
+                ]
+            }),
+        )
+        .await
+        .expect("create policy");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/policies/resource-lookup?service={svc_name}&level=schema&catalog=iceberg"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "resource-lookup; body={body}");
+    let arr = body.as_array().expect("array body");
+    assert!(
+        arr.iter().any(|v| v == "sales"),
+        "expected 'sales' in schema suggestions; body={body}"
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/policies/resource-lookup?service={svc_name}&level=schema&catalog=other"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "resource-lookup; body={body}");
+    let arr = body.as_array().expect("array body");
+    assert!(
+        !arr.iter().any(|v| v == "sales"),
+        "parent-filter mismatch should exclude 'sales'; body={body}"
+    );
+
+    authz.delete_service(svc.id).await.expect("cleanup service");
+}
+
+/// The `resource-lookup` route is platform-admin-gated like every other
+/// `/policies` route.
+#[tokio::test]
+async fn non_admin_cannot_lookup_resource_values() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "resource_lookup_plain", false).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            "/policies/resource-lookup?service=whatever&level=catalog",
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a non platform-admin must not use resource-lookup"
+    );
 }

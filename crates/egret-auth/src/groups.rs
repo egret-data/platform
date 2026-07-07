@@ -4,6 +4,14 @@ use egret_core::{Result, UserId};
 use egret_metastore::Db;
 use uuid::Uuid;
 
+/// A stored group row (local or synced from OIDC).
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct Group {
+    pub id: Uuid,
+    pub name: String,
+    pub source: String,
+}
+
 #[derive(Clone)]
 pub struct GroupRepo {
     db: Db,
@@ -12,6 +20,15 @@ pub struct GroupRepo {
 impl GroupRepo {
     pub fn new(db: Db) -> Self {
         Self { db }
+    }
+
+    /// List groups (name-ordered) for the principal picker.
+    pub async fn list(&self, limit: i64) -> Result<Vec<Group>> {
+        sqlx::query_as::<_, Group>("SELECT id, name, source FROM groups ORDER BY name LIMIT $1")
+            .bind(limit)
+            .fetch_all(&self.db.pool)
+            .await
+            .map_err(db_err)
     }
 
     /// Insert (source='oidc') or return the existing group id by name.
