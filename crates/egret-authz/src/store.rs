@@ -118,6 +118,16 @@ impl AuthzStore {
         }
         Ok(())
     }
+
+    /// Total policy count per service (service_id -> count), for the profiles list.
+    pub async fn policy_counts(&self) -> Result<std::collections::HashMap<i64, i64>, AuthzError> {
+        let rows = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT service_id, count(*) FROM authz_policies GROUP BY service_id",
+        )
+        .fetch_all(&self.db.pool)
+        .await?;
+        Ok(rows.into_iter().collect())
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]

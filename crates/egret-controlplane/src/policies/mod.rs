@@ -167,6 +167,7 @@ pub struct ProfileDto {
     pub name: String,
     pub r#type: String,
     pub policy_version: i64,
+    pub policy_count: i64,
     pub engines: Vec<ProfileEngine>,
 }
 
@@ -346,6 +347,7 @@ async fn list_profiles(
 ) -> Result<Json<Vec<ProfileDto>>, CpError> {
     require_platform_admin(&p)?;
     let engines = st.storage.list_engines().await?;
+    let counts = st.authz.policy_counts().await?;
     let profiles = st
         .authz
         .list_services()
@@ -361,6 +363,7 @@ async fn list_profiles(
                     status: e.status.clone(),
                 })
                 .collect(),
+            policy_count: counts.get(&s.id).copied().unwrap_or(0),
             id: s.id,
             name: s.name,
             r#type: s.r#type,

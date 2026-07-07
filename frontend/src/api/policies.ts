@@ -26,6 +26,7 @@ export interface Profile {
   name: string;
   type: string;
   policy_version: number;
+  policy_count: number;
   engines: ProfileEngine[];
 }
 

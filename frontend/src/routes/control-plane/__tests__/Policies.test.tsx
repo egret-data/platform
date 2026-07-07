@@ -12,6 +12,7 @@ vi.mock("@/api/policies", () => ({
         name: "trino",
         type: "hive",
         policy_version: 3,
+        policy_count: 3,
         engines: [{ id: "e1", name: "prod", status: "running" }],
       },
       {
@@ -19,6 +20,7 @@ vi.mock("@/api/policies", () => ({
         name: "starrocks",
         type: "olap",
         policy_version: 1,
+        policy_count: 0,
         engines: [],
       },
     ]),
@@ -65,5 +67,12 @@ describe("Policies page (profiles landing)", () => {
     wrap(<Policies />);
     await screen.findByRole("link", { name: "trino" });
     expect(screen.getByText("v3")).toBeInTheDocument();
+  });
+
+  it("renders the policy count badge", async () => {
+    wrap(<Policies />);
+    await screen.findByRole("link", { name: "trino" });
+    expect(screen.getByText("3")).toBeInTheDocument();
+    expect(screen.getByText("0")).toBeInTheDocument();
   });
 });

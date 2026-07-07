@@ -1,10 +1,12 @@
-import { Link } from "react-router-dom";
+import { useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ShieldCheck } from "lucide-react";
+import { Download, ShieldCheck } from "lucide-react";
 import { type Profile, listProfiles } from "@/api/policies";
 import { ApiError } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -20,6 +22,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { TrinoConfigDialog } from "@/components/policy/TrinoConfigDialog";
 
 /**
  * Control Plane → Policies (drill-down L1: Profiles landing).
@@ -30,6 +33,8 @@ import {
  * editor navigation now live there — this page is just the index.
  */
 export default function Policies() {
+  const navigate = useNavigate();
+  const [configTarget, setConfigTarget] = useState<string | null>(null);
   const profiles = useQuery<Profile[], ApiError>({
     queryKey: ["control-plane", "profiles"],
     queryFn: listProfiles,
@@ -65,11 +70,19 @@ export default function Policies() {
                   <TableHead>Type</TableHead>
                   <TableHead>Engines</TableHead>
                   <TableHead>Version</TableHead>
+                  <TableHead>Policies</TableHead>
+                  <TableHead>Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {rows.map((p) => (
-                  <TableRow key={p.id}>
+                  <TableRow
+                    key={p.id}
+                    className="cursor-pointer hover:bg-muted/50"
+                    onClick={() =>
+                      navigate(`/control-plane/policies/${encodeURIComponent(p.name)}`)
+                    }
+                  >
                     <TableCell>
                       <Link
                         to={`/control-plane/policies/${encodeURIComponent(p.name)}`}
@@ -91,12 +104,33 @@ export default function Policies() {
                     <TableCell className="text-muted-foreground">
                       v{p.policy_version}
                     </TableCell>
+                    <TableCell>
+                      <Badge
+                        variant="secondary"
+                        className={p.policy_count === 0 ? "text-muted-foreground" : undefined}
+                      >
+                        {p.policy_count}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        title="Download config"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setConfigTarget(p.name);
+                        }}
+                      >
+                        <Download className="h-4 w-4" />
+                      </Button>
+                    </TableCell>
                   </TableRow>
                 ))}
                 {rows.length === 0 && (
                   <TableRow className="hover:bg-transparent">
                     <TableCell
-                      colSpan={4}
+                      colSpan={6}
                       className="text-center text-muted-foreground"
                     >
                       {profiles.isLoading ? "Loading…" : "No profiles yet."}
@@ -108,6 +142,13 @@ export default function Policies() {
           )}
         </CardContent>
       </Card>
+      {configTarget && (
+        <TrinoConfigDialog
+          open
+          service={configTarget}
+          onOpenChange={(o) => !o && setConfigTarget(null)}
+        />
+      )}
     </div>
   );
 }
