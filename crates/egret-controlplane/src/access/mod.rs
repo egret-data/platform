@@ -10,11 +10,14 @@
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
+use egret_auth::roles::is_seeded;
+use egret_core::rbac;
 use egret_core::UserId;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::auth::require_permission;
@@ -42,6 +45,10 @@ pub fn router() -> Router<CpState> {
         )
         .route("/groups/{id}/roles", post(assign_group_role))
         .route("/groups/{id}/roles/{role_id}", delete(unassign_group_role))
+        .route("/access/roles", get(list_roles).post(create_role))
+        .route("/access/roles/{id}", patch(update_role).delete(delete_role))
+        .route("/access/roles/{id}/permissions", put(set_role_permissions))
+        .route("/permissions", get(list_permissions))
 }
 
 /// Reject removing a role assignment that holds the last `platform_admin`
@@ -367,4 +374,190 @@ async fn unassign_group_role(
     guard_last_admin(&st, role_id).await?;
     st.roles.unassign("group", id, role_id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------- Roles ----------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleDto {
+    pub id: Uuid,
+    pub scope: String,
+    pub name: String,
+    pub description: String,
+    pub permission_count: i64,
+    pub assignee_count: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateRoleInput {
+    scope: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateRoleInput {
+    description: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetPermissionsInput {
+    permissions: Vec<String>,
+}
+
+async fn list_roles(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+) -> Result<Json<Vec<RoleDto>>, CpError> {
+    require_permission(&p, "role:read")?;
+    let roles = st.roles.list().await?;
+    let mut out = Vec::with_capacity(roles.len());
+    for r in roles {
+        let permission_count = st.roles.permissions_of(r.id).await?.len() as i64;
+        let assignee_count = st.roles.assignees_of(r.id).await?.len() as i64;
+        out.push(RoleDto {
+            id: r.id,
+            scope: r.scope,
+            name: r.name,
+            description: r.description,
+            permission_count,
+            assignee_count,
+        });
+    }
+    Ok(Json(out))
+}
+
+async fn create_role(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Json(body): Json<CreateRoleInput>,
+) -> Result<(StatusCode, Json<RoleDto>), CpError> {
+    require_permission(&p, "role:create")?;
+    if body.scope != "platform" && body.scope != "workspace" {
+        return Err(CpError::BadRequest(format!(
+            "invalid scope: {}",
+            body.scope
+        )));
+    }
+    let id = st
+        .roles
+        .create(&body.scope, &body.name, &body.description)
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(RoleDto {
+            id,
+            scope: body.scope,
+            name: body.name,
+            description: body.description,
+            permission_count: 0,
+            assignee_count: 0,
+        }),
+    ))
+}
+
+async fn update_role(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UpdateRoleInput>,
+) -> Result<Json<RoleDto>, CpError> {
+    require_permission(&p, "role:update")?;
+    st.roles.get(id).await?.ok_or(CpError::NotFound)?;
+    st.roles.update_description(id, &body.description).await?;
+    let role = st.roles.get(id).await?.ok_or(CpError::NotFound)?;
+    let permission_count = st.roles.permissions_of(id).await?.len() as i64;
+    let assignee_count = st.roles.assignees_of(id).await?.len() as i64;
+    Ok(Json(RoleDto {
+        id: role.id,
+        scope: role.scope,
+        name: role.name,
+        description: role.description,
+        permission_count,
+        assignee_count,
+    }))
+}
+
+async fn delete_role(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, CpError> {
+    require_permission(&p, "role:delete")?;
+    let role = st.roles.get(id).await?.ok_or(CpError::NotFound)?;
+    if is_seeded(&role.name) {
+        return Err(CpError::Conflict(
+            "Seeded roles cannot be deleted".to_string(),
+        ));
+    }
+    st.roles.delete(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn set_role_permissions(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(body): Json<SetPermissionsInput>,
+) -> Result<StatusCode, CpError> {
+    require_permission(&p, "role:assign_permission")?;
+    for key in &body.permissions {
+        if !rbac::is_known(key) {
+            return Err(CpError::BadRequest(format!("unknown permission: {key}")));
+        }
+    }
+    st.roles.set_permissions(id, &body.permissions).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------- Permission catalog ----------
+
+#[derive(Debug, Serialize)]
+pub struct PermissionDto {
+    pub key: &'static str,
+    pub description: &'static str,
+    pub roles: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PermissionGroupDto {
+    pub group: &'static str,
+    pub permissions: Vec<PermissionDto>,
+}
+
+/// `GET /permissions` — the code-defined catalog (`egret_core::rbac`), each
+/// permission annotated with the role names that currently grant it.
+async fn list_permissions(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+) -> Result<Json<Vec<PermissionGroupDto>>, CpError> {
+    require_permission(&p, "role:read")?;
+    let pairs = st.roles.permission_role_pairs().await?;
+    let mut roles_by_perm: HashMap<String, Vec<String>> = HashMap::new();
+    for (permission, role_name) in pairs {
+        roles_by_perm.entry(permission).or_default().push(role_name);
+    }
+
+    let out = rbac::groups()
+        .into_iter()
+        .map(|group| {
+            let permissions = rbac::PERMISSIONS
+                .iter()
+                .filter(|perm| perm.group == group)
+                .map(|perm| {
+                    let mut roles = roles_by_perm.get(perm.key).cloned().unwrap_or_default();
+                    roles.sort();
+                    PermissionDto {
+                        key: perm.key,
+                        description: perm.description,
+                        roles,
+                    }
+                })
+                .collect();
+            PermissionGroupDto { group, permissions }
+        })
+        .collect();
+    Ok(Json(out))
 }

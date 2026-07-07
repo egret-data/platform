@@ -95,6 +95,19 @@ impl RoleRepo {
         .map_err(db_err)
     }
 
+    /// Every granted `(permission, role name)` pair across all roles — the raw
+    /// join `GET /permissions` groups in Rust to attach each catalog
+    /// permission's granting role names.
+    pub async fn permission_role_pairs(&self) -> Result<Vec<(String, String)>> {
+        sqlx::query_as(
+            "SELECT rp.permission, r.name FROM role_permissions rp \
+             JOIN roles r ON r.id = rp.role_id",
+        )
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)
+    }
+
     /// Count of principal assignments to the `platform_admin` role, used to
     /// guard against removing the last platform admin.
     pub async fn count_platform_admins(&self) -> Result<i64> {
@@ -109,16 +122,23 @@ impl RoleRepo {
     }
 
     /// Create a new role; returns its id.
+    /// Errors with `Conflict` if a role with the same `(scope, name)` already exists.
     pub async fn create(&self, scope: &str, name: &str, description: &str) -> Result<Uuid> {
-        sqlx::query_scalar(
+        let res = sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO roles (scope, name, description) VALUES ($1, $2, $3) RETURNING id",
         )
         .bind(scope)
         .bind(name)
         .bind(description)
         .fetch_one(&self.db.pool)
-        .await
-        .map_err(db_err)
+        .await;
+        match res {
+            Ok(id) => Ok(id),
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Err(
+                egret_core::Error::Conflict(format!("role already exists: {scope}/{name}")),
+            ),
+            Err(e) => Err(db_err(e)),
+        }
     }
 
     /// Update a role's description (name/scope are immutable after creation).
