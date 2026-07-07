@@ -3216,3 +3216,108 @@ async fn scoped_permission_policies_read_and_create() {
 
     authz.delete_service(svc.id).await.expect("cleanup service");
 }
+
+/// Monitor: every route in `monitor.rs` is gated on `engine:read` (monitoring
+/// is read-only cluster/query observation, even `kill_query`'s DELETE verb).
+/// Proves enforcement on both `/queries` (list) and `/cluster` (aggregate).
+#[tokio::test]
+async fn scoped_permission_monitor_queries_and_cluster() {
+    let fake = MonitorFakeProvisioner::default();
+    let Some(f) = setup_full(None, Some(Arc::new(fake.clone()))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin_token = session_for(&f, "monitor_scoped_setup", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &admin_token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    fake.set(200, b"[]");
+
+    let wrong = session_for_with_permission(&f, "monitor_scoped_wrong", "warehouse:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/queries"),
+            &wrong,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without engine:read must not list queries"
+    );
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/cluster"),
+            &wrong,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without engine:read must not fetch cluster state"
+    );
+
+    let reader = session_for_with_permission(&f, "monitor_scoped_reader", "engine:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/queries"),
+            &reader,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a scoped engine:read principal must list queries; body={body}"
+    );
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/cluster"),
+            &reader,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a scoped engine:read principal must fetch cluster state; body={body}"
+    );
+}
