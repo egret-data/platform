@@ -48,6 +48,20 @@ type ExceptionKey = "allowExceptions" | "denyExceptions";
 
 const DEFAULT_ACCESS_TYPES = ["select", "insert", "delete", "update", "create", "drop"];
 
+// Clusters the Trino access types into labeled groups so the access-item
+// checkbox grid reads as sections instead of one flat wrapping list. Any
+// service-def access type not covered here (and not "all", which gets its
+// own full-width toggle) falls back into a trailing "Other" bucket — see
+// `AccessItemRow`.
+const ACCESS_TYPE_GROUPS: { label: string; types: string[] }[] = [
+  { label: "Read", types: ["select", "show", "read_sysinfo"] },
+  { label: "Write", types: ["insert", "update", "delete", "write_sysinfo"] },
+  { label: "DDL", types: ["create", "drop", "alter"] },
+  { label: "Grant", types: ["grant", "revoke"] },
+  { label: "Other", types: ["use", "impersonate", "execute"] },
+];
+const ALL_GROUPED_ACCESS_TYPES = new Set(ACCESS_TYPE_GROUPS.flatMap((g) => g.types));
+
 const emptyLevel = () => ({ values: [] as string[], isExcludes: false, isRecursive: false });
 const emptyAccessItem = (effect: "allow" | "deny" = "allow"): AccessItem => ({
   users: [],
@@ -217,6 +231,31 @@ function AccessItemRow({
   onChange,
   onRemove,
 }: AccessItemRowProps) {
+  const toggleAccess = (a: string, c: boolean) =>
+    onChange({
+      accesses: c ? [...item.accesses, a] : item.accesses.filter((x) => x !== a),
+    });
+
+  // Intersect each group's types with what the service def actually exposes
+  // (skip empty groups), then bucket any def types not covered by any group
+  // into a trailing "Other" section. "all" (grant-everything) is rendered
+  // separately below, not as part of any group.
+  const groups = ACCESS_TYPE_GROUPS.map((g) => ({
+    label: g.label,
+    types: g.types.filter((t) => accessTypes.includes(t)),
+  })).filter((g) => g.types.length > 0);
+
+  const ungrouped = accessTypes.filter(
+    (t) => t !== "all" && !ALL_GROUPED_ACCESS_TYPES.has(t),
+  );
+  if (ungrouped.length > 0) {
+    const other = groups.find((g) => g.label === "Other");
+    if (other) other.types = [...other.types, ...ungrouped];
+    else groups.push({ label: "Other", types: ungrouped });
+  }
+
+  const hasAll = accessTypes.includes("all");
+
   return (
     <div className="space-y-2 rounded-md border p-3">
       <div className="flex items-start justify-between gap-2">
@@ -231,22 +270,34 @@ function AccessItemRow({
           <Trash2 className="h-4 w-4 text-muted-foreground" />
         </button>
       </div>
-      <div className="flex flex-wrap gap-3">
-        {accessTypes.map((a) => (
-          <label key={a} className="flex items-center gap-1.5 text-sm">
-            <Checkbox
-              checked={item.accesses.includes(a)}
-              onCheckedChange={(c) =>
-                onChange({
-                  accesses: c
-                    ? [...item.accesses, a]
-                    : item.accesses.filter((x) => x !== a),
-                })
-              }
-            />
-            {a}
-          </label>
+      <div className="space-y-2">
+        {groups.map((g) => (
+          <div key={g.label}>
+            <span className="text-xs text-muted-foreground">{g.label}</span>
+            <div className="flex flex-wrap gap-3">
+              {g.types.map((a) => (
+                <label key={a} className="flex items-center gap-1.5 text-sm">
+                  <Checkbox
+                    aria-label={a}
+                    checked={item.accesses.includes(a)}
+                    onCheckedChange={(c) => toggleAccess(a, c === true)}
+                  />
+                  {a}
+                </label>
+              ))}
+            </div>
+          </div>
         ))}
+        {hasAll && (
+          <label className="flex w-full items-center gap-1.5 text-sm">
+            <Checkbox
+              aria-label="all"
+              checked={item.accesses.includes("all")}
+              onCheckedChange={(c) => toggleAccess("all", c === true)}
+            />
+            All (grant everything)
+          </label>
+        )}
       </div>
     </div>
   );
@@ -696,7 +747,27 @@ export default function PolicyEditorPage() {
                         </div>
                         {form.items.map((it: MaskItem, i: number) => (
                           <div key={i} className="space-y-2 rounded-md border p-3">
-                            <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex-1 space-y-1.5">
+                                <span className="text-xs text-muted-foreground">Principals</span>
+                                <PrincipalPicker
+                                  users={it.users}
+                                  groups={it.groups}
+                                  onChange={(p) => setItem(i, p)}
+                                />
+                              </div>
+                              {form.items.length > 1 && (
+                                <button
+                                  type="button"
+                                  aria-label={`remove item ${i}`}
+                                  onClick={() => removeItem(i)}
+                                >
+                                  <Trash2 className="h-4 w-4 text-muted-foreground" />
+                                </button>
+                              )}
+                            </div>
+                            <div className="space-y-1.5">
+                              <FieldLabel label="Mask type" />
                               <Select
                                 value={it.maskType}
                                 onValueChange={(v) => setItem(i, { maskType: v })}
@@ -712,29 +783,18 @@ export default function PolicyEditorPage() {
                                   ))}
                                 </SelectContent>
                               </Select>
-                              {form.items.length > 1 && (
-                                <button
-                                  type="button"
-                                  aria-label={`remove item ${i}`}
-                                  onClick={() => removeItem(i)}
-                                >
-                                  <Trash2 className="h-4 w-4 text-muted-foreground" />
-                                </button>
-                              )}
                             </div>
                             {it.maskType === "CUSTOM" && (
-                              <Input
-                                aria-label={`value expr ${i}`}
-                                placeholder="cast(... {col} ...) as {type}"
-                                value={it.valueExpr ?? ""}
-                                onChange={(e) => setItem(i, { valueExpr: e.target.value })}
-                              />
+                              <div className="space-y-1.5">
+                                <FieldLabel label="Custom expression" />
+                                <Input
+                                  aria-label={`value expr ${i}`}
+                                  placeholder="cast(... {col} ...) as {type}"
+                                  value={it.valueExpr ?? ""}
+                                  onChange={(e) => setItem(i, { valueExpr: e.target.value })}
+                                />
+                              </div>
                             )}
-                            <PrincipalPicker
-                              users={it.users}
-                              groups={it.groups}
-                              onChange={(p) => setItem(i, p)}
-                            />
                           </div>
                         ))}
                       </CardContent>
@@ -755,13 +815,15 @@ export default function PolicyEditorPage() {
                         </div>
                         {form.items.map((it: RowFilterItem, i: number) => (
                           <div key={i} className="space-y-2 rounded-md border p-3">
-                            <div className="flex items-center justify-between gap-2">
-                              <Input
-                                aria-label={`filter ${i}`}
-                                placeholder="e.g. country = 'US'"
-                                value={it.filterExpr}
-                                onChange={(e) => setItem(i, { filterExpr: e.target.value })}
-                              />
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex-1 space-y-1.5">
+                                <span className="text-xs text-muted-foreground">Principals</span>
+                                <PrincipalPicker
+                                  users={it.users}
+                                  groups={it.groups}
+                                  onChange={(p) => setItem(i, p)}
+                                />
+                              </div>
                               {form.items.length > 1 && (
                                 <button
                                   type="button"
@@ -772,11 +834,15 @@ export default function PolicyEditorPage() {
                                 </button>
                               )}
                             </div>
-                            <PrincipalPicker
-                              users={it.users}
-                              groups={it.groups}
-                              onChange={(p) => setItem(i, p)}
-                            />
+                            <div className="space-y-1.5">
+                              <FieldLabel label="Filter expression" />
+                              <Input
+                                aria-label={`filter ${i}`}
+                                placeholder="e.g. country = 'US'"
+                                value={it.filterExpr}
+                                onChange={(e) => setItem(i, { filterExpr: e.target.value })}
+                              />
+                            </div>
                           </div>
                         ))}
                       </CardContent>
