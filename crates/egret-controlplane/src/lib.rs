@@ -58,6 +58,8 @@ pub struct CpState {
     /// Identity lookups for the policy principal picker.
     pub users: egret_auth::users::UserRepo,
     pub groups: egret_auth::groups::GroupRepo,
+    /// Platform RBAC roles, permissions, and principal assignments.
+    pub roles: egret_auth::roles::RoleRepo,
     /// Named secret layer, used in GLOBAL scope (`None` workspace) here.
     pub secrets: WorkspaceSecretStore,
     /// Session service backing the `Auth` extractor.

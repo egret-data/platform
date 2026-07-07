@@ -69,6 +69,7 @@ async fn setup_full(
         authz: egret_authz::AuthzStore::new(db.clone()),
         users: users.clone(),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
+        roles: egret_auth::roles::RoleRepo::new(db.clone()),
         secrets: workspace_secrets,
         sessions: sessions.clone(),
         provisioner: None,

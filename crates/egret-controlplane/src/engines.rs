@@ -2904,6 +2904,7 @@ mod tests {
             authz: egret_authz::AuthzStore::new(db.clone()),
             users: egret_auth::users::UserRepo::new(db.clone()),
             groups: egret_auth::groups::GroupRepo::new(db.clone()),
+            roles: egret_auth::roles::RoleRepo::new(db.clone()),
             secrets: workspace_secrets,
             sessions: egret_auth::session::SessionService::new(
                 db.clone(),
