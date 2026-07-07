@@ -1246,6 +1246,18 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .context("connecting to database")?;
     db.migrate().await.context("running migrations on boot")?;
 
+    // Warn (do not fail) if any stored role permission is unknown to the catalog —
+    // catches drift between the DB and egret_core::rbac.
+    if let Ok(rows) =
+        sqlx::query_scalar::<_, String>("SELECT DISTINCT permission FROM role_permissions")
+            .fetch_all(&db.pool)
+            .await
+    {
+        for perm in rows.iter().filter(|p| !egret_core::rbac::is_known(p)) {
+            tracing::warn!(permission = %perm, "role_permissions references a permission not in the catalog");
+        }
+    }
+
     let users = UserRepo::new(db.clone());
     let sessions = SessionService::new(
         db.clone(),
