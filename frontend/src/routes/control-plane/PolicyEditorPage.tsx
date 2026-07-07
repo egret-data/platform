@@ -8,6 +8,7 @@ import {
   type MaskItem,
   type RowFilterItem,
   type ServiceDef,
+  type ServiceDefResource,
   MASK_TYPES,
   createPolicy,
   deletePolicy,
@@ -353,6 +354,21 @@ export default function PolicyEditorPage() {
   });
   const accessTypes = def.data?.accessTypes?.map((a) => a.name) ?? DEFAULT_ACCESS_TYPES;
 
+  // Lookup of per-level resource flags (Exclude/Recursive support, mandatory)
+  // from the fetched Trino service-def. Before the def loads (or for
+  // masking/rowfilter kinds, which don't fetch it), fall back to Trino's
+  // known shape: excludesSupported + mandatory on every level, no recursive
+  // support anywhere — so the UI is sane even without the def in hand.
+  const resFlags = (def.data?.resources ?? []).reduce(
+    (m, r) => {
+      m[r.name] = r;
+      return m;
+    },
+    {} as Record<string, ServiceDefResource>,
+  );
+  const levelFlags = (lvl: string): ServiceDefResource =>
+    resFlags[lvl] ?? { name: lvl, excludesSupported: true, recursiveSupported: false, mandatory: true };
+
   const profileUrl = `/control-plane/policies/${encodeURIComponent(service)}`;
 
   const save = useMutation<{ id: number }, ApiError>({
@@ -432,6 +448,12 @@ export default function PolicyEditorPage() {
     kind === "rowfilter"
       ? (["catalog", "schema", "table"] as const)
       : (["catalog", "schema", "table", "column"] as const);
+
+  // Resource levels the current service-def marks mandatory but that are
+  // still empty — blocks Save and drives the per-level "Required" state.
+  const missingRequired = levels.filter(
+    (lvl) => levelFlags(lvl).mandatory && form.resources[lvl].values.length === 0,
+  );
 
   const kindTitle =
     kind === "masking" ? "Masking" : kind === "rowfilter" ? "Row filter" : "Permissions";
@@ -522,7 +544,7 @@ export default function PolicyEditorPage() {
               type="button"
               size="sm"
               onClick={() => save.mutate()}
-              disabled={save.isPending || !form.name.trim()}
+              disabled={save.isPending || !form.name.trim() || missingRequired.length > 0}
             >
               {save.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
               Save
@@ -587,9 +609,18 @@ export default function PolicyEditorPage() {
                         onChange={(v) =>
                           setForm((f: any) => ({ ...f, resources: { ...f.resources, [lvl]: v } }))
                         }
+                        excludesSupported={levelFlags(lvl).excludesSupported ?? true}
+                        recursiveSupported={levelFlags(lvl).recursiveSupported ?? false}
+                        mandatory={levelFlags(lvl).mandatory ?? false}
+                        invalid={missingRequired.includes(lvl)}
                       />
                     ))}
                   </div>
+                  {missingRequired.length > 0 && (
+                    <p className="text-xs text-muted-foreground">
+                      Fill the required resource levels.
+                    </p>
+                  )}
                 </ConfigSection>
               )}
 

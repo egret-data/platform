@@ -14,10 +14,26 @@ describe("ResourceLevelEditor", () => {
   it("shows values and toggles exclude", () => {
     const onChange = vi.fn();
     wrap(<ResourceLevelEditor label="Schema" level="schema" service="trino" parents={{}}
-      value={{ values: ["sales"], isExcludes: false, isRecursive: false }} onChange={onChange} />);
+      value={{ values: ["sales"], isExcludes: false, isRecursive: false }} onChange={onChange}
+      excludesSupported />);
     expect(screen.getByText("sales")).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Advanced Schema"));
     fireEvent.click(screen.getByLabelText("Exclude Schema"));
     expect(onChange).toHaveBeenCalled();
+  });
+
+  it("hides the Recursive switch when the service-def doesn't support it", () => {
+    wrap(<ResourceLevelEditor label="Schema" level="schema" service="trino" parents={{}}
+      value={{ values: ["sales"], isExcludes: false, isRecursive: false }} onChange={vi.fn()}
+      excludesSupported recursiveSupported={false} />);
+    fireEvent.click(screen.getByLabelText("Advanced Schema"));
+    expect(screen.queryByLabelText("Recursive Schema")).not.toBeInTheDocument();
+  });
+
+  it("hides the Advanced gear entirely when neither Exclude nor Recursive is supported", () => {
+    wrap(<ResourceLevelEditor label="Schema" level="schema" service="trino" parents={{}}
+      value={{ values: ["sales"], isExcludes: false, isRecursive: false }} onChange={vi.fn()}
+      excludesSupported={false} recursiveSupported={false} />);
+    expect(screen.queryByLabelText("Advanced Schema")).not.toBeInTheDocument();
   });
 });

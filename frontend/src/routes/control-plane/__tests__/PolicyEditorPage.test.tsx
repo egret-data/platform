@@ -24,7 +24,16 @@ vi.mock("@/api/policies", async (orig) => ({
   updatePolicy: (id: number, i: unknown) => updatePolicy(id, i),
   deletePolicy: () => deletePolicy(),
   getPolicy: () => getPolicy(),
-  getServiceDef: () => Promise.resolve({ accessTypes: [{ name: "select" }, { name: "insert" }] }),
+  getServiceDef: () =>
+    Promise.resolve({
+      accessTypes: [{ name: "select" }, { name: "insert" }],
+      resources: [
+        { name: "catalog", excludesSupported: true, mandatory: true },
+        { name: "schema", excludesSupported: true, mandatory: false },
+        { name: "table", excludesSupported: true, mandatory: false },
+        { name: "column", excludesSupported: true, mandatory: false },
+      ],
+    }),
   listPrincipals: () => Promise.resolve([]),
   resourceLookup: () => Promise.resolve([]),
 }));
@@ -61,6 +70,11 @@ describe("PolicyEditorPage", () => {
     fireEvent.change(catalogInput, { target: { value: "iceberg" } });
     fireEvent.keyDown(catalogInput, { key: "Enter" });
 
+    // Catalog is mandatory per the mocked service-def; Save stays disabled
+    // until both the def has loaded and catalog is filled.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^save$/i })).not.toBeDisabled(),
+    );
     fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
     await waitFor(() => expect(createPolicy).toHaveBeenCalled());
 

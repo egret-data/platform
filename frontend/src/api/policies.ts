@@ -59,9 +59,16 @@ export interface AccessPolicyInput {
 
 export interface Principal { kind: "user" | "group"; name: string; label: string; }
 
+export interface ServiceDefResource {
+  name: string;
+  excludesSupported?: boolean;
+  recursiveSupported?: boolean;
+  mandatory?: boolean;
+}
+
 export interface ServiceDef {
   accessTypes?: { name: string; label?: string }[];
-  resources?: { name: string }[];
+  resources?: ServiceDefResource[];
   [k: string]: unknown;
 }
 
