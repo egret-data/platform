@@ -142,4 +142,15 @@ describe("PolicyEditorPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /row filter/i }));
     expect(screen.getByLabelText("filter 0")).toBeInTheDocument();
   });
+
+  it("renders the Override switch (unchecked by default) in the Details section", async () => {
+    wrap(<PolicyEditorPage />);
+    await screen.findByLabelText("Policy name");
+    // Override lives under the "Details" left-nav section (a plain button,
+    // unmounted by default — Resource is the default section).
+    fireEvent.click(screen.getByRole("button", { name: /details/i }));
+    const override = screen.getByLabelText("Override") as HTMLElement;
+    expect(override).toBeInTheDocument();
+    expect(override).not.toBeChecked();
+  });
 });

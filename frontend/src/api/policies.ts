@@ -55,6 +55,7 @@ export interface AccessPolicyInput {
   isDenyAllElse: boolean;
   description: string;
   labels: string[];
+  isOverride: boolean;
 }
 
 export interface Principal { kind: "user" | "group"; name: string; label: string; }
@@ -94,6 +95,7 @@ export interface MaskingPolicyInput {
   items: MaskItem[];
   description: string;
   labels: string[];
+  isOverride: boolean;
 }
 export interface RowFilterItem { users: string[]; groups: string[]; filterExpr: string; }
 export interface RowFilterPolicyInput {
@@ -103,6 +105,7 @@ export interface RowFilterPolicyInput {
   items: RowFilterItem[];
   description: string;
   labels: string[];
+  isOverride: boolean;
 }
 export type PolicyInput = (AccessPolicyInput & { kind: "access" }) | MaskingPolicyInput | RowFilterPolicyInput;
 

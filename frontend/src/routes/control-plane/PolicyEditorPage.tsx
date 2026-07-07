@@ -102,6 +102,7 @@ function blankInput(kind: PolicyKind, service: string): any {
       items: [emptyMaskItem()],
       description: "",
       labels: [],
+      isOverride: false,
     };
   }
   if (kind === "rowfilter") {
@@ -114,6 +115,7 @@ function blankInput(kind: PolicyKind, service: string): any {
       items: [emptyRowFilterItem()],
       description: "",
       labels: [],
+      isOverride: false,
     };
   }
   return {
@@ -133,6 +135,7 @@ function blankInput(kind: PolicyKind, service: string): any {
     isDenyAllElse: false,
     description: "",
     labels: [],
+    isOverride: false,
   };
 }
 
@@ -170,6 +173,7 @@ function toFormState(kind: PolicyKind, service: string, body: Record<string, any
       items: items.length ? items : [emptyMaskItem()],
       description: String(body.description ?? ""),
       labels: body.labels ?? [],
+      isOverride: body.policyPriority === 1,
     };
   }
 
@@ -188,6 +192,7 @@ function toFormState(kind: PolicyKind, service: string, body: Record<string, any
       items: items.length ? items : [emptyRowFilterItem()],
       description: String(body.description ?? ""),
       labels: body.labels ?? [],
+      isOverride: body.policyPriority === 1,
     };
   }
 
@@ -216,6 +221,7 @@ function toFormState(kind: PolicyKind, service: string, body: Record<string, any
     isDenyAllElse: body.isDenyAllElse === true,
     description: String(body.description ?? ""),
     labels: body.policyLabels ?? [],
+    isOverride: body.policyPriority === 1,
   };
 }
 
@@ -887,6 +893,20 @@ export default function PolicyEditorPage() {
                           setForm((f: any) => ({ ...f, description: e.target.value }))
                         }
                       />
+                    </div>
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-4">
+                        <FieldLabel label="Override" htmlFor="policy-override" />
+                        <Switch
+                          id="policy-override"
+                          aria-label="Override"
+                          checked={form.isOverride}
+                          onCheckedChange={(c) => setForm((f: any) => ({ ...f, isOverride: c }))}
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        This policy&apos;s allow/deny wins over conflicting normal policies.
+                      </p>
                     </div>
                     <div className="space-y-1.5">
                       <FieldLabel label="Labels" htmlFor="policy-labels" />

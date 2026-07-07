@@ -76,6 +76,8 @@ pub struct AccessPolicyInput {
     pub description: String,
     #[serde(default)]
     pub labels: Vec<String>,
+    #[serde(default, rename = "isOverride")]
+    pub is_override: bool,
 }
 
 fn resource_obj(l: &ResourceLevel) -> Value {
@@ -135,6 +137,7 @@ pub fn access_to_ranger_json(input: &AccessPolicyInput) -> Value {
         "allowExceptions": allow_exc,
         "denyExceptions": deny_exc,
         "isDenyAllElse": deny_all,
+        "policyPriority": if input.is_override { 1 } else { 0 },
     })
 }
 
@@ -166,6 +169,8 @@ pub struct MaskingPolicyInput {
     pub description: String,
     #[serde(default)]
     pub labels: Vec<String>,
+    #[serde(default, rename = "isOverride")]
+    pub is_override: bool,
 }
 
 fn kind_masking() -> String {
@@ -207,6 +212,7 @@ pub fn masking_to_ranger_json(input: &MaskingPolicyInput) -> Value {
         "resources": Value::Object(resources),
         "dataMaskPolicyItems": input.items.iter().map(mask_item_obj).collect::<Vec<_>>(),
         "policyItems": [], "denyPolicyItems": [],
+        "policyPriority": if input.is_override { 1 } else { 0 },
     })
 }
 
@@ -246,6 +252,8 @@ pub struct RowFilterPolicyInput {
     pub description: String,
     #[serde(default)]
     pub labels: Vec<String>,
+    #[serde(default, rename = "isOverride")]
+    pub is_override: bool,
 }
 
 fn kind_rowfilter() -> String {
@@ -279,6 +287,7 @@ pub fn rowfilter_to_ranger_json(input: &RowFilterPolicyInput) -> Value {
         "resources": Value::Object(resources),
         "rowFilterPolicyItems": input.items.iter().map(rowfilter_item_obj).collect::<Vec<_>>(),
         "policyItems": [], "denyPolicyItems": [],
+        "policyPriority": if input.is_override { 1 } else { 0 },
     })
 }
 
@@ -491,6 +500,17 @@ mod tests {
         assert!(s.permissions.contains(&"insert".to_string()));
         assert_eq!(s.description, "d");
         assert_eq!(s.labels, vec!["l1".to_string()]);
+    }
+
+    #[test]
+    fn serializes_override_priority() {
+        let mut inp = sample();
+        inp.is_override = true;
+        let body = access_to_ranger_json(&inp);
+        assert_eq!(body["policyPriority"], 1);
+
+        let default_body = access_to_ranger_json(&sample());
+        assert_eq!(default_body["policyPriority"], 0);
     }
 
     #[test]
