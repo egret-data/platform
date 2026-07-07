@@ -122,6 +122,17 @@ impl UserRepo {
         Ok(())
     }
 
+    /// Set a user's status (`'active'` | `'disabled'`).
+    pub async fn set_status(&self, id: UserId, status: &str) -> Result<()> {
+        sqlx::query("UPDATE users SET status = $2 WHERE id = $1")
+            .bind(id.0)
+            .bind(status)
+            .execute(&self.db.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     /// Return the stable username for `user_id`, deriving and persisting one if
     /// not yet set.  The username is the email local-part slugified to
     /// `[a-z0-9_-]`; collisions are resolved by appending `-2`, `-3`, …

@@ -71,6 +71,120 @@ impl GroupRepo {
         tx.commit().await.map_err(db_err)?;
         Ok(())
     }
+
+    /// Create a local (admin-managed) group; returns its id.
+    /// Errors with `Conflict` if a group with the same name already exists.
+    pub async fn create_local(&self, name: &str) -> Result<Uuid> {
+        let res = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO groups (name, source) VALUES ($1, 'local') RETURNING id",
+        )
+        .bind(name)
+        .fetch_one(&self.db.pool)
+        .await;
+        match res {
+            Ok(id) => Ok(id),
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Err(
+                egret_core::Error::Conflict(format!("group already exists: {name}")),
+            ),
+            Err(e) => Err(db_err(e)),
+        }
+    }
+
+    /// Rename a local group. No-op (0 rows) if the group is oidc-sourced or
+    /// does not exist; returns the number of rows affected.
+    pub async fn rename(&self, id: Uuid, name: &str) -> Result<u64> {
+        Ok(
+            sqlx::query("UPDATE groups SET name = $2 WHERE id = $1 AND source = 'local'")
+                .bind(id)
+                .bind(name)
+                .execute(&self.db.pool)
+                .await
+                .map_err(db_err)?
+                .rows_affected(),
+        )
+    }
+
+    /// Delete a local group. No-op (0 rows) if the group is oidc-sourced or
+    /// does not exist, so callers can 409 on a synced group.
+    pub async fn delete_local(&self, id: Uuid) -> Result<u64> {
+        Ok(
+            sqlx::query("DELETE FROM groups WHERE id = $1 AND source = 'local'")
+                .bind(id)
+                .execute(&self.db.pool)
+                .await
+                .map_err(db_err)?
+                .rows_affected(),
+        )
+    }
+
+    /// Add a user to a group (idempotent).
+    pub async fn add_member(&self, group_id: Uuid, user_id: UserId) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(user_id.0)
+        .bind(group_id)
+        .execute(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// Remove a user from a group (idempotent).
+    pub async fn remove_member(&self, group_id: Uuid, user_id: UserId) -> Result<()> {
+        sqlx::query("DELETE FROM user_groups WHERE group_id = $1 AND user_id = $2")
+            .bind(group_id)
+            .bind(user_id.0)
+            .execute(&self.db.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    /// List the member user ids of a group.
+    pub async fn members_of(&self, group_id: Uuid) -> Result<Vec<Uuid>> {
+        sqlx::query_scalar("SELECT user_id FROM user_groups WHERE group_id = $1")
+            .bind(group_id)
+            .fetch_all(&self.db.pool)
+            .await
+            .map_err(db_err)
+    }
+
+    /// Each group with its member count, name-ordered.
+    pub async fn list_with_meta(&self) -> Result<Vec<(Group, i64)>> {
+        let rows = sqlx::query_as::<_, GroupWithCountRow>(
+            "SELECT g.id, g.name, g.source, COUNT(ug.user_id) AS member_count \
+             FROM groups g \
+             LEFT JOIN user_groups ug ON ug.group_id = g.id \
+             GROUP BY g.id, g.name, g.source \
+             ORDER BY g.name",
+        )
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    Group {
+                        id: r.id,
+                        name: r.name,
+                        source: r.source,
+                    },
+                    r.member_count,
+                )
+            })
+            .collect())
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct GroupWithCountRow {
+    id: Uuid,
+    name: String,
+    source: String,
+    member_count: i64,
 }
 
 fn db_err(e: sqlx::Error) -> egret_core::Error {
