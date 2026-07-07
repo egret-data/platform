@@ -72,6 +72,16 @@ describe("PolicyEditorPage", () => {
     fireEvent.change(catalogInput, { target: { value: "iceberg" } });
     fireEvent.keyDown(catalogInput, { key: "Enter" });
 
+    // Permissions tab: the Allow accordion is open by default with one blank
+    // row; grant it via the Permissions popover (PermissionPickerCell) and
+    // give it a user through the row's Users TagCombobox.
+    fireEvent.click(screen.getByRole("button", { name: /permissions/i }));
+    fireEvent.click(screen.getByText("Add permissions"));
+    fireEvent.click(screen.getByLabelText("select"));
+    fireEvent.click(screen.getByLabelText("Confirm"));
+    fireEvent.change(screen.getByLabelText("user 0"), { target: { value: "alice" } });
+    fireEvent.keyDown(screen.getByLabelText("user 0"), { key: "Enter" });
+
     // Catalog is mandatory per the mocked service-def; Save stays disabled
     // until both the def has loaded and catalog is filled.
     await waitFor(() =>
@@ -84,10 +94,13 @@ describe("PolicyEditorPage", () => {
       kind: string;
       name: string;
       resources: { catalog: { values: string[] } };
+      items: { users: string[]; accesses: string[] }[];
     };
     expect(arg.kind).toBe("access");
     expect(arg.name).toBe("p1");
     expect(arg.resources.catalog.values).toEqual(["iceberg"]);
+    expect(arg.items[0].accesses).toEqual(["select"]);
+    expect(arg.items[0].users).toEqual(["alice"]);
     expect(updatePolicy).not.toHaveBeenCalled();
 
     await waitFor(() =>
@@ -95,16 +108,31 @@ describe("PolicyEditorPage", () => {
     );
   });
 
-  it("hides the Deny tab when 'Deny all else' is enabled", async () => {
+  it("hides the Deny accordion when 'Deny all else' is enabled", async () => {
     wrap(<PolicyEditorPage />);
     await screen.findByLabelText("Policy name");
 
-    // Deny-all-else and the (inner, still-Radix) Allow/Deny tabs live under
-    // the "Permissions" section of the outer (plain-button) left-nav.
+    // Deny-all-else and the Allow/Deny accordions live under the
+    // "Permissions" section of the outer (plain-button) left-nav.
     fireEvent.click(screen.getByRole("button", { name: /permissions/i }));
-    expect(screen.getByRole("tab", { name: "Deny" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Deny conditions" })).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Deny all else"));
-    expect(screen.queryByRole("tab", { name: "Deny" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Deny conditions" })).not.toBeInTheDocument();
+  });
+
+  it("adds an additional resource block via 'Add resource'", async () => {
+    wrap(<PolicyEditorPage />);
+    await screen.findByLabelText("Policy name");
+
+    // Resource is the default section; only one set of 4 level editors
+    // (the primary block) exists until "Add resource" appends another.
+    expect(screen.getAllByPlaceholderText("value or * (Enter to add)")).toHaveLength(4);
+    fireEvent.click(screen.getByRole("button", { name: /add resource/i }));
+    expect(screen.getAllByPlaceholderText("value or * (Enter to add)")).toHaveLength(8);
+    expect(screen.getByRole("button", { name: /remove resource/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /remove resource/i }));
+    expect(screen.getAllByPlaceholderText("value or * (Enter to add)")).toHaveLength(4);
   });
 
   it("updates an existing policy when an id param is present", async () => {
@@ -157,14 +185,17 @@ describe("PolicyEditorPage", () => {
     fireEvent.change(trinouserInput, { target: { value: "bob" } });
     fireEvent.keyDown(trinouserInput, { key: "Enter" });
 
-    // Give the allow item a principal so it's a non-empty grant.
+    // Give the allow item a principal so it's a non-empty grant. The
+    // Permissions cell is hidden in impersonation mode (PermissionTable
+    // renders a static "impersonate" badge instead of the picker).
     fireEvent.click(screen.getByRole("button", { name: /permissions/i }));
-    fireEvent.change(screen.getByLabelText("Add user"), { target: { value: "alice" } });
-    fireEvent.keyDown(screen.getByLabelText("Add user"), { key: "Enter" });
+    fireEvent.change(screen.getByLabelText("user 0"), { target: { value: "alice" } });
+    fireEvent.keyDown(screen.getByLabelText("user 0"), { key: "Enter" });
 
-    // The access-type checkbox grid is hidden in impersonation mode.
-    expect(screen.queryByLabelText("select")).not.toBeInTheDocument();
-    expect(screen.getByText("Grants: impersonate")).toBeInTheDocument();
+    // The access-type checkbox grid (and its popover) is hidden in
+    // impersonation mode.
+    expect(screen.queryByText("Add permissions")).not.toBeInTheDocument();
+    expect(screen.getByText("impersonate")).toBeInTheDocument();
 
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^save$/i })).not.toBeDisabled(),

@@ -9,7 +9,6 @@ import {
   type RowFilterItem,
   type ServiceDef,
   type ServiceDefResource,
-  MASK_TYPES,
   createPolicy,
   deletePolicy,
   getPolicy,
@@ -28,44 +27,22 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TagCombobox } from "@/components/ui/tag-combobox";
 import { Textarea } from "@/components/ui/textarea";
-import { PrincipalPicker } from "@/components/policy/PrincipalPicker";
+import { MaskItemTable } from "@/components/policy/MaskItemTable";
+import { PermissionTable } from "@/components/policy/PermissionTable";
 import { ResourceLevelEditor } from "@/components/policy/ResourceLevelEditor";
+import { RowFilterItemTable } from "@/components/policy/RowFilterItemTable";
 import { ConfigSection } from "./config/ConfigSection";
 import { FieldLabel } from "./config/FieldLabel";
 
 type PolicyKind = "access" | "masking" | "rowfilter";
-type ExceptionKey = "allowExceptions" | "denyExceptions";
 
 const DEFAULT_ACCESS_TYPES = ["select", "insert", "delete", "update", "create", "drop"];
-
-// Clusters the Trino access types into labeled groups so the access-item
-// checkbox grid reads as sections instead of one flat wrapping list. Any
-// service-def access type not covered here (and not "all", which gets its
-// own full-width toggle) falls back into a trailing "Other" bucket — see
-// `AccessItemRow`.
-const ACCESS_TYPE_GROUPS: { label: string; types: string[] }[] = [
-  { label: "Read", types: ["select", "show", "read_sysinfo"] },
-  { label: "Write", types: ["insert", "update", "delete", "write_sysinfo"] },
-  { label: "DDL", types: ["create", "drop", "alter"] },
-  { label: "Grant", types: ["grant", "revoke"] },
-  { label: "Other", types: ["use", "impersonate", "execute"] },
-];
-const ALL_GROUPED_ACCESS_TYPES = new Set(ACCESS_TYPE_GROUPS.flatMap((g) => g.types));
 
 const emptyLevel = () => ({ values: [] as string[], isExcludes: false, isRecursive: false });
 const wildcardLevel = () => ({
@@ -88,6 +65,12 @@ const emptyMaskItem = (): MaskItem => ({
   valueExpr: undefined,
 });
 const emptyRowFilterItem = (): RowFilterItem => ({ users: [], groups: [], filterExpr: "" });
+const emptyTableResources = () => ({
+  catalog: emptyLevel(),
+  schema: wildcardLevel(),
+  table: wildcardLevel(),
+  column: wildcardLevel(),
+});
 
 /**
  * Builds a fresh form for a brand-new policy of the given kind. Mirrors the
@@ -102,12 +85,7 @@ function blankInput(kind: PolicyKind, service: string): any {
       name: "",
       service,
       isEnabled: true,
-      resources: {
-        catalog: emptyLevel(),
-        schema: wildcardLevel(),
-        table: wildcardLevel(),
-        column: wildcardLevel(),
-      },
+      resources: emptyTableResources(),
       items: [emptyMaskItem()],
       description: "",
       labels: [],
@@ -132,12 +110,7 @@ function blankInput(kind: PolicyKind, service: string): any {
     name: "",
     service,
     isEnabled: true,
-    resources: {
-      catalog: emptyLevel(),
-      schema: wildcardLevel(),
-      table: wildcardLevel(),
-      column: wildcardLevel(),
-    },
+    resources: emptyTableResources(),
     additional: [],
     resourceMode: "table",
     trinouser: emptyLevel(),
@@ -158,11 +131,12 @@ function blankInput(kind: PolicyKind, service: string): any {
  * `rowfilterToInput`, unified behind `kind` instead of three call sites.
  */
 function toFormState(kind: PolicyKind, service: string, body: Record<string, any>): any {
-  const lvl = (k: string) => ({
-    values: body?.resources?.[k]?.values ?? [],
-    isExcludes: !!body?.resources?.[k]?.isExcludes,
-    isRecursive: !!body?.resources?.[k]?.isRecursive,
+  const rawLevel = (raw: any) => ({
+    values: raw?.values ?? [],
+    isExcludes: !!raw?.isExcludes,
+    isRecursive: !!raw?.isRecursive,
   });
+  const lvl = (k: string) => rawLevel(body?.resources?.[k]);
 
   if (kind === "masking") {
     const items = (body.dataMaskPolicyItems ?? []).map((it: any) => ({
@@ -212,11 +186,19 @@ function toFormState(kind: PolicyKind, service: string, body: Record<string, any
     (arr ?? []).map((it: any) => ({
       users: it.users ?? [],
       groups: it.groups ?? [],
+      roles: it.roles ?? [],
       accesses: (it.accesses ?? []).map((a: any) => a.type),
+      delegateAdmin: !!it.delegateAdmin,
       effect,
     }));
   const items = [...map(body.policyItems, "allow"), ...map(body.denyPolicyItems, "deny")];
   const isImp = !!body?.resources?.trinouser;
+  const additional = (body.additionalResources ?? []).map((r: any) => ({
+    catalog: rawLevel(r?.catalog),
+    schema: rawLevel(r?.schema),
+    table: rawLevel(r?.table),
+    column: rawLevel(r?.column),
+  }));
   return {
     kind: "access",
     name: String(body.name ?? ""),
@@ -228,6 +210,7 @@ function toFormState(kind: PolicyKind, service: string, body: Record<string, any
       table: lvl("table"),
       column: lvl("column"),
     },
+    additional,
     resourceMode: isImp ? "impersonation" : "table",
     trinouser: lvl("trinouser"),
     items: items.length ? items : [emptyAccessItem()],
@@ -240,99 +223,50 @@ function toFormState(kind: PolicyKind, service: string, body: Record<string, any
   };
 }
 
-interface AccessItemRowProps {
-  item: AccessItem;
-  accessTypes: string[];
-  removeLabel: string;
-  onChange: (next: Partial<AccessItem>) => void;
-  onRemove: () => void;
-  /** User-impersonation mode: the only grantable access is "impersonate",
-   * so the checkbox grid collapses to a static chip. */
-  impersonationMode?: boolean;
+interface ResourceBlockProps {
+  value: any;
+  onChange: (v: any) => void;
+  service: string;
+  levels: readonly ("catalog" | "schema" | "table" | "column")[];
+  levelFlags: (lvl: string) => ServiceDefResource;
+  missingRequired?: string[];
 }
 
-function AccessItemRow({
-  item,
-  accessTypes,
-  removeLabel,
+/**
+ * One catalog/schema/table/column resource grid — the primary `resources`
+ * block and each `additionalResources` entry both render this, so Ranger's
+ * "extra independent resource hierarchy" repeater is just N of these plus a
+ * remove button (see the Resource section below).
+ */
+function ResourceBlock({
+  value,
   onChange,
-  onRemove,
-  impersonationMode = false,
-}: AccessItemRowProps) {
-  const toggleAccess = (a: string, c: boolean) =>
-    onChange({
-      accesses: c ? [...item.accesses, a] : item.accesses.filter((x) => x !== a),
-    });
-
-  // Intersect each group's types with what the service def actually exposes
-  // (skip empty groups), then bucket any def types not covered by any group
-  // into a trailing "Other" section. "all" (grant-everything) is rendered
-  // separately below, not as part of any group.
-  const groups = ACCESS_TYPE_GROUPS.map((g) => ({
-    label: g.label,
-    types: g.types.filter((t) => accessTypes.includes(t)),
-  })).filter((g) => g.types.length > 0);
-
-  const ungrouped = accessTypes.filter(
-    (t) => t !== "all" && !ALL_GROUPED_ACCESS_TYPES.has(t),
-  );
-  if (ungrouped.length > 0) {
-    const other = groups.find((g) => g.label === "Other");
-    if (other) other.types = [...other.types, ...ungrouped];
-    else groups.push({ label: "Other", types: ungrouped });
-  }
-
-  const hasAll = accessTypes.includes("all");
-
+  service,
+  levels,
+  levelFlags,
+  missingRequired = [],
+}: ResourceBlockProps) {
   return (
-    <div className="space-y-2 rounded-md border p-3">
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex-1">
-          <PrincipalPicker
-            users={item.users}
-            groups={item.groups}
-            onChange={(p) => onChange(p)}
-          />
-        </div>
-        <button type="button" aria-label={removeLabel} onClick={onRemove}>
-          <Trash2 className="h-4 w-4 text-muted-foreground" />
-        </button>
-      </div>
-      {impersonationMode ? (
-        <Badge variant="secondary" className="w-fit">
-          Grants: impersonate
-        </Badge>
-      ) : (
-        <div className="space-y-2">
-          {groups.map((g) => (
-            <div key={g.label}>
-              <span className="text-xs text-muted-foreground">{g.label}</span>
-              <div className="flex flex-wrap gap-3">
-                {g.types.map((a) => (
-                  <label key={a} className="flex items-center gap-1.5 text-sm">
-                    <Checkbox
-                      aria-label={a}
-                      checked={item.accesses.includes(a)}
-                      onCheckedChange={(c) => toggleAccess(a, c === true)}
-                    />
-                    {a}
-                  </label>
-                ))}
-              </div>
-            </div>
-          ))}
-          {hasAll && (
-            <label className="flex w-full items-center gap-1.5 text-sm">
-              <Checkbox
-                aria-label="all"
-                checked={item.accesses.includes("all")}
-                onCheckedChange={(c) => toggleAccess("all", c === true)}
-              />
-              All (grant everything)
-            </label>
-          )}
-        </div>
-      )}
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      {levels.map((lvl) => (
+        <ResourceLevelEditor
+          key={lvl}
+          label={lvl[0].toUpperCase() + lvl.slice(1)}
+          level={lvl}
+          service={service}
+          parents={{
+            catalog: value.catalog.values[0],
+            schema: value.schema.values[0],
+            table: value.table.values[0],
+          }}
+          value={value[lvl]}
+          onChange={(v) => onChange({ ...value, [lvl]: v })}
+          excludesSupported={levelFlags(lvl).excludesSupported ?? true}
+          recursiveSupported={levelFlags(lvl).recursiveSupported ?? false}
+          mandatory={levelFlags(lvl).mandatory ?? false}
+          invalid={missingRequired.includes(lvl)}
+        />
+      ))}
     </div>
   );
 }
@@ -354,7 +288,6 @@ export default function PolicyEditorPage() {
   const queryClient = useQueryClient();
 
   const [form, setForm] = useState<any>(() => blankInput(kind, service));
-  const [tab, setTab] = useState<"allow" | "deny">("allow");
   const [labelInput, setLabelInput] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
 
@@ -372,10 +305,6 @@ export default function PolicyEditorPage() {
   useEffect(() => {
     if (id && policyQuery.data) setForm(toFormState(kind, service, policyQuery.data));
   }, [id, policyQuery.data, kind, service]);
-
-  useEffect(() => {
-    if (form.isDenyAllElse && tab === "deny") setTab("allow");
-  }, [form.isDenyAllElse, tab]);
 
   const def = useQuery<ServiceDef>({
     queryKey: ["service-def", service],
@@ -436,45 +365,6 @@ export default function PolicyEditorPage() {
     },
   });
 
-  // ── Items (shared shape across all three kinds — masking/rowfilter items
-  // just carry fewer fields than AccessItem) ─────────────────────────────────
-  const setItem = (i: number, next: Record<string, unknown>) =>
-    setForm((f: any) => ({
-      ...f,
-      items: f.items.map((it: any, j: number) => (j === i ? { ...it, ...next } : it)),
-    }));
-  const addItem = (effect?: "allow" | "deny") =>
-    setForm((f: any) => ({
-      ...f,
-      items: [
-        ...f.items,
-        kind === "masking"
-          ? emptyMaskItem()
-          : kind === "rowfilter"
-            ? emptyRowFilterItem()
-            : {
-                ...emptyAccessItem(effect ?? "allow"),
-                accesses: f.resourceMode === "impersonation" ? ["impersonate"] : [],
-              },
-      ],
-    }));
-  const removeItem = (i: number) =>
-    setForm((f: any) => ({ ...f, items: f.items.filter((_: unknown, j: number) => j !== i) }));
-
-  // ── Exceptions (access only) ───────────────────────────────────────────────
-  const setException = (key: ExceptionKey, i: number, next: Partial<AccessItem>) =>
-    setForm((f: any) => ({
-      ...f,
-      [key]: f[key].map((it: AccessItem, j: number) => (j === i ? { ...it, ...next } : it)),
-    }));
-  const addException = (key: ExceptionKey, effect: "allow" | "deny") =>
-    setForm((f: any) => ({ ...f, [key]: [...f[key], emptyAccessItem(effect)] }));
-  const removeException = (key: ExceptionKey, i: number) =>
-    setForm((f: any) => ({
-      ...f,
-      [key]: f[key].filter((_: unknown, j: number) => j !== i),
-    }));
-
   const addLabel = () => {
     const t = labelInput.trim();
     if (t && !form.labels.includes(t)) setForm((f: any) => ({ ...f, labels: [...f.labels, t] }));
@@ -483,25 +373,13 @@ export default function PolicyEditorPage() {
   const removeLabel = (l: string) =>
     setForm((f: any) => ({ ...f, labels: f.labels.filter((x: string) => x !== l) }));
 
-  const allowItems: { it: AccessItem; i: number }[] =
-    kind === "access"
-      ? form.items
-          .map((it: AccessItem, i: number) => ({ it, i }))
-          .filter((x: { it: AccessItem }) => x.it.effect === "allow")
-      : [];
-  const denyItems: { it: AccessItem; i: number }[] =
-    kind === "access"
-      ? form.items
-          .map((it: AccessItem, i: number) => ({ it, i }))
-          .filter((x: { it: AccessItem }) => x.it.effect === "deny")
-      : [];
-
   const levels =
     kind === "rowfilter"
       ? (["catalog", "schema", "table"] as const)
       : (["catalog", "schema", "table", "column"] as const);
 
   const isImpersonation = kind === "access" && form.resourceMode === "impersonation";
+  const isTableResourceMode = kind === "access" && form.resourceMode === "table";
 
   // Resource levels the current service-def marks mandatory but that are
   // still empty — blocks Save and drives the per-level "Required" state. In
@@ -539,13 +417,31 @@ export default function PolicyEditorPage() {
     ? form.trinouser.values.length > 0
       ? 1
       : 0
-    : Object.values(form.resources).filter((l: any) => l.values.length > 0).length;
+    : Object.values(form.resources).filter((l: any) => l.values.length > 0).length +
+      (kind === "access" ? form.additional.length : 0);
   const rulesCount =
     form.items.length +
     (kind === "access" ? form.allowExceptions.length + form.denyExceptions.length : 0);
   const detailsCount = form.labels.length + (form.description ? 1 : 0);
   const countFor = (key: string): number =>
     key === "resource" ? resourceCount : key === "rules" ? rulesCount : detailsCount;
+
+  // ── Access items (Permissions tab): `form.items` is the single wire array
+  // with a per-item `effect`; allow/deny views below are derived filters
+  // whose onChange rebuilds `form.items` from the updated subset plus the
+  // untouched other side, keeping the `items` serializer wire intact.
+  const allowItems: AccessItem[] = kind === "access" ? form.items.filter((it: AccessItem) => it.effect === "allow") : [];
+  const denyItems: AccessItem[] = kind === "access" ? form.items.filter((it: AccessItem) => it.effect === "deny") : [];
+  const setAllowItems = (next: AccessItem[]) =>
+    setForm((f: any) => ({
+      ...f,
+      items: [...next, ...f.items.filter((it: AccessItem) => it.effect === "deny")],
+    }));
+  const setDenyItems = (next: AccessItem[]) =>
+    setForm((f: any) => ({
+      ...f,
+      items: [...f.items.filter((it: AccessItem) => it.effect === "allow"), ...next],
+    }));
 
   return (
     <div className="space-y-5">
@@ -718,36 +614,73 @@ export default function PolicyEditorPage() {
                     </div>
                   ) : (
                     <>
-                      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                        {levels.map((lvl) => (
-                          <ResourceLevelEditor
-                            key={lvl}
-                            label={lvl[0].toUpperCase() + lvl.slice(1)}
-                            level={lvl}
-                            service={service}
-                            parents={{
-                              catalog: form.resources.catalog.values[0],
-                              schema: form.resources.schema.values[0],
-                              table: form.resources.table.values[0],
-                            }}
-                            value={form.resources[lvl]}
-                            onChange={(v) =>
-                              setForm((f: any) => ({
-                                ...f,
-                                resources: { ...f.resources, [lvl]: v },
-                              }))
-                            }
-                            excludesSupported={levelFlags(lvl).excludesSupported ?? true}
-                            recursiveSupported={levelFlags(lvl).recursiveSupported ?? false}
-                            mandatory={levelFlags(lvl).mandatory ?? false}
-                            invalid={missingRequired.includes(lvl)}
-                          />
-                        ))}
-                      </div>
+                      <ResourceBlock
+                        value={form.resources}
+                        onChange={(r) => setForm((f: any) => ({ ...f, resources: r }))}
+                        service={service}
+                        levels={levels}
+                        levelFlags={levelFlags}
+                        missingRequired={missingRequired}
+                      />
                       {missingRequired.length > 0 && (
                         <p className="text-xs text-muted-foreground">
                           Fill the required resource levels.
                         </p>
+                      )}
+                      {isTableResourceMode && (
+                        <>
+                          {form.additional.map((res: any, i: number) => (
+                            <div key={i} className="mt-4 flex gap-3 border-t pt-4">
+                              <div className="min-w-0 flex-1">
+                                <ResourceBlock
+                                  value={res}
+                                  onChange={(r) =>
+                                    setForm((f: any) => ({
+                                      ...f,
+                                      additional: f.additional.map((a: any, j: number) =>
+                                        j === i ? r : a,
+                                      ),
+                                    }))
+                                  }
+                                  service={service}
+                                  levels={levels}
+                                  levelFlags={levelFlags}
+                                />
+                              </div>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="iconSm"
+                                title="Remove resource"
+                                aria-label={`remove resource ${i}`}
+                                onClick={() =>
+                                  setForm((f: any) => ({
+                                    ...f,
+                                    additional: f.additional.filter(
+                                      (_: unknown, j: number) => j !== i,
+                                    ),
+                                  }))
+                                }
+                              >
+                                <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
+                              </Button>
+                            </div>
+                          ))}
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="mt-4"
+                            onClick={() =>
+                              setForm((f: any) => ({
+                                ...f,
+                                additional: [...f.additional, emptyTableResources()],
+                              }))
+                            }
+                          >
+                            <Plus className="mr-1 h-4 w-4" /> Add resource
+                          </Button>
+                        </>
                       )}
                     </>
                   )}
@@ -772,237 +705,90 @@ export default function PolicyEditorPage() {
                           />
                         </div>
 
-                        <Tabs value={tab} onValueChange={(v) => setTab(v as "allow" | "deny")}>
-                          <TabsList>
-                            <TabsTrigger value="allow">Allow</TabsTrigger>
-                            {!form.isDenyAllElse && <TabsTrigger value="deny">Deny</TabsTrigger>}
-                          </TabsList>
-
-                          <TabsContent value="allow" className="space-y-3">
-                            <div className="flex items-center justify-between">
-                              <span className="text-sm font-medium">Allow items</span>
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                onClick={() => addItem("allow")}
-                              >
-                                <Plus className="mr-1 h-4 w-4" /> Add item
-                              </Button>
-                            </div>
-                            {allowItems.map(({ it, i }) => (
-                              <AccessItemRow
-                                key={i}
-                                item={it}
+                        <Accordion type="multiple" defaultValue={["allow"]}>
+                          <AccordionItem value="allow">
+                            <AccordionTrigger>Allow conditions</AccordionTrigger>
+                            <AccordionContent className="space-y-4">
+                              <PermissionTable
+                                items={allowItems}
+                                onChange={setAllowItems}
                                 accessTypes={accessTypes}
-                                removeLabel={`remove allow item ${i}`}
-                                onChange={(next) => setItem(i, next)}
-                                onRemove={() => removeItem(i)}
-                                impersonationMode={isImpersonation}
+                                effect="allow"
+                                impersonation={isImpersonation}
                               />
-                            ))}
-                            <Accordion type="single" collapsible>
-                              <AccordionItem value="exceptions">
-                                <AccordionTrigger>Exceptions</AccordionTrigger>
-                                <AccordionContent className="space-y-3">
-                                  <div className="flex items-center justify-between">
-                                    <span className="text-xs text-muted-foreground">
-                                      Allow exceptions (deny overrides)
-                                    </span>
-                                    <Button
-                                      type="button"
-                                      variant="outline"
-                                      size="sm"
-                                      onClick={() => addException("allowExceptions", "allow")}
-                                    >
-                                      <Plus className="mr-1 h-4 w-4" /> Add exception
-                                    </Button>
-                                  </div>
-                                  {form.allowExceptions.map((it: AccessItem, i: number) => (
-                                    <AccessItemRow
-                                      key={i}
-                                      item={it}
-                                      accessTypes={accessTypes}
-                                      removeLabel={`remove allow exception ${i}`}
-                                      onChange={(next) => setException("allowExceptions", i, next)}
-                                      onRemove={() => removeException("allowExceptions", i)}
-                                      impersonationMode={isImpersonation}
-                                    />
-                                  ))}
-                                </AccordionContent>
-                              </AccordionItem>
-                            </Accordion>
-                          </TabsContent>
-
-                          {!form.isDenyAllElse && (
-                            <TabsContent value="deny" className="space-y-3">
-                              <div className="flex items-center justify-between">
-                                <span className="text-sm font-medium">Deny items</span>
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => addItem("deny")}
-                                >
-                                  <Plus className="mr-1 h-4 w-4" /> Add item
-                                </Button>
-                              </div>
-                              {denyItems.map(({ it, i }) => (
-                                <AccessItemRow
-                                  key={i}
-                                  item={it}
-                                  accessTypes={accessTypes}
-                                  removeLabel={`remove deny item ${i}`}
-                                  onChange={(next) => setItem(i, next)}
-                                  onRemove={() => removeItem(i)}
-                                  impersonationMode={isImpersonation}
-                                />
-                              ))}
                               <Accordion type="single" collapsible>
-                                <AccordionItem value="exceptions">
-                                  <AccordionTrigger>Exceptions</AccordionTrigger>
-                                  <AccordionContent className="space-y-3">
-                                    <div className="flex items-center justify-between">
-                                      <span className="text-xs text-muted-foreground">
-                                        Deny exceptions (allow overrides)
-                                      </span>
-                                      <Button
-                                        type="button"
-                                        variant="outline"
-                                        size="sm"
-                                        onClick={() => addException("denyExceptions", "deny")}
-                                      >
-                                        <Plus className="mr-1 h-4 w-4" /> Add exception
-                                      </Button>
-                                    </div>
-                                    {form.denyExceptions.map((it: AccessItem, i: number) => (
-                                      <AccessItemRow
-                                        key={i}
-                                        item={it}
-                                        accessTypes={accessTypes}
-                                        removeLabel={`remove deny exception ${i}`}
-                                        onChange={(next) => setException("denyExceptions", i, next)}
-                                        onRemove={() => removeException("denyExceptions", i)}
-                                        impersonationMode={isImpersonation}
-                                      />
-                                    ))}
+                                <AccordionItem value="allow-exceptions">
+                                  <AccordionTrigger className="text-sm">
+                                    Exclude from allow
+                                  </AccordionTrigger>
+                                  <AccordionContent>
+                                    <PermissionTable
+                                      items={form.allowExceptions}
+                                      onChange={(next) =>
+                                        setForm((f: any) => ({ ...f, allowExceptions: next }))
+                                      }
+                                      accessTypes={accessTypes}
+                                      effect="allow"
+                                      impersonation={isImpersonation}
+                                    />
                                   </AccordionContent>
                                 </AccordionItem>
                               </Accordion>
-                            </TabsContent>
+                            </AccordionContent>
+                          </AccordionItem>
+
+                          {!form.isDenyAllElse && (
+                            <AccordionItem value="deny">
+                              <AccordionTrigger>Deny conditions</AccordionTrigger>
+                              <AccordionContent className="space-y-4">
+                                <PermissionTable
+                                  items={denyItems}
+                                  onChange={setDenyItems}
+                                  accessTypes={accessTypes}
+                                  effect="deny"
+                                  impersonation={isImpersonation}
+                                />
+                                <Accordion type="single" collapsible>
+                                  <AccordionItem value="deny-exceptions">
+                                    <AccordionTrigger className="text-sm">
+                                      Exclude from deny
+                                    </AccordionTrigger>
+                                    <AccordionContent>
+                                      <PermissionTable
+                                        items={form.denyExceptions}
+                                        onChange={(next) =>
+                                          setForm((f: any) => ({ ...f, denyExceptions: next }))
+                                        }
+                                        accessTypes={accessTypes}
+                                        effect="deny"
+                                        impersonation={isImpersonation}
+                                      />
+                                    </AccordionContent>
+                                  </AccordionItem>
+                                </Accordion>
+                              </AccordionContent>
+                            </AccordionItem>
                           )}
-                        </Tabs>
+                        </Accordion>
                       </div>
                     </ConfigSection>
                   )}
 
                   {kind === "masking" && (
                     <ConfigSection title={kindTitle}>
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm font-medium">Policy items</span>
-                          <Button type="button" variant="outline" size="sm" onClick={() => addItem()}>
-                            <Plus className="mr-1 h-4 w-4" /> Add item
-                          </Button>
-                        </div>
-                        {form.items.map((it: MaskItem, i: number) => (
-                          <div key={i} className="space-y-2 rounded-md border p-3">
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="flex-1 space-y-1.5">
-                                <span className="text-xs text-muted-foreground">Principals</span>
-                                <PrincipalPicker
-                                  users={it.users}
-                                  groups={it.groups}
-                                  onChange={(p) => setItem(i, p)}
-                                />
-                              </div>
-                              {form.items.length > 1 && (
-                                <button
-                                  type="button"
-                                  aria-label={`remove item ${i}`}
-                                  onClick={() => removeItem(i)}
-                                >
-                                  <Trash2 className="h-4 w-4 text-muted-foreground" />
-                                </button>
-                              )}
-                            </div>
-                            <div className="space-y-1.5">
-                              <FieldLabel label="Mask type" />
-                              <Select
-                                value={it.maskType}
-                                onValueChange={(v) => setItem(i, { maskType: v })}
-                              >
-                                <SelectTrigger aria-label={`mask type ${i}`} className="w-56">
-                                  <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  {MASK_TYPES.map((m) => (
-                                    <SelectItem key={m.name} value={m.name}>
-                                      {m.label}
-                                    </SelectItem>
-                                  ))}
-                                </SelectContent>
-                              </Select>
-                            </div>
-                            {it.maskType === "CUSTOM" && (
-                              <div className="space-y-1.5">
-                                <FieldLabel label="Custom expression" />
-                                <Input
-                                  aria-label={`value expr ${i}`}
-                                  placeholder="cast(... {col} ...) as {type}"
-                                  value={it.valueExpr ?? ""}
-                                  onChange={(e) => setItem(i, { valueExpr: e.target.value })}
-                                />
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
+                      <MaskItemTable
+                        items={form.items}
+                        onChange={(items) => setForm((f: any) => ({ ...f, items }))}
+                      />
                     </ConfigSection>
                   )}
 
                   {kind === "rowfilter" && (
                     <ConfigSection title={kindTitle}>
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm font-medium">Policy items</span>
-                          <Button type="button" variant="outline" size="sm" onClick={() => addItem()}>
-                            <Plus className="mr-1 h-4 w-4" /> Add item
-                          </Button>
-                        </div>
-                        {form.items.map((it: RowFilterItem, i: number) => (
-                          <div key={i} className="space-y-2 rounded-md border p-3">
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="flex-1 space-y-1.5">
-                                <span className="text-xs text-muted-foreground">Principals</span>
-                                <PrincipalPicker
-                                  users={it.users}
-                                  groups={it.groups}
-                                  onChange={(p) => setItem(i, p)}
-                                />
-                              </div>
-                              {form.items.length > 1 && (
-                                <button
-                                  type="button"
-                                  aria-label={`remove item ${i}`}
-                                  onClick={() => removeItem(i)}
-                                >
-                                  <Trash2 className="h-4 w-4 text-muted-foreground" />
-                                </button>
-                              )}
-                            </div>
-                            <div className="space-y-1.5">
-                              <FieldLabel label="Filter expression" />
-                              <Input
-                                aria-label={`filter ${i}`}
-                                placeholder="e.g. country = 'US'"
-                                value={it.filterExpr}
-                                onChange={(e) => setItem(i, { filterExpr: e.target.value })}
-                              />
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                      <RowFilterItemTable
+                        items={form.items}
+                        onChange={(items) => setForm((f: any) => ({ ...f, items }))}
+                      />
                     </ConfigSection>
                   )}
                 </>
