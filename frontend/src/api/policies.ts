@@ -49,6 +49,10 @@ export interface AccessPolicyInput {
   service: string;
   isEnabled: boolean;
   resources: { catalog: ResourceLevel; schema: ResourceLevel; table: ResourceLevel; column: ResourceLevel };
+  /** "table" (catalog/schema/table/column) or "impersonation" (trinouser). */
+  resourceMode: "table" | "impersonation";
+  /** The trinouser resource, used only when resourceMode === "impersonation". */
+  trinouser: ResourceLevel;
   items: AccessItem[];
   allowExceptions: AccessItem[];
   denyExceptions: AccessItem[];

@@ -14,6 +14,7 @@ import {
   deletePolicy,
   getPolicy,
   getServiceDef,
+  listPrincipals,
   updatePolicy,
 } from "@/api/policies";
 import { ApiError } from "@/api/client";
@@ -40,6 +41,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { TagCombobox } from "@/components/ui/tag-combobox";
 import { Textarea } from "@/components/ui/textarea";
 import { PrincipalPicker } from "@/components/policy/PrincipalPicker";
 import { ResourceLevelEditor } from "@/components/policy/ResourceLevelEditor";
@@ -129,6 +131,8 @@ function blankInput(kind: PolicyKind, service: string): any {
       table: emptyLevel(),
       column: emptyLevel(),
     },
+    resourceMode: "table",
+    trinouser: emptyLevel(),
     items: [emptyAccessItem()],
     allowExceptions: [],
     denyExceptions: [],
@@ -204,6 +208,7 @@ function toFormState(kind: PolicyKind, service: string, body: Record<string, any
       effect,
     }));
   const items = [...map(body.policyItems, "allow"), ...map(body.denyPolicyItems, "deny")];
+  const isImp = !!body?.resources?.trinouser;
   return {
     kind: "access",
     name: String(body.name ?? ""),
@@ -215,6 +220,8 @@ function toFormState(kind: PolicyKind, service: string, body: Record<string, any
       table: lvl("table"),
       column: lvl("column"),
     },
+    resourceMode: isImp ? "impersonation" : "table",
+    trinouser: lvl("trinouser"),
     items: items.length ? items : [emptyAccessItem()],
     allowExceptions: map(body.allowExceptions, "allow"),
     denyExceptions: map(body.denyExceptions, "deny"),
@@ -231,6 +238,9 @@ interface AccessItemRowProps {
   removeLabel: string;
   onChange: (next: Partial<AccessItem>) => void;
   onRemove: () => void;
+  /** User-impersonation mode: the only grantable access is "impersonate",
+   * so the checkbox grid collapses to a static chip. */
+  impersonationMode?: boolean;
 }
 
 function AccessItemRow({
@@ -239,6 +249,7 @@ function AccessItemRow({
   removeLabel,
   onChange,
   onRemove,
+  impersonationMode = false,
 }: AccessItemRowProps) {
   const toggleAccess = (a: string, c: boolean) =>
     onChange({
@@ -279,35 +290,41 @@ function AccessItemRow({
           <Trash2 className="h-4 w-4 text-muted-foreground" />
         </button>
       </div>
-      <div className="space-y-2">
-        {groups.map((g) => (
-          <div key={g.label}>
-            <span className="text-xs text-muted-foreground">{g.label}</span>
-            <div className="flex flex-wrap gap-3">
-              {g.types.map((a) => (
-                <label key={a} className="flex items-center gap-1.5 text-sm">
-                  <Checkbox
-                    aria-label={a}
-                    checked={item.accesses.includes(a)}
-                    onCheckedChange={(c) => toggleAccess(a, c === true)}
-                  />
-                  {a}
-                </label>
-              ))}
+      {impersonationMode ? (
+        <Badge variant="secondary" className="w-fit">
+          Grants: impersonate
+        </Badge>
+      ) : (
+        <div className="space-y-2">
+          {groups.map((g) => (
+            <div key={g.label}>
+              <span className="text-xs text-muted-foreground">{g.label}</span>
+              <div className="flex flex-wrap gap-3">
+                {g.types.map((a) => (
+                  <label key={a} className="flex items-center gap-1.5 text-sm">
+                    <Checkbox
+                      aria-label={a}
+                      checked={item.accesses.includes(a)}
+                      onCheckedChange={(c) => toggleAccess(a, c === true)}
+                    />
+                    {a}
+                  </label>
+                ))}
+              </div>
             </div>
-          </div>
-        ))}
-        {hasAll && (
-          <label className="flex w-full items-center gap-1.5 text-sm">
-            <Checkbox
-              aria-label="all"
-              checked={item.accesses.includes("all")}
-              onCheckedChange={(c) => toggleAccess("all", c === true)}
-            />
-            All (grant everything)
-          </label>
-        )}
-      </div>
+          ))}
+          {hasAll && (
+            <label className="flex w-full items-center gap-1.5 text-sm">
+              <Checkbox
+                aria-label="all"
+                checked={item.accesses.includes("all")}
+                onCheckedChange={(c) => toggleAccess("all", c === true)}
+              />
+              All (grant everything)
+            </label>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -377,8 +394,26 @@ export default function PolicyEditorPage() {
 
   const profileUrl = `/control-plane/policies/${encodeURIComponent(service)}`;
 
+  // In impersonation mode, "impersonate" is the only valid access type — force
+  // it onto every item/exception at save time regardless of what (if
+  // anything) was set on the form, so a stray empty `accesses: []` never
+  // reaches Ranger.
+  const buildSavePayload = () => {
+    if (kind !== "access" || form.resourceMode !== "impersonation") return form;
+    const forceImpersonate = (it: AccessItem) => ({ ...it, accesses: ["impersonate"] });
+    return {
+      ...form,
+      items: form.items.map(forceImpersonate),
+      allowExceptions: form.allowExceptions.map(forceImpersonate),
+      denyExceptions: form.denyExceptions.map(forceImpersonate),
+    };
+  };
+
   const save = useMutation<{ id: number }, ApiError>({
-    mutationFn: () => (id ? updatePolicy(Number(id), form) : createPolicy(form)),
+    mutationFn: () => {
+      const payload = buildSavePayload();
+      return id ? updatePolicy(Number(id), payload) : createPolicy(payload);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
       navigate(profileUrl);
@@ -409,7 +444,10 @@ export default function PolicyEditorPage() {
           ? emptyMaskItem()
           : kind === "rowfilter"
             ? emptyRowFilterItem()
-            : emptyAccessItem(effect ?? "allow"),
+            : {
+                ...emptyAccessItem(effect ?? "allow"),
+                accesses: f.resourceMode === "impersonation" ? ["impersonate"] : [],
+              },
       ],
     }));
   const removeItem = (i: number) =>
@@ -455,20 +493,28 @@ export default function PolicyEditorPage() {
       ? (["catalog", "schema", "table"] as const)
       : (["catalog", "schema", "table", "column"] as const);
 
+  const isImpersonation = kind === "access" && form.resourceMode === "impersonation";
+
   // Resource levels the current service-def marks mandatory but that are
-  // still empty — blocks Save and drives the per-level "Required" state.
-  const missingRequired = levels.filter(
-    (lvl) => levelFlags(lvl).mandatory && form.resources[lvl].values.length === 0,
-  );
+  // still empty — blocks Save and drives the per-level "Required" state. In
+  // impersonation mode the only resource is trinouser, so "missing" collapses
+  // to a single synthetic entry when it's empty.
+  const missingRequired: string[] = isImpersonation
+    ? form.trinouser.values.length === 0
+      ? ["trinouser"]
+      : []
+    : levels.filter((lvl) => levelFlags(lvl).mandatory && form.resources[lvl].values.length === 0);
 
   const kindTitle =
     kind === "masking" ? "Masking" : kind === "rowfilter" ? "Row filter" : "Permissions";
 
-  // At-a-glance summary of the resource path being configured, e.g.
-  // `iceberg.sales.*.*` — joins each level's first value (or a placeholder).
-  const resourcePreview = levels
-    .map((lvl) => form.resources[lvl].values[0] || "…")
-    .join(".");
+  // At-a-glance summary of the resource being configured, e.g. `iceberg.sales.*.*`
+  // for table mode, or the trinouser value(s) for impersonation mode.
+  const resourcePreview = isImpersonation
+    ? form.trinouser.values.length > 0
+      ? form.trinouser.values.join(", ")
+      : "…"
+    : levels.map((lvl) => form.resources[lvl].values[0] || "…").join(".");
 
   // Left-nav sections (vertical layout — mirrors EngineDetail's
   // `ConfigurationTab`). The middle section's key is always "rules"; only its
@@ -481,9 +527,11 @@ export default function PolicyEditorPage() {
 
   // Non-default field counts per section, driving the nav badges (same idea
   // as engine config's `sectionCounts`).
-  const resourceCount = Object.values(form.resources).filter(
-    (l: any) => l.values.length > 0,
-  ).length;
+  const resourceCount = isImpersonation
+    ? form.trinouser.values.length > 0
+      ? 1
+      : 0
+    : Object.values(form.resources).filter((l: any) => l.values.length > 0).length;
   const rulesCount =
     form.items.length +
     (kind === "access" ? form.allowExceptions.length + form.denyExceptions.length : 0);
@@ -598,34 +646,102 @@ export default function PolicyEditorPage() {
                   title="Resource"
                   description="The Trino resource this policy applies to. Use * for wildcards."
                 >
+                  {kind === "access" && (
+                    <div className="inline-flex w-fit rounded-md border p-0.5">
+                      {(
+                        [
+                          { key: "table", label: "Table access" },
+                          { key: "impersonation", label: "User impersonation" },
+                        ] as const
+                      ).map((opt) => (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          onClick={() =>
+                            setForm((f: any) => ({ ...f, resourceMode: opt.key }))
+                          }
+                          className={`rounded px-3 py-1.5 text-sm transition-colors ${
+                            form.resourceMode === opt.key
+                              ? "bg-muted font-medium"
+                              : "text-muted-foreground hover:bg-muted/50"
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   <p className="font-mono text-xs text-muted-foreground">{resourcePreview}</p>
-                  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                    {levels.map((lvl) => (
-                      <ResourceLevelEditor
-                        key={lvl}
-                        label={lvl[0].toUpperCase() + lvl.slice(1)}
-                        level={lvl}
-                        service={service}
-                        parents={{
-                          catalog: form.resources.catalog.values[0],
-                          schema: form.resources.schema.values[0],
-                          table: form.resources.table.values[0],
-                        }}
-                        value={form.resources[lvl]}
-                        onChange={(v) =>
-                          setForm((f: any) => ({ ...f, resources: { ...f.resources, [lvl]: v } }))
+                  {isImpersonation ? (
+                    <div className="max-w-sm space-y-1">
+                      <label className="text-sm font-medium">Trino user</label>
+                      <div
+                        className={
+                          missingRequired.includes("trinouser")
+                            ? "rounded-md ring-1 ring-destructive"
+                            : undefined
                         }
-                        excludesSupported={levelFlags(lvl).excludesSupported ?? true}
-                        recursiveSupported={levelFlags(lvl).recursiveSupported ?? false}
-                        mandatory={levelFlags(lvl).mandatory ?? false}
-                        invalid={missingRequired.includes(lvl)}
-                      />
-                    ))}
-                  </div>
-                  {missingRequired.length > 0 && (
-                    <p className="text-xs text-muted-foreground">
-                      Fill the required resource levels.
-                    </p>
+                      >
+                        <TagCombobox
+                          values={form.trinouser.values}
+                          onChange={(vals) =>
+                            setForm((f: any) => ({
+                              ...f,
+                              trinouser: { ...f.trinouser, values: vals },
+                            }))
+                          }
+                          suggest={(q) =>
+                            listPrincipals(q, "user").then((ps) =>
+                              ps.map((p) => ({ value: p.name, label: p.label })),
+                            )
+                          }
+                          queryKey={["principals", "user", "impersonation"]}
+                          placeholder="username or * (Enter to add)"
+                          creatable
+                          ariaLabel="Trino user value"
+                        />
+                      </div>
+                      {missingRequired.includes("trinouser") && (
+                        <p className="text-xs text-destructive">Required</p>
+                      )}
+                      <p className="text-xs text-muted-foreground">
+                        Who may be impersonated (a Trino username, or * for any).
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                        {levels.map((lvl) => (
+                          <ResourceLevelEditor
+                            key={lvl}
+                            label={lvl[0].toUpperCase() + lvl.slice(1)}
+                            level={lvl}
+                            service={service}
+                            parents={{
+                              catalog: form.resources.catalog.values[0],
+                              schema: form.resources.schema.values[0],
+                              table: form.resources.table.values[0],
+                            }}
+                            value={form.resources[lvl]}
+                            onChange={(v) =>
+                              setForm((f: any) => ({
+                                ...f,
+                                resources: { ...f.resources, [lvl]: v },
+                              }))
+                            }
+                            excludesSupported={levelFlags(lvl).excludesSupported ?? true}
+                            recursiveSupported={levelFlags(lvl).recursiveSupported ?? false}
+                            mandatory={levelFlags(lvl).mandatory ?? false}
+                            invalid={missingRequired.includes(lvl)}
+                          />
+                        ))}
+                      </div>
+                      {missingRequired.length > 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          Fill the required resource levels.
+                        </p>
+                      )}
+                    </>
                   )}
                 </ConfigSection>
               )}
@@ -674,6 +790,7 @@ export default function PolicyEditorPage() {
                                 removeLabel={`remove allow item ${i}`}
                                 onChange={(next) => setItem(i, next)}
                                 onRemove={() => removeItem(i)}
+                                impersonationMode={isImpersonation}
                               />
                             ))}
                             <Accordion type="single" collapsible>
@@ -701,6 +818,7 @@ export default function PolicyEditorPage() {
                                       removeLabel={`remove allow exception ${i}`}
                                       onChange={(next) => setException("allowExceptions", i, next)}
                                       onRemove={() => removeException("allowExceptions", i)}
+                                      impersonationMode={isImpersonation}
                                     />
                                   ))}
                                 </AccordionContent>
@@ -729,6 +847,7 @@ export default function PolicyEditorPage() {
                                   removeLabel={`remove deny item ${i}`}
                                   onChange={(next) => setItem(i, next)}
                                   onRemove={() => removeItem(i)}
+                                  impersonationMode={isImpersonation}
                                 />
                               ))}
                               <Accordion type="single" collapsible>
@@ -756,6 +875,7 @@ export default function PolicyEditorPage() {
                                         removeLabel={`remove deny exception ${i}`}
                                         onChange={(next) => setException("denyExceptions", i, next)}
                                         onRemove={() => removeException("denyExceptions", i)}
+                                        impersonationMode={isImpersonation}
                                       />
                                     ))}
                                   </AccordionContent>

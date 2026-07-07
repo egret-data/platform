@@ -55,6 +55,9 @@ fn default_effect() -> String {
 fn default_true() -> bool {
     true
 }
+fn default_resource_mode() -> String {
+    "table".to_string()
+}
 
 #[derive(Debug, Deserialize)]
 pub struct AccessPolicyInput {
@@ -64,6 +67,12 @@ pub struct AccessPolicyInput {
     pub is_enabled: bool,
     #[serde(default)]
     pub resources: EditorResources,
+    /// "table" (catalog/schema/table/column) or "impersonation" (trinouser).
+    #[serde(default = "default_resource_mode", rename = "resourceMode")]
+    pub resource_mode: String,
+    /// The trinouser resource, used only when resource_mode == "impersonation".
+    #[serde(default)]
+    pub trinouser: ResourceLevel,
     #[serde(default)]
     pub items: Vec<AccessItemInput>,
     #[serde(default, rename = "allowExceptions")]
@@ -99,14 +108,20 @@ fn item_obj(it: &AccessItemInput) -> Value {
 /// Render an `AccessPolicyInput` into a Ranger policyType-0 JSON body.
 pub fn access_to_ranger_json(input: &AccessPolicyInput) -> Value {
     let mut resources = Map::new();
-    for (key, level) in [
-        ("catalog", &input.resources.catalog),
-        ("schema", &input.resources.schema),
-        ("table", &input.resources.table),
-        ("column", &input.resources.column),
-    ] {
-        if !level.values.is_empty() {
-            resources.insert(key.to_string(), resource_obj(level));
+    if input.resource_mode == "impersonation" {
+        if !input.trinouser.values.is_empty() {
+            resources.insert("trinouser".to_string(), resource_obj(&input.trinouser));
+        }
+    } else {
+        for (key, level) in [
+            ("catalog", &input.resources.catalog),
+            ("schema", &input.resources.schema),
+            ("table", &input.resources.table),
+            ("column", &input.resources.column),
+        ] {
+            if !level.values.is_empty() {
+                resources.insert(key.to_string(), resource_obj(level));
+            }
         }
     }
     let (allow, deny): (Vec<_>, Vec<_>) = input.items.iter().partition(|it| it.effect != "deny");
@@ -511,6 +526,34 @@ mod tests {
 
         let default_body = access_to_ranger_json(&sample());
         assert_eq!(default_body["policyPriority"], 0);
+    }
+
+    #[test]
+    fn serializes_impersonation_resource_mode() {
+        let inp: AccessPolicyInput = serde_json::from_value(json!({
+            "name": "allow-alice-impersonate-bob",
+            "service": "trino",
+            "isEnabled": true,
+            "resourceMode": "impersonation",
+            "trinouser": {"values": ["bob"]},
+            "items": [
+                {"users": ["alice"], "accesses": ["impersonate"], "effect": "allow"}
+            ]
+        }))
+        .unwrap();
+        let body = access_to_ranger_json(&inp);
+        assert_eq!(body["policyType"], 0);
+        assert_eq!(body["resources"]["trinouser"]["values"][0], "bob");
+        assert!(body["resources"].get("catalog").is_none());
+        assert_eq!(body["policyItems"][0]["accesses"][0]["type"], "impersonate");
+    }
+
+    #[test]
+    fn defaults_to_table_resource_mode() {
+        // No `resourceMode` in the input — still emits catalog/schema/table/column.
+        let body = access_to_ranger_json(&sample());
+        assert!(body["resources"].get("catalog").is_some());
+        assert!(body["resources"].get("trinouser").is_none());
     }
 
     #[test]

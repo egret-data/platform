@@ -34,7 +34,9 @@ vi.mock("@/api/policies", async (orig) => ({
         { name: "column", excludesSupported: true, mandatory: false },
       ],
     }),
-  listPrincipals: () => Promise.resolve([]),
+  // Serves both the PrincipalPicker (who gets to impersonate) and the
+  // impersonation resource autocomplete (who may be impersonated).
+  listPrincipals: () => Promise.resolve([{ kind: "user", name: "bob", label: "bob" }]),
   resourceLookup: () => Promise.resolve([]),
 }));
 
@@ -141,6 +143,44 @@ describe("PolicyEditorPage", () => {
     // plain button, unmounted by default).
     fireEvent.click(screen.getByRole("button", { name: /row filter/i }));
     expect(screen.getByLabelText("filter 0")).toBeInTheDocument();
+  });
+
+  it("saves a user-impersonation policy with resourceMode + trinouser + forced accesses", async () => {
+    wrap(<PolicyEditorPage />);
+    fireEvent.change(await screen.findByLabelText("Policy name"), {
+      target: { value: "allow-impersonate-bob" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /user impersonation/i }));
+
+    const trinouserInput = screen.getByLabelText("Trino user value");
+    fireEvent.change(trinouserInput, { target: { value: "bob" } });
+    fireEvent.keyDown(trinouserInput, { key: "Enter" });
+
+    // Give the allow item a principal so it's a non-empty grant.
+    fireEvent.click(screen.getByRole("button", { name: /permissions/i }));
+    fireEvent.change(screen.getByLabelText("Add user"), { target: { value: "alice" } });
+    fireEvent.keyDown(screen.getByLabelText("Add user"), { key: "Enter" });
+
+    // The access-type checkbox grid is hidden in impersonation mode.
+    expect(screen.queryByLabelText("select")).not.toBeInTheDocument();
+    expect(screen.getByText("Grants: impersonate")).toBeInTheDocument();
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^save$/i })).not.toBeDisabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(createPolicy).toHaveBeenCalled());
+
+    const arg = createPolicy.mock.calls[0][0] as {
+      resourceMode: string;
+      trinouser: { values: string[] };
+      items: { users: string[]; accesses: string[] }[];
+    };
+    expect(arg.resourceMode).toBe("impersonation");
+    expect(arg.trinouser.values).toContain("bob");
+    expect(arg.items[0].accesses).toEqual(["impersonate"]);
+    expect(updatePolicy).not.toHaveBeenCalled();
   });
 
   it("renders the Override switch (unchecked by default) in the Details section", async () => {
