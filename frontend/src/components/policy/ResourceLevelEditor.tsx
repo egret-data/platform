@@ -6,7 +6,7 @@ import { TagCombobox } from "@/components/ui/tag-combobox";
 
 interface Props {
   label: string;
-  level: "catalog" | "schema" | "table" | "column";
+  level: string;
   service: string;
   parents: { catalog?: string; schema?: string; table?: string };
   value: ResourceLevel;

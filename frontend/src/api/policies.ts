@@ -84,6 +84,15 @@ export interface ServiceDefResource {
   excludesSupported?: boolean;
   recursiveSupported?: boolean;
   mandatory?: boolean;
+  /** Name of the parent resource type, e.g. "schema" for "table". Absent for root types (catalog, role, …). */
+  parent?: string;
+  /** Depth in the resource hierarchy (0 = root). */
+  level?: number;
+  /** Access types allowed when this resource is the policy's leaf (e.g. queryid → only "sqlinfo"). */
+  accessTypeRestrictions?: string[];
+  /** Whether a policy may validly stop the resource chain at this type (vs. requiring a child). */
+  isValidLeaf?: boolean;
+  uiHint?: string;
 }
 
 export interface ServiceDef {
@@ -170,7 +179,7 @@ export function deletePolicy(id: number): Promise<void> {
 
 export function resourceLookup(
   service: string,
-  level: "catalog" | "schema" | "table" | "column",
+  level: string,
   parents: { catalog?: string; schema?: string; table?: string } = {},
   q = "",
 ): Promise<string[]> {
