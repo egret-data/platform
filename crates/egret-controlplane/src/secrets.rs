@@ -2,7 +2,7 @@
 //!
 //! Global (control-plane) named secrets: every call scopes the
 //! `WorkspaceSecretStore` with `None` (rows with a NULL `workspace_id`), gated
-//! on `require_platform_admin`.
+//! on `require_permission(&p, "secret:<action>")` (platform_admin bypasses).
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -14,7 +14,7 @@ use egret_secrets::WorkspaceSecretMeta;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::auth::require_platform_admin;
+use crate::auth::require_permission;
 use crate::error::CpError;
 use crate::CpState;
 
@@ -72,7 +72,7 @@ async fn list(
     State(st): State<CpState>,
     Auth(principal): Auth,
 ) -> Result<Json<Vec<SecretDto>>, CpError> {
-    require_platform_admin(&principal)?;
+    require_permission(&principal, "secret:read")?;
     let metas = st.secrets.list(None).await?;
     Ok(Json(metas.into_iter().map(Into::into).collect()))
 }
@@ -82,7 +82,7 @@ async fn create(
     Auth(principal): Auth,
     Json(body): Json<CreateSecretInput>,
 ) -> Result<(StatusCode, Json<SecretDto>), CpError> {
-    require_platform_admin(&principal)?;
+    require_permission(&principal, "secret:create")?;
     let id = st
         .secrets
         .create(None, &body.name, body.description.as_deref(), &body.value)
@@ -97,7 +97,7 @@ async fn update(
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateSecretInput>,
 ) -> Result<Json<SecretDto>, CpError> {
-    require_platform_admin(&principal)?;
+    require_permission(&principal, "secret:update")?;
     if let Some(name) = &body.name {
         st.secrets
             .rename(None, id, name, body.description.as_deref())
@@ -115,7 +115,7 @@ async fn remove(
     Auth(principal): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, CpError> {
-    require_platform_admin(&principal)?;
+    require_permission(&principal, "secret:delete")?;
     st.secrets.delete(None, id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

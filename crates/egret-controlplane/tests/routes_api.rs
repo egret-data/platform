@@ -3053,3 +3053,72 @@ async fn scoped_permission_storage_read_and_create() {
         "a scoped storage:create principal must create; body={body}"
     );
 }
+
+/// Secrets: `secret:read` gates `GET /secrets`, `secret:create` gates
+/// `POST /secrets`.
+#[tokio::test]
+async fn scoped_permission_secrets_read_and_create() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    let wrong = session_for_with_permission(&f, "secret_scoped_wrong", "storage:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/secrets", &wrong, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without secret:read must not list secrets"
+    );
+
+    let reader = session_for_with_permission(&f, "secret_scoped_reader", "secret:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/secrets", &reader, None))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a scoped secret:read principal must list secrets; body={body}"
+    );
+
+    // secret:read alone must not create.
+    let suffix = Uuid::new_v4().simple().to_string();
+    let create_body = serde_json::json!({
+        "name": format!("scoped-secret-{suffix}"),
+        "value": "s3cr3t",
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/secrets", &reader, Some(create_body.clone())))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "secret:read alone must not create a secret"
+    );
+
+    let creator = session_for_with_permission(&f, "secret_scoped_creator", "secret:create").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/secrets", &creator, Some(create_body)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a scoped secret:create principal must create; body={body}"
+    );
+}
