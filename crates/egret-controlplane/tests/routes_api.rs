@@ -3122,3 +3122,97 @@ async fn scoped_permission_secrets_read_and_create() {
         "a scoped secret:create principal must create; body={body}"
     );
 }
+
+/// Policies: `policy:read` gates `GET /policies`, `policy:create` gates
+/// `POST /policies`.
+#[tokio::test]
+async fn scoped_permission_policies_read_and_create() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    let authz = egret_authz::AuthzStore::new(f.db.clone());
+    egret_authz::seed_trino(&authz)
+        .await
+        .expect("seed trino def");
+    let svc_name = format!("trino-{}", Uuid::new_v4().simple());
+    let svc = authz
+        .create_service(&svc_name, "trino", &serde_json::json!({}))
+        .await
+        .expect("create service");
+
+    let wrong = session_for_with_permission(&f, "policy_scoped_wrong", "engine:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/policies?service={svc_name}"),
+            &wrong,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without policy:read must not list policies"
+    );
+
+    let reader = session_for_with_permission(&f, "policy_scoped_reader", "policy:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/policies?service={svc_name}"),
+            &reader,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a scoped policy:read principal must list policies; body={body}"
+    );
+
+    let create_body = serde_json::json!({
+        "name": "scoped-create",
+        "service": svc_name,
+        "isEnabled": true,
+        "resources": {"catalog": {"values": ["iceberg"]}},
+        "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+    });
+
+    // policy:read alone must not create.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/policies", &reader, Some(create_body.clone())))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "policy:read alone must not create a policy"
+    );
+
+    let creator = session_for_with_permission(&f, "policy_scoped_creator", "policy:create").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/policies", &creator, Some(create_body)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a scoped policy:create principal must create; body={body}"
+    );
+
+    authz.delete_service(svc.id).await.expect("cleanup service");
+}
