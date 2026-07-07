@@ -70,11 +70,29 @@ pub fn summarize_policy(id: i64, service: &str, enabled: bool, body: &Value) -> 
             .and_then(Value::as_str)
             .map(str::to_string)
     };
-    let resource_path = ["catalog", "schema", "table", "column"]
+    let mut resource_path = ["catalog", "schema", "table", "column"]
         .iter()
         .filter_map(|k| level(k))
         .collect::<Vec<_>>()
         .join(".");
+    // Non-table resources (trinouser, function, procedure, queryid, …) don't fit
+    // the catalog.schema.table.column path — surface them as "type: value" so the
+    // list view isn't blank for e.g. impersonation policies.
+    if resource_path.is_empty() {
+        if let Some(obj) = res {
+            for (k, v) in obj {
+                if let Some(val) = v
+                    .get("values")
+                    .and_then(Value::as_array)
+                    .and_then(|a| a.first())
+                    .and_then(Value::as_str)
+                {
+                    resource_path = format!("{k}: {val}");
+                    break;
+                }
+            }
+        }
+    }
 
     // principals + permissions, unioned across every item bucket this kind can
     // populate. Access policies (0) can carry entries in any of allow/deny
