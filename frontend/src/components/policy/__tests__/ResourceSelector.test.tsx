@@ -87,7 +87,48 @@ describe("ResourceSelector", () => {
     expect(onChange).toHaveBeenCalledWith({
       catalog: { values: ["iceberg"] },
       schema: { values: ["sales"] },
-      table: { values: [] },
+      table: { values: ["*"], isExcludes: false, isRecursive: false },
     });
+  });
+
+  it("offers '— none —' on a level whose parent isValidLeaf, truncating the chain there when picked", () => {
+    const onChange = vi.fn();
+    wrap(
+      <ResourceSelector
+        resourceDefs={RESOURCE_DEFS}
+        service="trino"
+        value={{
+          catalog: { values: ["c"] },
+          schema: { values: ["*"] },
+          table: { values: ["*"] },
+          column: { values: ["*"] },
+        }}
+        onChange={onChange}
+      />,
+    );
+
+    // Column's parent (table) is a valid leaf, so Column's Type select offers "— none —".
+    fireEvent.click(screen.getByLabelText("Resource type at level 4"));
+    const noneOption = screen.getByRole("option", { name: "— none —" });
+    expect(noneOption).toBeInTheDocument();
+    fireEvent.click(noneOption);
+    expect(onChange).toHaveBeenCalledWith({
+      catalog: { values: ["c"] },
+      schema: { values: ["*"] },
+      table: { values: ["*"] },
+    });
+  });
+
+  it("never offers '— none —' on the root level (a policy needs at least one resource)", () => {
+    wrap(
+      <ResourceSelector
+        resourceDefs={RESOURCE_DEFS}
+        service="trino"
+        value={{ catalog: { values: ["c"] } }}
+        onChange={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByLabelText("Resource type at level 1"));
+    expect(screen.queryByRole("option", { name: "— none —" })).not.toBeInTheDocument();
   });
 });

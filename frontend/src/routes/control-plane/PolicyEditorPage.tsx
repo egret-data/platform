@@ -64,10 +64,18 @@ const emptyMaskItem = (): MaskItem => ({
   valueExpr: undefined,
 });
 const emptyRowFilterItem = (): RowFilterItem => ({ users: [], groups: [], filterExpr: "" });
+// Table-level chain (catalog/schema/table) — the common stopping point for
+// access and row-filter policies. Only catalog starts empty (the one
+// Required field); the user can extend to column (access) or drop back to
+// schema/catalog via ResourceSelector's "— none —" affordance.
 const emptyTableResources = () => ({
   catalog: emptyLevel(),
   schema: wildcardLevel(),
   table: wildcardLevel(),
+});
+// Column-level chain — masking policies operate on a column, so include it.
+const emptyColumnResources = () => ({
+  ...emptyTableResources(),
   column: wildcardLevel(),
 });
 
@@ -84,7 +92,7 @@ function blankInput(kind: PolicyKind, service: string): any {
       name: "",
       service,
       isEnabled: true,
-      resources: emptyTableResources(),
+      resources: emptyColumnResources(),
       items: [emptyMaskItem()],
       description: "",
       labels: [],
@@ -97,7 +105,7 @@ function blankInput(kind: PolicyKind, service: string): any {
       name: "",
       service,
       isEnabled: true,
-      resources: { catalog: emptyLevel(), schema: wildcardLevel(), table: wildcardLevel() },
+      resources: emptyTableResources(),
       items: [emptyRowFilterItem()],
       description: "",
       labels: [],

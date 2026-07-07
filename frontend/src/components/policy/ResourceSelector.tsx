@@ -18,6 +18,9 @@ export interface ResourceSelectorProps {
 const NONE = "__none__";
 
 const emptyLevel = (): ResourceLevel => ({ values: [] });
+/** Default value for a level added via "Add level" — a wildcard, not empty,
+ * so a freshly-extended chain isn't immediately flagged "Required". */
+const defaultNewLevel = (): ResourceLevel => ({ values: ["*"], isExcludes: false, isRecursive: false });
 
 /** Friendly labels for resource type names that don't read well merely capitalized. */
 const LABELS: Record<string, string> = {
@@ -42,6 +45,11 @@ function labelFor(name: string): string {
  * level's type truncates the chain below it; a "None (stop here)" entry on
  * the trailing type selector lets the chain stop at a valid leaf instead of
  * being extended into its children.
+ *
+ * Any non-root level whose *parent* is itself a valid stopping point
+ * (`parentDef.isValidLeaf`) also gets a "— none —" entry in its own Type
+ * select — Ranger allows a policy to stop at that parent, so picking
+ * "— none —" truncates the chain there and every level below it.
  */
 export function ResourceSelector({ resourceDefs, service, value, onChange, onLeafChange }: ResourceSelectorProps) {
   const byName = useMemo(() => {
@@ -93,6 +101,14 @@ export function ResourceSelector({ resourceDefs, service, value, onChange, onLea
 
   const setResourceValue = (name: string, lvl: ResourceLevel) => onChange({ ...value, [name]: lvl });
 
+  // Drops every key in the chain from `index` onward, truncating whatever
+  // sub-chain existed at and below that position.
+  const truncateAt = (index: number) => {
+    const next = { ...value };
+    for (let i = index; i < chain.length; i++) delete next[chain[i]];
+    onChange(next);
+  };
+
   // Switching the type occupying position `index` drops every key in the
   // chain from `index` onward and installs `newName` with a fresh empty
   // value, truncating whatever sub-chain existed below the old type.
@@ -103,8 +119,11 @@ export function ResourceSelector({ resourceDefs, service, value, onChange, onLea
     onChange(next);
   };
 
-  // Extends the chain by adding the given child type as the new leaf.
-  const extendChain = (childName: string) => onChange({ ...value, [childName]: value[childName] ?? emptyLevel() });
+  // Extends the chain by adding the given child type as the new leaf,
+  // defaulting to a wildcard so the freshly-added level isn't immediately
+  // flagged "Required".
+  const extendChain = (childName: string) =>
+    onChange({ ...value, [childName]: value[childName] ?? defaultNewLevel() });
 
   // Parent values (catalog/schema/table) visible to `ResourceLevelEditor`'s
   // lookup autocomplete for the level at chain position `index`.
@@ -127,13 +146,22 @@ export function ResourceSelector({ resourceDefs, service, value, onChange, onLea
     <div className="space-y-3">
       {chain.map((name, index) => {
         const validOptions = index === 0 ? roots : childrenOfName(chain[index - 1]);
+        const parentDef = index > 0 ? byName.get(chain[index - 1]) : undefined;
+        // Stopping at the parent is a legal Ranger policy (its def marks it a
+        // valid leaf), so this level's Type select gets a "— none —" entry
+        // that truncates the chain back up to (and not including) here.
+        // Never offered at the root — a policy needs at least one resource.
+        const showNone = index > 0 && parentDef?.isValidLeaf === true;
         const def = byName.get(name) ?? { name };
         return (
           <div key={`${index}-${name}`} className="space-y-1.5 rounded-md border p-3">
-            {validOptions.length > 1 ? (
+            {validOptions.length > 1 || showNone ? (
               <div className="flex items-center gap-2">
                 <span className="text-xs text-muted-foreground">Type</span>
-                <Select value={name} onValueChange={(v) => switchTypeAt(index, v)}>
+                <Select
+                  value={name}
+                  onValueChange={(v) => (v === NONE ? truncateAt(index) : switchTypeAt(index, v))}
+                >
                   <SelectTrigger size="sm" className="h-7 w-44" aria-label={`Resource type at level ${index + 1}`}>
                     <SelectValue />
                   </SelectTrigger>
@@ -143,6 +171,7 @@ export function ResourceSelector({ resourceDefs, service, value, onChange, onLea
                         {labelFor(o.name)}
                       </SelectItem>
                     ))}
+                    {showNone && <SelectItem value={NONE}>— none —</SelectItem>}
                   </SelectContent>
                 </Select>
               </div>

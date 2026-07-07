@@ -143,19 +143,19 @@ describe("PolicyEditorPage", () => {
     wrap(<PolicyEditorPage />);
     await screen.findByLabelText("Policy name");
 
-    // Resource is the default section; the primary block starts with all 4
-    // catalog/schema/table/column levels filled in (the default chain) once
-    // the service-def (which ResourceSelector needs to build the hierarchy)
-    // has loaded. "Add resource" appends a blank entry, which ResourceSelector
-    // defaults to a single catalog level (nothing chosen yet to cascade
-    // further).
-    expect(await screen.findAllByPlaceholderText("value or * (Enter to add)")).toHaveLength(4);
+    // Resource is the default section; the primary block starts with the
+    // default catalog/schema/table chain (3 levels — access stops at table,
+    // not forced down to column) once the service-def (which ResourceSelector
+    // needs to build the hierarchy) has loaded. "Add resource" appends a
+    // blank entry, which ResourceSelector defaults to a single catalog level
+    // (nothing chosen yet to cascade further).
+    expect(await screen.findAllByPlaceholderText("value or * (Enter to add)")).toHaveLength(3);
     fireEvent.click(screen.getByRole("button", { name: /add resource/i }));
-    expect(screen.getAllByPlaceholderText("value or * (Enter to add)")).toHaveLength(5);
+    expect(screen.getAllByPlaceholderText("value or * (Enter to add)")).toHaveLength(4);
     expect(screen.getByRole("button", { name: /remove resource/i })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /remove resource/i }));
-    expect(screen.getAllByPlaceholderText("value or * (Enter to add)")).toHaveLength(4);
+    expect(screen.getAllByPlaceholderText("value or * (Enter to add)")).toHaveLength(3);
   });
 
   it("updates an existing policy when an id param is present", async () => {
