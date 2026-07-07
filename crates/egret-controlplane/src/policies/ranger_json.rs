@@ -6,11 +6,11 @@
 //! Called by the create/update handlers in `policies/mod.rs`.
 //!
 //! NOTE: this serializer is lossy for policies NOT authored by egret's editor.
-//! It always emits `roles: []`, `delegateAdmin: false`, empty allow/deny
-//! exceptions, `isAllowed: true` per access, and `serviceType: "trino"`. Editing
-//! a foreign/Ranger-native policy through the UI therefore drops those fields.
-//! P2 is trino-only + egret-authored by design; revisit if importing external
-//! Ranger policies becomes a requirement.
+//! It always emits `delegateAdmin: false`, `isAllowed: true` per access, and
+//! `serviceType: "trino"`. Editing a foreign/Ranger-native policy through the
+//! UI therefore drops those fields. P2 is trino-only + egret-authored by
+//! design; revisit if importing external Ranger policies becomes a
+//! requirement.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -43,6 +43,8 @@ pub struct AccessItemInput {
     pub users: Vec<String>,
     #[serde(default)]
     pub groups: Vec<String>,
+    #[serde(default)]
+    pub roles: Vec<String>,
     #[serde(default)]
     pub accesses: Vec<String>,
     #[serde(default = "default_effect")]
@@ -87,10 +89,31 @@ pub struct AccessPolicyInput {
     pub labels: Vec<String>,
     #[serde(default, rename = "isOverride")]
     pub is_override: bool,
+    /// Extra independent resource hierarchies (Ranger additionalResources).
+    #[serde(default)]
+    pub additional: Vec<EditorResources>,
 }
 
 fn resource_obj(l: &ResourceLevel) -> Value {
     json!({ "values": l.values, "isExcludes": l.is_excludes, "isRecursive": l.is_recursive })
+}
+
+/// Build the catalog/schema/table/column resources map for one resource
+/// hierarchy (used for both the primary `resources` and each entry of
+/// `additionalResources`).
+fn table_resources_map(r: &EditorResources) -> Map<String, Value> {
+    let mut m = Map::new();
+    for (key, level) in [
+        ("catalog", &r.catalog),
+        ("schema", &r.schema),
+        ("table", &r.table),
+        ("column", &r.column),
+    ] {
+        if !level.values.is_empty() {
+            m.insert(key.to_string(), resource_obj(level));
+        }
+    }
+    m
 }
 
 fn item_obj(it: &AccessItemInput) -> Value {
@@ -100,7 +123,7 @@ fn item_obj(it: &AccessItemInput) -> Value {
         .map(|a| json!({ "type": a, "isAllowed": true }))
         .collect();
     json!({
-        "users": it.users, "groups": it.groups, "roles": [],
+        "users": it.users, "groups": it.groups, "roles": it.roles,
         "accesses": accesses, "delegateAdmin": false,
     })
 }
@@ -108,21 +131,19 @@ fn item_obj(it: &AccessItemInput) -> Value {
 /// Render an `AccessPolicyInput` into a Ranger policyType-0 JSON body.
 pub fn access_to_ranger_json(input: &AccessPolicyInput) -> Value {
     let mut resources = Map::new();
+    let mut additional_resources: Vec<Value> = Vec::new();
     if input.resource_mode == "impersonation" {
         if !input.trinouser.values.is_empty() {
             resources.insert("trinouser".to_string(), resource_obj(&input.trinouser));
         }
     } else {
-        for (key, level) in [
-            ("catalog", &input.resources.catalog),
-            ("schema", &input.resources.schema),
-            ("table", &input.resources.table),
-            ("column", &input.resources.column),
-        ] {
-            if !level.values.is_empty() {
-                resources.insert(key.to_string(), resource_obj(level));
-            }
-        }
+        resources = table_resources_map(&input.resources);
+        additional_resources = input
+            .additional
+            .iter()
+            .map(|r| Value::Object(table_resources_map(r)))
+            .filter(|v| v.as_object().map(|o| !o.is_empty()).unwrap_or(false))
+            .collect();
     }
     let (allow, deny): (Vec<_>, Vec<_>) = input.items.iter().partition(|it| it.effect != "deny");
     let policy_items: Vec<Value> = allow.iter().map(|it| item_obj(it)).collect();
@@ -147,6 +168,7 @@ pub fn access_to_ranger_json(input: &AccessPolicyInput) -> Value {
         "description": input.description,
         "policyLabels": input.labels,
         "resources": Value::Object(resources),
+        "additionalResources": additional_resources,
         "policyItems": policy_items,
         "denyPolicyItems": deny_items,
         "allowExceptions": allow_exc,
@@ -554,6 +576,23 @@ mod tests {
         let body = access_to_ranger_json(&sample());
         assert!(body["resources"].get("catalog").is_some());
         assert!(body["resources"].get("trinouser").is_none());
+    }
+
+    #[test]
+    fn serializes_additional_resources_and_roles() {
+        let inp: AccessPolicyInput = serde_json::from_value(json!({
+            "kind":"access","name":"p","service":"trino","isEnabled":true,
+            "resources":{"catalog":{"values":["iceberg"]},"schema":{"values":["sales"]}},
+            "additional":[{"catalog":{"values":["hive"]},"schema":{"values":["reports"]},"table":{"values":["daily"]}}],
+            "items":[{"users":["alice"],"groups":["g1"],"roles":["analyst_role"],"accesses":["select"],"effect":"allow"}]
+        })).unwrap();
+        let b = access_to_ranger_json(&inp);
+        assert_eq!(b["resources"]["catalog"]["values"][0], "iceberg");
+        let add = b["additionalResources"].as_array().unwrap();
+        assert_eq!(add.len(), 1);
+        assert_eq!(add[0]["catalog"]["values"][0], "hive");
+        assert_eq!(add[0]["table"]["values"][0], "daily");
+        assert_eq!(b["policyItems"][0]["roles"][0], "analyst_role");
     }
 
     #[test]
