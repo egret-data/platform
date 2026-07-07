@@ -60,24 +60,36 @@ export function PermissionPickerCell({ value, options, onChange }: PermissionPic
           )}
         </button>
       </PopoverTrigger>
-      <PopoverContent className="w-56 space-y-3" align="start">
+      <PopoverContent
+        className="w-auto min-w-[320px] max-w-[440px] space-y-3"
+        align="start"
+        side="bottom"
+        collisionPadding={16}
+      >
         <div className="text-sm font-medium">Permissions</div>
-        <div className="space-y-2">
-          {options.map((opt) => (
-            <div key={opt} className="flex items-center gap-2">
-              <Checkbox
-                id={`perm-${opt}`}
-                aria-label={opt}
-                checked={draft.includes(opt)}
-                onCheckedChange={(c) => toggle(opt, c === true)}
-              />
-              <Label htmlFor={`perm-${opt}`} className="font-normal">
-                {opt}
-              </Label>
-            </div>
-          ))}
+        <div className="max-h-64 overflow-y-auto pr-1">
+          <div
+            className={cn(
+              "grid gap-x-4 gap-y-1.5",
+              options.length > 6 ? "grid-cols-2" : "grid-cols-1"
+            )}
+          >
+            {options.map((opt) => (
+              <div key={opt} className="flex items-center gap-2 whitespace-nowrap">
+                <Checkbox
+                  id={`perm-${opt}`}
+                  aria-label={opt}
+                  checked={draft.includes(opt)}
+                  onCheckedChange={(c) => toggle(opt, c === true)}
+                />
+                <Label htmlFor={`perm-${opt}`} className="font-normal">
+                  {opt}
+                </Label>
+              </div>
+            ))}
+          </div>
           {options.length > 1 && (
-            <div className="flex items-center gap-2 border-t pt-2">
+            <div className="mt-1.5 flex items-center gap-2 border-t pt-2">
               <Checkbox
                 id="perm-select-all"
                 aria-label="Select all"
