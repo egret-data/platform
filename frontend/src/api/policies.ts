@@ -43,12 +43,27 @@ export function listPolicies(service: string, type?: string): Promise<PolicySumm
 // ── Policy editor (Task 4) ────────────────────────────────────────────────
 
 export interface ResourceLevel { values: string[]; isExcludes?: boolean; isRecursive?: boolean; }
-export interface AccessItem { users: string[]; groups: string[]; accesses: string[]; effect: "allow" | "deny"; }
+export interface AccessItem {
+  users: string[];
+  groups: string[];
+  roles: string[];
+  accesses: string[];
+  effect: "allow" | "deny";
+  delegateAdmin?: boolean;
+}
+export interface TableResources {
+  catalog: ResourceLevel;
+  schema: ResourceLevel;
+  table: ResourceLevel;
+  column: ResourceLevel;
+}
 export interface AccessPolicyInput {
   name: string;
   service: string;
   isEnabled: boolean;
-  resources: { catalog: ResourceLevel; schema: ResourceLevel; table: ResourceLevel; column: ResourceLevel };
+  resources: TableResources;
+  /** Additional resource sets (Ranger's "additionalResources") — same shape as `resources`. */
+  additional: TableResources[];
   /** "table" (catalog/schema/table/column) or "impersonation" (trinouser). */
   resourceMode: "table" | "impersonation";
   /** The trinouser resource, used only when resourceMode === "impersonation". */

@@ -76,8 +76,10 @@ const wildcardLevel = () => ({
 const emptyAccessItem = (effect: "allow" | "deny" = "allow"): AccessItem => ({
   users: [],
   groups: [],
+  roles: [],
   accesses: [],
   effect,
+  delegateAdmin: false,
 });
 const emptyMaskItem = (): MaskItem => ({
   users: [],
@@ -136,6 +138,7 @@ function blankInput(kind: PolicyKind, service: string): any {
       table: wildcardLevel(),
       column: wildcardLevel(),
     },
+    additional: [],
     resourceMode: "table",
     trinouser: emptyLevel(),
     items: [emptyAccessItem()],
