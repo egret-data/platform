@@ -109,7 +109,7 @@ describe("Sidebar – workspace zones", () => {
 });
 
 describe("Sidebar – Control Plane group", () => {
-  test("renders the Control Plane items (Workspaces, Engines, Warehouses, Storage, Secrets, Users)", () => {
+  test("renders the Control Plane items (Workspaces, Engines, Warehouses, Storage, Secrets)", () => {
     renderSidebar("/control-plane/workspaces");
     expect(screen.getByText("Control Plane")).toBeInTheDocument();
 
@@ -133,14 +133,34 @@ describe("Sidebar – Control Plane group", () => {
       "href",
       "/control-plane/secrets",
     );
-    expect(screen.getByRole("link", { name: "Users" })).toHaveAttribute(
-      "href",
-      "/control-plane/users",
-    );
     // Dropped from the Control Plane.
     for (const gone of ["Resources", "Monitoring", "Platform Policies"]) {
       expect(screen.queryByRole("link", { name: gone })).not.toBeInTheDocument();
     }
+  });
+});
+
+describe("Sidebar – Access control group", () => {
+  test("renders Users, Groups, Roles, Permissions at their /control-plane routes", () => {
+    renderSidebar("/control-plane/workspaces");
+    expect(screen.getByText("Access control")).toBeInTheDocument();
+
+    expect(screen.getByRole("link", { name: "Users" })).toHaveAttribute(
+      "href",
+      "/control-plane/users",
+    );
+    expect(screen.getByRole("link", { name: "Groups" })).toHaveAttribute(
+      "href",
+      "/control-plane/groups",
+    );
+    expect(screen.getByRole("link", { name: "Roles" })).toHaveAttribute(
+      "href",
+      "/control-plane/roles",
+    );
+    expect(screen.getByRole("link", { name: "Permissions" })).toHaveAttribute(
+      "href",
+      "/control-plane/permissions",
+    );
   });
 });
 

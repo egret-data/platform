@@ -2,9 +2,9 @@ import { useState } from "react";
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
   BarChart3, Bell, Boxes, ChevronDown, ChevronRight, Database,
-  FolderKanban, HardDrive, KeyRound, LayoutDashboard, type LucideIcon,
+  FolderKanban, HardDrive, KeyRound, LayoutDashboard, ListChecks, type LucideIcon,
   NotebookText, PanelLeftClose, PanelLeftOpen, Plug, Server, Share2, ShieldCheck,
-  SquareTerminal, Table2, Users, Waypoints, Workflow,
+  SquareTerminal, Table2, UserCog, Users, UsersRound, Waypoints, Workflow,
 } from "lucide-react";
 import {
   Tooltip,
@@ -65,7 +65,15 @@ const CONTROL_PLANE_GROUPS: NavGroup[] = [
       { label: "Warehouses", icon: Boxes },
       { label: "Storage", icon: HardDrive },
       { label: "Secrets", icon: KeyRound },
+    ],
+  },
+  {
+    heading: "Access control",
+    items: [
       { label: "Users", icon: Users },
+      { label: "Groups", icon: UsersRound },
+      { label: "Roles", icon: UserCog },
+      { label: "Permissions", icon: ListChecks },
     ],
   },
   {

@@ -37,6 +37,10 @@ import ProfileDetailPage from "@/routes/control-plane/ProfileDetailPage";
 import PolicyEditorPage from "@/routes/control-plane/PolicyEditorPage";
 import Warehouses from "@/routes/control-plane/Warehouses";
 import WarehouseDetail from "@/routes/control-plane/WarehouseDetail";
+import UsersPage from "@/routes/control-plane/access/UsersPage";
+import GroupsPage from "@/routes/control-plane/access/GroupsPage";
+import RolesPage from "@/routes/control-plane/access/RolesPage";
+import PermissionsPage from "@/routes/control-plane/access/PermissionsPage";
 
 const qc = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1, staleTime: 30000 } } });
 
@@ -96,7 +100,10 @@ function ControlPlaneRoutes() {
           <Route path="policies/:service" element={<ProfileDetailPage />} />
           <Route path="policies/:service/:kind/new" element={<PolicyEditorPage />} />
           <Route path="policies/:service/:kind/:id" element={<PolicyEditorPage />} />
-          <Route path="users" element={<Placeholder title="Users" />} />
+          <Route path="users" element={<UsersPage />} />
+          <Route path="groups" element={<GroupsPage />} />
+          <Route path="roles" element={<RolesPage />} />
+          <Route path="permissions" element={<PermissionsPage />} />
           <Route path="*" element={<Navigate to="workspaces" replace />} />
         </Routes>
       </AppShell>
