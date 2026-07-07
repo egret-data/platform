@@ -1,3 +1,650 @@
+import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Pencil, Plus, ShieldCheck, Trash2, UsersRound } from "lucide-react";
+
+import {
+  type AccessGroup,
+  type AccessRole,
+  type AccessUser,
+  addMember,
+  assignGroupRole,
+  createGroup,
+  deleteGroup,
+  listGroups,
+  listRoles,
+  listUsers,
+  renameGroup,
+  unassignGroupRole,
+} from "@/api/access";
+import { ApiError } from "@/api/client";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { TagCombobox } from "@/components/ui/tag-combobox";
+import { usersQueryKey } from "@/routes/control-plane/access/UsersPage";
+
+export const groupsQueryKey = ["control-plane", "access", "groups"] as const;
+const rolesQueryKey = ["control-plane", "access", "roles"] as const;
+
+const COLUMNS = ["Name", "Source", "Members", "Roles", ""];
+
+const OIDC_TOOLTIP = "Synced from your identity provider — read-only here.";
+
+/**
+ * Control Plane → Access control → Groups.
+ *
+ * Lists local + OIDC-synced groups. Local groups can be renamed, deleted, and
+ * have their membership managed here; OIDC groups are read-only except for
+ * role assignment (their membership is owned by the identity provider).
+ */
 export default function GroupsPage() {
-  return <div className="text-muted-foreground">Groups — coming soon</div>;
+  const groups = useQuery<AccessGroup[], ApiError>({
+    queryKey: groupsQueryKey,
+    queryFn: listGroups,
+    retry: false,
+  });
+  const rows = groups.data ?? [];
+  const queryClient = useQueryClient();
+
+  const [createOpen, setCreateOpen] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<AccessGroup | null>(null);
+  const [membersTarget, setMembersTarget] = useState<AccessGroup | null>(null);
+  const [rolesTarget, setRolesTarget] = useState<AccessGroup | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<AccessGroup | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const deleteMutation = useMutation<void, ApiError, string>({
+    mutationFn: (id) => deleteGroup(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: groupsQueryKey });
+      setDeleteError(null);
+    },
+    onError: (err) => setDeleteError(err.message ?? "Failed to delete group."),
+  });
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h1 className="text-2xl font-semibold leading-tight">Groups</h1>
+        <p className="text-sm text-muted-foreground">
+          Local and identity-provider groups, their membership, and role
+          assignments.
+        </p>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-2">
+            <div className="space-y-1.5">
+              <CardTitle className="text-lg">All groups</CardTitle>
+              <CardDescription>
+                Grant roles to a group to apply them to every member.
+              </CardDescription>
+            </div>
+            <Button size="sm" onClick={() => setCreateOpen(true)}>
+              <Plus className="mr-1 h-4 w-4" />
+              New group
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {deleteError && (
+            <Alert variant="destructive" className="mb-4">
+              <AlertDescription>{deleteError}</AlertDescription>
+            </Alert>
+          )}
+          <Table>
+            <TableHeader>
+              <TableRow>
+                {COLUMNS.map((col) => (
+                  <TableHead
+                    key={col || "actions"}
+                    className={col === "" ? "text-right" : undefined}
+                  >
+                    {col || <span className="sr-only">Actions</span>}
+                  </TableHead>
+                ))}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((g) => {
+                const isOidc = g.source === "oidc";
+                return (
+                  <TableRow key={g.id}>
+                    <TableCell className="font-medium">{g.name}</TableCell>
+                    <TableCell>
+                      <Badge variant={isOidc ? "secondary" : "outline"}>
+                        {g.source}
+                      </Badge>
+                      {isOidc && (
+                        <div className="text-xs font-normal text-muted-foreground">
+                          synced
+                        </div>
+                      )}
+                    </TableCell>
+                    <TableCell>{g.memberCount}</TableCell>
+                    <TableCell>
+                      {g.roles.length === 0 ? (
+                        <span className="text-muted-foreground">—</span>
+                      ) : (
+                        <div className="flex flex-wrap gap-1">
+                          {g.roles.map((r) => (
+                            <Badge key={r} variant="secondary">
+                              {r}
+                            </Badge>
+                          ))}
+                        </div>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex justify-end gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Assign roles to ${g.name}`}
+                          onClick={() => setRolesTarget(g)}
+                        >
+                          <ShieldCheck className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Manage members of ${g.name}`}
+                          disabled={isOidc}
+                          title={isOidc ? OIDC_TOOLTIP : undefined}
+                          onClick={() => setMembersTarget(g)}
+                        >
+                          <UsersRound className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Rename ${g.name}`}
+                          disabled={isOidc}
+                          title={isOidc ? OIDC_TOOLTIP : undefined}
+                          onClick={() => setRenameTarget(g)}
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Delete ${g.name}`}
+                          disabled={isOidc}
+                          title={isOidc ? OIDC_TOOLTIP : undefined}
+                          onClick={() => {
+                            setDeleteError(null);
+                            setDeleteTarget(g);
+                          }}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+              {rows.length === 0 && (
+                <TableRow className="hover:bg-transparent">
+                  <TableCell
+                    colSpan={COLUMNS.length}
+                    className="text-center text-muted-foreground"
+                  >
+                    {groups.isError ? (
+                      <span className="text-destructive">
+                        {groups.error?.message ?? "Failed to load groups."}
+                      </span>
+                    ) : groups.isLoading ? (
+                      "Loading…"
+                    ) : (
+                      "No groups yet."
+                    )}
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+
+      <CreateGroupDialog open={createOpen} onOpenChange={setCreateOpen} />
+      <RenameGroupDialog
+        group={renameTarget}
+        onOpenChange={(o) => {
+          if (!o) setRenameTarget(null);
+        }}
+      />
+      <ManageMembersDialog
+        group={membersTarget}
+        onOpenChange={(o) => {
+          if (!o) setMembersTarget(null);
+        }}
+      />
+      <AssignGroupRolesDialog
+        group={rolesTarget}
+        onOpenChange={(o) => {
+          if (!o) setRolesTarget(null);
+        }}
+      />
+
+      <ConfirmDeleteDialog
+        open={deleteTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) setDeleteTarget(null);
+        }}
+        title={deleteTarget ? `Delete "${deleteTarget.name}"?` : "Delete group?"}
+        description="This group will be permanently removed. Role grants on the group are also removed; members keep any roles assigned directly to them."
+        confirmText="delete"
+        onConfirm={() => {
+          if (deleteTarget) deleteMutation.mutate(deleteTarget.id);
+          setDeleteTarget(null);
+        }}
+      />
+    </div>
+  );
+}
+
+function CreateGroupDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const createMutation = useMutation<AccessGroup, ApiError, { name: string }>({
+    mutationFn: (input) => createGroup(input),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: groupsQueryKey }),
+  });
+
+  function reset() {
+    setName("");
+    setError(null);
+    createMutation.reset();
+  }
+
+  function handleOpenChange(next: boolean) {
+    if (!next) reset();
+    onOpenChange(next);
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    try {
+      await createMutation.mutateAsync({ name: name.trim() });
+      handleOpenChange(false);
+    } catch (err) {
+      setError((err as ApiError).message ?? "Failed to create group.");
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogContent>
+        <form onSubmit={handleSubmit}>
+          <DialogHeader>
+            <DialogTitle>New group</DialogTitle>
+            <DialogDescription>Create a local group.</DialogDescription>
+          </DialogHeader>
+
+          <div className="my-4 space-y-4">
+            {error && (
+              <Alert variant="destructive">
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+            <div className="space-y-1.5">
+              <Label htmlFor="new-group-name">Name</Label>
+              <Input
+                id="new-group-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+                autoFocus
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={createMutation.isPending}>
+              Create
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RenameGroupDialog({
+  group,
+  onOpenChange,
+}: {
+  group: AccessGroup | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (group) {
+      setName(group.name);
+      setError(null);
+    }
+  }, [group]);
+
+  const renameMutation = useMutation<AccessGroup, ApiError, string>({
+    mutationFn: (newName) => renameGroup(group!.id, newName),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: groupsQueryKey }),
+  });
+
+  function handleOpenChange(next: boolean) {
+    if (!next) {
+      setError(null);
+      renameMutation.reset();
+    }
+    onOpenChange(next);
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    try {
+      await renameMutation.mutateAsync(name.trim());
+      handleOpenChange(false);
+    } catch (err) {
+      setError((err as ApiError).message ?? "Failed to rename group.");
+    }
+  }
+
+  return (
+    <Dialog open={group !== null} onOpenChange={handleOpenChange}>
+      <DialogContent>
+        <form onSubmit={handleSubmit}>
+          <DialogHeader>
+            <DialogTitle>Rename group</DialogTitle>
+            <DialogDescription>Change the display name of this group.</DialogDescription>
+          </DialogHeader>
+
+          <div className="my-4 space-y-4">
+            {error && (
+              <Alert variant="destructive">
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+            <div className="space-y-1.5">
+              <Label htmlFor="rename-group-name">Name</Label>
+              <Input
+                id="rename-group-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+                autoFocus
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={renameMutation.isPending}>
+              Save
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Membership management for a local group.
+ *
+ * `AccessGroup` (the list response) does not include the current member
+ * list — only a `memberCount` — so this dialog cannot prefill or diff
+ * against existing members. It lets an admin pick users to add; each pick
+ * calls `addMember` immediately against the group. Removing an existing
+ * member isn't supported from this dialog for the same reason (there's no
+ * members-listing endpoint yet to know who to offer for removal).
+ */
+function ManageMembersDialog({
+  group,
+  onOpenChange,
+}: {
+  group: AccessGroup | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const queryClient = useQueryClient();
+  const users = useQuery<AccessUser[], ApiError>({
+    queryKey: usersQueryKey,
+    queryFn: listUsers,
+    retry: false,
+  });
+  const [added, setAdded] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (group) {
+      setAdded([]);
+      setError(null);
+    }
+  }, [group]);
+
+  function handleOpenChange(next: boolean) {
+    if (!next) setError(null);
+    onOpenChange(next);
+  }
+
+  async function handleSave() {
+    if (!group) return;
+    setError(null);
+    setSaving(true);
+    const userByEmail = new Map((users.data ?? []).map((u) => [u.email, u]));
+    let failed = false;
+    try {
+      for (const email of added) {
+        const u = userByEmail.get(email);
+        if (u) await addMember(group.id, u.id);
+      }
+    } catch (err) {
+      failed = true;
+      setError((err as ApiError).message ?? "Failed to add members.");
+    } finally {
+      queryClient.invalidateQueries({ queryKey: groupsQueryKey });
+      setSaving(false);
+    }
+    if (!failed) handleOpenChange(false);
+  }
+
+  return (
+    <Dialog open={group !== null} onOpenChange={handleOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Manage members — {group?.name}</DialogTitle>
+          <DialogDescription>
+            Add users to this group. This group currently has{" "}
+            {group?.memberCount ?? 0} member{group?.memberCount === 1 ? "" : "s"}.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="my-4 space-y-2">
+          {error && (
+            <Alert variant="destructive">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          )}
+          <TagCombobox
+            values={added}
+            onChange={setAdded}
+            suggest={(q) =>
+              Promise.resolve(
+                (users.data ?? [])
+                  .filter((u) => u.email.toLowerCase().includes(q.toLowerCase()))
+                  .map((u) => ({ value: u.email, label: u.name })),
+              )
+            }
+            queryKey={["control-plane", "access", "users", "suggest"]}
+            placeholder="Add member by email…"
+            ariaLabel="Add member"
+            creatable={false}
+          />
+          <p className="text-xs text-muted-foreground">
+            Existing members aren&apos;t listed yet — this adds new members
+            without removing current ones.
+          </p>
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="button" onClick={handleSave} disabled={saving || added.length === 0}>
+            Add
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function AssignGroupRolesDialog({
+  group,
+  onOpenChange,
+}: {
+  group: AccessGroup | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const queryClient = useQueryClient();
+  const roles = useQuery<AccessRole[], ApiError>({
+    queryKey: rolesQueryKey,
+    queryFn: listRoles,
+    retry: false,
+  });
+  const [selected, setSelected] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (group) {
+      setSelected(group.roles);
+      setError(null);
+    }
+  }, [group]);
+
+  function handleOpenChange(next: boolean) {
+    if (!next) setError(null);
+    onOpenChange(next);
+  }
+
+  async function handleSave() {
+    if (!group) return;
+    setError(null);
+    setSaving(true);
+    const roleByName = new Map((roles.data ?? []).map((r) => [r.name, r]));
+    const current = new Set(group.roles);
+    const next = new Set(selected);
+    const toAdd = selected.filter((r) => !current.has(r));
+    const toRemove = group.roles.filter((r) => !next.has(r));
+    let failed = false;
+    try {
+      for (const name of toAdd) {
+        const role = roleByName.get(name);
+        if (role) await assignGroupRole(group.id, role.id);
+      }
+      for (const name of toRemove) {
+        const role = roleByName.get(name);
+        if (role) await unassignGroupRole(group.id, role.id);
+      }
+    } catch (err) {
+      failed = true;
+      setError((err as ApiError).message ?? "Failed to update roles.");
+    } finally {
+      queryClient.invalidateQueries({ queryKey: groupsQueryKey });
+      queryClient.invalidateQueries({ queryKey: usersQueryKey });
+      setSaving(false);
+    }
+    if (!failed) handleOpenChange(false);
+  }
+
+  return (
+    <Dialog open={group !== null} onOpenChange={handleOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Assign roles — {group?.name}</DialogTitle>
+          <DialogDescription>
+            Roles granted here apply to every member of the group.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="my-4 space-y-4">
+          {error && (
+            <Alert variant="destructive">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          )}
+
+          <TagCombobox
+            values={selected}
+            onChange={setSelected}
+            suggest={(q) =>
+              Promise.resolve(
+                (roles.data ?? [])
+                  .filter((r) => r.name.toLowerCase().includes(q.toLowerCase()))
+                  .map((r) => ({ value: r.name, hint: r.scope })),
+              )
+            }
+            queryKey={["control-plane", "access", "roles", "suggest"]}
+            placeholder="Add role…"
+            ariaLabel="Add role"
+            creatable={false}
+          />
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="button" onClick={handleSave} disabled={saving}>
+            Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
