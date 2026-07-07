@@ -3218,8 +3218,10 @@ async fn scoped_permission_policies_read_and_create() {
     authz.delete_service(svc.id).await.expect("cleanup service");
 }
 
-/// Monitor: every route in `monitor.rs` is gated on `engine:read` (monitoring
-/// is read-only cluster/query observation, even `kill_query`'s DELETE verb).
+/// Monitor: `list_queries`, `get_query`, and `get_cluster` are gated on
+/// `engine:read` (read-only cluster/query observation). `kill_query`'s DELETE
+/// verb is destructive and is gated on `engine:kill` instead (see
+/// `egret_core::rbac::PERMISSIONS`), not exercised by this test.
 /// Proves enforcement on both `/queries` (list) and `/cluster` (aggregate).
 #[tokio::test]
 async fn scoped_permission_monitor_queries_and_cluster() {

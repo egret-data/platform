@@ -2,7 +2,7 @@
 INSERT INTO role_permissions (role_id, permission)
 SELECT r.id, perm FROM roles r, unnest(ARRAY[
     'policy:read','policy:create','policy:update','policy:delete','policy:seed',
-    'warehouse:read','database:read','storage:read','engine:read',
+    'warehouse:read','storage:read','engine:read',
     'user:read','group:read','role:read'
 ]) AS perm
 WHERE r.scope='platform' AND r.name='data_steward'

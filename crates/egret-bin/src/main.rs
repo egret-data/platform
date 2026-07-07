@@ -1247,13 +1247,26 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     db.migrate().await.context("running migrations on boot")?;
 
     // Warn (do not fail) if any stored role permission is unknown to the catalog —
-    // catches drift between the DB and egret_core::rbac.
+    // catches drift between the DB and egret_core::rbac. In debug builds, fail fast
+    // instead: an unknown role_permissions key almost always means the catalog and a
+    // migration/seed have drifted apart during development, and it's cheaper to catch
+    // that at `cargo run` time than to discover it as a silent dead grant in prod.
     if let Ok(rows) =
         sqlx::query_scalar::<_, String>("SELECT DISTINCT permission FROM role_permissions")
             .fetch_all(&db.pool)
             .await
     {
-        for perm in rows.iter().filter(|p| !egret_core::rbac::is_known(p)) {
+        let unknown: Vec<&String> = rows
+            .iter()
+            .filter(|p| !egret_core::rbac::is_known(p))
+            .collect();
+        #[cfg(debug_assertions)]
+        if !unknown.is_empty() {
+            panic!(
+                "role_permissions references permissions not in egret_core::rbac::PERMISSIONS: {unknown:?}"
+            );
+        }
+        for perm in unknown {
             tracing::warn!(permission = %perm, "role_permissions references a permission not in the catalog");
         }
     }

@@ -277,7 +277,7 @@ async fn kill_query(
     Auth(p): Auth,
     Path((id, qid)): Path<(Uuid, String)>,
 ) -> Result<StatusCode, CpError> {
-    require_permission(&p, "engine:read")?;
+    require_permission(&p, "engine:kill")?;
     let engine = load_engine(&st, id).await?;
     let (code, _) =
         coordinator_call(&st, &engine, "DELETE", &format!("/v1/query/{qid}"), None).await?;

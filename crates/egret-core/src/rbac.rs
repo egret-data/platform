@@ -1,5 +1,11 @@
 //! Code-defined RBAC permission catalog — the single source of truth for every
 //! control-plane permission. DB `role_permissions` rows must reference these keys.
+//!
+//! `workspace:*` keys are enforced by `egret_workspace::rbac::Authorizer::require_platform`
+//! (not `egret_controlplane::auth::require_permission`) but are real, live gates on
+//! workspace admin routes (`egret-workspace/src/routes.rs`) — keep them here.
+//! `database:*` was removed from this catalog: it had zero enforcement call sites
+//! anywhere in the codebase (genuinely dead, unlike `workspace:*`).
 
 /// One catalog entry. `key` is the `resource:action` string checked in code.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -30,6 +36,7 @@ pub static PERMISSIONS: &[Permission] = &[
         "Engines",
         "Provision / restart engines on the cluster"
     ),
+    perm!("engine:kill", "Engines", "Kill running queries"),
     perm!("warehouse:read", "Warehouses", "View catalog warehouses"),
     perm!("warehouse:create", "Warehouses", "Create warehouses"),
     perm!("warehouse:update", "Warehouses", "Update warehouses"),
@@ -42,22 +49,6 @@ pub static PERMISSIONS: &[Permission] = &[
     perm!("secret:create", "Secrets", "Create secrets"),
     perm!("secret:update", "Secrets", "Update secrets"),
     perm!("secret:delete", "Secrets", "Delete secrets"),
-    perm!("database:read", "Databases", "View database connections"),
-    perm!(
-        "database:create",
-        "Databases",
-        "Create database connections"
-    ),
-    perm!(
-        "database:update",
-        "Databases",
-        "Update database connections"
-    ),
-    perm!(
-        "database:delete",
-        "Databases",
-        "Delete database connections"
-    ),
     perm!("policy:read", "Policies", "View Ranger policies"),
     perm!("policy:create", "Policies", "Create policies"),
     perm!("policy:update", "Policies", "Update policies"),
@@ -121,7 +112,7 @@ mod tests {
         for p in PERMISSIONS {
             assert!(seen.insert(p.key), "duplicate permission key: {}", p.key);
         }
-        assert!(PERMISSIONS.len() >= 40);
+        assert!(!PERMISSIONS.is_empty());
     }
     #[test]
     fn known_and_groups() {
