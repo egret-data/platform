@@ -226,6 +226,8 @@ function PolicyTypeTable({
     navigate(`/control-plane/policies/${encodeURIComponent(service)}/${type}/new`);
   const goToEdit = (id: number) =>
     navigate(`/control-plane/policies/${encodeURIComponent(service)}/${type}/${id}`);
+  const editPath = (id: number) =>
+    `/control-plane/policies/${encodeURIComponent(service)}/${type}/${id}`;
 
   return (
     <Card>
@@ -261,7 +263,12 @@ function PolicyTypeTable({
             {rows.map((r) => (
               <TableRow key={r.id}>
                 <TableCell className="font-medium">
-                  {r.name}
+                  <Link
+                    to={editPath(r.id)}
+                    className="text-primary hover:underline"
+                  >
+                    {r.name}
+                  </Link>
                   {r.description && (
                     <div className="text-xs font-normal text-muted-foreground">
                       {r.description}
@@ -271,8 +278,22 @@ function PolicyTypeTable({
                 <TableCell className="font-mono text-xs">
                   {r.resource_path}
                 </TableCell>
-                <TableCell>{r.principals.join(", ")}</TableCell>
-                <TableCell>{r.permissions.join(", ")}</TableCell>
+                <TableCell>
+                  <div
+                    className="max-w-[180px] truncate"
+                    title={r.principals.join(", ")}
+                  >
+                    {r.principals.join(", ")}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div
+                    className="max-w-[280px] truncate"
+                    title={r.permissions.join(", ")}
+                  >
+                    {r.permissions.join(", ")}
+                  </div>
+                </TableCell>
                 <TableCell>
                   {r.labels && r.labels.length > 0 ? (
                     <div className="flex flex-wrap gap-1">

@@ -117,7 +117,9 @@ function blankInput(kind: PolicyKind, service: string): any {
     name: "",
     service,
     isEnabled: true,
-    resources: emptyTableResources(),
+    // Show the full catalog→schema→table→column chain by default; the user can
+    // drop column (or table/schema) via the "— none —" option if not needed.
+    resources: emptyColumnResources(),
     additional: [],
     items: [emptyAccessItem()],
     allowExceptions: [],
