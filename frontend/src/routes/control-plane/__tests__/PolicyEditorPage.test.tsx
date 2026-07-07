@@ -1,5 +1,4 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -84,8 +83,9 @@ describe("PolicyEditorPage", () => {
     wrap(<PolicyEditorPage />);
     await screen.findByLabelText("Policy name");
 
-    // Deny-all-else and the Allow/Deny tabs live under the "Permissions" tab.
-    await userEvent.click(screen.getByRole("tab", { name: /permissions/i }));
+    // Deny-all-else and the (inner, still-Radix) Allow/Deny tabs live under
+    // the "Permissions" section of the outer (plain-button) left-nav.
+    fireEvent.click(screen.getByRole("button", { name: /permissions/i }));
     expect(screen.getByRole("tab", { name: "Deny" })).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Deny all else"));
     expect(screen.queryByRole("tab", { name: "Deny" })).not.toBeInTheDocument();
@@ -113,8 +113,9 @@ describe("PolicyEditorPage", () => {
     routeParams = { service: "trino", kind: "masking" };
     wrap(<PolicyEditorPage />);
     await screen.findByLabelText("Policy name");
-    // Kind-specific rules live under the "Masking" tab (unmounted by default).
-    await userEvent.click(screen.getByRole("tab", { name: /masking/i }));
+    // Kind-specific rules live under the "Masking" left-nav section (a plain
+    // button, unmounted by default — Resource is the default section).
+    fireEvent.click(screen.getByRole("button", { name: /masking/i }));
     expect(screen.getByLabelText("mask type 0")).toBeInTheDocument();
   });
 
@@ -122,8 +123,9 @@ describe("PolicyEditorPage", () => {
     routeParams = { service: "trino", kind: "rowfilter" };
     wrap(<PolicyEditorPage />);
     await screen.findByLabelText("Policy name");
-    // Kind-specific rules live under the "Row filter" tab (unmounted by default).
-    await userEvent.click(screen.getByRole("tab", { name: /row filter/i }));
+    // Kind-specific rules live under the "Row filter" left-nav section (a
+    // plain button, unmounted by default).
+    fireEvent.click(screen.getByRole("button", { name: /row filter/i }));
     expect(screen.getByLabelText("filter 0")).toBeInTheDocument();
   });
 });
