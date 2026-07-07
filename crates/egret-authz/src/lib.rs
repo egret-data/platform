@@ -1,4 +1,5 @@
 //! Ranger policy storage + versioning: service-defs, services, policies (native RangerPolicy jsonb).
+pub mod default_policies;
 pub mod error;
 pub mod service_def;
 pub mod store;

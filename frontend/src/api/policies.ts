@@ -118,6 +118,14 @@ export function getTrinoConfig(service: string): Promise<ConfigFile[]> {
   return apiJson<ConfigFile[]>(`/control-plane/policies/services/${encodeURIComponent(service)}/trino-config`);
 }
 
+/** Seed default "admin has all access" policies (one per Trino resource hierarchy). Idempotent. */
+export function seedDefaultPolicies(service: string): Promise<{ created: number }> {
+  return apiJson<{ created: number }>(
+    `/control-plane/policies/services/${encodeURIComponent(service)}/seed-defaults`,
+    { method: "POST" },
+  );
+}
+
 export const MASK_TYPES = [
   { name: "MASK", label: "Redact" },
   { name: "MASK_SHOW_LAST_4", label: "Show last 4" },

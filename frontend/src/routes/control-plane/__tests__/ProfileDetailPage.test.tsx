@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { describe, it, expect, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { setPolicyEnabled } from "@/api/policies";
+import { setPolicyEnabled, seedDefaultPolicies } from "@/api/policies";
 import ProfileDetailPage from "../ProfileDetailPage";
 
 const navigate = vi.fn();
@@ -46,6 +46,7 @@ vi.mock("@/api/policies", () => ({
   getTrinoConfig: vi.fn(() => Promise.resolve([
     { name: "access-control.properties", content: "access-control.name=ranger" },
   ])),
+  seedDefaultPolicies: vi.fn(() => Promise.resolve({ created: 13 })),
 }));
 
 function wrap(ui: React.ReactNode) {
@@ -82,5 +83,13 @@ describe("ProfileDetailPage", () => {
     const toggle = screen.getByRole("switch", { name: /toggle allow-analysts/i });
     await user.click(toggle);
     expect(setPolicyEnabled).toHaveBeenCalledWith(42, false);
+  });
+
+  it("seeds default policies when the header button is clicked", async () => {
+    const user = userEvent.setup();
+    wrap(<ProfileDetailPage />);
+    await screen.findByText("allow-analysts");
+    await user.click(screen.getByRole("button", { name: /seed default policies/i }));
+    expect(seedDefaultPolicies).toHaveBeenCalledWith("trino-prod");
   });
 });

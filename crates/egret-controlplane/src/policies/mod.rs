@@ -214,6 +214,10 @@ pub fn router() -> Router<CpState> {
             "/policies/services/{service}/trino-config",
             get(trino_config),
         )
+        .route(
+            "/policies/services/{service}/seed-defaults",
+            axum::routing::post(seed_defaults),
+        )
         .route("/policies/service-def/{name}", get(get_service_def))
         .route("/policies/resource-lookup", get(resource_lookup))
         .route("/principals", get(list_principals))
@@ -441,6 +445,24 @@ async fn trino_config(
             content: xml,
         },
     ]))
+}
+
+/// POST /policies/services/{service}/seed-defaults — seed default "admin has
+/// all access" policies (one per Trino resource hierarchy) for a profile,
+/// mirroring Ranger's default-policy-on-service-create behavior. Idempotent:
+/// a no-op (created: 0) if the service already has any policy.
+async fn seed_defaults(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(service): Path<String>,
+) -> Result<Json<Value>, CpError> {
+    require_platform_admin(&p)?;
+    let svc = st.authz.get_service(&service).await?;
+    let created = st
+        .authz
+        .seed_default_trino_policies(svc.id, &service, "admin")
+        .await?;
+    Ok(Json(json!({ "created": created })))
 }
 
 /// GET /policies/service-def/{name} — the def slices the editor renders from.

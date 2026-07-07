@@ -4,9 +4,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   Download,
+  Loader2,
   Pencil,
   Plus,
   ShieldCheck,
+  Sprout,
   Trash2,
 } from "lucide-react";
 import {
@@ -16,6 +18,7 @@ import {
   listPolicies,
   deletePolicy,
   setPolicyEnabled,
+  seedDefaultPolicies,
 } from "@/api/policies";
 import { ApiError } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -69,6 +72,7 @@ const COLUMNS = [
 export default function ProfileDetailPage() {
   const { service = "" } = useParams();
   const [configOpen, setConfigOpen] = useState(false);
+  const queryClient = useQueryClient();
 
   const profiles = useQuery<Profile[], ApiError>({
     queryKey: ["control-plane", "profiles"],
@@ -76,6 +80,12 @@ export default function ProfileDetailPage() {
     retry: false,
   });
   const profile = profiles.data?.find((p) => p.name === service);
+
+  const seedDefaults = useMutation({
+    mutationFn: () => seedDefaultPolicies(service),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] }),
+  });
 
   return (
     <div className="space-y-5">
@@ -118,10 +128,25 @@ export default function ProfileDetailPage() {
               <span className="text-sm text-muted-foreground">no engine</span>
             )}
           </div>
-          <Button size="sm" variant="outline" onClick={() => setConfigOpen(true)}>
-            <Download className="mr-1 h-4 w-4" />
-            Download Trino config
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={seedDefaults.isPending || !service}
+              onClick={() => seedDefaults.mutate()}
+            >
+              {seedDefaults.isPending ? (
+                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+              ) : (
+                <Sprout className="mr-1 h-4 w-4" />
+              )}
+              Seed default policies
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setConfigOpen(true)}>
+              <Download className="mr-1 h-4 w-4" />
+              Download Trino config
+            </Button>
+          </div>
         </div>
       </Card>
 
