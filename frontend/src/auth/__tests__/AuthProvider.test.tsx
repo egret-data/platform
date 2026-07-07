@@ -18,7 +18,7 @@ function wrap() {
 
 test("authenticated when /auth/me returns 200", async () => {
   vi.spyOn(globalThis, "fetch").mockResolvedValue(
-    new Response(JSON.stringify({ user_id: "1", email: "a@b.c", platform_roles: [] }), { status: 200 }));
+    new Response(JSON.stringify({ user_id: "1", email: "a@b.c", platform_roles: [], permissions: [] }), { status: 200 }));
   wrap();
   await waitFor(() => expect(screen.getByText("a@b.c")).toBeInTheDocument());
 });

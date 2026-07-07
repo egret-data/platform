@@ -22,7 +22,7 @@ import type { Me } from "@/api/hooks";
 
 afterEach(() => vi.restoreAllMocks());
 
-const ME: Me = { user_id: "1", email: "a@b.c", platform_roles: [] };
+const ME: Me = { user_id: "1", email: "a@b.c", platform_roles: [], permissions: [] };
 
 /** Wrap LoginPage in the minimal router + auth context required for testing. */
 function renderLoginRoute(me: Me | null, isLoading = false) {
