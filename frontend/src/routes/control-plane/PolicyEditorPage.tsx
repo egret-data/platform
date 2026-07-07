@@ -25,10 +25,11 @@ import {
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -41,6 +42,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { PrincipalPicker } from "@/components/policy/PrincipalPicker";
 import { ResourceLevelEditor } from "@/components/policy/ResourceLevelEditor";
+import { ConfigSection } from "./config/ConfigSection";
 import { FieldLabel } from "./config/FieldLabel";
 
 type PolicyKind = "access" | "masking" | "rowfilter";
@@ -474,13 +476,17 @@ export default function PolicyEditorPage() {
       <Card className="overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/30 p-5">
           <div className="flex min-w-0 flex-wrap items-center gap-3">
-            <Input
-              aria-label="Policy name"
-              value={form.name}
-              placeholder="Policy name"
-              onChange={(e) => setForm((f: any) => ({ ...f, name: e.target.value }))}
-              className="h-9 max-w-sm text-base font-semibold"
-            />
+            <div className="space-y-1.5">
+              <Label htmlFor="policy-name">Policy name</Label>
+              <Input
+                id="policy-name"
+                aria-label="Policy name"
+                value={form.name}
+                placeholder="Policy name"
+                onChange={(e) => setForm((f: any) => ({ ...f, name: e.target.value }))}
+                className="h-9 max-w-sm text-base font-semibold"
+              />
+            </div>
             <Badge variant="secondary">{kind}</Badge>
             <div className="flex items-center gap-2">
               <Switch
@@ -560,46 +566,38 @@ export default function PolicyEditorPage() {
 
             <div className="min-w-0 flex-1">
               {section === "resource" && (
-                <Card>
-                  <CardHeader>
-                    <FieldLabel
-                      label="Resource"
-                      help="The Trino resource this policy applies to. Use * for wildcards."
-                    />
-                    <p className="font-mono text-xs text-muted-foreground">{resourcePreview}</p>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                      {levels.map((lvl) => (
-                        <ResourceLevelEditor
-                          key={lvl}
-                          label={lvl[0].toUpperCase() + lvl.slice(1)}
-                          level={lvl}
-                          service={service}
-                          parents={{
-                            catalog: form.resources.catalog.values[0],
-                            schema: form.resources.schema.values[0],
-                            table: form.resources.table.values[0],
-                          }}
-                          value={form.resources[lvl]}
-                          onChange={(v) =>
-                            setForm((f: any) => ({ ...f, resources: { ...f.resources, [lvl]: v } }))
-                          }
-                        />
-                      ))}
-                    </div>
-                  </CardContent>
-                </Card>
+                <ConfigSection
+                  title="Resource"
+                  description="The Trino resource this policy applies to. Use * for wildcards."
+                >
+                  <p className="font-mono text-xs text-muted-foreground">{resourcePreview}</p>
+                  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                    {levels.map((lvl) => (
+                      <ResourceLevelEditor
+                        key={lvl}
+                        label={lvl[0].toUpperCase() + lvl.slice(1)}
+                        level={lvl}
+                        service={service}
+                        parents={{
+                          catalog: form.resources.catalog.values[0],
+                          schema: form.resources.schema.values[0],
+                          table: form.resources.table.values[0],
+                        }}
+                        value={form.resources[lvl]}
+                        onChange={(v) =>
+                          setForm((f: any) => ({ ...f, resources: { ...f.resources, [lvl]: v } }))
+                        }
+                      />
+                    ))}
+                  </div>
+                </ConfigSection>
               )}
 
               {section === "rules" && (
                 <>
                   {kind === "access" && (
-                    <Card>
-                      <CardHeader>
-                        <CardTitle className="text-lg">{kindTitle}</CardTitle>
-                      </CardHeader>
-                      <CardContent className="space-y-4">
+                    <ConfigSection title={kindTitle}>
+                      <div className="space-y-4">
                         <div className="flex items-center justify-between gap-4">
                           <FieldLabel
                             label="Deny everything else not explicitly allowed"
@@ -729,16 +727,13 @@ export default function PolicyEditorPage() {
                             </TabsContent>
                           )}
                         </Tabs>
-                      </CardContent>
-                    </Card>
+                      </div>
+                    </ConfigSection>
                   )}
 
                   {kind === "masking" && (
-                    <Card>
-                      <CardHeader>
-                        <CardTitle className="text-lg">{kindTitle}</CardTitle>
-                      </CardHeader>
-                      <CardContent className="space-y-3">
+                    <ConfigSection title={kindTitle}>
+                      <div className="space-y-3">
                         <div className="flex items-center justify-between">
                           <span className="text-sm font-medium">Policy items</span>
                           <Button type="button" variant="outline" size="sm" onClick={() => addItem()}>
@@ -797,16 +792,13 @@ export default function PolicyEditorPage() {
                             )}
                           </div>
                         ))}
-                      </CardContent>
-                    </Card>
+                      </div>
+                    </ConfigSection>
                   )}
 
                   {kind === "rowfilter" && (
-                    <Card>
-                      <CardHeader>
-                        <CardTitle className="text-lg">{kindTitle}</CardTitle>
-                      </CardHeader>
-                      <CardContent className="space-y-3">
+                    <ConfigSection title={kindTitle}>
+                      <div className="space-y-3">
                         <div className="flex items-center justify-between">
                           <span className="text-sm font-medium">Policy items</span>
                           <Button type="button" variant="outline" size="sm" onClick={() => addItem()}>
@@ -845,18 +837,15 @@ export default function PolicyEditorPage() {
                             </div>
                           </div>
                         ))}
-                      </CardContent>
-                    </Card>
+                      </div>
+                    </ConfigSection>
                   )}
                 </>
               )}
 
               {section === "details" && (
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="text-lg">Details</CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
+                <ConfigSection title="Details">
+                  <div className="space-y-4">
                     <div className="space-y-1.5">
                       <FieldLabel label="Description" htmlFor="policy-description" />
                       <Textarea
@@ -899,8 +888,8 @@ export default function PolicyEditorPage() {
                         }}
                       />
                     </div>
-                  </CardContent>
-                </Card>
+                  </div>
+                </ConfigSection>
               )}
             </div>
           </div>

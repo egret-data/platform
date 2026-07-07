@@ -49,6 +49,16 @@ const TYPES = [
 
 type PolicyType = (typeof TYPES)[number]["key"];
 
+const COLUMNS = [
+  "Name",
+  "Resource",
+  "Principals",
+  "Permissions",
+  "Labels",
+  "Enabled",
+  "",
+];
+
 /**
  * Control Plane → Policy profile detail (drill-down L2).
  *
@@ -68,7 +78,7 @@ export default function ProfileDetailPage() {
   const profile = profiles.data?.find((p) => p.name === service);
 
   return (
-    <div className="space-y-5 p-6">
+    <div className="space-y-5">
       <Link
         to="/control-plane/policies"
         className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
@@ -212,13 +222,14 @@ function PolicyTypeTable({
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Resource</TableHead>
-              <TableHead>Principals</TableHead>
-              <TableHead>Permissions</TableHead>
-              <TableHead>Labels</TableHead>
-              <TableHead>Enabled</TableHead>
-              <TableHead className="text-right">Actions</TableHead>
+              {COLUMNS.map((col) => (
+                <TableHead
+                  key={col || "actions"}
+                  className={col === "" ? "text-right" : undefined}
+                >
+                  {col || <span className="sr-only">Actions</span>}
+                </TableHead>
+              ))}
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -285,7 +296,7 @@ function PolicyTypeTable({
             {rows.length === 0 && (
               <TableRow className="hover:bg-transparent">
                 <TableCell
-                  colSpan={7}
+                  colSpan={COLUMNS.length}
                   className="text-center text-muted-foreground"
                 >
                   {policies.isError ? (

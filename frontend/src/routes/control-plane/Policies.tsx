@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Download, ShieldCheck } from "lucide-react";
 import { type Profile, listProfiles } from "@/api/policies";
@@ -24,6 +24,8 @@ import {
 } from "@/components/ui/table";
 import { TrinoConfigDialog } from "@/components/policy/TrinoConfigDialog";
 
+const COLUMNS = ["Name", "Type", "Engines", "Version", "Policies", ""];
+
 /**
  * Control Plane → Policies (drill-down L1: Profiles landing).
  *
@@ -33,7 +35,6 @@ import { TrinoConfigDialog } from "@/components/policy/TrinoConfigDialog";
  * editor navigation now live there — this page is just the index.
  */
 export default function Policies() {
-  const navigate = useNavigate();
   const [configTarget, setConfigTarget] = useState<string | null>(null);
   const profiles = useQuery<Profile[], ApiError>({
     queryKey: ["control-plane", "profiles"],
@@ -43,105 +44,96 @@ export default function Policies() {
   const rows = profiles.data ?? [];
 
   return (
-    <div className="p-6">
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-lg">
-            <ShieldCheck className="h-5 w-5" />
-            Policy Profiles
-          </CardTitle>
-          <CardDescription>
-            Ranger policy sets. Each engine enforces one profile. Open a
-            profile to manage its access, masking, and row-filter policies.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {profiles.isError ? (
-            <Alert variant="destructive">
-              <AlertDescription>
-                {profiles.error?.message ?? "Failed to load profiles."}
-              </AlertDescription>
-            </Alert>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Type</TableHead>
-                  <TableHead>Engines</TableHead>
-                  <TableHead>Version</TableHead>
-                  <TableHead>Policies</TableHead>
-                  <TableHead>Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {rows.map((p) => (
-                  <TableRow
-                    key={p.id}
-                    className="cursor-pointer hover:bg-muted/50"
-                    onClick={() =>
-                      navigate(`/control-plane/policies/${encodeURIComponent(p.name)}`)
-                    }
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-lg">
+          <ShieldCheck className="h-5 w-5" />
+          Policy Profiles
+        </CardTitle>
+        <CardDescription>
+          Ranger policy sets. Each engine enforces one profile. Open a
+          profile to manage its access, masking, and row-filter policies.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {profiles.isError ? (
+          <Alert variant="destructive">
+            <AlertDescription>
+              {profiles.error?.message ?? "Failed to load profiles."}
+            </AlertDescription>
+          </Alert>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                {COLUMNS.map((col) => (
+                  <TableHead
+                    key={col || "actions"}
+                    className={col === "" ? "text-right" : undefined}
                   >
-                    <TableCell>
-                      <Link
-                        to={`/control-plane/policies/${encodeURIComponent(p.name)}`}
-                        className="font-medium text-primary hover:underline"
-                      >
-                        {p.name}
-                      </Link>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="secondary">{p.type}</Badge>
-                    </TableCell>
-                    <TableCell>
-                      {p.engines.length ? (
-                        p.engines.map((e) => e.name).join(", ")
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      v{p.policy_version}
-                    </TableCell>
-                    <TableCell>
-                      <Badge
-                        variant="secondary"
-                        className={p.policy_count === 0 ? "text-muted-foreground" : undefined}
-                      >
-                        {p.policy_count}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        title="Download config"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setConfigTarget(p.name);
-                        }}
-                      >
-                        <Download className="h-4 w-4" />
-                      </Button>
-                    </TableCell>
-                  </TableRow>
+                    {col || <span className="sr-only">Actions</span>}
+                  </TableHead>
                 ))}
-                {rows.length === 0 && (
-                  <TableRow className="hover:bg-transparent">
-                    <TableCell
-                      colSpan={6}
-                      className="text-center text-muted-foreground"
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((p) => (
+                <TableRow key={p.id}>
+                  <TableCell>
+                    <Link
+                      to={`/control-plane/policies/${encodeURIComponent(p.name)}`}
+                      className="font-medium text-primary hover:underline"
                     >
-                      {profiles.isLoading ? "Loading…" : "No profiles yet."}
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+                      {p.name}
+                    </Link>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="secondary">{p.type}</Badge>
+                  </TableCell>
+                  <TableCell>
+                    {p.engines.length ? (
+                      p.engines.map((e) => e.name).join(", ")
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    v{p.policy_version}
+                  </TableCell>
+                  <TableCell>
+                    <Badge
+                      variant="secondary"
+                      className={p.policy_count === 0 ? "text-muted-foreground" : undefined}
+                    >
+                      {p.policy_count}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      title="Download config"
+                      onClick={() => setConfigTarget(p.name)}
+                    >
+                      <Download className="h-4 w-4" />
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+              {rows.length === 0 && (
+                <TableRow className="hover:bg-transparent">
+                  <TableCell
+                    colSpan={COLUMNS.length}
+                    className="text-center text-muted-foreground"
+                  >
+                    {profiles.isLoading ? "Loading…" : "No profiles yet."}
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        )}
+      </CardContent>
       {configTarget && (
         <TrinoConfigDialog
           open
@@ -149,6 +141,6 @@ export default function Policies() {
           onOpenChange={(o) => !o && setConfigTarget(null)}
         />
       )}
-    </div>
+    </Card>
   );
 }
