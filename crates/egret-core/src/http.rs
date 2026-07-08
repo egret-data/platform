@@ -31,9 +31,6 @@ impl IntoResponse for Error {
         // errors; hide internals for 5xx.
         let msg = match &self {
             Error::Internal(_) => "internal error".to_string(),
-            Error::Unauthorized => "unauthorized".to_string(),
-            Error::Forbidden => "forbidden".to_string(),
-            Error::TooManyRequests => "too many requests".to_string(),
             other => other.to_string(),
         };
         (status, Json(serde_json::json!({ "error": msg }))).into_response()
@@ -46,6 +43,7 @@ impl IntoResponse for Error {
 /// is the seam's own error, which supplies its own `IntoResponse`. A handler
 /// returns `Result<T, ApiError<MyDomainError>>` and `?` works on both a
 /// `core::Error` and `MyDomainError` (given the seam adds `From<MyDomainError>`).
+#[derive(Debug)]
 pub enum ApiError<D> {
     Auth(Error),
     Domain(D),
@@ -115,5 +113,24 @@ mod tests {
     fn api_error_domain_arm_delegates_to_d() {
         let e: ApiError<StatusCode> = ApiError::Domain(StatusCode::IM_A_TEAPOT);
         assert_eq!(e.into_response().status(), StatusCode::IM_A_TEAPOT);
+    }
+
+    #[tokio::test]
+    async fn error_response_body_redacts_internal_and_passes_client_msg() {
+        // 5xx must not leak the wrapped anyhow detail.
+        let resp = Error::Internal(anyhow::anyhow!("db password = hunter2")).into_response();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"], "internal error");
+
+        // Client-facing errors pass their Display message through.
+        let resp = Error::NotFound("user".into()).into_response();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"], "not found: user");
     }
 }
