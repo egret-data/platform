@@ -16,7 +16,16 @@ pub mod browse;
 pub mod mount;
 pub mod pool;
 pub mod recovery;
+/// The embedded-catalog RBAC store (warehouses/roles/grants/Catalog Clients),
+/// merged in from the former `egret-catalog` crate (E3d-1). Runs on the
+/// egret-side sqlx-0.8 pool aliased as `sqlx08`.
+pub mod store;
 pub mod warehouse;
+
+pub use store::{
+    CatalogClient, CatalogError, CatalogGrant, CatalogRole, CatalogStore, CreatedClient,
+    GrantInput, NewClient, Warehouse,
+};
 
 pub use admin::{
     get_warehouse_config, list_tasks, rotate_storage_credential, search_tabulars,

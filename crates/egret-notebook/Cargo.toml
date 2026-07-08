@@ -9,7 +9,6 @@ egret-core = { workspace = true, features = ["http"] }
 egret-metastore.workspace = true
 egret-auth.workspace = true
 egret-workspace.workspace = true
-egret-catalog.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 sqlx.workspace = true

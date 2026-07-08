@@ -2522,7 +2522,7 @@ mod tests {
         let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
         Some(CpState {
             engine_mgmt: crate::EngineMgmtStore::new(db.clone()),
-            catalog: std::sync::Arc::new(egret_catalog::CatalogStore::new(db.clone())),
+            catalog: std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
             storage_registry: egret_storage::StorageRegistry::new(db.clone()),
             authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
             secrets: workspace_secrets,

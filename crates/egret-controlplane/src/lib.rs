@@ -29,7 +29,7 @@ pub use warehouses::{
 use axum::extract::FromRef;
 use axum::Router;
 use egret_auth::session::SessionService;
-use egret_catalog::CatalogStore;
+use egret_catalog_engine::CatalogStore;
 use egret_secrets::WorkspaceSecretStore;
 use egret_storage::StorageRegistry;
 use std::sync::Arc;

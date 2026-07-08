@@ -1,7 +1,7 @@
 //! Embedded-catalog RBAC store: warehouse → role → Catalog Client create + verify.
 mod common;
 
-use egret_catalog::service::embedded::NewClient;
+use egret_catalog_engine::store::embedded::NewClient;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -14,7 +14,7 @@ async fn create_client_then_verify() {
 
     // The storage-connection registry moved to egret-storage (E3a); seed the row
     // the warehouse FK-references directly, so this crate needn't depend on it.
-    let sc_id: Uuid = sqlx::query_scalar(
+    let sc_id: Uuid = sqlx08::query_scalar(
         "INSERT INTO storage.storage_connections \
            (name, provider, region, bucket, access_key, path_style) \
          VALUES ($1, 's3', 'us-east-1', 'warehouse', 'egret', true) RETURNING id",

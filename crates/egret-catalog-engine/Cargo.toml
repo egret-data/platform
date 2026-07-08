@@ -37,10 +37,21 @@ lakekeeper-io = { git = "https://github.com/lakekeeper/lakekeeper", rev = "79165
 
 egret-config = { workspace = true }
 egret-metastore = { workspace = true }
-# Workspace→warehouse mapping store (the egret-side, sqlx-0.8 pool). We only
-# call its async methods; its sqlx-0.8 `Pool` type never crosses into this
-# crate's sqlx-0.9 surface, so the two majors coexist as transitive deps.
-egret-catalog = { workspace = true }
+# The embedded-catalog RBAC store (the former `egret-catalog` crate, merged in
+# by E3d-1) lives in `src/store/` and runs its SQL on the egret-side sqlx-0.8
+# pool exposed by `egret_metastore::Db`, addressed through the renamed `sqlx08`
+# dependency below (kept distinct from this crate's sqlx-0.9 lakekeeper surface).
+# The `CatalogPort` it implements + the leaf DTOs it maps to.
+egret-catalog-api = { workspace = true }
+# The mini machine-IdP `ClientVerifier`/`VerifiedClient` the store implements.
+egret-machine-idp = { workspace = true }
+# Catalog Client secret hashing/verification + random client-id/secret material.
+argon2.workspace = true
+rand.workspace = true
+base64.workspace = true
+hex.workspace = true
+# `CatalogError`'s `#[derive(thiserror::Error)]`.
+thiserror.workspace = true
 # Runtime S3 config threaded into the warehouse storage profile.
 egret-storage = { workspace = true }
 # Per-workspace storage secret_key is sealed/unsealed via the secret store
@@ -95,6 +106,20 @@ sqlx = { version = "0.9", default-features = false, features = [
     "tls-rustls",
     "postgres",
     "migrate",
+] }
+# The egret-side sqlx-0.8 surface, renamed so it coexists with the sqlx-0.9
+# dep above (two semver-incompatible majors = two distinct crates). The merged
+# `store` module's runtime queries and `FromRow` impls go through this alias;
+# `egret_metastore::Db.pool` is a 0.8.x `PgPool`, and Cargo unifies this to the
+# SAME 0.8.x, so `sqlx08::query(..).fetch_one(&db.pool)` type-checks. Feature set
+# mirrors the workspace `sqlx` (what the former `egret-catalog` crate resolved),
+# minus `migrate` which the store never calls.
+sqlx08 = { package = "sqlx", version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "macros",
+    "uuid",
+    "chrono",
 ] }
 
 [dev-dependencies]

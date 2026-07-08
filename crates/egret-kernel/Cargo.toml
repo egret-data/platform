@@ -35,7 +35,6 @@ rand.workspace = true
 [dev-dependencies]
 tower.workspace = true
 http-body-util = "0.1"
-egret-catalog.workspace = true
 async-trait.workspace = true
 futures-channel.workspace = true
 egret-kernel = { path = ".", features = ["test-util"] }

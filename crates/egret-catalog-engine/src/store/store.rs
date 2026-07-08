@@ -15,7 +15,7 @@ impl CatalogStore {
         Self { db }
     }
 
-    pub fn pool(&self) -> &sqlx::PgPool {
+    pub fn pool(&self) -> &sqlx08::PgPool {
         &self.db.pool
     }
 }

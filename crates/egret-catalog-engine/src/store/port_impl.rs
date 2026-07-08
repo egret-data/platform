@@ -7,9 +7,9 @@
 //! The inherent `CatalogStore` methods (same names) shadow these trait methods,
 //! so `self.<method>()` below resolves to the concrete implementation — exactly
 //! as `egret-policy`'s `port_impl` relies on.
-use crate::service::embedded as concrete;
-use crate::service::CatalogStore;
-use crate::CatalogError;
+use crate::store::embedded as concrete;
+use crate::store::CatalogError;
+use crate::store::CatalogStore;
 use egret_catalog_api::{
     CatalogApiError, CatalogClient, CatalogGrant, CatalogPort, CatalogRole, CreatedClient,
     GrantInput, NewClient, Warehouse,

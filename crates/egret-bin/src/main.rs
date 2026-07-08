@@ -219,7 +219,7 @@ impl egret_policy::EngineBindingReader for EngineBindingReaderImpl {
 /// the decision here.
 struct EgretCatalogGuard {
     keys: egret_machine_idp::PgSigningKeyStore,
-    catalog: egret_catalog::CatalogStore,
+    catalog: egret_catalog_engine::CatalogStore,
 }
 
 #[async_trait::async_trait]
@@ -357,7 +357,7 @@ fn catalog_ns_parts(seg: &str) -> Vec<String> {
 /// and everything in it; `table` covers only its exact table (plus, for reads,
 /// listing the namespace that holds it). Writes require `write`/`manage`.
 fn catalog_grant_covers(
-    g: &egret_catalog::service::CatalogGrant,
+    g: &egret_catalog_engine::store::CatalogGrant,
     target_ns: Option<&[String]>,
     target_table: Option<&str>,
     is_write: bool,
@@ -1152,7 +1152,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         let guard: std::sync::Arc<dyn egret_catalog_engine::CatalogGuard> =
             std::sync::Arc::new(EgretCatalogGuard {
                 keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
-                catalog: egret_catalog::CatalogStore::new(db.clone()),
+                catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
             });
         Some(egret_catalog_engine::mount_catalog_engine(
             engine_state,
@@ -1203,7 +1203,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // Control plane: global platform-admin Storage + Secrets + embedded-catalog
     // management. The warehouse provisioner (above) creates lakekeeper warehouses.
     let control_plane = Some(egret_controlplane::CpState {
-        storage: egret_catalog::CatalogStore::new(db.clone()),
+        storage: egret_catalog_engine::CatalogStore::new(db.clone()),
         storage_registry: egret_storage::StorageRegistry::new(db.clone()),
         users: egret_auth::users::UserRepo::new(db.clone()),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
@@ -1231,7 +1231,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // Engine-mgmt seam: owns the engine domain (HTTP router + provisioning).
     let engine_mgmt = Some(egret_engine_mgmt::EngineMgmtState {
         engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
-        catalog: std::sync::Arc::new(egret_catalog::CatalogStore::new(db.clone())),
+        catalog: std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
         storage_registry: egret_storage::StorageRegistry::new(db.clone()),
         // Policy/Ranger seam behind its `PolicyPort` contract (E2a); the concrete
         // in-process impl is the shared `PolicyStore`.
@@ -1266,7 +1266,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             .public_url
             .clone()
             .unwrap_or_else(|| "http://localhost:8080".to_string()),
-        clients: std::sync::Arc::new(egret_catalog::CatalogStore::new(db.clone())),
+        clients: std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
     });
 
     let app = build_router(AppState {
@@ -1298,7 +1298,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
 #[cfg(test)]
 mod catalog_authz_tests {
     use super::{catalog_grant_covers, catalog_ns_parts};
-    use egret_catalog::service::CatalogGrant;
+    use egret_catalog_engine::store::CatalogGrant;
     use uuid::Uuid;
 
     fn grant(sec: &str, ns: Option<&[&str]>, table: Option<&str>, privilege: &str) -> CatalogGrant {

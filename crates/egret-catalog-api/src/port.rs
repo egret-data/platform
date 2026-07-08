@@ -15,7 +15,7 @@ use uuid::Uuid;
 ///
 /// Naming note: unlike the policy seam (`PolicyError` in the contract crate,
 /// `PolicyStoreError` on the concrete store), here the concrete store keeps its
-/// established, widely-used public name `egret_catalog::CatalogError` and the
+/// established, widely-used public name `egret_catalog_engine::CatalogError` and the
 /// boundary type is `CatalogApiError` — renaming the concrete type would be large
 /// churn for no gain, and `...ApiError` reads clearly as "the contract boundary".
 #[derive(Debug, thiserror::Error)]

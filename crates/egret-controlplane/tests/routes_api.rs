@@ -58,7 +58,7 @@ async fn setup_full(
     );
 
     let app = control_plane_router().with_state(CpState {
-        storage: egret_catalog::CatalogStore::new(db.clone()),
+        storage: egret_catalog_engine::CatalogStore::new(db.clone()),
         storage_registry: egret_storage::StorageRegistry::new(db.clone()),
         users: users.clone(),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
@@ -413,7 +413,7 @@ async fn seed_provisioned_warehouse(f: &Fixture) -> Uuid {
     .await
     .expect("insert storage connection");
 
-    let catalog_store = egret_catalog::CatalogStore::new(f.db.clone());
+    let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
     let wh = catalog_store
         .create_warehouse(
             &format!("browse-wh-{}", Uuid::new_v4().simple()),
@@ -451,7 +451,7 @@ async fn seed_unprovisioned_warehouse(f: &Fixture) -> Uuid {
     .await
     .expect("insert storage connection");
 
-    let catalog_store = egret_catalog::CatalogStore::new(f.db.clone());
+    let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
     catalog_store
         .create_warehouse(
             &format!("browse-wh-unprov-{}", Uuid::new_v4().simple()),
@@ -897,7 +897,7 @@ async fn setup_isolated_schema() -> Option<Fixture> {
     );
 
     let app = control_plane_router().with_state(CpState {
-        storage: egret_catalog::CatalogStore::new(db.clone()),
+        storage: egret_catalog_engine::CatalogStore::new(db.clone()),
         storage_registry: egret_storage::StorageRegistry::new(db.clone()),
         users: users.clone(),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
