@@ -2710,6 +2710,8 @@ dependencies = [
  "egret-orchestrator",
  "egret-secrets",
  "futures-util",
+ "http-body-util",
+ "k8s-openapi 0.24.0",
  "kube 0.99.0",
  "reqwest 0.12.28",
  "serde",
@@ -2717,6 +2719,7 @@ dependencies = [
  "sqlx 0.8.6",
  "thiserror 2.0.18",
  "tokio",
+ "tower",
  "tracing",
  "uuid",
 ]

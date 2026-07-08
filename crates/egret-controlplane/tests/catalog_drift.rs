@@ -8,7 +8,9 @@
 //! Most control-plane routes gate on `egret_controlplane::auth::require_permission`.
 //! `workspace:*` keys are the one exception: they're enforced by the sibling
 //! `egret_workspace::rbac::Authorizer::require_platform` in
-//! `egret-workspace/src/routes.rs`, so that file is scanned too.
+//! `egret-workspace/src/routes.rs`, so that file is scanned too. `engine:*`
+//! keys are enforced by `egret_auth::require_permission` in the
+//! `egret-engine-mgmt` seam's `engines.rs`/`monitor.rs` (E1c), also scanned.
 
 use std::collections::HashSet;
 
@@ -20,11 +22,9 @@ const ALLOWED_UNENFORCED: &[&str] = &[];
 /// Control-plane source files scanned for `require_permission(..., "key")`
 /// call sites, relative to this crate's `src/`.
 const CONTROLPLANE_FILES: &[&str] = &[
-    "engines.rs",
     "warehouses.rs",
     "storage.rs",
     "secrets.rs",
-    "monitor.rs",
     "policies/mod.rs",
     "access/mod.rs",
 ];
@@ -32,7 +32,11 @@ const CONTROLPLANE_FILES: &[&str] = &[
 /// Extra source files (outside this crate) that enforce catalog permissions
 /// through a different gate function. Path is relative to this crate's
 /// `CARGO_MANIFEST_DIR`.
-const EXTRA_FILES: &[&str] = &["../egret-workspace/src/routes.rs"];
+const EXTRA_FILES: &[&str] = &[
+    "../egret-workspace/src/routes.rs",
+    "../egret-engine-mgmt/src/engines.rs",
+    "../egret-engine-mgmt/src/monitor.rs",
+];
 
 /// Gate function names whose first-string-literal argument is a
 /// `resource:action` permission key.
