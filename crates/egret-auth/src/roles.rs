@@ -80,6 +80,26 @@ impl RoleRepo {
         .map_err(db_err)
     }
 
+    /// A role's assignees with display names: users by email, groups by name.
+    pub async fn assignees_named(&self, role_id: Uuid) -> Result<Vec<(String, String)>> {
+        // returns (kind, name) where kind is "user" | "group"
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT 'user' AS kind, u.email::text AS name \
+               FROM platform_role_assignments pra JOIN users u ON u.id = pra.principal_id \
+              WHERE pra.role_id = $1 AND pra.principal_type = 'user' \
+             UNION ALL \
+             SELECT 'group' AS kind, g.name \
+               FROM platform_role_assignments pra JOIN groups g ON g.id = pra.principal_id \
+              WHERE pra.role_id = $1 AND pra.principal_type = 'group' \
+             ORDER BY name",
+        )
+        .bind(role_id)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(rows)
+    }
+
     /// Roles directly assigned to a principal (does not expand group membership).
     pub async fn roles_of(&self, ptype: &str, pid: Uuid) -> Result<Vec<RoleRow>> {
         sqlx::query_as::<_, RoleRow>(

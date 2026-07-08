@@ -3897,3 +3897,110 @@ async fn permission_enforcement() {
         "at least one permission group must list permissions; body={j}"
     );
 }
+
+/// `GET /access/roles/{id}/assignees` lists a role's assignees by display
+/// name (users by email, groups by name), for the admin console's
+/// drill-into-a-role view. A scoped principal without `role:read` is 403.
+#[tokio::test]
+async fn role_assignees_lists_users_and_groups() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin = session_for(&f, "role_assignees_admin", true).await;
+    let roles = egret_auth::roles::RoleRepo::new(f.db.clone());
+    let groups = egret_auth::groups::GroupRepo::new(f.db.clone());
+
+    // A fresh custom role, with no assignees yet.
+    let role_name = format!("assignee_role_{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/access/roles",
+            &admin,
+            Some(serde_json::json!({
+                "scope": "platform",
+                "name": role_name,
+                "description": "role assignees test",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create custom role; body={j}");
+    let role_id: Uuid = j["id"].as_str().expect("role id in body").parse().unwrap();
+
+    // Assign the role to a user and a group directly (bypassing the
+    // assign-role HTTP routes, which are exercised elsewhere).
+    let member_email = format!("assignee_user_{}@egret.local", Uuid::new_v4().simple());
+    let member_id = f
+        .users
+        .insert_local(&member_email, "Assignee User", "x")
+        .await
+        .expect("insert user")
+        .0;
+    roles
+        .assign("user", member_id, role_id)
+        .await
+        .expect("assign role to user");
+
+    let group_name = format!("assignee-group-{}", Uuid::new_v4().simple());
+    let group_id = groups
+        .create_local(&group_name)
+        .await
+        .expect("create group");
+    roles
+        .assign("group", group_id, role_id)
+        .await
+        .expect("assign role to group");
+
+    // A scoped principal without `role:read` is 403.
+    let wrong = session_for_with_permission(&f, "role_assignees_wrong", "user:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/access/roles/{role_id}/assignees"),
+            &wrong,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without role:read must not list role assignees"
+    );
+
+    // The platform_admin sees both assignees, named.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/access/roles/{role_id}/assignees"),
+            &admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list role assignees; body={j}");
+    let assignees = j.as_array().expect("assignees array");
+    assert_eq!(assignees.len(), 2, "two assignees; body={j}");
+    assert!(
+        assignees
+            .iter()
+            .any(|a| a["kind"] == "user" && a["name"] == member_email),
+        "user assignee named by email; body={j}"
+    );
+    assert!(
+        assignees
+            .iter()
+            .any(|a| a["kind"] == "group" && a["name"] == group_name),
+        "group assignee named by group name; body={j}"
+    );
+}

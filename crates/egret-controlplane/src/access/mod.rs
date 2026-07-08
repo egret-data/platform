@@ -51,6 +51,7 @@ pub fn router() -> Router<CpState> {
         .route("/access/roles", get(list_roles).post(create_role))
         .route("/access/roles/{id}", patch(update_role).delete(delete_role))
         .route("/access/roles/{id}/permissions", put(set_role_permissions))
+        .route("/access/roles/{id}/assignees", get(list_role_assignees))
         .route("/permissions", get(list_permissions))
 }
 
@@ -538,6 +539,30 @@ async fn set_role_permissions(
     }
     st.roles.set_permissions(id, &body.permissions).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoleAssigneeDto {
+    pub kind: String,
+    pub name: String,
+}
+
+/// `GET /access/roles/{id}/assignees` — the role's current assignees (users
+/// by email, groups by name), so the admin console can drill into who holds
+/// a role. Read-only, so it gates on `role:read`.
+async fn list_role_assignees(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<RoleAssigneeDto>>, CpError> {
+    require_permission(&p, "role:read")?;
+    let assignees = st.roles.assignees_named(id).await?;
+    Ok(Json(
+        assignees
+            .into_iter()
+            .map(|(kind, name)| RoleAssigneeDto { kind, name })
+            .collect(),
+    ))
 }
 
 // ---------- Permission catalog ----------
