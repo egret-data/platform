@@ -14,8 +14,10 @@ pub struct EngineMgmtState {
     /// Global storage-connection registry (`storage_connections`) — cross-seam:
     /// auto-wiring.
     pub storage: egret_catalog::CatalogStore,
-    /// Shared Ranger policy store (`authz_*`) — cross-seam: Ranger auto-bind.
-    pub authz: egret_authz::AuthzStore,
+    /// The Policy/Ranger seam, behind its contract `PolicyPort` (E2a) — cross-seam:
+    /// engine-create auto-bind to a Ranger profile. The concrete `AuthzStore` is
+    /// wired in the composition root; at a real split an HTTP client fills this in.
+    pub authz: Arc<dyn egret_policy_api::PolicyPort>,
     /// Named secret layer, used in GLOBAL scope (`None` workspace) here —
     /// secret resolution.
     pub secrets: egret_secrets::WorkspaceSecretStore,

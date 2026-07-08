@@ -59,7 +59,7 @@ async fn setup_full(
     let app = engine_mgmt_router().with_state(EngineMgmtState {
         engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
         storage: egret_catalog::CatalogStore::new(db.clone()),
-        authz: egret_authz::AuthzStore::new(db.clone()),
+        authz: std::sync::Arc::new(egret_authz::AuthzStore::new(db.clone())),
         secrets: workspace_secrets,
         sessions: sessions.clone(),
         engine_provisioner,

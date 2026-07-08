@@ -2437,9 +2437,11 @@ dependencies = [
 name = "egret-authz"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "egret-core",
  "egret-metastore",
+ "egret-policy-api",
  "serde",
  "serde_json",
  "sqlx 0.8.6",
@@ -2708,6 +2710,7 @@ dependencies = [
  "egret-engine-mgmt-api",
  "egret-metastore",
  "egret-orchestrator",
+ "egret-policy-api",
  "egret-secrets",
  "futures-util",
  "http-body-util",
@@ -2854,6 +2857,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "egret-policy-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "egret-ranger"
 version = "0.1.0"
 dependencies = [
@@ -2863,6 +2876,7 @@ dependencies = [
  "egret-config",
  "egret-core",
  "egret-metastore",
+ "egret-policy-api",
  "http 1.4.2",
  "http-body-util",
  "serde",

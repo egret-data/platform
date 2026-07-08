@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 egret-core.workspace = true
 egret-metastore.workspace = true
+egret-policy-api.workspace = true
+async-trait.workspace = true
 sqlx.workspace = true
 serde.workspace = true
 serde_json.workspace = true

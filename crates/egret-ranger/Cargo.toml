@@ -9,6 +9,7 @@ egret-core.workspace = true
 egret-config.workspace = true
 egret-metastore.workspace = true
 egret-authz.workspace = true
+egret-policy-api.workspace = true
 axum.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -15,7 +15,10 @@ egret-engine-mgmt-api.workspace = true
 egret-auth.workspace = true
 egret-catalog.workspace = true
 egret-secrets.workspace = true
-egret-authz.workspace = true
+# Policy/Ranger seam contract (E2a). Engine-create auto-binds an engine to a
+# Ranger profile through `PolicyPort`; the concrete `egret-authz` impl is wired
+# in egret-bin and only needed here as a dev-dep for test state construction.
+egret-policy-api.workspace = true
 egret-core.workspace = true
 egret-orchestrator.workspace = true
 axum = { workspace = true, features = ["ws"] }
@@ -31,6 +34,9 @@ tracing.workspace = true
 kube.workspace = true
 
 [dev-dependencies]
+# Concrete Policy/Ranger store — only test state construction builds it directly
+# (production wires it in egret-bin behind `PolicyPort`).
+egret-authz.workspace = true
 tower.workspace = true
 http-body-util = "0.1"
 # `kube` (a normal dep, for `EngineProvisioningPort`'s WS-bridge use of

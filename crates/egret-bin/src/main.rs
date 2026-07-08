@@ -1179,7 +1179,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let engine_mgmt = Some(egret_engine_mgmt::EngineMgmtState {
         engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
         storage: egret_catalog::CatalogStore::new(db.clone()),
-        authz: egret_authz::AuthzStore::new(db.clone()),
+        // Policy/Ranger seam behind its `PolicyPort` contract (E2a); the concrete
+        // in-process impl is the shared `AuthzStore`.
+        authz: std::sync::Arc::new(egret_authz::AuthzStore::new(db.clone())),
         secrets: workspace_secrets.clone(),
         sessions: sessions.clone(),
         engine_provisioner,
