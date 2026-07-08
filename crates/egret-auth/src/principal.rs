@@ -2,9 +2,7 @@
 
 use axum::extract::{FromRef, FromRequestParts};
 use axum::http::request::Parts;
-use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use axum_extra::extract::cookie::CookieJar;
 use egret_core::{Error, Principal};
 
@@ -46,15 +44,6 @@ impl From<Error> for AuthError {
 
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
-        let (status, msg) = match self.0 {
-            Error::NotFound(_) => (StatusCode::NOT_FOUND, "not found"),
-            Error::InvalidInput(_) => (StatusCode::BAD_REQUEST, "invalid input"),
-            Error::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
-            Error::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
-            Error::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
-            Error::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "too many requests"),
-            Error::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-        };
-        (status, Json(serde_json::json!({ "error": msg }))).into_response()
+        self.0.into_response()
     }
 }
