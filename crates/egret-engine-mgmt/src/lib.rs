@@ -7,6 +7,7 @@ pub mod monitor;
 pub mod state;
 pub mod store;
 
+pub use engines::router as engine_mgmt_router;
 pub use error::EngineMgmtError;
 pub use http_error::EngineHttpError;
 pub use state::EngineMgmtState;
