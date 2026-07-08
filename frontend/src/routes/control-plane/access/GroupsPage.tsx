@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Plus, ShieldCheck, Trash2, UsersRound } from "lucide-react";
+import { MoreHorizontal, Pencil, Plus, ShieldCheck, Trash2, UsersRound } from "lucide-react";
 
 import {
   type AccessGroup,
@@ -39,6 +39,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -170,49 +177,52 @@ export default function GroupsPage() {
                       )}
                     </TableCell>
                     <TableCell className="text-right">
-                      <div className="flex justify-end gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          aria-label={`Assign roles to ${g.name}`}
-                          onClick={() => setRolesTarget(g)}
-                        >
-                          <ShieldCheck className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          aria-label={`Manage members of ${g.name}`}
-                          disabled={isOidc}
-                          title={isOidc ? OIDC_TOOLTIP : undefined}
-                          onClick={() => setMembersTarget(g)}
-                        >
-                          <UsersRound className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          aria-label={`Rename ${g.name}`}
-                          disabled={isOidc}
-                          title={isOidc ? OIDC_TOOLTIP : undefined}
-                          onClick={() => setRenameTarget(g)}
-                        >
-                          <Pencil className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          aria-label={`Delete ${g.name}`}
-                          disabled={isOidc}
-                          title={isOidc ? OIDC_TOOLTIP : undefined}
-                          onClick={() => {
-                            setDeleteError(null);
-                            setDeleteTarget(g);
-                          }}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label={`Actions for ${g.name}`}
+                          >
+                            <MoreHorizontal className="h-4 w-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem onClick={() => setRolesTarget(g)}>
+                            <ShieldCheck className="mr-2 h-4 w-4" />
+                            Assign roles
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            disabled={isOidc}
+                            title={isOidc ? OIDC_TOOLTIP : undefined}
+                            onClick={() => setMembersTarget(g)}
+                          >
+                            <UsersRound className="mr-2 h-4 w-4" />
+                            Manage members
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            disabled={isOidc}
+                            title={isOidc ? OIDC_TOOLTIP : undefined}
+                            onClick={() => setRenameTarget(g)}
+                          >
+                            <Pencil className="mr-2 h-4 w-4" />
+                            Rename
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            disabled={isOidc}
+                            title={isOidc ? OIDC_TOOLTIP : undefined}
+                            className="text-destructive focus:text-destructive"
+                            onClick={() => {
+                              setDeleteError(null);
+                              setDeleteTarget(g);
+                            }}
+                          >
+                            <Trash2 className="mr-2 h-4 w-4" />
+                            Delete
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </TableCell>
                   </TableRow>
                 );

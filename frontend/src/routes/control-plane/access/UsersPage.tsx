@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Plus, ShieldCheck } from "lucide-react";
+import { MoreHorizontal, Pencil, Plus, ShieldCheck } from "lucide-react";
 
 import {
   type AccessRole,
@@ -31,6 +31,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -139,24 +145,27 @@ export default function UsersPage() {
                     )}
                   </TableCell>
                   <TableCell className="text-right">
-                    <div className="flex justify-end gap-1">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        aria-label={`Assign roles to ${u.email}`}
-                        onClick={() => setRolesTarget(u)}
-                      >
-                        <ShieldCheck className="h-4 w-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        aria-label={`Edit ${u.email}`}
-                        onClick={() => setEditTarget(u)}
-                      >
-                        <Pencil className="h-4 w-4" />
-                      </Button>
-                    </div>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Actions for ${u.email}`}
+                        >
+                          <MoreHorizontal className="h-4 w-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={() => setRolesTarget(u)}>
+                          <ShieldCheck className="mr-2 h-4 w-4" />
+                          Assign roles
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => setEditTarget(u)}>
+                          <Pencil className="mr-2 h-4 w-4" />
+                          Edit
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </TableCell>
                 </TableRow>
               ))}

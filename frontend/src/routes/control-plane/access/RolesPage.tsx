@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Plus, Trash2 } from "lucide-react";
+import { MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 
 import {
   type AccessRole,
@@ -33,6 +33,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -174,29 +181,36 @@ export default function RolesPage() {
                       <Badge variant="secondary">{r.assigneeCount}</Badge>
                     </TableCell>
                     <TableCell className="text-right">
-                      <div className="flex justify-end gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          aria-label={`Edit permissions for ${r.name}`}
-                          onClick={() => setEditTarget(r)}
-                        >
-                          <Pencil className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          aria-label={`Delete ${r.name}`}
-                          disabled={seeded}
-                          title={seeded ? BUILTIN_DELETE_TOOLTIP : undefined}
-                          onClick={() => {
-                            setDeleteError(null);
-                            setDeleteTarget(r);
-                          }}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label={`Actions for ${r.name}`}
+                          >
+                            <MoreHorizontal className="h-4 w-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem onClick={() => setEditTarget(r)}>
+                            <Pencil className="mr-2 h-4 w-4" />
+                            Edit permissions
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            disabled={seeded}
+                            title={seeded ? BUILTIN_DELETE_TOOLTIP : undefined}
+                            className="text-destructive focus:text-destructive"
+                            onClick={() => {
+                              setDeleteError(null);
+                              setDeleteTarget(r);
+                            }}
+                          >
+                            <Trash2 className="mr-2 h-4 w-4" />
+                            Delete
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     </TableCell>
                   </TableRow>
                 );

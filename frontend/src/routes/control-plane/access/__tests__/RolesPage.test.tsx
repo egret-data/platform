@@ -61,14 +61,24 @@ describe("RolesPage", () => {
   });
 
   test("renders rows, marks the seeded role built-in, and disables its delete action", async () => {
+    const user = userEvent.setup();
     renderPage();
 
     expect(await screen.findByText("data_steward")).toBeInTheDocument();
     expect(screen.getByText("custom_role")).toBeInTheDocument();
     expect(screen.getByText("built-in")).toBeInTheDocument();
 
-    expect(screen.getByRole("button", { name: /Delete data_steward/i })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /Delete custom_role/i })).not.toBeDisabled();
+    await user.click(screen.getByRole("button", { name: /Actions for data_steward/i }));
+    expect(await screen.findByRole("menuitem", { name: "Delete" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    await user.keyboard("{Escape}");
+
+    await user.click(screen.getByRole("button", { name: /Actions for custom_role/i }));
+    expect(await screen.findByRole("menuitem", { name: "Delete" })).not.toHaveAttribute(
+      "aria-disabled",
+    );
   });
 
   test("New role dialog calls createRole with the entered fields", async () => {
@@ -108,7 +118,8 @@ describe("RolesPage", () => {
     renderPage();
     await screen.findByText("custom_role");
 
-    await user.click(screen.getByRole("button", { name: /Edit permissions for custom_role/i }));
+    await user.click(screen.getByRole("button", { name: /Actions for custom_role/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit permissions" }));
     await screen.findByRole("heading", { name: /Edit role — custom_role/i });
 
     // custom_role is only in the `roles` list of catalog.read, so it should
@@ -144,7 +155,8 @@ describe("RolesPage", () => {
     renderPage();
     await screen.findByText("platform_admin");
 
-    await user.click(screen.getByRole("button", { name: /Edit permissions for platform_admin/i }));
+    await user.click(screen.getByRole("button", { name: /Actions for platform_admin/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit permissions" }));
     await screen.findByRole("heading", { name: /Edit role — platform_admin/i });
 
     expect(screen.getByText(/Superuser — bypasses all permission checks/i)).toBeInTheDocument();

@@ -100,7 +100,8 @@ describe("UsersPage", () => {
     renderPage();
     await screen.findByText("alice@example.com");
 
-    await user.click(screen.getByRole("button", { name: /Assign roles to alice@example.com/i }));
+    await user.click(screen.getByRole("button", { name: /Actions for alice@example.com/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Assign roles" }));
     await screen.findByRole("heading", { name: /Assign roles/i });
 
     // Alice currently has "Admin" as a chip; remove it.

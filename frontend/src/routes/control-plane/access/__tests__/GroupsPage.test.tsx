@@ -85,7 +85,8 @@ describe("GroupsPage", () => {
     renderPage();
     await screen.findByText("Engineering");
 
-    await user.click(screen.getByRole("button", { name: /Assign roles to Engineering/i }));
+    await user.click(screen.getByRole("button", { name: /Actions for Engineering/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Assign roles" }));
     await screen.findByRole("heading", { name: /Assign roles/i });
 
     await user.click(screen.getByRole("button", { name: "remove Admin" }));
@@ -111,7 +112,8 @@ describe("GroupsPage", () => {
     renderPage();
     await screen.findByText("Engineering");
 
-    await user.click(screen.getByRole("button", { name: /Manage members of Engineering/i }));
+    await user.click(screen.getByRole("button", { name: /Actions for Engineering/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Manage members" }));
     await screen.findByRole("heading", { name: /Manage members/i });
 
     // Prefilled with the fetched current member (alice), shown as a removable chip.
@@ -131,17 +133,38 @@ describe("GroupsPage", () => {
   });
 
   test("an oidc group has rename, delete, and manage-members disabled but roles enabled", async () => {
+    const user = userEvent.setup();
     renderPage();
     await screen.findByText("SSO-Everyone");
 
-    expect(screen.getByRole("button", { name: /Rename SSO-Everyone/i })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /Delete SSO-Everyone/i })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /Manage members of SSO-Everyone/i })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /Assign roles to SSO-Everyone/i })).not.toBeDisabled();
+    await user.click(screen.getByRole("button", { name: /Actions for SSO-Everyone/i }));
+    expect(await screen.findByRole("menuitem", { name: "Rename" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(screen.getByRole("menuitem", { name: "Delete" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(screen.getByRole("menuitem", { name: "Manage members" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+    expect(screen.getByRole("menuitem", { name: "Assign roles" })).not.toHaveAttribute(
+      "aria-disabled",
+    );
+    await user.keyboard("{Escape}");
 
     // Local group's actions remain enabled.
-    expect(screen.getByRole("button", { name: /Rename Engineering/i })).not.toBeDisabled();
-    expect(screen.getByRole("button", { name: /Delete Engineering/i })).not.toBeDisabled();
-    expect(screen.getByRole("button", { name: /Manage members of Engineering/i })).not.toBeDisabled();
+    await user.click(screen.getByRole("button", { name: /Actions for Engineering/i }));
+    expect(await screen.findByRole("menuitem", { name: "Rename" })).not.toHaveAttribute(
+      "aria-disabled",
+    );
+    expect(screen.getByRole("menuitem", { name: "Delete" })).not.toHaveAttribute(
+      "aria-disabled",
+    );
+    expect(screen.getByRole("menuitem", { name: "Manage members" })).not.toHaveAttribute(
+      "aria-disabled",
+    );
   });
 });

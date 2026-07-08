@@ -53,42 +53,46 @@ export default function PermissionsPage() {
       ) : groups.length === 0 ? (
         <p className="text-sm text-muted-foreground">No permissions defined.</p>
       ) : (
-        groups.map((g) => (
-          <ConfigSection key={g.group} title={g.group}>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  {COLUMNS.map((col) => (
-                    <TableHead key={col}>{col}</TableHead>
-                  ))}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {g.permissions.map((p) => (
-                  <TableRow key={p.key}>
-                    <TableCell className="font-mono text-xs">{p.key}</TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {p.description}
-                    </TableCell>
-                    <TableCell>
-                      {p.roles.length === 0 ? (
-                        <span className="text-muted-foreground">—</span>
-                      ) : (
-                        <div className="flex flex-wrap gap-1">
-                          {p.roles.map((role) => (
-                            <Badge key={role} variant="secondary">
-                              {role}
-                            </Badge>
-                          ))}
-                        </div>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </ConfigSection>
-        ))
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          {groups.map((g) => (
+            <ConfigSection key={g.group} title={g.group}>
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      {COLUMNS.map((col) => (
+                        <TableHead key={col}>{col}</TableHead>
+                      ))}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {g.permissions.map((p) => (
+                      <TableRow key={p.key}>
+                        <TableCell className="font-mono text-xs">{p.key}</TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {p.description}
+                        </TableCell>
+                        <TableCell>
+                          {p.roles.length === 0 ? (
+                            <span className="text-muted-foreground">—</span>
+                          ) : (
+                            <div className="flex flex-wrap gap-1">
+                              {p.roles.map((role) => (
+                                <Badge key={role} variant="secondary">
+                                  {role}
+                                </Badge>
+                              ))}
+                            </div>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </ConfigSection>
+          ))}
+        </div>
       )}
     </div>
   );
