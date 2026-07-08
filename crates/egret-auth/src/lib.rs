@@ -1,5 +1,6 @@
 //! `egret-auth` — authentication (local), sessions, and the request `Principal`.
 
+pub mod authz;
 pub mod cookie;
 pub mod csrf;
 pub mod groups;
@@ -16,3 +17,5 @@ pub mod routes;
 pub mod session;
 pub mod token;
 pub mod users;
+
+pub use authz::{require_permission, require_platform_admin};
