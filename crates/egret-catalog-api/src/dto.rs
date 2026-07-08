@@ -1,8 +1,9 @@
-//! Catalog seam wire DTOs — pure serde (no sqlx) mirrors of the concrete
-//! `egret-catalog` row structs. The concrete store's `sqlx::FromRow` types stay
-//! in `egret-catalog`; these are the transport-neutral shapes the `CatalogPort`
-//! exchanges across the seam boundary. Field sets are copied 1:1 from
-//! `egret-catalog/src/service/embedded.rs`.
+//! Catalog seam wire DTOs — pure serde (no sqlx) mirrors of the concrete store
+//! row structs. The concrete store's `FromRow` types live in the
+//! `egret-catalog-engine` `store` module (folded in from the former `egret-catalog`
+//! crate in E3d-1); these are the transport-neutral shapes the `CatalogPort`
+//! exchanges across the seam boundary. Field sets mirror
+//! `egret-catalog-engine/src/store/embedded.rs`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
