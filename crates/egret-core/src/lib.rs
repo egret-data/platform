@@ -2,6 +2,8 @@
 
 pub mod context;
 pub mod error;
+#[cfg(feature = "http")]
+pub mod http;
 pub mod ids;
 pub mod pagination;
 pub mod rbac;
