@@ -10,7 +10,7 @@ mod tests {
 
     #[test]
     fn trino_servicedef_fixture_is_valid_json_with_resources() {
-        let raw = include_str!("../tests/fixtures/trino-servicedef.json");
+        let raw = include_str!("../../tests/fixtures/trino-servicedef.json");
         let def: Value = serde_json::from_str(raw).expect("trino def parses");
         assert_eq!(def["name"], "trino");
         let resources = def["resources"].as_array().unwrap();

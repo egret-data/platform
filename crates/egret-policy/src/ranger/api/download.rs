@@ -1,8 +1,8 @@
 //! Policy download + tags download endpoints (Ranger plugin polling protocol).
 
-use crate::dto::{ServicePolicies, ServiceTags};
-use crate::error::RangerError;
-use crate::routes::RangerState;
+use crate::ranger::dto::{ServicePolicies, ServiceTags};
+use crate::ranger::error::RangerError;
+use crate::ranger::routes::RangerState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};

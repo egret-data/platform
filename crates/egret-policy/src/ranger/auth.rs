@@ -1,6 +1,6 @@
 //! Bearer-token auth middleware for the Ranger REST surface.
 
-use crate::routes::RangerState;
+use super::routes::RangerState;
 use axum::extract::State;
 use axum::http::{Request, StatusCode};
 use axum::middleware::Next;

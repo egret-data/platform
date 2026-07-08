@@ -43,7 +43,7 @@ pub struct CpState {
     pub storage: CatalogStore,
     /// Shared Ranger policy store (`authz_*`), the same store the machine-facing
     /// `/service` router writes. Used by the read-only Policies endpoints.
-    pub authz: egret_authz::AuthzStore,
+    pub authz: egret_policy::AuthzStore,
     /// Identity lookups for the policy principal picker.
     pub users: egret_auth::users::UserRepo,
     pub groups: egret_auth::groups::GroupRepo,

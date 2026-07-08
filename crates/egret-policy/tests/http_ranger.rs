@@ -1,9 +1,9 @@
 //! DB-gated Ranger HTTP tests. Self-skip without DATABASE_URL.
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use egret_authz::{seed_trino, AuthzStore};
 use egret_metastore::Db;
-use egret_ranger::{ranger_router, RangerState};
+use egret_policy::{ranger_router, RangerState};
+use egret_policy::{seed_trino, AuthzStore};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::sync::Arc;

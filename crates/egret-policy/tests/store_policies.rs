@@ -1,6 +1,6 @@
 //! DB-gated AuthzStore policy tests. Self-skip without DATABASE_URL.
-use egret_authz::AuthzStore;
 use egret_metastore::Db;
+use egret_policy::AuthzStore;
 use serde_json::json;
 
 async fn store() -> Option<AuthzStore> {
@@ -92,11 +92,11 @@ async fn policy_crud_bumps_version() {
         s.update_policy(999_999_999, "x", &pol, true)
             .await
             .unwrap_err(),
-        egret_authz::AuthzError::NotFound(_)
+        egret_policy::AuthzError::NotFound(_)
     ));
     assert!(matches!(
         s.delete_policy(999_999_999).await.unwrap_err(),
-        egret_authz::AuthzError::NotFound(_)
+        egret_policy::AuthzError::NotFound(_)
     ));
 }
 

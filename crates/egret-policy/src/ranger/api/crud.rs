@@ -1,9 +1,9 @@
-use crate::error::RangerError;
-use crate::routes::RangerState;
+use crate::ranger::error::RangerError;
+use crate::ranger::routes::RangerState;
+use crate::AuthzError;
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use egret_authz::AuthzError;
 use serde_json::{json, Value};
 
 pub fn crud_routes() -> Router<RangerState> {

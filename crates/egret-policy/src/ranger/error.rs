@@ -1,9 +1,9 @@
 //! Error type mapping AuthzError → HTTP status for the Ranger REST surface.
 
+use crate::AuthzError;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use egret_authz::AuthzError;
 
 pub struct RangerError(pub AuthzError);
 

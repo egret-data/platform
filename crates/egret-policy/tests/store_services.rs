@@ -1,6 +1,6 @@
 //! DB-gated AuthzStore service tests. Self-skip without DATABASE_URL.
-use egret_authz::AuthzStore;
 use egret_metastore::Db;
+use egret_policy::AuthzStore;
 use serde_json::json;
 
 async fn store() -> Option<AuthzStore> {
@@ -38,7 +38,7 @@ async fn seed_def_then_create_service() {
         s.create_service(&svcname, &defname, &json!({}))
             .await
             .unwrap_err(),
-        egret_authz::AuthzError::AlreadyExists(_)
+        egret_policy::AuthzError::AlreadyExists(_)
     ));
     s.delete_service(svc.id).await.unwrap();
     assert!(s.get_service(&svcname).await.is_err());

@@ -2523,7 +2523,7 @@ mod tests {
         Some(CpState {
             engine_mgmt: crate::EngineMgmtStore::new(db.clone()),
             storage: egret_catalog::CatalogStore::new(db.clone()),
-            authz: std::sync::Arc::new(egret_authz::AuthzStore::new(db.clone())),
+            authz: std::sync::Arc::new(egret_policy::AuthzStore::new(db.clone())),
             secrets: workspace_secrets,
             sessions: egret_auth::session::SessionService::new(
                 db.clone(),

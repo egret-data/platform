@@ -1,9 +1,9 @@
 //! HTTP state + the Ranger Admin `ranger_router()` (axum 0.8).
 
-use crate::api;
+use super::api;
+use crate::AuthzStore;
 use axum::routing::get;
 use axum::Router;
-use egret_authz::AuthzStore;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -25,7 +25,7 @@ pub fn ranger_router(state: RangerState) -> Router {
         .merge(api::crud_routes())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            crate::auth::require_bearer,
+            super::auth::require_bearer,
         ))
         .with_state(state)
 }

@@ -1,8 +1,8 @@
 //! DB-gated tests for the `PolicyPort` (contract crate) impl over `AuthzStore`.
 //! Exercised through `&dyn PolicyPort` so it is the trait method under test, not
 //! the same-named inherent method it shadows. Self-skip without DATABASE_URL.
-use egret_authz::AuthzStore;
 use egret_metastore::Db;
+use egret_policy::AuthzStore;
 use egret_policy_api::{PolicyError, PolicyPort};
 use serde_json::json;
 

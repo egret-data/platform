@@ -6,8 +6,8 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use egret_authz::AuthzError;
 use egret_catalog::CatalogError;
+use egret_policy::AuthzError;
 use egret_secrets::SecretsError;
 
 #[derive(Debug, thiserror::Error)]

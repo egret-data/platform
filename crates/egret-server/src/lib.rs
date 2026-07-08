@@ -24,7 +24,7 @@ pub struct AppState {
     /// Present when `config.oidc.enabled`; `None` otherwise (or in unit tests).
     pub oidc: Option<OidcRoutesState>,
     /// Present when `config.ranger.enabled`; `None` otherwise (or in unit tests).
-    pub ranger: Option<egret_ranger::RangerState>,
+    pub ranger: Option<egret_policy::RangerState>,
     /// Present once a database is wired (in `egret-bin`); `None` in pure health unit tests.
     pub database: Option<egret_database::DatabaseState>,
     /// Present once the engine is wired (in `egret-bin`); `None` in unit tests.
@@ -106,7 +106,7 @@ pub fn build_router(state: AppState) -> Router {
     if let Some(ranger) = state.ranger.clone() {
         router = router.merge(
             Router::new()
-                .nest("/service", egret_ranger::ranger_router(ranger))
+                .nest("/service", egret_policy::ranger_router(ranger))
                 .with_state(()),
         );
     }
