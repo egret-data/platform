@@ -264,12 +264,12 @@ async fn resource_lookup(
     let mut out: Vec<String> = Vec::new();
 
     if qp.level == "catalog" {
-        if let Ok(engines) = st.storage.list_engines().await {
+        if let Ok(engines) = st.engine_mgmt.list_engines().await {
             for e in engines
                 .iter()
                 .filter(|e| e.authz_service_id == Some(svc.id))
             {
-                if let Ok(cats) = st.storage.list_engine_catalogs(e.id).await {
+                if let Ok(cats) = st.engine_mgmt.list_engine_catalogs(e.id).await {
                     for c in cats {
                         if !out.contains(&c.name) {
                             out.push(c.name);
@@ -368,7 +368,7 @@ async fn list_profiles(
     Auth(p): Auth,
 ) -> Result<Json<Vec<ProfileDto>>, CpError> {
     require_permission(&p, "policy:read")?;
-    let engines = st.storage.list_engines().await?;
+    let engines = st.engine_mgmt.list_engines().await?;
     let counts = st.authz.policy_counts().await?;
     let profiles = st
         .authz

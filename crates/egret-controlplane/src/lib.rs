@@ -53,6 +53,8 @@ use std::sync::Arc;
 pub struct CpState {
     /// Global storage-connection registry (`storage_connections`).
     pub storage: CatalogStore,
+    /// Engine-mgmt store (`engine_mgmt` schema) — owns engines/engine_catalogs CRUD.
+    pub engine_mgmt: egret_engine_mgmt::EngineMgmtStore,
     /// Shared Ranger policy store (`authz_*`), the same store the machine-facing
     /// `/service` router writes. Used by the read-only Policies endpoints.
     pub authz: egret_authz::AuthzStore,

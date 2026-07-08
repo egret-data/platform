@@ -52,6 +52,15 @@ impl From<CatalogError> for CpError {
     }
 }
 
+impl From<egret_engine_mgmt::EngineMgmtError> for CpError {
+    fn from(e: egret_engine_mgmt::EngineMgmtError) -> Self {
+        match e {
+            egret_engine_mgmt::EngineMgmtError::AlreadyExists(s) => CpError::AlreadyExists(s),
+            egret_engine_mgmt::EngineMgmtError::Db(_) => CpError::Internal,
+        }
+    }
+}
+
 impl From<SecretsError> for CpError {
     fn from(e: SecretsError) -> Self {
         match e {

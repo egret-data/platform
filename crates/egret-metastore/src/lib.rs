@@ -62,3 +62,4 @@ mod tests {
 // migration registry: 0033_databases_name_per_workspace
 // migration registry: 0039_notebook_resource_access
 // migration registry: 0040_user_username
+// migration registry: 0062_engine_mgmt_schema (moves engines/engine_catalogs to engine_mgmt schema)
