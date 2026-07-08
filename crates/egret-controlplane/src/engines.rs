@@ -1524,7 +1524,11 @@ async fn get_engine(
     Path(id): Path<Uuid>,
 ) -> Result<Json<EngineDetailDto>, CpError> {
     require_permission(&p, "engine:read")?;
-    let engine = st.engine_mgmt.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
     let status = match st.engine_provisioner.as_ref() {
         Some(prov) => match prov.status(&engine.namespace, &engine.name).await {
             Ok(s) => EngineStatusDto {
@@ -1567,7 +1571,11 @@ async fn update_engine(
     Json(b): Json<CreateEngineBody>,
 ) -> Result<Json<EngineDto>, CpError> {
     require_permission(&p, "engine:update")?;
-    let engine = st.engine_mgmt.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
 
     // Rebuild the spec from the body + config. The primary Catalog Client is NOT
     // re-minted (its credential lives on the primary catalog row), so nothing is
@@ -1591,8 +1599,14 @@ async fn update_engine(
         spec["trinoConfig"] = tc.clone();
     }
     validate_spec_resource_groups(&spec)?;
-    st.engine_mgmt.update_engine(id, &spec, &engine.status).await?;
-    let engine = st.engine_mgmt.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    st.engine_mgmt
+        .update_engine(id, &spec, &engine.status)
+        .await?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
 
     let req = build_provision_req(&st, &engine).await?;
     let Some(prov) = st.engine_provisioner.as_ref() else {
@@ -1610,7 +1624,11 @@ async fn delete_engine(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CpError> {
     require_permission(&p, "engine:delete")?;
-    let engine = st.engine_mgmt.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
     // Collect any minted Catalog Clients referenced by the catalog rows before the
     // engine (and its cascading catalogs) are removed.
     let cats = st
@@ -1643,7 +1661,11 @@ async fn restart_engine(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CpError> {
     require_permission(&p, "engine:provision")?;
-    let engine = st.engine_mgmt.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
     let Some(prov) = st.engine_provisioner.as_ref() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
@@ -1661,7 +1683,11 @@ async fn list_catalogs(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<EngineCatalogDto>>, CpError> {
     require_permission(&p, "engine:read")?;
-    let _engine = st.engine_mgmt.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let _engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
     Ok(Json(
         st.engine_mgmt
             .list_engine_catalogs(id)
@@ -1679,7 +1705,11 @@ async fn add_catalog(
     Json(b): Json<AddCatalogBody>,
 ) -> Result<(StatusCode, Json<EngineCatalogDto>), CpError> {
     require_permission(&p, "engine:create")?;
-    let engine = st.engine_mgmt.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
     // The stored `kind` IS the Trino connector name (or `egret-warehouse`); the
     // control-plane no longer gates on a fixed enum — any non-blank kind is a
     // valid connector. The frontend's own catalog-kind list (a UX hint, not a
@@ -1827,7 +1857,11 @@ async fn get_catalog(
     Path((id, cid)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<EngineCatalogDetailDto>, CpError> {
     require_permission(&p, "engine:read")?;
-    let engine = st.engine_mgmt.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
     let cat = st
         .engine_mgmt
         .get_engine_catalog(cid)
@@ -1903,7 +1937,11 @@ async fn test_catalog(
     Path((id, cid)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<CatalogTestDto>, CpError> {
     require_permission(&p, "engine:read")?;
-    let engine = st.engine_mgmt.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
     let cat = st
         .engine_mgmt
         .get_engine_catalog(cid)
@@ -1990,7 +2028,11 @@ async fn remove_catalog(
     Path((id, cid)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, CpError> {
     require_permission(&p, "engine:delete")?;
-    let engine = st.engine_mgmt.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
     let cat = st
         .engine_mgmt
         .get_engine_catalog(cid)
@@ -2035,7 +2077,11 @@ async fn update_catalog(
     Json(b): Json<UpdateCatalogBody>,
 ) -> Result<Json<EngineCatalogDto>, CpError> {
     require_permission(&p, "engine:update")?;
-    let engine = st.engine_mgmt.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
     let prev = st
         .engine_mgmt
         .get_engine_catalog(cid)
@@ -2117,7 +2163,11 @@ async fn pod_logs(
     axum::extract::Query(q): axum::extract::Query<PodLogsQuery>,
 ) -> Result<Json<PodLogsDto>, CpError> {
     require_permission(&p, "engine:read")?;
-    let engine = st.engine_mgmt.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
     let Some(prov) = st.engine_provisioner.as_ref() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
@@ -2166,7 +2216,11 @@ async fn pod_logs_follow(
     ws: WebSocketUpgrade,
 ) -> Result<Response, CpError> {
     require_permission(&p, "engine:read")?;
-    let engine = st.engine_mgmt.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
     let Some(prov) = st.engine_provisioner.clone() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
@@ -2269,7 +2323,11 @@ async fn pod_exec(
     ws: WebSocketUpgrade,
 ) -> Result<Response, CpError> {
     require_permission(&p, "engine:provision")?;
-    let engine = st.engine_mgmt.get_engine(id).await?.ok_or(CpError::NotFound)?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
     let Some(prov) = st.engine_provisioner.clone() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };

@@ -155,7 +155,10 @@ fn monitor_headers(engine: &Engine) -> Vec<(String, String)> {
 }
 
 async fn load_engine(st: &CpState, id: Uuid) -> Result<Engine, CpError> {
-    st.engine_mgmt.get_engine(id).await?.ok_or(CpError::NotFound)
+    st.engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)
 }
 
 /// The engine's public Ingress base URL (`https://{host}`) when
