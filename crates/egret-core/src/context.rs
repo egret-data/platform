@@ -12,6 +12,8 @@ pub struct Principal {
     pub email: String,
     /// Platform-level roles (e.g. `platform_admin`, `data_steward`).
     pub platform_roles: Vec<String>,
+    /// Effective permission keys resolved at session build.
+    pub permissions: Vec<String>,
 }
 
 /// Identity + the workspace the current request operates within.
@@ -43,6 +45,7 @@ mod tests {
                 user_id: UserId::new(),
                 email: "a@b.c".into(),
                 platform_roles: roles.into_iter().map(String::from).collect(),
+                permissions: vec![],
             },
             workspace_role: "ws_editor".into(),
         }

@@ -1,10 +1,10 @@
 //! Control-plane Storage router (`/storage`), nested under `/api/control-plane`.
 //!
-//! Storage connections are GLOBAL (platform-admin only) after migration 0050;
-//! every handler gates on `require_platform_admin` and calls the global
-//! `StorageConn` CRUD on `CatalogStore`. A `new_secret` in the create/update
-//! body mints a GLOBAL named secret (`secrets.create(None, ..)`) and uses its
-//! id as the connection's `secret_ref`.
+//! Storage connections are GLOBAL after migration 0050; every handler gates on
+//! `require_permission(&p, "storage:<action>")` (platform_admin bypasses) and
+//! calls the global `StorageConn` CRUD on `CatalogStore`. A `new_secret` in the
+//! create/update body mints a GLOBAL named secret (`secrets.create(None, ..)`)
+//! and uses its id as the connection's `secret_ref`.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -17,7 +17,7 @@ use egret_secrets::NewSecret;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::auth::require_platform_admin;
+use crate::auth::require_permission;
 use crate::error::CpError;
 use crate::CpState;
 
@@ -102,7 +102,7 @@ async fn download_object(
     Path(id): Path<Uuid>,
     axum::extract::Query(dq): axum::extract::Query<DownloadQuery>,
 ) -> Result<axum::response::Response, CpError> {
-    require_platform_admin(&principal)?;
+    require_permission(&principal, "storage:read")?;
     let (store, bucket) = open_store(&st, id).await?;
     use egret_storage::ObjectStore as _;
     let uri = format!("s3://{bucket}/{}", dq.key);
@@ -183,7 +183,7 @@ async fn browse_objects(
     Path(id): Path<Uuid>,
     axum::extract::Query(bq): axum::extract::Query<BrowseQuery>,
 ) -> Result<Json<ListingDto>, CpError> {
-    require_platform_admin(&principal)?;
+    require_permission(&principal, "storage:read")?;
     let (store, _bucket) = open_store(&st, id).await?;
     use egret_storage::ObjectStore as _;
     let listing = store
@@ -236,7 +236,7 @@ async fn list(
     State(st): State<CpState>,
     Auth(principal): Auth,
 ) -> Result<Json<Vec<StorageDto>>, CpError> {
-    require_platform_admin(&principal)?;
+    require_permission(&principal, "storage:read")?;
     let conns = st.storage.list_storage_conns().await?;
     Ok(Json(conns.into_iter().map(Into::into).collect()))
 }
@@ -246,7 +246,7 @@ async fn create(
     Auth(principal): Auth,
     Json(body): Json<StorageInput>,
 ) -> Result<(StatusCode, Json<StorageDto>), CpError> {
-    require_platform_admin(&principal)?;
+    require_permission(&principal, "storage:create")?;
     let secret_ref = resolve_secret_ref(&st, &body).await?;
     let conn = st
         .storage
@@ -260,7 +260,7 @@ async fn detail(
     Auth(principal): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<StorageDto>, CpError> {
-    require_platform_admin(&principal)?;
+    require_permission(&principal, "storage:read")?;
     let conn = st
         .storage
         .get_storage_conn(id)
@@ -275,7 +275,7 @@ async fn update(
     Path(id): Path<Uuid>,
     Json(body): Json<StorageInput>,
 ) -> Result<Json<StorageDto>, CpError> {
-    require_platform_admin(&principal)?;
+    require_permission(&principal, "storage:update")?;
     let secret_ref = resolve_secret_ref(&st, &body).await?;
     let updated = st
         .storage
@@ -320,7 +320,7 @@ async fn remove(
     Auth(principal): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, CpError> {
-    require_platform_admin(&principal)?;
+    require_permission(&principal, "storage:delete")?;
     if !st.storage.delete_storage_conn(id).await? {
         return Err(CpError::NotFound);
     }

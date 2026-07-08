@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { ThemeProvider } from "@/components/theme-provider";
 import { AuthProvider } from "@/auth/AuthProvider";
-import { RequireAuth, RequireGlobalAdmin, RequireWorkspace } from "@/auth/guards";
+import { RequireAuth, RequireControlPlaneAccess, RequireGlobalAdmin, RequirePermission, RequireWorkspace } from "@/auth/guards";
 import { AppShell } from "@/components/layout/AppShell";
 import { LoginPage } from "@/auth/LoginPage";
 import { NotFound } from "@/routes/NotFound";
@@ -37,6 +37,10 @@ import ProfileDetailPage from "@/routes/control-plane/ProfileDetailPage";
 import PolicyEditorPage from "@/routes/control-plane/PolicyEditorPage";
 import Warehouses from "@/routes/control-plane/Warehouses";
 import WarehouseDetail from "@/routes/control-plane/WarehouseDetail";
+import UsersPage from "@/routes/control-plane/access/UsersPage";
+import GroupsPage from "@/routes/control-plane/access/GroupsPage";
+import RolesPage from "@/routes/control-plane/access/RolesPage";
+import PermissionsPage from "@/routes/control-plane/access/PermissionsPage";
 
 const qc = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1, staleTime: 30000 } } });
 
@@ -78,29 +82,56 @@ function ExploreRoutes() {
   );
 }
 
+// First section (in preference order) each control-plane read permission
+// unlocks. Used to redirect a scoped (non platform_admin) user landing on
+// `/control-plane` to a section they can actually see, instead of the
+// platform_admin-only "workspaces" default.
+const FIRST_SECTION_BY_PERM: { path: string; perm: string }[] = [
+  { path: "engines", perm: "engine:read" },
+  { path: "warehouses", perm: "warehouse:read" },
+  { path: "storage", perm: "storage:read" },
+  { path: "secrets", perm: "secret:read" },
+  { path: "policies", perm: "policy:read" },
+  { path: "users", perm: "user:read" },
+  { path: "groups", perm: "group:read" },
+  { path: "roles", perm: "role:read" },
+  { path: "permissions", perm: "role:read" },
+];
+
+function ControlPlaneIndex() {
+  const { me } = useAuth();
+  if (me?.platform_roles.includes("platform_admin")) return <Navigate to="workspaces" replace />;
+  const perms = me?.permissions ?? [];
+  const first = FIRST_SECTION_BY_PERM.find((s) => perms.includes(s.perm));
+  return <Navigate to={first ? first.path : "workspaces"} replace />;
+}
+
 function ControlPlaneRoutes() {
   return (
-    <RequireGlobalAdmin>
+    <RequireControlPlaneAccess>
       <AppShell>
         <Routes>
-          <Route index element={<Navigate to="workspaces" replace />} />
-          <Route path="workspaces" element={<Placeholder title="Workspaces" />} />
-          <Route path="engines" element={<ControlPlaneEngines />} />
-          <Route path="engines/:id" element={<EngineDetail />} />
-          <Route path="warehouses" element={<Warehouses />} />
-          <Route path="warehouses/:id" element={<WarehouseDetail />} />
-          <Route path="storage" element={<ControlPlaneStorage />} />
-          <Route path="storage/:id/browse" element={<StorageBrowser />} />
-          <Route path="secrets" element={<ControlPlaneSecrets />} />
-          <Route path="policies" element={<Policies />} />
-          <Route path="policies/:service" element={<ProfileDetailPage />} />
-          <Route path="policies/:service/:kind/new" element={<PolicyEditorPage />} />
-          <Route path="policies/:service/:kind/:id" element={<PolicyEditorPage />} />
-          <Route path="users" element={<Placeholder title="Users" />} />
-          <Route path="*" element={<Navigate to="workspaces" replace />} />
+          <Route index element={<ControlPlaneIndex />} />
+          <Route path="workspaces" element={<RequireGlobalAdmin><Placeholder title="Workspaces" /></RequireGlobalAdmin>} />
+          <Route path="engines" element={<RequirePermission perm="engine:read"><ControlPlaneEngines /></RequirePermission>} />
+          <Route path="engines/:id" element={<RequirePermission perm="engine:read"><EngineDetail /></RequirePermission>} />
+          <Route path="warehouses" element={<RequirePermission perm="warehouse:read"><Warehouses /></RequirePermission>} />
+          <Route path="warehouses/:id" element={<RequirePermission perm="warehouse:read"><WarehouseDetail /></RequirePermission>} />
+          <Route path="storage" element={<RequirePermission perm="storage:read"><ControlPlaneStorage /></RequirePermission>} />
+          <Route path="storage/:id/browse" element={<RequirePermission perm="storage:read"><StorageBrowser /></RequirePermission>} />
+          <Route path="secrets" element={<RequirePermission perm="secret:read"><ControlPlaneSecrets /></RequirePermission>} />
+          <Route path="policies" element={<RequirePermission perm="policy:read"><Policies /></RequirePermission>} />
+          <Route path="policies/:service" element={<RequirePermission perm="policy:read"><ProfileDetailPage /></RequirePermission>} />
+          <Route path="policies/:service/:kind/new" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
+          <Route path="policies/:service/:kind/:id" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
+          <Route path="users" element={<RequirePermission perm="user:read"><UsersPage /></RequirePermission>} />
+          <Route path="groups" element={<RequirePermission perm="group:read"><GroupsPage /></RequirePermission>} />
+          <Route path="roles" element={<RequirePermission perm="role:read"><RolesPage /></RequirePermission>} />
+          <Route path="permissions" element={<RequirePermission perm="role:read"><PermissionsPage /></RequirePermission>} />
+          <Route path="*" element={<ControlPlaneIndex />} />
         </Routes>
       </AppShell>
-    </RequireGlobalAdmin>
+    </RequireControlPlaneAccess>
   );
 }
 

@@ -17,7 +17,7 @@ use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::auth::require_platform_admin;
+use crate::auth::require_permission;
 use crate::engines::monitor_password;
 use crate::error::CpError;
 use crate::CpState;
@@ -251,7 +251,7 @@ async fn list_queries(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<QueryDto>>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:read")?;
     let engine = load_engine(&st, id).await?;
     let v = coordinator_json(&st, &engine, "GET", "/v1/query").await?;
     let list = v
@@ -266,7 +266,7 @@ async fn get_query(
     Auth(p): Auth,
     Path((id, qid)): Path<(Uuid, String)>,
 ) -> Result<Json<QueryDetailDto>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:read")?;
     let engine = load_engine(&st, id).await?;
     let v = coordinator_json(&st, &engine, "GET", &format!("/v1/query/{qid}")).await?;
     Ok(Json(query_detail_dto(&v)))
@@ -277,7 +277,7 @@ async fn kill_query(
     Auth(p): Auth,
     Path((id, qid)): Path<(Uuid, String)>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:kill")?;
     let engine = load_engine(&st, id).await?;
     let (code, _) =
         coordinator_call(&st, &engine, "DELETE", &format!("/v1/query/{qid}"), None).await?;
@@ -292,7 +292,7 @@ async fn get_cluster(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ClusterDto>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:read")?;
     let engine = load_engine(&st, id).await?;
     let nodes = coordinator_json(&st, &engine, "GET", "/v1/node").await?;
     let queries = coordinator_json(&st, &engine, "GET", "/v1/query").await?;

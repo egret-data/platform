@@ -16,20 +16,29 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { AuthContext } from "@/auth/useAuth";
+import type { Me } from "@/api/hooks";
 
-function renderSidebar(initialPath: string) {
+// Default to a platform_admin `me` so existing assertions (which expect every
+// item to render) keep passing without threading permissions through every
+// call site; tests that care about permission filtering pass their own `me`.
+const ADMIN_ME: Me = { user_id: "1", email: "admin@example.com", platform_roles: ["platform_admin"], permissions: [] };
+
+function renderSidebar(initialPath: string, me: Me | null = ADMIN_ME) {
   // Mount Sidebar under routes that expose the :workspace param (mirroring the
   // app), so its `base` resolves to /explore/:ws or /control-plane.
   const sidebar = <Sidebar collapsed={false} onToggle={vi.fn()} />;
   return render(
-    <TooltipProvider>
-      <MemoryRouter initialEntries={[initialPath]}>
-        <Routes>
-          <Route path="/explore/:workspace/*" element={sidebar} />
-          <Route path="*" element={sidebar} />
-        </Routes>
-      </MemoryRouter>
-    </TooltipProvider>,
+    <AuthContext.Provider value={{ me, isLoading: false }}>
+      <TooltipProvider>
+        <MemoryRouter initialEntries={[initialPath]}>
+          <Routes>
+            <Route path="/explore/:workspace/*" element={sidebar} />
+            <Route path="*" element={sidebar} />
+          </Routes>
+        </MemoryRouter>
+      </TooltipProvider>
+    </AuthContext.Provider>,
   );
 }
 
@@ -109,7 +118,7 @@ describe("Sidebar – workspace zones", () => {
 });
 
 describe("Sidebar – Control Plane group", () => {
-  test("renders the Control Plane items (Workspaces, Engines, Warehouses, Storage, Secrets, Users)", () => {
+  test("renders the Control Plane items (Workspaces, Engines, Warehouses, Storage, Secrets)", () => {
     renderSidebar("/control-plane/workspaces");
     expect(screen.getByText("Control Plane")).toBeInTheDocument();
 
@@ -133,14 +142,34 @@ describe("Sidebar – Control Plane group", () => {
       "href",
       "/control-plane/secrets",
     );
-    expect(screen.getByRole("link", { name: "Users" })).toHaveAttribute(
-      "href",
-      "/control-plane/users",
-    );
     // Dropped from the Control Plane.
     for (const gone of ["Resources", "Monitoring", "Platform Policies"]) {
       expect(screen.queryByRole("link", { name: gone })).not.toBeInTheDocument();
     }
+  });
+});
+
+describe("Sidebar – Access control group", () => {
+  test("renders Users, Groups, Roles, Permissions at their /control-plane routes", () => {
+    renderSidebar("/control-plane/workspaces");
+    expect(screen.getByText("Access control")).toBeInTheDocument();
+
+    expect(screen.getByRole("link", { name: "Users" })).toHaveAttribute(
+      "href",
+      "/control-plane/users",
+    );
+    expect(screen.getByRole("link", { name: "Groups" })).toHaveAttribute(
+      "href",
+      "/control-plane/groups",
+    );
+    expect(screen.getByRole("link", { name: "Roles" })).toHaveAttribute(
+      "href",
+      "/control-plane/roles",
+    );
+    expect(screen.getByRole("link", { name: "Permissions" })).toHaveAttribute(
+      "href",
+      "/control-plane/permissions",
+    );
   });
 });
 
@@ -152,5 +181,53 @@ describe("Sidebar – Control Plane Data Governance group", () => {
       "href",
       "/control-plane/policies",
     );
+  });
+});
+
+describe("Sidebar – permission-based filtering", () => {
+  test("a scoped (non platform_admin) user with only policy:read sees Policies but not Engines/Users/Roles/Workspaces", () => {
+    renderSidebar("/control-plane/workspaces", {
+      user_id: "2",
+      email: "scoped@example.com",
+      platform_roles: [],
+      permissions: ["policy:read"],
+    });
+
+    expect(screen.getByRole("link", { name: "Policies" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Engines" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Users" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Roles" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Workspaces" })).not.toBeInTheDocument();
+
+    // Groups with no visible items are dropped entirely, heading included.
+    expect(screen.queryByText("Access control")).not.toBeInTheDocument();
+    // The "Control Plane" heading (Workspaces/Engines/Warehouses/Storage/Secrets)
+    // has nothing visible for this user either.
+    expect(screen.queryByText("Control Plane")).not.toBeInTheDocument();
+    expect(screen.getByText("Data Governance")).toBeInTheDocument();
+  });
+
+  test("a platform_admin sees every Control Plane item regardless of permissions", () => {
+    renderSidebar("/control-plane/workspaces", {
+      user_id: "3",
+      email: "admin2@example.com",
+      platform_roles: ["platform_admin"],
+      permissions: [],
+    });
+
+    for (const label of [
+      "Workspaces",
+      "Engines",
+      "Warehouses",
+      "Storage",
+      "Secrets",
+      "Users",
+      "Groups",
+      "Roles",
+      "Permissions",
+      "Policies",
+    ]) {
+      expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
+    }
   });
 });

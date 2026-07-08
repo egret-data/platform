@@ -15,7 +15,7 @@ use egret_auth::principal::Auth;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::auth::require_platform_admin;
+use crate::auth::require_permission;
 use crate::error::CpError;
 use crate::CpState;
 pub use ranger_json::{
@@ -259,7 +259,7 @@ async fn resource_lookup(
     Auth(p): Auth,
     Query(qp): Query<ResourceLookupQuery>,
 ) -> Result<Json<Vec<String>>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "policy:read")?;
     let svc = st.authz.get_service(&qp.service).await?;
     let mut out: Vec<String> = Vec::new();
 
@@ -322,7 +322,7 @@ async fn list_policies(
     Auth(p): Auth,
     Query(qp): Query<ListQuery>,
 ) -> Result<Json<Vec<PolicySummary>>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "policy:read")?;
     let svc = st.authz.get_service(&qp.service).await?;
     let mut out: Vec<PolicySummary> = st
         .authz
@@ -352,7 +352,7 @@ async fn get_policy(
     Auth(p): Auth,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "policy:read")?;
     let row = st.authz.get_policy(id).await?;
     let mut body = row.policy_jsonb;
     if let Value::Object(m) = &mut body {
@@ -367,7 +367,7 @@ async fn list_profiles(
     State(st): State<CpState>,
     Auth(p): Auth,
 ) -> Result<Json<Vec<ProfileDto>>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "policy:read")?;
     let engines = st.storage.list_engines().await?;
     let counts = st.authz.policy_counts().await?;
     let profiles = st
@@ -408,7 +408,7 @@ async fn trino_config(
     Auth(p): Auth,
     Path(service): Path<String>,
 ) -> Result<Json<Vec<ConfigFile>>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "policy:read")?;
     let _ = st.authz.get_service(&service).await?; // 404 if the profile doesn't exist
     let base = st.engine_egret_url.trim_end_matches('/');
 
@@ -456,7 +456,7 @@ async fn seed_defaults(
     Auth(p): Auth,
     Path(service): Path<String>,
 ) -> Result<Json<Value>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "policy:seed")?;
     let svc = st.authz.get_service(&service).await?;
     let created = st
         .authz
@@ -474,7 +474,7 @@ async fn get_service_def(
     Auth(p): Auth,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "policy:read")?;
     let def_name = match st.authz.get_service(&name).await {
         Ok(svc) => svc.r#type,
         Err(_) => name,
@@ -510,7 +510,7 @@ async fn list_principals(
     Auth(p): Auth,
     Query(qp): Query<PrincipalQuery>,
 ) -> Result<Json<Vec<Principal>>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "policy:read")?;
     let q = qp.q.unwrap_or_default().to_lowercase();
     let want_users = qp.kind.as_deref() != Some("group");
     let want_groups = qp.kind.as_deref() != Some("user");
@@ -557,7 +557,7 @@ async fn create_policy(
     Auth(p): Auth,
     Json(v): Json<Value>,
 ) -> Result<Json<Value>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "policy:create")?;
     let pol = editor_to_ranger_json(&v).map_err(CpError::BadRequest)?;
     if pol.name.trim().is_empty() {
         return Err(CpError::BadRequest("policy name is required".into()));
@@ -580,7 +580,7 @@ async fn update_policy(
     Path(id): Path<i64>,
     Json(v): Json<Value>,
 ) -> Result<Json<Value>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "policy:update")?;
     let pol = editor_to_ranger_json(&v).map_err(CpError::BadRequest)?;
     if pol.name.trim().is_empty() {
         return Err(CpError::BadRequest("policy name is required".into()));
@@ -597,7 +597,7 @@ async fn delete_policy_handler(
     Auth(p): Auth,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "policy:delete")?;
     st.authz.delete_policy(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -614,7 +614,7 @@ async fn set_policy_enabled(
     Path(id): Path<i64>,
     Json(b): Json<EnabledBody>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "policy:update")?;
     st.authz.set_policy_enabled(id, b.enabled).await?;
     Ok(StatusCode::NO_CONTENT)
 }

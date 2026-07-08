@@ -9,6 +9,7 @@
 //! The router is nested at `/api/control-plane` in `egret-server`, behind the
 //! same CSRF layer as the other mutating APIs.
 
+mod access;
 mod auth;
 mod engines;
 mod error;
@@ -58,6 +59,8 @@ pub struct CpState {
     /// Identity lookups for the policy principal picker.
     pub users: egret_auth::users::UserRepo,
     pub groups: egret_auth::groups::GroupRepo,
+    /// Platform RBAC roles, permissions, and principal assignments.
+    pub roles: egret_auth::roles::RoleRepo,
     /// Named secret layer, used in GLOBAL scope (`None` workspace) here.
     pub secrets: WorkspaceSecretStore,
     /// Session service backing the `Auth` extractor.
@@ -97,4 +100,5 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(warehouses::router())
         .merge(engines::router())
         .merge(policies::router())
+        .merge(access::router())
 }

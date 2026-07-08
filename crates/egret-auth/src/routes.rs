@@ -41,6 +41,7 @@ pub struct MeResponse {
     pub user_id: String,
     pub email: String,
     pub platform_roles: Vec<String>,
+    pub permissions: Vec<String>,
 }
 
 /// Build the auth router. `login` and `config` are CSRF-exempt (client has no cookie yet);
@@ -121,6 +122,7 @@ async fn login(
             user_id: user.id.to_string(),
             email: user.email,
             platform_roles: vec![],
+            permissions: vec![],
         }),
     ))
 }
@@ -143,6 +145,7 @@ async fn me(Auth(principal): Auth) -> impl IntoResponse {
         user_id: principal.user_id.to_string(),
         email: principal.email,
         platform_roles: principal.platform_roles,
+        permissions: principal.permissions,
     })
 }
 

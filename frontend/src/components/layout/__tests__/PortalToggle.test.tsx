@@ -53,6 +53,7 @@ const ME_WITH_ROLE: Me = {
   user_id: "u1",
   email: "admin@example.com",
   platform_roles: ["platform_admin"],
+  permissions: [],
 };
 
 /** LocationProbe lets us assert navigate() side-effects */

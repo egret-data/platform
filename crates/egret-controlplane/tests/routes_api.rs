@@ -69,6 +69,7 @@ async fn setup_full(
         authz: egret_authz::AuthzStore::new(db.clone()),
         users: users.clone(),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
+        roles: egret_auth::roles::RoleRepo::new(db.clone()),
         secrets: workspace_secrets,
         sessions: sessions.clone(),
         provisioner: None,
@@ -108,6 +109,53 @@ async fn session_for(f: &Fixture, tag: &str, platform_admin: bool) -> String {
         .await
         .expect("grant platform_admin");
     }
+    f.sessions
+        .create(uid, "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token
+}
+
+/// Create a NON-admin user holding exactly one fine-grained permission key
+/// (via a fresh ad-hoc platform-scoped role), and return its session token.
+/// Exercises the `require_permission` scoped-principal path (as opposed to
+/// `session_for`'s `platform_admin` bypass path): `platform_roles` stays
+/// empty, `permissions` carries only `permission`.
+async fn session_for_with_permission(f: &Fixture, tag: &str, permission: &str) -> String {
+    let email = format!("{tag}_{}@egret.local", Uuid::new_v4().simple());
+    let uid = f
+        .users
+        .insert_local(&email, "Test", "x")
+        .await
+        .expect("insert user");
+
+    let role_name = format!("test_role_{}", Uuid::new_v4().simple());
+    let (role_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO roles (scope, name, description) VALUES ('platform', $1, 'test-only role') \
+         RETURNING id",
+    )
+    .bind(&role_name)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert role");
+
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
+        .bind(role_id)
+        .bind(permission)
+        .execute(&f.db.pool)
+        .await
+        .expect("grant permission");
+
+    sqlx::query(
+        "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
+         VALUES ('user', $1, $2)",
+    )
+    .bind(uid.0)
+    .bind(role_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("assign role");
+
     f.sessions
         .create(uid, "test", "127.0.0.1")
         .await
@@ -2759,5 +2807,1271 @@ async fn non_admin_cannot_lookup_resource_values() {
         resp.status(),
         StatusCode::FORBIDDEN,
         "a non platform-admin must not use resource-lookup"
+    );
+}
+
+// ── P1-T5: fine-grained `require_permission` enforcement ─────────────────────
+//
+// `platform_admin`/blanket-forbidden coverage lives above (per-module, from
+// the `require_platform_admin` era). These prove the NEW `resource:action`
+// gate: a scoped, non-admin principal holding the wrong (or no) permission is
+// Forbidden, and a scoped, non-admin principal holding exactly the right
+// permission succeeds — same as `platform_admin`, without the superuser
+// bypass.
+
+/// Engines: `engine:read` gates `GET /engines`, `engine:create` gates
+/// `POST /engines`.
+#[tokio::test]
+async fn scoped_permission_engines_read_and_create() {
+    let Some(f) = setup_full(None, Some(Arc::new(FakeEngineProvisioner::default()))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    let wrong = session_for_with_permission(&f, "engine_scoped_wrong", "warehouse:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/engines", &wrong, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without engine:read must not list engines"
+    );
+
+    let reader = session_for_with_permission(&f, "engine_scoped_reader", "engine:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/engines", &reader, None))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a scoped engine:read principal must list engines; body={body}"
+    );
+
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_body = serde_json::json!({
+        "name": format!("trino-{}", Uuid::new_v4().simple()),
+        "warehouseId": wh_id,
+        "coordinatorReplicas": 1,
+        "workerReplicas": 1,
+        "cpuMin": "1",
+        "cpuMax": "2",
+        "memory": "4Gi",
+    });
+
+    // engine:read alone must not create.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/engines", &reader, Some(engine_body.clone())))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "engine:read alone must not create an engine"
+    );
+
+    let creator = session_for_with_permission(&f, "engine_scoped_creator", "engine:create").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/engines", &creator, Some(engine_body)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a scoped engine:create principal must create; body={body}"
+    );
+}
+
+/// Warehouses: `warehouse:read` gates `GET /warehouses`, `warehouse:create`
+/// gates `POST /warehouses`.
+#[tokio::test]
+async fn scoped_permission_warehouses_read_and_create() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    let wrong = session_for_with_permission(&f, "wh_scoped_wrong", "engine:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/warehouses", &wrong, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without warehouse:read must not list warehouses"
+    );
+
+    let reader = session_for_with_permission(&f, "wh_scoped_reader", "warehouse:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/warehouses", &reader, None))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a scoped warehouse:read principal must list warehouses; body={body}"
+    );
+
+    let (ws_id,): (Uuid,) =
+        sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
+            .bind(format!("wh-scoped-ws-{}", Uuid::new_v4().simple()))
+            .bind("Scoped Perm Test Workspace")
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("insert workspace");
+    let (storage_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO storage_connections (name, region, bucket, access_key) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(format!("wh-scoped-sc-{}", Uuid::new_v4().simple()))
+    .bind("us-east-1")
+    .bind("egret-scoped-test")
+    .bind("AKIATEST")
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert storage connection");
+    let wh_body = serde_json::json!({
+        "name": format!("wh-scoped-{}", Uuid::new_v4().simple()),
+        "workspaceId": ws_id,
+        "storageConnectionId": storage_id,
+    });
+
+    // warehouse:read alone must not create.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/warehouses", &reader, Some(wh_body.clone())))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "warehouse:read alone must not create a warehouse"
+    );
+
+    let creator = session_for_with_permission(&f, "wh_scoped_creator", "warehouse:create").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/warehouses", &creator, Some(wh_body)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a scoped warehouse:create principal must create; body={body}"
+    );
+}
+
+/// Storage: `storage:read` gates `GET /storage`, `storage:create` gates
+/// `POST /storage`. A principal with only one of the two must not get the other.
+#[tokio::test]
+async fn scoped_permission_storage_read_and_create() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    let wrong = session_for_with_permission(&f, "storage_scoped_wrong", "secret:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/storage", &wrong, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without storage:read must not list storage"
+    );
+
+    let reader = session_for_with_permission(&f, "storage_scoped_reader", "storage:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/storage", &reader, None))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a scoped storage:read principal must list storage; body={body}"
+    );
+
+    // storage:read alone must not create.
+    let suffix = Uuid::new_v4().simple().to_string();
+    let create_body = serde_json::json!({
+        "name": format!("scoped-store-{suffix}"),
+        "provider": "s3",
+        "region": "us-east-1",
+        "bucket": "egret-scoped-test",
+        "access_key": "AKIATEST",
+        "path_style": true,
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/storage", &reader, Some(create_body.clone())))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "storage:read alone must not create a storage connection"
+    );
+
+    let creator = session_for_with_permission(&f, "storage_scoped_creator", "storage:create").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/storage", &creator, Some(create_body)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a scoped storage:create principal must create; body={body}"
+    );
+}
+
+/// Secrets: `secret:read` gates `GET /secrets`, `secret:create` gates
+/// `POST /secrets`.
+#[tokio::test]
+async fn scoped_permission_secrets_read_and_create() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    let wrong = session_for_with_permission(&f, "secret_scoped_wrong", "storage:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/secrets", &wrong, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without secret:read must not list secrets"
+    );
+
+    let reader = session_for_with_permission(&f, "secret_scoped_reader", "secret:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/secrets", &reader, None))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a scoped secret:read principal must list secrets; body={body}"
+    );
+
+    // secret:read alone must not create.
+    let suffix = Uuid::new_v4().simple().to_string();
+    let create_body = serde_json::json!({
+        "name": format!("scoped-secret-{suffix}"),
+        "value": "s3cr3t",
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/secrets", &reader, Some(create_body.clone())))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "secret:read alone must not create a secret"
+    );
+
+    let creator = session_for_with_permission(&f, "secret_scoped_creator", "secret:create").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/secrets", &creator, Some(create_body)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a scoped secret:create principal must create; body={body}"
+    );
+}
+
+/// Policies: `policy:read` gates `GET /policies`, `policy:create` gates
+/// `POST /policies`.
+#[tokio::test]
+async fn scoped_permission_policies_read_and_create() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    let authz = egret_authz::AuthzStore::new(f.db.clone());
+    egret_authz::seed_trino(&authz)
+        .await
+        .expect("seed trino def");
+    let svc_name = format!("trino-{}", Uuid::new_v4().simple());
+    let svc = authz
+        .create_service(&svc_name, "trino", &serde_json::json!({}))
+        .await
+        .expect("create service");
+
+    let wrong = session_for_with_permission(&f, "policy_scoped_wrong", "engine:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/policies?service={svc_name}"),
+            &wrong,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without policy:read must not list policies"
+    );
+
+    let reader = session_for_with_permission(&f, "policy_scoped_reader", "policy:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/policies?service={svc_name}"),
+            &reader,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a scoped policy:read principal must list policies; body={body}"
+    );
+
+    let create_body = serde_json::json!({
+        "name": "scoped-create",
+        "service": svc_name,
+        "isEnabled": true,
+        "resources": {"catalog": {"values": ["iceberg"]}},
+        "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+    });
+
+    // policy:read alone must not create.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/policies", &reader, Some(create_body.clone())))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "policy:read alone must not create a policy"
+    );
+
+    let creator = session_for_with_permission(&f, "policy_scoped_creator", "policy:create").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/policies", &creator, Some(create_body)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a scoped policy:create principal must create; body={body}"
+    );
+
+    authz.delete_service(svc.id).await.expect("cleanup service");
+}
+
+/// Monitor: `list_queries`, `get_query`, and `get_cluster` are gated on
+/// `engine:read` (read-only cluster/query observation). `kill_query`'s DELETE
+/// verb is destructive and is gated on `engine:kill` instead (see
+/// `egret_core::rbac::PERMISSIONS`), not exercised by this test.
+/// Proves enforcement on both `/queries` (list) and `/cluster` (aggregate).
+#[tokio::test]
+async fn scoped_permission_monitor_queries_and_cluster() {
+    let fake = MonitorFakeProvisioner::default();
+    let Some(f) = setup_full(None, Some(Arc::new(fake.clone()))).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin_token = session_for(&f, "monitor_scoped_setup", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &admin_token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    fake.set(200, b"[]");
+
+    let wrong = session_for_with_permission(&f, "monitor_scoped_wrong", "warehouse:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/queries"),
+            &wrong,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without engine:read must not list queries"
+    );
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/cluster"),
+            &wrong,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without engine:read must not fetch cluster state"
+    );
+
+    let reader = session_for_with_permission(&f, "monitor_scoped_reader", "engine:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/queries"),
+            &reader,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a scoped engine:read principal must list queries; body={body}"
+    );
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/cluster"),
+            &reader,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a scoped engine:read principal must fetch cluster state; body={body}"
+    );
+}
+
+// ── Access (Users / Groups / Roles / Permissions) ─────────────────────────────
+
+/// Build a `Fixture` backed by a dedicated, freshly-migrated Postgres SCHEMA
+/// (not the shared `public` one every other test in this file uses) via a
+/// pool-level `search_path` pin — the same per-connection isolation
+/// `egret-catalog-engine::pool::build_isolated_pool` uses to keep lakekeeper's
+/// tables out of `public`.
+///
+/// `last_admin_guard` needs this: `guard_last_admin` blocks on
+/// `RoleRepo::count_platform_admins()` being GLOBALLY exactly 1, but dozens of
+/// other `#[tokio::test]`s in this file call `session_for(.., true)`, each
+/// inserting its own `platform_admin` assignment into the shared `public`
+/// schema, and tests run concurrently — so the ambient count there is never
+/// reliably 1. A private schema (starting at 0 assignments) sidesteps the
+/// race instead of asserting on an unstable global.
+async fn setup_isolated_schema() -> Option<Fixture> {
+    // NB: this workspace pins `sqlx = "0.8"` (see egret-controlplane's
+    // Cargo.toml), which predates the 0.9 `AssertSqlSafe`/`sql_str` API that
+    // `egret-catalog-engine::pool::build_isolated_pool` uses (that crate
+    // pulls in its own separate sqlx 0.9 dependency just for this trick — see
+    // the `sqlx = { version = "0.9", ... }` comment in its Cargo.toml). On
+    // 0.8, `sqlx::query(&str)` runs unparameterized SQL directly, no wrapper
+    // needed.
+    use sqlx::{ConnectOptions, Connection};
+    use std::str::FromStr;
+
+    let dsn = std::env::var("DATABASE_URL").ok()?;
+    let schema = format!("rbac_isolated_{}", Uuid::new_v4().simple());
+    let opts = sqlx::postgres::PgConnectOptions::from_str(&dsn).expect("parse DATABASE_URL");
+
+    // Create the schema via a one-shot connection on the default search_path.
+    let mut conn = opts
+        .clone()
+        .connect()
+        .await
+        .expect("connect for schema setup");
+    sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\""))
+        .execute(&mut conn)
+        .await
+        .expect("create isolated schema");
+    conn.close().await.ok();
+
+    // Every pooled connection pins search_path to the fresh schema, so
+    // unqualified DDL/DML (including `_sqlx_migrations`) lands there instead
+    // of `public`.
+    let set_search_path = format!("SET search_path = \"{schema}\", public");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .after_connect(move |conn, _meta| {
+            let stmt = set_search_path.clone();
+            Box::pin(async move {
+                sqlx::query(&stmt).execute(&mut *conn).await?;
+                Ok(())
+            })
+        })
+        .connect_with(opts)
+        .await
+        .expect("connect isolated pool");
+
+    let db = Db { pool };
+    db.migrate().await.expect("migrate isolated schema");
+
+    let crypto =
+        egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
+    let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
+    let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
+
+    let users = UserRepo::new(db.clone());
+    let sessions = SessionService::new(
+        db.clone(),
+        chrono::Duration::hours(24),
+        chrono::Duration::minutes(60),
+    );
+
+    let app = control_plane_router().with_state(CpState {
+        storage: egret_catalog::CatalogStore::new(db.clone()),
+        authz: egret_authz::AuthzStore::new(db.clone()),
+        users: users.clone(),
+        groups: egret_auth::groups::GroupRepo::new(db.clone()),
+        roles: egret_auth::roles::RoleRepo::new(db.clone()),
+        secrets: workspace_secrets,
+        sessions: sessions.clone(),
+        provisioner: None,
+        browser: None,
+        engine_provisioner: None,
+        engine_egret_url: "http://egret:8080".into(),
+        engine_jwks_uri: "https://idp/jwks".into(),
+    });
+
+    Some(Fixture {
+        app,
+        users,
+        sessions,
+        db,
+    })
+}
+
+/// `POST /users` creates a local user, `GET /users` lists it (with its
+/// assigned role), and `POST`/`DELETE .../roles(/{roleId})` assign/unassign a
+/// custom (non-admin) role — so no `guard_last_admin` guard is in play here.
+#[tokio::test]
+async fn users_crud_and_role_assign() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin = session_for(&f, "users_admin", true).await;
+    let email = format!("cruduser_{}@egret.local", Uuid::new_v4().simple());
+
+    // POST /users → 201, a local user.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/users",
+            &admin,
+            Some(serde_json::json!({
+                "email": email,
+                "name": "Crud User",
+                "password": "S3curePassw0rd!",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create user; body={j}");
+    assert_eq!(j["email"], serde_json::json!(email), "user email; body={j}");
+    assert_eq!(j["provider"], "local", "user provider; body={j}");
+    let user_id = j["id"].as_str().expect("user id in body").to_string();
+
+    // GET /users → the new user shows up.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/users", &admin, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list users; body={j}");
+    assert!(
+        j.as_array()
+            .expect("users array")
+            .iter()
+            .any(|u| u["id"] == user_id),
+        "new user must be listed; body={j}"
+    );
+
+    // Create a custom (non-admin) role to assign/unassign.
+    let role_name = format!("crud_role_{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/access/roles",
+            &admin,
+            Some(serde_json::json!({
+                "scope": "platform",
+                "name": role_name,
+                "description": "crud test role",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create role; body={j}");
+    let role_id = j["id"].as_str().expect("role id in body").to_string();
+
+    // Assign the role to the new user.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/users/{user_id}/roles"),
+            &admin,
+            Some(serde_json::json!({ "roleId": role_id })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "assign role to user");
+
+    // GET /users → the user's roles now include it.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/users", &admin, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list users after assign; body={j}");
+    let entry = j
+        .as_array()
+        .expect("users array")
+        .iter()
+        .find(|u| u["id"] == user_id)
+        .expect("assigned user still listed");
+    assert!(
+        entry["roles"]
+            .as_array()
+            .expect("roles array")
+            .contains(&serde_json::json!(role_name)),
+        "assigned role must show up on the user; entry={entry}"
+    );
+
+    // Unassign — a non-admin role, so `guard_last_admin` never fires.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/users/{user_id}/roles/{role_id}"),
+            &admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "unassign a non-admin role"
+    );
+}
+
+/// `guard_last_admin` (shared by the user- and group-role unassign routes)
+/// blocks removing the platform-wide LAST `platform_admin` assignment — 409,
+/// not 200/204. Run against `setup_isolated_schema` (see its docstring for
+/// why the shared-schema fixture can't give this a deterministic count).
+#[tokio::test]
+async fn last_admin_guard() {
+    let Some(f) = setup_isolated_schema().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    // The lone platform_admin in this isolated schema.
+    let token = session_for(&f, "solo_admin", true).await;
+    let (admin_id, role_id): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT pra.principal_id, pra.role_id FROM platform_role_assignments pra \
+         JOIN roles r ON r.id = pra.role_id WHERE r.name = 'platform_admin'",
+    )
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("the sole platform_admin assignment");
+
+    // Removing the only platform_admin assignment must 409, not succeed.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/users/{admin_id}/roles/{role_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "removing the last platform_admin must 409; body={j}"
+    );
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("last platform admin"),
+        "409 body should explain the last-admin guard; body={j}"
+    );
+
+    // A second admin breaks the tie: the same removal now succeeds.
+    let _second_admin_token = session_for(&f, "second_admin", true).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/users/{admin_id}/roles/{role_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "removal succeeds once a second platform_admin exists"
+    );
+}
+
+/// Local groups support create/add-member/delete; an OIDC-synced group
+/// (`upsert_oidc_group`) cannot be deleted (409) — mirrors the OIDC rename
+/// guard on the same `groups` table (`rows == 0` ⇒ `CpError::Conflict`).
+#[tokio::test]
+async fn groups_local_and_oidc() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin = session_for(&f, "groups_admin", true).await;
+    let group_name = format!("crud-group-{}", Uuid::new_v4().simple());
+
+    // POST /groups → 201, a local group.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/groups",
+            &admin,
+            Some(serde_json::json!({ "name": group_name })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create local group; body={j}");
+    assert_eq!(j["source"], "local", "group source; body={j}");
+    let group_id = j["id"].as_str().expect("group id in body").to_string();
+
+    // Add a member.
+    let member_email = format!("groupmember_{}@egret.local", Uuid::new_v4().simple());
+    let member_id = f
+        .users
+        .insert_local(&member_email, "Group Member", "x")
+        .await
+        .expect("insert member")
+        .0;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/groups/{group_id}/members"),
+            &admin,
+            Some(serde_json::json!({ "userId": member_id })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "add group member");
+
+    // GET /groups/{id}/members lists the member back (prefill for the
+    // manage-members dialog).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/groups/{group_id}/members"),
+            &admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list group members; body={j}");
+    let members = j.as_array().expect("members array");
+    assert_eq!(members.len(), 1, "one member; body={j}");
+    assert_eq!(
+        members[0]["id"],
+        member_id.to_string(),
+        "member id; body={j}"
+    );
+    assert_eq!(members[0]["email"], member_email, "member email; body={j}");
+
+    // DELETE the local group → 204.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &format!("/groups/{group_id}"), &admin, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "delete local group");
+
+    // An OIDC-synced group cannot be deleted through the admin route.
+    let oidc_name = format!("oidc-group-{}", Uuid::new_v4().simple());
+    let oidc_repo = egret_auth::groups::GroupRepo::new(f.db.clone());
+    let oidc_group_id = oidc_repo
+        .upsert_oidc_group(&oidc_name)
+        .await
+        .expect("upsert oidc group");
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/groups/{oidc_group_id}"),
+            &admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "deleting an oidc-synced group must 409; body={j}"
+    );
+}
+
+/// `POST /access/roles` creates a custom role; `PUT .../permissions` accepts
+/// a known permission (204) and rejects an unknown one (400, validated
+/// against `egret_core::rbac::is_known` before any DB write); a seeded role
+/// (`data_steward`) cannot be deleted (409) but the custom role can (204).
+#[tokio::test]
+async fn roles_seeded_and_permissions() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin = session_for(&f, "roles_admin", true).await;
+    let role_name = format!("custom_role_{}", Uuid::new_v4().simple());
+
+    // POST /access/roles → 201, a custom role.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/access/roles",
+            &admin,
+            Some(serde_json::json!({
+                "scope": "platform",
+                "name": role_name,
+                "description": "custom test role",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create custom role; body={j}");
+    let role_id = j["id"].as_str().expect("role id in body").to_string();
+
+    // PUT permissions with a known permission → 204.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/access/roles/{role_id}/permissions"),
+            &admin,
+            Some(serde_json::json!({ "permissions": ["engine:read"] })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "set a known permission"
+    );
+
+    // PUT permissions with an unknown permission → 400, no partial write.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/access/roles/{role_id}/permissions"),
+            &admin,
+            Some(serde_json::json!({ "permissions": ["engine:frobnicate"] })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "unknown permission must 400; body={j}"
+    );
+
+    // Seeded roles (migration 0003) cannot be deleted.
+    let (seeded_id,): (Uuid,) =
+        sqlx::query_as("SELECT id FROM roles WHERE scope = 'platform' AND name = 'data_steward'")
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("data_steward seeded by migration 0003");
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/access/roles/{seeded_id}"),
+            &admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "deleting a seeded role must 409; body={j}"
+    );
+
+    // The custom role, not seeded, can be deleted.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/access/roles/{role_id}"),
+            &admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "delete the custom role"
+    );
+}
+
+/// A scoped principal without `role:read` is 403 on `GET /access/roles`; with
+/// it (or platform_admin), 200. `GET /permissions` returns the non-empty
+/// code-defined catalog (`egret_core::rbac::PERMISSIONS`, independent of DB
+/// content) for an authorized caller — it too is gated on `role:read`.
+///
+/// Writes to the authorization graph are a different story: they're
+/// `platform_admin`-only now (not delegatable), so even a principal holding
+/// `role:read` — enough to *see* roles — must still be 403 on
+/// `POST /access/roles`, `PUT .../permissions`, and `POST /users/{id}/roles`.
+/// The guard is the handler's first line, so these 403 before any DB lookup —
+/// the path/body UUIDs below don't need to resolve to anything real.
+#[tokio::test]
+async fn permission_enforcement() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    let wrong = session_for_with_permission(&f, "access_scoped_wrong", "user:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/access/roles", &wrong, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without role:read must not list roles"
+    );
+
+    let reader = session_for_with_permission(&f, "access_scoped_reader", "role:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/access/roles", &reader, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a scoped role:read principal must list roles; body={j}"
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/permissions", &reader, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list permissions; body={j}");
+    let groups = j.as_array().expect("permission groups array");
+    assert!(
+        !groups.is_empty(),
+        "permission catalog must not be empty; body={j}"
+    );
+    assert!(
+        groups
+            .iter()
+            .any(|g| g["permissions"].as_array().is_some_and(|p| !p.is_empty())),
+        "at least one permission group must list permissions; body={j}"
+    );
+
+    // A role:read holder can see roles but must not be able to create one —
+    // role definitions are part of the authorization graph, platform_admin
+    // only.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/access/roles",
+            &reader,
+            Some(serde_json::json!({
+                "scope": "platform",
+                "name": format!("escalation_attempt_{}", Uuid::new_v4().simple()),
+                "description": "should never be created",
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a role:read principal must not create roles (platform_admin only)"
+    );
+
+    // Nor set a role's permissions — this is exactly how the closed
+    // escalation worked (a delegated `role:assign_permission` let a
+    // non-admin grant themselves anything).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/access/roles/{}/permissions", Uuid::new_v4()),
+            &reader,
+            Some(serde_json::json!({ "permissions": ["engine:read"] })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a role:read principal must not set role permissions (platform_admin only)"
+    );
+
+    // Nor assign a role to a user — the other half of the closed escalation
+    // (a delegated `user:assign_role` let a non-admin hand themselves any
+    // role, including platform_admin).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/users/{}/roles", Uuid::new_v4()),
+            &reader,
+            Some(serde_json::json!({ "roleId": Uuid::new_v4() })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a role:read principal must not assign roles to users (platform_admin only)"
+    );
+}
+
+/// `GET /access/roles/{id}/assignees` lists a role's assignees by display
+/// name (users by email, groups by name), for the admin console's
+/// drill-into-a-role view. A scoped principal without `role:read` is 403.
+#[tokio::test]
+async fn role_assignees_lists_users_and_groups() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin = session_for(&f, "role_assignees_admin", true).await;
+    let roles = egret_auth::roles::RoleRepo::new(f.db.clone());
+    let groups = egret_auth::groups::GroupRepo::new(f.db.clone());
+
+    // A fresh custom role, with no assignees yet.
+    let role_name = format!("assignee_role_{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/access/roles",
+            &admin,
+            Some(serde_json::json!({
+                "scope": "platform",
+                "name": role_name,
+                "description": "role assignees test",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create custom role; body={j}");
+    let role_id: Uuid = j["id"].as_str().expect("role id in body").parse().unwrap();
+
+    // Assign the role to a user and a group directly (bypassing the
+    // assign-role HTTP routes, which are exercised elsewhere).
+    let member_email = format!("assignee_user_{}@egret.local", Uuid::new_v4().simple());
+    let member_id = f
+        .users
+        .insert_local(&member_email, "Assignee User", "x")
+        .await
+        .expect("insert user")
+        .0;
+    roles
+        .assign("user", member_id, role_id)
+        .await
+        .expect("assign role to user");
+
+    let group_name = format!("assignee-group-{}", Uuid::new_v4().simple());
+    let group_id = groups
+        .create_local(&group_name)
+        .await
+        .expect("create group");
+    roles
+        .assign("group", group_id, role_id)
+        .await
+        .expect("assign role to group");
+
+    // A scoped principal without `role:read` is 403.
+    let wrong = session_for_with_permission(&f, "role_assignees_wrong", "user:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/access/roles/{role_id}/assignees"),
+            &wrong,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without role:read must not list role assignees"
+    );
+
+    // The platform_admin sees both assignees, named.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/access/roles/{role_id}/assignees"),
+            &admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list role assignees; body={j}");
+    let assignees = j.as_array().expect("assignees array");
+    assert_eq!(assignees.len(), 2, "two assignees; body={j}");
+    assert!(
+        assignees
+            .iter()
+            .any(|a| a["kind"] == "user" && a["name"] == member_email),
+        "user assignee named by email; body={j}"
+    );
+    assert!(
+        assignees
+            .iter()
+            .any(|a| a["kind"] == "group" && a["name"] == group_name),
+        "group assignee named by group name; body={j}"
     );
 }

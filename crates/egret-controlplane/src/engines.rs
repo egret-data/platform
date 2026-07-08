@@ -34,7 +34,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
-use crate::auth::require_platform_admin;
+use crate::auth::require_permission;
 use crate::error::CpError;
 use crate::CpState;
 
@@ -1645,7 +1645,7 @@ async fn list_engines(
     State(st): State<CpState>,
     Auth(p): Auth,
 ) -> Result<Json<Vec<EngineDto>>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:read")?;
     Ok(Json(
         st.storage
             .list_engines()
@@ -1713,7 +1713,7 @@ async fn create_engine(
     Auth(p): Auth,
     Json(b): Json<CreateEngineBody>,
 ) -> Result<(StatusCode, Json<EngineDto>), CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:create")?;
 
     // 1. Resolve the warehouse; it must exist and be provisioned (has a
     //    lakekeeper counterpart) — engines connect by warehouse NAME.
@@ -1894,7 +1894,7 @@ async fn get_engine(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<EngineDetailDto>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:read")?;
     let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
     let status = match st.engine_provisioner.as_ref() {
         Some(prov) => match prov.status(&engine.namespace, &engine.name).await {
@@ -1937,7 +1937,7 @@ async fn update_engine(
     Path(id): Path<Uuid>,
     Json(b): Json<CreateEngineBody>,
 ) -> Result<Json<EngineDto>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:update")?;
     let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
 
     // Rebuild the spec from the body + config. The primary Catalog Client is NOT
@@ -1980,7 +1980,7 @@ async fn delete_engine(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:delete")?;
     let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
     // Collect any minted Catalog Clients referenced by the catalog rows before the
     // engine (and its cascading catalogs) are removed.
@@ -2013,7 +2013,7 @@ async fn restart_engine(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:provision")?;
     let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
     let Some(prov) = st.engine_provisioner.as_ref() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
@@ -2031,7 +2031,7 @@ async fn list_catalogs(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<EngineCatalogDto>>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:read")?;
     let _engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
     Ok(Json(
         st.storage
@@ -2049,7 +2049,7 @@ async fn add_catalog(
     Path(id): Path<Uuid>,
     Json(b): Json<AddCatalogBody>,
 ) -> Result<(StatusCode, Json<EngineCatalogDto>), CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:create")?;
     let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
     // The stored `kind` IS the Trino connector name (or `egret-warehouse`); the
     // control-plane no longer gates on a fixed enum — any non-blank kind is a
@@ -2197,7 +2197,7 @@ async fn get_catalog(
     Auth(p): Auth,
     Path((id, cid)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<EngineCatalogDetailDto>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:read")?;
     let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
     let cat = st
         .storage
@@ -2273,7 +2273,7 @@ async fn test_catalog(
     Auth(p): Auth,
     Path((id, cid)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<CatalogTestDto>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:read")?;
     let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
     let cat = st
         .storage
@@ -2360,7 +2360,7 @@ async fn remove_catalog(
     Auth(p): Auth,
     Path((id, cid)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:delete")?;
     let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
     let cat = st
         .storage
@@ -2405,7 +2405,7 @@ async fn update_catalog(
     Path((id, cid)): Path<(Uuid, Uuid)>,
     Json(b): Json<UpdateCatalogBody>,
 ) -> Result<Json<EngineCatalogDto>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:update")?;
     let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
     let prev = st
         .storage
@@ -2487,7 +2487,7 @@ async fn pod_logs(
     Path((id, pod)): Path<(Uuid, String)>,
     axum::extract::Query(q): axum::extract::Query<PodLogsQuery>,
 ) -> Result<Json<PodLogsDto>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:read")?;
     let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
     let Some(prov) = st.engine_provisioner.as_ref() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
@@ -2536,7 +2536,7 @@ async fn pod_logs_follow(
     axum::extract::Query(q): axum::extract::Query<PodLogsFollowQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:read")?;
     let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
     let Some(prov) = st.engine_provisioner.clone() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
@@ -2639,7 +2639,7 @@ async fn pod_exec(
     Path((id, pod)): Path<(Uuid, String)>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "engine:provision")?;
     let engine = st.storage.get_engine(id).await?.ok_or(CpError::NotFound)?;
     let Some(prov) = st.engine_provisioner.clone() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
@@ -2904,6 +2904,7 @@ mod tests {
             authz: egret_authz::AuthzStore::new(db.clone()),
             users: egret_auth::users::UserRepo::new(db.clone()),
             groups: egret_auth::groups::GroupRepo::new(db.clone()),
+            roles: egret_auth::roles::RoleRepo::new(db.clone()),
             secrets: workspace_secrets,
             sessions: egret_auth::session::SessionService::new(
                 db.clone(),

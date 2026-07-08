@@ -1,0 +1,14 @@
+-- Drop grants for permissions removed from the code catalog (egret_core::rbac::PERMISSIONS).
+--
+-- `database:*` (read/create/update/delete, plus the legacy `database:manage` seeded by
+-- 0008) had zero `require_permission` call sites anywhere in the codebase — genuinely
+-- dead, so both the catalog entries and their grants are dropped here.
+--
+-- `workspace:*` (read/create/update/archive) is INTENTIONALLY NOT touched by this
+-- migration: those keys remain in the code catalog because they are live-enforced by
+-- `egret_workspace::rbac::Authorizer::require_platform` (a sibling authorizer to
+-- `egret_controlplane::auth::require_permission`, used by `egret-workspace/src/routes.rs`
+-- for the workspace-admin CRUD routes). `require_platform` has no platform_admin bypass,
+-- so deleting these grants would silently lock platform_admin (and data_steward's
+-- workspace:read) out of workspace management — a functional regression, not cleanup.
+DELETE FROM role_permissions WHERE permission LIKE 'database:%';

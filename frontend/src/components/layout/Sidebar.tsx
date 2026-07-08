@@ -2,17 +2,20 @@ import { useState } from "react";
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
   BarChart3, Bell, Boxes, ChevronDown, ChevronRight, Database,
-  FolderKanban, HardDrive, KeyRound, LayoutDashboard, type LucideIcon,
+  FolderKanban, HardDrive, KeyRound, LayoutDashboard, ListChecks, type LucideIcon,
   NotebookText, PanelLeftClose, PanelLeftOpen, Plug, Server, Share2, ShieldCheck,
-  SquareTerminal, Table2, Users, Waypoints, Workflow,
+  SquareTerminal, Table2, UserCog, Users, UsersRound, Waypoints, Workflow,
 } from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { useAuth } from "@/auth/useAuth";
 
-type NavItem = { label: string; icon: LucideIcon };
+/** `perm` is the fine-grained read permission that unlocks this item in the
+ * Control Plane; items with no `perm` (e.g. Workspaces) are platform_admin-only. */
+type NavItem = { label: string; icon: LucideIcon; perm?: string };
 type NavGroup = { heading: string; items: NavItem[] };
 
 const EXPLORE_GROUPS: NavGroup[] = [
@@ -61,17 +64,25 @@ const CONTROL_PLANE_GROUPS: NavGroup[] = [
     heading: "Control Plane",
     items: [
       { label: "Workspaces", icon: FolderKanban },
-      { label: "Engines", icon: Server },
-      { label: "Warehouses", icon: Boxes },
-      { label: "Storage", icon: HardDrive },
-      { label: "Secrets", icon: KeyRound },
-      { label: "Users", icon: Users },
+      { label: "Engines", icon: Server, perm: "engine:read" },
+      { label: "Warehouses", icon: Boxes, perm: "warehouse:read" },
+      { label: "Storage", icon: HardDrive, perm: "storage:read" },
+      { label: "Secrets", icon: KeyRound, perm: "secret:read" },
+    ],
+  },
+  {
+    heading: "Access control",
+    items: [
+      { label: "Users", icon: Users, perm: "user:read" },
+      { label: "Groups", icon: UsersRound, perm: "group:read" },
+      { label: "Roles", icon: UserCog, perm: "role:read" },
+      { label: "Permissions", icon: ListChecks, perm: "role:read" },
     ],
   },
   {
     heading: "Data Governance",
     items: [
-      { label: "Policies", icon: ShieldCheck },
+      { label: "Policies", icon: ShieldCheck, perm: "policy:read" },
     ],
   },
 ];
@@ -98,7 +109,22 @@ interface SidebarProps {
 export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const isAdmin = useLocation().pathname.startsWith("/control-plane");
   const { workspace } = useParams();
-  const groups = isAdmin ? CONTROL_PLANE_GROUPS : EXPLORE_GROUPS;
+  const { me } = useAuth();
+  const isPlatformAdmin = me?.platform_roles.includes("platform_admin") ?? false;
+  const permissions = me?.permissions ?? [];
+
+  // Control-plane items are permission-gated: platform_admin sees everything,
+  // everyone else sees only items whose `perm` they hold. Items with no `perm`
+  // (Workspaces) are platform_admin-only. Groups left with no visible items
+  // are dropped entirely (heading included). Explore items are unchanged.
+  const groups = isAdmin
+    ? CONTROL_PLANE_GROUPS.map((group) => ({
+        ...group,
+        items: group.items.filter(
+          (item) => isPlatformAdmin || (item.perm !== undefined && permissions.includes(item.perm)),
+        ),
+      })).filter((group) => group.items.length > 0)
+    : EXPLORE_GROUPS;
   const base = isAdmin ? "/control-plane" : `/explore/${workspace ?? ""}`;
 
   // Per-group collapse (only meaningful when the sidebar itself is expanded).

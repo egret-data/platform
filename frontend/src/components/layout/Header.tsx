@@ -34,8 +34,16 @@ export function Header() {
   const navigate = useNavigate();
   const { workspace } = useParams<{ workspace?: string }>();
   const isAdmin = location.pathname.startsWith("/control-plane");
-  // Control Plane is global-admin only — a platform role alone isn't enough.
-  const canAdmin = me?.platform_roles?.includes("platform_admin") ?? false;
+  // The Control Plane entry shows for platform_admin OR anyone holding a
+  // control-plane permission (so scoped roles can reach the sections they're
+  // allowed — matching RequireControlPlaneAccess). Empty for everyone else.
+  const CONTROL_PLANE_PERMS = [
+    "engine:read", "warehouse:read", "storage:read", "secret:read",
+    "policy:read", "user:read", "group:read", "role:read", "workspace:read",
+  ];
+  const canAdmin =
+    (me?.platform_roles?.includes("platform_admin") ?? false) ||
+    (me?.permissions?.some((p) => CONTROL_PLANE_PERMS.includes(p)) ?? false);
 
   // Persist the current workspace slug so Explorer can be restored from Admin
   useEffect(() => {

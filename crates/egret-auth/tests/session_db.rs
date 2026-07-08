@@ -236,6 +236,76 @@ async fn platform_role_via_group_appears_in_principal() {
 }
 
 #[tokio::test]
+async fn permissions_resolve_direct_group_and_empty() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let svc = SessionService::new(db.clone(), Duration::hours(24), Duration::minutes(60));
+
+    // Temp platform role + a single permission, unique per run so reruns don't collide.
+    let role_name = format!("t_role-{}", uuid::Uuid::new_v4().simple());
+    let role_id: uuid::Uuid =
+        sqlx::query_scalar("INSERT INTO roles (scope, name) VALUES ('platform', $1) RETURNING id")
+            .bind(&role_name)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'engine:read')")
+        .bind(role_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    // U1: role assigned directly.
+    let u1 = seed_user(&db).await;
+    sqlx::query(
+        "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
+         VALUES ('user', $1, $2)",
+    )
+    .bind(u1.0)
+    .bind(role_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let issued = svc.create(u1, "a", "").await.unwrap();
+    let principal = svc.validate(&issued.token).await.unwrap().unwrap();
+    assert!(principal.permissions.iter().any(|p| p == "engine:read"));
+
+    // U2: role assigned via group membership.
+    let u2 = seed_user(&db).await;
+    let gid: uuid::Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+        .bind(format!("g-{}", uuid::Uuid::new_v4().simple()))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(u2.0)
+        .bind(gid)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
+         VALUES ('group', $1, $2)",
+    )
+    .bind(gid)
+    .bind(role_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let issued = svc.create(u2, "a", "").await.unwrap();
+    let principal = svc.validate(&issued.token).await.unwrap().unwrap();
+    assert!(principal.permissions.iter().any(|p| p == "engine:read"));
+
+    // U3: no roles at all -> empty permissions.
+    let u3 = seed_user(&db).await;
+    let issued = svc.create(u3, "a", "").await.unwrap();
+    let principal = svc.validate(&issued.token).await.unwrap().unwrap();
+    assert!(principal.permissions.is_empty());
+}
+
+#[tokio::test]
 async fn login_is_rate_limited() {
     let Some(db) = connect().await else {
         eprintln!("skip");

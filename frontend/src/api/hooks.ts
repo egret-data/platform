@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch, apiJson } from "./client";
 
-export interface Me { user_id: string; email: string; platform_roles: string[]; }
+export interface Me { user_id: string; email: string; platform_roles: string[]; permissions: string[]; }
 export interface WorkspaceSummary { id: string; slug: string; name: string; }
 
 export function useMe() {

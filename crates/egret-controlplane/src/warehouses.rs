@@ -13,7 +13,7 @@ use egret_catalog::service::embedded::{GrantInput, NewClient};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::auth::require_platform_admin;
+use crate::auth::require_permission;
 use crate::error::CpError;
 use crate::CpState;
 
@@ -276,7 +276,7 @@ async fn list_warehouses(
     State(st): State<CpState>,
     Auth(p): Auth,
 ) -> Result<Json<Vec<WarehouseDto>>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:read")?;
     Ok(Json(
         st.storage
             .list_warehouses()
@@ -292,7 +292,7 @@ async fn create_warehouse(
     Auth(p): Auth,
     Json(b): Json<CreateWarehouseBody>,
 ) -> Result<(StatusCode, Json<WarehouseDto>), CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:create")?;
     let w = st
         .storage
         .create_warehouse(&b.name, b.workspace_id, b.storage_connection_id)
@@ -358,7 +358,7 @@ async fn get_warehouse(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<WarehouseDto>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:read")?;
     let w = st
         .storage
         .get_warehouse(id)
@@ -372,7 +372,7 @@ async fn delete_warehouse(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:delete")?;
     st.storage.delete_warehouse(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -409,7 +409,7 @@ async fn list_roles(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<RoleDto>>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:read")?;
     Ok(Json(
         st.storage
             .list_roles(id)
@@ -426,7 +426,7 @@ async fn create_role(
     Path(id): Path<Uuid>,
     Json(b): Json<CreateRoleBody>,
 ) -> Result<(StatusCode, Json<RoleDto>), CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:create")?;
     let desc = b.description.as_deref().filter(|d| !d.trim().is_empty());
     let r = st
         .storage
@@ -440,7 +440,7 @@ async fn delete_role(
     Auth(p): Auth,
     Path(role_id): Path<Uuid>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:delete")?;
     st.storage.delete_role(role_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -468,7 +468,7 @@ async fn list_grants(
     Auth(p): Auth,
     Path(role_id): Path<Uuid>,
 ) -> Result<Json<Vec<GrantDto>>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:read")?;
     Ok(Json(
         st.storage
             .list_grants(role_id)
@@ -491,7 +491,7 @@ async fn add_grant(
     Path(role_id): Path<Uuid>,
     Json(b): Json<AddGrantBody>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:create")?;
     st.storage
         .add_grant(
             role_id,
@@ -511,7 +511,7 @@ async fn revoke_grant(
     Auth(p): Auth,
     Path(grant_id): Path<Uuid>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:delete")?;
     st.storage.revoke_grant(grant_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -547,7 +547,7 @@ async fn list_clients(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<ClientDto>>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:read")?;
     Ok(Json(
         st.storage
             .list_clients(id)
@@ -570,7 +570,7 @@ async fn create_client(
     Path(id): Path<Uuid>,
     Json(b): Json<CreateClientBody>,
 ) -> Result<(StatusCode, Json<CreatedClientDto>), CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:create")?;
     let c = st
         .storage
         .create_client(&NewClient {
@@ -596,7 +596,7 @@ async fn revoke_client(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:delete")?;
     st.storage.revoke_client(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -701,7 +701,7 @@ async fn browse_namespaces(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<NamespaceDto>>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:read")?;
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
     };
@@ -725,7 +725,7 @@ async fn browse_tables(
     Auth(p): Auth,
     Path((id, ns)): Path<(Uuid, String)>,
 ) -> Result<Json<Vec<TabularDto>>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:read")?;
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
     };
@@ -751,7 +751,7 @@ async fn browse_schema(
     Auth(p): Auth,
     Path((id, ns, table)): Path<(Uuid, String, String)>,
 ) -> Result<Json<SchemaDto>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:read")?;
     let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
     let b = st.browser.as_ref().ok_or(CpError::NotFound)?;
     let d = b
@@ -812,7 +812,7 @@ async fn browse_view(
     Auth(p): Auth,
     Path((id, ns, view)): Path<(Uuid, String, String)>,
 ) -> Result<Json<Vec<ColumnDto>>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:read")?;
     let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
     let b = st.browser.as_ref().ok_or(CpError::NotFound)?;
     let cols = b
@@ -835,7 +835,7 @@ async fn browse_deleted(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<DeletedTabularDto>>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:read")?;
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
     };
@@ -871,7 +871,7 @@ async fn undrop_tabular(
     Path(id): Path<Uuid>,
     Json(b): Json<UndropBody>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:update")?;
     let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
     browser
@@ -901,7 +901,7 @@ async fn set_protection(
     Path(id): Path<Uuid>,
     Json(b): Json<ProtectionBody>,
 ) -> Result<Json<ProtectionDto>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:update")?;
     let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
     let protected = browser
@@ -926,7 +926,7 @@ async fn warehouse_config(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<WarehouseConfigDto>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:read")?;
     let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
     let b = st.browser.as_ref().ok_or(CpError::NotFound)?;
     let c = b
@@ -953,7 +953,7 @@ async fn set_warehouse_status(
     Path(id): Path<Uuid>,
     Json(b): Json<StatusBody>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:update")?;
     let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
     browser
@@ -975,7 +975,7 @@ async fn set_delete_profile_route(
     Path(id): Path<Uuid>,
     Json(b): Json<DeleteProfileBody>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:update")?;
     let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
     browser
@@ -996,7 +996,7 @@ async fn set_format_policy(
     Path(id): Path<Uuid>,
     Json(b): Json<FormatPolicyBody>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:update")?;
     if b.versions.is_empty() {
         return Err(CpError::BadRequest(
             "at least one format version required".into(),
@@ -1024,7 +1024,7 @@ async fn rotate_credential(
     Path(id): Path<Uuid>,
     Json(b): Json<RotateCredBody>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:update")?;
     let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
     browser
@@ -1054,7 +1054,7 @@ async fn search_tabulars(
     Path(id): Path<Uuid>,
     axum::extract::Query(sq): axum::extract::Query<SearchQuery>,
 ) -> Result<Json<Vec<SearchResultDto>>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:read")?;
     if sq.q.trim().is_empty() {
         return Ok(Json(vec![]));
     }
@@ -1090,7 +1090,7 @@ async fn list_tasks(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<TaskDto>>, CpError> {
-    require_platform_admin(&p)?;
+    require_permission(&p, "warehouse:read")?;
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
     };

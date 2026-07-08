@@ -4,6 +4,7 @@ pub mod context;
 pub mod error;
 pub mod ids;
 pub mod pagination;
+pub mod rbac;
 
 pub use context::{Principal, WorkspaceContext};
 pub use error::{Error, Result};
