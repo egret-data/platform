@@ -11,9 +11,11 @@ use crate::EngineMgmtStore;
 pub struct EngineMgmtState {
     /// Its own data (E1b) — engines/engine_catalogs CRUD.
     pub engine_mgmt: EngineMgmtStore,
-    /// Catalog RBAC (roles/grants/clients) + warehouse lookups — cross-seam:
-    /// engine-create auto-wiring of a Catalog Client.
-    pub storage: egret_catalog::CatalogStore,
+    /// Catalog RBAC (roles/grants/clients) + warehouse lookups, behind its
+    /// contract `CatalogPort` (E3b) — cross-seam: engine-create auto-wiring of a
+    /// Catalog Client. The concrete `CatalogStore` is wired in the composition
+    /// root; at a real split an HTTP client fills this in.
+    pub catalog: Arc<dyn egret_catalog_api::CatalogPort>,
     /// Global storage-connection registry (`storage.storage_connections`, E3a)
     /// — cross-seam: resolving S3 coords for provisioning.
     pub storage_registry: egret_storage::StorageRegistry,

@@ -2515,6 +2515,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
+ "egret-catalog-api",
  "egret-machine-idp",
  "egret-metastore",
  "hex",
@@ -2525,6 +2526,18 @@ dependencies = [
  "sqlx 0.8.6",
  "thiserror 2.0.18",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "egret-catalog-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
  "uuid",
 ]
 
@@ -2684,6 +2697,7 @@ dependencies = [
  "chrono",
  "egret-auth",
  "egret-catalog",
+ "egret-catalog-api",
  "egret-core",
  "egret-engine-mgmt-api",
  "egret-metastore",

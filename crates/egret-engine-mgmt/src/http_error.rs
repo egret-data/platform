@@ -7,7 +7,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use egret_catalog::CatalogError;
+use egret_catalog_api::CatalogApiError;
 use egret_secrets::SecretsError;
 
 #[derive(Debug, thiserror::Error)]
@@ -37,17 +37,17 @@ pub enum EngineHttpError {
     Internal,
 }
 
-impl From<CatalogError> for EngineHttpError {
-    fn from(e: CatalogError) -> Self {
+impl From<CatalogApiError> for EngineHttpError {
+    fn from(e: CatalogApiError) -> Self {
         match e {
-            CatalogError::NotFound(_) => EngineHttpError::NotFound,
-            CatalogError::AlreadyExists(s) => EngineHttpError::AlreadyExists(s),
-            CatalogError::InUse => EngineHttpError::BadRequest(
+            CatalogApiError::NotFound(_) => EngineHttpError::NotFound,
+            CatalogApiError::AlreadyExists(s) => EngineHttpError::AlreadyExists(s),
+            CatalogApiError::InUse => EngineHttpError::BadRequest(
                 "role is in use by one or more Catalog Clients — delete those clients first"
                     .to_string(),
             ),
-            CatalogError::BadRequest(s) => EngineHttpError::BadRequest(s),
-            CatalogError::Db(_) => EngineHttpError::Internal,
+            CatalogApiError::BadRequest(s) => EngineHttpError::BadRequest(s),
+            CatalogApiError::Backend(_) => EngineHttpError::Internal,
         }
     }
 }

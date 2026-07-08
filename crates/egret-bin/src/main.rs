@@ -1231,7 +1231,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // Engine-mgmt seam: owns the engine domain (HTTP router + provisioning).
     let engine_mgmt = Some(egret_engine_mgmt::EngineMgmtState {
         engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
-        storage: egret_catalog::CatalogStore::new(db.clone()),
+        catalog: std::sync::Arc::new(egret_catalog::CatalogStore::new(db.clone())),
         storage_registry: egret_storage::StorageRegistry::new(db.clone()),
         // Policy/Ranger seam behind its `PolicyPort` contract (E2a); the concrete
         // in-process impl is the shared `PolicyStore`.

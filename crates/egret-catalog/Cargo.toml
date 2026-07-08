@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 egret-metastore.workspace = true
+egret-catalog-api.workspace = true
 sqlx.workspace = true
 chrono.workspace = true
 uuid.workspace = true
