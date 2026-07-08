@@ -5,8 +5,20 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import UsersPage from "@/routes/control-plane/access/UsersPage";
 import * as api from "@/api/access";
+import { AuthContext } from "@/auth/useAuth";
+import type { Me } from "@/api/hooks";
 
 vi.mock("@/api/access");
+
+// Role assignment is platform_admin-only; default to a platform_admin `me`
+// so existing assertions (which exercise "Assign roles") keep passing.
+// Tests that care about the non-admin view pass their own `me`.
+const ADMIN_ME: Me = {
+  user_id: "1",
+  email: "admin@example.com",
+  platform_roles: ["platform_admin"],
+  permissions: [],
+};
 
 const USERS: api.AccessUser[] = [
   {
@@ -34,12 +46,14 @@ const ROLES: api.AccessRole[] = [
   { id: "r2", scope: "platform", name: "Analyst", description: "", permissionCount: 0, assigneeCount: 0 },
 ];
 
-function renderPage() {
+function renderPage(me: Me | null = ADMIN_ME) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <QueryClientProvider client={qc}>
-      <UsersPage />
-    </QueryClientProvider>,
+    <AuthContext.Provider value={{ me, isLoading: false }}>
+      <QueryClientProvider client={qc}>
+        <UsersPage />
+      </QueryClientProvider>
+    </AuthContext.Provider>,
   );
 }
 
@@ -141,5 +155,25 @@ describe("UsersPage", () => {
 
     await waitFor(() => expect(api.assignUserRole).toHaveBeenCalledWith("u1", "r2"));
     await waitFor(() => expect(api.unassignUserRole).toHaveBeenCalledWith("u1", "r1"));
+  });
+
+  test("a non-admin user:read viewer can still create/edit users but not assign roles", async () => {
+    const NON_ADMIN_ME: Me = {
+      user_id: "2",
+      email: "viewer@example.com",
+      platform_roles: [],
+      permissions: ["user:read", "user:create", "user:update"],
+    };
+    const user = userEvent.setup();
+    renderPage(NON_ADMIN_ME);
+
+    expect(await screen.findByText("alice@example.com")).toBeInTheDocument();
+
+    // Delegatable controls remain.
+    expect(screen.getByRole("button", { name: /New user/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Actions for alice@example.com/i }));
+    expect(await screen.findByRole("menuitem", { name: "Edit" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Assign roles" })).not.toBeInTheDocument();
   });
 });

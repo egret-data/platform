@@ -20,6 +20,7 @@ import {
   unassignGroupRole,
 } from "@/api/access";
 import { ApiError } from "@/api/client";
+import { useAuth } from "@/auth/useAuth";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -78,6 +79,12 @@ const OIDC_TOOLTIP = "Synced from your identity provider — read-only here.";
  * role assignment (their membership is owned by the identity provider).
  */
 export default function GroupsPage() {
+  const { me } = useAuth();
+  // Assigning roles to a group and managing its membership are
+  // platform_admin-only on the backend; group lifecycle (create/rename/
+  // delete) stays delegatable.
+  const isAdmin = me?.platform_roles.includes("platform_admin") ?? false;
+
   const groups = useQuery<AccessGroup[], ApiError>({
     queryKey: groupsQueryKey,
     queryFn: listGroups,
@@ -203,18 +210,22 @@ export default function GroupsPage() {
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => setRolesTarget(g)}>
-                            <ShieldCheck className="mr-2 h-4 w-4" />
-                            Assign roles
-                          </DropdownMenuItem>
-                          <DropdownMenuItem
-                            disabled={isOidc}
-                            title={isOidc ? OIDC_TOOLTIP : undefined}
-                            onClick={() => setMembersTarget(g)}
-                          >
-                            <UsersRound className="mr-2 h-4 w-4" />
-                            Manage members
-                          </DropdownMenuItem>
+                          {isAdmin && (
+                            <DropdownMenuItem onClick={() => setRolesTarget(g)}>
+                              <ShieldCheck className="mr-2 h-4 w-4" />
+                              Assign roles
+                            </DropdownMenuItem>
+                          )}
+                          {isAdmin && (
+                            <DropdownMenuItem
+                              disabled={isOidc}
+                              title={isOidc ? OIDC_TOOLTIP : undefined}
+                              onClick={() => setMembersTarget(g)}
+                            >
+                              <UsersRound className="mr-2 h-4 w-4" />
+                              Manage members
+                            </DropdownMenuItem>
+                          )}
                           <DropdownMenuItem
                             disabled={isOidc}
                             title={isOidc ? OIDC_TOOLTIP : undefined}

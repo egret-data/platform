@@ -15,6 +15,7 @@ import {
   updateRole,
 } from "@/api/access";
 import { ApiError } from "@/api/client";
+import { useAuth } from "@/auth/useAuth";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -89,6 +90,12 @@ function isSeeded(role: AccessRole): boolean {
  * Built-in (seeded) roles cannot be deleted.
  */
 export default function RolesPage() {
+  const { me } = useAuth();
+  // RBAC-granting writes (create/update/delete role, set permissions) are
+  // platform_admin-only on the backend; a role:read-only viewer gets a
+  // read-only table with no Actions menu at all.
+  const isAdmin = me?.platform_roles.includes("platform_admin") ?? false;
+
   const roles = useQuery<AccessRole[], ApiError>({
     queryKey: rolesQueryKey,
     queryFn: listRoles,
@@ -131,10 +138,12 @@ export default function RolesPage() {
                 Edit a role's permissions to change what it grants.
               </CardDescription>
             </div>
-            <Button size="sm" onClick={() => setCreateOpen(true)}>
-              <Plus className="mr-1 h-4 w-4" />
-              New role
-            </Button>
+            {isAdmin && (
+              <Button size="sm" onClick={() => setCreateOpen(true)}>
+                <Plus className="mr-1 h-4 w-4" />
+                New role
+              </Button>
+            )}
           </div>
         </CardHeader>
         <CardContent>
@@ -198,36 +207,38 @@ export default function RolesPage() {
                       )}
                     </TableCell>
                     <TableCell className="text-right">
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            aria-label={`Actions for ${r.name}`}
-                          >
-                            <MoreHorizontal className="h-4 w-4" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => setEditTarget(r)}>
-                            <Pencil className="mr-2 h-4 w-4" />
-                            Edit permissions
-                          </DropdownMenuItem>
-                          <DropdownMenuSeparator />
-                          <DropdownMenuItem
-                            disabled={seeded}
-                            title={seeded ? BUILTIN_DELETE_TOOLTIP : undefined}
-                            className="text-destructive focus:text-destructive"
-                            onClick={() => {
-                              setDeleteError(null);
-                              setDeleteTarget(r);
-                            }}
-                          >
-                            <Trash2 className="mr-2 h-4 w-4" />
-                            Delete
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
+                      {isAdmin && (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              aria-label={`Actions for ${r.name}`}
+                            >
+                              <MoreHorizontal className="h-4 w-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={() => setEditTarget(r)}>
+                              <Pencil className="mr-2 h-4 w-4" />
+                              Edit permissions
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              disabled={seeded}
+                              title={seeded ? BUILTIN_DELETE_TOOLTIP : undefined}
+                              className="text-destructive focus:text-destructive"
+                              onClick={() => {
+                                setDeleteError(null);
+                                setDeleteTarget(r);
+                              }}
+                            >
+                              <Trash2 className="mr-2 h-4 w-4" />
+                              Delete
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      )}
                     </TableCell>
                   </TableRow>
                 );

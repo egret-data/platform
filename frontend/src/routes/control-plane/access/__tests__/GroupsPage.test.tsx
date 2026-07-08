@@ -5,8 +5,21 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import GroupsPage from "@/routes/control-plane/access/GroupsPage";
 import * as api from "@/api/access";
+import { AuthContext } from "@/auth/useAuth";
+import type { Me } from "@/api/hooks";
 
 vi.mock("@/api/access");
+
+// Assigning roles to a group and managing its membership are
+// platform_admin-only; default to a platform_admin `me` so existing
+// assertions (which exercise those controls) keep passing. Tests that care
+// about the non-admin view pass their own `me`.
+const ADMIN_ME: Me = {
+  user_id: "1",
+  email: "admin@example.com",
+  platform_roles: ["platform_admin"],
+  permissions: [],
+};
 
 const GROUPS: api.AccessGroup[] = [
   { id: "g1", name: "Engineering", source: "local", memberCount: 3, roles: ["Admin"] },
@@ -27,12 +40,14 @@ const GROUP_MEMBERS: api.GroupMember[] = [
   { id: "u1", email: "alice@example.com", name: "Alice" },
 ];
 
-function renderPage() {
+function renderPage(me: Me | null = ADMIN_ME) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <QueryClientProvider client={qc}>
-      <GroupsPage />
-    </QueryClientProvider>,
+    <AuthContext.Provider value={{ me, isLoading: false }}>
+      <QueryClientProvider client={qc}>
+        <GroupsPage />
+      </QueryClientProvider>
+    </AuthContext.Provider>,
   );
 }
 
@@ -184,5 +199,32 @@ describe("GroupsPage", () => {
     expect(screen.getByRole("menuitem", { name: "Manage members" })).not.toHaveAttribute(
       "aria-disabled",
     );
+  });
+
+  test("a non-admin group:read viewer can still create/rename/delete groups but not assign roles or manage members", async () => {
+    const NON_ADMIN_ME: Me = {
+      user_id: "2",
+      email: "viewer@example.com",
+      platform_roles: [],
+      permissions: ["group:read", "group:create", "group:update", "group:delete"],
+    };
+    const user = userEvent.setup();
+    renderPage(NON_ADMIN_ME);
+
+    expect(await screen.findByText("Engineering")).toBeInTheDocument();
+
+    // Delegatable controls remain.
+    expect(screen.getByRole("button", { name: /New group/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Actions for Engineering/i }));
+    expect(await screen.findByRole("menuitem", { name: "Rename" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Delete" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Assign roles" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Manage members" })).not.toBeInTheDocument();
+
+    // The read-only members drill-in still works.
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "View members of Engineering" }));
+    expect(await screen.findByText("alice@example.com")).toBeInTheDocument();
   });
 });

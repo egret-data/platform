@@ -5,8 +5,21 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import RolesPage from "@/routes/control-plane/access/RolesPage";
 import * as api from "@/api/access";
+import { AuthContext } from "@/auth/useAuth";
+import type { Me } from "@/api/hooks";
 
 vi.mock("@/api/access");
+
+// RBAC-granting writes (create/update/delete role, set permissions) are
+// platform_admin-only; default to a platform_admin `me` so existing
+// assertions (which exercise those controls) keep passing. Tests that care
+// about the non-admin, read-only view pass their own `me`.
+const ADMIN_ME: Me = {
+  user_id: "1",
+  email: "admin@example.com",
+  platform_roles: ["platform_admin"],
+  permissions: [],
+};
 
 const ROLES: api.AccessRole[] = [
   {
@@ -45,12 +58,14 @@ const PERMISSIONS: api.PermissionCatalogGroup[] = [
   },
 ];
 
-function renderPage() {
+function renderPage(me: Me | null = ADMIN_ME) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <QueryClientProvider client={qc}>
-      <RolesPage />
-    </QueryClientProvider>,
+    <AuthContext.Provider value={{ me, isLoading: false }}>
+      <QueryClientProvider client={qc}>
+        <RolesPage />
+      </QueryClientProvider>
+    </AuthContext.Provider>,
   );
 }
 
@@ -190,5 +205,34 @@ describe("RolesPage", () => {
     vi.mocked(api.listRoles).mockResolvedValue([]);
     renderPage();
     expect(await screen.findByText("No roles yet.")).toBeInTheDocument();
+  });
+
+  test("a non-admin role:read viewer sees a read-only table: no New role button and no Actions menu", async () => {
+    const NON_ADMIN_ME: Me = {
+      user_id: "2",
+      email: "viewer@example.com",
+      platform_roles: [],
+      permissions: ["role:read"],
+    };
+    renderPage(NON_ADMIN_ME);
+
+    expect(await screen.findByText("data_steward")).toBeInTheDocument();
+    expect(screen.getByText("custom_role")).toBeInTheDocument();
+
+    expect(screen.queryByRole("button", { name: /New role/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Actions for data_steward/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Actions for custom_role/i }),
+    ).not.toBeInTheDocument();
+
+    // The read-only assignee drill-in still works.
+    vi.mocked(api.getRoleAssignees).mockResolvedValue([
+      { kind: "user", name: "alice@example.com" },
+    ]);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "View assignees of data_steward" }));
+    expect(await screen.findByText("alice@example.com")).toBeInTheDocument();
   });
 });

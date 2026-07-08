@@ -13,6 +13,7 @@ import {
   updateUser,
 } from "@/api/access";
 import { ApiError } from "@/api/client";
+import { useAuth } from "@/auth/useAuth";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -62,6 +63,11 @@ const COLUMNS = ["Email", "Name", "Provider", "Status", "Roles", "Groups", ""];
  * (name + enable-disable) / role-assignment actions.
  */
 export default function UsersPage() {
+  const { me } = useAuth();
+  // Role assignment is platform_admin-only on the backend; user create/edit
+  // (name + enable/disable) stays delegatable via user:create/user:update.
+  const isAdmin = me?.platform_roles.includes("platform_admin") ?? false;
+
   const users = useQuery<AccessUser[], ApiError>({
     queryKey: usersQueryKey,
     queryFn: listUsers,
@@ -162,10 +168,12 @@ export default function UsersPage() {
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
-                        <DropdownMenuItem onClick={() => setRolesTarget(u)}>
-                          <ShieldCheck className="mr-2 h-4 w-4" />
-                          Assign roles
-                        </DropdownMenuItem>
+                        {isAdmin && (
+                          <DropdownMenuItem onClick={() => setRolesTarget(u)}>
+                            <ShieldCheck className="mr-2 h-4 w-4" />
+                            Assign roles
+                          </DropdownMenuItem>
+                        )}
                         <DropdownMenuItem onClick={() => setEditTarget(u)}>
                           <Pencil className="mr-2 h-4 w-4" />
                           Edit
