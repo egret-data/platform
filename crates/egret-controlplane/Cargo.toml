@@ -7,9 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 egret-core.workspace = true
-egret-engine-mgmt.workspace = true
 egret-auth.workspace = true
-egret-authz.workspace = true
 egret-catalog.workspace = true
 egret-storage.workspace = true
 async-trait.workspace = true

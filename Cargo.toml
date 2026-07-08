@@ -19,8 +19,8 @@ egret-iceberg-ext = { path = "crates/egret-iceberg-ext" }
 egret-catalog = { path = "crates/egret-catalog" }
 egret-catalog-engine = { path = "crates/egret-catalog-engine" }
 egret-controlplane = { path = "crates/egret-controlplane" }
-egret-authz = { path = "crates/egret-authz" }
-egret-ranger = { path = "crates/egret-ranger" }
+egret-policy-api = { path = "crates/egret-policy-api" }
+egret-policy = { path = "crates/egret-policy" }
 egret-secrets = { path = "crates/egret-secrets" }
 egret-database = { path = "crates/egret-database" }
 egret-engine = { path = "crates/egret-engine" }

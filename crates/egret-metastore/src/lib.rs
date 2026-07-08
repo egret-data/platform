@@ -1,6 +1,6 @@
 //! Postgres access: a pooled connection wrapper and the embedded migrator.
 //! (touched to re-embed migrations: 0037 removes notebook engine column; 0040_user_username adds users.username citext; 0041_kernels adds kernels table; 0042_notebook_kernels adds notebook_kernels table; 0043_kernel_token adds token_hash + token_expires_at; 0044_oidc_refresh_tokens adds oidc_refresh_tokens table; 0045 adds unique index on workspace_warehouses.warehouse_id; 0046 adds notebook_cells.sql_target; 0047 drops notebook_cells.sql_target)
-// migrations: through 0060 (rbac catalog reconcile: drop dead database:* grants)
+// migrations: through 0063 (E2c: policy schema — move authz_* into `policy`, drop dead policy_audit)
 
 use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::postgres::PgPoolOptions;

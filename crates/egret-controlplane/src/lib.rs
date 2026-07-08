@@ -12,17 +12,12 @@
 mod access;
 mod auth;
 mod error;
-mod policies;
 mod secrets;
 mod storage;
 mod warehouses;
 
 pub use auth::require_platform_admin;
 pub use error::CpError;
-pub use policies::{
-    editor_to_ranger_json, masking_to_ranger_json, rowfilter_to_ranger_json, summarize_policy,
-    MaskingPolicyInput, PolicySummary, RangerPolicy, RowFilterPolicyInput,
-};
 pub use warehouses::{
     BrowseColumn, BrowseDeletedTabular, BrowseNamespace, BrowsePartition, BrowseSearchResult,
     BrowseSnapshot, BrowseSort, BrowseTableDetail, BrowseTabular, BrowseTask,
@@ -41,10 +36,7 @@ use std::sync::Arc;
 pub struct CpState {
     /// Global storage-connection registry (`storage_connections`).
     pub storage: CatalogStore,
-    /// Shared Ranger policy store (`authz_*`), the same store the machine-facing
-    /// `/service` router writes. Used by the read-only Policies endpoints.
-    pub authz: egret_authz::AuthzStore,
-    /// Identity lookups for the policy principal picker.
+    /// Identity lookups for the access-control console (roles/permissions).
     pub users: egret_auth::users::UserRepo,
     pub groups: egret_auth::groups::GroupRepo,
     /// Platform RBAC roles, permissions, and principal assignments.
@@ -59,15 +51,6 @@ pub struct CpState {
     /// Reads catalog structure from the embedded lakekeeper (wired in egret-bin);
     /// `None` in tests.
     pub browser: Option<Arc<dyn WarehouseBrowser>>,
-    /// Cross-seam, read-only: the `policies` module's resource-lookup/profile
-    /// listing surfaces which engines/catalogs are bound to a Ranger service,
-    /// and `trino_config` needs egret's public URL to render the plugin config.
-    /// Owned by the `egret-engine-mgmt` seam (E1c); read directly here, same
-    /// as `EngineMgmtState` reads `CatalogStore`/`AuthzStore` cross-seam.
-    pub engine_mgmt: egret_engine_mgmt::EngineMgmtStore,
-    /// In-cluster URL Trino pods use to reach egret's REST catalog + token
-    /// endpoint (e.g. `http://egret:8080`); populated from config in egret-bin.
-    pub engine_egret_url: String,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.
@@ -84,6 +67,5 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(storage::router())
         .merge(secrets::router())
         .merge(warehouses::router())
-        .merge(policies::router())
         .merge(access::router())
 }

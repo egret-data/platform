@@ -170,6 +170,49 @@ impl egret_kernel::engine_conn::EngineConnResolver for EngineConnResolverImpl {
     }
 }
 
+/// Reads the engine-provisioning seam for the Policy/Ranger admin console (E2d):
+/// which provisioned engines bind to which Ranger profile, and their catalog
+/// names. Backed by `EngineMgmtStore`; the composition root is the only place the
+/// two seams meet (the Policies module depends on `EngineBindingReader`, not on
+/// `egret-engine-mgmt`).
+struct EngineBindingReaderImpl {
+    store: egret_engine_mgmt::EngineMgmtStore,
+}
+
+#[async_trait::async_trait]
+impl egret_policy::EngineBindingReader for EngineBindingReaderImpl {
+    async fn list_engine_bindings(
+        &self,
+    ) -> Result<Vec<egret_policy::EngineBinding>, egret_policy::EngineReadError> {
+        let engines = self
+            .store
+            .list_engines()
+            .await
+            .map_err(|e| egret_policy::EngineReadError(e.to_string()))?;
+        Ok(engines
+            .into_iter()
+            .map(|e| egret_policy::EngineBinding {
+                id: e.id,
+                name: e.name,
+                status: e.status,
+                authz_service_id: e.authz_service_id,
+            })
+            .collect())
+    }
+
+    async fn engine_catalog_names(
+        &self,
+        engine_id: uuid::Uuid,
+    ) -> Result<Vec<String>, egret_policy::EngineReadError> {
+        let cats = self
+            .store
+            .list_engine_catalogs(engine_id)
+            .await
+            .map_err(|e| egret_policy::EngineReadError(e.to_string()))?;
+        Ok(cats.into_iter().map(|c| c.name).collect())
+    }
+}
+
 /// egret's authN + authZ guard for the embedded catalog (EB-3). Validates the
 /// egret-issued JWT (authN); the JWT's `warehouse`+`roles` claims + the RBAC
 /// store drive authZ. lakekeeper itself runs on `AllowAllAuthorizer` — egret owns
@@ -897,11 +940,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     };
 
     let ranger = if config.ranger.enabled {
-        let store = egret_authz::AuthzStore::new(db.clone());
-        egret_authz::seed_trino(&store)
+        let store = egret_policy::PolicyStore::new(db.clone());
+        egret_policy::seed_trino(&store)
             .await
             .map_err(anyhow::Error::from)?;
-        Some(egret_ranger::RangerState {
+        Some(egret_policy::RangerState {
             store,
             auth_token: config.ranger.auth_token.clone().into(),
         })
@@ -1159,11 +1202,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
 
     // Control plane: global platform-admin Storage + Secrets + embedded-catalog
     // management. The warehouse provisioner (above) creates lakekeeper warehouses.
-    // `engine_mgmt`/`engine_egret_url` are cross-seam, read-only: the Policies
-    // module surfaces which engines/catalogs bind to a Ranger service.
     let control_plane = Some(egret_controlplane::CpState {
         storage: egret_catalog::CatalogStore::new(db.clone()),
-        authz: egret_authz::AuthzStore::new(db.clone()),
         users: egret_auth::users::UserRepo::new(db.clone()),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
         roles: egret_auth::roles::RoleRepo::new(db.clone()),
@@ -1171,7 +1211,19 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         sessions: sessions.clone(),
         provisioner: catalog_provisioner,
         browser: catalog_browser,
-        engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
+    });
+
+    // Policy/Ranger seam admin router (E2d): the Policies console. Owns the
+    // policy store; reads the engine seam through `EngineBindingReader` (which
+    // engines bind to which profile) — wired here in the composition root.
+    let policy_admin = Some(egret_policy::PolicyAdminState {
+        store: egret_policy::PolicyStore::new(db.clone()),
+        engines: std::sync::Arc::new(EngineBindingReaderImpl {
+            store: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
+        }),
+        users: egret_auth::users::UserRepo::new(db.clone()),
+        groups: egret_auth::groups::GroupRepo::new(db.clone()),
+        sessions: sessions.clone(),
         engine_egret_url: engine_egret_url.clone(),
     });
 
@@ -1179,7 +1231,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let engine_mgmt = Some(egret_engine_mgmt::EngineMgmtState {
         engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
         storage: egret_catalog::CatalogStore::new(db.clone()),
-        authz: egret_authz::AuthzStore::new(db.clone()),
+        // Policy/Ranger seam behind its `PolicyPort` contract (E2a); the concrete
+        // in-process impl is the shared `PolicyStore`.
+        authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
         secrets: workspace_secrets.clone(),
         sessions: sessions.clone(),
         engine_provisioner,
@@ -1225,6 +1279,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         notebook,
         kernel,
         control_plane,
+        policy_admin,
         engine_mgmt,
         catalog_engine,
         idp,

@@ -1,0 +1,631 @@
+//! Admin Policies router (`/policies`, `/principals`) HTTP tests — moved with the
+//! module out of egret-controlplane in E2d. DB-gated; self-skips without
+//! `DATABASE_URL`. Auth is a session cookie (the CSRF layer is applied above this
+//! router in egret-server, not here). The cross-seam engine-binding read is a
+//! mock `EngineBindingReader`; the real impl (over EngineMgmtStore) and the
+//! engine auto-bind round-trip are covered in egret-engine-mgmt.
+use axum::body::Body;
+use axum::http::{Request as HttpRequest, StatusCode};
+use axum::response::Response;
+use egret_auth::groups::GroupRepo;
+use egret_auth::session::SessionService;
+use egret_auth::users::UserRepo;
+use egret_metastore::Db;
+use egret_policy::{
+    policy_admin_router, EngineBinding, EngineBindingReader, EngineReadError, PolicyAdminState,
+    PolicyStore,
+};
+use http_body_util::BodyExt;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tower::ServiceExt; // oneshot
+use uuid::Uuid;
+
+/// Configurable stand-in for the engine-provisioning seam's binding read.
+#[derive(Default)]
+struct MockEngineReader {
+    bindings: Vec<EngineBinding>,
+    catalogs: HashMap<Uuid, Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl EngineBindingReader for MockEngineReader {
+    async fn list_engine_bindings(&self) -> Result<Vec<EngineBinding>, EngineReadError> {
+        Ok(self.bindings.clone())
+    }
+    async fn engine_catalog_names(&self, engine_id: Uuid) -> Result<Vec<String>, EngineReadError> {
+        Ok(self.catalogs.get(&engine_id).cloned().unwrap_or_default())
+    }
+}
+
+struct Fixture {
+    db: Db,
+    users: UserRepo,
+    groups: GroupRepo,
+    sessions: SessionService,
+    store: PolicyStore,
+}
+
+impl Fixture {
+    /// Build the router with a given engine-binding reader.
+    fn app(&self, engines: Arc<dyn EngineBindingReader>) -> axum::Router {
+        policy_admin_router().with_state(PolicyAdminState {
+            store: self.store.clone(),
+            engines,
+            users: self.users.clone(),
+            groups: self.groups.clone(),
+            sessions: self.sessions.clone(),
+            engine_egret_url: "http://egret:8080".into(),
+        })
+    }
+    /// Router with no bound engines (the common case).
+    fn app_empty(&self) -> axum::Router {
+        self.app(Arc::new(MockEngineReader::default()))
+    }
+}
+
+async fn setup() -> Option<Fixture> {
+    let dsn = std::env::var("DATABASE_URL").ok()?;
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let sessions = SessionService::new(
+        db.clone(),
+        chrono::Duration::hours(24),
+        chrono::Duration::minutes(60),
+    );
+    Some(Fixture {
+        users: UserRepo::new(db.clone()),
+        groups: GroupRepo::new(db.clone()),
+        sessions,
+        store: PolicyStore::new(db.clone()),
+        db,
+    })
+}
+
+async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json = serde_json::from_slice(&bytes).unwrap_or_else(
+        |_| serde_json::json!({ "_raw": String::from_utf8_lossy(&bytes).to_string() }),
+    );
+    (status, json)
+}
+
+fn req(method: &str, uri: &str, token: &str, body: Option<serde_json::Value>) -> HttpRequest<Body> {
+    let mut b = HttpRequest::builder()
+        .method(method)
+        .uri(uri)
+        .header("Cookie", format!("egret_session={token}"));
+    let body = match body {
+        Some(v) => {
+            b = b.header("Content-Type", "application/json");
+            Body::from(serde_json::to_vec(&v).unwrap())
+        }
+        None => Body::empty(),
+    };
+    b.body(body).unwrap()
+}
+
+/// Create a user (optionally platform_admin) and return its session token.
+async fn session_for(f: &Fixture, tag: &str, platform_admin: bool) -> String {
+    let email = format!("{tag}_{}@egret.local", Uuid::new_v4().simple());
+    let uid = f
+        .users
+        .insert_local(&email, "Test", "x")
+        .await
+        .expect("insert user");
+    if platform_admin {
+        sqlx::query(
+            "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
+             SELECT 'user', $1, id FROM roles WHERE scope='platform' AND name='platform_admin'",
+        )
+        .bind(uid.0)
+        .execute(&f.db.pool)
+        .await
+        .expect("grant platform_admin");
+    }
+    f.sessions
+        .create(uid, "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token
+}
+
+/// Create a NON-admin user holding exactly one fine-grained permission key.
+async fn session_for_with_permission(f: &Fixture, tag: &str, permission: &str) -> String {
+    let email = format!("{tag}_{}@egret.local", Uuid::new_v4().simple());
+    let uid = f
+        .users
+        .insert_local(&email, "Test", "x")
+        .await
+        .expect("insert user");
+    let role_name = format!("test_role_{}", Uuid::new_v4().simple());
+    let (role_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO roles (scope, name, description) VALUES ('platform', $1, 'test-only role') \
+         RETURNING id",
+    )
+    .bind(&role_name)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert role");
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
+        .bind(role_id)
+        .bind(permission)
+        .execute(&f.db.pool)
+        .await
+        .expect("grant permission");
+    sqlx::query(
+        "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
+         VALUES ('user', $1, $2)",
+    )
+    .bind(uid.0)
+    .bind(role_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("assign role");
+    f.sessions
+        .create(uid, "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token
+}
+
+async fn seed_service(f: &Fixture) -> (String, i64) {
+    egret_policy::seed_trino(&f.store)
+        .await
+        .expect("seed trino");
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let svc = f
+        .store
+        .create_service(&name, "trino", &serde_json::json!({}))
+        .await
+        .expect("create service");
+    (name, svc.id)
+}
+
+#[tokio::test]
+async fn platform_admin_can_list_policies_by_type() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "policies_admin", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    f.store
+        .create_policy(
+            svc_id,
+            "allow-analysts-select",
+            &serde_json::json!({
+                "name": "allow-analysts-select", "policyType": 0,
+                "resources": {"catalog": {"values": ["iceberg"]}, "schema": {"values": ["sales"]},
+                              "table": {"values": ["orders"]}, "column": {"values": ["*"]}},
+                "policyItems": [{"users": ["alice"], "groups": ["analysts"], "accesses": [{"type": "select"}]}]
+            }),
+        )
+        .await
+        .expect("create policy");
+
+    let resp = f
+        .app_empty()
+        .oneshot(req(
+            "GET",
+            &format!("/policies?service={svc_name}&type=access"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list policies; body={body}");
+    let arr = body.as_array().expect("array body");
+    assert_eq!(arr.len(), 1, "expected one summary; body={body}");
+    assert_eq!(arr[0]["policy_type"], serde_json::json!("access"));
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn non_admin_cannot_list_policies() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "policies_plain", false).await;
+    let resp = f
+        .app_empty()
+        .oneshot(req("GET", "/policies?service=whatever", &token, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn admin_can_create_and_delete_access_policy() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "crud", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let create = serde_json::json!({
+        "name": "p-create", "service": svc_name, "isEnabled": true,
+        "resources": {"catalog": {"values": ["iceberg"]}},
+        "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+    });
+    let resp = f
+        .app_empty()
+        .oneshot(req("POST", "/policies", &token, Some(create)))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "create policy; body={body}");
+    let id = body["id"].as_i64().expect("id");
+
+    let resp = f
+        .app_empty()
+        .oneshot(req(
+            "GET",
+            &format!("/policies?service={svc_name}&type=access"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (_, list) = into_json(resp).await;
+    assert_eq!(list.as_array().expect("array").len(), 1, "body={list}");
+
+    let resp = f
+        .app_empty()
+        .oneshot(req("DELETE", &format!("/policies/{id}"), &token, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn admin_can_toggle_policy_enabled() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "toggle", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let create = serde_json::json!({
+        "name": "p-toggle", "service": svc_name, "isEnabled": true,
+        "resources": {"catalog": {"values": ["iceberg"]}},
+        "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+    });
+    let resp = f
+        .app_empty()
+        .oneshot(req("POST", "/policies", &token, Some(create)))
+        .await
+        .unwrap();
+    let (_, body) = into_json(resp).await;
+    let id = body["id"].as_i64().expect("id");
+
+    let resp = f
+        .app_empty()
+        .oneshot(req(
+            "PUT",
+            &format!("/policies/{id}/enabled"),
+            &token,
+            Some(serde_json::json!({ "enabled": false })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let resp = f
+        .app_empty()
+        .oneshot(req("GET", &format!("/policies/{id}"), &token, None))
+        .await
+        .unwrap();
+    let (_, body) = into_json(resp).await;
+    assert_eq!(body["isEnabled"], false, "body={body}");
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn admin_can_create_masking_and_rowfilter_policies() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "mrf", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+
+    let mask = serde_json::json!({
+        "kind": "masking", "name": "m1", "service": svc_name, "isEnabled": true,
+        "resources": {"catalog": {"values": ["c"]}, "schema": {"values": ["s"]},
+                      "table": {"values": ["t"]}, "column": {"values": ["email"]}},
+        "items": [{"groups": ["pii"], "maskType": "MASK_HASH"}]
+    });
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req("POST", "/policies", &token, Some(mask)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "masking; body={body}");
+
+    let rf = serde_json::json!({
+        "kind": "rowfilter", "name": "r1", "service": svc_name, "isEnabled": true,
+        "resources": {"catalog": {"values": ["c"]}, "schema": {"values": ["s"]},
+                      "table": {"values": ["t"]}},
+        "items": [{"users": ["bob"], "filterExpr": "country = 'US'"}]
+    });
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req("POST", "/policies", &token, Some(rf)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "rowfilter; body={body}");
+
+    for (kind, _) in [("masking", 1), ("rowfilter", 2)] {
+        let (_, list) = into_json(
+            f.app_empty()
+                .oneshot(req(
+                    "GET",
+                    &format!("/policies?service={svc_name}&type={kind}"),
+                    &token,
+                    None,
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            list.as_array().expect("array").len(),
+            1,
+            "one {kind} summary; body={list}"
+        );
+    }
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn admin_gets_trino_config_for_profile() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "cfg", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "GET",
+                &format!("/policies/services/{svc_name}/trino-config"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "trino-config; body={body}");
+    let files = body.as_array().expect("array");
+    assert_eq!(files.len(), 2);
+    assert!(files
+        .iter()
+        .any(|file| file["name"] == "access-control.properties"
+            && file["content"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("ranger.service.name={svc_name}"))));
+    assert!(files
+        .iter()
+        .any(|file| file["name"] == "ranger-trino-security.xml"
+            && file["content"]
+                .as_str()
+                .unwrap()
+                .contains("ranger.plugin.trino.policy.rest.url")));
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn admin_can_list_principals() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "principals", true).await;
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req("GET", "/principals?q=", &token, None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "principals; body={body}");
+    assert!(
+        body.as_array()
+            .expect("array")
+            .iter()
+            .any(|p| p["kind"] == "user"),
+        "expected a user principal; body={body}"
+    );
+}
+
+#[tokio::test]
+async fn platform_admin_can_lookup_resource_values() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "resource_lookup_admin", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    f.store
+        .create_policy(
+            svc_id,
+            "allow-analysts-select",
+            &serde_json::json!({
+                "name": "allow-analysts-select", "policyType": 0,
+                "resources": {"catalog": {"values": ["iceberg"]}, "schema": {"values": ["sales"]}},
+                "policyItems": [{"users": ["alice"], "accesses": [{"type": "select"}]}]
+            }),
+        )
+        .await
+        .expect("create policy");
+
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "GET",
+                &format!(
+                    "/policies/resource-lookup?service={svc_name}&level=schema&catalog=iceberg"
+                ),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "resource-lookup; body={body}");
+    assert!(
+        body.as_array().expect("array").iter().any(|v| v == "sales"),
+        "expected 'sales'; body={body}"
+    );
+
+    // parent-filter mismatch excludes it.
+    let (_, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "GET",
+                &format!("/policies/resource-lookup?service={svc_name}&level=schema&catalog=other"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        !body.as_array().expect("array").iter().any(|v| v == "sales"),
+        "parent mismatch should exclude 'sales'; body={body}"
+    );
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+/// `list_profiles` surfaces the engines the `EngineBindingReader` reports as
+/// bound to a profile (the cross-seam read the admin UI shows).
+#[tokio::test]
+async fn list_profiles_shows_bound_engines_from_reader() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "profiles", true).await;
+    let (_svc_name, svc_id) = seed_service(&f).await;
+    let engine_id = Uuid::new_v4();
+    let reader = Arc::new(MockEngineReader {
+        bindings: vec![EngineBinding {
+            id: engine_id,
+            name: "trino-prod".into(),
+            status: "Running".into(),
+            authz_service_id: Some(svc_id),
+        }],
+        catalogs: HashMap::new(),
+    });
+
+    let (status, body) = into_json(
+        f.app(reader)
+            .oneshot(req("GET", "/policies/services", &token, None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "list profiles; body={body}");
+    let profile = body
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|p| p["id"] == serde_json::json!(svc_id))
+        .unwrap_or_else(|| panic!("profile {svc_id} not found; body={body}"));
+    assert!(
+        profile["engines"]
+            .as_array()
+            .expect("engines")
+            .iter()
+            .any(|e| e["id"] == serde_json::json!(engine_id)),
+        "bound engine should appear under its profile; body={body}"
+    );
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn scoped_permission_policies_read_and_create() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let (svc_name, svc_id) = seed_service(&f).await;
+
+    let wrong = session_for_with_permission(&f, "policy_scoped_wrong", "engine:read").await;
+    let resp = f
+        .app_empty()
+        .oneshot(req(
+            "GET",
+            &format!("/policies?service={svc_name}"),
+            &wrong,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "without policy:read must not list"
+    );
+
+    let reader = session_for_with_permission(&f, "policy_scoped_reader", "policy:read").await;
+    let (status, _) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "GET",
+                &format!("/policies?service={svc_name}"),
+                &reader,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "policy:read must list");
+
+    let create_body = serde_json::json!({
+        "name": "scoped-create", "service": svc_name, "isEnabled": true,
+        "resources": {"catalog": {"values": ["iceberg"]}},
+        "items": [{"users": ["alice"], "accesses": ["select"], "effect": "allow"}]
+    });
+    let resp = f
+        .app_empty()
+        .oneshot(req("POST", "/policies", &reader, Some(create_body.clone())))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "policy:read alone must not create"
+    );
+
+    let creator = session_for_with_permission(&f, "policy_scoped_creator", "policy:create").await;
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req("POST", "/policies", &creator, Some(create_body)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "policy:create must create; body={body}"
+    );
+    f.store.delete_service(svc_id).await.expect("cleanup");
+}

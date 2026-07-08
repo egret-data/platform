@@ -7,7 +7,6 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use egret_authz::AuthzError;
 use egret_catalog::CatalogError;
 use egret_secrets::SecretsError;
 
@@ -72,17 +71,6 @@ impl From<SecretsError> for EngineHttpError {
                 EngineHttpError::BadRequest("secrets master_key is not configured".to_string())
             }
             SecretsError::Crypto(_) | SecretsError::Db(_) => EngineHttpError::Internal,
-        }
-    }
-}
-
-impl From<AuthzError> for EngineHttpError {
-    fn from(e: AuthzError) -> Self {
-        match e {
-            AuthzError::NotFound(_) => EngineHttpError::NotFound,
-            AuthzError::AlreadyExists(s) => EngineHttpError::AlreadyExists(s),
-            AuthzError::BadRequest(s) => EngineHttpError::BadRequest(s),
-            AuthzError::Db(_) | AuthzError::Json(_) => EngineHttpError::Internal,
         }
     }
 }
