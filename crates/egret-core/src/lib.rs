@@ -10,5 +10,7 @@ pub mod rbac;
 
 pub use context::{Principal, WorkspaceContext};
 pub use error::{Error, Result};
+#[cfg(feature = "http")]
+pub use http::ApiError;
 pub use ids::{UserId, WorkspaceId};
 pub use pagination::Pagination;

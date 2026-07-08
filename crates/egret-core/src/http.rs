@@ -40,6 +40,32 @@ impl IntoResponse for Error {
     }
 }
 
+/// The uniform API-error envelope every seam returns from its handlers.
+///
+/// `Auth` covers authn/authz/validation via the shared core mapping; `Domain`
+/// is the seam's own error, which supplies its own `IntoResponse`. A handler
+/// returns `Result<T, ApiError<MyDomainError>>` and `?` works on both a
+/// `core::Error` and `MyDomainError` (given the seam adds `From<MyDomainError>`).
+pub enum ApiError<D> {
+    Auth(Error),
+    Domain(D),
+}
+
+impl<D> From<Error> for ApiError<D> {
+    fn from(e: Error) -> Self {
+        ApiError::Auth(e)
+    }
+}
+
+impl<D: IntoResponse> IntoResponse for ApiError<D> {
+    fn into_response(self) -> Response {
+        match self {
+            ApiError::Auth(e) => e.into_response(),
+            ApiError::Domain(d) => d.into_response(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,5 +103,17 @@ mod tests {
 
         let resp = Error::NotFound("user".into()).into_response();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn api_error_auth_arm_uses_core_mapping() {
+        let e: ApiError<StatusCode> = Error::Forbidden.into();
+        assert_eq!(e.into_response().status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn api_error_domain_arm_delegates_to_d() {
+        let e: ApiError<StatusCode> = ApiError::Domain(StatusCode::IM_A_TEAPOT);
+        assert_eq!(e.into_response().status(), StatusCode::IM_A_TEAPOT);
     }
 }
