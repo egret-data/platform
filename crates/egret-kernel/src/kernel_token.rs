@@ -1,8 +1,12 @@
 //! Kernel callback bearer token: random plaintext + SHA-256 hash for at-rest storage.
+//!
+//! The `egk_`-prefixed plaintext format is kernel-specific and minted here; the
+//! at-rest hashing is the shared [`egret_core::token::hash_token`] so it stays
+//! byte-identical with the other opaque-token schemes.
 
 use std::time::Duration;
 
-use sha2::{Digest, Sha256};
+pub use egret_core::token::hash_token;
 
 /// Token lifetime backstop (the row delete on stop/reap is the primary revocation).
 pub const TOKEN_TTL: Duration = Duration::from_secs(12 * 3600);
@@ -13,13 +17,6 @@ pub fn mint() -> (String, String) {
     let token = format!("egk_{}", hex::encode(raw));
     let hash = hash_token(&token);
     (token, hash)
-}
-
-/// SHA-256 hex of a token (for lookup + at-rest comparison).
-pub fn hash_token(token: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(token.as_bytes());
-    hex::encode(h.finalize())
 }
 
 #[cfg(test)]
