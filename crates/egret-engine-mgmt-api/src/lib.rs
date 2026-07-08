@@ -376,3 +376,17 @@ pub struct EngineStatus {
     pub message: Option<String>,
     pub pods: Vec<PodStatus>,
 }
+
+use async_trait::async_trait;
+
+/// Provisions/updates/deletes a query engine on Kubernetes. Kube-free by
+/// construction (this crate has no kube dep). Implemented in the composition
+/// root (egret-bin) over `egret-orchestrator::TrinoProvisioner`.
+#[async_trait]
+pub trait EngineProvisioningPort: Send + Sync {
+    async fn provision(&self, req: &EngineSpec) -> Result<(), String>;
+    async fn status(&self, namespace: &str, name: &str) -> Result<EngineStatus, String>;
+    async fn update(&self, req: &EngineSpec) -> Result<(), String>;
+    async fn delete(&self, namespace: &str, name: &str) -> Result<(), String>;
+    async fn restart(&self, namespace: &str, name: &str) -> Result<(), String>;
+}

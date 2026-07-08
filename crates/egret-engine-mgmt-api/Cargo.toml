@@ -9,3 +9,4 @@ license.workspace = true
 # (e.g. `Affinity::raw_override`); serde_json is the one unavoidable dependency
 # — no kube/k8s-openapi or anything heavier leaks in.
 serde_json.workspace = true
+async-trait.workspace = true
