@@ -11,25 +11,13 @@
 
 mod access;
 mod auth;
-mod engines;
 mod error;
-pub mod monitor;
 mod policies;
 mod secrets;
 mod storage;
 mod warehouses;
 
 pub use auth::require_platform_admin;
-pub use engines::{
-    AffinityReq, AuthReq, AutoscalingReq, CatalogReq, ContainerPortReq, CronTriggerReq,
-    DeploymentStrategyReq, EngineLiveStatus, EnginePod, EngineProvisionReq, EngineProvisioner,
-    EnvFromSourceReq, FaultTolerantReq, GracefulShutdownReq, HeapReq, HpaConfigReq, IngressReq,
-    JwtReq, KedaConfigReq, KedaTriggerReq, MiniContainerReq, NodeSelectorRequirementReq,
-    ObjectMountReq, PasswordEntryReq, ProbeReq, ProbesReq, PrometheusTriggerReq, ResourceGroupReq,
-    ResourceGroupsReq, ResourceSelectorReq, RoleConfigReq, RoleResourcesReq, SecurityContextReq,
-    SessionRuleReq, TolerationReq, TopologySpreadConstraintReq, TrinoConfigReq, VolumeMountReq,
-    WorkerRoleConfigReq,
-};
 pub use error::CpError;
 pub use policies::{
     editor_to_ranger_json, masking_to_ranger_json, rowfilter_to_ranger_json, summarize_policy,
@@ -53,8 +41,6 @@ use std::sync::Arc;
 pub struct CpState {
     /// Global storage-connection registry (`storage_connections`).
     pub storage: CatalogStore,
-    /// Engine-mgmt store (`engine_mgmt` schema) — owns engines/engine_catalogs CRUD.
-    pub engine_mgmt: egret_engine_mgmt::EngineMgmtStore,
     /// Shared Ranger policy store (`authz_*`), the same store the machine-facing
     /// `/service` router writes. Used by the read-only Policies endpoints.
     pub authz: egret_authz::AuthzStore,
@@ -73,17 +59,15 @@ pub struct CpState {
     /// Reads catalog structure from the embedded lakekeeper (wired in egret-bin);
     /// `None` in tests.
     pub browser: Option<Arc<dyn WarehouseBrowser>>,
-    /// Provisions query engines onto Kubernetes (wired in egret-bin over
-    /// `egret-orchestrator`); `None` in tests and when no cluster is configured
-    /// (the routes then report "kubernetes not configured").
-    pub engine_provisioner: Option<Arc<dyn EngineProvisioner>>,
+    /// Cross-seam, read-only: the `policies` module's resource-lookup/profile
+    /// listing surfaces which engines/catalogs are bound to a Ranger service,
+    /// and `trino_config` needs egret's public URL to render the plugin config.
+    /// Owned by the `egret-engine-mgmt` seam (E1c); read directly here, same
+    /// as `EngineMgmtState` reads `CatalogStore`/`AuthzStore` cross-seam.
+    pub engine_mgmt: egret_engine_mgmt::EngineMgmtStore,
     /// In-cluster URL Trino pods use to reach egret's REST catalog + token
     /// endpoint (e.g. `http://egret:8080`); populated from config in egret-bin.
     pub engine_egret_url: String,
-    /// Default JWKS URI for a Trino JWT authenticator when the engine's auth
-    /// block omits one (e.g. Keycloak `.../protocol/openid-connect/certs`);
-    /// populated from config in egret-bin (Task 5). Tests set a dummy value.
-    pub engine_jwks_uri: String,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.
@@ -100,7 +84,6 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(storage::router())
         .merge(secrets::router())
         .merge(warehouses::router())
-        .merge(engines::router())
         .merge(policies::router())
         .merge(access::router())
 }
