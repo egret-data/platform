@@ -1,8 +1,10 @@
-//! BI error + HTTP mapping.
+//! BI domain error + its HTTP mapping. The auth/validation arm now lives in
+//! `egret_core::ApiError` (shared); this file keeps only the BI-domain arm.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use egret_core::ApiError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BiError {
@@ -37,53 +39,30 @@ impl From<egret_engine::EngineError> for BiError {
     }
 }
 
-pub enum BiApiError {
-    Auth(egret_core::Error),
-    Domain(BiError),
-}
-impl From<egret_core::Error> for BiApiError {
-    fn from(e: egret_core::Error) -> Self {
-        BiApiError::Auth(e)
-    }
-}
-impl From<BiError> for BiApiError {
-    fn from(e: BiError) -> Self {
-        BiApiError::Domain(e)
+/// Domain arm only — the shared `Auth` arm is in `egret_core::ApiError`.
+impl IntoResponse for BiError {
+    fn into_response(self) -> Response {
+        let (status, msg) = match &self {
+            BiError::NotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
+            BiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
+            BiError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            BiError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
+            BiError::Engine(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
+            BiError::Db(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error".to_string(),
+            ),
+        };
+        (status, Json(serde_json::json!({ "error": msg }))).into_response()
     }
 }
 
-impl IntoResponse for BiApiError {
-    fn into_response(self) -> Response {
-        let (status, msg) = match self {
-            BiApiError::Auth(e) => match e {
-                egret_core::Error::NotFound(_) => (StatusCode::NOT_FOUND, "not found".to_string()),
-                egret_core::Error::InvalidInput(m) => (StatusCode::BAD_REQUEST, m),
-                egret_core::Error::Unauthorized => {
-                    (StatusCode::UNAUTHORIZED, "unauthorized".to_string())
-                }
-                egret_core::Error::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
-                egret_core::Error::Conflict(m) => (StatusCode::CONFLICT, m),
-                egret_core::Error::TooManyRequests => (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "too many requests".to_string(),
-                ),
-                egret_core::Error::Internal(_) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal error".to_string(),
-                ),
-            },
-            BiApiError::Domain(e) => match &e {
-                BiError::NotFound(_) => (StatusCode::NOT_FOUND, e.to_string()),
-                BiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
-                BiError::BadRequest(_) => (StatusCode::BAD_REQUEST, e.to_string()),
-                BiError::Conflict(_) => (StatusCode::CONFLICT, e.to_string()),
-                BiError::Engine(_) => (StatusCode::BAD_GATEWAY, e.to_string()),
-                BiError::Db(_) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal error".to_string(),
-                ),
-            },
-        };
-        (status, Json(serde_json::json!({ "error": msg }))).into_response()
+/// The BI handler error type. `From<egret_core::Error>` comes from core;
+/// this adds the domain-side `From` so `?` works on `BiError` too.
+pub type BiApiError = ApiError<BiError>;
+
+impl From<BiError> for BiApiError {
+    fn from(e: BiError) -> Self {
+        ApiError::Domain(e)
     }
 }
