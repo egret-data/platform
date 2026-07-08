@@ -1,0 +1,34 @@
+//! Cross-seam read into the engine-provisioning seam (E1 / `egret-engine-mgmt`).
+//!
+//! The admin Policies UI shows which provisioned engines bind to each Ranger
+//! profile and offers their catalog names for resource autocomplete. That data
+//! is owned by the engine seam — read it through this narrow `Port`, never by
+//! reaching into engine-mgmt's tables (design §3.2: no cross-seam JOIN). The
+//! composition root (egret-bin) supplies the concrete impl over `EngineMgmtStore`.
+use async_trait::async_trait;
+
+/// One provisioned engine and the policy profile (if any) it is bound to.
+#[derive(Debug, Clone)]
+pub struct EngineBinding {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub status: String,
+    /// The `policy.authz_services` id this engine enforces, if bound.
+    pub authz_service_id: Option<i64>,
+}
+
+/// Transport-neutral read error (no engine-seam error type leaks across).
+#[derive(Debug, thiserror::Error)]
+#[error("engine binding read error: {0}")]
+pub struct EngineReadError(pub String);
+
+#[async_trait]
+pub trait EngineBindingReader: Send + Sync {
+    /// All provisioned engines with their profile binding.
+    async fn list_engine_bindings(&self) -> Result<Vec<EngineBinding>, EngineReadError>;
+    /// Catalog names configured on one engine (for resource autocomplete).
+    async fn engine_catalog_names(
+        &self,
+        engine_id: uuid::Uuid,
+    ) -> Result<Vec<String>, EngineReadError>;
+}

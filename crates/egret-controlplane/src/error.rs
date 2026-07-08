@@ -7,7 +7,6 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use egret_catalog::CatalogError;
-use egret_policy::PolicyStoreError;
 use egret_secrets::SecretsError;
 
 #[derive(Debug, thiserror::Error)]
@@ -52,15 +51,6 @@ impl From<CatalogError> for CpError {
     }
 }
 
-impl From<egret_engine_mgmt::EngineMgmtError> for CpError {
-    fn from(e: egret_engine_mgmt::EngineMgmtError) -> Self {
-        match e {
-            egret_engine_mgmt::EngineMgmtError::AlreadyExists(s) => CpError::AlreadyExists(s),
-            egret_engine_mgmt::EngineMgmtError::Db(_) => CpError::Internal,
-        }
-    }
-}
-
 impl From<SecretsError> for CpError {
     fn from(e: SecretsError) -> Self {
         match e {
@@ -71,17 +61,6 @@ impl From<SecretsError> for CpError {
                 CpError::BadRequest("secrets master_key is not configured".to_string())
             }
             SecretsError::Crypto(_) | SecretsError::Db(_) => CpError::Internal,
-        }
-    }
-}
-
-impl From<PolicyStoreError> for CpError {
-    fn from(e: PolicyStoreError) -> Self {
-        match e {
-            PolicyStoreError::NotFound(_) => CpError::NotFound,
-            PolicyStoreError::AlreadyExists(s) => CpError::AlreadyExists(s),
-            PolicyStoreError::BadRequest(s) => CpError::BadRequest(s),
-            PolicyStoreError::Db(_) | PolicyStoreError::Json(_) => CpError::Internal,
         }
     }
 }

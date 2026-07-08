@@ -310,8 +310,8 @@ pub fn editor_to_ranger_json(v: &Value) -> Result<RangerPolicy, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::summarize_policy;
     use super::*;
-    use crate::summarize_policy;
     use serde_json::json;
 
     fn sample() -> AccessPolicyInput {
@@ -388,7 +388,7 @@ mod tests {
         assert_eq!(items[0]["dataMaskInfo"]["dataMaskType"], "MASK_HASH");
         assert_eq!(items[0]["accesses"][0]["type"], "select");
         assert_eq!(items[0]["users"][0], "alice");
-        let s = crate::summarize_policy(1, "trino", true, &body);
+        let s = summarize_policy(1, "trino", true, &body);
         assert_eq!(s.policy_type, "masking");
         assert_eq!(s.resource_path, "iceberg.sales.users.email");
     }
@@ -422,7 +422,7 @@ mod tests {
         let items = body["rowFilterPolicyItems"].as_array().unwrap();
         assert_eq!(items[0]["rowFilterInfo"]["filterExpr"], "country = 'US'");
         assert_eq!(items[0]["groups"][0], "analysts");
-        let s = crate::summarize_policy(2, "trino", true, &body);
+        let s = summarize_policy(2, "trino", true, &body);
         assert_eq!(s.policy_type, "rowfilter");
         assert_eq!(s.resource_path, "iceberg.sales.orders");
     }

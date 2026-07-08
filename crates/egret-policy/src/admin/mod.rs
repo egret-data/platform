@@ -1,27 +1,62 @@
-//! Control-plane Policies router (`/policies`), nested under `/api/control-plane`.
+//! Admin Policies router (`/policies`, `/principals`), nested under
+//! `/api/control-plane` — moved into the Policy/Ranger seam in E2d.
 //!
-//! Read/parse Ranger policies from the shared `PolicyStore` into typed summaries
+//! Read/parse Ranger policies from the seam's `PolicyStore` into typed summaries
 //! for the admin UI. Ranger stores three policy kinds by `policyType`:
 //! 0 = access (`policyItems`), 1 = masking (`dataMaskPolicyItems`),
-//! 2 = row-filter (`rowFilterPolicyItems`). P1 is read-only.
+//! 2 = row-filter (`rowFilterPolicyItems`).
 
+mod error;
 mod ranger_json;
+mod reader;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{FromRef, Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
+use egret_auth::require_permission;
+use egret_auth::session::SessionService;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::auth::require_permission;
-use crate::error::CpError;
-use crate::CpState;
+use crate::PolicyStore;
+pub use error::PolicyHttpError;
 pub use ranger_json::{
     editor_to_ranger_json, masking_to_ranger_json, rowfilter_to_ranger_json, MaskingPolicyInput,
     RangerPolicy, RowFilterPolicyInput,
 };
+pub use reader::{EngineBinding, EngineBindingReader, EngineReadError};
+use std::sync::Arc;
+
+/// State for the admin Policies router. The `PolicyStore` is in-seam; the engine
+/// binding read + the identity repos are cross-seam, wired in the composition root.
+#[derive(Clone)]
+pub struct PolicyAdminState {
+    /// The seam's own policy store (`policy.authz_*`).
+    pub store: PolicyStore,
+    /// Cross-seam read into the engine seam (which engines bind to which profile).
+    pub engines: Arc<dyn EngineBindingReader>,
+    /// Core-hub identity lookups for the principal picker.
+    pub users: egret_auth::users::UserRepo,
+    pub groups: egret_auth::groups::GroupRepo,
+    /// Session service backing the `Auth` extractor.
+    pub sessions: SessionService,
+    /// In-cluster URL Trino pods use to reach egret's REST catalog + token
+    /// endpoint (e.g. `http://egret:8080`); rendered into the plugin config.
+    pub engine_egret_url: String,
+}
+
+impl FromRef<PolicyAdminState> for SessionService {
+    fn from_ref(s: &PolicyAdminState) -> Self {
+        s.sessions.clone()
+    }
+}
+
+/// Build the admin Policies router (to be nested at `/api/control-plane`).
+pub fn policy_admin_router() -> Router<PolicyAdminState> {
+    router()
+}
 
 /// Human-readable name for a Ranger `policyType` integer.
 fn policy_type_name(t: i64) -> &'static str {
@@ -196,7 +231,7 @@ pub struct ProfileEngine {
     pub status: String,
 }
 
-pub fn router() -> Router<CpState> {
+pub fn router() -> Router<PolicyAdminState> {
     Router::new()
         .route("/policies", get(list_policies).post(create_policy))
         .route(
@@ -255,24 +290,24 @@ fn values_at(res: Option<&serde_json::Map<String, Value>>, k: &str) -> Vec<Strin
 /// in the service's existing policies. schema/table/column: distinct values used
 /// in the service's policies, filtered so parent levels match.
 async fn resource_lookup(
-    State(st): State<CpState>,
+    State(st): State<PolicyAdminState>,
     Auth(p): Auth,
     Query(qp): Query<ResourceLookupQuery>,
-) -> Result<Json<Vec<String>>, CpError> {
+) -> Result<Json<Vec<String>>, PolicyHttpError> {
     require_permission(&p, "policy:read")?;
-    let svc = st.authz.get_service(&qp.service).await?;
+    let svc = st.store.get_service(&qp.service).await?;
     let mut out: Vec<String> = Vec::new();
 
     if qp.level == "catalog" {
-        if let Ok(engines) = st.engine_mgmt.list_engines().await {
+        if let Ok(engines) = st.engines.list_engine_bindings().await {
             for e in engines
                 .iter()
                 .filter(|e| e.authz_service_id == Some(svc.id))
             {
-                if let Ok(cats) = st.engine_mgmt.list_engine_catalogs(e.id).await {
-                    for c in cats {
-                        if !out.contains(&c.name) {
-                            out.push(c.name);
+                if let Ok(names) = st.engines.engine_catalog_names(e.id).await {
+                    for name in names {
+                        if !out.contains(&name) {
+                            out.push(name);
                         }
                     }
                 }
@@ -280,7 +315,7 @@ async fn resource_lookup(
         }
     }
 
-    for row in st.authz.list_policies(svc.id).await? {
+    for row in st.store.list_policies(svc.id).await? {
         let res = row.policy_jsonb.get("resources").and_then(Value::as_object);
         let parent_ok = |k: &str, want: &Option<String>| -> bool {
             match want {
@@ -318,14 +353,14 @@ async fn resource_lookup(
 
 /// GET /policies?service=&type=&q= — policy summaries for one profile, filtered.
 async fn list_policies(
-    State(st): State<CpState>,
+    State(st): State<PolicyAdminState>,
     Auth(p): Auth,
     Query(qp): Query<ListQuery>,
-) -> Result<Json<Vec<PolicySummary>>, CpError> {
+) -> Result<Json<Vec<PolicySummary>>, PolicyHttpError> {
     require_permission(&p, "policy:read")?;
-    let svc = st.authz.get_service(&qp.service).await?;
+    let svc = st.store.get_service(&qp.service).await?;
     let mut out: Vec<PolicySummary> = st
-        .authz
+        .store
         .list_policies(svc.id)
         .await?
         .into_iter()
@@ -348,12 +383,12 @@ async fn list_policies(
 
 /// GET /policies/{id} — the raw stored Ranger body (with id + isEnabled), for detail.
 async fn get_policy(
-    State(st): State<CpState>,
+    State(st): State<PolicyAdminState>,
     Auth(p): Auth,
     Path(id): Path<i64>,
-) -> Result<Json<Value>, CpError> {
+) -> Result<Json<Value>, PolicyHttpError> {
     require_permission(&p, "policy:read")?;
-    let row = st.authz.get_policy(id).await?;
+    let row = st.store.get_policy(id).await?;
     let mut body = row.policy_jsonb;
     if let Value::Object(m) = &mut body {
         m.insert("id".into(), Value::from(row.id));
@@ -364,14 +399,14 @@ async fn get_policy(
 
 /// GET /policies/services — profiles + the engine(s) that link to each.
 async fn list_profiles(
-    State(st): State<CpState>,
+    State(st): State<PolicyAdminState>,
     Auth(p): Auth,
-) -> Result<Json<Vec<ProfileDto>>, CpError> {
+) -> Result<Json<Vec<ProfileDto>>, PolicyHttpError> {
     require_permission(&p, "policy:read")?;
-    let engines = st.engine_mgmt.list_engines().await?;
-    let counts = st.authz.policy_counts().await?;
+    let engines = st.engines.list_engine_bindings().await?;
+    let counts = st.store.policy_counts().await?;
     let profiles = st
-        .authz
+        .store
         .list_services()
         .await?
         .into_iter()
@@ -404,12 +439,12 @@ pub struct ConfigFile {
 /// GET /policies/services/{service}/trino-config — the two files a Trino
 /// coordinator needs to enforce this profile via the native ranger plugin.
 async fn trino_config(
-    State(st): State<CpState>,
+    State(st): State<PolicyAdminState>,
     Auth(p): Auth,
     Path(service): Path<String>,
-) -> Result<Json<Vec<ConfigFile>>, CpError> {
+) -> Result<Json<Vec<ConfigFile>>, PolicyHttpError> {
     require_permission(&p, "policy:read")?;
-    let _ = st.authz.get_service(&service).await?; // 404 if the profile doesn't exist
+    let _ = st.store.get_service(&service).await?; // 404 if the profile doesn't exist
     let base = st.engine_egret_url.trim_end_matches('/');
 
     let props = format!(
@@ -452,14 +487,14 @@ async fn trino_config(
 /// mirroring Ranger's default-policy-on-service-create behavior. Idempotent:
 /// a no-op (created: 0) if the service already has any policy.
 async fn seed_defaults(
-    State(st): State<CpState>,
+    State(st): State<PolicyAdminState>,
     Auth(p): Auth,
     Path(service): Path<String>,
-) -> Result<Json<Value>, CpError> {
+) -> Result<Json<Value>, PolicyHttpError> {
     require_permission(&p, "policy:seed")?;
-    let svc = st.authz.get_service(&service).await?;
+    let svc = st.store.get_service(&service).await?;
     let created = st
-        .authz
+        .store
         .seed_default_trino_policies(svc.id, &service, "admin")
         .await?;
     Ok(Json(json!({ "created": created })))
@@ -470,16 +505,16 @@ async fn seed_defaults(
 /// service's `type`). Falls back to treating `name` as a def name directly
 /// (back-compat) when no such service exists.
 async fn get_service_def(
-    State(st): State<CpState>,
+    State(st): State<PolicyAdminState>,
     Auth(p): Auth,
     Path(name): Path<String>,
-) -> Result<Json<Value>, CpError> {
+) -> Result<Json<Value>, PolicyHttpError> {
     require_permission(&p, "policy:read")?;
-    let def_name = match st.authz.get_service(&name).await {
+    let def_name = match st.store.get_service(&name).await {
         Ok(svc) => svc.r#type,
         Err(_) => name,
     };
-    Ok(Json(st.authz.get_service_def(&def_name).await?.def_jsonb))
+    Ok(Json(st.store.get_service_def(&def_name).await?.def_jsonb))
 }
 
 #[derive(Debug, Deserialize)]
@@ -506,17 +541,22 @@ pub struct Principal {
 /// deployment's Trino/Ranger group-mapping keys identities on something else
 /// (e.g. a username), the admin must free-type the correct value instead.
 async fn list_principals(
-    State(st): State<CpState>,
+    State(st): State<PolicyAdminState>,
     Auth(p): Auth,
     Query(qp): Query<PrincipalQuery>,
-) -> Result<Json<Vec<Principal>>, CpError> {
+) -> Result<Json<Vec<Principal>>, PolicyHttpError> {
     require_permission(&p, "policy:read")?;
     let q = qp.q.unwrap_or_default().to_lowercase();
     let want_users = qp.kind.as_deref() != Some("group");
     let want_groups = qp.kind.as_deref() != Some("user");
     let mut out: Vec<Principal> = Vec::new();
     if want_users {
-        for u in st.users.list(200, 0).await.map_err(|_| CpError::Internal)? {
+        for u in st
+            .users
+            .list(200, 0)
+            .await
+            .map_err(|_| PolicyHttpError::Internal)?
+        {
             let name = u.email.clone();
             let label = if u.name.is_empty() {
                 u.email.clone()
@@ -534,7 +574,12 @@ async fn list_principals(
         }
     }
     if want_groups {
-        for g in st.groups.list(200).await.map_err(|_| CpError::Internal)? {
+        for g in st
+            .groups
+            .list(200)
+            .await
+            .map_err(|_| PolicyHttpError::Internal)?
+        {
             if q.is_empty() || g.name.to_lowercase().contains(&q) {
                 out.push(Principal {
                     kind: "group",
@@ -553,20 +598,22 @@ async fn list_principals(
 /// Missing `kind` defaults to "access" (see `editor_to_ranger_json`), so the
 /// P2 editor form — which never sent `kind` — stays wire-compatible.
 async fn create_policy(
-    State(st): State<CpState>,
+    State(st): State<PolicyAdminState>,
     Auth(p): Auth,
     Json(v): Json<Value>,
-) -> Result<Json<Value>, CpError> {
+) -> Result<Json<Value>, PolicyHttpError> {
     require_permission(&p, "policy:create")?;
-    let pol = editor_to_ranger_json(&v).map_err(CpError::BadRequest)?;
+    let pol = editor_to_ranger_json(&v).map_err(PolicyHttpError::BadRequest)?;
     if pol.name.trim().is_empty() {
-        return Err(CpError::BadRequest("policy name is required".into()));
+        return Err(PolicyHttpError::BadRequest(
+            "policy name is required".into(),
+        ));
     }
-    let svc = st.authz.get_service(&pol.service).await?;
-    let id = st.authz.create_policy(svc.id, &pol.name, &pol.body).await?;
+    let svc = st.store.get_service(&pol.service).await?;
+    let id = st.store.create_policy(svc.id, &pol.name, &pol.body).await?;
     if !pol.is_enabled {
         // create_policy inserts with enabled=true (DB default); reflect the form's toggle.
-        st.authz
+        st.store
             .update_policy(id, &pol.name, &pol.body, false)
             .await?;
     }
@@ -575,17 +622,19 @@ async fn create_policy(
 
 /// PUT /policies/{id} — replace a policy's body (any kind).
 async fn update_policy(
-    State(st): State<CpState>,
+    State(st): State<PolicyAdminState>,
     Auth(p): Auth,
     Path(id): Path<i64>,
     Json(v): Json<Value>,
-) -> Result<Json<Value>, CpError> {
+) -> Result<Json<Value>, PolicyHttpError> {
     require_permission(&p, "policy:update")?;
-    let pol = editor_to_ranger_json(&v).map_err(CpError::BadRequest)?;
+    let pol = editor_to_ranger_json(&v).map_err(PolicyHttpError::BadRequest)?;
     if pol.name.trim().is_empty() {
-        return Err(CpError::BadRequest("policy name is required".into()));
+        return Err(PolicyHttpError::BadRequest(
+            "policy name is required".into(),
+        ));
     }
-    st.authz
+    st.store
         .update_policy(id, &pol.name, &pol.body, pol.is_enabled)
         .await?;
     Ok(Json(json!({ "id": id })))
@@ -593,12 +642,12 @@ async fn update_policy(
 
 /// DELETE /policies/{id}
 async fn delete_policy_handler(
-    State(st): State<CpState>,
+    State(st): State<PolicyAdminState>,
     Auth(p): Auth,
     Path(id): Path<i64>,
-) -> Result<StatusCode, CpError> {
+) -> Result<StatusCode, PolicyHttpError> {
     require_permission(&p, "policy:delete")?;
-    st.authz.delete_policy(id).await?;
+    st.store.delete_policy(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -609,13 +658,13 @@ pub struct EnabledBody {
 
 /// PUT /policies/{id}/enabled — toggle a policy's enabled flag.
 async fn set_policy_enabled(
-    State(st): State<CpState>,
+    State(st): State<PolicyAdminState>,
     Auth(p): Auth,
     Path(id): Path<i64>,
     Json(b): Json<EnabledBody>,
-) -> Result<StatusCode, CpError> {
+) -> Result<StatusCode, PolicyHttpError> {
     require_permission(&p, "policy:update")?;
-    st.authz.set_policy_enabled(id, b.enabled).await?;
+    st.store.set_policy_enabled(id, b.enabled).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

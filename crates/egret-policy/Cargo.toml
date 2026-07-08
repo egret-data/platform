@@ -11,6 +11,9 @@ license.workspace = true
 egret-core.workspace = true
 egret-metastore.workspace = true
 egret-policy-api.workspace = true
+# The admin Policies router (E2d) needs the Auth extractor + require_permission
+# gate + identity repos (principal picker) from the core hub.
+egret-auth.workspace = true
 async-trait.workspace = true
 sqlx.workspace = true
 serde.workspace = true
