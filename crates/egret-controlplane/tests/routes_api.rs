@@ -59,7 +59,7 @@ async fn setup_full(
 
     let app = control_plane_router().with_state(CpState {
         storage: egret_catalog::CatalogStore::new(db.clone()),
-        authz: egret_policy::AuthzStore::new(db.clone()),
+        authz: egret_policy::PolicyStore::new(db.clone()),
         users: users.clone(),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
         roles: egret_auth::roles::RoleRepo::new(db.clone()),
@@ -595,7 +595,7 @@ async fn platform_admin_can_list_policies_by_type() {
     };
     let token = session_for(&f, "policies_admin", true).await;
 
-    let authz = egret_policy::AuthzStore::new(f.db.clone());
+    let authz = egret_policy::PolicyStore::new(f.db.clone());
     egret_policy::seed_trino(&authz)
         .await
         .expect("seed trino def");
@@ -660,7 +660,7 @@ async fn platform_admin_autobind_engine_to_new_profile() {
     let wh_id = seed_provisioned_warehouse(&f).await;
 
     let engine_mgmt = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone());
-    let authz = egret_policy::AuthzStore::new(f.db.clone());
+    let authz = egret_policy::PolicyStore::new(f.db.clone());
 
     // Mirrors the `create_engine` auto-bind "create" branch: seed the Trino
     // service-def (required FK for `create_service`), then create a fresh
@@ -767,7 +767,7 @@ async fn admin_can_create_and_delete_access_policy() {
     };
     let token = session_for(&f, "crud", true).await;
 
-    let authz = egret_policy::AuthzStore::new(f.db.clone());
+    let authz = egret_policy::PolicyStore::new(f.db.clone());
     egret_policy::seed_trino(&authz)
         .await
         .expect("seed trino def");
@@ -835,7 +835,7 @@ async fn admin_can_toggle_policy_enabled() {
     };
     let token = session_for(&f, "toggle", true).await;
 
-    let authz = egret_policy::AuthzStore::new(f.db.clone());
+    let authz = egret_policy::PolicyStore::new(f.db.clone());
     egret_policy::seed_trino(&authz)
         .await
         .expect("seed trino def");
@@ -903,7 +903,7 @@ async fn admin_can_create_masking_and_rowfilter_policies() {
     };
     let token = session_for(&f, "mrf", true).await;
 
-    let authz = egret_policy::AuthzStore::new(f.db.clone());
+    let authz = egret_policy::PolicyStore::new(f.db.clone());
     egret_policy::seed_trino(&authz)
         .await
         .expect("seed trino def");
@@ -997,7 +997,7 @@ async fn admin_gets_trino_config_for_profile() {
     };
     let token = session_for(&f, "cfg", true).await;
 
-    let authz = egret_policy::AuthzStore::new(f.db.clone());
+    let authz = egret_policy::PolicyStore::new(f.db.clone());
     egret_policy::seed_trino(&authz)
         .await
         .expect("seed trino def");
@@ -1076,7 +1076,7 @@ async fn platform_admin_can_lookup_resource_values() {
     };
     let token = session_for(&f, "resource_lookup_admin", true).await;
 
-    let authz = egret_policy::AuthzStore::new(f.db.clone());
+    let authz = egret_policy::PolicyStore::new(f.db.clone());
     egret_policy::seed_trino(&authz)
         .await
         .expect("seed trino def");
@@ -1421,7 +1421,7 @@ async fn scoped_permission_policies_read_and_create() {
         return;
     };
 
-    let authz = egret_policy::AuthzStore::new(f.db.clone());
+    let authz = egret_policy::PolicyStore::new(f.db.clone());
     egret_policy::seed_trino(&authz)
         .await
         .expect("seed trino def");
@@ -1582,7 +1582,7 @@ async fn setup_isolated_schema() -> Option<Fixture> {
 
     let app = control_plane_router().with_state(CpState {
         storage: egret_catalog::CatalogStore::new(db.clone()),
-        authz: egret_policy::AuthzStore::new(db.clone()),
+        authz: egret_policy::PolicyStore::new(db.clone()),
         users: users.clone(),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
         roles: egret_auth::roles::RoleRepo::new(db.clone()),

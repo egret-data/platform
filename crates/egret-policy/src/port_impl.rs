@@ -1,9 +1,9 @@
-//! `PolicyPort` (contract crate) implemented over the concrete `AuthzStore`.
+//! `PolicyPort` (contract crate) implemented over the concrete `PolicyStore`.
 //! The in-process wiring; at a real split an HTTP client implements the same
-//! trait. Converts `ServiceRow -> PolicyService` and `AuthzError -> PolicyError`
+//! trait. Converts `ServiceRow -> PolicyService` and `PolicyStoreError -> PolicyError`
 //! at the seam boundary so no sqlx type escapes the contract.
 use crate::store::ServiceRow;
-use crate::{AuthzError, AuthzStore};
+use crate::{PolicyStore, PolicyStoreError};
 use egret_policy_api::{PolicyError, PolicyPort, PolicyService};
 use serde_json::Value;
 
@@ -17,18 +17,18 @@ impl From<ServiceRow> for PolicyService {
     }
 }
 
-impl From<AuthzError> for PolicyError {
-    fn from(e: AuthzError) -> Self {
+impl From<PolicyStoreError> for PolicyError {
+    fn from(e: PolicyStoreError) -> Self {
         match e {
-            AuthzError::NotFound(m) => PolicyError::NotFound(m),
-            AuthzError::AlreadyExists(m) => PolicyError::AlreadyExists(m),
+            PolicyStoreError::NotFound(m) => PolicyError::NotFound(m),
+            PolicyStoreError::AlreadyExists(m) => PolicyError::AlreadyExists(m),
             other => PolicyError::Backend(other.to_string()),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl PolicyPort for AuthzStore {
+impl PolicyPort for PolicyStore {
     async fn ensure_trino_def(&self) -> Result<(), PolicyError> {
         crate::service_def::seed_trino(self)
             .await

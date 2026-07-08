@@ -14,7 +14,7 @@
 //! table/column chain plus the 9 standalone/attached admin resources).
 
 use crate::service_def::trino_service_def;
-use crate::{AuthzError, AuthzStore};
+use crate::{PolicyStore, PolicyStoreError};
 use serde_json::{json, Map, Value};
 
 struct ResourceDef {
@@ -86,7 +86,7 @@ fn hierarchy_chain<'a>(leaf: &'a ResourceDef, all: &'a [ResourceDef]) -> Vec<&'a
     chain
 }
 
-impl AuthzStore {
+impl PolicyStore {
     /// Idempotently seed one default admin-all-access policy per Trino
     /// resource hierarchy. If the service already has any policy (default or
     /// user-authored), this is a no-op that returns `0` — we never want to
@@ -96,7 +96,7 @@ impl AuthzStore {
         service_id: i64,
         service_name: &str,
         admin_principal: &str,
-    ) -> Result<usize, AuthzError> {
+    ) -> Result<usize, PolicyStoreError> {
         if !self.list_policies(service_id).await?.is_empty() {
             return Ok(0);
         }

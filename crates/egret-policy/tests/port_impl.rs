@@ -1,16 +1,16 @@
-//! DB-gated tests for the `PolicyPort` (contract crate) impl over `AuthzStore`.
+//! DB-gated tests for the `PolicyPort` (contract crate) impl over `PolicyStore`.
 //! Exercised through `&dyn PolicyPort` so it is the trait method under test, not
 //! the same-named inherent method it shadows. Self-skip without DATABASE_URL.
 use egret_metastore::Db;
-use egret_policy::AuthzStore;
+use egret_policy::PolicyStore;
 use egret_policy_api::{PolicyError, PolicyPort};
 use serde_json::json;
 
-async fn store() -> Option<AuthzStore> {
+async fn store() -> Option<PolicyStore> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
-    Some(AuthzStore::new(db))
+    Some(PolicyStore::new(db))
 }
 fn uniq(p: &str) -> String {
     format!("{p}_{}", uuid::Uuid::new_v4().simple())
@@ -42,7 +42,7 @@ async fn ensure_trino_def_is_idempotent_and_create_service_returns_policyservice
     let listed = port.list_services().await.unwrap();
     assert!(listed.iter().any(|p| p.id == svc.id && p.name == name));
 
-    // Duplicate name maps AuthzError::AlreadyExists -> PolicyError::AlreadyExists.
+    // Duplicate name maps PolicyStoreError::AlreadyExists -> PolicyError::AlreadyExists.
     let err = port
         .create_service(&name, "trino", &json!({}))
         .await

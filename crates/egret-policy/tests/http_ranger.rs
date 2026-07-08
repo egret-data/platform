@@ -3,7 +3,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use egret_metastore::Db;
 use egret_policy::{ranger_router, RangerState};
-use egret_policy::{seed_trino, AuthzStore};
+use egret_policy::{seed_trino, PolicyStore};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -15,7 +15,7 @@ async fn app() -> Option<(axum::Router, String)> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
-    let store = AuthzStore::new(db);
+    let store = PolicyStore::new(db);
     seed_trino(&store).await.expect("seed");
     let svc = format!("trino_{}", uuid::Uuid::new_v4().simple());
     let state = RangerState {
@@ -49,7 +49,7 @@ async fn anonymous_mode_allows_download_without_bearer() {
     };
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
-    let store = AuthzStore::new(db);
+    let store = PolicyStore::new(db);
     seed_trino(&store).await.expect("seed");
     let svc = format!("trino_{}", uuid::Uuid::new_v4().simple());
     let app = ranger_router(RangerState {

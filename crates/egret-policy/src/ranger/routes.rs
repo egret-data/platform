@@ -1,14 +1,14 @@
 //! HTTP state + the Ranger Admin `ranger_router()` (axum 0.8).
 
 use super::api;
-use crate::AuthzStore;
+use crate::PolicyStore;
 use axum::routing::get;
 use axum::Router;
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct RangerState {
-    pub store: AuthzStore,
+    pub store: PolicyStore,
     pub auth_token: Arc<str>,
 }
 

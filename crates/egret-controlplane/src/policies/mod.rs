@@ -1,6 +1,6 @@
 //! Control-plane Policies router (`/policies`), nested under `/api/control-plane`.
 //!
-//! Read/parse Ranger policies from the shared `AuthzStore` into typed summaries
+//! Read/parse Ranger policies from the shared `PolicyStore` into typed summaries
 //! for the admin UI. Ranger stores three policy kinds by `policyType`:
 //! 0 = access (`policyItems`), 1 = masking (`dataMaskPolicyItems`),
 //! 2 = row-filter (`rowFilterPolicyItems`). P1 is read-only.

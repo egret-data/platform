@@ -1,5 +1,5 @@
 #[derive(Debug, thiserror::Error)]
-pub enum AuthzError {
+pub enum PolicyStoreError {
     #[error("not found: {0}")]
     NotFound(String),
     #[error("already exists: {0}")]

@@ -1,13 +1,13 @@
-//! DB-gated AuthzStore policy tests. Self-skip without DATABASE_URL.
+//! DB-gated PolicyStore policy tests. Self-skip without DATABASE_URL.
 use egret_metastore::Db;
-use egret_policy::AuthzStore;
+use egret_policy::PolicyStore;
 use serde_json::json;
 
-async fn store() -> Option<AuthzStore> {
+async fn store() -> Option<PolicyStore> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
-    Some(AuthzStore::new(db))
+    Some(PolicyStore::new(db))
 }
 fn uniq(p: &str) -> String {
     format!("{p}_{}", uuid::Uuid::new_v4().simple())
@@ -92,11 +92,11 @@ async fn policy_crud_bumps_version() {
         s.update_policy(999_999_999, "x", &pol, true)
             .await
             .unwrap_err(),
-        egret_policy::AuthzError::NotFound(_)
+        egret_policy::PolicyStoreError::NotFound(_)
     ));
     assert!(matches!(
         s.delete_policy(999_999_999).await.unwrap_err(),
-        egret_policy::AuthzError::NotFound(_)
+        egret_policy::PolicyStoreError::NotFound(_)
     ));
 }
 

@@ -897,7 +897,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     };
 
     let ranger = if config.ranger.enabled {
-        let store = egret_policy::AuthzStore::new(db.clone());
+        let store = egret_policy::PolicyStore::new(db.clone());
         egret_policy::seed_trino(&store)
             .await
             .map_err(anyhow::Error::from)?;
@@ -1163,7 +1163,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // module surfaces which engines/catalogs bind to a Ranger service.
     let control_plane = Some(egret_controlplane::CpState {
         storage: egret_catalog::CatalogStore::new(db.clone()),
-        authz: egret_policy::AuthzStore::new(db.clone()),
+        authz: egret_policy::PolicyStore::new(db.clone()),
         users: egret_auth::users::UserRepo::new(db.clone()),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
         roles: egret_auth::roles::RoleRepo::new(db.clone()),
@@ -1180,8 +1180,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
         storage: egret_catalog::CatalogStore::new(db.clone()),
         // Policy/Ranger seam behind its `PolicyPort` contract (E2a); the concrete
-        // in-process impl is the shared `AuthzStore`.
-        authz: std::sync::Arc::new(egret_policy::AuthzStore::new(db.clone())),
+        // in-process impl is the shared `PolicyStore`.
+        authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
         secrets: workspace_secrets.clone(),
         sessions: sessions.clone(),
         engine_provisioner,

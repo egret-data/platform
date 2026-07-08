@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use egret_catalog::CatalogError;
-use egret_policy::AuthzError;
+use egret_policy::PolicyStoreError;
 use egret_secrets::SecretsError;
 
 #[derive(Debug, thiserror::Error)]
@@ -75,13 +75,13 @@ impl From<SecretsError> for CpError {
     }
 }
 
-impl From<AuthzError> for CpError {
-    fn from(e: AuthzError) -> Self {
+impl From<PolicyStoreError> for CpError {
+    fn from(e: PolicyStoreError) -> Self {
         match e {
-            AuthzError::NotFound(_) => CpError::NotFound,
-            AuthzError::AlreadyExists(s) => CpError::AlreadyExists(s),
-            AuthzError::BadRequest(s) => CpError::BadRequest(s),
-            AuthzError::Db(_) | AuthzError::Json(_) => CpError::Internal,
+            PolicyStoreError::NotFound(_) => CpError::NotFound,
+            PolicyStoreError::AlreadyExists(s) => CpError::AlreadyExists(s),
+            PolicyStoreError::BadRequest(s) => CpError::BadRequest(s),
+            PolicyStoreError::Db(_) | PolicyStoreError::Json(_) => CpError::Internal,
         }
     }
 }

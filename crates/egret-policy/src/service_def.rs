@@ -1,4 +1,4 @@
-use crate::{AuthzError, AuthzStore};
+use crate::{PolicyStore, PolicyStoreError};
 use serde_json::Value;
 
 /// The official Trino Ranger service-def, embedded at compile time.
@@ -7,16 +7,16 @@ pub const TRINO_SERVICE_DEF_JSON: &str = include_str!("service-defs/trino.json")
 pub const TRINO_DEF_NAME: &str = "trino";
 
 /// Parse the embedded Trino service-def.
-pub fn trino_service_def() -> Result<Value, AuthzError> {
+pub fn trino_service_def() -> Result<Value, PolicyStoreError> {
     Ok(serde_json::from_str(TRINO_SERVICE_DEF_JSON)?)
 }
 
 /// Idempotently seed the Trino service-def into the store. Call at startup when ranger is enabled.
-pub async fn seed_trino(store: &AuthzStore) -> Result<(), AuthzError> {
+pub async fn seed_trino(store: &PolicyStore) -> Result<(), PolicyStoreError> {
     let def = trino_service_def()?;
     let id = def["id"]
         .as_i64()
-        .ok_or_else(|| AuthzError::BadRequest("trino def missing numeric id".into()))?;
+        .ok_or_else(|| PolicyStoreError::BadRequest("trino def missing numeric id".into()))?;
     let name = def["name"].as_str().unwrap_or(TRINO_DEF_NAME);
     store.upsert_service_def(id, name, &def).await
 }

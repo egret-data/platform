@@ -1,9 +1,9 @@
-use crate::AuthzError;
+use crate::PolicyStoreError;
 use egret_metastore::Db;
 use serde_json::Value;
 
 #[derive(Clone)]
-pub struct AuthzStore {
+pub struct PolicyStore {
     db: Db,
 }
 
@@ -24,7 +24,7 @@ pub struct ServiceRow {
     pub policy_version: i64,
 }
 
-impl AuthzStore {
+impl PolicyStore {
     pub fn new(db: Db) -> Self {
         Self { db }
     }
@@ -35,7 +35,7 @@ impl AuthzStore {
         id: i64,
         name: &str,
         def: &Value,
-    ) -> Result<(), AuthzError> {
+    ) -> Result<(), PolicyStoreError> {
         sqlx::query(
             r#"INSERT INTO policy.authz_service_defs (id, name, def_jsonb) VALUES ($1,$2,$3)
                ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, def_jsonb = EXCLUDED.def_jsonb"#,
@@ -48,17 +48,17 @@ impl AuthzStore {
         Ok(())
     }
 
-    pub async fn get_service_def(&self, name: &str) -> Result<ServiceDefRow, AuthzError> {
+    pub async fn get_service_def(&self, name: &str) -> Result<ServiceDefRow, PolicyStoreError> {
         sqlx::query_as::<_, ServiceDefRow>(
             r#"SELECT id, name, def_jsonb FROM policy.authz_service_defs WHERE name = $1"#,
         )
         .bind(name)
         .fetch_optional(&self.db.pool)
         .await?
-        .ok_or_else(|| AuthzError::NotFound(format!("service-def {name}")))
+        .ok_or_else(|| PolicyStoreError::NotFound(format!("service-def {name}")))
     }
 
-    pub async fn list_service_defs(&self) -> Result<Vec<ServiceDefRow>, AuthzError> {
+    pub async fn list_service_defs(&self) -> Result<Vec<ServiceDefRow>, PolicyStoreError> {
         Ok(sqlx::query_as::<_, ServiceDefRow>(
             r#"SELECT id, name, def_jsonb FROM policy.authz_service_defs ORDER BY name"#,
         )
@@ -71,7 +71,7 @@ impl AuthzStore {
         name: &str,
         typ: &str,
         config: &Value,
-    ) -> Result<ServiceRow, AuthzError> {
+    ) -> Result<ServiceRow, PolicyStoreError> {
         sqlx::query_as::<_, ServiceRow>(
             r#"INSERT INTO policy.authz_services (name, type, config_jsonb)
                VALUES ($1,$2,$3) RETURNING id, name, type, config_jsonb, policy_version"#,
@@ -83,23 +83,23 @@ impl AuthzStore {
         .await
         .map_err(|e| match &e {
             sqlx::Error::Database(d) if d.is_unique_violation() => {
-                AuthzError::AlreadyExists(name.into())
+                PolicyStoreError::AlreadyExists(name.into())
             }
-            _ => AuthzError::Db(e),
+            _ => PolicyStoreError::Db(e),
         })
     }
 
-    pub async fn get_service(&self, name: &str) -> Result<ServiceRow, AuthzError> {
+    pub async fn get_service(&self, name: &str) -> Result<ServiceRow, PolicyStoreError> {
         sqlx::query_as::<_, ServiceRow>(
             r#"SELECT id, name, type, config_jsonb, policy_version FROM policy.authz_services WHERE name = $1"#,
         )
         .bind(name)
         .fetch_optional(&self.db.pool)
         .await?
-        .ok_or_else(|| AuthzError::NotFound(format!("service {name}")))
+        .ok_or_else(|| PolicyStoreError::NotFound(format!("service {name}")))
     }
 
-    pub async fn list_services(&self) -> Result<Vec<ServiceRow>, AuthzError> {
+    pub async fn list_services(&self) -> Result<Vec<ServiceRow>, PolicyStoreError> {
         Ok(sqlx::query_as::<_, ServiceRow>(
             r#"SELECT id, name, type, config_jsonb, policy_version FROM policy.authz_services ORDER BY name"#,
         )
@@ -107,20 +107,22 @@ impl AuthzStore {
         .await?)
     }
 
-    pub async fn delete_service(&self, id: i64) -> Result<(), AuthzError> {
+    pub async fn delete_service(&self, id: i64) -> Result<(), PolicyStoreError> {
         let n = sqlx::query(r#"DELETE FROM policy.authz_services WHERE id = $1"#)
             .bind(id)
             .execute(&self.db.pool)
             .await?
             .rows_affected();
         if n == 0 {
-            return Err(AuthzError::NotFound(format!("service id {id}")));
+            return Err(PolicyStoreError::NotFound(format!("service id {id}")));
         }
         Ok(())
     }
 
     /// Total policy count per service (service_id -> count), for the profiles list.
-    pub async fn policy_counts(&self) -> Result<std::collections::HashMap<i64, i64>, AuthzError> {
+    pub async fn policy_counts(
+        &self,
+    ) -> Result<std::collections::HashMap<i64, i64>, PolicyStoreError> {
         let rows = sqlx::query_as::<_, (i64, i64)>(
             "SELECT service_id, count(*) FROM policy.authz_policies GROUP BY service_id",
         )
@@ -140,14 +142,14 @@ pub struct PolicyRow {
     pub version: i64,
 }
 
-impl AuthzStore {
+impl PolicyStore {
     /// Create a policy under a service and bump policy_version atomically. Returns the new policy id.
     pub async fn create_policy(
         &self,
         service_id: i64,
         name: &str,
         policy: &Value,
-    ) -> Result<i64, AuthzError> {
+    ) -> Result<i64, PolicyStoreError> {
         let mut tx = self.db.pool.begin().await?;
         let id: i64 = sqlx::query_scalar::<_, i64>(
             r#"INSERT INTO policy.authz_policies (service_id, name, policy_jsonb)
@@ -160,9 +162,9 @@ impl AuthzStore {
         .await
         .map_err(|e| match &e {
             sqlx::Error::Database(d) if d.is_unique_violation() => {
-                AuthzError::AlreadyExists(name.into())
+                PolicyStoreError::AlreadyExists(name.into())
             }
-            _ => AuthzError::Db(e),
+            _ => PolicyStoreError::Db(e),
         })?;
         sqlx::query(
             r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
@@ -180,7 +182,7 @@ impl AuthzStore {
         name: &str,
         policy: &Value,
         enabled: bool,
-    ) -> Result<(), AuthzError> {
+    ) -> Result<(), PolicyStoreError> {
         let mut tx = self.db.pool.begin().await?;
         let svc: Option<i64> = sqlx::query_scalar::<_, i64>(
             r#"SELECT service_id FROM policy.authz_policies WHERE id = $1"#,
@@ -190,7 +192,7 @@ impl AuthzStore {
         .await?;
         let Some(service_id) = svc else {
             tx.rollback().await?;
-            return Err(AuthzError::NotFound(format!("policy {id}")));
+            return Err(PolicyStoreError::NotFound(format!("policy {id}")));
         };
         sqlx::query(
             r#"UPDATE policy.authz_policies SET name=$2, policy_jsonb=$3, enabled=$4, version=version+1, updated_at=now() WHERE id=$1"#,
@@ -212,7 +214,7 @@ impl AuthzStore {
     }
 
     /// Flip a policy's enabled flag without rewriting its body; bumps versions.
-    pub async fn set_policy_enabled(&self, id: i64, enabled: bool) -> Result<(), AuthzError> {
+    pub async fn set_policy_enabled(&self, id: i64, enabled: bool) -> Result<(), PolicyStoreError> {
         let mut tx = self.db.pool.begin().await?;
         let svc: Option<i64> = sqlx::query_scalar::<_, i64>(
             r#"SELECT service_id FROM policy.authz_policies WHERE id = $1"#,
@@ -222,7 +224,7 @@ impl AuthzStore {
         .await?;
         let Some(service_id) = svc else {
             tx.rollback().await?;
-            return Err(AuthzError::NotFound(format!("policy id {id}")));
+            return Err(PolicyStoreError::NotFound(format!("policy id {id}")));
         };
         sqlx::query(
             r#"UPDATE policy.authz_policies SET enabled=$2, version=version+1, updated_at=now() WHERE id=$1"#,
@@ -241,7 +243,7 @@ impl AuthzStore {
         Ok(())
     }
 
-    pub async fn delete_policy(&self, id: i64) -> Result<(), AuthzError> {
+    pub async fn delete_policy(&self, id: i64) -> Result<(), PolicyStoreError> {
         let mut tx = self.db.pool.begin().await?;
         let svc: Option<i64> = sqlx::query_scalar::<_, i64>(
             r#"DELETE FROM policy.authz_policies WHERE id = $1 RETURNING service_id"#,
@@ -251,7 +253,7 @@ impl AuthzStore {
         .await?;
         let Some(service_id) = svc else {
             tx.rollback().await?;
-            return Err(AuthzError::NotFound(format!("policy {id}")));
+            return Err(PolicyStoreError::NotFound(format!("policy {id}")));
         };
         sqlx::query(
             r#"UPDATE policy.authz_services SET policy_version = policy_version + 1, updated_at = now() WHERE id = $1"#,
@@ -263,20 +265,20 @@ impl AuthzStore {
         Ok(())
     }
 
-    pub async fn get_policy(&self, id: i64) -> Result<PolicyRow, AuthzError> {
+    pub async fn get_policy(&self, id: i64) -> Result<PolicyRow, PolicyStoreError> {
         sqlx::query_as::<_, PolicyRow>(
             r#"SELECT id, service_id, name, policy_jsonb, enabled, version FROM policy.authz_policies WHERE id = $1"#,
         )
         .bind(id)
         .fetch_optional(&self.db.pool)
         .await?
-        .ok_or_else(|| AuthzError::NotFound(format!("policy {id}")))
+        .ok_or_else(|| PolicyStoreError::NotFound(format!("policy {id}")))
     }
 
     /// All policies for a service (enabled and disabled), newest first — the
     /// admin list view. Returns typed rows; unlike `enabled_policies_for_service`
     /// this does not inject id/version into the body (the caller/summary does that).
-    pub async fn list_policies(&self, service_id: i64) -> Result<Vec<PolicyRow>, AuthzError> {
+    pub async fn list_policies(&self, service_id: i64) -> Result<Vec<PolicyRow>, PolicyStoreError> {
         Ok(sqlx::query_as::<_, PolicyRow>(
             r#"SELECT id, service_id, name, policy_jsonb, enabled, version
                FROM policy.authz_policies WHERE service_id = $1 ORDER BY id DESC"#,
@@ -290,7 +292,7 @@ impl AuthzStore {
     pub async fn enabled_policies_for_service(
         &self,
         service_id: i64,
-    ) -> Result<Vec<Value>, AuthzError> {
+    ) -> Result<Vec<Value>, PolicyStoreError> {
         // Inject the DB-assigned numeric `id`, `version`, and `isEnabled` into each policy.
         // The Ranger policy engine NPEs on a policy whose `id` is null, and clients only send
         // these on the response/CRUD path — the stored body keeps the client's original JSON.

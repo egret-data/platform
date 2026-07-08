@@ -1,6 +1,6 @@
 use crate::ranger::error::RangerError;
 use crate::ranger::routes::RangerState;
-use crate::AuthzError;
+use crate::PolicyStoreError;
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -64,12 +64,12 @@ async fn create_service(
     State(s): State<RangerState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, RangerError> {
-    let name = body["name"]
-        .as_str()
-        .ok_or_else(|| RangerError::from(AuthzError::BadRequest("service.name required".into())))?;
-    let typ = body["type"]
-        .as_str()
-        .ok_or_else(|| RangerError::from(AuthzError::BadRequest("service.type required".into())))?;
+    let name = body["name"].as_str().ok_or_else(|| {
+        RangerError::from(PolicyStoreError::BadRequest("service.name required".into()))
+    })?;
+    let typ = body["type"].as_str().ok_or_else(|| {
+        RangerError::from(PolicyStoreError::BadRequest("service.type required".into()))
+    })?;
     let configs = body.get("configs").cloned().unwrap_or_else(|| json!({}));
     let row = s.store.create_service(name, typ, &configs).await?;
     Ok(Json(json!({
@@ -95,11 +95,13 @@ async fn create_policy(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, RangerError> {
     let service = body["service"].as_str().ok_or_else(|| {
-        RangerError::from(AuthzError::BadRequest("policy.service required".into()))
+        RangerError::from(PolicyStoreError::BadRequest(
+            "policy.service required".into(),
+        ))
     })?;
-    let name = body["name"]
-        .as_str()
-        .ok_or_else(|| RangerError::from(AuthzError::BadRequest("policy.name required".into())))?;
+    let name = body["name"].as_str().ok_or_else(|| {
+        RangerError::from(PolicyStoreError::BadRequest("policy.name required".into()))
+    })?;
     let svc = s.store.get_service(service).await?;
     let id = s.store.create_policy(svc.id, name, &body).await?;
     let mut out = body.clone();
@@ -122,9 +124,9 @@ async fn update_policy(
     Path(id): Path<i64>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, RangerError> {
-    let name = body["name"]
-        .as_str()
-        .ok_or_else(|| RangerError::from(AuthzError::BadRequest("policy.name required".into())))?;
+    let name = body["name"].as_str().ok_or_else(|| {
+        RangerError::from(PolicyStoreError::BadRequest("policy.name required".into()))
+    })?;
     let enabled = body
         .get("isEnabled")
         .and_then(Value::as_bool)

@@ -1,14 +1,14 @@
 //! DB-gated tests for `seed_default_trino_policies`. Self-skip without
 //! DATABASE_URL — do NOT point this at the live demo Postgres on :5432.
 use egret_metastore::Db;
-use egret_policy::AuthzStore;
+use egret_policy::PolicyStore;
 use serde_json::json;
 
-async fn store() -> Option<AuthzStore> {
+async fn store() -> Option<PolicyStore> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
-    Some(AuthzStore::new(db))
+    Some(PolicyStore::new(db))
 }
 fn uniq(p: &str) -> String {
     format!("{p}_{}", uuid::Uuid::new_v4().simple())

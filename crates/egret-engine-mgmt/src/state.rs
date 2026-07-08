@@ -15,7 +15,7 @@ pub struct EngineMgmtState {
     /// auto-wiring.
     pub storage: egret_catalog::CatalogStore,
     /// The Policy/Ranger seam, behind its contract `PolicyPort` (E2a) — cross-seam:
-    /// engine-create auto-bind to a Ranger profile. The concrete `AuthzStore` is
+    /// engine-create auto-bind to a Ranger profile. The concrete `PolicyStore` is
     /// wired in the composition root; at a real split an HTTP client fills this in.
     pub authz: Arc<dyn egret_policy_api::PolicyPort>,
     /// Named secret layer, used in GLOBAL scope (`None` workspace) here —

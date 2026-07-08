@@ -43,7 +43,7 @@ pub struct CpState {
     pub storage: CatalogStore,
     /// Shared Ranger policy store (`authz_*`), the same store the machine-facing
     /// `/service` router writes. Used by the read-only Policies endpoints.
-    pub authz: egret_policy::AuthzStore,
+    pub authz: egret_policy::PolicyStore,
     /// Identity lookups for the policy principal picker.
     pub users: egret_auth::users::UserRepo,
     pub groups: egret_auth::groups::GroupRepo,
@@ -63,7 +63,7 @@ pub struct CpState {
     /// listing surfaces which engines/catalogs are bound to a Ranger service,
     /// and `trino_config` needs egret's public URL to render the plugin config.
     /// Owned by the `egret-engine-mgmt` seam (E1c); read directly here, same
-    /// as `EngineMgmtState` reads `CatalogStore`/`AuthzStore` cross-seam.
+    /// as `EngineMgmtState` reads `CatalogStore`/`PolicyStore` cross-seam.
     pub engine_mgmt: egret_engine_mgmt::EngineMgmtStore,
     /// In-cluster URL Trino pods use to reach egret's REST catalog + token
     /// endpoint (e.g. `http://egret:8080`); populated from config in egret-bin.
