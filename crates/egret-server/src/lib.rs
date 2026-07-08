@@ -179,7 +179,10 @@ pub fn build_router(state: AppState) -> Router {
 
     if let Some(em) = state.engine_mgmt.clone() {
         let group = Router::new()
-            .nest("/api/control-plane", egret_engine_mgmt::engine_mgmt_router())
+            .nest(
+                "/api/control-plane",
+                egret_engine_mgmt::engine_mgmt_router(),
+            )
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
             .with_state(em);
         router = router.merge(group);

@@ -288,7 +288,12 @@ impl EngineProvisioningPort for FakeEnginePort {
 #[tokio::test]
 async fn monitor_queries_maps_list_and_maps_bad_gateway() {
     let fake = Arc::new(egret_orchestrator::kube_client::FakeKube::default());
-    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), Some(fake.clone())).await else {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(fake.clone()),
+    )
+    .await
+    else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -374,7 +379,12 @@ async fn monitor_queries_maps_list_and_maps_bad_gateway() {
 #[tokio::test]
 async fn test_catalog_reports_ok_error_and_non_2xx() {
     let fake = Arc::new(egret_orchestrator::kube_client::FakeKube::default());
-    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), Some(fake.clone())).await else {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(fake.clone()),
+    )
+    .await
+    else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -435,7 +445,8 @@ async fn test_catalog_reports_ok_error_and_non_2xx() {
     // A canned error body → ok:false + the error message surfaced verbatim.
     fake.set_coordinator_response(
         200,
-        br#"{"id":"q2","stats":{"state":"FAILED"},"error":{"message":"catalog not found"}}"#.to_vec(),
+        br#"{"id":"q2","stats":{"state":"FAILED"},"error":{"message":"catalog not found"}}"#
+            .to_vec(),
     );
     let resp = f
         .app
@@ -508,7 +519,14 @@ async fn test_catalog_reports_ok_error_and_non_2xx() {
 
 #[tokio::test]
 async fn create_and_get_engine() {
-    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), Some(Arc::new(egret_orchestrator::kube_client::FakeKube::default()))).await else {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -575,7 +593,14 @@ async fn create_and_get_engine() {
 
 #[tokio::test]
 async fn pod_logs_known_pod_ok_unknown_pod_404() {
-    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), Some(Arc::new(egret_orchestrator::kube_client::FakeKube::default()))).await else {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -658,7 +683,14 @@ async fn pod_logs_known_pod_ok_unknown_pod_404() {
 #[tokio::test]
 async fn restart_engine_calls_provisioner_unknown_404() {
     let fake = FakeEnginePort::default();
-    let Some(f) = setup_full(Some(Arc::new(fake.clone())), Some(Arc::new(egret_orchestrator::kube_client::FakeKube::default()))).await else {
+    let Some(f) = setup_full(
+        Some(Arc::new(fake.clone())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -735,7 +767,14 @@ async fn restart_engine_calls_provisioner_unknown_404() {
 
 #[tokio::test]
 async fn update_engine_per_role_trino_config_roundtrips() {
-    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), Some(Arc::new(egret_orchestrator::kube_client::FakeKube::default()))).await else {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -821,7 +860,6 @@ async fn update_engine_per_role_trino_config_roundtrips() {
 }
 
 /// Seed a global storage_connection with a resolvable secret_ref; returns its id.
-
 async fn seed_exchange_storage_conn(f: &Fixture) -> Uuid {
     let secrets = egret_secrets::WorkspaceSecretStore::new(
         f.db.clone(),
@@ -856,10 +894,16 @@ async fn seed_exchange_storage_conn(f: &Fixture) -> Uuid {
     id
 }
 
-
 #[tokio::test]
 async fn update_engine_resource_groups_and_fault_tolerant() {
-    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), Some(Arc::new(egret_orchestrator::kube_client::FakeKube::default()))).await else {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -982,7 +1026,6 @@ async fn update_engine_resource_groups_and_fault_tolerant() {
 }
 
 /// Create a global named secret holding `value`; returns its id.
-
 async fn seed_secret(f: &Fixture, value: &str) -> Uuid {
     let secrets = egret_secrets::WorkspaceSecretStore::new(
         f.db.clone(),
@@ -1002,10 +1045,16 @@ async fn seed_secret(f: &Fixture, value: &str) -> Uuid {
         .expect("create password secret")
 }
 
-
 #[tokio::test]
 async fn update_engine_auth_and_ingress() {
-    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), Some(Arc::new(egret_orchestrator::kube_client::FakeKube::default()))).await else {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1123,10 +1172,16 @@ async fn update_engine_auth_and_ingress() {
     );
 }
 
-
 #[tokio::test]
 async fn update_engine_pod_scheduling_roundtrips() {
-    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), Some(Arc::new(egret_orchestrator::kube_client::FakeKube::default()))).await else {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1217,10 +1272,16 @@ async fn update_engine_pod_scheduling_roundtrips() {
     );
 }
 
-
 #[tokio::test]
 async fn update_engine_autoscaling_roundtrips() {
-    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), Some(Arc::new(egret_orchestrator::kube_client::FakeKube::default()))).await else {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1342,10 +1403,16 @@ async fn update_engine_autoscaling_roundtrips() {
     );
 }
 
-
 #[tokio::test]
 async fn engine_catalog_routes() {
-    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), Some(Arc::new(egret_orchestrator::kube_client::FakeKube::default()))).await else {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1460,7 +1527,14 @@ async fn engine_catalog_routes() {
 /// must revoke that MINTED client, not the user's original one.
 #[tokio::test]
 async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
-    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), Some(Arc::new(egret_orchestrator::kube_client::FakeKube::default()))).await else {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1623,7 +1697,14 @@ async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
 /// warehouse) must 400, not silently fall back to the default role or 500.
 #[tokio::test]
 async fn add_catalog_with_foreign_client_id_400() {
-    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), Some(Arc::new(egret_orchestrator::kube_client::FakeKube::default()))).await else {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1724,7 +1805,14 @@ async fn add_catalog_with_foreign_client_id_400() {
 
 #[tokio::test]
 async fn create_engine_unprovisioned_warehouse_400() {
-    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), Some(Arc::new(egret_orchestrator::kube_client::FakeKube::default()))).await else {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1757,10 +1845,16 @@ async fn create_engine_unprovisioned_warehouse_400() {
     );
 }
 
-
 #[tokio::test]
 async fn scoped_permission_engines_read_and_create() {
-    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), Some(Arc::new(egret_orchestrator::kube_client::FakeKube::default()))).await else {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1834,7 +1928,12 @@ async fn scoped_permission_engines_read_and_create() {
 #[tokio::test]
 async fn scoped_permission_monitor_queries_and_cluster() {
     let fake = Arc::new(egret_orchestrator::kube_client::FakeKube::default());
-    let Some(f) = setup_full(Some(Arc::new(FakeEnginePort::default())), Some(fake.clone())).await else {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(fake.clone()),
+    )
+    .await
+    else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
@@ -1932,4 +2031,3 @@ async fn scoped_permission_monitor_queries_and_cluster() {
         "a scoped engine:read principal must fetch cluster state; body={body}"
     );
 }
-

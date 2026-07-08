@@ -1138,14 +1138,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             }
         }
     };
-    let engine_provisioner: Option<std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>> =
-        kube.clone().map(|kube| {
-            let trino = egret_orchestrator::TrinoProvisioner::new(kube.clone());
-            std::sync::Arc::new(EgretEngineProvisioningPort::new(
-                std::sync::Arc::new(trino),
-                kube,
-            )) as std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>
-        });
+    let engine_provisioner: Option<
+        std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>,
+    > = kube.clone().map(|kube| {
+        let trino = egret_orchestrator::TrinoProvisioner::new(kube.clone());
+        std::sync::Arc::new(EgretEngineProvisioningPort::new(
+            std::sync::Arc::new(trino),
+            kube,
+        )) as std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>
+    });
 
     // In-cluster URL Trino pods use to reach egret's REST catalog + token
     // endpoint; shared by the engine-mgmt seam (provisioning) and control-plane
