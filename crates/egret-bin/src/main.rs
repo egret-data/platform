@@ -357,7 +357,7 @@ fn catalog_ns_parts(seg: &str) -> Vec<String> {
 /// and everything in it; `table` covers only its exact table (plus, for reads,
 /// listing the namespace that holds it). Writes require `write`/`manage`.
 fn catalog_grant_covers(
-    g: &egret_catalog_engine::store::CatalogGrant,
+    g: &egret_catalog_engine::CatalogGrant,
     target_ns: Option<&[String]>,
     target_table: Option<&str>,
     is_write: bool,
@@ -1298,7 +1298,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
 #[cfg(test)]
 mod catalog_authz_tests {
     use super::{catalog_grant_covers, catalog_ns_parts};
-    use egret_catalog_engine::store::CatalogGrant;
+    use egret_catalog_engine::CatalogGrant;
     use uuid::Uuid;
 
     fn grant(sec: &str, ns: Option<&[&str]>, table: Option<&str>, privilege: &str) -> CatalogGrant {

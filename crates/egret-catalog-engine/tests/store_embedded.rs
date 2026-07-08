@@ -1,7 +1,7 @@
 //! Embedded-catalog RBAC store: warehouse → role → Catalog Client create + verify.
 mod common;
 
-use egret_catalog_engine::store::embedded::NewClient;
+use egret_catalog_engine::NewClient;
 use uuid::Uuid;
 
 #[tokio::test]

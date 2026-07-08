@@ -4,7 +4,7 @@
 //! `warehouse_id` FK now crosses the seam through `egret_catalog_engine::CatalogStore`
 //! (a dev-only dependency here), exactly like `create_engine`'s auto-wiring in
 //! control-plane. DB-gated; self-skips without `DATABASE_URL`.
-use egret_catalog_engine::store::CatalogStore;
+use egret_catalog_engine::CatalogStore;
 use egret_engine_mgmt::EngineMgmtStore;
 use egret_metastore::Db;
 use uuid::Uuid;

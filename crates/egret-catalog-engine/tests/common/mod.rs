@@ -3,7 +3,7 @@
 //! resulting dead_code warnings here so callers stay warning-free.
 #![allow(dead_code)]
 
-use egret_catalog_engine::store::CatalogStore;
+use egret_catalog_engine::CatalogStore;
 use egret_metastore::Db;
 use uuid::Uuid;
 

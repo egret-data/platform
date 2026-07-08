@@ -1561,7 +1561,7 @@ async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
         .await
         .expect("create role");
     let existing_client = catalog_store
-        .create_client(&egret_catalog_engine::store::embedded::NewClient {
+        .create_client(&egret_catalog_engine::NewClient {
             name: "pre-existing-client".into(),
             consumer_type: "external".into(),
             workspace_id: wh.workspace_id,
@@ -1726,7 +1726,7 @@ async fn add_catalog_with_foreign_client_id_400() {
         .await
         .expect("create role");
     let foreign_client = catalog_store
-        .create_client(&egret_catalog_engine::store::embedded::NewClient {
+        .create_client(&egret_catalog_engine::NewClient {
             name: "foreign-client".into(),
             consumer_type: "external".into(),
             workspace_id: other_wh.workspace_id,

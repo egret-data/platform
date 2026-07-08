@@ -10,10 +10,10 @@ pub mod embedded;
 pub mod error;
 /// `CatalogPort` (egret-catalog-api) impl over `CatalogStore` — the E3b seam
 /// boundary. Only trait/`From` impls; nothing to re-export.
+pub mod handle;
 mod port_impl;
-pub mod store;
 pub use embedded::{
     CatalogClient, CatalogGrant, CatalogRole, CreatedClient, GrantInput, NewClient, Warehouse,
 };
 pub use error::CatalogError;
-pub use store::CatalogStore;
+pub use handle::CatalogStore;

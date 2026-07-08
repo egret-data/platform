@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use rand::Rng as _;
 use uuid::Uuid;
 
-use super::store::CatalogStore;
+use super::handle::CatalogStore;
 
 // ── warehouses ───────────────────────────────────────────────────────────────
 

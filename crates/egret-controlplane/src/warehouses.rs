@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
-use egret_catalog_engine::store::embedded::{GrantInput, NewClient};
+use egret_catalog_engine::{GrantInput, NewClient};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -252,8 +252,8 @@ struct WarehouseDto {
     storage_conn_id: Uuid,
     lakekeeper_warehouse_id: Option<String>,
 }
-impl From<egret_catalog_engine::store::Warehouse> for WarehouseDto {
-    fn from(w: egret_catalog_engine::store::Warehouse) -> Self {
+impl From<egret_catalog_engine::Warehouse> for WarehouseDto {
+    fn from(w: egret_catalog_engine::Warehouse) -> Self {
         WarehouseDto {
             id: w.id,
             name: w.name,
@@ -385,8 +385,8 @@ struct RoleDto {
     consumer_type: String,
     description: Option<String>,
 }
-impl From<egret_catalog_engine::store::CatalogRole> for RoleDto {
-    fn from(r: egret_catalog_engine::store::CatalogRole) -> Self {
+impl From<egret_catalog_engine::CatalogRole> for RoleDto {
+    fn from(r: egret_catalog_engine::CatalogRole) -> Self {
         RoleDto {
             id: r.id,
             name: r.name,
