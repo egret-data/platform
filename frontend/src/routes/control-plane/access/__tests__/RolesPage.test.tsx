@@ -138,6 +138,29 @@ describe("RolesPage", () => {
     expect(new Set(keys)).toEqual(new Set(["catalog.read", "catalog.write"]));
   });
 
+  test("clicking the assignee count opens the assignees dialog and lists them", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getRoleAssignees).mockResolvedValue([
+      { kind: "user", name: "alice@example.com" },
+      { kind: "group", name: "Engineering" },
+    ]);
+
+    renderPage();
+    await screen.findByText("data_steward");
+
+    // data_steward has assigneeCount 1, so its count is a clickable control;
+    // custom_role has 0, so it stays a plain, non-interactive badge.
+    await user.click(screen.getByRole("button", { name: "View assignees of data_steward" }));
+    expect(
+      screen.queryByRole("button", { name: "View assignees of custom_role" }),
+    ).not.toBeInTheDocument();
+
+    await screen.findByRole("heading", { name: /Assignees — data_steward/i });
+    expect(await screen.findByText("alice@example.com")).toBeInTheDocument();
+    expect(screen.getByText("Engineering")).toBeInTheDocument();
+    expect(api.getRoleAssignees).toHaveBeenCalledWith("r1");
+  });
+
   test("platform_admin's checklist is shown read-only with a superuser note", async () => {
     vi.mocked(api.listRoles).mockResolvedValue([
       {
@@ -161,5 +184,11 @@ describe("RolesPage", () => {
 
     expect(screen.getByText(/Superuser — bypasses all permission checks/i)).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "catalog.read" })).toBeDisabled();
+  });
+
+  test("renders an empty state when there are no roles", async () => {
+    vi.mocked(api.listRoles).mockResolvedValue([]);
+    renderPage();
+    expect(await screen.findByText("No roles yet.")).toBeInTheDocument();
   });
 });

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, test, vi } from "vitest";
@@ -54,10 +54,30 @@ describe("UsersPage", () => {
     expect(await screen.findByText("alice@example.com")).toBeInTheDocument();
     expect(screen.getByText("bob@example.com")).toBeInTheDocument();
     expect(screen.getByText("Alice")).toBeInTheDocument();
-    expect(screen.getByText("Engineering")).toBeInTheDocument();
     expect(screen.getByText("Admin")).toBeInTheDocument();
     expect(screen.getByText("active")).toBeInTheDocument();
     expect(screen.getByText("disabled")).toBeInTheDocument();
+  });
+
+  test("renders a user's groups as chips in their own Groups column", async () => {
+    renderPage();
+    await screen.findByText("bob@example.com");
+
+    // Bob belongs to "Engineering"; the chip renders as its own column, no
+    // longer as a sub-line under the Name cell.
+    expect(screen.getByText("Engineering")).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Groups" })).toBeInTheDocument();
+
+    // Alice has no groups, so her Groups cell falls back to a dash.
+    const aliceRow = screen.getByText("alice@example.com").closest("tr");
+    expect(aliceRow).not.toBeNull();
+    expect(within(aliceRow as HTMLElement).getByText("—")).toBeInTheDocument();
+  });
+
+  test("renders an empty state when there are no users", async () => {
+    vi.mocked(api.listUsers).mockResolvedValue([]);
+    renderPage();
+    expect(await screen.findByText("No users yet.")).toBeInTheDocument();
   });
 
   test("New user dialog calls createUser with the entered fields", async () => {

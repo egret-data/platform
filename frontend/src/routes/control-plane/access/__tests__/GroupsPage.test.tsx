@@ -132,6 +132,24 @@ describe("GroupsPage", () => {
     await waitFor(() => expect(api.removeMember).toHaveBeenCalledWith("g1", "u1"));
   });
 
+  test("clicking the member count opens a read-only members dialog", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("Engineering");
+
+    await user.click(screen.getByRole("button", { name: "View members of Engineering" }));
+    await screen.findByRole("heading", { name: /Members — Engineering/i });
+
+    expect(await screen.findByText("alice@example.com")).toBeInTheDocument();
+    expect(api.getGroupMembers).toHaveBeenCalledWith("g1");
+  });
+
+  test("renders an empty state when there are no groups", async () => {
+    vi.mocked(api.listGroups).mockResolvedValue([]);
+    renderPage();
+    expect(await screen.findByText("No groups yet.")).toBeInTheDocument();
+  });
+
   test("an oidc group has rename, delete, and manage-members disabled but roles enabled", async () => {
     const user = userEvent.setup();
     renderPage();

@@ -53,7 +53,7 @@ import { TagCombobox } from "@/components/ui/tag-combobox";
 export const usersQueryKey = ["control-plane", "access", "users"] as const;
 const rolesQueryKey = ["control-plane", "access", "roles"] as const;
 
-const COLUMNS = ["Email", "Name", "Provider", "Status", "Roles", ""];
+const COLUMNS = ["Email", "Name", "Provider", "Status", "Roles", "Groups", ""];
 
 /**
  * Control Plane → Access control → Users.
@@ -115,14 +115,7 @@ export default function UsersPage() {
               {rows.map((u) => (
                 <TableRow key={u.id}>
                   <TableCell className="font-medium">{u.email}</TableCell>
-                  <TableCell>
-                    {u.name}
-                    {u.groups.length > 0 && (
-                      <div className="text-xs font-normal text-muted-foreground">
-                        {u.groups.join(", ")}
-                      </div>
-                    )}
-                  </TableCell>
+                  <TableCell>{u.name}</TableCell>
                   <TableCell>
                     <Badge variant="outline">{u.provider}</Badge>
                   </TableCell>
@@ -139,6 +132,19 @@ export default function UsersPage() {
                         {u.roles.map((r) => (
                           <Badge key={r} variant="secondary">
                             {r}
+                          </Badge>
+                        ))}
+                      </div>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {u.groups.length === 0 ? (
+                      <span className="text-muted-foreground">—</span>
+                    ) : (
+                      <div className="flex flex-wrap gap-1">
+                        {u.groups.map((g) => (
+                          <Badge key={g} variant="outline">
+                            {g}
                           </Badge>
                         ))}
                       </div>

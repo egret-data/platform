@@ -5,8 +5,10 @@ import { MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 import {
   type AccessRole,
   type PermissionCatalogGroup,
+  type RoleAssignee,
   createRole,
   deleteRole,
+  getRoleAssignees,
   listPermissions,
   listRoles,
   setRolePermissions,
@@ -99,6 +101,7 @@ export default function RolesPage() {
   const [editTarget, setEditTarget] = useState<AccessRole | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AccessRole | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [assigneesTarget, setAssigneesTarget] = useState<AccessRole | null>(null);
 
   const deleteMutation = useMutation<void, ApiError, string>({
     mutationFn: (id) => deleteRole(id),
@@ -178,7 +181,21 @@ export default function RolesPage() {
                       <Badge variant="secondary">{r.permissionCount}</Badge>
                     </TableCell>
                     <TableCell>
-                      <Badge variant="secondary">{r.assigneeCount}</Badge>
+                      {r.assigneeCount > 0 ? (
+                        <Button
+                          type="button"
+                          variant="link"
+                          className="h-auto p-0"
+                          aria-label={`View assignees of ${r.name}`}
+                          onClick={() => setAssigneesTarget(r)}
+                        >
+                          <Badge variant="secondary" className="cursor-pointer">
+                            {r.assigneeCount}
+                          </Badge>
+                        </Button>
+                      ) : (
+                        <Badge variant="secondary">{r.assigneeCount}</Badge>
+                      )}
                     </TableCell>
                     <TableCell className="text-right">
                       <DropdownMenu>
@@ -243,6 +260,12 @@ export default function RolesPage() {
         role={editTarget}
         onOpenChange={(o) => {
           if (!o) setEditTarget(null);
+        }}
+      />
+      <RoleAssigneesDialog
+        role={assigneesTarget}
+        onOpenChange={(o) => {
+          if (!o) setAssigneesTarget(null);
         }}
       />
 
@@ -547,6 +570,69 @@ function EditRoleDialog({
           </Button>
           <Button type="button" onClick={handleSave} disabled={saving}>
             Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Read-only drill-in listing who holds a role — users and groups, fetched
+ * from `GET /access/roles/{id}/assignees` only while the dialog is open.
+ */
+function RoleAssigneesDialog({
+  role,
+  onOpenChange,
+}: {
+  role: AccessRole | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const open = role !== null;
+  const assignees = useQuery<RoleAssignee[], ApiError>({
+    queryKey: ["control-plane", "access", "role-assignees", role?.id ?? ""],
+    queryFn: () => getRoleAssignees(role!.id),
+    enabled: open,
+    retry: false,
+  });
+  const rows = assignees.data ?? [];
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Assignees — {role?.name}</DialogTitle>
+          <DialogDescription>
+            Users and groups currently assigned this role.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="my-4 space-y-2">
+          {assignees.isLoading ? (
+            <p className="text-sm text-muted-foreground">Loading…</p>
+          ) : assignees.isError ? (
+            <p className="text-sm text-destructive">
+              {assignees.error?.message ?? "Failed to load assignees."}
+            </p>
+          ) : rows.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No assignees.</p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {rows.map((a, i) => (
+                <div key={`${a.kind}-${a.name}-${i}`} className="flex items-center gap-1.5">
+                  <Badge variant={a.kind === "user" ? "outline" : "secondary"}>
+                    {a.kind}
+                  </Badge>
+                  <span className="text-sm">{a.name}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            Close
           </Button>
         </DialogFooter>
       </DialogContent>

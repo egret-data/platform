@@ -35,6 +35,11 @@ export interface AccessRole {
   assigneeCount: number;
 }
 
+export interface RoleAssignee {
+  kind: "user" | "group";
+  name: string;
+}
+
 export interface PermissionCatalogGroup {
   group: string;
   permissions: { key: string; description: string; roles: string[] }[];
@@ -148,6 +153,10 @@ export function setRolePermissions(id: string, permissions: string[]): Promise<v
   return apiFetch(`/control-plane/access/roles/${encodeURIComponent(id)}/permissions`, {
     method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ permissions }),
   }).then(() => undefined);
+}
+
+export function getRoleAssignees(roleId: string): Promise<RoleAssignee[]> {
+  return apiJson<RoleAssignee[]>(`/control-plane/access/roles/${encodeURIComponent(roleId)}/assignees`);
 }
 
 // ── Permission catalog ──────────────────────────────────────────────────────

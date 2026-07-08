@@ -92,6 +92,7 @@ export default function GroupsPage() {
   const [rolesTarget, setRolesTarget] = useState<AccessGroup | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AccessGroup | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [viewMembersTarget, setViewMembersTarget] = useState<AccessGroup | null>(null);
 
   const deleteMutation = useMutation<void, ApiError, string>({
     mutationFn: (id) => deleteGroup(id),
@@ -162,7 +163,21 @@ export default function GroupsPage() {
                         </div>
                       )}
                     </TableCell>
-                    <TableCell>{g.memberCount}</TableCell>
+                    <TableCell>
+                      {g.memberCount > 0 ? (
+                        <Button
+                          type="button"
+                          variant="link"
+                          className="h-auto p-0"
+                          aria-label={`View members of ${g.name}`}
+                          onClick={() => setViewMembersTarget(g)}
+                        >
+                          {g.memberCount}
+                        </Button>
+                      ) : (
+                        g.memberCount
+                      )}
+                    </TableCell>
                     <TableCell>
                       {g.roles.length === 0 ? (
                         <span className="text-muted-foreground">—</span>
@@ -267,6 +282,12 @@ export default function GroupsPage() {
         group={rolesTarget}
         onOpenChange={(o) => {
           if (!o) setRolesTarget(null);
+        }}
+      />
+      <ViewMembersDialog
+        group={viewMembersTarget}
+        onOpenChange={(o) => {
+          if (!o) setViewMembersTarget(null);
         }}
       />
 
@@ -575,6 +596,66 @@ function ManageMembersDialog({
           </Button>
           <Button type="button" onClick={handleSave} disabled={saving}>
             Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Read-only drill-in listing a group's members (email + name), fetched via
+ * `getGroupMembers` only while the dialog is open. Editing membership is
+ * handled separately by `ManageMembersDialog`.
+ */
+function ViewMembersDialog({
+  group,
+  onOpenChange,
+}: {
+  group: AccessGroup | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const open = group !== null;
+  const members = useQuery<GroupMember[], ApiError>({
+    queryKey: groupMembersQueryKey(group?.id ?? ""),
+    queryFn: () => getGroupMembers(group!.id),
+    enabled: open,
+    retry: false,
+  });
+  const rows = members.data ?? [];
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Members — {group?.name}</DialogTitle>
+          <DialogDescription>Current members of this group.</DialogDescription>
+        </DialogHeader>
+
+        <div className="my-4 space-y-2">
+          {members.isLoading ? (
+            <p className="text-sm text-muted-foreground">Loading…</p>
+          ) : members.isError ? (
+            <p className="text-sm text-destructive">
+              {members.error?.message ?? "Failed to load members."}
+            </p>
+          ) : rows.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No members.</p>
+          ) : (
+            <ul className="space-y-1.5">
+              {rows.map((m) => (
+                <li key={m.id} className="flex items-center justify-between gap-2 text-sm">
+                  <span className="font-medium">{m.email}</span>
+                  <span className="text-muted-foreground">{m.name}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            Close
           </Button>
         </DialogFooter>
       </DialogContent>
