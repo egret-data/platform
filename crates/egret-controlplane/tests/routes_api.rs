@@ -281,7 +281,7 @@ impl egret_controlplane::WarehouseBrowser for FakeBrowser {
     async fn namespaces(
         &self,
         _wh: &str,
-    ) -> Result<Vec<egret_controlplane::BrowseNamespace>, String> {
+    ) -> Result<Vec<egret_controlplane::BrowseNamespace>, egret_catalog_engine::CatalogEngineError> {
         Ok(vec![egret_controlplane::BrowseNamespace {
             parts: vec!["analytics".into()],
             id: None,
@@ -292,7 +292,7 @@ impl egret_controlplane::WarehouseBrowser for FakeBrowser {
         &self,
         _wh: &str,
         _ns: &[String],
-    ) -> Result<Vec<egret_controlplane::BrowseTabular>, String> {
+    ) -> Result<Vec<egret_controlplane::BrowseTabular>, egret_catalog_engine::CatalogEngineError> {
         Ok(vec![egret_controlplane::BrowseTabular {
             name: "events".into(),
             kind: "table".into(),
@@ -305,7 +305,7 @@ impl egret_controlplane::WarehouseBrowser for FakeBrowser {
         _wh: &str,
         _ns: &[String],
         _t: &str,
-    ) -> Result<egret_controlplane::BrowseTableDetail, String> {
+    ) -> Result<egret_controlplane::BrowseTableDetail, egret_catalog_engine::CatalogEngineError> {
         Ok(egret_controlplane::BrowseTableDetail {
             location: "s3://bucket/t".into(),
             format_version: 2,
@@ -328,7 +328,7 @@ impl egret_controlplane::WarehouseBrowser for FakeBrowser {
         _wh: &str,
         _ns: &[String],
         _view: &str,
-    ) -> Result<Vec<egret_controlplane::BrowseColumn>, String> {
+    ) -> Result<Vec<egret_controlplane::BrowseColumn>, egret_catalog_engine::CatalogEngineError> {
         Ok(vec![egret_controlplane::BrowseColumn {
             name: "id".into(),
             type_: "long".into(),
@@ -338,10 +338,10 @@ impl egret_controlplane::WarehouseBrowser for FakeBrowser {
     async fn deleted_tabulars(
         &self,
         _wh: &str,
-    ) -> Result<Vec<egret_controlplane::BrowseDeletedTabular>, String> {
+    ) -> Result<Vec<egret_controlplane::BrowseDeletedTabular>, egret_catalog_engine::CatalogEngineError> {
         Ok(vec![])
     }
-    async fn undrop(&self, _wh: &str, _kind: &str, _id: uuid::Uuid) -> Result<(), String> {
+    async fn undrop(&self, _wh: &str, _kind: &str, _id: uuid::Uuid) -> Result<(), egret_catalog_engine::CatalogEngineError> {
         Ok(())
     }
     async fn set_protection(
@@ -350,10 +350,10 @@ impl egret_controlplane::WarehouseBrowser for FakeBrowser {
         _target: &str,
         _id: uuid::Uuid,
         protected: bool,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, egret_catalog_engine::CatalogEngineError> {
         Ok(protected)
     }
-    async fn config(&self, _wh: &str) -> Result<egret_controlplane::BrowseWarehouseConfig, String> {
+    async fn config(&self, _wh: &str) -> Result<egret_controlplane::BrowseWarehouseConfig, egret_catalog_engine::CatalogEngineError> {
         Ok(egret_controlplane::BrowseWarehouseConfig {
             active: true,
             delete_profile_seconds: Some(604800),
@@ -362,13 +362,13 @@ impl egret_controlplane::WarehouseBrowser for FakeBrowser {
             stats_updated_ms: 0,
         })
     }
-    async fn set_active(&self, _wh: &str, _active: bool) -> Result<(), String> {
+    async fn set_active(&self, _wh: &str, _active: bool) -> Result<(), egret_catalog_engine::CatalogEngineError> {
         Ok(())
     }
-    async fn set_delete_profile(&self, _wh: &str, _seconds: Option<i64>) -> Result<(), String> {
+    async fn set_delete_profile(&self, _wh: &str, _seconds: Option<i64>) -> Result<(), egret_catalog_engine::CatalogEngineError> {
         Ok(())
     }
-    async fn set_format_versions(&self, _wh: &str, _versions: Vec<u8>) -> Result<(), String> {
+    async fn set_format_versions(&self, _wh: &str, _versions: Vec<u8>) -> Result<(), egret_catalog_engine::CatalogEngineError> {
         Ok(())
     }
     async fn rotate_credential(
@@ -376,17 +376,17 @@ impl egret_controlplane::WarehouseBrowser for FakeBrowser {
         _wh: &str,
         _access_key: &str,
         _secret_key: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), egret_catalog_engine::CatalogEngineError> {
         Ok(())
     }
     async fn search(
         &self,
         _wh: &str,
         _query: &str,
-    ) -> Result<Vec<egret_controlplane::BrowseSearchResult>, String> {
+    ) -> Result<Vec<egret_controlplane::BrowseSearchResult>, egret_catalog_engine::CatalogEngineError> {
         Ok(vec![])
     }
-    async fn tasks(&self, _wh: &str) -> Result<Vec<egret_controlplane::BrowseTask>, String> {
+    async fn tasks(&self, _wh: &str) -> Result<Vec<egret_controlplane::BrowseTask>, egret_catalog_engine::CatalogEngineError> {
         Ok(vec![])
     }
 }

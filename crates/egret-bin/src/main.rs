@@ -404,7 +404,7 @@ impl egret_controlplane::WarehouseProvisioner for LakekeeperProvisioner {
         &self,
         name: &str,
         s3: &egret_controlplane::ProvisionS3,
-    ) -> Result<String, String> {
+    ) -> Result<String, egret_catalog_engine::CatalogEngineError> {
         let cfg = egret_catalog_engine::S3StorageConfig {
             bucket: s3.bucket.clone(),
             region: s3.region.clone(),
@@ -421,7 +421,6 @@ impl egret_controlplane::WarehouseProvisioner for LakekeeperProvisioner {
             &cfg,
         )
         .await
-        .map_err(|e| e.to_string())
     }
 }
 
@@ -511,7 +510,8 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
     async fn namespaces(
         &self,
         wh: &str,
-    ) -> Result<Vec<egret_controlplane::BrowseNamespace>, String> {
+    ) -> Result<Vec<egret_controlplane::BrowseNamespace>, egret_catalog_engine::CatalogEngineError>
+    {
         egret_catalog_engine::list_namespaces(self.engine_state.clone(), &self.system_user, wh)
             .await
             .map(|v| {
@@ -523,14 +523,14 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
                     })
                     .collect()
             })
-            .map_err(|e| e.to_string())
     }
 
     async fn tabulars(
         &self,
         wh: &str,
         ns: &[String],
-    ) -> Result<Vec<egret_controlplane::BrowseTabular>, String> {
+    ) -> Result<Vec<egret_controlplane::BrowseTabular>, egret_catalog_engine::CatalogEngineError>
+    {
         egret_catalog_engine::list_tabulars(self.engine_state.clone(), &self.system_user, wh, ns)
             .await
             .map(|v| {
@@ -547,7 +547,6 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
                     })
                     .collect()
             })
-            .map_err(|e| e.to_string())
     }
 
     async fn schema(
@@ -555,7 +554,8 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
         wh: &str,
         ns: &[String],
         table: &str,
-    ) -> Result<egret_controlplane::BrowseTableDetail, String> {
+    ) -> Result<egret_controlplane::BrowseTableDetail, egret_catalog_engine::CatalogEngineError>
+    {
         egret_catalog_engine::load_table_detail(
             self.engine_state.clone(),
             &self.system_user,
@@ -611,7 +611,6 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
                 })
                 .collect(),
         })
-        .map_err(|e| e.to_string())
     }
 
     async fn view_columns(
@@ -619,7 +618,8 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
         wh: &str,
         ns: &[String],
         view: &str,
-    ) -> Result<Vec<egret_controlplane::BrowseColumn>, String> {
+    ) -> Result<Vec<egret_controlplane::BrowseColumn>, egret_catalog_engine::CatalogEngineError>
+    {
         egret_catalog_engine::load_view_detail(
             self.engine_state.clone(),
             &self.system_user,
@@ -637,13 +637,15 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
                 })
                 .collect()
         })
-        .map_err(|e| e.to_string())
     }
 
     async fn deleted_tabulars(
         &self,
         wh: &str,
-    ) -> Result<Vec<egret_controlplane::BrowseDeletedTabular>, String> {
+    ) -> Result<
+        Vec<egret_controlplane::BrowseDeletedTabular>,
+        egret_catalog_engine::CatalogEngineError,
+    > {
         egret_catalog_engine::list_deleted_tabulars(
             self.engine_state.clone(),
             &self.system_user,
@@ -666,10 +668,14 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
                 })
                 .collect()
         })
-        .map_err(|e| e.to_string())
     }
 
-    async fn undrop(&self, wh: &str, kind: &str, id: uuid::Uuid) -> Result<(), String> {
+    async fn undrop(
+        &self,
+        wh: &str,
+        kind: &str,
+        id: uuid::Uuid,
+    ) -> Result<(), egret_catalog_engine::CatalogEngineError> {
         let k = match kind {
             "view" => egret_catalog_engine::TabularKindName::View,
             _ => egret_catalog_engine::TabularKindName::Table,
@@ -682,7 +688,6 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             id,
         )
         .await
-        .map_err(|e| e.to_string())
     }
 
     async fn set_protection(
@@ -691,7 +696,7 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
         target: &str,
         id: uuid::Uuid,
         protected: bool,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, egret_catalog_engine::CatalogEngineError> {
         let t = match target {
             "namespace" => egret_catalog_engine::ProtectTarget::Namespace,
             "view" => egret_catalog_engine::ProtectTarget::View,
@@ -706,10 +711,13 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             protected,
         )
         .await
-        .map_err(|e| e.to_string())
     }
 
-    async fn config(&self, wh: &str) -> Result<egret_controlplane::BrowseWarehouseConfig, String> {
+    async fn config(
+        &self,
+        wh: &str,
+    ) -> Result<egret_controlplane::BrowseWarehouseConfig, egret_catalog_engine::CatalogEngineError>
+    {
         egret_catalog_engine::get_warehouse_config(self.engine_state.clone(), &self.system_user, wh)
             .await
             .map(|c| egret_controlplane::BrowseWarehouseConfig {
@@ -719,10 +727,13 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
                 num_views: c.num_views,
                 stats_updated_ms: c.stats_updated_ms,
             })
-            .map_err(|e| e.to_string())
     }
 
-    async fn set_active(&self, wh: &str, active: bool) -> Result<(), String> {
+    async fn set_active(
+        &self,
+        wh: &str,
+        active: bool,
+    ) -> Result<(), egret_catalog_engine::CatalogEngineError> {
         egret_catalog_engine::set_warehouse_active(
             self.engine_state.clone(),
             &self.system_user,
@@ -730,10 +741,13 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             active,
         )
         .await
-        .map_err(|e| e.to_string())
     }
 
-    async fn set_delete_profile(&self, wh: &str, seconds: Option<i64>) -> Result<(), String> {
+    async fn set_delete_profile(
+        &self,
+        wh: &str,
+        seconds: Option<i64>,
+    ) -> Result<(), egret_catalog_engine::CatalogEngineError> {
         egret_catalog_engine::set_delete_profile(
             self.engine_state.clone(),
             &self.system_user,
@@ -741,10 +755,13 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             seconds,
         )
         .await
-        .map_err(|e| e.to_string())
     }
 
-    async fn set_format_versions(&self, wh: &str, versions: Vec<u8>) -> Result<(), String> {
+    async fn set_format_versions(
+        &self,
+        wh: &str,
+        versions: Vec<u8>,
+    ) -> Result<(), egret_catalog_engine::CatalogEngineError> {
         egret_catalog_engine::set_format_versions(
             self.engine_state.clone(),
             &self.system_user,
@@ -752,7 +769,6 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             &versions,
         )
         .await
-        .map_err(|e| e.to_string())
     }
 
     async fn rotate_credential(
@@ -760,7 +776,7 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
         wh: &str,
         access_key: &str,
         secret_key: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), egret_catalog_engine::CatalogEngineError> {
         egret_catalog_engine::rotate_storage_credential(
             self.engine_state.clone(),
             &self.system_user,
@@ -769,14 +785,14 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             secret_key,
         )
         .await
-        .map_err(|e| e.to_string())
     }
 
     async fn search(
         &self,
         wh: &str,
         query: &str,
-    ) -> Result<Vec<egret_controlplane::BrowseSearchResult>, String> {
+    ) -> Result<Vec<egret_controlplane::BrowseSearchResult>, egret_catalog_engine::CatalogEngineError>
+    {
         egret_catalog_engine::search_tabulars(
             self.engine_state.clone(),
             &self.system_user,
@@ -793,10 +809,12 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
                 })
                 .collect()
         })
-        .map_err(|e| e.to_string())
     }
 
-    async fn tasks(&self, wh: &str) -> Result<Vec<egret_controlplane::BrowseTask>, String> {
+    async fn tasks(
+        &self,
+        wh: &str,
+    ) -> Result<Vec<egret_controlplane::BrowseTask>, egret_catalog_engine::CatalogEngineError> {
         egret_catalog_engine::list_tasks(self.engine_state.clone(), &self.system_user, wh)
             .await
             .map(|v| {
@@ -808,7 +826,6 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
                     })
                     .collect()
             })
-            .map_err(|e| e.to_string())
     }
 }
 

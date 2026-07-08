@@ -12,6 +12,7 @@ use lakekeeper::service::storage::{StorageCredential, StorageProfile};
 use lakekeeper_storage_postgres::{PostgresBackend, SecretsState};
 
 use crate::bootstrap::system_request_metadata;
+use crate::error::CatalogEngineError;
 use crate::mount::EngineState;
 
 type EngineApiServer =
@@ -38,7 +39,7 @@ pub async fn create_lakekeeper_warehouse(
     system_user: &str,
     name: &str,
     s3: &S3StorageConfig,
-) -> anyhow::Result<String> {
+) -> Result<String, CatalogEngineError> {
     let metadata = system_request_metadata(system_user)?;
 
     // Build the storage profile + credential from JSON (the documented wire
@@ -87,7 +88,7 @@ pub async fn create_lakekeeper_warehouse(
         SecretsState,
     >>::create_warehouse(request, engine_state, metadata)
     .await
-    .map_err(|e| anyhow::anyhow!("lakekeeper create_warehouse: {e:?}"))?;
+    .map_err(|e| CatalogEngineError::from_lakekeeper("lakekeeper create_warehouse", e))?;
 
     Ok(response.warehouse_id().to_string())
 }

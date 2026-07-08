@@ -6,7 +6,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use egret_catalog_engine::CatalogError;
+use egret_catalog_engine::{CatalogEngineError, CatalogError};
 use egret_secrets::SecretsError;
 
 #[derive(Debug, thiserror::Error)]
@@ -47,6 +47,21 @@ impl From<CatalogError> for CpError {
             ),
             CatalogError::BadRequest(s) => CpError::BadRequest(s),
             CatalogError::Db(_) => CpError::Internal,
+        }
+    }
+}
+
+/// The engine-level domain error from the per-request warehouse/browse
+/// operations (E3d-2). Carries lakekeeper's own status classification through to
+/// the right HTTP code instead of the pre-E3d-2 opaque 500.
+impl From<CatalogEngineError> for CpError {
+    fn from(e: CatalogEngineError) -> Self {
+        match e {
+            CatalogEngineError::NotFound(_) => CpError::NotFound,
+            CatalogEngineError::BadRequest(s) => CpError::BadRequest(s),
+            CatalogEngineError::Conflict(s) => CpError::Conflict(s),
+            CatalogEngineError::Upstream(_) => CpError::BadGateway,
+            CatalogEngineError::Internal(_) => CpError::Internal,
         }
     }
 }

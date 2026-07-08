@@ -13,6 +13,9 @@
 pub mod admin;
 pub mod bootstrap;
 pub mod browse;
+/// Crate-level engine domain error ([`CatalogEngineError`]) for the per-request
+/// warehouse/browse operations — distinct from the store's [`CatalogError`].
+pub mod error;
 pub mod mount;
 pub mod pool;
 pub mod recovery;
@@ -38,6 +41,7 @@ pub use browse::{
     NamespaceEntry, PartitionField, SnapshotInfo, SortField, TableDetail, TabularEntry,
     TabularKind,
 };
+pub use error::CatalogEngineError;
 pub use lakekeeper::api::ApiContext;
 /// lakekeeper's built-in open authorizer. EB-1 mounts the engine with this
 /// permissive authorizer; EB-3 replaces it with the real egret authorizer.

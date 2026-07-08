@@ -4,6 +4,7 @@
 //! storage credential. System principal, like `browse`/`recovery`.
 
 use crate::bootstrap::system_request_metadata;
+use crate::error::CatalogEngineError;
 use crate::mount::EngineState;
 use anyhow::Context as _;
 use lakekeeper::api::iceberg::types::PageToken;
@@ -33,10 +34,10 @@ pub struct WarehouseConfig {
     pub stats_updated_ms: i64,
 }
 
-fn wh(warehouse_id: &str) -> anyhow::Result<WarehouseId> {
-    let uuid: Uuid = warehouse_id
-        .parse()
-        .context("lakekeeper warehouse id is not a UUID")?;
+fn wh(warehouse_id: &str) -> Result<WarehouseId, CatalogEngineError> {
+    let uuid: Uuid = warehouse_id.parse().map_err(|_| {
+        CatalogEngineError::BadRequest("lakekeeper warehouse id is not a UUID".into())
+    })?;
     Ok(WarehouseId::from(uuid))
 }
 
@@ -45,7 +46,7 @@ pub async fn get_warehouse_config(
     engine_state: ApiContext<EngineState>,
     system_user: &str,
     warehouse_id: &str,
-) -> anyhow::Result<WarehouseConfig> {
+) -> Result<WarehouseConfig, CatalogEngineError> {
     let wid = wh(warehouse_id)?;
     let rm = system_request_metadata(system_user).context("system metadata")?;
     let info = <EngineApiServer as WarehouseMgmtService<_, _, _>>::get_warehouse(
@@ -54,7 +55,7 @@ pub async fn get_warehouse_config(
         rm,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("get_warehouse: {e:?}"))?;
+    .map_err(|e| CatalogEngineError::from_lakekeeper("get_warehouse", e))?;
 
     let rm = system_request_metadata(system_user).context("system metadata")?;
     let stats = <EngineApiServer as WarehouseMgmtService<_, _, _>>::get_warehouse_statistics(
@@ -67,7 +68,7 @@ pub async fn get_warehouse_config(
         rm,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("get_warehouse_statistics: {e:?}"))?;
+    .map_err(|e| CatalogEngineError::from_lakekeeper("get_warehouse_statistics", e))?;
     let latest = stats.stats.first();
 
     Ok(WarehouseConfig {
@@ -90,7 +91,7 @@ pub async fn set_warehouse_active(
     system_user: &str,
     warehouse_id: &str,
     active: bool,
-) -> anyhow::Result<()> {
+) -> Result<(), CatalogEngineError> {
     let wid = wh(warehouse_id)?;
     let rm = system_request_metadata(system_user).context("system metadata")?;
     if active {
@@ -100,7 +101,7 @@ pub async fn set_warehouse_active(
             rm,
         )
         .await
-        .map_err(|e| anyhow::anyhow!("activate_warehouse: {e:?}"))?;
+        .map_err(|e| CatalogEngineError::from_lakekeeper("activate_warehouse", e))?;
     } else {
         <EngineApiServer as WarehouseMgmtService<_, _, _>>::deactivate_warehouse(
             wid,
@@ -108,7 +109,7 @@ pub async fn set_warehouse_active(
             rm,
         )
         .await
-        .map_err(|e| anyhow::anyhow!("deactivate_warehouse: {e:?}"))?;
+        .map_err(|e| CatalogEngineError::from_lakekeeper("deactivate_warehouse", e))?;
     }
     Ok(())
 }
@@ -119,7 +120,7 @@ pub async fn set_delete_profile(
     system_user: &str,
     warehouse_id: &str,
     seconds: Option<i64>,
-) -> anyhow::Result<()> {
+) -> Result<(), CatalogEngineError> {
     let delete_profile = match seconds {
         Some(s) => TabularDeleteProfile::Soft {
             expiration_seconds: chrono::Duration::seconds(s),
@@ -134,7 +135,7 @@ pub async fn set_delete_profile(
         rm,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("update_warehouse_delete_profile: {e:?}"))?;
+    .map_err(|e| CatalogEngineError::from_lakekeeper("update_warehouse_delete_profile", e))?;
     Ok(())
 }
 
@@ -144,7 +145,7 @@ pub async fn set_format_versions(
     system_user: &str,
     warehouse_id: &str,
     versions: &[u8],
-) -> anyhow::Result<()> {
+) -> Result<(), CatalogEngineError> {
     // Build the whole request via serde (ints -> FormatVersion) to avoid coupling
     // to the enum variants; default to the highest allowed version.
     let default = versions.iter().copied().max().unwrap_or(2);
@@ -162,7 +163,9 @@ pub async fn set_format_versions(
         rm,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("update_warehouse_format_version_policy: {e:?}"))?;
+    .map_err(|e| {
+        CatalogEngineError::from_lakekeeper("update_warehouse_format_version_policy", e)
+    })?;
     Ok(())
 }
 
@@ -173,7 +176,7 @@ pub async fn rotate_storage_credential(
     warehouse_id: &str,
     access_key: &str,
     secret_key: &str,
-) -> anyhow::Result<()> {
+) -> Result<(), CatalogEngineError> {
     let cred: StorageCredential = serde_json::from_value(serde_json::json!({
         "type": "s3",
         "credential-type": "access-key",
@@ -191,7 +194,7 @@ pub async fn rotate_storage_credential(
         rm,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("update_storage_credential: {e:?}"))?;
+    .map_err(|e| CatalogEngineError::from_lakekeeper("update_storage_credential", e))?;
     Ok(())
 }
 
@@ -208,7 +211,7 @@ pub async fn search_tabulars(
     system_user: &str,
     warehouse_id: &str,
     query: &str,
-) -> anyhow::Result<Vec<SearchResult>> {
+) -> Result<Vec<SearchResult>, CatalogEngineError> {
     use lakekeeper::api::management::v1::tabular::{
         SearchTabularRequest, TabularManagementService,
     };
@@ -223,7 +226,7 @@ pub async fn search_tabulars(
         },
     )
     .await
-    .map_err(|e| anyhow::anyhow!("search_tabular: {e:?}"))?;
+    .map_err(|e| CatalogEngineError::from_lakekeeper("search_tabular", e))?;
     Ok(resp
         .tabulars
         .into_iter()
@@ -250,7 +253,7 @@ pub async fn list_tasks(
     engine_state: ApiContext<EngineState>,
     system_user: &str,
     warehouse_id: &str,
-) -> anyhow::Result<Vec<TaskInfo>> {
+) -> Result<Vec<TaskInfo>, CatalogEngineError> {
     use lakekeeper::api::management::v1::tasks::{ListTasksRequest, Service as TasksMgmtService};
     let request: ListTasksRequest =
         serde_json::from_value(serde_json::json!({})).context("list tasks request")?;
@@ -262,7 +265,7 @@ pub async fn list_tasks(
         rm,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("list_tasks: {e:?}"))?;
+    .map_err(|e| CatalogEngineError::from_lakekeeper("list_tasks", e))?;
     Ok(resp
         .tasks
         .into_iter()

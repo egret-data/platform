@@ -34,7 +34,11 @@ pub struct ProvisionS3 {
 /// the lakekeeper `ApiContext`. Returns the lakekeeper warehouse id, or an error.
 #[async_trait::async_trait]
 pub trait WarehouseProvisioner: Send + Sync {
-    async fn provision(&self, name: &str, s3: &ProvisionS3) -> Result<String, String>;
+    async fn provision(
+        &self,
+        name: &str,
+        s3: &ProvisionS3,
+    ) -> Result<String, egret_catalog_engine::CatalogEngineError>;
 }
 
 /// Catalog browse result rows (control-plane DTOs; camelCase on the wire).
@@ -103,37 +107,37 @@ pub trait WarehouseBrowser: Send + Sync {
     async fn namespaces(
         &self,
         lakekeeper_warehouse_id: &str,
-    ) -> Result<Vec<BrowseNamespace>, String>;
+    ) -> Result<Vec<BrowseNamespace>, egret_catalog_engine::CatalogEngineError>;
     async fn tabulars(
         &self,
         lakekeeper_warehouse_id: &str,
         namespace: &[String],
-    ) -> Result<Vec<BrowseTabular>, String>;
+    ) -> Result<Vec<BrowseTabular>, egret_catalog_engine::CatalogEngineError>;
     async fn schema(
         &self,
         lakekeeper_warehouse_id: &str,
         namespace: &[String],
         table: &str,
-    ) -> Result<BrowseTableDetail, String>;
+    ) -> Result<BrowseTableDetail, egret_catalog_engine::CatalogEngineError>;
     /// Current-schema columns of a view.
     async fn view_columns(
         &self,
         lakekeeper_warehouse_id: &str,
         namespace: &[String],
         view: &str,
-    ) -> Result<Vec<BrowseColumn>, String>;
+    ) -> Result<Vec<BrowseColumn>, egret_catalog_engine::CatalogEngineError>;
     /// Soft-deleted tables/views awaiting purge.
     async fn deleted_tabulars(
         &self,
         lakekeeper_warehouse_id: &str,
-    ) -> Result<Vec<BrowseDeletedTabular>, String>;
+    ) -> Result<Vec<BrowseDeletedTabular>, egret_catalog_engine::CatalogEngineError>;
     /// Recover a soft-deleted table (`kind`="table") or view (`kind`="view").
     async fn undrop(
         &self,
         lakekeeper_warehouse_id: &str,
         kind: &str,
         id: uuid::Uuid,
-    ) -> Result<(), String>;
+    ) -> Result<(), egret_catalog_engine::CatalogEngineError>;
     /// Set the protected flag on a `target` ("table"/"view"/"namespace") by id.
     async fn set_protection(
         &self,
@@ -141,38 +145,48 @@ pub trait WarehouseBrowser: Send + Sync {
         target: &str,
         id: uuid::Uuid,
         protected: bool,
-    ) -> Result<bool, String>;
+    ) -> Result<bool, egret_catalog_engine::CatalogEngineError>;
     /// Read the warehouse's admin config (status / soft-delete TTL / statistics).
-    async fn config(&self, lakekeeper_warehouse_id: &str) -> Result<BrowseWarehouseConfig, String>;
+    async fn config(
+        &self,
+        lakekeeper_warehouse_id: &str,
+    ) -> Result<BrowseWarehouseConfig, egret_catalog_engine::CatalogEngineError>;
     /// Activate/deactivate the warehouse.
-    async fn set_active(&self, lakekeeper_warehouse_id: &str, active: bool) -> Result<(), String>;
+    async fn set_active(
+        &self,
+        lakekeeper_warehouse_id: &str,
+        active: bool,
+    ) -> Result<(), egret_catalog_engine::CatalogEngineError>;
     /// Set soft-delete retention (`Some(seconds)`) or hard delete (`None`).
     async fn set_delete_profile(
         &self,
         lakekeeper_warehouse_id: &str,
         seconds: Option<i64>,
-    ) -> Result<(), String>;
+    ) -> Result<(), egret_catalog_engine::CatalogEngineError>;
     /// Set the allowed Iceberg format versions.
     async fn set_format_versions(
         &self,
         lakekeeper_warehouse_id: &str,
         versions: Vec<u8>,
-    ) -> Result<(), String>;
+    ) -> Result<(), egret_catalog_engine::CatalogEngineError>;
     /// Rotate the S3 access-key credential.
     async fn rotate_credential(
         &self,
         lakekeeper_warehouse_id: &str,
         access_key: &str,
         secret_key: &str,
-    ) -> Result<(), String>;
+    ) -> Result<(), egret_catalog_engine::CatalogEngineError>;
     /// Search tables/views across the warehouse by name.
     async fn search(
         &self,
         lakekeeper_warehouse_id: &str,
         query: &str,
-    ) -> Result<Vec<BrowseSearchResult>, String>;
+    ) -> Result<Vec<BrowseSearchResult>, egret_catalog_engine::CatalogEngineError>;
     /// List recent background (GC) tasks on the warehouse.
-    async fn tasks(&self, lakekeeper_warehouse_id: &str) -> Result<Vec<BrowseTask>, String>;
+    async fn tasks(
+        &self,
+        lakekeeper_warehouse_id: &str,
+    ) -> Result<Vec<BrowseTask>, egret_catalog_engine::CatalogEngineError>;
 }
 
 /// Warehouse admin config (status / soft-delete TTL / latest statistics).
@@ -348,9 +362,7 @@ async fn provision_lakekeeper(
         secret_key,
         key_prefix: sc.key_prefix,
     };
-    prov.provision(name, &s3)
-        .await
-        .map_err(|e| CpError::BadRequest(format!("warehouse provisioning failed: {e}")))
+    prov.provision(name, &s3).await.map_err(CpError::from)
 }
 
 async fn get_warehouse(
@@ -705,10 +717,7 @@ async fn browse_namespaces(
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
     };
-    let ns = b
-        .namespaces(&lk)
-        .await
-        .map_err(|e| CpError::BadRequest(format!("browse: {e}")))?;
+    let ns = b.namespaces(&lk).await?;
     Ok(Json(
         ns.into_iter()
             .map(|n| NamespaceDto {
@@ -729,10 +738,7 @@ async fn browse_tables(
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
     };
-    let tabulars = b
-        .tabulars(&lk, &parse_ns(&ns))
-        .await
-        .map_err(|e| CpError::BadRequest(format!("browse: {e}")))?;
+    let tabulars = b.tabulars(&lk, &parse_ns(&ns)).await?;
     Ok(Json(
         tabulars
             .into_iter()
@@ -754,10 +760,7 @@ async fn browse_schema(
     require_permission(&p, "warehouse:read")?;
     let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
     let b = st.browser.as_ref().ok_or(CpError::NotFound)?;
-    let d = b
-        .schema(&lk, &parse_ns(&ns), &table)
-        .await
-        .map_err(|e| CpError::BadRequest(format!("browse: {e}")))?;
+    let d = b.schema(&lk, &parse_ns(&ns), &table).await?;
     Ok(Json(SchemaDto {
         location: d.location,
         format_version: d.format_version,
@@ -815,10 +818,7 @@ async fn browse_view(
     require_permission(&p, "warehouse:read")?;
     let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
     let b = st.browser.as_ref().ok_or(CpError::NotFound)?;
-    let cols = b
-        .view_columns(&lk, &parse_ns(&ns), &view)
-        .await
-        .map_err(|e| CpError::BadRequest(format!("browse: {e}")))?;
+    let cols = b.view_columns(&lk, &parse_ns(&ns), &view).await?;
     Ok(Json(
         cols.into_iter()
             .map(|c| ColumnDto {
@@ -839,10 +839,7 @@ async fn browse_deleted(
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
     };
-    let items = b
-        .deleted_tabulars(&lk)
-        .await
-        .map_err(|e| CpError::BadRequest(format!("browse: {e}")))?;
+    let items = b.deleted_tabulars(&lk).await?;
     Ok(Json(
         items
             .into_iter()
@@ -874,10 +871,7 @@ async fn undrop_tabular(
     require_permission(&p, "warehouse:update")?;
     let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
-    browser
-        .undrop(&lk, &b.kind, b.id)
-        .await
-        .map_err(|e| CpError::BadRequest(format!("undrop: {e}")))?;
+    browser.undrop(&lk, &b.kind, b.id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -906,8 +900,7 @@ async fn set_protection(
     let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
     let protected = browser
         .set_protection(&lk, &b.target, b.id, b.protected)
-        .await
-        .map_err(|e| CpError::BadRequest(format!("protection: {e}")))?;
+        .await?;
     Ok(Json(ProtectionDto { protected }))
 }
 
@@ -929,10 +922,7 @@ async fn warehouse_config(
     require_permission(&p, "warehouse:read")?;
     let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
     let b = st.browser.as_ref().ok_or(CpError::NotFound)?;
-    let c = b
-        .config(&lk)
-        .await
-        .map_err(|e| CpError::BadRequest(format!("config: {e}")))?;
+    let c = b.config(&lk).await?;
     Ok(Json(WarehouseConfigDto {
         active: c.active,
         delete_profile_seconds: c.delete_profile_seconds,
@@ -956,10 +946,7 @@ async fn set_warehouse_status(
     require_permission(&p, "warehouse:update")?;
     let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
-    browser
-        .set_active(&lk, b.active)
-        .await
-        .map_err(|e| CpError::BadRequest(format!("status: {e}")))?;
+    browser.set_active(&lk, b.active).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -978,10 +965,7 @@ async fn set_delete_profile_route(
     require_permission(&p, "warehouse:update")?;
     let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
-    browser
-        .set_delete_profile(&lk, b.seconds)
-        .await
-        .map_err(|e| CpError::BadRequest(format!("delete-profile: {e}")))?;
+    browser.set_delete_profile(&lk, b.seconds).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1004,10 +988,7 @@ async fn set_format_policy(
     }
     let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
-    browser
-        .set_format_versions(&lk, b.versions)
-        .await
-        .map_err(|e| CpError::BadRequest(format!("format-policy: {e}")))?;
+    browser.set_format_versions(&lk, b.versions).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1029,8 +1010,7 @@ async fn rotate_credential(
     let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
     browser
         .rotate_credential(&lk, &b.access_key, &b.secret_key)
-        .await
-        .map_err(|e| CpError::BadRequest(format!("storage-credential: {e}")))?;
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1061,10 +1041,7 @@ async fn search_tabulars(
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
     };
-    let items = b
-        .search(&lk, sq.q.trim())
-        .await
-        .map_err(|e| CpError::BadRequest(format!("search: {e}")))?;
+    let items = b.search(&lk, sq.q.trim()).await?;
     Ok(Json(
         items
             .into_iter()
@@ -1094,10 +1071,7 @@ async fn list_tasks(
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
     };
-    let items = b
-        .tasks(&lk)
-        .await
-        .map_err(|e| CpError::BadRequest(format!("tasks: {e}")))?;
+    let items = b.tasks(&lk).await?;
     Ok(Json(
         items
             .into_iter()
