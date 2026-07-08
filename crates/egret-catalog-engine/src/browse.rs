@@ -119,8 +119,14 @@ pub async fn list_namespaces(
             for (i, ns) in resp.namespaces.iter().enumerate() {
                 let levels = ns.clone().inner();
                 frontier.push(Some(
-                    NamespaceIdent::from_vec(levels.clone())
-                        .map_err(|e| anyhow::anyhow!("namespace ident: {e:?}"))?,
+                    // `levels` is an ident lakekeeper JUST returned (`ns.inner()`),
+                    // not user input, so a re-parse failure is an internal
+                    // inconsistency (500), not a client BadRequest (400).
+                    NamespaceIdent::from_vec(levels.clone()).map_err(|e| {
+                        CatalogEngineError::Internal(format!(
+                            "namespace ident from lakekeeper: {e:?}"
+                        ))
+                    })?,
                 ));
                 out.push(NamespaceEntry {
                     parts: levels,

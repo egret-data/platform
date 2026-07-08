@@ -84,12 +84,24 @@ impl IntoResponse for CatalogEngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use axum::response::IntoResponse;
 
-    #[test]
-    fn not_found_maps_to_404() {
+    /// Collect the JSON body of a response into `{"error": ...}`.
+    async fn body_json(resp: Response) -> serde_json::Value {
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn not_found_maps_to_404() {
         let resp = CatalogEngineError::NotFound("ns".into()).into_response();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        // Lock down the `{"error": msg}` body shape (message passed through).
+        assert_eq!(
+            body_json(resp).await,
+            serde_json::json!({"error": "not found: ns"})
+        );
     }
 
     #[test]
@@ -110,9 +122,15 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     }
 
-    #[test]
-    fn internal_maps_to_500() {
-        let resp = CatalogEngineError::Internal("boom".into()).into_response();
+    #[tokio::test]
+    async fn internal_maps_to_500_and_redacts_detail() {
+        let resp = CatalogEngineError::Internal("secret db dsn leaked here".into()).into_response();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // The sensitive inner detail MUST NOT leak: the body is redacted to the
+        // generic "internal error".
+        assert_eq!(
+            body_json(resp).await,
+            serde_json::json!({"error": "internal error"})
+        );
     }
 }
