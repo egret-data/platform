@@ -9,6 +9,14 @@ thiserror.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 uuid.workspace = true
+axum = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+# Opt-in HTTP mapping (Error -> Response, ApiError<D>). Pure-domain consumers
+# of egret-core do not pull axum unless they enable this.
+http = ["dep:axum", "dep:serde_json"]
 
 [dev-dependencies]
 serde_json.workspace = true
+axum.workspace = true
