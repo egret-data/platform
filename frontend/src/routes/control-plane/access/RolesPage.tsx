@@ -453,7 +453,7 @@ function EditRoleDialog({
 
   return (
     <Dialog open={role !== null} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+      <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Edit role — {role?.name}</DialogTitle>
           <DialogDescription>
@@ -495,28 +495,28 @@ function EditRoleDialog({
               </p>
             ) : (
               groups.map((group) => (
-                <div key={group.group} className="space-y-2">
-                  <h3 className="text-sm font-semibold">{group.group}</h3>
-                  <div className="space-y-2 rounded-md border p-3">
+                <div key={group.group} className="space-y-1.5">
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                    {group.group}
+                  </h3>
+                  <div className="grid grid-cols-1 gap-x-6 gap-y-1.5 rounded-md border p-3 sm:grid-cols-2">
                     {group.permissions.map((p) => {
                       const id = `perm-${p.key}`;
                       return (
-                        <div key={p.key} className="flex items-start gap-2">
+                        <div key={p.key} className="flex items-center gap-2">
                           <Checkbox
                             id={id}
-                            className="mt-0.5"
                             checked={checked.has(p.key)}
                             disabled={isSuperuser}
                             onCheckedChange={(c) => toggle(p.key, c === true)}
                           />
-                          <div className="space-y-0.5">
-                            <Label htmlFor={id} className="font-normal">
-                              {p.key}
-                            </Label>
-                            <p className="text-xs text-muted-foreground">
-                              {p.description}
-                            </p>
-                          </div>
+                          <Label
+                            htmlFor={id}
+                            className="cursor-pointer font-normal"
+                            title={p.description}
+                          >
+                            {p.key}
+                          </Label>
                         </div>
                       );
                     })}
