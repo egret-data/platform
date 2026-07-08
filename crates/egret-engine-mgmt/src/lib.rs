@@ -3,6 +3,7 @@
 pub mod engines;
 pub mod error;
 pub mod http_error;
+pub mod monitor;
 pub mod state;
 pub mod store;
 

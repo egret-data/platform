@@ -12,15 +12,15 @@ use axum::routing::get;
 use axum::{Json, Router};
 use base64::Engine as _;
 use egret_auth::principal::Auth;
-use egret_engine_mgmt::Engine;
+use egret_auth::require_permission;
 use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::auth::require_permission;
 use crate::engines::monitor_password;
-use crate::error::CpError;
-use crate::CpState;
+use crate::Engine;
+use crate::EngineHttpError as CpError;
+use crate::EngineMgmtState as CpState;
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -224,12 +224,12 @@ pub(crate) async fn coordinator_call(
     if let Some(resp) = try_ingress(engine, method, path, &headers, body.clone()).await {
         return Ok(resp);
     }
-    let prov = st
-        .engine_provisioner
+    let kube = st
+        .kube
         .as_ref()
         .ok_or_else(|| CpError::BadRequest("kubernetes not configured".into()))?;
     let service = format!("{}-trino", engine.name);
-    prov.coordinator_request(&engine.namespace, &service, method, path, &headers, body)
+    kube.coordinator_request(&engine.namespace, &service, method, path, &headers, body)
         .await
         .map_err(|_| CpError::BadGateway)
 }
