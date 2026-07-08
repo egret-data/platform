@@ -2599,6 +2599,7 @@ dependencies = [
  "egret-authz",
  "egret-catalog",
  "egret-core",
+ "egret-engine-mgmt",
  "egret-engine-mgmt-api",
  "egret-metastore",
  "egret-secrets",
@@ -2692,6 +2693,18 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "egret-engine-mgmt"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "egret-metastore",
+ "serde_json",
+ "sqlx 0.8.6",
+ "thiserror 2.0.18",
  "uuid",
 ]
 

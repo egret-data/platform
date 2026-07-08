@@ -12,7 +12,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use base64::Engine as _;
 use egret_auth::principal::Auth;
-use egret_catalog::service::Engine;
+use egret_engine_mgmt::Engine;
 use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
@@ -155,7 +155,7 @@ fn monitor_headers(engine: &Engine) -> Vec<(String, String)> {
 }
 
 async fn load_engine(st: &CpState, id: Uuid) -> Result<Engine, CpError> {
-    st.storage.get_engine(id).await?.ok_or(CpError::NotFound)
+    st.engine_mgmt.get_engine(id).await?.ok_or(CpError::NotFound)
 }
 
 /// The engine's public Ingress base URL (`https://{host}`) when

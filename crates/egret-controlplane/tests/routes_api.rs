@@ -66,6 +66,7 @@ async fn setup_full(
 
     let app = control_plane_router().with_state(CpState {
         storage: egret_catalog::CatalogStore::new(db.clone()),
+        engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
         authz: egret_authz::AuthzStore::new(db.clone()),
         users: users.clone(),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
@@ -1909,6 +1910,7 @@ async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
 
     // Seed a pre-existing, user-owned client on a custom (non-default) role.
     let catalog_store = egret_catalog::CatalogStore::new(f.db.clone());
+    let engine_mgmt = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone());
     let wh = catalog_store
         .get_warehouse(wh_id)
         .await
@@ -2000,7 +2002,7 @@ async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
     assert_eq!(j["config"]["mintedClient"], true, "mintedClient; body={j}");
     // credential/clientRowId are redacted from the HTTP response; inspect the
     // stored row directly via the storage layer instead.
-    let stored = catalog_store
+    let stored = engine_mgmt
         .list_engine_catalogs(Uuid::parse_str(&engine_id).unwrap())
         .await
         .expect("list engine catalogs")
@@ -2296,7 +2298,7 @@ async fn platform_admin_autobind_engine_to_new_profile() {
     let token = session_for(&f, "autobind_admin", true).await;
     let wh_id = seed_provisioned_warehouse(&f).await;
 
-    let catalog = egret_catalog::CatalogStore::new(f.db.clone());
+    let engine_mgmt = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone());
     let authz = egret_authz::AuthzStore::new(f.db.clone());
 
     // Mirrors the `create_engine` auto-bind "create" branch: seed the Trino
@@ -2307,7 +2309,7 @@ async fn platform_admin_autobind_engine_to_new_profile() {
         .expect("seed trino def");
 
     let engine_name = format!("trino-{}", Uuid::new_v4().simple());
-    let engine = catalog
+    let engine = engine_mgmt
         .create_engine(
             &engine_name,
             "trino",
@@ -2327,12 +2329,12 @@ async fn platform_admin_autobind_engine_to_new_profile() {
         .await
         .expect("create service");
 
-    catalog
+    engine_mgmt
         .set_engine_authz_service(engine.id, Some(svc.id))
         .await
         .expect("bind engine to profile");
 
-    let engines = catalog.list_engines().await.expect("list engines");
+    let engines = engine_mgmt.list_engines().await.expect("list engines");
     let bound = engines
         .iter()
         .find(|e| e.id == engine.id)
@@ -2364,7 +2366,7 @@ async fn platform_admin_autobind_engine_to_new_profile() {
         "bound engine should appear under its profile; body={body}"
     );
 
-    catalog
+    engine_mgmt
         .delete_engine(engine.id)
         .await
         .expect("cleanup engine");
@@ -3401,6 +3403,7 @@ async fn setup_isolated_schema() -> Option<Fixture> {
 
     let app = control_plane_router().with_state(CpState {
         storage: egret_catalog::CatalogStore::new(db.clone()),
+        engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
         authz: egret_authz::AuthzStore::new(db.clone()),
         users: users.clone(),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
