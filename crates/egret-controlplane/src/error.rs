@@ -28,10 +28,6 @@ pub enum CpError {
     /// A named secret is still referenced and cannot be deleted.
     #[error("secret is in use by {0} connection(s)")]
     InUse(i64),
-    /// A Trino coordinator request failed (unreachable or non-2xx / non-JSON
-    /// response) — surfaced to the UI as a 502 the monitor page can show.
-    #[error("engine not reachable")]
-    BadGateway,
     #[error("internal error")]
     Internal,
 }
@@ -102,7 +98,6 @@ impl IntoResponse for CpError {
             CpError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             CpError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
             CpError::InUse(_) => (StatusCode::CONFLICT, self.to_string()),
-            CpError::BadGateway => (StatusCode::BAD_GATEWAY, self.to_string()),
             CpError::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal error".to_string(),

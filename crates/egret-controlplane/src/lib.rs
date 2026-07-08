@@ -31,7 +31,9 @@ use std::sync::Arc;
 /// Shared state for the control-plane router.
 #[derive(Clone)]
 pub struct CpState {
-    /// Embedded-catalog store: warehouses + catalog RBAC (roles/grants/clients).
+    /// Embedded-catalog store; used here only to list warehouses for the storage
+    /// credential-rotation push-down (the warehouse/role/grant/client admin moved
+    /// to egret-catalog-engine in E3d-3).
     pub storage: CatalogStore,
     /// Global storage-connection registry (`storage.storage_connections`, E3a).
     pub storage_registry: StorageRegistry,
