@@ -356,6 +356,77 @@ async fn assign_platform_role_then_user_gains_access() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+/// Regression for the privilege-escalation this branch closes: `PUT
+/// /users/{id}/platform-roles` replaces a user's platform role assignments
+/// outright, so it must be `platform_admin`-only — not delegable via a
+/// granular permission. Before the fix, a non-admin holding `user:assign_role`
+/// (grantable through `role:assign_permission`, itself delegatable) could
+/// call this route to assign themselves `platform_admin` directly, bypassing
+/// `role_permissions` entirely.
+#[tokio::test]
+async fn set_platform_roles_rejects_delegated_permission_not_platform_admin() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let attacker = seed_user(&db).await;
+    let st = ws_state(&db).await;
+
+    // Grant the attacker exactly one delegated permission — `user:assign_role`
+    // — via a fresh ad-hoc platform-scoped role, mirroring how a
+    // non-admin could previously have been granted it through
+    // `role:assign_permission`. No `platform_admin` role.
+    let (role_id,): (uuid::Uuid,) = sqlx::query_as(
+        "INSERT INTO roles (scope, name, description) VALUES ('platform', $1, 'test-only role') \
+         RETURNING id",
+    )
+    .bind(uniq("attacker_role"))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'user:assign_role')",
+    )
+    .bind(role_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
+         VALUES ('user', $1, $2)",
+    )
+    .bind(attacker.0)
+    .bind(role_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let cookie = login_cookie(&db, attacker, &st.sessions).await;
+    let app = axum::Router::new()
+        .nest("/api/admin", admin_user_router())
+        .with_state(st);
+
+    // Attempt to grant itself `platform_admin` directly.
+    let body = serde_json::to_vec(&serde_json::json!({"roles": ["platform_admin"]})).unwrap();
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .method("PUT")
+                .uri(format!("/api/admin/users/{}/platform-roles", attacker.0))
+                .header("cookie", cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a delegated user:assign_role permission must not grant platform roles"
+    );
+}
+
 // ── Task 9: Workspace member routes ──────────────────────────────────────────
 
 #[tokio::test]

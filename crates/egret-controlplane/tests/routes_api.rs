@@ -3843,6 +3843,13 @@ async fn roles_seeded_and_permissions() {
 /// it (or platform_admin), 200. `GET /permissions` returns the non-empty
 /// code-defined catalog (`egret_core::rbac::PERMISSIONS`, independent of DB
 /// content) for an authorized caller — it too is gated on `role:read`.
+///
+/// Writes to the authorization graph are a different story: they're
+/// `platform_admin`-only now (not delegatable), so even a principal holding
+/// `role:read` — enough to *see* roles — must still be 403 on
+/// `POST /access/roles`, `PUT .../permissions`, and `POST /users/{id}/roles`.
+/// The guard is the handler's first line, so these 403 before any DB lookup —
+/// the path/body UUIDs below don't need to resolve to anything real.
 #[tokio::test]
 async fn permission_enforcement() {
     let Some(f) = setup().await else {
@@ -3895,6 +3902,70 @@ async fn permission_enforcement() {
             .iter()
             .any(|g| g["permissions"].as_array().is_some_and(|p| !p.is_empty())),
         "at least one permission group must list permissions; body={j}"
+    );
+
+    // A role:read holder can see roles but must not be able to create one —
+    // role definitions are part of the authorization graph, platform_admin
+    // only.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/access/roles",
+            &reader,
+            Some(serde_json::json!({
+                "scope": "platform",
+                "name": format!("escalation_attempt_{}", Uuid::new_v4().simple()),
+                "description": "should never be created",
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a role:read principal must not create roles (platform_admin only)"
+    );
+
+    // Nor set a role's permissions — this is exactly how the closed
+    // escalation worked (a delegated `role:assign_permission` let a
+    // non-admin grant themselves anything).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/access/roles/{}/permissions", Uuid::new_v4()),
+            &reader,
+            Some(serde_json::json!({ "permissions": ["engine:read"] })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a role:read principal must not set role permissions (platform_admin only)"
+    );
+
+    // Nor assign a role to a user — the other half of the closed escalation
+    // (a delegated `user:assign_role` let a non-admin hand themselves any
+    // role, including platform_admin).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/users/{}/roles", Uuid::new_v4()),
+            &reader,
+            Some(serde_json::json!({ "roleId": Uuid::new_v4() })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a role:read principal must not assign roles to users (platform_admin only)"
     );
 }
 

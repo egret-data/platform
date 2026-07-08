@@ -6,6 +6,16 @@
 //! workspace admin routes (`egret-workspace/src/routes.rs`) — keep them here.
 //! `database:*` was removed from this catalog: it had zero enforcement call sites
 //! anywhere in the codebase (genuinely dead, unlike `workspace:*`).
+//!
+//! `role:create`/`role:update`/`role:delete`/`role:assign_permission`,
+//! `user:assign_role`, and `group:manage_members` were removed: they used to
+//! be delegatable permissions guarding writes to the authorization graph
+//! itself (role definitions, role-permission sets, role/group-role
+//! assignments, group membership), which let a non-admin holding one of them
+//! grant themselves any permission. Those routes now gate on
+//! `require_platform_admin` only (see `egret-controlplane/src/access/mod.rs`),
+//! so the keys are no longer enforced anywhere and are dropped from the
+//! catalog to keep the drift-lint honest.
 
 /// One catalog entry. `key` is the `resource:action` string checked in code.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -66,25 +76,11 @@ pub static PERMISSIONS: &[Permission] = &[
     perm!("user:create", "Users", "Create local users"),
     perm!("user:update", "Users", "Update users (name/status)"),
     perm!("user:disable", "Users", "Disable users"),
-    perm!(
-        "user:assign_role",
-        "Users",
-        "Assign/unassign platform roles to users"
-    ),
     perm!("group:read", "Groups", "View groups"),
     perm!("group:create", "Groups", "Create local groups"),
     perm!("group:update", "Groups", "Update local groups"),
     perm!("group:delete", "Groups", "Delete local groups"),
-    perm!("group:manage_members", "Groups", "Add/remove group members"),
     perm!("role:read", "Roles", "View roles"),
-    perm!("role:create", "Roles", "Create custom roles"),
-    perm!("role:update", "Roles", "Update roles"),
-    perm!("role:delete", "Roles", "Delete custom roles"),
-    perm!(
-        "role:assign_permission",
-        "Roles",
-        "Set a role's permissions"
-    ),
 ];
 
 /// True if `key` is a known catalog permission.

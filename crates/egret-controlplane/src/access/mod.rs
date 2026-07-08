@@ -2,11 +2,17 @@
 //! catalog — CRUD + role-assignment endpoints, nested under
 //! `/api/control-plane`.
 //!
-//! Follows the module/router/handler idiom of `secrets.rs`: every handler
-//! gates on `require_permission(&p, "resource:action")?` first
-//! (`platform_admin` always bypasses). RBAC roles are mounted at
-//! `/access/roles` (not `/roles`) to avoid colliding with the embedded-catalog
-//! `roles`/`role_id` routes already served by `warehouses.rs`.
+//! Follows the module/router/handler idiom of `secrets.rs`: read and
+//! user/group-lifecycle handlers gate on `require_permission(&p,
+//! "resource:action")?` (delegatable; `platform_admin` always bypasses), but
+//! every handler that mutates the authorization graph itself — role
+//! definitions, role-permission sets, role assignments, and group membership
+//! (which can carry roles) — gates on `require_platform_admin(&p)?` instead,
+//! since a delegated `role:*`/`user:assign_role`/`group:manage_members`
+//! permission would otherwise let a non-admin grant themselves any
+//! permission. RBAC roles are mounted at `/access/roles` (not `/roles`) to
+//! avoid colliding with the embedded-catalog `roles`/`role_id` routes already
+//! served by `warehouses.rs`.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -20,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::auth::require_permission;
+use crate::auth::{require_permission, require_platform_admin};
 use crate::error::CpError;
 use crate::CpState;
 
@@ -217,7 +223,7 @@ async fn assign_user_role(
     Path(id): Path<Uuid>,
     Json(body): Json<AssignRoleInput>,
 ) -> Result<StatusCode, CpError> {
-    require_permission(&p, "user:assign_role")?;
+    require_platform_admin(&p)?;
     st.roles.assign("user", id, body.role_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -227,7 +233,7 @@ async fn unassign_user_role(
     Auth(p): Auth,
     Path((id, role_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, CpError> {
-    require_permission(&p, "user:assign_role")?;
+    require_platform_admin(&p)?;
     guard_last_admin(&st, role_id).await?;
     st.roles.unassign("user", id, role_id).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -368,7 +374,7 @@ async fn add_group_member(
     Path(id): Path<Uuid>,
     Json(body): Json<AddMemberInput>,
 ) -> Result<StatusCode, CpError> {
-    require_permission(&p, "group:manage_members")?;
+    require_platform_admin(&p)?;
     st.groups.add_member(id, UserId(body.user_id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -378,7 +384,7 @@ async fn remove_group_member(
     Auth(p): Auth,
     Path((id, user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, CpError> {
-    require_permission(&p, "group:manage_members")?;
+    require_platform_admin(&p)?;
     st.groups.remove_member(id, UserId(user_id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -389,7 +395,7 @@ async fn assign_group_role(
     Path(id): Path<Uuid>,
     Json(body): Json<AssignRoleInput>,
 ) -> Result<StatusCode, CpError> {
-    require_permission(&p, "user:assign_role")?;
+    require_platform_admin(&p)?;
     st.roles.assign("group", id, body.role_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -399,7 +405,7 @@ async fn unassign_group_role(
     Auth(p): Auth,
     Path((id, role_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, CpError> {
-    require_permission(&p, "user:assign_role")?;
+    require_platform_admin(&p)?;
     guard_last_admin(&st, role_id).await?;
     st.roles.unassign("group", id, role_id).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -463,7 +469,7 @@ async fn create_role(
     Auth(p): Auth,
     Json(body): Json<CreateRoleInput>,
 ) -> Result<(StatusCode, Json<RoleDto>), CpError> {
-    require_permission(&p, "role:create")?;
+    require_platform_admin(&p)?;
     if body.scope != "platform" && body.scope != "workspace" {
         return Err(CpError::BadRequest(format!(
             "invalid scope: {}",
@@ -493,7 +499,7 @@ async fn update_role(
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateRoleInput>,
 ) -> Result<Json<RoleDto>, CpError> {
-    require_permission(&p, "role:update")?;
+    require_platform_admin(&p)?;
     st.roles.get(id).await?.ok_or(CpError::NotFound)?;
     st.roles.update_description(id, &body.description).await?;
     let role = st.roles.get(id).await?.ok_or(CpError::NotFound)?;
@@ -514,7 +520,7 @@ async fn delete_role(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CpError> {
-    require_permission(&p, "role:delete")?;
+    require_platform_admin(&p)?;
     let role = st.roles.get(id).await?.ok_or(CpError::NotFound)?;
     if is_seeded(&role.name) {
         return Err(CpError::Conflict(
@@ -531,7 +537,7 @@ async fn set_role_permissions(
     Path(id): Path<Uuid>,
     Json(body): Json<SetPermissionsInput>,
 ) -> Result<StatusCode, CpError> {
-    require_permission(&p, "role:assign_permission")?;
+    require_platform_admin(&p)?;
     for key in &body.permissions {
         if !rbac::is_known(key) {
             return Err(CpError::BadRequest(format!("unknown permission: {key}")));

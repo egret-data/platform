@@ -276,10 +276,15 @@ async fn set_platform_roles(
     Path(id): Path<Uuid>,
     Json(body): Json<SetPlatformRoles>,
 ) -> Result<Json<serde_json::Value>, AuthError> {
-    st.authz
-        .require_platform(&p, "user:assign_role")
-        .await
-        .map_err(AuthError)?;
+    // Replacing a user's platform role assignments (which can include
+    // `platform_admin` itself) mutates the authorization graph directly, so
+    // this must not be delegatable — a holder of a granular permission like
+    // the former `user:assign_role` could otherwise grant themselves any
+    // role. `platform_admin` only, same as the equivalent control-plane
+    // role-assignment endpoints in `egret-controlplane/src/access/mod.rs`.
+    if !p.platform_roles.iter().any(|r| r == "platform_admin") {
+        return Err(AuthError(Error::Forbidden));
+    }
     st.authz
         .replace_platform_roles(UserId(id), &body.roles)
         .await
