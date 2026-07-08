@@ -11,3 +11,10 @@ uuid.workspace = true
 chrono.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# Cross-seam only in tests: seeds the workspace/storage/warehouse rows an
+# engine FKs to (mirrors how `create_engine`'s auto-wiring cooperates with
+# `CatalogStore` in control-plane — see engines.rs).
+egret-catalog.workspace = true
+tokio.workspace = true
