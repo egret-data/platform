@@ -43,18 +43,19 @@ async fn migrate_isolates_schemas() {
         "lakekeeper.\"table\" should exist in the lakekeeper schema"
     );
 
-    // 2. egret's own tables stay in public. Assert against `warehouses`, an
-    //    egret-owned table (migration 0053) that lives in public. (The old
+    // 2. egret's own tables stay in egret's schemas (not lakekeeper's). Assert
+    //    against `warehouses`, an egret-owned table (migration 0053) that the
+    //    Catalog seam moved into the `catalog` schema (migration 0065). (The old
     //    `catalog_tokens` this test used was dropped in migration 0048 when the
     //    embedded catalog was re-platformed.)
     let egret_table: Option<String> =
-        sqlx::query_scalar("SELECT to_regclass('public.warehouses')::text")
+        sqlx::query_scalar("SELECT to_regclass('catalog.warehouses')::text")
             .fetch_one(&pool)
             .await
             .unwrap();
     assert!(
         egret_table.is_some(),
-        "public.warehouses should exist (egret's migrations untouched)"
+        "catalog.warehouses should exist (egret's migrations untouched)"
     );
 
     // 2b. lakekeeper's `table` must NOT leak into public.
