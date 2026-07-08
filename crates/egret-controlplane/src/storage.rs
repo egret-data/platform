@@ -2,9 +2,9 @@
 //!
 //! Storage connections are GLOBAL after migration 0050; every handler gates on
 //! `require_permission(&p, "storage:<action>")` (platform_admin bypasses) and
-//! calls the global `StorageConn` CRUD on `CatalogStore`. A `new_secret` in the
-//! create/update body mints a GLOBAL named secret (`secrets.create(None, ..)`)
-//! and uses its id as the connection's `secret_ref`.
+//! calls the global `StorageConn` CRUD on `StorageRegistry` (egret-storage, E3a).
+//! A `new_secret` in the create/update body mints a GLOBAL named secret
+//! (`secrets.create(None, ..)`) and uses its id as the connection's `secret_ref`.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -12,8 +12,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use egret_auth::principal::Auth;
-use egret_catalog::{StorageConn, StorageConnInput};
 use egret_secrets::NewSecret;
+use egret_storage::{StorageConn, StorageConnInput};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -130,7 +130,7 @@ async fn download_object(
 /// Resolve a storage connection + its secret and open an S3 store. Returns the bucket too.
 async fn open_store(st: &CpState, id: Uuid) -> Result<(egret_storage::S3Store, String), CpError> {
     let conn = st
-        .storage
+        .storage_registry
         .get_storage_conn(id)
         .await?
         .ok_or(CpError::NotFound)?;
@@ -237,7 +237,7 @@ async fn list(
     Auth(principal): Auth,
 ) -> Result<Json<Vec<StorageDto>>, CpError> {
     require_permission(&principal, "storage:read")?;
-    let conns = st.storage.list_storage_conns().await?;
+    let conns = st.storage_registry.list_storage_conns().await?;
     Ok(Json(conns.into_iter().map(Into::into).collect()))
 }
 
@@ -249,7 +249,7 @@ async fn create(
     require_permission(&principal, "storage:create")?;
     let secret_ref = resolve_secret_ref(&st, &body).await?;
     let conn = st
-        .storage
+        .storage_registry
         .create_storage_conn(&to_input(&body, secret_ref))
         .await?;
     Ok((StatusCode::CREATED, Json(conn.into())))
@@ -262,7 +262,7 @@ async fn detail(
 ) -> Result<Json<StorageDto>, CpError> {
     require_permission(&principal, "storage:read")?;
     let conn = st
-        .storage
+        .storage_registry
         .get_storage_conn(id)
         .await?
         .ok_or(CpError::NotFound)?;
@@ -278,14 +278,14 @@ async fn update(
     require_permission(&principal, "storage:update")?;
     let secret_ref = resolve_secret_ref(&st, &body).await?;
     let updated = st
-        .storage
+        .storage_registry
         .update_storage_conn(id, &to_input(&body, secret_ref))
         .await?;
     if !updated {
         return Err(CpError::NotFound);
     }
     let conn = st
-        .storage
+        .storage_registry
         .get_storage_conn(id)
         .await?
         .ok_or(CpError::NotFound)?;
@@ -321,7 +321,7 @@ async fn remove(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, CpError> {
     require_permission(&principal, "storage:delete")?;
-    if !st.storage.delete_storage_conn(id).await? {
+    if !st.storage_registry.delete_storage_conn(id).await? {
         return Err(CpError::NotFound);
     }
     Ok(Json(serde_json::json!({ "ok": true })))

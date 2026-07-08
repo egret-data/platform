@@ -13,7 +13,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 egret-engine-mgmt-api.workspace = true
 egret-auth.workspace = true
-egret-catalog.workspace = true
+# Catalog seam contract (E3b). Engine-create auto-wires a Catalog Client through
+# `CatalogPort`; the concrete `egret-catalog-engine` store impl is wired in egret-bin and only
+# needed here as a dev-dep for test state construction.
+egret-catalog-api.workspace = true
+egret-storage.workspace = true
 egret-secrets.workspace = true
 # Policy/Ranger seam contract (E2a). Engine-create auto-binds an engine to a
 # Ranger profile through `PolicyPort`; the concrete `egret-policy` impl is wired
@@ -37,6 +41,11 @@ kube.workspace = true
 # Concrete Policy/Ranger store — only test state construction builds it directly
 # (production wires it in egret-bin behind `PolicyPort`).
 egret-policy.workspace = true
+# Concrete Catalog store — only test state construction builds it directly
+# (production wires it in egret-bin behind `CatalogPort`). The store now lives in
+# egret-catalog-engine (E3d-1); this dev-dep pulls the embedded lakekeeper engine
+# into the TEST build only (prod engine-mgmt stays on `CatalogPort`).
+egret-catalog-engine.workspace = true
 tower.workspace = true
 http-body-util = "0.1"
 # `kube` (a normal dep, for `EngineProvisioningPort`'s WS-bridge use of

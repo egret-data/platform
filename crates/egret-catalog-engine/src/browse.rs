@@ -5,6 +5,7 @@
 //! lakekeeper service calls are kept — no routing, workspace-scoping, or DDL.
 
 use crate::bootstrap::system_request_metadata;
+use crate::error::CatalogEngineError;
 use crate::mount::{EngineServer, EngineState};
 use anyhow::Context as _;
 use lakekeeper::api::iceberg::types::{PageToken, Prefix};
@@ -90,7 +91,7 @@ pub async fn list_namespaces(
     engine_state: ApiContext<EngineState>,
     system_user: &str,
     warehouse_id: &str,
-) -> anyhow::Result<Vec<NamespaceEntry>> {
+) -> Result<Vec<NamespaceEntry>, CatalogEngineError> {
     let px = prefix(warehouse_id);
     let mut out: Vec<NamespaceEntry> = Vec::new();
     let mut frontier: Vec<Option<NamespaceIdent>> = vec![None];
@@ -112,14 +113,20 @@ pub async fn list_namespaces(
                 rm,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("list_namespaces: {e:?}"))?;
+            .map_err(|e| CatalogEngineError::from_lakekeeper("list_namespaces", e))?;
             let uuids = resp.namespace_uuids.clone().unwrap_or_default();
             let protection = resp.protection_status.clone().unwrap_or_default();
             for (i, ns) in resp.namespaces.iter().enumerate() {
                 let levels = ns.clone().inner();
                 frontier.push(Some(
-                    NamespaceIdent::from_vec(levels.clone())
-                        .map_err(|e| anyhow::anyhow!("namespace ident: {e:?}"))?,
+                    // `levels` is an ident lakekeeper JUST returned (`ns.inner()`),
+                    // not user input, so a re-parse failure is an internal
+                    // inconsistency (500), not a client BadRequest (400).
+                    NamespaceIdent::from_vec(levels.clone()).map_err(|e| {
+                        CatalogEngineError::Internal(format!(
+                            "namespace ident from lakekeeper: {e:?}"
+                        ))
+                    })?,
                 ));
                 out.push(NamespaceEntry {
                     parts: levels,
@@ -143,11 +150,11 @@ pub async fn list_tabulars(
     system_user: &str,
     warehouse_id: &str,
     namespace: &[String],
-) -> anyhow::Result<Vec<TabularEntry>> {
+) -> Result<Vec<TabularEntry>, CatalogEngineError> {
     let params = NamespaceParameters {
         prefix: Some(prefix(warehouse_id)),
         namespace: NamespaceIdent::from_vec(namespace.to_vec())
-            .map_err(|e| anyhow::anyhow!("namespace ident: {e:?}"))?,
+            .map_err(|e| CatalogEngineError::BadRequest(format!("namespace ident: {e:?}")))?,
     };
 
     let mut out: Vec<TabularEntry> = Vec::new();
@@ -163,7 +170,7 @@ pub async fn list_tabulars(
             rm,
         )
         .await
-        .map_err(|e| anyhow::anyhow!("list_tables: {e:?}"))?;
+        .map_err(|e| CatalogEngineError::from_lakekeeper("list_tables", e))?;
         let uuids = resp.table_uuids.clone().unwrap_or_default();
         let protection = resp.protection_status.clone().unwrap_or_default();
         for (i, ident) in resp.identifiers.iter().enumerate() {
@@ -191,7 +198,7 @@ pub async fn list_tabulars(
             rm,
         )
         .await
-        .map_err(|e| anyhow::anyhow!("list_views: {e:?}"))?;
+        .map_err(|e| CatalogEngineError::from_lakekeeper("list_views", e))?;
         let uuids = resp.table_uuids.clone().unwrap_or_default();
         let protection = resp.protection_status.clone().unwrap_or_default();
         for (i, ident) in resp.identifiers.iter().enumerate() {
@@ -226,10 +233,10 @@ pub async fn load_view_detail(
     warehouse_id: &str,
     namespace: &[String],
     view: &str,
-) -> anyhow::Result<Vec<ColumnInfo>> {
+) -> Result<Vec<ColumnInfo>, CatalogEngineError> {
     let ident = TableIdent {
         namespace: NamespaceIdent::from_vec(namespace.to_vec())
-            .map_err(|e| anyhow::anyhow!("namespace ident: {e:?}"))?,
+            .map_err(|e| CatalogEngineError::BadRequest(format!("namespace ident: {e:?}")))?,
         name: view.to_string(),
     };
     let rm = system_request_metadata(system_user).context("system metadata")?;
@@ -243,7 +250,7 @@ pub async fn load_view_detail(
         rm,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("load_view: {e:?}"))?;
+    .map_err(|e| CatalogEngineError::from_lakekeeper("load_view", e))?;
 
     let schema = loaded.metadata.current_schema();
     Ok(schema
@@ -267,10 +274,10 @@ pub async fn load_table_detail(
     warehouse_id: &str,
     namespace: &[String],
     table: &str,
-) -> anyhow::Result<TableDetail> {
+) -> Result<TableDetail, CatalogEngineError> {
     let ident = TableIdent {
         namespace: NamespaceIdent::from_vec(namespace.to_vec())
-            .map_err(|e| anyhow::anyhow!("namespace ident: {e:?}"))?,
+            .map_err(|e| CatalogEngineError::BadRequest(format!("namespace ident: {e:?}")))?,
         name: table.to_string(),
     };
     let rm = system_request_metadata(system_user).context("system metadata")?;
@@ -284,13 +291,15 @@ pub async fn load_table_detail(
         rm,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("load_table: {e:?}"))?;
+    .map_err(|e| CatalogEngineError::from_lakekeeper("load_table", e))?;
 
     let result = match loaded {
         LoadTableResultOrNotModified::LoadTableResult(res) => res,
         // We send no if-none-match etags, so the engine never returns 304.
         LoadTableResultOrNotModified::NotModifiedResponse(_) => {
-            anyhow::bail!("unexpected 304 from load_table")
+            return Err(CatalogEngineError::Internal(
+                "unexpected 304 from load_table".into(),
+            ))
         }
     };
 

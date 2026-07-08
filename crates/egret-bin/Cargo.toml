@@ -19,7 +19,6 @@ egret-metastore.workspace = true
 egret-server.workspace = true
 egret-auth.workspace = true
 egret-workspace.workspace = true
-egret-catalog.workspace = true
 egret-catalog-engine.workspace = true
 egret-engine-mgmt.workspace = true
 egret-engine-mgmt-api.workspace = true

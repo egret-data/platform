@@ -16,7 +16,7 @@ egret-auth = { path = "crates/egret-auth" }
 egret-workspace = { path = "crates/egret-workspace" }
 egret-storage = { path = "crates/egret-storage" }
 egret-iceberg-ext = { path = "crates/egret-iceberg-ext" }
-egret-catalog = { path = "crates/egret-catalog" }
+egret-catalog-api = { path = "crates/egret-catalog-api" }
 egret-catalog-engine = { path = "crates/egret-catalog-engine" }
 egret-controlplane = { path = "crates/egret-controlplane" }
 egret-policy-api = { path = "crates/egret-policy-api" }

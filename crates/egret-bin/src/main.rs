@@ -219,7 +219,7 @@ impl egret_policy::EngineBindingReader for EngineBindingReaderImpl {
 /// the decision here.
 struct EgretCatalogGuard {
     keys: egret_machine_idp::PgSigningKeyStore,
-    catalog: egret_catalog::CatalogStore,
+    catalog: egret_catalog_engine::CatalogStore,
 }
 
 #[async_trait::async_trait]
@@ -357,7 +357,7 @@ fn catalog_ns_parts(seg: &str) -> Vec<String> {
 /// and everything in it; `table` covers only its exact table (plus, for reads,
 /// listing the namespace that holds it). Writes require `write`/`manage`.
 fn catalog_grant_covers(
-    g: &egret_catalog::service::CatalogGrant,
+    g: &egret_catalog_engine::CatalogGrant,
     target_ns: Option<&[String]>,
     target_table: Option<&str>,
     is_write: bool,
@@ -399,12 +399,12 @@ struct LakekeeperProvisioner {
 }
 
 #[async_trait::async_trait]
-impl egret_controlplane::WarehouseProvisioner for LakekeeperProvisioner {
+impl egret_catalog_engine::WarehouseProvisioner for LakekeeperProvisioner {
     async fn provision(
         &self,
         name: &str,
-        s3: &egret_controlplane::ProvisionS3,
-    ) -> Result<String, String> {
+        s3: &egret_catalog_engine::ProvisionS3,
+    ) -> Result<String, egret_catalog_engine::CatalogEngineError> {
         let cfg = egret_catalog_engine::S3StorageConfig {
             bucket: s3.bucket.clone(),
             region: s3.region.clone(),
@@ -421,7 +421,6 @@ impl egret_controlplane::WarehouseProvisioner for LakekeeperProvisioner {
             &cfg,
         )
         .await
-        .map_err(|e| e.to_string())
     }
 }
 
@@ -507,35 +506,36 @@ struct LakekeeperBrowser {
 }
 
 #[async_trait::async_trait]
-impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
+impl egret_catalog_engine::WarehouseBrowser for LakekeeperBrowser {
     async fn namespaces(
         &self,
         wh: &str,
-    ) -> Result<Vec<egret_controlplane::BrowseNamespace>, String> {
+    ) -> Result<Vec<egret_catalog_engine::BrowseNamespace>, egret_catalog_engine::CatalogEngineError>
+    {
         egret_catalog_engine::list_namespaces(self.engine_state.clone(), &self.system_user, wh)
             .await
             .map(|v| {
                 v.into_iter()
-                    .map(|n| egret_controlplane::BrowseNamespace {
+                    .map(|n| egret_catalog_engine::BrowseNamespace {
                         parts: n.parts,
                         id: n.id,
                         protected: n.protected,
                     })
                     .collect()
             })
-            .map_err(|e| e.to_string())
     }
 
     async fn tabulars(
         &self,
         wh: &str,
         ns: &[String],
-    ) -> Result<Vec<egret_controlplane::BrowseTabular>, String> {
+    ) -> Result<Vec<egret_catalog_engine::BrowseTabular>, egret_catalog_engine::CatalogEngineError>
+    {
         egret_catalog_engine::list_tabulars(self.engine_state.clone(), &self.system_user, wh, ns)
             .await
             .map(|v| {
                 v.into_iter()
-                    .map(|t| egret_controlplane::BrowseTabular {
+                    .map(|t| egret_catalog_engine::BrowseTabular {
                         name: t.name,
                         kind: match t.kind {
                             egret_catalog_engine::TabularKind::View => "view",
@@ -547,7 +547,6 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
                     })
                     .collect()
             })
-            .map_err(|e| e.to_string())
     }
 
     async fn schema(
@@ -555,7 +554,8 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
         wh: &str,
         ns: &[String],
         table: &str,
-    ) -> Result<egret_controlplane::BrowseTableDetail, String> {
+    ) -> Result<egret_catalog_engine::BrowseTableDetail, egret_catalog_engine::CatalogEngineError>
+    {
         egret_catalog_engine::load_table_detail(
             self.engine_state.clone(),
             &self.system_user,
@@ -564,7 +564,7 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             table,
         )
         .await
-        .map(|d| egret_controlplane::BrowseTableDetail {
+        .map(|d| egret_catalog_engine::BrowseTableDetail {
             location: d.location,
             format_version: d.format_version,
             last_updated_ms: d.last_updated_ms,
@@ -573,7 +573,7 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             columns: d
                 .columns
                 .into_iter()
-                .map(|c| egret_controlplane::BrowseColumn {
+                .map(|c| egret_catalog_engine::BrowseColumn {
                     name: c.name,
                     type_: c.r#type,
                     required: c.required,
@@ -582,7 +582,7 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             partition_fields: d
                 .partition_fields
                 .into_iter()
-                .map(|p| egret_controlplane::BrowsePartition {
+                .map(|p| egret_catalog_engine::BrowsePartition {
                     name: p.name,
                     source_column: p.source_column,
                     transform: p.transform,
@@ -591,7 +591,7 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             sort_fields: d
                 .sort_fields
                 .into_iter()
-                .map(|s| egret_controlplane::BrowseSort {
+                .map(|s| egret_catalog_engine::BrowseSort {
                     column: s.column,
                     transform: s.transform,
                     direction: s.direction,
@@ -602,7 +602,7 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             snapshots: d
                 .snapshots
                 .into_iter()
-                .map(|s| egret_controlplane::BrowseSnapshot {
+                .map(|s| egret_catalog_engine::BrowseSnapshot {
                     snapshot_id: s.snapshot_id,
                     parent_snapshot_id: s.parent_snapshot_id,
                     timestamp_ms: s.timestamp_ms,
@@ -611,7 +611,6 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
                 })
                 .collect(),
         })
-        .map_err(|e| e.to_string())
     }
 
     async fn view_columns(
@@ -619,7 +618,8 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
         wh: &str,
         ns: &[String],
         view: &str,
-    ) -> Result<Vec<egret_controlplane::BrowseColumn>, String> {
+    ) -> Result<Vec<egret_catalog_engine::BrowseColumn>, egret_catalog_engine::CatalogEngineError>
+    {
         egret_catalog_engine::load_view_detail(
             self.engine_state.clone(),
             &self.system_user,
@@ -630,20 +630,22 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
         .await
         .map(|cols| {
             cols.into_iter()
-                .map(|c| egret_controlplane::BrowseColumn {
+                .map(|c| egret_catalog_engine::BrowseColumn {
                     name: c.name,
                     type_: c.r#type,
                     required: c.required,
                 })
                 .collect()
         })
-        .map_err(|e| e.to_string())
     }
 
     async fn deleted_tabulars(
         &self,
         wh: &str,
-    ) -> Result<Vec<egret_controlplane::BrowseDeletedTabular>, String> {
+    ) -> Result<
+        Vec<egret_catalog_engine::BrowseDeletedTabular>,
+        egret_catalog_engine::CatalogEngineError,
+    > {
         egret_catalog_engine::list_deleted_tabulars(
             self.engine_state.clone(),
             &self.system_user,
@@ -652,7 +654,7 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
         .await
         .map(|v| {
             v.into_iter()
-                .map(|d| egret_controlplane::BrowseDeletedTabular {
+                .map(|d| egret_catalog_engine::BrowseDeletedTabular {
                     id: d.id,
                     name: d.name,
                     namespace: d.namespace,
@@ -666,10 +668,14 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
                 })
                 .collect()
         })
-        .map_err(|e| e.to_string())
     }
 
-    async fn undrop(&self, wh: &str, kind: &str, id: uuid::Uuid) -> Result<(), String> {
+    async fn undrop(
+        &self,
+        wh: &str,
+        kind: &str,
+        id: uuid::Uuid,
+    ) -> Result<(), egret_catalog_engine::CatalogEngineError> {
         let k = match kind {
             "view" => egret_catalog_engine::TabularKindName::View,
             _ => egret_catalog_engine::TabularKindName::Table,
@@ -682,7 +688,6 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             id,
         )
         .await
-        .map_err(|e| e.to_string())
     }
 
     async fn set_protection(
@@ -691,7 +696,7 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
         target: &str,
         id: uuid::Uuid,
         protected: bool,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, egret_catalog_engine::CatalogEngineError> {
         let t = match target {
             "namespace" => egret_catalog_engine::ProtectTarget::Namespace,
             "view" => egret_catalog_engine::ProtectTarget::View,
@@ -706,23 +711,29 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             protected,
         )
         .await
-        .map_err(|e| e.to_string())
     }
 
-    async fn config(&self, wh: &str) -> Result<egret_controlplane::BrowseWarehouseConfig, String> {
+    async fn config(
+        &self,
+        wh: &str,
+    ) -> Result<egret_catalog_engine::BrowseWarehouseConfig, egret_catalog_engine::CatalogEngineError>
+    {
         egret_catalog_engine::get_warehouse_config(self.engine_state.clone(), &self.system_user, wh)
             .await
-            .map(|c| egret_controlplane::BrowseWarehouseConfig {
+            .map(|c| egret_catalog_engine::BrowseWarehouseConfig {
                 active: c.active,
                 delete_profile_seconds: c.delete_profile_seconds,
                 num_tables: c.num_tables,
                 num_views: c.num_views,
                 stats_updated_ms: c.stats_updated_ms,
             })
-            .map_err(|e| e.to_string())
     }
 
-    async fn set_active(&self, wh: &str, active: bool) -> Result<(), String> {
+    async fn set_active(
+        &self,
+        wh: &str,
+        active: bool,
+    ) -> Result<(), egret_catalog_engine::CatalogEngineError> {
         egret_catalog_engine::set_warehouse_active(
             self.engine_state.clone(),
             &self.system_user,
@@ -730,10 +741,13 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             active,
         )
         .await
-        .map_err(|e| e.to_string())
     }
 
-    async fn set_delete_profile(&self, wh: &str, seconds: Option<i64>) -> Result<(), String> {
+    async fn set_delete_profile(
+        &self,
+        wh: &str,
+        seconds: Option<i64>,
+    ) -> Result<(), egret_catalog_engine::CatalogEngineError> {
         egret_catalog_engine::set_delete_profile(
             self.engine_state.clone(),
             &self.system_user,
@@ -741,10 +755,13 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             seconds,
         )
         .await
-        .map_err(|e| e.to_string())
     }
 
-    async fn set_format_versions(&self, wh: &str, versions: Vec<u8>) -> Result<(), String> {
+    async fn set_format_versions(
+        &self,
+        wh: &str,
+        versions: Vec<u8>,
+    ) -> Result<(), egret_catalog_engine::CatalogEngineError> {
         egret_catalog_engine::set_format_versions(
             self.engine_state.clone(),
             &self.system_user,
@@ -752,7 +769,6 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             &versions,
         )
         .await
-        .map_err(|e| e.to_string())
     }
 
     async fn rotate_credential(
@@ -760,7 +776,7 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
         wh: &str,
         access_key: &str,
         secret_key: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), egret_catalog_engine::CatalogEngineError> {
         egret_catalog_engine::rotate_storage_credential(
             self.engine_state.clone(),
             &self.system_user,
@@ -769,14 +785,16 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
             secret_key,
         )
         .await
-        .map_err(|e| e.to_string())
     }
 
     async fn search(
         &self,
         wh: &str,
         query: &str,
-    ) -> Result<Vec<egret_controlplane::BrowseSearchResult>, String> {
+    ) -> Result<
+        Vec<egret_catalog_engine::BrowseSearchResult>,
+        egret_catalog_engine::CatalogEngineError,
+    > {
         egret_catalog_engine::search_tabulars(
             self.engine_state.clone(),
             &self.system_user,
@@ -786,29 +804,31 @@ impl egret_controlplane::WarehouseBrowser for LakekeeperBrowser {
         .await
         .map(|v| {
             v.into_iter()
-                .map(|r| egret_controlplane::BrowseSearchResult {
+                .map(|r| egret_catalog_engine::BrowseSearchResult {
                     namespace: r.namespace,
                     name: r.name,
                     kind: r.kind.to_string(),
                 })
                 .collect()
         })
-        .map_err(|e| e.to_string())
     }
 
-    async fn tasks(&self, wh: &str) -> Result<Vec<egret_controlplane::BrowseTask>, String> {
+    async fn tasks(
+        &self,
+        wh: &str,
+    ) -> Result<Vec<egret_catalog_engine::BrowseTask>, egret_catalog_engine::CatalogEngineError>
+    {
         egret_catalog_engine::list_tasks(self.engine_state.clone(), &self.system_user, wh)
             .await
             .map(|v| {
                 v.into_iter()
-                    .map(|t| egret_controlplane::BrowseTask {
+                    .map(|t| egret_catalog_engine::BrowseTask {
                         queue: t.queue,
                         entity: t.entity,
                         status: t.status,
                     })
                     .collect()
             })
-            .map_err(|e| e.to_string())
     }
 }
 
@@ -1120,9 +1140,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // (fronted by egret's CatalogGuard), and build the warehouse provisioner —
     // both need the lakekeeper ApiContext built here.
     let mut catalog_provisioner: Option<
-        std::sync::Arc<dyn egret_controlplane::WarehouseProvisioner>,
+        std::sync::Arc<dyn egret_catalog_engine::WarehouseProvisioner>,
     > = None;
-    let mut catalog_browser: Option<std::sync::Arc<dyn egret_controlplane::WarehouseBrowser>> =
+    let mut catalog_browser: Option<std::sync::Arc<dyn egret_catalog_engine::WarehouseBrowser>> =
         None;
     let catalog_engine: Option<axum::Router> = if config.catalog.enabled {
         let dsn = config.database.url.as_str();
@@ -1152,7 +1172,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         let guard: std::sync::Arc<dyn egret_catalog_engine::CatalogGuard> =
             std::sync::Arc::new(EgretCatalogGuard {
                 keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
-                catalog: egret_catalog::CatalogStore::new(db.clone()),
+                catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
             });
         Some(egret_catalog_engine::mount_catalog_engine(
             engine_state,
@@ -1200,17 +1220,33 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| "http://egret:8080".to_string());
 
-    // Control plane: global platform-admin Storage + Secrets + embedded-catalog
-    // management. The warehouse provisioner (above) creates lakekeeper warehouses.
+    // Control plane: global platform-admin Storage + Secrets + Access console.
+    // Keeps `storage` (CatalogStore) + `browser` for the Storage router's
+    // credential-rotation push-down onto provisioned warehouses; the warehouse
+    // admin router itself moved to egret-catalog-engine (E3d-3, see
+    // `catalog_admin` below).
     let control_plane = Some(egret_controlplane::CpState {
-        storage: egret_catalog::CatalogStore::new(db.clone()),
+        storage: egret_catalog_engine::CatalogStore::new(db.clone()),
+        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
         users: egret_auth::users::UserRepo::new(db.clone()),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
         roles: egret_auth::roles::RoleRepo::new(db.clone()),
         secrets: workspace_secrets.clone(),
         sessions: sessions.clone(),
+        browser: catalog_browser.clone(),
+    });
+
+    // Catalog seam admin router (E3d-3): warehouses / catalog-roles / grants /
+    // Catalog Clients / warehouse browse+admin. Moved out of egret-controlplane
+    // into egret-catalog-engine; still nested at `/api/control-plane`. The
+    // warehouse provisioner (built above) creates lakekeeper warehouses.
+    let catalog_admin = Some(egret_catalog_engine::CatalogAdminState {
+        store: egret_catalog_engine::CatalogStore::new(db.clone()),
+        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
+        secrets: workspace_secrets.clone(),
         provisioner: catalog_provisioner,
         browser: catalog_browser,
+        sessions: sessions.clone(),
     });
 
     // Policy/Ranger seam admin router (E2d): the Policies console. Owns the
@@ -1230,7 +1266,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // Engine-mgmt seam: owns the engine domain (HTTP router + provisioning).
     let engine_mgmt = Some(egret_engine_mgmt::EngineMgmtState {
         engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
-        storage: egret_catalog::CatalogStore::new(db.clone()),
+        catalog: std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
+        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
         // Policy/Ranger seam behind its `PolicyPort` contract (E2a); the concrete
         // in-process impl is the shared `PolicyStore`.
         authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
@@ -1264,7 +1301,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             .public_url
             .clone()
             .unwrap_or_else(|| "http://localhost:8080".to_string()),
-        clients: std::sync::Arc::new(egret_catalog::CatalogStore::new(db.clone())),
+        clients: std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
     });
 
     let app = build_router(AppState {
@@ -1279,6 +1316,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         notebook,
         kernel,
         control_plane,
+        catalog_admin,
         policy_admin,
         engine_mgmt,
         catalog_engine,
@@ -1296,7 +1334,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
 #[cfg(test)]
 mod catalog_authz_tests {
     use super::{catalog_grant_covers, catalog_ns_parts};
-    use egret_catalog::service::CatalogGrant;
+    use egret_catalog_engine::CatalogGrant;
     use uuid::Uuid;
 
     fn grant(sec: &str, ns: Option<&[&str]>, table: Option<&str>, privilege: &str) -> CatalogGrant {

@@ -3,7 +3,7 @@
 //! this store; the mini-IdP's [`ClientVerifier`] + the lakekeeper Authorizer (EB-3)
 //! read from it.
 
-use crate::CatalogError;
+use crate::store::CatalogError;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
@@ -12,11 +12,11 @@ use chrono::{DateTime, Utc};
 use rand::Rng as _;
 use uuid::Uuid;
 
-use super::store::CatalogStore;
+use super::handle::CatalogStore;
 
 // ── warehouses ───────────────────────────────────────────────────────────────
 
-#[derive(Clone, Debug, sqlx::FromRow)]
+#[derive(Clone, Debug)]
 pub struct Warehouse {
     pub id: Uuid,
     pub name: String,
@@ -28,7 +28,7 @@ pub struct Warehouse {
 
 // ── roles + grants ───────────────────────────────────────────────────────────
 
-#[derive(Clone, Debug, sqlx::FromRow)]
+#[derive(Clone, Debug)]
 pub struct CatalogRole {
     pub id: Uuid,
     pub warehouse_id: Uuid,
@@ -37,7 +37,7 @@ pub struct CatalogRole {
     pub description: Option<String>,
 }
 
-#[derive(Clone, Debug, sqlx::FromRow)]
+#[derive(Clone, Debug)]
 pub struct CatalogGrant {
     pub id: Uuid,
     pub catalog_role_id: Uuid,
@@ -56,7 +56,7 @@ pub struct GrantInput {
 
 // ── clients ──────────────────────────────────────────────────────────────────
 
-#[derive(Clone, Debug, sqlx::FromRow)]
+#[derive(Clone, Debug)]
 pub struct CatalogClient {
     pub id: Uuid,
     pub name: String,
@@ -85,6 +85,72 @@ pub struct CreatedClient {
     pub client_secret: String,
 }
 
+// ── FromRow impls (hand-written, sqlx08) ─────────────────────────────────────
+// These are hand-written rather than `#[derive(sqlx08::FromRow)]` because sqlx's
+// derive emits a hard-coded `::sqlx` path in its generated code. In this crate
+// the bare `sqlx` name is the sqlx-0.9 lakekeeper surface, so the derived impl
+// would target the wrong (0.9) `FromRow`/`Row` traits while the store's queries
+// run through the 0.8 alias `sqlx08`. Column names/types are unchanged, so these
+// are behaviourally identical to the former derive.
+
+impl sqlx08::FromRow<'_, sqlx08::postgres::PgRow> for Warehouse {
+    fn from_row(row: &sqlx08::postgres::PgRow) -> sqlx08::Result<Self> {
+        use sqlx08::Row as _;
+        Ok(Self {
+            id: row.try_get("id")?,
+            name: row.try_get("name")?,
+            workspace_id: row.try_get("workspace_id")?,
+            storage_conn_id: row.try_get("storage_conn_id")?,
+            lakekeeper_warehouse_id: row.try_get("lakekeeper_warehouse_id")?,
+            created_at: row.try_get("created_at")?,
+        })
+    }
+}
+
+impl sqlx08::FromRow<'_, sqlx08::postgres::PgRow> for CatalogRole {
+    fn from_row(row: &sqlx08::postgres::PgRow) -> sqlx08::Result<Self> {
+        use sqlx08::Row as _;
+        Ok(Self {
+            id: row.try_get("id")?,
+            warehouse_id: row.try_get("warehouse_id")?,
+            name: row.try_get("name")?,
+            consumer_type: row.try_get("consumer_type")?,
+            description: row.try_get("description")?,
+        })
+    }
+}
+
+impl sqlx08::FromRow<'_, sqlx08::postgres::PgRow> for CatalogGrant {
+    fn from_row(row: &sqlx08::postgres::PgRow) -> sqlx08::Result<Self> {
+        use sqlx08::Row as _;
+        Ok(Self {
+            id: row.try_get("id")?,
+            catalog_role_id: row.try_get("catalog_role_id")?,
+            securable_type: row.try_get("securable_type")?,
+            namespace: row.try_get("namespace")?,
+            table_name: row.try_get("table_name")?,
+            privilege: row.try_get("privilege")?,
+        })
+    }
+}
+
+impl sqlx08::FromRow<'_, sqlx08::postgres::PgRow> for CatalogClient {
+    fn from_row(row: &sqlx08::postgres::PgRow) -> sqlx08::Result<Self> {
+        use sqlx08::Row as _;
+        Ok(Self {
+            id: row.try_get("id")?,
+            name: row.try_get("name")?,
+            consumer_type: row.try_get("consumer_type")?,
+            workspace_id: row.try_get("workspace_id")?,
+            warehouse_id: row.try_get("warehouse_id")?,
+            catalog_role_id: row.try_get("catalog_role_id")?,
+            client_id: row.try_get("client_id")?,
+            created_at: row.try_get("created_at")?,
+            last_used_at: row.try_get("last_used_at")?,
+        })
+    }
+}
+
 impl CatalogStore {
     // warehouses ---------------------------------------------------------------
 
@@ -94,8 +160,8 @@ impl CatalogStore {
         workspace_id: Uuid,
         storage_conn_id: Uuid,
     ) -> Result<Warehouse, CatalogError> {
-        sqlx::query_as::<_, Warehouse>(
-            "INSERT INTO warehouses (name, workspace_id, storage_conn_id) VALUES ($1,$2,$3) \
+        sqlx08::query_as::<_, Warehouse>(
+            "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) VALUES ($1,$2,$3) \
              RETURNING id, name, workspace_id, storage_conn_id, lakekeeper_warehouse_id, created_at",
         )
         .bind(name)
@@ -104,7 +170,7 @@ impl CatalogStore {
         .fetch_one(self.pool())
         .await
         .map_err(|e| match &e {
-            sqlx::Error::Database(d) if d.constraint() == Some("warehouses_workspace_id_name_key") => {
+            sqlx08::Error::Database(d) if d.constraint() == Some("warehouses_workspace_id_name_key") => {
                 CatalogError::AlreadyExists(name.to_string())
             }
             _ => CatalogError::Db(e),
@@ -116,7 +182,7 @@ impl CatalogStore {
         id: Uuid,
         lk_id: &str,
     ) -> Result<(), CatalogError> {
-        sqlx::query("UPDATE warehouses SET lakekeeper_warehouse_id = $2 WHERE id = $1")
+        sqlx08::query("UPDATE catalog.warehouses SET lakekeeper_warehouse_id = $2 WHERE id = $1")
             .bind(id)
             .bind(lk_id)
             .execute(self.pool())
@@ -125,18 +191,18 @@ impl CatalogStore {
     }
 
     pub async fn list_warehouses(&self) -> Result<Vec<Warehouse>, CatalogError> {
-        Ok(sqlx::query_as::<_, Warehouse>(
+        Ok(sqlx08::query_as::<_, Warehouse>(
             "SELECT id, name, workspace_id, storage_conn_id, lakekeeper_warehouse_id, created_at \
-             FROM warehouses ORDER BY name",
+             FROM catalog.warehouses ORDER BY name",
         )
         .fetch_all(self.pool())
         .await?)
     }
 
     pub async fn get_warehouse(&self, id: Uuid) -> Result<Option<Warehouse>, CatalogError> {
-        Ok(sqlx::query_as::<_, Warehouse>(
+        Ok(sqlx08::query_as::<_, Warehouse>(
             "SELECT id, name, workspace_id, storage_conn_id, lakekeeper_warehouse_id, created_at \
-             FROM warehouses WHERE id = $1",
+             FROM catalog.warehouses WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(self.pool())
@@ -147,9 +213,9 @@ impl CatalogStore {
         &self,
         name: &str,
     ) -> Result<Option<Warehouse>, CatalogError> {
-        Ok(sqlx::query_as::<_, Warehouse>(
+        Ok(sqlx08::query_as::<_, Warehouse>(
             "SELECT id, name, workspace_id, storage_conn_id, lakekeeper_warehouse_id, created_at \
-             FROM warehouses WHERE name = $1",
+             FROM catalog.warehouses WHERE name = $1",
         )
         .bind(name)
         .fetch_optional(self.pool())
@@ -157,7 +223,7 @@ impl CatalogStore {
     }
 
     pub async fn delete_warehouse(&self, id: Uuid) -> Result<(), CatalogError> {
-        sqlx::query("DELETE FROM warehouses WHERE id = $1")
+        sqlx08::query("DELETE FROM catalog.warehouses WHERE id = $1")
             .bind(id)
             .execute(self.pool())
             .await?;
@@ -173,8 +239,8 @@ impl CatalogStore {
         consumer_type: &str,
         description: Option<&str>,
     ) -> Result<CatalogRole, CatalogError> {
-        sqlx::query_as::<_, CatalogRole>(
-            "INSERT INTO catalog_roles (warehouse_id, name, consumer_type, description) VALUES ($1,$2,$3,$4) \
+        sqlx08::query_as::<_, CatalogRole>(
+            "INSERT INTO catalog.catalog_roles (warehouse_id, name, consumer_type, description) VALUES ($1,$2,$3,$4) \
              RETURNING id, warehouse_id, name, consumer_type, description",
         )
         .bind(warehouse_id)
@@ -184,7 +250,7 @@ impl CatalogStore {
         .fetch_one(self.pool())
         .await
         .map_err(|e| match &e {
-            sqlx::Error::Database(d)
+            sqlx08::Error::Database(d)
                 if d.constraint() == Some("catalog_roles_warehouse_id_name_key") =>
             {
                 CatalogError::AlreadyExists(name.to_string())
@@ -194,8 +260,8 @@ impl CatalogStore {
     }
 
     pub async fn list_roles(&self, warehouse_id: Uuid) -> Result<Vec<CatalogRole>, CatalogError> {
-        Ok(sqlx::query_as::<_, CatalogRole>(
-            "SELECT id, warehouse_id, name, consumer_type, description FROM catalog_roles \
+        Ok(sqlx08::query_as::<_, CatalogRole>(
+            "SELECT id, warehouse_id, name, consumer_type, description FROM catalog.catalog_roles \
              WHERE warehouse_id = $1 ORDER BY name",
         )
         .bind(warehouse_id)
@@ -206,12 +272,12 @@ impl CatalogStore {
     /// Delete a role. Its grants cascade; blocked by FK if any Catalog Client
     /// still references it (surfaced as `CatalogError::InUse`).
     pub async fn delete_role(&self, role_id: Uuid) -> Result<(), CatalogError> {
-        sqlx::query("DELETE FROM catalog_roles WHERE id = $1")
+        sqlx08::query("DELETE FROM catalog.catalog_roles WHERE id = $1")
             .bind(role_id)
             .execute(self.pool())
             .await
             .map_err(|e| match &e {
-                sqlx::Error::Database(d) if d.is_foreign_key_violation() => CatalogError::InUse,
+                sqlx08::Error::Database(d) if d.is_foreign_key_violation() => CatalogError::InUse,
                 _ => CatalogError::Db(e),
             })?;
         Ok(())
@@ -225,8 +291,8 @@ impl CatalogStore {
         // Reject a duplicate of an identical grant (same securable + privilege).
         // NULL namespace/table are compared with IS NOT DISTINCT FROM so
         // catalog-level duplicates are caught too.
-        let exists: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM catalog_grants \
+        let exists: Option<Uuid> = sqlx08::query_scalar(
+            "SELECT id FROM catalog.catalog_grants \
              WHERE catalog_role_id = $1 AND securable_type = $2 \
                AND namespace IS NOT DISTINCT FROM $3 AND table_name IS NOT DISTINCT FROM $4 \
                AND privilege = $5",
@@ -241,8 +307,8 @@ impl CatalogStore {
         if exists.is_some() {
             return Err(CatalogError::AlreadyExists("grant".to_string()));
         }
-        Ok(sqlx::query_as::<_, CatalogGrant>(
-            "INSERT INTO catalog_grants (catalog_role_id, securable_type, namespace, table_name, privilege) \
+        Ok(sqlx08::query_as::<_, CatalogGrant>(
+            "INSERT INTO catalog.catalog_grants (catalog_role_id, securable_type, namespace, table_name, privilege) \
              VALUES ($1,$2,$3,$4,$5) \
              RETURNING id, catalog_role_id, securable_type, namespace, table_name, privilege",
         )
@@ -259,9 +325,9 @@ impl CatalogStore {
         &self,
         catalog_role_id: Uuid,
     ) -> Result<Vec<CatalogGrant>, CatalogError> {
-        Ok(sqlx::query_as::<_, CatalogGrant>(
+        Ok(sqlx08::query_as::<_, CatalogGrant>(
             "SELECT id, catalog_role_id, securable_type, namespace, table_name, privilege \
-             FROM catalog_grants WHERE catalog_role_id = $1",
+             FROM catalog.catalog_grants WHERE catalog_role_id = $1",
         )
         .bind(catalog_role_id)
         .fetch_all(self.pool())
@@ -275,11 +341,11 @@ impl CatalogStore {
         warehouse_name: &str,
         role_name: &str,
     ) -> Result<Vec<CatalogGrant>, CatalogError> {
-        Ok(sqlx::query_as::<_, CatalogGrant>(
+        Ok(sqlx08::query_as::<_, CatalogGrant>(
             "SELECT g.id, g.catalog_role_id, g.securable_type, g.namespace, g.table_name, g.privilege \
-             FROM catalog_grants g \
-             JOIN catalog_roles r ON r.id = g.catalog_role_id \
-             JOIN warehouses w ON w.id = r.warehouse_id \
+             FROM catalog.catalog_grants g \
+             JOIN catalog.catalog_roles r ON r.id = g.catalog_role_id \
+             JOIN catalog.warehouses w ON w.id = r.warehouse_id \
              WHERE w.name = $1 AND r.name = $2",
         )
         .bind(warehouse_name)
@@ -289,7 +355,7 @@ impl CatalogStore {
     }
 
     pub async fn revoke_grant(&self, grant_id: Uuid) -> Result<(), CatalogError> {
-        sqlx::query("DELETE FROM catalog_grants WHERE id = $1")
+        sqlx08::query("DELETE FROM catalog.catalog_grants WHERE id = $1")
             .bind(grant_id)
             .execute(self.pool())
             .await?;
@@ -318,8 +384,8 @@ impl CatalogStore {
             .hash_password(client_secret.as_bytes(), &salt)
             .map_err(|e| CatalogError::BadRequest(format!("hash: {e}")))?
             .to_string();
-        let id: Uuid = sqlx::query_scalar(
-            "INSERT INTO catalog_clients \
+        let id: Uuid = sqlx08::query_scalar(
+            "INSERT INTO catalog.catalog_clients \
                (name, consumer_type, workspace_id, warehouse_id, catalog_role_id, client_id, client_secret_hash) \
              VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id",
         )
@@ -343,10 +409,10 @@ impl CatalogStore {
         &self,
         warehouse_id: Uuid,
     ) -> Result<Vec<CatalogClient>, CatalogError> {
-        Ok(sqlx::query_as::<_, CatalogClient>(
+        Ok(sqlx08::query_as::<_, CatalogClient>(
             "SELECT id, name, consumer_type, workspace_id, warehouse_id, catalog_role_id, \
                     client_id, created_at, last_used_at \
-             FROM catalog_clients WHERE warehouse_id = $1 ORDER BY name",
+             FROM catalog.catalog_clients WHERE warehouse_id = $1 ORDER BY name",
         )
         .bind(warehouse_id)
         .fetch_all(self.pool())
@@ -354,7 +420,7 @@ impl CatalogStore {
     }
 
     pub async fn revoke_client(&self, id: Uuid) -> Result<(), CatalogError> {
-        sqlx::query("DELETE FROM catalog_clients WHERE id = $1")
+        sqlx08::query("DELETE FROM catalog.catalog_clients WHERE id = $1")
             .bind(id)
             .execute(self.pool())
             .await?;
@@ -368,11 +434,11 @@ impl CatalogStore {
         client_id: &str,
         client_secret: &str,
     ) -> Result<Option<(String, String)>, CatalogError> {
-        let row: Option<(Uuid, String, String, String)> = sqlx::query_as(
+        let row: Option<(Uuid, String, String, String)> = sqlx08::query_as(
             "SELECT c.id, c.client_secret_hash, w.name, r.name \
-             FROM catalog_clients c \
-             JOIN warehouses w ON w.id = c.warehouse_id \
-             JOIN catalog_roles r ON r.id = c.catalog_role_id \
+             FROM catalog.catalog_clients c \
+             JOIN catalog.warehouses w ON w.id = c.warehouse_id \
+             JOIN catalog.catalog_roles r ON r.id = c.catalog_role_id \
              WHERE c.client_id = $1",
         )
         .bind(client_id)
@@ -389,10 +455,11 @@ impl CatalogStore {
         {
             return Ok(None);
         }
-        let _ = sqlx::query("UPDATE catalog_clients SET last_used_at = now() WHERE id = $1")
-            .bind(id)
-            .execute(self.pool())
-            .await;
+        let _ =
+            sqlx08::query("UPDATE catalog.catalog_clients SET last_used_at = now() WHERE id = $1")
+                .bind(id)
+                .execute(self.pool())
+                .await;
         Ok(Some((warehouse, role)))
     }
 }

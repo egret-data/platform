@@ -39,7 +39,7 @@ async fn seed_storage(db: &Db, secret_ref: Uuid) {
     // Storage moved to the control plane (migration 0050): `workspace_storages`
     // was renamed to `storage_connections` and its `workspace_id` column dropped.
     sqlx::query(
-        "INSERT INTO storage_connections (name, region, bucket, access_key, secret_ref) \
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key, secret_ref) \
          VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(format!("storage-{}", Uuid::new_v4().simple()))
@@ -156,7 +156,7 @@ async fn delete_blocked_while_in_use_then_allowed() {
     assert!(matches!(err, SecretsError::InUse(1)), "got {err:?}");
 
     // Drop the reference, then delete succeeds and the vault row is gone.
-    sqlx::query("DELETE FROM storage_connections WHERE secret_ref = $1")
+    sqlx::query("DELETE FROM storage.storage_connections WHERE secret_ref = $1")
         .bind(id)
         .execute(&c.db.pool)
         .await

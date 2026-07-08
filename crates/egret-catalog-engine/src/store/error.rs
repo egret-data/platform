@@ -9,5 +9,5 @@ pub enum CatalogError {
     #[error("bad request: {0}")]
     BadRequest(String),
     #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(#[from] sqlx08::Error),
 }

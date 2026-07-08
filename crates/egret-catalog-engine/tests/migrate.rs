@@ -1,7 +1,8 @@
 //! DB-gated test proving egret's migrator and lakekeeper's migrator coexist in
 //! one Postgres database without colliding, by isolating lakekeeper into its own
 //! `lakekeeper` schema (tables AND its `_sqlx_migrations` tracker), while egret's
-//! migrations stay in `public`.
+//! migration tracker (`_sqlx_migrations`) stays in `public` (egret's own tables now
+//! live in per-seam schemas: `engine_mgmt`/`policy`/`storage`/`catalog`).
 //!
 //! Self-skips when `DATABASE_URL` is unset. Run with:
 //!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
@@ -19,7 +20,7 @@ async fn migrate_isolates_schemas() {
     };
 
     // Run BOTH migrators against the same database.
-    // egret -> public.*, lakekeeper -> lakekeeper.*
+    // egret -> public.* + per-seam schemas, lakekeeper -> lakekeeper.*
     let db = Db::connect(&dsn, 5).await.expect("egret pool connects");
     db.migrate().await.expect("egret migrations apply");
 
@@ -43,18 +44,19 @@ async fn migrate_isolates_schemas() {
         "lakekeeper.\"table\" should exist in the lakekeeper schema"
     );
 
-    // 2. egret's own tables stay in public. Assert against `warehouses`, an
-    //    egret-owned table (migration 0053) that lives in public. (The old
+    // 2. egret's own tables stay in egret's schemas (not lakekeeper's). Assert
+    //    against `warehouses`, an egret-owned table (migration 0053) that the
+    //    Catalog seam moved into the `catalog` schema (migration 0065). (The old
     //    `catalog_tokens` this test used was dropped in migration 0048 when the
     //    embedded catalog was re-platformed.)
     let egret_table: Option<String> =
-        sqlx::query_scalar("SELECT to_regclass('public.warehouses')::text")
+        sqlx::query_scalar("SELECT to_regclass('catalog.warehouses')::text")
             .fetch_one(&pool)
             .await
             .unwrap();
     assert!(
         egret_table.is_some(),
-        "public.warehouses should exist (egret's migrations untouched)"
+        "catalog.warehouses should exist (egret's migrations untouched)"
     );
 
     // 2b. lakekeeper's `table` must NOT leak into public.

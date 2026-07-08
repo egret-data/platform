@@ -4,6 +4,7 @@
 //! principal (admin sees all), mirroring `browse`/`warehouse`.
 
 use crate::bootstrap::system_request_metadata;
+use crate::error::CatalogEngineError;
 use crate::mount::EngineState;
 use anyhow::Context as _;
 use lakekeeper::api::management::v1::namespace::NamespaceManagementService;
@@ -46,10 +47,10 @@ pub enum ProtectTarget {
     Namespace,
 }
 
-fn wh(warehouse_id: &str) -> anyhow::Result<WarehouseId> {
-    let uuid: Uuid = warehouse_id
-        .parse()
-        .context("lakekeeper warehouse id is not a UUID")?;
+fn wh(warehouse_id: &str) -> Result<WarehouseId, CatalogEngineError> {
+    let uuid: Uuid = warehouse_id.parse().map_err(|_| {
+        CatalogEngineError::BadRequest("lakekeeper warehouse id is not a UUID".into())
+    })?;
     Ok(WarehouseId::from(uuid))
 }
 
@@ -58,7 +59,7 @@ pub async fn list_deleted_tabulars(
     engine_state: ApiContext<EngineState>,
     system_user: &str,
     warehouse_id: &str,
-) -> anyhow::Result<Vec<DeletedTabular>> {
+) -> Result<Vec<DeletedTabular>, CatalogEngineError> {
     let rm = system_request_metadata(system_user).context("system metadata")?;
     let resp = <EngineApiServer as WarehouseMgmtService<
         PostgresBackend,
@@ -75,7 +76,7 @@ pub async fn list_deleted_tabulars(
         rm,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("list_soft_deleted_tabulars: {e:?}"))?;
+    .map_err(|e| CatalogEngineError::from_lakekeeper("list_soft_deleted_tabulars", e))?;
 
     Ok(resp
         .tabulars
@@ -105,7 +106,7 @@ pub async fn undrop_tabular(
     warehouse_id: &str,
     kind: TabularKindName,
     id: Uuid,
-) -> anyhow::Result<()> {
+) -> Result<(), CatalogEngineError> {
     let rm = system_request_metadata(system_user).context("system metadata")?;
     let target = match kind {
         TabularKindName::Table => TabularId::Table(TableId::from(id)),
@@ -118,7 +119,7 @@ pub async fn undrop_tabular(
         engine_state,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("undrop_tabulars: {e:?}"))?;
+    .map_err(|e| CatalogEngineError::from_lakekeeper("undrop_tabulars", e))?;
     Ok(())
 }
 
@@ -130,7 +131,7 @@ pub async fn set_protection(
     target: ProtectTarget,
     id: Uuid,
     protected: bool,
-) -> anyhow::Result<bool> {
+) -> Result<bool, CatalogEngineError> {
     let rm = system_request_metadata(system_user).context("system metadata")?;
     let wid = wh(warehouse_id)?;
     let resp = match target {
@@ -161,6 +162,6 @@ pub async fn set_protection(
             .await
         }
     }
-    .map_err(|e| anyhow::anyhow!("set_protection: {e:?}"))?;
+    .map_err(|e| CatalogEngineError::from_lakekeeper("set_protection", e))?;
     Ok(resp.protected)
 }

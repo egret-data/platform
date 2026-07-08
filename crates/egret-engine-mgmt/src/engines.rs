@@ -26,7 +26,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
 use egret_auth::require_permission;
-use egret_catalog::service::embedded::{GrantInput, NewClient};
+use egret_catalog_api::{GrantInput, NewClient};
 use futures_util::sink::SinkExt;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -489,7 +489,7 @@ async fn resolve_fault_tolerant(
         return Ok(None);
     };
     let sc = st
-        .storage
+        .storage_registry
         .get_storage_conn(conn_id)
         .await?
         .ok_or_else(|| CpError::BadRequest("unknown exchange storage connection".into()))?;
@@ -1214,7 +1214,7 @@ async fn list_engines(
 /// whole warehouse.
 async fn ensure_engine_role(st: &CpState, warehouse_id: Uuid) -> Result<Uuid, CpError> {
     if let Some(r) = st
-        .storage
+        .catalog
         .list_roles(warehouse_id)
         .await?
         .into_iter()
@@ -1223,7 +1223,7 @@ async fn ensure_engine_role(st: &CpState, warehouse_id: Uuid) -> Result<Uuid, Cp
         return Ok(r.id);
     }
     let role = st
-        .storage
+        .catalog
         .create_role(
             warehouse_id,
             ENGINE_ROLE_NAME,
@@ -1231,10 +1231,10 @@ async fn ensure_engine_role(st: &CpState, warehouse_id: Uuid) -> Result<Uuid, Cp
             Some("Auto-created role for query engines"),
         )
         .await?;
-    st.storage
+    st.catalog
         .add_grant(
             role.id,
-            &GrantInput {
+            GrantInput {
                 securable_type: "catalog".into(),
                 namespace: None,
                 table_name: None,
@@ -1271,7 +1271,7 @@ async fn create_engine(
     // 1. Resolve the warehouse; it must exist and be provisioned (has a
     //    lakekeeper counterpart) — engines connect by warehouse NAME.
     let wh = st
-        .storage
+        .catalog
         .get_warehouse(b.warehouse_id)
         .await?
         .ok_or_else(|| CpError::BadRequest("unknown warehouse".into()))?;
@@ -1283,7 +1283,7 @@ async fn create_engine(
 
     // 2. Resolve the storage endpoint for the Trino S3 connector.
     let sc = st
-        .storage
+        .storage_registry
         .get_storage_conn(wh.storage_conn_id)
         .await?
         .ok_or_else(|| CpError::BadRequest("unknown storage connection".into()))?;
@@ -1292,8 +1292,8 @@ async fn create_engine(
     // 3. Auto-wire: mint a fresh Catalog Client for the warehouse.
     let role_id = ensure_engine_role(&st, wh.id).await?;
     let client = st
-        .storage
-        .create_client(&NewClient {
+        .catalog
+        .create_client(NewClient {
             name: format!("engine-{}", b.name),
             consumer_type: "engine".into(),
             workspace_id: wh.workspace_id,
@@ -1339,7 +1339,7 @@ async fn create_engine(
     {
         Ok(e) => e,
         Err(e) => {
-            let _ = st.storage.revoke_client(client.id).await;
+            let _ = st.catalog.revoke_client(client.id).await;
             return Err(e.into());
         }
     };
@@ -1364,7 +1364,7 @@ async fn create_engine(
         .await
     {
         let _ = st.engine_mgmt.delete_engine(engine.id).await;
-        let _ = st.storage.revoke_client(client.id).await;
+        let _ = st.catalog.revoke_client(client.id).await;
         return Err(e.into());
     }
 
@@ -1373,7 +1373,7 @@ async fn create_engine(
         Ok(r) => r,
         Err(e) => {
             let _ = st.engine_mgmt.delete_engine(engine.id).await; // CASCADE removes the catalog
-            let _ = st.storage.revoke_client(client.id).await;
+            let _ = st.catalog.revoke_client(client.id).await;
             return Err(e);
         }
     };
@@ -1382,12 +1382,12 @@ async fn create_engine(
     //    client on any failure.
     let Some(prov) = st.engine_provisioner.as_ref() else {
         let _ = st.engine_mgmt.delete_engine(engine.id).await;
-        let _ = st.storage.revoke_client(client.id).await;
+        let _ = st.catalog.revoke_client(client.id).await;
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
     if let Err(msg) = prov.provision(&req).await {
         let _ = st.engine_mgmt.delete_engine(engine.id).await;
-        let _ = st.storage.revoke_client(client.id).await;
+        let _ = st.catalog.revoke_client(client.id).await;
         return Err(CpError::BadRequest(format!(
             "engine provisioning failed: {msg}"
         )));
@@ -1568,7 +1568,7 @@ async fn delete_engine(
     st.engine_mgmt.delete_engine(id).await?; // CASCADE removes engine_catalogs
     for c in cats {
         if let Some(cid) = client_row_id(&c.config) {
-            let _ = st.storage.revoke_client(cid).await;
+            let _ = st.catalog.revoke_client(cid).await;
         }
     }
     Ok(StatusCode::NO_CONTENT)
@@ -1669,7 +1669,7 @@ async fn add_catalog(
                 CpError::BadRequest("egret-warehouse catalog requires config.warehouseId".into())
             })?;
         let wh = st
-            .storage
+            .catalog
             .get_warehouse(wh_id)
             .await?
             .ok_or_else(|| CpError::BadRequest("unknown warehouse".into()))?;
@@ -1679,7 +1679,7 @@ async fn add_catalog(
             ));
         }
         let sc = st
-            .storage
+            .storage_registry
             .get_storage_conn(wh.storage_conn_id)
             .await?
             .ok_or_else(|| CpError::BadRequest("unknown storage connection".into()))?;
@@ -1699,7 +1699,7 @@ async fn add_catalog(
         };
         let role_id = match client_id_param {
             Some(cid) => {
-                st.storage
+                st.catalog
                     .list_clients(wh.id)
                     .await?
                     .into_iter()
@@ -1714,8 +1714,8 @@ async fn add_catalog(
             None => ensure_engine_role(&st, wh.id).await?,
         };
         let client = st
-            .storage
-            .create_client(&NewClient {
+            .catalog
+            .create_client(NewClient {
                 name: format!("engine-{}-{}", engine.name, b.name),
                 consumer_type: "engine".into(),
                 workspace_id: wh.workspace_id,
@@ -1743,7 +1743,7 @@ async fn add_catalog(
         Ok(c) => c,
         Err(e) => {
             if let Some(cid) = minted_client {
-                let _ = st.storage.revoke_client(cid).await;
+                let _ = st.catalog.revoke_client(cid).await;
             }
             return Err(e.into());
         }
@@ -1753,7 +1753,7 @@ async fn add_catalog(
     let rollback = |st: CpState, cat_id: Uuid, minted: Option<Uuid>| async move {
         let _ = st.engine_mgmt.delete_engine_catalog(cat_id).await;
         if let Some(cid) = minted {
-            let _ = st.storage.revoke_client(cid).await;
+            let _ = st.catalog.revoke_client(cid).await;
         }
     };
     let req = match build_provision_req(&st, &engine).await {
@@ -1981,7 +1981,7 @@ async fn remove_catalog(
     // "adopt an existing client verbatim" path.
     if let Some(clientid) = client_row_id(&cat.config) {
         if is_minted_client(&cat.config) {
-            let _ = st.storage.revoke_client(clientid).await;
+            let _ = st.catalog.revoke_client(clientid).await;
         }
     }
     // Re-render + roll.
@@ -2522,7 +2522,8 @@ mod tests {
         let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
         Some(CpState {
             engine_mgmt: crate::EngineMgmtStore::new(db.clone()),
-            storage: egret_catalog::CatalogStore::new(db.clone()),
+            catalog: std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
+            storage_registry: egret_storage::StorageRegistry::new(db.clone()),
             authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
             secrets: workspace_secrets,
             sessions: egret_auth::session::SessionService::new(

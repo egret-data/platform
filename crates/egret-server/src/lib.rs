@@ -37,6 +37,8 @@ pub struct AppState {
     pub kernel: Option<egret_kernel::KernelState>,
     /// Present once the control plane is wired (in `egret-bin`); `None` in unit tests.
     pub control_plane: Option<egret_controlplane::CpState>,
+    /// Present once the Catalog seam admin router is wired (E3d-3); `None` in unit tests.
+    pub catalog_admin: Option<egret_catalog_engine::CatalogAdminState>,
     /// Present once the Policy/Ranger admin router is wired (E2d); `None` in unit tests.
     pub policy_admin: Option<egret_policy::PolicyAdminState>,
     /// Present once the engine-mgmt seam is wired (in `egret-bin`); `None` in unit tests.
@@ -63,6 +65,7 @@ impl AppState {
             notebook: None,
             kernel: None,
             control_plane: None,
+            catalog_admin: None,
             policy_admin: None,
             engine_mgmt: None,
             catalog_engine: None,
@@ -177,6 +180,19 @@ pub fn build_router(state: AppState) -> Router {
             )
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
             .with_state(cp);
+        router = router.merge(group);
+    }
+
+    if let Some(ca) = state.catalog_admin.clone() {
+        // Catalog seam admin router (E3d-3), moved out of control_plane_router.
+        // Same /api/control-plane prefix (FE URLs unchanged) + CSRF layer.
+        let group = Router::new()
+            .nest(
+                "/api/control-plane",
+                egret_catalog_engine::catalog_admin_router(),
+            )
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(ca);
         router = router.merge(group);
     }
 

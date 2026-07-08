@@ -6,7 +6,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use egret_catalog::CatalogError;
+use egret_catalog_engine::CatalogError;
 use egret_secrets::SecretsError;
 
 #[derive(Debug, thiserror::Error)]
@@ -28,10 +28,6 @@ pub enum CpError {
     /// A named secret is still referenced and cannot be deleted.
     #[error("secret is in use by {0} connection(s)")]
     InUse(i64),
-    /// A Trino coordinator request failed (unreachable or non-2xx / non-JSON
-    /// response) — surfaced to the UI as a 502 the monitor page can show.
-    #[error("engine not reachable")]
-    BadGateway,
     #[error("internal error")]
     Internal,
 }
@@ -47,6 +43,17 @@ impl From<CatalogError> for CpError {
             ),
             CatalogError::BadRequest(s) => CpError::BadRequest(s),
             CatalogError::Db(_) => CpError::Internal,
+        }
+    }
+}
+
+impl From<egret_storage::StorageRegistryError> for CpError {
+    fn from(e: egret_storage::StorageRegistryError) -> Self {
+        use egret_storage::StorageRegistryError as E;
+        match e {
+            E::NotFound(_) => CpError::NotFound,
+            E::AlreadyExists(s) => CpError::AlreadyExists(s),
+            E::Db(_) => CpError::Internal,
         }
     }
 }
@@ -91,7 +98,6 @@ impl IntoResponse for CpError {
             CpError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             CpError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
             CpError::InUse(_) => (StatusCode::CONFLICT, self.to_string()),
-            CpError::BadGateway => (StatusCode::BAD_GATEWAY, self.to_string()),
             CpError::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal error".to_string(),

@@ -1,16 +1,27 @@
-//! Storage connection registry: global (control-plane) N-entry storage registry.
+//! Storage-connection registry: the global (control-plane) N-entry registry.
 //!
-//! Provides CRUD on `CatalogStore` targeting the `storage_connections` table.
-//! Storage connections are global (platform-admin only); they are not scoped to
-//! a workspace. Entries are keyed by `id` (or by unique `name`).
+//! Provides CRUD on the `storage.storage_connections` table via [`StorageRegistry`].
+//! Storage connections are global (platform-admin only); they are not scoped to a
+//! workspace. Entries are keyed by `id` (or by unique `name`).
+//!
+//! Relocated from `egret-catalog` (E3a): the Catalog seam no longer owns storage.
 
-use crate::CatalogError;
 use chrono::{DateTime, Utc};
+use egret_metastore::Db;
 use uuid::Uuid;
 
-use super::store::CatalogStore;
+/// Errors produced by the storage-connection registry.
+#[derive(Debug, thiserror::Error)]
+pub enum StorageRegistryError {
+    #[error("not found: {0}")]
+    NotFound(String),
+    #[error("already exists: {0}")]
+    AlreadyExists(String),
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
+}
 
-/// A registered storage connection entry in `storage_connections`.
+/// A registered storage connection entry in `storage.storage_connections`.
 /// No secret plaintext value is stored; `secret_ref` is a foreign key into
 /// whatever vault/secret table the caller manages.
 #[derive(Clone, Debug, PartialEq)]
@@ -80,15 +91,29 @@ impl From<StorageConnRecord> for StorageConn {
     }
 }
 
-impl CatalogStore {
+/// Postgres-backed registry over `storage.storage_connections`.
+#[derive(Clone)]
+pub struct StorageRegistry {
+    db: Db,
+}
+
+impl StorageRegistry {
+    pub fn new(db: Db) -> Self {
+        Self { db }
+    }
+
+    fn pool(&self) -> &sqlx::PgPool {
+        &self.db.pool
+    }
+
     /// Insert a new (global) storage connection. Returns the created row.
-    /// A duplicate-name unique violation maps to `CatalogError::AlreadyExists`.
+    /// A duplicate-name unique violation maps to `StorageRegistryError::AlreadyExists`.
     pub async fn create_storage_conn(
         &self,
         input: &StorageConnInput,
-    ) -> Result<StorageConn, CatalogError> {
+    ) -> Result<StorageConn, StorageRegistryError> {
         let rec = sqlx::query_as::<_, StorageConnRecord>(
-            "INSERT INTO storage_connections \
+            "INSERT INTO storage.storage_connections \
                (name, purpose, provider, endpoint, region, bucket, \
                 key_prefix, access_key, secret_ref, path_style) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
@@ -109,41 +134,44 @@ impl CatalogStore {
         .await
         .map_err(|e| match &e {
             sqlx::Error::Database(d) if d.constraint() == Some("storage_connections_name_key") => {
-                CatalogError::AlreadyExists(input.name.clone())
+                StorageRegistryError::AlreadyExists(input.name.clone())
             }
-            _ => CatalogError::Db(e),
+            _ => StorageRegistryError::Db(e),
         })?;
 
         Ok(rec.into())
     }
 
     /// List all storage connections, ordered by name.
-    pub async fn list_storage_conns(&self) -> Result<Vec<StorageConn>, CatalogError> {
+    pub async fn list_storage_conns(&self) -> Result<Vec<StorageConn>, StorageRegistryError> {
         let recs = sqlx::query_as::<_, StorageConnRecord>(
             "SELECT id, name, purpose, provider, endpoint, region, \
                     bucket, key_prefix, access_key, secret_ref, path_style, created_at \
-             FROM storage_connections \
+             FROM storage.storage_connections \
              ORDER BY name",
         )
         .fetch_all(self.pool())
         .await
-        .map_err(CatalogError::Db)?;
+        .map_err(StorageRegistryError::Db)?;
 
         Ok(recs.into_iter().map(Into::into).collect())
     }
 
     /// Get a single storage connection by id. Returns `None` if it does not exist.
-    pub async fn get_storage_conn(&self, id: Uuid) -> Result<Option<StorageConn>, CatalogError> {
+    pub async fn get_storage_conn(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<StorageConn>, StorageRegistryError> {
         let rec = sqlx::query_as::<_, StorageConnRecord>(
             "SELECT id, name, purpose, provider, endpoint, region, \
                     bucket, key_prefix, access_key, secret_ref, path_style, created_at \
-             FROM storage_connections \
+             FROM storage.storage_connections \
              WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(self.pool())
         .await
-        .map_err(CatalogError::Db)?;
+        .map_err(StorageRegistryError::Db)?;
 
         Ok(rec.map(Into::into))
     }
@@ -154,9 +182,9 @@ impl CatalogStore {
         &self,
         id: Uuid,
         input: &StorageConnInput,
-    ) -> Result<bool, CatalogError> {
+    ) -> Result<bool, StorageRegistryError> {
         let result = sqlx::query(
-            "UPDATE storage_connections SET \
+            "UPDATE storage.storage_connections SET \
                name       = $1, \
                purpose    = $2, \
                provider   = $3, \
@@ -182,19 +210,26 @@ impl CatalogStore {
         .bind(id)
         .execute(self.pool())
         .await
-        .map_err(CatalogError::Db)?;
+        .map_err(|e| match &e {
+            // Renaming onto an existing name trips the unique index — mirror
+            // `create_storage_conn` and surface it as a 409, not a 500.
+            sqlx::Error::Database(d) if d.constraint() == Some("storage_connections_name_key") => {
+                StorageRegistryError::AlreadyExists(input.name.clone())
+            }
+            _ => StorageRegistryError::Db(e),
+        })?;
 
         Ok(result.rows_affected() == 1)
     }
 
     /// Delete a storage connection. Returns `true` if a row was deleted,
     /// `false` if no row matched the given id (no-op).
-    pub async fn delete_storage_conn(&self, id: Uuid) -> Result<bool, CatalogError> {
-        let result = sqlx::query("DELETE FROM storage_connections WHERE id = $1")
+    pub async fn delete_storage_conn(&self, id: Uuid) -> Result<bool, StorageRegistryError> {
+        let result = sqlx::query("DELETE FROM storage.storage_connections WHERE id = $1")
             .bind(id)
             .execute(self.pool())
             .await
-            .map_err(CatalogError::Db)?;
+            .map_err(StorageRegistryError::Db)?;
 
         Ok(result.rows_affected() == 1)
     }

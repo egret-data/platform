@@ -13,10 +13,26 @@
 pub mod admin;
 pub mod bootstrap;
 pub mod browse;
+/// Crate-level engine domain error ([`CatalogEngineError`]) for the per-request
+/// warehouse/browse operations — distinct from the store's [`CatalogError`].
+pub mod error;
 pub mod mount;
 pub mod pool;
 pub mod recovery;
+/// The embedded-catalog RBAC store (warehouses/roles/grants/Catalog Clients),
+/// merged in from the former `egret-catalog` crate (E3d-1). Runs on the
+/// egret-side sqlx-0.8 pool aliased as `sqlx08`.
+pub mod store;
 pub mod warehouse;
+/// The control-plane catalog admin router (warehouses / roles / grants /
+/// clients / browse), moved out of `egret-controlplane` into this seam (E3d-3).
+/// Nested at `/api/control-plane` in `egret-server`.
+pub mod warehouse_admin;
+
+pub use store::{
+    CatalogClient, CatalogError, CatalogGrant, CatalogRole, CatalogStore, CreatedClient,
+    GrantInput, NewClient, Warehouse,
+};
 
 pub use admin::{
     get_warehouse_config, list_tasks, rotate_storage_credential, search_tabulars,
@@ -29,6 +45,7 @@ pub use browse::{
     NamespaceEntry, PartitionField, SnapshotInfo, SortField, TableDetail, TabularEntry,
     TabularKind,
 };
+pub use error::CatalogEngineError;
 pub use lakekeeper::api::ApiContext;
 /// lakekeeper's built-in open authorizer. EB-1 mounts the engine with this
 /// permissive authorizer; EB-3 replaces it with the real egret authorizer.
@@ -49,6 +66,12 @@ pub use recovery::{
     TabularKindName,
 };
 pub use warehouse::{create_lakekeeper_warehouse, S3StorageConfig};
+pub use warehouse_admin::{
+    catalog_admin_router, BrowseColumn, BrowseDeletedTabular, BrowseNamespace, BrowsePartition,
+    BrowseSearchResult, BrowseSnapshot, BrowseSort, BrowseTableDetail, BrowseTabular, BrowseTask,
+    BrowseWarehouseConfig, CatalogAdminState, CatalogHttpError, ProvisionS3, WarehouseBrowser,
+    WarehouseProvisioner,
+};
 
 /// Run lakekeeper's Postgres catalog migrations against an isolated
 /// `lakekeeper` schema in the database addressed by `dsn`.

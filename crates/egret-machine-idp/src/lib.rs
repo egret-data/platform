@@ -161,7 +161,7 @@ impl SigningKeyStore for PgSigningKeyStore {
     async fn active(&self) -> Result<KeyMaterial, IdpError> {
         // jsonb is read as ::text to avoid needing sqlx's `json` feature.
         let row: Option<(String, String, String)> = sqlx::query_as(
-            "SELECT kid, private_pem, public_jwk::text FROM oidc_signing_keys \
+            "SELECT kid, private_pem, public_jwk::text FROM catalog.oidc_signing_keys \
              WHERE retired_at IS NULL ORDER BY created_at DESC LIMIT 1",
         )
         .fetch_optional(&self.db.pool)
@@ -181,7 +181,7 @@ impl SigningKeyStore for PgSigningKeyStore {
         let jwk_text =
             serde_json::to_string(&km.public_jwk).map_err(|e| IdpError::Crypto(e.to_string()))?;
         sqlx::query(
-            "INSERT INTO oidc_signing_keys (kid, algorithm, private_pem, public_jwk) \
+            "INSERT INTO catalog.oidc_signing_keys (kid, algorithm, private_pem, public_jwk) \
              VALUES ($1, 'RS256', $2, $3::jsonb) ON CONFLICT (kid) DO NOTHING",
         )
         .bind(&km.kid)
@@ -194,7 +194,7 @@ impl SigningKeyStore for PgSigningKeyStore {
 
     async fn all_public_jwks(&self) -> Result<Vec<serde_json::Value>, IdpError> {
         let rows: Vec<String> = sqlx::query_scalar(
-            "SELECT public_jwk::text FROM oidc_signing_keys \
+            "SELECT public_jwk::text FROM catalog.oidc_signing_keys \
              WHERE retired_at IS NULL ORDER BY created_at DESC",
         )
         .fetch_all(&self.db.pool)

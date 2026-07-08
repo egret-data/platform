@@ -58,7 +58,8 @@ async fn setup_full(
 
     let app = engine_mgmt_router().with_state(EngineMgmtState {
         engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
-        storage: egret_catalog::CatalogStore::new(db.clone()),
+        catalog: std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
+        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
         authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
         secrets: workspace_secrets,
         sessions: sessions.clone(),
@@ -174,7 +175,7 @@ async fn seed_provisioned_warehouse(f: &Fixture) -> Uuid {
             .expect("insert workspace");
 
     let (storage_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO storage_connections (name, region, bucket, access_key) \
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
          VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(format!("engine-sc-{}", Uuid::new_v4().simple()))
@@ -185,7 +186,7 @@ async fn seed_provisioned_warehouse(f: &Fixture) -> Uuid {
     .await
     .expect("insert storage connection");
 
-    let catalog_store = egret_catalog::CatalogStore::new(f.db.clone());
+    let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
     let wh = catalog_store
         .create_warehouse(
             &format!("engine-wh-{}", Uuid::new_v4().simple()),
@@ -212,7 +213,7 @@ async fn seed_unprovisioned_warehouse(f: &Fixture) -> Uuid {
             .expect("insert workspace");
 
     let (storage_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO storage_connections (name, region, bucket, access_key) \
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
          VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(format!("engine-sc-unprov-{}", Uuid::new_v4().simple()))
@@ -223,7 +224,7 @@ async fn seed_unprovisioned_warehouse(f: &Fixture) -> Uuid {
     .await
     .expect("insert storage connection");
 
-    let catalog_store = egret_catalog::CatalogStore::new(f.db.clone());
+    let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
     catalog_store
         .create_warehouse(
             &format!("engine-wh-unprov-{}", Uuid::new_v4().simple()),
@@ -878,7 +879,7 @@ async fn seed_exchange_storage_conn(f: &Fixture) -> Uuid {
         .await
         .expect("create exchange secret");
     let (id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO storage_connections (name, region, bucket, access_key, endpoint, secret_ref, path_style) \
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key, endpoint, secret_ref, path_style) \
          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
     )
     .bind(format!("exchange-sc-{}", Uuid::new_v4().simple()))
@@ -1543,7 +1544,7 @@ async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
     let name = format!("trino-{}", Uuid::new_v4().simple());
 
     // Seed a pre-existing, user-owned client on a custom (non-default) role.
-    let catalog_store = egret_catalog::CatalogStore::new(f.db.clone());
+    let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
     let engine_mgmt = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone());
     let wh = catalog_store
         .get_warehouse(wh_id)
@@ -1560,7 +1561,7 @@ async fn add_catalog_with_client_id_inherits_role_and_mints_new_client() {
         .await
         .expect("create role");
     let existing_client = catalog_store
-        .create_client(&egret_catalog::service::embedded::NewClient {
+        .create_client(&egret_catalog_engine::NewClient {
             name: "pre-existing-client".into(),
             consumer_type: "external".into(),
             workspace_id: wh.workspace_id,
@@ -1714,7 +1715,7 @@ async fn add_catalog_with_foreign_client_id_400() {
     let name = format!("trino-{}", Uuid::new_v4().simple());
 
     // A client that belongs to a DIFFERENT warehouse.
-    let catalog_store = egret_catalog::CatalogStore::new(f.db.clone());
+    let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
     let other_wh = catalog_store
         .get_warehouse(other_wh_id)
         .await
@@ -1725,7 +1726,7 @@ async fn add_catalog_with_foreign_client_id_400() {
         .await
         .expect("create role");
     let foreign_client = catalog_store
-        .create_client(&egret_catalog::service::embedded::NewClient {
+        .create_client(&egret_catalog_engine::NewClient {
             name: "foreign-client".into(),
             consumer_type: "external".into(),
             workspace_id: other_wh.workspace_id,
