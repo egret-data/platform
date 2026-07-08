@@ -2499,6 +2499,7 @@ dependencies = [
  "egret-core",
  "egret-database",
  "egret-engine",
+ "egret-engine-mgmt",
  "egret-kernel",
  "egret-machine-idp",
  "egret-metastore",
