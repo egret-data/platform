@@ -1,21 +1,60 @@
-//! Control-plane management for the embedded catalog: warehouses, catalog-roles,
-//! grants, and Catalog Clients. All routes are platform-admin gated and operate
-//! over the egret RBAC store (`CatalogStore`). NOTE: warehouse creation here
-//! records the egret-side row; provisioning the lakekeeper warehouse itself is
-//! wired with the Authorizer/engine integration (EB-3 T3/T4).
+//! Control-plane admin router for the embedded catalog: warehouses,
+//! catalog-roles, grants, Catalog Clients, and warehouse browse/admin ops.
+//! Moved out of `egret-controlplane` into the Catalog seam (E3d-3); the router
+//! is still nested at `/api/control-plane` in `egret-server` (FE URLs
+//! unchanged). Every route is gated on `require_permission(&p, "warehouse:*")`
+//! (platform_admin bypasses) and operates over the egret RBAC store
+//! (`CatalogStore`). NOTE: warehouse creation here records the egret-side row;
+//! provisioning the lakekeeper warehouse itself is done through the
+//! [`WarehouseProvisioner`] seam, wired in the composition root (egret-bin).
 
-use axum::extract::{Path, State};
+mod error;
+
+use axum::extract::{FromRef, Path, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
-use egret_catalog_engine::{GrantInput, NewClient};
+use egret_auth::require_permission;
+use egret_auth::session::SessionService;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::auth::require_permission;
-use crate::error::CpError;
-use crate::CpState;
+use crate::{CatalogStore, GrantInput, NewClient};
+pub use error::CatalogHttpError;
+
+/// State for the admin catalog router. The `CatalogStore` + storage-connection
+/// registry + secret store are all in-crate/downstream deps; the
+/// `WarehouseProvisioner`/`WarehouseBrowser` are composition-root seams wired in
+/// egret-bin (`None` in tests, which record the egret row without a lakekeeper
+/// counterpart).
+#[derive(Clone)]
+pub struct CatalogAdminState {
+    /// Embedded-catalog store: warehouses + catalog RBAC (roles/grants/clients).
+    pub store: CatalogStore,
+    /// Global storage-connection registry (`storage.storage_connections`, E3a).
+    pub storage_registry: egret_storage::StorageRegistry,
+    /// Named secret layer, used in GLOBAL scope (`None` workspace) here.
+    pub secrets: egret_secrets::WorkspaceSecretStore,
+    /// Provisions the embedded lakekeeper warehouse on create (wired in egret-bin).
+    pub provisioner: Option<Arc<dyn WarehouseProvisioner>>,
+    /// Reads catalog structure from the embedded lakekeeper (wired in egret-bin).
+    pub browser: Option<Arc<dyn WarehouseBrowser>>,
+    /// Session service backing the `Auth` extractor.
+    pub sessions: SessionService,
+}
+
+impl FromRef<CatalogAdminState> for SessionService {
+    fn from_ref(s: &CatalogAdminState) -> Self {
+        s.sessions.clone()
+    }
+}
+
+/// Build the admin catalog router (to be nested at `/api/control-plane`).
+pub fn catalog_admin_router() -> Router<CatalogAdminState> {
+    router()
+}
 
 /// S3 config handed to the [`WarehouseProvisioner`] to create the lakekeeper
 /// warehouse (secret already resolved to plaintext).
@@ -38,7 +77,7 @@ pub trait WarehouseProvisioner: Send + Sync {
         &self,
         name: &str,
         s3: &ProvisionS3,
-    ) -> Result<String, egret_catalog_engine::CatalogEngineError>;
+    ) -> Result<String, crate::CatalogEngineError>;
 }
 
 /// Catalog browse result rows (control-plane DTOs; camelCase on the wire).
@@ -107,37 +146,37 @@ pub trait WarehouseBrowser: Send + Sync {
     async fn namespaces(
         &self,
         lakekeeper_warehouse_id: &str,
-    ) -> Result<Vec<BrowseNamespace>, egret_catalog_engine::CatalogEngineError>;
+    ) -> Result<Vec<BrowseNamespace>, crate::CatalogEngineError>;
     async fn tabulars(
         &self,
         lakekeeper_warehouse_id: &str,
         namespace: &[String],
-    ) -> Result<Vec<BrowseTabular>, egret_catalog_engine::CatalogEngineError>;
+    ) -> Result<Vec<BrowseTabular>, crate::CatalogEngineError>;
     async fn schema(
         &self,
         lakekeeper_warehouse_id: &str,
         namespace: &[String],
         table: &str,
-    ) -> Result<BrowseTableDetail, egret_catalog_engine::CatalogEngineError>;
+    ) -> Result<BrowseTableDetail, crate::CatalogEngineError>;
     /// Current-schema columns of a view.
     async fn view_columns(
         &self,
         lakekeeper_warehouse_id: &str,
         namespace: &[String],
         view: &str,
-    ) -> Result<Vec<BrowseColumn>, egret_catalog_engine::CatalogEngineError>;
+    ) -> Result<Vec<BrowseColumn>, crate::CatalogEngineError>;
     /// Soft-deleted tables/views awaiting purge.
     async fn deleted_tabulars(
         &self,
         lakekeeper_warehouse_id: &str,
-    ) -> Result<Vec<BrowseDeletedTabular>, egret_catalog_engine::CatalogEngineError>;
+    ) -> Result<Vec<BrowseDeletedTabular>, crate::CatalogEngineError>;
     /// Recover a soft-deleted table (`kind`="table") or view (`kind`="view").
     async fn undrop(
         &self,
         lakekeeper_warehouse_id: &str,
         kind: &str,
         id: uuid::Uuid,
-    ) -> Result<(), egret_catalog_engine::CatalogEngineError>;
+    ) -> Result<(), crate::CatalogEngineError>;
     /// Set the protected flag on a `target` ("table"/"view"/"namespace") by id.
     async fn set_protection(
         &self,
@@ -145,48 +184,48 @@ pub trait WarehouseBrowser: Send + Sync {
         target: &str,
         id: uuid::Uuid,
         protected: bool,
-    ) -> Result<bool, egret_catalog_engine::CatalogEngineError>;
+    ) -> Result<bool, crate::CatalogEngineError>;
     /// Read the warehouse's admin config (status / soft-delete TTL / statistics).
     async fn config(
         &self,
         lakekeeper_warehouse_id: &str,
-    ) -> Result<BrowseWarehouseConfig, egret_catalog_engine::CatalogEngineError>;
+    ) -> Result<BrowseWarehouseConfig, crate::CatalogEngineError>;
     /// Activate/deactivate the warehouse.
     async fn set_active(
         &self,
         lakekeeper_warehouse_id: &str,
         active: bool,
-    ) -> Result<(), egret_catalog_engine::CatalogEngineError>;
+    ) -> Result<(), crate::CatalogEngineError>;
     /// Set soft-delete retention (`Some(seconds)`) or hard delete (`None`).
     async fn set_delete_profile(
         &self,
         lakekeeper_warehouse_id: &str,
         seconds: Option<i64>,
-    ) -> Result<(), egret_catalog_engine::CatalogEngineError>;
+    ) -> Result<(), crate::CatalogEngineError>;
     /// Set the allowed Iceberg format versions.
     async fn set_format_versions(
         &self,
         lakekeeper_warehouse_id: &str,
         versions: Vec<u8>,
-    ) -> Result<(), egret_catalog_engine::CatalogEngineError>;
+    ) -> Result<(), crate::CatalogEngineError>;
     /// Rotate the S3 access-key credential.
     async fn rotate_credential(
         &self,
         lakekeeper_warehouse_id: &str,
         access_key: &str,
         secret_key: &str,
-    ) -> Result<(), egret_catalog_engine::CatalogEngineError>;
+    ) -> Result<(), crate::CatalogEngineError>;
     /// Search tables/views across the warehouse by name.
     async fn search(
         &self,
         lakekeeper_warehouse_id: &str,
         query: &str,
-    ) -> Result<Vec<BrowseSearchResult>, egret_catalog_engine::CatalogEngineError>;
+    ) -> Result<Vec<BrowseSearchResult>, crate::CatalogEngineError>;
     /// List recent background (GC) tasks on the warehouse.
     async fn tasks(
         &self,
         lakekeeper_warehouse_id: &str,
-    ) -> Result<Vec<BrowseTask>, egret_catalog_engine::CatalogEngineError>;
+    ) -> Result<Vec<BrowseTask>, crate::CatalogEngineError>;
 }
 
 /// Warehouse admin config (status / soft-delete TTL / latest statistics).
@@ -210,7 +249,7 @@ pub struct BrowseTask {
     pub status: String,
 }
 
-pub fn router() -> Router<CpState> {
+fn router() -> Router<CatalogAdminState> {
     Router::new()
         .route("/warehouses", get(list_warehouses).post(create_warehouse))
         .route(
@@ -266,8 +305,8 @@ struct WarehouseDto {
     storage_conn_id: Uuid,
     lakekeeper_warehouse_id: Option<String>,
 }
-impl From<egret_catalog_engine::Warehouse> for WarehouseDto {
-    fn from(w: egret_catalog_engine::Warehouse) -> Self {
+impl From<crate::Warehouse> for WarehouseDto {
+    fn from(w: crate::Warehouse) -> Self {
         WarehouseDto {
             id: w.id,
             name: w.name,
@@ -287,12 +326,12 @@ struct CreateWarehouseBody {
 }
 
 async fn list_warehouses(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
-) -> Result<Json<Vec<WarehouseDto>>, CpError> {
+) -> Result<Json<Vec<WarehouseDto>>, CatalogHttpError> {
     require_permission(&p, "warehouse:read")?;
     Ok(Json(
-        st.storage
+        st.store
             .list_warehouses()
             .await?
             .into_iter()
@@ -302,13 +341,13 @@ async fn list_warehouses(
 }
 
 async fn create_warehouse(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Json(b): Json<CreateWarehouseBody>,
-) -> Result<(StatusCode, Json<WarehouseDto>), CpError> {
+) -> Result<(StatusCode, Json<WarehouseDto>), CatalogHttpError> {
     require_permission(&p, "warehouse:create")?;
     let w = st
-        .storage
+        .store
         .create_warehouse(&b.name, b.workspace_id, b.storage_connection_id)
         .await?;
 
@@ -316,41 +355,41 @@ async fn create_warehouse(
     // roll back the egret row — a warehouse with no lakekeeper counterpart is useless.
     if let Some(prov) = &st.provisioner {
         match provision_lakekeeper(&st, &b.name, b.storage_connection_id, prov.as_ref()).await {
-            Ok(lk_id) => st.storage.set_lakekeeper_warehouse_id(w.id, &lk_id).await?,
+            Ok(lk_id) => st.store.set_lakekeeper_warehouse_id(w.id, &lk_id).await?,
             Err(e) => {
-                let _ = st.storage.delete_warehouse(w.id).await;
+                let _ = st.store.delete_warehouse(w.id).await;
                 return Err(e);
             }
         }
     }
 
     let w = st
-        .storage
+        .store
         .get_warehouse(w.id)
         .await?
-        .ok_or(CpError::NotFound)?;
+        .ok_or(CatalogHttpError::NotFound)?;
     Ok((StatusCode::CREATED, Json(w.into())))
 }
 
 /// Resolve the storage connection (+ its secret) and provision the lakekeeper warehouse.
 async fn provision_lakekeeper(
-    st: &CpState,
+    st: &CatalogAdminState,
     name: &str,
     storage_conn_id: Uuid,
     prov: &dyn WarehouseProvisioner,
-) -> Result<String, CpError> {
+) -> Result<String, CatalogHttpError> {
     let sc = st
         .storage_registry
         .get_storage_conn(storage_conn_id)
         .await?
-        .ok_or_else(|| CpError::BadRequest("unknown storage connection".into()))?;
+        .ok_or_else(|| CatalogHttpError::BadRequest("unknown storage connection".into()))?;
     let secret_key = match sc.secret_ref {
         // Storage-connection secrets are GLOBAL (None scope), per P2.
         Some(ref_id) => st
             .secrets
             .resolve_plaintext(None, ref_id)
             .await
-            .map_err(|e| CpError::BadRequest(format!("resolve storage secret: {e}")))?,
+            .map_err(|e| CatalogHttpError::BadRequest(format!("resolve storage secret: {e}")))?,
         None => String::new(),
     };
     let s3 = ProvisionS3 {
@@ -362,30 +401,32 @@ async fn provision_lakekeeper(
         secret_key,
         key_prefix: sc.key_prefix,
     };
-    prov.provision(name, &s3).await.map_err(CpError::from)
+    prov.provision(name, &s3)
+        .await
+        .map_err(CatalogHttpError::from)
 }
 
 async fn get_warehouse(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
-) -> Result<Json<WarehouseDto>, CpError> {
+) -> Result<Json<WarehouseDto>, CatalogHttpError> {
     require_permission(&p, "warehouse:read")?;
     let w = st
-        .storage
+        .store
         .get_warehouse(id)
         .await?
-        .ok_or(CpError::NotFound)?;
+        .ok_or(CatalogHttpError::NotFound)?;
     Ok(Json(w.into()))
 }
 
 async fn delete_warehouse(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
-) -> Result<StatusCode, CpError> {
+) -> Result<StatusCode, CatalogHttpError> {
     require_permission(&p, "warehouse:delete")?;
-    st.storage.delete_warehouse(id).await?;
+    st.store.delete_warehouse(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -397,8 +438,8 @@ struct RoleDto {
     consumer_type: String,
     description: Option<String>,
 }
-impl From<egret_catalog_engine::CatalogRole> for RoleDto {
-    fn from(r: egret_catalog_engine::CatalogRole) -> Self {
+impl From<crate::CatalogRole> for RoleDto {
+    fn from(r: crate::CatalogRole) -> Self {
         RoleDto {
             id: r.id,
             name: r.name,
@@ -417,13 +458,13 @@ struct CreateRoleBody {
 }
 
 async fn list_roles(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
-) -> Result<Json<Vec<RoleDto>>, CpError> {
+) -> Result<Json<Vec<RoleDto>>, CatalogHttpError> {
     require_permission(&p, "warehouse:read")?;
     Ok(Json(
-        st.storage
+        st.store
             .list_roles(id)
             .await?
             .into_iter()
@@ -433,27 +474,27 @@ async fn list_roles(
 }
 
 async fn create_role(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
     Json(b): Json<CreateRoleBody>,
-) -> Result<(StatusCode, Json<RoleDto>), CpError> {
+) -> Result<(StatusCode, Json<RoleDto>), CatalogHttpError> {
     require_permission(&p, "warehouse:create")?;
     let desc = b.description.as_deref().filter(|d| !d.trim().is_empty());
     let r = st
-        .storage
+        .store
         .create_role(id, &b.name, &b.consumer_type, desc)
         .await?;
     Ok((StatusCode::CREATED, Json(r.into())))
 }
 
 async fn delete_role(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(role_id): Path<Uuid>,
-) -> Result<StatusCode, CpError> {
+) -> Result<StatusCode, CatalogHttpError> {
     require_permission(&p, "warehouse:delete")?;
-    st.storage.delete_role(role_id).await?;
+    st.store.delete_role(role_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -476,13 +517,13 @@ struct AddGrantBody {
 }
 
 async fn list_grants(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(role_id): Path<Uuid>,
-) -> Result<Json<Vec<GrantDto>>, CpError> {
+) -> Result<Json<Vec<GrantDto>>, CatalogHttpError> {
     require_permission(&p, "warehouse:read")?;
     Ok(Json(
-        st.storage
+        st.store
             .list_grants(role_id)
             .await?
             .into_iter()
@@ -498,13 +539,13 @@ async fn list_grants(
 }
 
 async fn add_grant(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(role_id): Path<Uuid>,
     Json(b): Json<AddGrantBody>,
-) -> Result<StatusCode, CpError> {
+) -> Result<StatusCode, CatalogHttpError> {
     require_permission(&p, "warehouse:create")?;
-    st.storage
+    st.store
         .add_grant(
             role_id,
             &GrantInput {
@@ -519,12 +560,12 @@ async fn add_grant(
 }
 
 async fn revoke_grant(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(grant_id): Path<Uuid>,
-) -> Result<StatusCode, CpError> {
+) -> Result<StatusCode, CatalogHttpError> {
     require_permission(&p, "warehouse:delete")?;
-    st.storage.revoke_grant(grant_id).await?;
+    st.store.revoke_grant(grant_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -555,13 +596,13 @@ struct CreateClientBody {
 }
 
 async fn list_clients(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
-) -> Result<Json<Vec<ClientDto>>, CpError> {
+) -> Result<Json<Vec<ClientDto>>, CatalogHttpError> {
     require_permission(&p, "warehouse:read")?;
     Ok(Json(
-        st.storage
+        st.store
             .list_clients(id)
             .await?
             .into_iter()
@@ -577,14 +618,14 @@ async fn list_clients(
 }
 
 async fn create_client(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
     Json(b): Json<CreateClientBody>,
-) -> Result<(StatusCode, Json<CreatedClientDto>), CpError> {
+) -> Result<(StatusCode, Json<CreatedClientDto>), CatalogHttpError> {
     require_permission(&p, "warehouse:create")?;
     let c = st
-        .storage
+        .store
         .create_client(&NewClient {
             name: b.name,
             consumer_type: b.consumer_type,
@@ -604,12 +645,12 @@ async fn create_client(
 }
 
 async fn revoke_client(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
-) -> Result<StatusCode, CpError> {
+) -> Result<StatusCode, CatalogHttpError> {
     require_permission(&p, "warehouse:delete")?;
-    st.storage.revoke_client(id).await?;
+    st.store.revoke_client(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -700,19 +741,19 @@ fn parse_ns(ns: &str) -> Vec<String> {
 }
 
 /// Look up the lakekeeper warehouse id for an egret warehouse row.
-async fn lk_id(st: &CpState, id: Uuid) -> Result<Option<String>, CpError> {
+async fn lk_id(st: &CatalogAdminState, id: Uuid) -> Result<Option<String>, CatalogHttpError> {
     Ok(st
-        .storage
+        .store
         .get_warehouse(id)
         .await?
         .and_then(|w| w.lakekeeper_warehouse_id))
 }
 
 async fn browse_namespaces(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
-) -> Result<Json<Vec<NamespaceDto>>, CpError> {
+) -> Result<Json<Vec<NamespaceDto>>, CatalogHttpError> {
     require_permission(&p, "warehouse:read")?;
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
@@ -730,10 +771,10 @@ async fn browse_namespaces(
 }
 
 async fn browse_tables(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path((id, ns)): Path<(Uuid, String)>,
-) -> Result<Json<Vec<TabularDto>>, CpError> {
+) -> Result<Json<Vec<TabularDto>>, CatalogHttpError> {
     require_permission(&p, "warehouse:read")?;
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
@@ -753,13 +794,13 @@ async fn browse_tables(
 }
 
 async fn browse_schema(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path((id, ns, table)): Path<(Uuid, String, String)>,
-) -> Result<Json<SchemaDto>, CpError> {
+) -> Result<Json<SchemaDto>, CatalogHttpError> {
     require_permission(&p, "warehouse:read")?;
-    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
-    let b = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
+    let b = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     let d = b.schema(&lk, &parse_ns(&ns), &table).await?;
     Ok(Json(SchemaDto {
         location: d.location,
@@ -811,13 +852,13 @@ async fn browse_schema(
 }
 
 async fn browse_view(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path((id, ns, view)): Path<(Uuid, String, String)>,
-) -> Result<Json<Vec<ColumnDto>>, CpError> {
+) -> Result<Json<Vec<ColumnDto>>, CatalogHttpError> {
     require_permission(&p, "warehouse:read")?;
-    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
-    let b = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
+    let b = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     let cols = b.view_columns(&lk, &parse_ns(&ns), &view).await?;
     Ok(Json(
         cols.into_iter()
@@ -831,10 +872,10 @@ async fn browse_view(
 }
 
 async fn browse_deleted(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
-) -> Result<Json<Vec<DeletedTabularDto>>, CpError> {
+) -> Result<Json<Vec<DeletedTabularDto>>, CatalogHttpError> {
     require_permission(&p, "warehouse:read")?;
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
@@ -863,14 +904,14 @@ struct UndropBody {
 }
 
 async fn undrop_tabular(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
     Json(b): Json<UndropBody>,
-) -> Result<StatusCode, CpError> {
+) -> Result<StatusCode, CatalogHttpError> {
     require_permission(&p, "warehouse:update")?;
-    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
-    let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
+    let browser = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     browser.undrop(&lk, &b.kind, b.id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -890,14 +931,14 @@ struct ProtectionDto {
 }
 
 async fn set_protection(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
     Json(b): Json<ProtectionBody>,
-) -> Result<Json<ProtectionDto>, CpError> {
+) -> Result<Json<ProtectionDto>, CatalogHttpError> {
     require_permission(&p, "warehouse:update")?;
-    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
-    let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
+    let browser = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     let protected = browser
         .set_protection(&lk, &b.target, b.id, b.protected)
         .await?;
@@ -915,13 +956,13 @@ struct WarehouseConfigDto {
 }
 
 async fn warehouse_config(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
-) -> Result<Json<WarehouseConfigDto>, CpError> {
+) -> Result<Json<WarehouseConfigDto>, CatalogHttpError> {
     require_permission(&p, "warehouse:read")?;
-    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
-    let b = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
+    let b = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     let c = b.config(&lk).await?;
     Ok(Json(WarehouseConfigDto {
         active: c.active,
@@ -938,14 +979,14 @@ struct StatusBody {
 }
 
 async fn set_warehouse_status(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
     Json(b): Json<StatusBody>,
-) -> Result<StatusCode, CpError> {
+) -> Result<StatusCode, CatalogHttpError> {
     require_permission(&p, "warehouse:update")?;
-    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
-    let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
+    let browser = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     browser.set_active(&lk, b.active).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -957,14 +998,14 @@ struct DeleteProfileBody {
 }
 
 async fn set_delete_profile_route(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
     Json(b): Json<DeleteProfileBody>,
-) -> Result<StatusCode, CpError> {
+) -> Result<StatusCode, CatalogHttpError> {
     require_permission(&p, "warehouse:update")?;
-    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
-    let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
+    let browser = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     browser.set_delete_profile(&lk, b.seconds).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -975,19 +1016,19 @@ struct FormatPolicyBody {
 }
 
 async fn set_format_policy(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
     Json(b): Json<FormatPolicyBody>,
-) -> Result<StatusCode, CpError> {
+) -> Result<StatusCode, CatalogHttpError> {
     require_permission(&p, "warehouse:update")?;
     if b.versions.is_empty() {
-        return Err(CpError::BadRequest(
+        return Err(CatalogHttpError::BadRequest(
             "at least one format version required".into(),
         ));
     }
-    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
-    let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
+    let browser = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     browser.set_format_versions(&lk, b.versions).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1000,14 +1041,14 @@ struct RotateCredBody {
 }
 
 async fn rotate_credential(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
     Json(b): Json<RotateCredBody>,
-) -> Result<StatusCode, CpError> {
+) -> Result<StatusCode, CatalogHttpError> {
     require_permission(&p, "warehouse:update")?;
-    let lk = lk_id(&st, id).await?.ok_or(CpError::NotFound)?;
-    let browser = st.browser.as_ref().ok_or(CpError::NotFound)?;
+    let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
+    let browser = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     browser
         .rotate_credential(&lk, &b.access_key, &b.secret_key)
         .await?;
@@ -1029,11 +1070,11 @@ struct SearchQuery {
 }
 
 async fn search_tabulars(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
     axum::extract::Query(sq): axum::extract::Query<SearchQuery>,
-) -> Result<Json<Vec<SearchResultDto>>, CpError> {
+) -> Result<Json<Vec<SearchResultDto>>, CatalogHttpError> {
     require_permission(&p, "warehouse:read")?;
     if sq.q.trim().is_empty() {
         return Ok(Json(vec![]));
@@ -1063,10 +1104,10 @@ struct TaskDto {
 }
 
 async fn list_tasks(
-    State(st): State<CpState>,
+    State(st): State<CatalogAdminState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
-) -> Result<Json<Vec<TaskDto>>, CpError> {
+) -> Result<Json<Vec<TaskDto>>, CatalogHttpError> {
     require_permission(&p, "warehouse:read")?;
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));

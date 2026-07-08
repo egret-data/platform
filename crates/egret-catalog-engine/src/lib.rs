@@ -24,6 +24,10 @@ pub mod recovery;
 /// egret-side sqlx-0.8 pool aliased as `sqlx08`.
 pub mod store;
 pub mod warehouse;
+/// The control-plane catalog admin router (warehouses / roles / grants /
+/// clients / browse), moved out of `egret-controlplane` into this seam (E3d-3).
+/// Nested at `/api/control-plane` in `egret-server`.
+pub mod warehouse_admin;
 
 pub use store::{
     CatalogClient, CatalogError, CatalogGrant, CatalogRole, CatalogStore, CreatedClient,
@@ -62,6 +66,12 @@ pub use recovery::{
     TabularKindName,
 };
 pub use warehouse::{create_lakekeeper_warehouse, S3StorageConfig};
+pub use warehouse_admin::{
+    catalog_admin_router, BrowseColumn, BrowseDeletedTabular, BrowseNamespace, BrowsePartition,
+    BrowseSearchResult, BrowseSnapshot, BrowseSort, BrowseTableDetail, BrowseTabular, BrowseTask,
+    BrowseWarehouseConfig, CatalogAdminState, CatalogHttpError, ProvisionS3, WarehouseBrowser,
+    WarehouseProvisioner,
+};
 
 /// Run lakekeeper's Postgres catalog migrations against an isolated
 /// `lakekeeper` schema in the database addressed by `dsn`.

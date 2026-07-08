@@ -10,8 +10,9 @@
 //! `egret_workspace::rbac::Authorizer::require_platform` in
 //! `egret-workspace/src/routes.rs`, so that file is scanned too. `engine:*`
 //! keys are enforced by `egret_auth::require_permission` in the
-//! `egret-engine-mgmt` seam's `engines.rs`/`monitor.rs` (E1c), and `policy:*`
-//! keys in the `egret-policy` seam's `admin/mod.rs` (E2d) — both scanned.
+//! `egret-engine-mgmt` seam's `engines.rs`/`monitor.rs` (E1c), `policy:*` keys in
+//! the `egret-policy` seam's `admin/mod.rs` (E2d), and `warehouse:*` keys in the
+//! `egret-catalog-engine` seam's `warehouse_admin/mod.rs` (E3d-3) — all scanned.
 
 use std::collections::HashSet;
 
@@ -22,7 +23,7 @@ const ALLOWED_UNENFORCED: &[&str] = &[];
 
 /// Control-plane source files scanned for `require_permission(..., "key")`
 /// call sites, relative to this crate's `src/`.
-const CONTROLPLANE_FILES: &[&str] = &["warehouses.rs", "storage.rs", "secrets.rs", "access/mod.rs"];
+const CONTROLPLANE_FILES: &[&str] = &["storage.rs", "secrets.rs", "access/mod.rs"];
 
 /// Extra source files (outside this crate) that enforce catalog permissions
 /// through a different gate function. Path is relative to this crate's
@@ -32,6 +33,8 @@ const EXTRA_FILES: &[&str] = &[
     "../egret-engine-mgmt/src/engines.rs",
     "../egret-engine-mgmt/src/monitor.rs",
     "../egret-policy/src/admin/mod.rs",
+    // `warehouse:*` keys moved into the Catalog seam's admin router (E3d-3).
+    "../egret-catalog-engine/src/warehouse_admin/mod.rs",
 ];
 
 /// Gate function names whose first-string-literal argument is a
@@ -123,6 +126,7 @@ fn scan_actually_finds_known_call_sites() {
         "engine:kill",
         "policy:read",
         "workspace:read",
+        "warehouse:read",
     ] {
         assert!(
             enforced.contains(key),

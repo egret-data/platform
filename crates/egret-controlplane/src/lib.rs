@@ -16,20 +16,14 @@ mod auth;
 mod error;
 mod secrets;
 mod storage;
-mod warehouses;
 
 pub use auth::require_platform_admin;
 pub use error::CpError;
-pub use warehouses::{
-    BrowseColumn, BrowseDeletedTabular, BrowseNamespace, BrowsePartition, BrowseSearchResult,
-    BrowseSnapshot, BrowseSort, BrowseTableDetail, BrowseTabular, BrowseTask,
-    BrowseWarehouseConfig, ProvisionS3, WarehouseBrowser, WarehouseProvisioner,
-};
 
 use axum::extract::FromRef;
 use axum::Router;
 use egret_auth::session::SessionService;
-use egret_catalog_engine::CatalogStore;
+use egret_catalog_engine::{CatalogStore, WarehouseBrowser};
 use egret_secrets::WorkspaceSecretStore;
 use egret_storage::StorageRegistry;
 use std::sync::Arc;
@@ -50,11 +44,9 @@ pub struct CpState {
     pub secrets: WorkspaceSecretStore,
     /// Session service backing the `Auth` extractor.
     pub sessions: SessionService,
-    /// Provisions the embedded lakekeeper warehouse on create (wired in egret-bin);
-    /// `None` in tests (the egret row is recorded without a lakekeeper counterpart).
-    pub provisioner: Option<Arc<dyn WarehouseProvisioner>>,
     /// Reads catalog structure from the embedded lakekeeper (wired in egret-bin);
-    /// `None` in tests.
+    /// `None` in tests. Used by the Storage router's credential-rotation push-down
+    /// (the warehouse admin router itself moved to egret-catalog-engine in E3d-3).
     pub browser: Option<Arc<dyn WarehouseBrowser>>,
 }
 
@@ -71,6 +63,5 @@ pub fn control_plane_router() -> Router<CpState> {
     Router::new()
         .merge(storage::router())
         .merge(secrets::router())
-        .merge(warehouses::router())
         .merge(access::router())
 }

@@ -2888,6 +2888,7 @@ dependencies = [
  "axum",
  "egret-auth",
  "egret-bi",
+ "egret-catalog-engine",
  "egret-config",
  "egret-controlplane",
  "egret-core",
