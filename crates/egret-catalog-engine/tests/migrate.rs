@@ -1,7 +1,8 @@
 //! DB-gated test proving egret's migrator and lakekeeper's migrator coexist in
 //! one Postgres database without colliding, by isolating lakekeeper into its own
 //! `lakekeeper` schema (tables AND its `_sqlx_migrations` tracker), while egret's
-//! migrations stay in `public`.
+//! migration tracker (`_sqlx_migrations`) stays in `public` (egret's own tables now
+//! live in per-seam schemas: `engine_mgmt`/`policy`/`storage`/`catalog`).
 //!
 //! Self-skips when `DATABASE_URL` is unset. Run with:
 //!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
@@ -19,7 +20,7 @@ async fn migrate_isolates_schemas() {
     };
 
     // Run BOTH migrators against the same database.
-    // egret -> public.*, lakekeeper -> lakekeeper.*
+    // egret -> public.* + per-seam schemas, lakekeeper -> lakekeeper.*
     let db = Db::connect(&dsn, 5).await.expect("egret pool connects");
     db.migrate().await.expect("egret migrations apply");
 
