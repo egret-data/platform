@@ -1,21 +1,12 @@
-//! Opaque session tokens. The raw token lives only in the cookie; the DB stores its hash.
+//! Opaque session tokens. The raw token lives only in the cookie; the DB stores
+//! its hash. Thin wrappers over the shared [`egret_core::token`] primitives so
+//! the minting format and hashing algorithm are defined once workspace-wide.
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
-use rand::rngs::OsRng;
-use rand::RngCore;
-use sha2::{Digest, Sha256};
+pub use egret_core::token::hash_token;
 
 /// Generate a fresh 256-bit url-safe token.
 pub fn generate_token() -> String {
-    let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)
-}
-
-/// Hash a token for storage/lookup (sha-256, hex).
-pub fn hash_token(token: &str) -> String {
-    hex::encode(Sha256::digest(token.as_bytes()))
+    egret_core::token::random_token_b64()
 }
 
 #[cfg(test)]

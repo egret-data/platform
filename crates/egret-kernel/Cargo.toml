@@ -8,7 +8,7 @@ license.workspace = true
 test-util = []
 
 [dependencies]
-egret-core = { workspace = true, features = ["http"] }
+egret-core = { workspace = true, features = ["http", "token"] }
 egret-metastore.workspace = true
 egret-auth.workspace = true
 egret-workspace.workspace = true

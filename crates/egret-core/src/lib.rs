@@ -7,6 +7,8 @@ pub mod http;
 pub mod ids;
 pub mod pagination;
 pub mod rbac;
+#[cfg(feature = "token")]
+pub mod token;
 
 pub use context::{Principal, WorkspaceContext};
 pub use error::{Error, Result};
