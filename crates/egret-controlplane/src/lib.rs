@@ -1,10 +1,12 @@
 //! Control-plane HTTP surface: platform-admin-only, GLOBAL Storage + Secrets.
 //!
-//! After migration 0050 storage connections are global (`storage_connections`)
-//! and named secrets are global-capable (nullable `workspace_id`). This crate
-//! rebuilds their HTTP routers at the control plane; every handler is gated on
+//! After migration 0050 storage connections are global
+//! (`storage.storage_connections`, relocated to its own schema in E3a) and named
+//! secrets are global-capable (nullable `workspace_id`). This crate rebuilds
+//! their HTTP routers at the control plane; every handler is gated on
 //! `require_platform_admin` and every store call uses the global scope
-//! (`secrets.*(None, ..)`, the global `StorageConn` CRUD on `CatalogStore`).
+//! (`secrets.*(None, ..)`, the global `StorageConn` CRUD on `StorageRegistry`
+//! from egret-storage).
 //!
 //! The router is nested at `/api/control-plane` in `egret-server`, behind the
 //! same CSRF layer as the other mutating APIs.

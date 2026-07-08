@@ -210,7 +210,14 @@ impl StorageRegistry {
         .bind(id)
         .execute(self.pool())
         .await
-        .map_err(StorageRegistryError::Db)?;
+        .map_err(|e| match &e {
+            // Renaming onto an existing name trips the unique index — mirror
+            // `create_storage_conn` and surface it as a 409, not a 500.
+            sqlx::Error::Database(d) if d.constraint() == Some("storage_connections_name_key") => {
+                StorageRegistryError::AlreadyExists(input.name.clone())
+            }
+            _ => StorageRegistryError::Db(e),
+        })?;
 
         Ok(result.rows_affected() == 1)
     }

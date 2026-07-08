@@ -117,6 +117,29 @@ async fn update_then_delete() {
 }
 
 #[tokio::test]
+async fn update_to_duplicate_name_rejected() {
+    let Some(s) = store().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let name_a = unique_name("upd-a");
+    let name_b = unique_name("upd-b");
+    let a = s.create_storage_conn(&sample_input(&name_a)).await.unwrap();
+    let _b = s.create_storage_conn(&sample_input(&name_b)).await.unwrap();
+
+    // Renaming A onto B's (existing) name trips the unique index → AlreadyExists
+    // (409), not a blanket Db error (500).
+    let rename = StorageConnInput {
+        name: name_b.clone(),
+        ..sample_input(&name_a)
+    };
+    match s.update_storage_conn(a.id, &rename).await {
+        Err(StorageRegistryError::AlreadyExists(n)) => assert_eq!(n, name_b),
+        other => panic!("expected AlreadyExists({name_b}), got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn duplicate_name_rejected() {
     let Some(s) = store().await else {
         eprintln!("skip: DATABASE_URL not set");
