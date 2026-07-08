@@ -1,4 +1,8 @@
 //! DB-gated Ranger HTTP tests. Self-skip without DATABASE_URL.
+//!
+//! The Ranger `/service` surface is read-only (policy download + GETs) since E2e;
+//! services/policies are created through the store (as egret's admin API does),
+//! not via HTTP write routes (which were removed).
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use egret_metastore::Db;
@@ -11,18 +15,24 @@ use tower::ServiceExt;
 
 const TOKEN: &str = "devtoken";
 
-async fn app() -> Option<(axum::Router, String)> {
+/// A bearer-gated Ranger app with the Trino def seeded and one service created.
+/// Returns the router, the service name, and a store handle for further seeding.
+async fn app() -> Option<(axum::Router, String, PolicyStore)> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
     let store = PolicyStore::new(db);
     seed_trino(&store).await.expect("seed");
     let svc = format!("trino_{}", uuid::Uuid::new_v4().simple());
+    store
+        .create_service(&svc, "trino", &json!({}))
+        .await
+        .expect("create service");
     let state = RangerState {
-        store,
+        store: store.clone(),
         auth_token: Arc::from(TOKEN),
     };
-    Some((ranger_router(state), svc))
+    Some((ranger_router(state), svc, store))
 }
 
 fn req(method: &str, uri: &str, token: Option<&str>, body: Option<Value>) -> Request<Body> {
@@ -52,22 +62,15 @@ async fn anonymous_mode_allows_download_without_bearer() {
     let store = PolicyStore::new(db);
     seed_trino(&store).await.expect("seed");
     let svc = format!("trino_{}", uuid::Uuid::new_v4().simple());
+    store
+        .create_service(&svc, "trino", &json!({}))
+        .await
+        .expect("create service");
     let app = ranger_router(RangerState {
         store,
         auth_token: Arc::from(""),
     });
-    // create a service (no bearer), then download (no bearer) → 200
-    let r = app
-        .clone()
-        .oneshot(req(
-            "POST",
-            "/plugins/services",
-            None,
-            Some(json!({"name": svc, "type": "trino", "configs": {}})),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(r.status(), StatusCode::OK);
+    // download (no bearer) → 200 in anonymous mode.
     let r = app
         .oneshot(req(
             "GET",
@@ -82,7 +85,7 @@ async fn anonymous_mode_allows_download_without_bearer() {
 
 #[tokio::test]
 async fn download_requires_bearer() {
-    let Some((app, svc)) = app().await else {
+    let Some((app, svc, _store)) = app().await else {
         eprintln!("skip");
         return;
     };
@@ -99,25 +102,13 @@ async fn download_requires_bearer() {
 }
 
 #[tokio::test]
-async fn create_service_policy_then_download_and_304() {
-    let Some((app, svc)) = app().await else {
+async fn seeded_service_policy_then_download_and_304() {
+    let Some((app, svc, store)) = app().await else {
         eprintln!("skip");
         return;
     };
-    // create service
-    let r = app
-        .clone()
-        .oneshot(req(
-            "POST",
-            "/plugins/services",
-            Some(TOKEN),
-            Some(json!({"name": svc, "type": "trino", "configs": {}})),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(r.status(), StatusCode::OK);
 
-    // download (no lastKnownVersion) → 200 ServicePolicies with serviceDef
+    // download (no lastKnownVersion) → 200 ServicePolicies with serviceDef.
     let r = app
         .clone()
         .oneshot(req(
@@ -135,7 +126,7 @@ async fn create_service_policy_then_download_and_304() {
     assert_eq!(sp["serviceDef"]["name"], "trino");
     let ver = sp["policyVersion"].as_i64().unwrap();
 
-    // same version → 304
+    // same version → 304.
     let r = app
         .clone()
         .oneshot(req(
@@ -148,17 +139,18 @@ async fn create_service_policy_then_download_and_304() {
         .unwrap();
     assert_eq!(r.status(), StatusCode::NOT_MODIFIED);
 
-    // add a policy → version bumps → download at old version is 200 with 1 policy
+    // add a policy through the store → version bumps → download at old version is
+    // 200 with 1 policy.
+    let svc_id = store.get_service(&svc).await.expect("get service").id;
     let pol = json!({"service": svc, "name":"p1","policyType":0,
         "resources":{"catalog":{"values":["hive"],"isExcludes":false,"isRecursive":false},
                      "schema":{"values":["default"]},"table":{"values":["t"]},"column":{"values":["*"]}},
         "policyItems":[{"accesses":[{"type":"select","isAllowed":true}],"users":["alice"]}]});
-    let r = app
-        .clone()
-        .oneshot(req("POST", "/plugins/policies", Some(TOKEN), Some(pol)))
+    store
+        .create_policy(svc_id, "p1", &pol)
         .await
-        .unwrap();
-    assert_eq!(r.status(), StatusCode::OK);
+        .expect("create policy");
+
     let r = app
         .clone()
         .oneshot(req(
@@ -186,7 +178,7 @@ async fn create_service_policy_then_download_and_304() {
 
 #[tokio::test]
 async fn download_unknown_service_404() {
-    let Some((app, _svc)) = app().await else {
+    let Some((app, _svc, _store)) = app().await else {
         eprintln!("skip");
         return;
     };

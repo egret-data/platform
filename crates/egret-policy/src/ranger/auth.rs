@@ -8,10 +8,13 @@ use axum::response::Response;
 
 /// Constant-time bearer check against the configured ranger token.
 ///
-/// Anonymous mode: when no token is configured (empty), `/service` is open. The native
-/// Ranger plugins (e.g. Trino's `RangerAdminRESTClient`) authenticate out-of-band
-/// (Kerberos / trusted network) and do not send a bearer token, so an empty token lets
-/// stock plugins download policies. Set a token to require bearer auth.
+/// Anonymous mode: when no token is configured (empty), the `/service` surface is
+/// open. Native Ranger plugins (e.g. Trino's `RangerAdminRESTClient`) authenticate
+/// out-of-band (Kerberos / trusted network) and do not send a bearer token, so an
+/// empty token lets stock plugins download policies. Set a token to require bearer
+/// auth. The surface is **read-only** (policy download + service/def GETs) — the
+/// write routes were removed in E2e — so an empty token never exposes mutations;
+/// egret's own policy writes go through the authenticated control-plane admin API.
 pub async fn require_bearer(
     State(state): State<RangerState>,
     req: Request<axum::body::Body>,
