@@ -24,6 +24,22 @@ impl Error {
     }
 }
 
+impl IntoResponse for Error {
+    fn into_response(self) -> Response {
+        let status = self.status_code();
+        // Public-safe message: expose the specific message for client-facing
+        // errors; hide internals for 5xx.
+        let msg = match &self {
+            Error::Internal(_) => "internal error".to_string(),
+            Error::Unauthorized => "unauthorized".to_string(),
+            Error::Forbidden => "forbidden".to_string(),
+            Error::TooManyRequests => "too many requests".to_string(),
+            other => other.to_string(),
+        };
+        (status, Json(serde_json::json!({ "error": msg }))).into_response()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -40,5 +56,14 @@ mod tests {
             Error::Internal(anyhow::anyhow!("boom")).status_code(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
+    }
+
+    #[test]
+    fn error_into_response_carries_status() {
+        let resp = Error::Forbidden.into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let resp = Error::NotFound("user".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
