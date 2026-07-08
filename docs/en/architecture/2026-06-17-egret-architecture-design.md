@@ -1,10 +1,17 @@
 # Egret — Master Architecture Design
 
-> **Status:** Living · **Date:** 2026-06-27 · **Version:** 0.2
+> **Status:** Living · **Date:** 2026-07-08 · **Version:** 0.3
 > This is the **canonical (source-of-truth) document** for the Egret project. All later tasks/specs reference it.
 > A Vietnamese reference translation lives at [`docs/vi/architecture/2026-06-17-egret-architecture-design.md`](../../vi/architecture/2026-06-17-egret-architecture-design.md).
 > Major decisions are recorded in [§2 Architecture Decisions](#2-architecture-decisions-adr-summary).
 > **v0.2 evolution:** since v0.1 the catalog was re-built on an embedded lakekeeper, the product reframed into 4 workspace pillars, and per-token catalog authz landed — see [§2 ADRs](#2-architecture-decisions-adr-summary), [§10.3](#103-iceberg-rest-catalog-egret-catalog), and the [§16 roadmap](#16-roadmap--status).
+>
+> **⚠️ v0.3 corrections (2026-07-08) — read first.** A [whole-project audit](./2026-07-08-project-review-audit.md) found this document had drifted from the code. Until the affected sections are rewritten in full, the audit + the [service-ready architecture redesign (Effort A)](./2026-07-08-service-ready-architecture-design.md) are authoritative where they conflict with the body below. Key corrections:
+> - **Crate map is stale.** 22 crates exist. Crates present in code but missing from §5/§15: **`egret-controlplane`** (largest, ~7.3k LOC), **`egret-orchestrator`** (k8s engine provisioning), **`egret-kernel`** (Daft/Jupyter kernel runtime), **`egret-machine-idp`** (machine-IdP for catalog JWTs). Crates named in §5 that do **not** exist: `egret-dataapi`, `egret-workflow`, `egret-notify`, `egret-monitor`, `egret-events` (all still unbuilt; monitoring currently lives inside `egret-controlplane/monitor.rs`). `egret-notebook` is **shipped**, not "(planned)".
+> - **ADR-16 is superseded.** The `EgretAuthorizer` + `catalog_tokens` design was removed (migration 0048); catalog authz is now a front-of-router **`CatalogGuard`** (in `egret-bin`) over machine-JWT claims + the **`catalog_grants`** tables (migration 0053), with lakekeeper on `AllowAllAuthorizer`.
+> - **Frontend is a flat single-package app** (`frontend/`, React 18 + Vite), **not** the `apps/web + packages/*` monorepo §6/§15 describe.
+> - **Migrations** are at **0061** (not ~0029).
+> - **Architecture direction:** Effort A restructures the modular monolith into 7 service-extractable seams (contract-crate + owned-schema + event bus) — see the redesign doc. Foundation epic E0 in progress: unified `Error→HTTP` mapping and the platform authz gate now live in `egret-core`/`egret-auth`.
 
 ---
 
