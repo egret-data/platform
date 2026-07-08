@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+egret-engine-mgmt-api.workspace = true
 kube.workspace = true
 k8s-openapi.workspace = true
 serde.workspace = true
