@@ -1,0 +1,11 @@
+[package]
+name = "egret-engine-mgmt-api"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The DTOs carry a few `serde_json::Value` "raw override" escape-hatch fields
+# (e.g. `Affinity::raw_override`); serde_json is the one unavoidable dependency
+# — no kube/k8s-openapi or anything heavier leaks in.
+serde_json.workspace = true

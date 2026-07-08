@@ -2599,6 +2599,7 @@ dependencies = [
  "egret-authz",
  "egret-catalog",
  "egret-core",
+ "egret-engine-mgmt-api",
  "egret-metastore",
  "egret-secrets",
  "egret-storage",
@@ -2692,6 +2693,13 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "egret-engine-mgmt-api"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -2802,6 +2810,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "egret-engine-mgmt-api",
  "futures-util",
  "http 1.4.2",
  "k8s-openapi 0.24.0",
