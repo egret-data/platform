@@ -382,20 +382,23 @@ impl egret_controlplane::WarehouseProvisioner for LakekeeperProvisioner {
     }
 }
 
-/// Provisions query engines (Phase 1: Trino) onto Kubernetes for the control
-/// plane. Adapts the kube-free `egret_controlplane::EngineProvisioner` trait
-/// onto the `egret-orchestrator` `TrinoProvisioner`. Since E1a both traits'
+/// Provisions query engines (Phase 1: Trino) onto Kubernetes for the
+/// engine-mgmt seam. Adapts the kube-free `egret_engine_mgmt_api::EngineProvisioningPort`
+/// trait onto the `egret-orchestrator` `TrinoProvisioner`. Since E1a both traits'
 /// spec/status types are the SAME `egret-engine-mgmt-api` DTOs (aliased under
 /// different names on each side), so this is a pure pass-through — no
-/// translation between the two.
-struct EgretEngineProvisioner {
+/// translation between the two. The 4 kube-shaped ops (exec/pod-logs/
+/// coordinator-request) are NOT on the Port — the seam calls
+/// `egret_orchestrator::KubeClient` directly via `EngineMgmtState.kube`.
+struct EgretEngineProvisioningPort {
     inner: std::sync::Arc<egret_orchestrator::TrinoProvisioner>,
-    /// The same KubeClient the `TrinoProvisioner` holds, kept here so the
-    /// kube-free `coordinator_request` seam can reach it directly.
+    /// The same KubeClient the `TrinoProvisioner` holds, kept here so
+    /// `restart` (which bypasses TrinoProvisioner's render/apply path) can
+    /// reach it directly.
     kube: std::sync::Arc<dyn egret_orchestrator::KubeClient>,
 }
 
-impl EgretEngineProvisioner {
+impl EgretEngineProvisioningPort {
     fn new(
         inner: std::sync::Arc<egret_orchestrator::TrinoProvisioner>,
         kube: std::sync::Arc<dyn egret_orchestrator::KubeClient>,
@@ -405,8 +408,8 @@ impl EgretEngineProvisioner {
 }
 
 #[async_trait::async_trait]
-impl egret_controlplane::EngineProvisioner for EgretEngineProvisioner {
-    async fn provision(&self, req: &egret_controlplane::EngineProvisionReq) -> Result<(), String> {
+impl egret_engine_mgmt_api::EngineProvisioningPort for EgretEngineProvisioningPort {
+    async fn provision(&self, req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
         egret_orchestrator::EngineProvisioner::provision(self.inner.as_ref(), req)
             .await
             .map_err(|e| e.to_string())
@@ -416,8 +419,8 @@ impl egret_controlplane::EngineProvisioner for EgretEngineProvisioner {
         &self,
         namespace: &str,
         name: &str,
-    ) -> Result<egret_controlplane::EngineLiveStatus, String> {
-        // `egret_controlplane::EngineLiveStatus` and `egret_orchestrator::EngineStatus`
+    ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
+        // `egret_engine_mgmt_api::EngineStatus` and `egret_orchestrator::EngineStatus`
         // are now the SAME type (both alias `egret_engine_mgmt_api::EngineStatus`), so
         // the orchestrator's status passes straight through — no reverse mapping.
         egret_orchestrator::EngineProvisioner::status(self.inner.as_ref(), namespace, name)
@@ -425,7 +428,7 @@ impl egret_controlplane::EngineProvisioner for EgretEngineProvisioner {
             .map_err(|e| e.to_string())
     }
 
-    async fn update(&self, req: &egret_controlplane::EngineProvisionReq) -> Result<(), String> {
+    async fn update(&self, req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
         egret_orchestrator::EngineProvisioner::update(self.inner.as_ref(), req)
             .await
             .map_err(|e| e.to_string())
@@ -440,7 +443,7 @@ impl egret_controlplane::EngineProvisioner for EgretEngineProvisioner {
     async fn restart(&self, namespace: &str, name: &str) -> Result<(), String> {
         // Roll BOTH Deployments directly via KubeClient (bypassing the
         // TrinoProvisioner render/apply path entirely) so this never touches
-        // config — same seam as coordinator_request/pod_logs below.
+        // config.
         self.kube
             .restart_deployment(namespace, &format!("{name}-coordinator"))
             .await
@@ -449,53 +452,6 @@ impl egret_controlplane::EngineProvisioner for EgretEngineProvisioner {
             .restart_deployment(namespace, &format!("{name}-worker"))
             .await
             .map_err(|e| e.to_string())
-    }
-
-    async fn coordinator_request(
-        &self,
-        namespace: &str,
-        service: &str,
-        method: &str,
-        path: &str,
-        headers: &[(String, String)],
-        body: Option<Vec<u8>>,
-    ) -> anyhow::Result<(u16, Vec<u8>)> {
-        self.kube
-            .coordinator_request(namespace, service, method, path, headers, body)
-            .await
-    }
-
-    async fn pod_logs(
-        &self,
-        namespace: &str,
-        pod: &str,
-        container: Option<&str>,
-        tail_lines: i64,
-        previous: bool,
-    ) -> anyhow::Result<String> {
-        self.kube
-            .pod_logs(namespace, pod, container, tail_lines, previous)
-            .await
-    }
-
-    async fn pod_logs_stream(
-        &self,
-        namespace: &str,
-        pod: &str,
-        tail_lines: i64,
-    ) -> anyhow::Result<
-        std::pin::Pin<Box<dyn futures_util::Stream<Item = anyhow::Result<bytes::Bytes>> + Send>>,
-    > {
-        self.kube.pod_logs_stream(namespace, pod, tail_lines).await
-    }
-
-    async fn exec(
-        &self,
-        namespace: &str,
-        pod: &str,
-        command: &[String],
-    ) -> anyhow::Result<kube::api::AttachedProcess> {
-        self.kube.exec(namespace, pod, command).await
     }
 }
 
@@ -1165,34 +1121,48 @@ async fn serve(config: Config) -> anyhow::Result<()> {
 
     // Engine provisioning: build a kube client best-effort (in-cluster first, then
     // the local kubeconfig for dev). If neither is available egret still boots —
-    // engine routes then report "kubernetes not configured".
-    let engine_provisioner: Option<std::sync::Arc<dyn egret_controlplane::EngineProvisioner>> = {
+    // engine routes then report "kubernetes not configured". Both the kube-free
+    // Port (provision/status/update/delete/restart) and the raw `KubeClient`
+    // (exec/pod-logs/coordinator-request, served straight off `EngineMgmtState`)
+    // are derived from the SAME kube client.
+    let kube: Option<std::sync::Arc<dyn egret_orchestrator::KubeClient>> = {
         let kube = match egret_orchestrator::LiveKube::in_cluster().await {
             Ok(k) => Some(k),
             Err(_) => egret_orchestrator::LiveKube::from_kubeconfig().await.ok(),
         };
         match kube {
-            Some(k) => {
-                let kube: std::sync::Arc<dyn egret_orchestrator::KubeClient> =
-                    std::sync::Arc::new(k);
-                let trino = egret_orchestrator::TrinoProvisioner::new(kube.clone());
-                Some(std::sync::Arc::new(EgretEngineProvisioner::new(
-                    std::sync::Arc::new(trino),
-                    kube,
-                )))
-            }
+            Some(k) => Some(std::sync::Arc::new(k)),
             None => {
                 tracing::warn!("kubernetes unavailable; engine provisioning disabled");
                 None
             }
         }
     };
+    let engine_provisioner: Option<
+        std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>,
+    > = kube.clone().map(|kube| {
+        let trino = egret_orchestrator::TrinoProvisioner::new(kube.clone());
+        std::sync::Arc::new(EgretEngineProvisioningPort::new(
+            std::sync::Arc::new(trino),
+            kube,
+        )) as std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>
+    });
+
+    // In-cluster URL Trino pods use to reach egret's REST catalog + token
+    // endpoint; shared by the engine-mgmt seam (provisioning) and control-plane
+    // (policies' `trino_config` route renders the same base URL).
+    let engine_egret_url = config
+        .catalog
+        .public_url
+        .clone()
+        .unwrap_or_else(|| "http://egret:8080".to_string());
 
     // Control plane: global platform-admin Storage + Secrets + embedded-catalog
     // management. The warehouse provisioner (above) creates lakekeeper warehouses.
+    // `engine_mgmt`/`engine_egret_url` are cross-seam, read-only: the Policies
+    // module surfaces which engines/catalogs bind to a Ranger service.
     let control_plane = Some(egret_controlplane::CpState {
         storage: egret_catalog::CatalogStore::new(db.clone()),
-        engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
         authz: egret_authz::AuthzStore::new(db.clone()),
         users: egret_auth::users::UserRepo::new(db.clone()),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
@@ -1201,12 +1171,20 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         sessions: sessions.clone(),
         provisioner: catalog_provisioner,
         browser: catalog_browser,
+        engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
+        engine_egret_url: engine_egret_url.clone(),
+    });
+
+    // Engine-mgmt seam: owns the engine domain (HTTP router + provisioning).
+    let engine_mgmt = Some(egret_engine_mgmt::EngineMgmtState {
+        engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
+        storage: egret_catalog::CatalogStore::new(db.clone()),
+        authz: egret_authz::AuthzStore::new(db.clone()),
+        secrets: workspace_secrets.clone(),
+        sessions: sessions.clone(),
         engine_provisioner,
-        engine_egret_url: config
-            .catalog
-            .public_url
-            .clone()
-            .unwrap_or_else(|| "http://egret:8080".to_string()),
+        kube,
+        engine_egret_url,
         // Default JWKS the JWT authenticator validates engine tokens against.
         // Derived from the OIDC realm (Keycloak `.../realms/<realm>` issuer):
         // JWKS lives at `.../protocol/openid-connect/certs`. Empty when OIDC is
@@ -1247,6 +1225,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         notebook,
         kernel,
         control_plane,
+        engine_mgmt,
         catalog_engine,
         idp,
     });

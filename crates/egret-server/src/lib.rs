@@ -37,6 +37,8 @@ pub struct AppState {
     pub kernel: Option<egret_kernel::KernelState>,
     /// Present once the control plane is wired (in `egret-bin`); `None` in unit tests.
     pub control_plane: Option<egret_controlplane::CpState>,
+    /// Present once the engine-mgmt seam is wired (in `egret-bin`); `None` in unit tests.
+    pub engine_mgmt: Option<egret_engine_mgmt::EngineMgmtState>,
     /// Embedded lakekeeper Iceberg REST catalog router, mounted at `/catalog/v1`
     /// when `config.catalog.enabled` (in `egret-bin`); `None` otherwise.
     pub catalog_engine: Option<axum::Router>,
@@ -59,6 +61,7 @@ impl AppState {
             notebook: None,
             kernel: None,
             control_plane: None,
+            engine_mgmt: None,
             catalog_engine: None,
             idp: None,
         }
@@ -171,6 +174,17 @@ pub fn build_router(state: AppState) -> Router {
             )
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
             .with_state(cp);
+        router = router.merge(group);
+    }
+
+    if let Some(em) = state.engine_mgmt.clone() {
+        let group = Router::new()
+            .nest(
+                "/api/control-plane",
+                egret_engine_mgmt::engine_mgmt_router(),
+            )
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(em);
         router = router.merge(group);
     }
 
