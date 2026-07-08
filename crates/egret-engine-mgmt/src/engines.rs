@@ -5,14 +5,16 @@
 //! for the warehouse, and records that as the engine's PRIMARY catalog row. A
 //! cluster can then carry additional catalogs (Postgres, tpch/tpcds, generic).
 //!
-//! The control-plane owns all connector-kind logic: [`build_catalog_req`]
+//! This seam owns all connector-kind logic: [`build_catalog_req`]
 //! translates each stored [`EngineCatalog`] row into a flat `{name, properties,
 //! env}` [`CatalogReq`], and [`build_provision_req`] assembles the full
-//! [`EngineProvisionReq`]. The actual k8s work lives behind the
-//! [`EngineProvisioner`] trait, implemented in egret-bin over `egret-orchestrator`
-//! so this crate stays kube-free EXCEPT for one seam: [`EngineProvisioner::exec`]
+//! [`EngineProvisionReq`]. The kube-free provisioning ops (provision/status/
+//! update/delete/restart) go through the `EngineProvisioningPort`, implemented
+//! in egret-bin over `egret-orchestrator`. The kube-shaped ops
+//! (exec/pod-logs/coordinator-request) go straight through
+//! `egret_orchestrator::KubeClient`, held on `EngineMgmtState::kube`: `exec`
 //! returns a `kube::api::AttachedProcess` so [`bridge_exec`] can pump it onto a
-//! browser WebSocket (see the trait doc for why).
+//! browser WebSocket.
 
 use std::collections::BTreeMap;
 
@@ -22,21 +24,19 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use bytes::Bytes;
 use egret_auth::principal::Auth;
+use egret_auth::require_permission;
 use egret_catalog::service::embedded::{GrantInput, NewClient};
-use egret_engine_mgmt::{Engine, EngineCatalog};
 use futures_util::sink::SinkExt;
-use futures_util::{Stream, StreamExt};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::pin::Pin;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
-use crate::auth::require_permission;
-use crate::error::CpError;
-use crate::CpState;
+use crate::EngineHttpError as CpError;
+use crate::EngineMgmtState as CpState;
+use crate::{Engine, EngineCatalog};
 
 /// Default Trino image (official `trinodb/trino` tag) when the body omits it.
 const DEFAULT_IMAGE_VERSION: &str = "470";
@@ -68,82 +68,6 @@ pub use egret_engine_mgmt_api::{
     TopologySpreadConstraint as TopologySpreadConstraintReq, TrinoConfig as TrinoConfigReq,
     VolumeMount as VolumeMountReq, WorkerRoleConfig as WorkerRoleConfigReq,
 };
-
-/// Provisions/updates/deletes a query engine on Kubernetes. Implemented in the
-/// composition root (egret-bin) over `egret-orchestrator`; `None` in tests and
-/// when no cluster is configured (routes then report "kubernetes not configured").
-#[async_trait::async_trait]
-pub trait EngineProvisioner: Send + Sync {
-    async fn provision(&self, req: &EngineProvisionReq) -> Result<(), String>;
-    async fn status(&self, namespace: &str, name: &str) -> Result<EngineLiveStatus, String>;
-    async fn update(&self, req: &EngineProvisionReq) -> Result<(), String>;
-    async fn delete(&self, namespace: &str, name: &str) -> Result<(), String>;
-
-    /// Roll the coordinator + worker pods WITHOUT changing config (like
-    /// `kubectl rollout restart`). A plain `update` with an unchanged spec is a
-    /// no-op (the rendered manifest's config-checksum is identical), so this is
-    /// a distinct seam over `KubeClient::restart_deployment`.
-    async fn restart(&self, namespace: &str, name: &str) -> Result<(), String>;
-
-    /// Issue a raw HTTP request to a Trino coordinator `Service` and return
-    /// `(status, body)`. Kube-free seam over `KubeClient::coordinator_request`
-    /// (Service DNS in-cluster / kube API-server proxy in dev); non-2xx statuses
-    /// are returned as-is for the caller to map.
-    async fn coordinator_request(
-        &self,
-        namespace: &str,
-        service: &str,
-        method: &str,
-        path: &str,
-        headers: &[(String, String)],
-        body: Option<Vec<u8>>,
-    ) -> anyhow::Result<(u16, Vec<u8>)>;
-
-    /// Tail a pod's logs. Kube-free seam over `KubeClient::pod_logs`; bounded by
-    /// `tail_lines` (the route clamps this before calling in).
-    async fn pod_logs(
-        &self,
-        namespace: &str,
-        pod: &str,
-        container: Option<&str>,
-        tail_lines: i64,
-        previous: bool,
-    ) -> anyhow::Result<String>;
-
-    /// Open a live-following stream of a pod's log bytes (`kubectl logs -f`
-    /// equivalent). Kube-free seam over `KubeClient::pod_logs_stream`; the
-    /// `pod_logs_follow` WS route pumps chunks from this stream onto a
-    /// browser WebSocket as they arrive — a ONE-directional stream (pod ->
-    /// browser), unlike [`exec`](Self::exec)'s bidirectional bridge.
-    async fn pod_logs_stream(
-        &self,
-        namespace: &str,
-        pod: &str,
-        tail_lines: i64,
-    ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<Bytes>> + Send>>>;
-
-    /// Exec `command` inside `pod` and return the live `AttachedProcess` for
-    /// [`bridge_exec`] to pump onto a browser WebSocket.
-    ///
-    /// UNLIKE every other seam on this trait, this one is NOT kube-free:
-    /// `kube::api::AttachedProcess` (stdin/stdout streams + a terminal-resize
-    /// sender) is threaded straight through instead of being translated into a
-    /// kube-free carrier type. Rationale: the WS bridge has to live somewhere
-    /// that can drive both an axum `WebSocket` and the kube attach handle, and
-    /// this crate already owns the axum router. The alternative — moving the
-    /// bridge into egret-bin and having this trait expose a higher-level
-    /// `exec_ws(WebSocket)` — would couple this crate's trait to axum's
-    /// `WebSocket` type instead, which is no better. Since egret-bin and
-    /// egret-orchestrator both already depend on `kube`, accepting the
-    /// `kube::api::AttachedProcess` type here (and the `kube` dependency it
-    /// drags into this crate's `Cargo.toml`) is the least-bad coupling.
-    async fn exec(
-        &self,
-        namespace: &str,
-        pod: &str,
-        command: &[String],
-    ) -> anyhow::Result<kube::api::AttachedProcess>;
-}
 
 pub fn router() -> Router<CpState> {
     Router::new()
@@ -2179,8 +2103,12 @@ async fn pod_logs(
     if !status.pods.iter().any(|pp| pp.name == pod) {
         return Err(CpError::NotFound);
     }
+    let kube = st
+        .kube
+        .as_ref()
+        .ok_or_else(|| CpError::BadRequest("kubernetes not configured".into()))?;
     let tail = q.tail.unwrap_or(1000).clamp(1, 5000);
-    let logs = prov
+    let logs = kube
         .pod_logs(
             &engine.namespace,
             &pod,
@@ -2234,31 +2162,34 @@ async fn pod_logs_follow(
     if !status.pods.iter().any(|pp| pp.name == pod) {
         return Err(CpError::NotFound);
     }
+    let Some(kube) = st.kube.clone() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
     let namespace = engine.namespace.clone();
     let engine_name = engine.name.clone();
     let user = p.email.clone();
     let tail = q.tail.unwrap_or(1000).clamp(1, 5000);
     tracing::info!(engine = %engine_name, pod = %pod, user = %user, "pod log follow session opening");
     Ok(ws.on_upgrade(move |socket| async move {
-        bridge_log_follow(prov, &namespace, &pod, tail, socket).await;
+        bridge_log_follow(kube, &namespace, &pod, tail, socket).await;
         tracing::info!(engine = %engine_name, pod = %pod, user = %user, "pod log follow session closed");
     }))
 }
 
-/// Pump log byte chunks from `EngineProvisioner::pod_logs_stream` onto the
+/// Pump log byte chunks from `KubeClient::pod_logs_stream` onto the
 /// browser `WebSocket` as `Binary` frames, as they arrive. This is a
 /// ONE-directional stream (pod -> browser): the only thing read back off the
 /// socket is a `Close`, purely to stop the pump when the client disconnects
 /// — there is no stdin to forward, unlike [`bridge_exec`]. Exits on stream
 /// end/error, WS close, or a WS send error.
 async fn bridge_log_follow(
-    prov: Arc<dyn EngineProvisioner>,
+    kube: Arc<dyn egret_orchestrator::KubeClient>,
     namespace: &str,
     pod: &str,
     tail_lines: i64,
     mut socket: WebSocket,
 ) {
-    let mut stream = match prov.pod_logs_stream(namespace, pod, tail_lines).await {
+    let mut stream = match kube.pod_logs_stream(namespace, pod, tail_lines).await {
         Ok(s) => s,
         Err(e) => {
             let _ = socket
@@ -2312,7 +2243,7 @@ struct ExecResize {
 }
 
 /// `GET /engines/{id}/pods/{pod}/exec` — upgrades to a WebSocket and bridges it
-/// to a `/bin/sh` session inside the pod via `EngineProvisioner::exec`. Same
+/// to a `/bin/sh` session inside the pod via `KubeClient::exec`. Same
 /// ownership guard as [`pod_logs`]: the pod must be one of the engine's live
 /// pods, checked BEFORE the WS upgrade so an unknown pod 404s instead of
 /// upgrading and failing inside the socket.
@@ -2341,26 +2272,29 @@ async fn pod_exec(
     if !status.pods.iter().any(|pp| pp.name == pod) {
         return Err(CpError::NotFound);
     }
+    let Some(kube) = st.kube.clone() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
     let namespace = engine.namespace.clone();
     let engine_name = engine.name.clone();
     let user = p.email.clone();
     tracing::info!(engine = %engine_name, pod = %pod, user = %user, "pod exec session opening");
     Ok(ws.on_upgrade(move |socket| async move {
-        bridge_exec(prov, &namespace, &pod, socket).await;
+        bridge_exec(kube, &namespace, &pod, socket).await;
         tracing::info!(engine = %engine_name, pod = %pod, user = %user, "pod exec session closed");
     }))
 }
 
 /// Pump bytes between the browser `WebSocket` and a `/bin/sh` session attached
-/// via `EngineProvisioner::exec`. Browser `Text`/`Binary` messages become
+/// via `KubeClient::exec`. Browser `Text`/`Binary` messages become
 /// stdin, EXCEPT a `Text` message that parses as [`ExecCtrlMsg`] with a
 /// `resize` field, which instead resizes the pty via
 /// `AttachedProcess::terminal_size()`. Pod stdout bytes become WS `Binary`
 /// frames. Exits on WS close, stdout EOF, or a stdin/stdout I/O error; any
-/// `EngineProvisioner::exec` failure (e.g. `FakeKube`'s
+/// `KubeClient::exec` failure (e.g. `FakeKube`'s
 /// "exec not supported") is sent back as one WS text frame before closing.
 async fn bridge_exec(
-    prov: Arc<dyn EngineProvisioner>,
+    kube: Arc<dyn egret_orchestrator::KubeClient>,
     namespace: &str,
     pod: &str,
     mut socket: WebSocket,
@@ -2375,7 +2309,7 @@ async fn bridge_exec(
         "-c".to_string(),
         "export TERM=xterm-256color; if command -v bash >/dev/null 2>&1; then exec bash; else exec sh; fi".to_string(),
     ];
-    let mut attached = match prov.exec(namespace, pod, &shell).await {
+    let mut attached = match kube.exec(namespace, pod, &shell).await {
         Ok(a) => a,
         Err(e) => {
             let _ = socket
@@ -2572,8 +2506,8 @@ mod tests {
         }
     }
 
-    /// Build a real `CpState` against the local dev Postgres (mirrors the
-    /// self-skip pattern used by `tests/routes_api.rs`); `None` when
+    /// Build a real `EngineMgmtState` against the local dev Postgres (mirrors
+    /// the self-skip pattern used by `tests/routes_api.rs`); `None` when
     /// `DATABASE_URL` isn't set so this suite doesn't fail in environments
     /// without a database.
     async fn test_state() -> Option<CpState> {
@@ -2587,21 +2521,17 @@ mod tests {
         let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
         let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
         Some(CpState {
+            engine_mgmt: crate::EngineMgmtStore::new(db.clone()),
             storage: egret_catalog::CatalogStore::new(db.clone()),
-            engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
             authz: egret_authz::AuthzStore::new(db.clone()),
-            users: egret_auth::users::UserRepo::new(db.clone()),
-            groups: egret_auth::groups::GroupRepo::new(db.clone()),
-            roles: egret_auth::roles::RoleRepo::new(db.clone()),
             secrets: workspace_secrets,
             sessions: egret_auth::session::SessionService::new(
                 db.clone(),
                 chrono::Duration::hours(24),
                 chrono::Duration::minutes(60),
             ),
-            provisioner: None,
-            browser: None,
             engine_provisioner: None,
+            kube: None,
             engine_egret_url: "http://egret:8080".into(),
             engine_jwks_uri: "https://idp/jwks".into(),
         })
