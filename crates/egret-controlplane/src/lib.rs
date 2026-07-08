@@ -29,13 +29,16 @@ use axum::Router;
 use egret_auth::session::SessionService;
 use egret_catalog::CatalogStore;
 use egret_secrets::WorkspaceSecretStore;
+use egret_storage::StorageRegistry;
 use std::sync::Arc;
 
 /// Shared state for the control-plane router.
 #[derive(Clone)]
 pub struct CpState {
-    /// Global storage-connection registry (`storage_connections`).
+    /// Embedded-catalog store: warehouses + catalog RBAC (roles/grants/clients).
     pub storage: CatalogStore,
+    /// Global storage-connection registry (`storage.storage_connections`, E3a).
+    pub storage_registry: StorageRegistry,
     /// Identity lookups for the access-control console (roles/permissions).
     pub users: egret_auth::users::UserRepo,
     pub groups: egret_auth::groups::GroupRepo,

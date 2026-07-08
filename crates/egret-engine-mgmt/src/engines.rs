@@ -489,7 +489,7 @@ async fn resolve_fault_tolerant(
         return Ok(None);
     };
     let sc = st
-        .storage
+        .storage_registry
         .get_storage_conn(conn_id)
         .await?
         .ok_or_else(|| CpError::BadRequest("unknown exchange storage connection".into()))?;
@@ -1283,7 +1283,7 @@ async fn create_engine(
 
     // 2. Resolve the storage endpoint for the Trino S3 connector.
     let sc = st
-        .storage
+        .storage_registry
         .get_storage_conn(wh.storage_conn_id)
         .await?
         .ok_or_else(|| CpError::BadRequest("unknown storage connection".into()))?;
@@ -1679,7 +1679,7 @@ async fn add_catalog(
             ));
         }
         let sc = st
-            .storage
+            .storage_registry
             .get_storage_conn(wh.storage_conn_id)
             .await?
             .ok_or_else(|| CpError::BadRequest("unknown storage connection".into()))?;
@@ -2523,6 +2523,7 @@ mod tests {
         Some(CpState {
             engine_mgmt: crate::EngineMgmtStore::new(db.clone()),
             storage: egret_catalog::CatalogStore::new(db.clone()),
+            storage_registry: egret_storage::StorageRegistry::new(db.clone()),
             authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
             secrets: workspace_secrets,
             sessions: egret_auth::session::SessionService::new(

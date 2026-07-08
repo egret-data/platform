@@ -51,6 +51,17 @@ impl From<CatalogError> for CpError {
     }
 }
 
+impl From<egret_storage::StorageRegistryError> for CpError {
+    fn from(e: egret_storage::StorageRegistryError) -> Self {
+        use egret_storage::StorageRegistryError as E;
+        match e {
+            E::NotFound(_) => CpError::NotFound,
+            E::AlreadyExists(s) => CpError::AlreadyExists(s),
+            E::Db(_) => CpError::Internal,
+        }
+    }
+}
+
 impl From<SecretsError> for CpError {
     fn from(e: SecretsError) -> Self {
         match e {

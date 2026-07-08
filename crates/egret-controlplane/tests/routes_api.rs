@@ -59,6 +59,7 @@ async fn setup_full(
 
     let app = control_plane_router().with_state(CpState {
         storage: egret_catalog::CatalogStore::new(db.clone()),
+        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
         users: users.clone(),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
         roles: egret_auth::roles::RoleRepo::new(db.clone()),
@@ -401,7 +402,7 @@ async fn seed_provisioned_warehouse(f: &Fixture) -> Uuid {
             .expect("insert workspace");
 
     let (storage_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO storage_connections (name, region, bucket, access_key) \
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
          VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(format!("browse-sc-{}", Uuid::new_v4().simple()))
@@ -439,7 +440,7 @@ async fn seed_unprovisioned_warehouse(f: &Fixture) -> Uuid {
             .expect("insert workspace");
 
     let (storage_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO storage_connections (name, region, bucket, access_key) \
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
          VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(format!("browse-sc-unprov-{}", Uuid::new_v4().simple()))
@@ -635,7 +636,7 @@ async fn scoped_permission_warehouses_read_and_create() {
             .await
             .expect("insert workspace");
     let (storage_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO storage_connections (name, region, bucket, access_key) \
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
          VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(format!("wh-scoped-sc-{}", Uuid::new_v4().simple()))
@@ -897,6 +898,7 @@ async fn setup_isolated_schema() -> Option<Fixture> {
 
     let app = control_plane_router().with_state(CpState {
         storage: egret_catalog::CatalogStore::new(db.clone()),
+        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
         users: users.clone(),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
         roles: egret_auth::roles::RoleRepo::new(db.clone()),

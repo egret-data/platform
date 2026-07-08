@@ -1,6 +1,7 @@
-//! Postgres-backed `CatalogStore`: the shared handle the storage-connection
-//! registry ([`storage_conn`](super::storage_conn)) hangs its queries off.
-//! Holds the egret-side sqlx pool via [`egret_metastore::Db`].
+//! Postgres-backed `CatalogStore`: the shared handle the embedded-catalog
+//! stores ([`embedded`](super::embedded): warehouses, roles/grants, clients)
+//! hang their queries off. Holds the egret-side sqlx pool via
+//! [`egret_metastore::Db`].
 
 use egret_metastore::Db;
 

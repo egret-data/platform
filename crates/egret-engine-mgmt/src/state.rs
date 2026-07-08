@@ -11,9 +11,12 @@ use crate::EngineMgmtStore;
 pub struct EngineMgmtState {
     /// Its own data (E1b) — engines/engine_catalogs CRUD.
     pub engine_mgmt: EngineMgmtStore,
-    /// Global storage-connection registry (`storage_connections`) — cross-seam:
-    /// auto-wiring.
+    /// Catalog RBAC (roles/grants/clients) + warehouse lookups — cross-seam:
+    /// engine-create auto-wiring of a Catalog Client.
     pub storage: egret_catalog::CatalogStore,
+    /// Global storage-connection registry (`storage.storage_connections`, E3a)
+    /// — cross-seam: resolving S3 coords for provisioning.
+    pub storage_registry: egret_storage::StorageRegistry,
     /// The Policy/Ranger seam, behind its contract `PolicyPort` (E2a) — cross-seam:
     /// engine-create auto-bind to a Ranger profile. The concrete `PolicyStore` is
     /// wired in the composition root; at a real split an HTTP client fills this in.

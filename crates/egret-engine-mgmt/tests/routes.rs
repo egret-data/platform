@@ -59,6 +59,7 @@ async fn setup_full(
     let app = engine_mgmt_router().with_state(EngineMgmtState {
         engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
         storage: egret_catalog::CatalogStore::new(db.clone()),
+        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
         authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
         secrets: workspace_secrets,
         sessions: sessions.clone(),
@@ -174,7 +175,7 @@ async fn seed_provisioned_warehouse(f: &Fixture) -> Uuid {
             .expect("insert workspace");
 
     let (storage_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO storage_connections (name, region, bucket, access_key) \
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
          VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(format!("engine-sc-{}", Uuid::new_v4().simple()))
@@ -212,7 +213,7 @@ async fn seed_unprovisioned_warehouse(f: &Fixture) -> Uuid {
             .expect("insert workspace");
 
     let (storage_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO storage_connections (name, region, bucket, access_key) \
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key) \
          VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(format!("engine-sc-unprov-{}", Uuid::new_v4().simple()))
@@ -878,7 +879,7 @@ async fn seed_exchange_storage_conn(f: &Fixture) -> Uuid {
         .await
         .expect("create exchange secret");
     let (id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO storage_connections (name, region, bucket, access_key, endpoint, secret_ref, path_style) \
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key, endpoint, secret_ref, path_style) \
          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
     )
     .bind(format!("exchange-sc-{}", Uuid::new_v4().simple()))

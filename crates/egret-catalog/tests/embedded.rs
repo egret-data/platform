@@ -2,7 +2,6 @@
 mod common;
 
 use egret_catalog::service::embedded::NewClient;
-use egret_catalog::service::StorageConnInput;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -13,24 +12,20 @@ async fn create_client_then_verify() {
     };
     let ws = common::seed_workspace(&store).await;
 
-    let sc = store
-        .create_storage_conn(&StorageConnInput {
-            name: format!("eb-store-{}", Uuid::new_v4().simple()),
-            purpose: None,
-            provider: "s3".into(),
-            endpoint: Some("http://localhost:9000".into()),
-            region: "us-east-1".into(),
-            bucket: "warehouse".into(),
-            key_prefix: None,
-            access_key: "egret".into(),
-            secret_ref: None,
-            path_style: true,
-        })
-        .await
-        .unwrap();
+    // The storage-connection registry moved to egret-storage (E3a); seed the row
+    // the warehouse FK-references directly, so this crate needn't depend on it.
+    let sc_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections \
+           (name, provider, region, bucket, access_key, path_style) \
+         VALUES ($1, 's3', 'us-east-1', 'warehouse', 'egret', true) RETURNING id",
+    )
+    .bind(format!("eb-store-{}", Uuid::new_v4().simple()))
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
 
     let wh_name = format!("eb-wh-{}", Uuid::new_v4().simple());
-    let wh = store.create_warehouse(&wh_name, ws, sc.id).await.unwrap();
+    let wh = store.create_warehouse(&wh_name, ws, sc_id).await.unwrap();
     let role = store
         .create_role(wh.id, "engine", "engine", None)
         .await

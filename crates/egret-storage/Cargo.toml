@@ -6,13 +6,16 @@ license.workspace = true
 
 [dependencies]
 egret-core.workspace = true
+egret-metastore.workspace = true
 aws-config.workspace = true
 aws-credential-types.workspace = true
 aws-sdk-s3.workspace = true
 aws-sigv4.workspace = true
 async-trait.workspace = true
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 url.workspace = true

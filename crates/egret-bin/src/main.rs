@@ -1204,6 +1204,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // management. The warehouse provisioner (above) creates lakekeeper warehouses.
     let control_plane = Some(egret_controlplane::CpState {
         storage: egret_catalog::CatalogStore::new(db.clone()),
+        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
         users: egret_auth::users::UserRepo::new(db.clone()),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
         roles: egret_auth::roles::RoleRepo::new(db.clone()),
@@ -1231,6 +1232,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let engine_mgmt = Some(egret_engine_mgmt::EngineMgmtState {
         engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
         storage: egret_catalog::CatalogStore::new(db.clone()),
+        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
         // Policy/Ranger seam behind its `PolicyPort` contract (E2a); the concrete
         // in-process impl is the shared `PolicyStore`.
         authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),

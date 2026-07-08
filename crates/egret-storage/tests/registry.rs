@@ -1,10 +1,17 @@
-//! DB-gated storage_connections (global registry) store tests.
-//! Self-skip without DATABASE_URL.
-mod common;
-use common::store;
-use egret_catalog::service::storage_conn::StorageConnInput;
-use egret_catalog::{CatalogError, StorageConn};
+//! DB-gated storage_connections (global registry) store tests for the relocated
+//! `StorageRegistry` (E3a). Self-skip without DATABASE_URL.
+use egret_metastore::Db;
+use egret_storage::{StorageConn, StorageConnInput, StorageRegistry, StorageRegistryError};
 use uuid::Uuid;
+
+/// Connect to the database named by `DATABASE_URL` and return a ready
+/// `StorageRegistry`. Returns `None` (self-skip) when the env var is unset.
+async fn store() -> Option<StorageRegistry> {
+    let url = std::env::var("DATABASE_URL").ok()?;
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    Some(StorageRegistry::new(db))
+}
 
 fn sample_input(name: &str) -> StorageConnInput {
     StorageConnInput {
@@ -123,7 +130,7 @@ async fn duplicate_name_rejected() {
     // Second create with same (global) name → AlreadyExists.
     let result = s.create_storage_conn(&input).await;
     match result {
-        Err(CatalogError::AlreadyExists(n)) => assert_eq!(n, name),
+        Err(StorageRegistryError::AlreadyExists(n)) => assert_eq!(n, name),
         other => panic!("expected AlreadyExists({name}), got {other:?}"),
     }
 }

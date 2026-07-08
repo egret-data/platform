@@ -326,7 +326,7 @@ async fn provision_lakekeeper(
     prov: &dyn WarehouseProvisioner,
 ) -> Result<String, CpError> {
     let sc = st
-        .storage
+        .storage_registry
         .get_storage_conn(storage_conn_id)
         .await?
         .ok_or_else(|| CpError::BadRequest("unknown storage connection".into()))?;

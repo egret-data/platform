@@ -1,13 +1,16 @@
-//! Object-store abstraction (S3/MinIO) and S3 SigV4 remote signing for the catalog.
+//! Object-store abstraction (S3/MinIO) and S3 SigV4 remote signing for the catalog,
+//! plus the global storage-connection registry (`storage.storage_connections`, E3a).
 mod config;
 mod error;
 mod location;
+mod registry;
 mod s3;
 pub mod signer;
 
 pub use config::StorageConfig;
 pub use error::StorageError;
 pub use location::{table_base_location, table_metadata_location};
+pub use registry::{StorageConn, StorageConnInput, StorageRegistry, StorageRegistryError};
 pub use s3::S3Store;
 
 use async_trait::async_trait;

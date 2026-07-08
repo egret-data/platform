@@ -52,6 +52,17 @@ impl From<CatalogError> for EngineHttpError {
     }
 }
 
+impl From<egret_storage::StorageRegistryError> for EngineHttpError {
+    fn from(e: egret_storage::StorageRegistryError) -> Self {
+        use egret_storage::StorageRegistryError as E;
+        match e {
+            E::NotFound(_) => EngineHttpError::NotFound,
+            E::AlreadyExists(s) => EngineHttpError::AlreadyExists(s),
+            E::Db(_) => EngineHttpError::Internal,
+        }
+    }
+}
+
 impl From<crate::EngineMgmtError> for EngineHttpError {
     fn from(e: crate::EngineMgmtError) -> Self {
         match e {
