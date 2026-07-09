@@ -10,6 +10,274 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/.well-known/jwks.json": {
+      "get": {
+        "tags": [
+          "idp"
+        ],
+        "operationId": "jwks",
+        "responses": {
+          "200": {
+            "description": "The IdP's active public JWKs (for JWT verification)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JwksDoc"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/.well-known/openid-configuration": {
+      "get": {
+        "tags": [
+          "idp"
+        ],
+        "operationId": "discovery",
+        "responses": {
+          "200": {
+            "description": "OIDC discovery metadata for the egret machine-IdP",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiscoveryDoc"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/config": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "auth_config",
+        "responses": {
+          "200": {
+            "description": "Pre-login capability probe (is OIDC enabled?)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthConfig"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Logged in; sets session + CSRF cookies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid email or password",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many login attempts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "logout",
+        "responses": {
+          "200": {
+            "description": "Session revoked; clears session + CSRF cookies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ack"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "description": "The authenticated caller's identity + permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/oidc/callback": {
+      "get": {
+        "tags": [
+          "oidc"
+        ],
+        "operationId": "oidc_callback",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "description": "Authorization code from the OIDC provider",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Opaque state value echoed back for CSRF protection",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "Login succeeded; sets session + CSRF cookies and redirects to the post-login page"
+          },
+          "400": {
+            "description": "Missing, malformed, or mismatched OIDC state cookie (text/plain body)"
+          },
+          "401": {
+            "description": "OIDC code exchange failed (text/plain body)"
+          },
+          "409": {
+            "description": "Email already used by another account (text/plain body)"
+          },
+          "500": {
+            "description": "Provisioning, session, or refresh-token persistence failure (text/plain body)"
+          }
+        }
+      }
+    },
+    "/api/auth/oidc/login": {
+      "get": {
+        "tags": [
+          "oidc"
+        ],
+        "operationId": "oidc_login",
+        "responses": {
+          "303": {
+            "description": "Redirect to the OIDC provider's authorize endpoint (sets the encrypted state cookie)"
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/databases": {
       "get": {
         "tags": [
@@ -1134,6 +1402,66 @@
           }
         }
       }
+    },
+    "/oauth/token": {
+      "post": {
+        "tags": [
+          "idp"
+        ],
+        "operationId": "token_endpoint",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenForm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A signed access token (client_credentials grant)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResp"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unsupported grant_type (OAuth `{ \"error\": ... }` body)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid client credentials (OAuth `{ \"error\": ... }` body)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1146,6 +1474,18 @@
         ],
         "properties": {
           "ok": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AuthConfig": {
+        "type": "object",
+        "description": "Pre-login capability probe returned by `GET /api/auth/config`: tells the\nfront-end whether the OIDC \"Sign in with SSO\" button should be shown.",
+        "required": [
+          "oidc_enabled"
+        ],
+        "properties": {
+          "oidc_enabled": {
             "type": "boolean"
           }
         }
@@ -1353,6 +1693,40 @@
           }
         }
       },
+      "DiscoveryDoc": {
+        "type": "object",
+        "description": "OIDC discovery document served at `/.well-known/openid-configuration` so the\nembedded lakekeeper can locate this IdP's JWKS + token endpoint. Doc-only\nmirror of the `serde_json::Value` the handler builds.",
+        "required": [
+          "issuer",
+          "jwks_uri",
+          "token_endpoint",
+          "grant_types_supported",
+          "id_token_signing_alg_values_supported"
+        ],
+        "properties": {
+          "issuer": {
+            "type": "string"
+          },
+          "jwks_uri": {
+            "type": "string"
+          },
+          "token_endpoint": {
+            "type": "string"
+          },
+          "grant_types_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "id_token_signing_alg_values_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "Engine": {
         "type": "string",
         "description": "Supported query engines.",
@@ -1372,6 +1746,65 @@
             "type": "string",
             "description": "Public-safe error message.",
             "example": "not found: user"
+          }
+        }
+      },
+      "JwksDoc": {
+        "type": "object",
+        "description": "JWK set served at `/.well-known/jwks.json`. Doc-only mirror of the\n`serde_json::Value` the handler builds; each key is a raw RFC 7517 JWK.",
+        "required": [
+          "keys"
+        ],
+        "properties": {
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        }
+      },
+      "MeResponse": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "email",
+          "platform_roles",
+          "permissions"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "platform_roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -1675,6 +2108,46 @@
             "type": "string"
           }
         }
+      },
+      "TokenForm": {
+        "type": "object",
+        "required": [
+          "grant_type",
+          "client_id",
+          "client_secret"
+        ],
+        "properties": {
+          "grant_type": {
+            "type": "string"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "client_secret": {
+            "type": "string"
+          }
+        }
+      },
+      "TokenResp": {
+        "type": "object",
+        "required": [
+          "access_token",
+          "token_type",
+          "expires_in"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "token_type": {
+            "type": "string"
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
       }
     }
   },
@@ -1686,6 +2159,18 @@
     {
       "name": "queries",
       "description": "Workspace query submission, status, results, and history"
+    },
+    {
+      "name": "auth",
+      "description": "Local login/logout, session identity, and the pre-login config probe"
+    },
+    {
+      "name": "oidc",
+      "description": "OIDC single-sign-on login initiation and provider callback"
+    },
+    {
+      "name": "idp",
+      "description": "egret mini machine-IdP: OIDC discovery, JWKS, and client_credentials token minting"
     }
   ]
 }

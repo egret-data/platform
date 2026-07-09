@@ -2443,6 +2443,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "utoipa",
  "uuid",
 ]
 
@@ -2723,6 +2724,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
+ "egret-core",
  "egret-metastore",
  "jsonwebtoken 9.3.1",
  "rand 0.8.6",
@@ -2732,6 +2734,7 @@ dependencies = [
  "sqlx 0.8.6",
  "thiserror 2.0.18",
  "tokio",
+ "utoipa",
  "uuid",
 ]
 

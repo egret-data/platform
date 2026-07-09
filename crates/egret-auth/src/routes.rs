@@ -9,7 +9,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
 use egret_config::Config;
-use egret_core::Error;
+use egret_core::http::ErrorBody;
+use egret_core::{Ack, Error};
 use serde::{Deserialize, Serialize};
 
 use crate::cookie::{clear_cookie, csrf_cookie, session_cookie, CSRF_COOKIE, SESSION_COOKIE};
@@ -30,18 +31,25 @@ pub struct AuthState {
     pub rate_limiter: RateLimiter,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct MeResponse {
     pub user_id: String,
     pub email: String,
     pub platform_roles: Vec<String>,
     pub permissions: Vec<String>,
+}
+
+/// Pre-login capability probe returned by `GET /api/auth/config`: tells the
+/// front-end whether the OIDC "Sign in with SSO" button should be shown.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct AuthConfig {
+    pub oidc_enabled: bool,
 }
 
 /// Build the auth router. `login` and `config` are CSRF-exempt (client has no cookie yet);
@@ -57,10 +65,31 @@ pub fn auth_router() -> Router<AuthState> {
         .merge(protected)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/auth/config",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Pre-login capability probe (is OIDC enabled?)", body = AuthConfig),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn auth_config(State(st): State<AuthState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "oidc_enabled": st.config.oidc.enabled }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/login",
+    tag = "auth",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "Logged in; sets session + CSRF cookies", body = MeResponse),
+        (status = 401, description = "Invalid email or password", body = ErrorBody),
+        (status = 429, description = "Too many login attempts", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn login(
     State(st): State<AuthState>,
     headers: HeaderMap,
@@ -127,6 +156,15 @@ async fn login(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/logout",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Session revoked; clears session + CSRF cookies", body = Ack),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn logout(
     State(st): State<AuthState>,
     jar: CookieJar,
@@ -140,6 +178,16 @@ async fn logout(
     Ok((jar, Json(serde_json::json!({ "ok": true }))))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/auth/me",
+    tag = "auth",
+    responses(
+        (status = 200, description = "The authenticated caller's identity + permissions", body = MeResponse),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn me(Auth(principal): Auth) -> impl IntoResponse {
     Json(MeResponse {
         user_id: principal.user_id.to_string(),
@@ -155,3 +203,13 @@ impl FromRef<AuthState> for SessionService {
         st.sessions.clone()
     }
 }
+
+/// OpenAPI fragment for the local-auth router (`/api/auth`). Merged into the
+/// Auth seam's `egret_auth::openapi()` (E0·P4b-1).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(login, auth_config, logout, me),
+    components(schemas(LoginRequest, MeResponse, AuthConfig, Ack, ErrorBody)),
+    tags((name = "auth", description = "Local login/logout, session identity, and the pre-login config probe")),
+)]
+pub struct AuthApi;

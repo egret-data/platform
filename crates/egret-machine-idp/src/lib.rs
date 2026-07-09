@@ -15,6 +15,7 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Form, Json, Router};
+use egret_core::http::ErrorBody;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -73,6 +74,34 @@ pub fn idp_router() -> Router<IdpState> {
         .route("/oauth/token", post(token_endpoint))
 }
 
+/// OpenAPI fragment for the mini machine-IdP router (discovery + JWKS + the
+/// client_credentials token endpoint). These paths are merged un-nested into the
+/// root router, so the documented paths are absolute as-is. Merged into
+/// `egret_machine_idp::openapi()` (E0·P4b-1).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(discovery, jwks, token_endpoint),
+    components(schemas(TokenForm, TokenResp, DiscoveryDoc, JwksDoc, ErrorBody)),
+    tags((name = "idp", description = "egret mini machine-IdP: OIDC discovery, JWKS, and client_credentials token minting")),
+)]
+pub struct IdpApi;
+
+/// The machine-IdP seam's OpenAPI document (E0·P4b-1). `egret-server` merges
+/// this into the top-level API doc. This is the per-crate `openapi()` convention
+/// every annotated seam exposes.
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    use utoipa::OpenApi as _;
+    IdpApi::openapi()
+}
+
+#[utoipa::path(
+    get,
+    path = "/.well-known/openid-configuration",
+    tag = "idp",
+    responses(
+        (status = 200, description = "OIDC discovery metadata for the egret machine-IdP", body = DiscoveryDoc),
+    ),
+)]
 async fn discovery(State(st): State<IdpState>) -> Json<serde_json::Value> {
     let iss = st.issuer.trim_end_matches('/');
     Json(serde_json::json!({
@@ -84,25 +113,66 @@ async fn discovery(State(st): State<IdpState>) -> Json<serde_json::Value> {
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/.well-known/jwks.json",
+    tag = "idp",
+    responses(
+        (status = 200, description = "The IdP's active public JWKs (for JWT verification)", body = JwksDoc),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn jwks(State(st): State<IdpState>) -> Result<Json<serde_json::Value>, IdpError> {
     let keys = st.keys.all_public_jwks().await?;
     Ok(Json(serde_json::json!({ "keys": keys })))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct TokenForm {
     grant_type: String,
     client_id: String,
     client_secret: String,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 struct TokenResp {
     access_token: String,
     token_type: String,
     expires_in: u64,
 }
 
+/// OIDC discovery document served at `/.well-known/openid-configuration` so the
+/// embedded lakekeeper can locate this IdP's JWKS + token endpoint. Doc-only
+/// mirror of the `serde_json::Value` the handler builds.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct DiscoveryDoc {
+    issuer: String,
+    jwks_uri: String,
+    token_endpoint: String,
+    grant_types_supported: Vec<String>,
+    id_token_signing_alg_values_supported: Vec<String>,
+}
+
+/// JWK set served at `/.well-known/jwks.json`. Doc-only mirror of the
+/// `serde_json::Value` the handler builds; each key is a raw RFC 7517 JWK.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct JwksDoc {
+    #[schema(value_type = Vec<Object>)]
+    keys: Vec<serde_json::Value>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/oauth/token",
+    tag = "idp",
+    request_body(content = TokenForm, content_type = "application/x-www-form-urlencoded"),
+    responses(
+        (status = 200, description = "A signed access token (client_credentials grant)", body = TokenResp),
+        (status = 400, description = "Unsupported grant_type (OAuth `{ \"error\": ... }` body)", body = ErrorBody),
+        (status = 401, description = "Invalid client credentials (OAuth `{ \"error\": ... }` body)", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn token_endpoint(
     State(st): State<IdpState>,
     Form(f): Form<TokenForm>,
