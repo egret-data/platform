@@ -2060,6 +2060,961 @@
         }
       }
     },
+    "/api/control-plane/policies": {
+      "get": {
+        "tags": [
+          "policy-admin"
+        ],
+        "summary": "GET /policies?service=&type=&q= — policy summaries for one profile, filtered.",
+        "operationId": "list_policies",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "description": "Policy profile (Ranger service) name to list policies for.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "description": "Optional kind filter: `access` | `masking` | `rowfilter`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Optional case-insensitive name/resource-path substring filter.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Policy summaries for the profile, filtered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PolicySummary"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "policy-admin"
+        ],
+        "summary": "POST /policies — create an Access/Masking/Row-filter policy (by `kind`).",
+        "description": "Missing `kind` defaults to \"access\" (see `editor_to_ranger_json`), so the\nP2 editor form — which never sent `kind` — stays wire-compatible.\n\nThe request body is one of the editor input unions — `AccessPolicyInput`\n(the default when `kind` is absent), `MaskingPolicyInput`, or\n`RowFilterPolicyInput` — dispatched on `kind`; documented as a free-form\nobject since the handler accepts any of the three shapes.",
+        "operationId": "create_policy",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Policy created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedPolicyId"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid editor input or missing policy name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:create permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A policy with this name already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/policies/resource-lookup": {
+      "get": {
+        "tags": [
+          "policy-admin"
+        ],
+        "summary": "GET /policies/resource-lookup — suggestions for one resource level.\ncatalog: engine-catalog names of engines bound to the profile + values used\nin the service's existing policies. schema/table/column: distinct values used\nin the service's policies, filtered so parent levels match.",
+        "operationId": "resource_lookup",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "description": "Policy profile (Ranger service) name to draw suggestions from.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "level",
+            "in": "query",
+            "description": "Resource level to suggest: `catalog` | `schema` | `table` | `column`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Parent catalog filter (for schema/table/column levels).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "schema",
+            "in": "query",
+            "description": "Parent schema filter (for table/column levels).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "table",
+            "in": "query",
+            "description": "Parent table filter (for the column level).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Optional case-insensitive substring filter on the suggestions.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Suggested resource values for the given level (max 50)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/policies/service-def/{name}": {
+      "get": {
+        "tags": [
+          "policy-admin"
+        ],
+        "summary": "GET /policies/service-def/{name} — the def slices the editor renders from.\nThe frontend passes a SERVICE name; resolve it to its service-def (by the\nservice's `type`). Falls back to treating `name` as a def name directly\n(back-compat) when no such service exists.",
+        "operationId": "get_service_def",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Profile name (resolved to its service-def) or a def name directly",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The raw Ranger service-definition the editor renders from",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such service-def",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/policies/services": {
+      "get": {
+        "tags": [
+          "policy-admin"
+        ],
+        "summary": "GET /policies/services — profiles + the engine(s) that link to each.",
+        "operationId": "list_profiles",
+        "responses": {
+          "200": {
+            "description": "Policy profiles with their linked engines and policy counts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProfileDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/policies/services/{service}/seed-defaults": {
+      "post": {
+        "tags": [
+          "policy-admin"
+        ],
+        "summary": "POST /policies/services/{service}/seed-defaults — seed default \"admin has\nall access\" policies (one per Trino resource hierarchy) for a profile,\nmirroring Ranger's default-policy-on-service-create behavior. Idempotent:\na no-op (created: 0) if the service already has any policy.",
+        "operationId": "seed_defaults",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "path",
+            "description": "Policy profile (Ranger service) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Number of default policies created (0 if the profile already had policies)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SeedResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:seed permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/policies/services/{service}/trino-config": {
+      "get": {
+        "tags": [
+          "policy-admin"
+        ],
+        "summary": "GET /policies/services/{service}/trino-config — the two files a Trino\ncoordinator needs to enforce this profile via the native ranger plugin.",
+        "operationId": "trino_config",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "path",
+            "description": "Policy profile (Ranger service) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The Trino coordinator config files for this profile's native ranger plugin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ConfigFile"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/policies/{id}": {
+      "get": {
+        "tags": [
+          "policy-admin"
+        ],
+        "summary": "GET /policies/{id} — the raw stored Ranger body (with id + isEnabled), for detail.",
+        "operationId": "get_policy",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Policy id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The raw stored Ranger policy body (with id + isEnabled)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "policy-admin"
+        ],
+        "summary": "PUT /policies/{id} — replace a policy's body (any kind).",
+        "operationId": "update_policy",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Policy id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Policy replaced",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedPolicyId"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid editor input or missing policy name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "policy-admin"
+        ],
+        "summary": "DELETE /policies/{id}",
+        "operationId": "delete_policy_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Policy id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Policy deleted"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:delete permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/policies/{id}/enabled": {
+      "put": {
+        "tags": [
+          "policy-admin"
+        ],
+        "summary": "PUT /policies/{id}/enabled — toggle a policy's enabled flag.",
+        "operationId": "set_policy_enabled",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Policy id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnabledBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Policy enabled flag updated"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/principals": {
+      "get": {
+        "tags": [
+          "policy-admin"
+        ],
+        "summary": "GET /principals?q=&kind= — egret users + groups for the policy picker.",
+        "description": "Correctness note: the user principal `name` is the user's `email`; if a\ndeployment's Trino/Ranger group-mapping keys identities on something else\n(e.g. a username), the admin must free-type the correct value instead.",
+        "operationId": "list_principals",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Optional case-insensitive substring filter on name/label.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Optional kind filter: `user` | `group`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "egret users + groups for the policy principal picker (max 50)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Principal"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/roles/{role_id}": {
       "delete": {
         "tags": [
@@ -6721,10 +7676,428 @@
           }
         }
       }
+    },
+    "/service/plugins/definitions": {
+      "get": {
+        "tags": [
+          "ranger"
+        ],
+        "operationId": "list_defs",
+        "responses": {
+          "200": {
+            "description": "All stored Ranger service-definitions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerServiceDefs"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (when a ranger auth token is configured)"
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/service/plugins/definitions/name/{name}": {
+      "get": {
+        "tags": [
+          "ranger"
+        ],
+        "operationId": "get_def",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Service-definition name (e.g. `trino`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The raw Ranger service-definition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (when a ranger auth token is configured)"
+          },
+          "404": {
+            "description": "No such service-definition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/service/plugins/policies/download/{service}": {
+      "get": {
+        "tags": [
+          "ranger"
+        ],
+        "summary": "`GET /plugins/policies/download/{service}?lastKnownVersion=N`",
+        "description": "Returns 304 when the plugin's cached version matches; 200 + `ServicePolicies` otherwise.",
+        "operationId": "download_policies",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "path",
+            "description": "Policy profile (Ranger service) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "lastKnownVersion",
+            "in": "query",
+            "description": "The plugin's cached policy version; a match yields `304 Not Modified`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The service's enabled policies + service-def (plugin download envelope)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerServicePolicies"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not modified — the plugin's lastKnownVersion matches the current policy version"
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (when a ranger auth token is configured)"
+          },
+          "404": {
+            "description": "No such policy profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/service/plugins/policies/{id}": {
+      "get": {
+        "tags": [
+          "ranger"
+        ],
+        "operationId": "get_policy",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Policy id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The raw stored Ranger policy body (with id)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (when a ranger auth token is configured)"
+          },
+          "404": {
+            "description": "No such policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/service/plugins/services": {
+      "get": {
+        "tags": [
+          "ranger"
+        ],
+        "operationId": "list_services",
+        "responses": {
+          "200": {
+            "description": "All policy profiles (Ranger services)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RangerServiceRef"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (when a ranger auth token is configured)"
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/service/tags/download/{service}": {
+      "get": {
+        "tags": [
+          "ranger"
+        ],
+        "summary": "`GET /tags/download/{service}?lastKnownVersion=N`",
+        "description": "Returns an empty well-formed tag payload so the plugin doesn't error (tag policies deferred).",
+        "operationId": "download_tags",
+        "parameters": [
+          {
+            "name": "service",
+            "in": "path",
+            "description": "Policy profile (Ranger service) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "lastKnownVersion",
+            "in": "query",
+            "description": "The plugin's cached policy version; a match yields `304 Not Modified`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "An empty, well-formed tag payload (tag policies deferred)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerServiceTags"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (when a ranger auth token is configured)"
+          },
+          "404": {
+            "description": "No such policy profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangerErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
+      "AccessItemInput": {
+        "type": "object",
+        "properties": {
+          "users": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "accesses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "effect": {
+            "type": "string"
+          }
+        }
+      },
+      "AccessPolicyInput": {
+        "type": "object",
+        "required": [
+          "name",
+          "service"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "isEnabled": {
+            "type": "boolean"
+          },
+          "resources": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ResourceLevel"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AccessItemInput"
+            }
+          },
+          "allowExceptions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AccessItemInput"
+            }
+          },
+          "denyExceptions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AccessItemInput"
+            }
+          },
+          "isDenyAllElse": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "isOverride": {
+            "type": "boolean"
+          },
+          "additional": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/components/schemas/ResourceLevel"
+              },
+              "propertyNames": {
+                "type": "string"
+              }
+            },
+            "description": "Extra independent resource hierarchies (Ranger additionalResources)."
+          }
+        }
+      },
       "Ack": {
         "type": "object",
         "description": "The uniform acknowledgement body `{ \"ok\": true }` returned by mutating\nendpoints that have nothing else to say (delete, cancel, …).",
@@ -6909,6 +8282,21 @@
             "type": "string"
           },
           "type": {
+            "type": "string"
+          }
+        }
+      },
+      "ConfigFile": {
+        "type": "object",
+        "required": [
+          "name",
+          "content"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "content": {
             "type": "string"
           }
         }
@@ -7168,6 +8556,20 @@
           }
         }
       },
+      "CreatedPolicyId": {
+        "type": "object",
+        "description": "Doc-only mirror of the `{ \"id\": <n> }` body the create/update handlers return.",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The created/updated policy's id."
+          }
+        }
+      },
       "Database": {
         "type": "object",
         "description": "A full database registration row (no secret material).\n\n`Serialize`/`Deserialize` are forward-looking contract surface: today the\nwire type is the separate `DatabaseDetailDto` and the store builds `Database`\nfield-by-field from sqlx rows, so these codecs are not yet exercised — they\nlet a future out-of-process query-seam client exchange this domain type.",
@@ -7399,6 +8801,17 @@
           }
         }
       },
+      "EnabledBody": {
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
       "Engine": {
         "type": "string",
         "description": "Supported query engines.",
@@ -7575,6 +8988,80 @@
           }
         }
       },
+      "MaskItemInput": {
+        "type": "object",
+        "properties": {
+          "users": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "maskType": {
+            "type": "string"
+          },
+          "valueExpr": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "MaskingPolicyInput": {
+        "type": "object",
+        "required": [
+          "name",
+          "service"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "isEnabled": {
+            "type": "boolean"
+          },
+          "resources": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ResourceLevel"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MaskItemInput"
+            }
+          },
+          "description": {
+            "type": "string"
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "isOverride": {
+            "type": "boolean"
+          }
+        }
+      },
       "MeResponse": {
         "type": "object",
         "required": [
@@ -7746,6 +9233,144 @@
           }
         }
       },
+      "PolicySummary": {
+        "type": "object",
+        "description": "Flattened, UI-facing view of one stored Ranger policy.",
+        "required": [
+          "id",
+          "name",
+          "service",
+          "policy_type",
+          "resource_path",
+          "principals",
+          "permissions",
+          "is_enabled",
+          "description",
+          "labels"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "policy_type": {
+            "type": "string"
+          },
+          "resource_path": {
+            "type": "string"
+          },
+          "principals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "is_enabled": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Principal": {
+        "type": "object",
+        "description": "One egret identity offered by the policy picker.",
+        "required": [
+          "kind",
+          "name",
+          "label"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "description": "The value written into the policy (user email / group name)."
+          },
+          "label": {
+            "type": "string",
+            "description": "Display label."
+          }
+        }
+      },
+      "ProfileDto": {
+        "type": "object",
+        "description": "A profile (Ranger service) + the engine(s) that link to it.",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "policy_version",
+          "policy_count",
+          "engines"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "policy_version": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "policy_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "engines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProfileEngine"
+            }
+          }
+        }
+      },
+      "ProfileEngine": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
       "ProtectionBody": {
         "type": "object",
         "required": [
@@ -7884,6 +9509,155 @@
           }
         }
       },
+      "RangerErrorBody": {
+        "type": "object",
+        "description": "Doc-only mirror of the Ranger error envelope (`{ msg, statusCode }`), which\ndiffers from the control-plane `ErrorBody` shape.",
+        "required": [
+          "msg",
+          "statusCode"
+        ],
+        "properties": {
+          "msg": {
+            "type": "string"
+          },
+          "statusCode": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "RangerServiceDefs": {
+        "type": "object",
+        "description": "Doc-only mirror of the `{ \"serviceDefs\": [...] }` envelope `list_defs` returns.",
+        "required": [
+          "serviceDefs"
+        ],
+        "properties": {
+          "serviceDefs": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Each element is a raw Ranger service-definition object (stored verbatim)."
+          }
+        }
+      },
+      "RangerServicePolicies": {
+        "type": "object",
+        "description": "Doc-only mirror of the `ServicePolicies` plugin download envelope\n(`egret-policy-api`) returned by `download_policies`.",
+        "required": [
+          "serviceName",
+          "serviceId",
+          "policyVersion",
+          "serviceDef",
+          "policies",
+          "auditMode"
+        ],
+        "properties": {
+          "serviceName": {
+            "type": "string"
+          },
+          "serviceId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "policyVersion": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "policyUpdateTime": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "epoch millis; omitted when unknown"
+          },
+          "serviceDef": {
+            "type": "object",
+            "description": "The raw Ranger service-definition (stored verbatim)."
+          },
+          "policies": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "The service's enabled policies, each a raw Ranger policy object."
+          },
+          "auditMode": {
+            "type": "string"
+          }
+        }
+      },
+      "RangerServiceRef": {
+        "type": "object",
+        "description": "Doc-only mirror of one `list_services` entry.",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "configs",
+          "policyVersion",
+          "isEnabled"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "configs": {
+            "type": "object",
+            "description": "The service's config map (stored verbatim)."
+          },
+          "policyVersion": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "isEnabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "RangerServiceTags": {
+        "type": "object",
+        "description": "Doc-only mirror of the empty `ServiceTags` payload returned by `download_tags`.",
+        "required": [
+          "op",
+          "serviceName",
+          "tagVersion",
+          "tags",
+          "serviceResources"
+        ],
+        "properties": {
+          "op": {
+            "type": "string"
+          },
+          "serviceName": {
+            "type": "string"
+          },
+          "tagVersion": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "tags": {
+            "type": "object",
+            "description": "Tag map keyed by tag-id (empty this phase)."
+          },
+          "serviceResources": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      },
       "RenameGroupInput": {
         "type": "object",
         "required": [
@@ -7892,6 +9666,23 @@
         "properties": {
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "ResourceLevel": {
+        "type": "object",
+        "properties": {
+          "values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "isExcludes": {
+            "type": "boolean"
+          },
+          "isRecursive": {
+            "type": "boolean"
           }
         }
       },
@@ -7999,6 +9790,74 @@
           },
           "secretKey": {
             "type": "string"
+          }
+        }
+      },
+      "RowFilterItemInput": {
+        "type": "object",
+        "properties": {
+          "users": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "filterExpr": {
+            "type": "string"
+          }
+        }
+      },
+      "RowFilterPolicyInput": {
+        "type": "object",
+        "required": [
+          "name",
+          "service"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "isEnabled": {
+            "type": "boolean"
+          },
+          "resources": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ResourceLevel"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RowFilterItemInput"
+            }
+          },
+          "description": {
+            "type": "string"
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "isOverride": {
+            "type": "boolean"
           }
         }
       },
@@ -8126,6 +9985,20 @@
           "used_by": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "SeedResult": {
+        "type": "object",
+        "description": "Doc-only mirror of the `{ \"created\": <n> }` body `seed_defaults` returns.",
+        "required": [
+          "created"
+        ],
+        "properties": {
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many default policies were created (0 if the profile already had any)."
           }
         }
       },
@@ -8828,6 +10701,14 @@
     {
       "name": "control-plane-catalog",
       "description": "Embedded-catalog warehouse management: warehouses, catalog roles/grants/clients, browse, and admin ops"
+    },
+    {
+      "name": "policy-admin",
+      "description": "Data-governance policy console: access/masking/row-filter policy CRUD, profiles, and the principal picker"
+    },
+    {
+      "name": "ranger",
+      "description": "Ranger Admin REST serving surface polled by engine plugins (read-only policy/service-def download)"
     },
     {
       "name": "idp",

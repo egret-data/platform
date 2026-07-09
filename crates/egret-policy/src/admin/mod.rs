@@ -20,6 +20,8 @@ use egret_auth::session::SessionService;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use egret_core::http::ErrorBody;
+
 use crate::PolicyStore;
 pub use error::PolicyHttpError;
 pub use ranger_json::{
@@ -77,7 +79,7 @@ fn item_key(policy_type: i64) -> &'static str {
 }
 
 /// Flattened, UI-facing view of one stored Ranger policy.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct PolicySummary {
     pub id: i64,
     pub name: String,
@@ -204,17 +206,21 @@ pub fn summarize_policy(id: i64, service: &str, enabled: bool, body: &Value) -> 
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListQuery {
+    /// Policy profile (Ranger service) name to list policies for.
     pub service: String,
+    /// Optional kind filter: `access` | `masking` | `rowfilter`.
     #[serde(default)]
-    pub r#type: Option<String>, // access | masking | rowfilter
+    pub r#type: Option<String>,
+    /// Optional case-insensitive name/resource-path substring filter.
     #[serde(default)]
     pub q: Option<String>,
 }
 
 /// A profile (Ranger service) + the engine(s) that link to it.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ProfileDto {
     pub id: i64,
     pub name: String,
@@ -224,7 +230,7 @@ pub struct ProfileDto {
     pub engines: Vec<ProfileEngine>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ProfileEngine {
     pub id: uuid::Uuid,
     pub name: String,
@@ -258,16 +264,23 @@ pub fn router() -> Router<PolicyAdminState> {
         .route("/principals", get(list_principals))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ResourceLookupQuery {
+    /// Policy profile (Ranger service) name to draw suggestions from.
     pub service: String,
-    pub level: String, // catalog | schema | table | column
+    /// Resource level to suggest: `catalog` | `schema` | `table` | `column`.
+    pub level: String,
+    /// Parent catalog filter (for schema/table/column levels).
     #[serde(default)]
     pub catalog: Option<String>,
+    /// Parent schema filter (for table/column levels).
     #[serde(default)]
     pub schema: Option<String>,
+    /// Parent table filter (for the column level).
     #[serde(default)]
     pub table: Option<String>,
+    /// Optional case-insensitive substring filter on the suggestions.
     #[serde(default)]
     pub q: Option<String>,
 }
@@ -289,6 +302,19 @@ fn values_at(res: Option<&serde_json::Map<String, Value>>, k: &str) -> Vec<Strin
 /// catalog: engine-catalog names of engines bound to the profile + values used
 /// in the service's existing policies. schema/table/column: distinct values used
 /// in the service's policies, filtered so parent levels match.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/policies/resource-lookup",
+    tag = "policy-admin",
+    params(ResourceLookupQuery),
+    responses(
+        (status = 200, description = "Suggested resource values for the given level (max 50)", body = Vec<String>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn resource_lookup(
     State(st): State<PolicyAdminState>,
     Auth(p): Auth,
@@ -352,6 +378,19 @@ async fn resource_lookup(
 }
 
 /// GET /policies?service=&type=&q= — policy summaries for one profile, filtered.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/policies",
+    tag = "policy-admin",
+    params(ListQuery),
+    responses(
+        (status = 200, description = "Policy summaries for the profile, filtered", body = Vec<PolicySummary>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list_policies(
     State(st): State<PolicyAdminState>,
     Auth(p): Auth,
@@ -382,6 +421,19 @@ async fn list_policies(
 }
 
 /// GET /policies/{id} — the raw stored Ranger body (with id + isEnabled), for detail.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/policies/{id}",
+    tag = "policy-admin",
+    params(("id" = i64, Path, description = "Policy id")),
+    responses(
+        (status = 200, description = "The raw stored Ranger policy body (with id + isEnabled)", body = Object),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 404, description = "No such policy", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn get_policy(
     State(st): State<PolicyAdminState>,
     Auth(p): Auth,
@@ -398,6 +450,17 @@ async fn get_policy(
 }
 
 /// GET /policies/services — profiles + the engine(s) that link to each.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/policies/services",
+    tag = "policy-admin",
+    responses(
+        (status = 200, description = "Policy profiles with their linked engines and policy counts", body = Vec<ProfileDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list_profiles(
     State(st): State<PolicyAdminState>,
     Auth(p): Auth,
@@ -430,7 +493,7 @@ async fn list_profiles(
     Ok(Json(profiles))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ConfigFile {
     pub name: String,
     pub content: String,
@@ -438,6 +501,19 @@ pub struct ConfigFile {
 
 /// GET /policies/services/{service}/trino-config — the two files a Trino
 /// coordinator needs to enforce this profile via the native ranger plugin.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/policies/services/{service}/trino-config",
+    tag = "policy-admin",
+    params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
+    responses(
+        (status = 200, description = "The Trino coordinator config files for this profile's native ranger plugin", body = Vec<ConfigFile>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn trino_config(
     State(st): State<PolicyAdminState>,
     Auth(p): Auth,
@@ -486,6 +562,19 @@ async fn trino_config(
 /// all access" policies (one per Trino resource hierarchy) for a profile,
 /// mirroring Ranger's default-policy-on-service-create behavior. Idempotent:
 /// a no-op (created: 0) if the service already has any policy.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/policies/services/{service}/seed-defaults",
+    tag = "policy-admin",
+    params(("service" = String, Path, description = "Policy profile (Ranger service) name")),
+    responses(
+        (status = 200, description = "Number of default policies created (0 if the profile already had policies)", body = SeedResult),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:seed permission", body = ErrorBody),
+        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn seed_defaults(
     State(st): State<PolicyAdminState>,
     Auth(p): Auth,
@@ -504,6 +593,19 @@ async fn seed_defaults(
 /// The frontend passes a SERVICE name; resolve it to its service-def (by the
 /// service's `type`). Falls back to treating `name` as a def name directly
 /// (back-compat) when no such service exists.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/policies/service-def/{name}",
+    tag = "policy-admin",
+    params(("name" = String, Path, description = "Profile name (resolved to its service-def) or a def name directly")),
+    responses(
+        (status = 200, description = "The raw Ranger service-definition the editor renders from", body = Object),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 404, description = "No such service-def", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn get_service_def(
     State(st): State<PolicyAdminState>,
     Auth(p): Auth,
@@ -517,17 +619,21 @@ async fn get_service_def(
     Ok(Json(st.store.get_service_def(&def_name).await?.def_jsonb))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct PrincipalQuery {
+    /// Optional case-insensitive substring filter on name/label.
     #[serde(default)]
     pub q: Option<String>,
+    /// Optional kind filter: `user` | `group`.
     #[serde(default)]
-    pub kind: Option<String>, // "user" | "group"
+    pub kind: Option<String>,
 }
 
 /// One egret identity offered by the policy picker.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct Principal {
+    #[schema(value_type = String)]
     pub kind: &'static str,
     /// The value written into the policy (user email / group name).
     pub name: String,
@@ -540,6 +646,18 @@ pub struct Principal {
 /// Correctness note: the user principal `name` is the user's `email`; if a
 /// deployment's Trino/Ranger group-mapping keys identities on something else
 /// (e.g. a username), the admin must free-type the correct value instead.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/principals",
+    tag = "policy-admin",
+    params(PrincipalQuery),
+    responses(
+        (status = 200, description = "egret users + groups for the policy principal picker (max 50)", body = Vec<Principal>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list_principals(
     State(st): State<PolicyAdminState>,
     Auth(p): Auth,
@@ -593,10 +711,44 @@ async fn list_principals(
     Ok(Json(out))
 }
 
+/// Doc-only mirror of the `{ "id": <n> }` body the create/update handlers return.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CreatedPolicyId {
+    /// The created/updated policy's id.
+    pub id: i64,
+}
+
+/// Doc-only mirror of the `{ "created": <n> }` body `seed_defaults` returns.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct SeedResult {
+    /// How many default policies were created (0 if the profile already had any).
+    pub created: i64,
+}
+
 /// POST /policies — create an Access/Masking/Row-filter policy (by `kind`).
 ///
 /// Missing `kind` defaults to "access" (see `editor_to_ranger_json`), so the
 /// P2 editor form — which never sent `kind` — stays wire-compatible.
+///
+/// The request body is one of the editor input unions — `AccessPolicyInput`
+/// (the default when `kind` is absent), `MaskingPolicyInput`, or
+/// `RowFilterPolicyInput` — dispatched on `kind`; documented as a free-form
+/// object since the handler accepts any of the three shapes.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/policies",
+    tag = "policy-admin",
+    request_body = Object,
+    responses(
+        (status = 200, description = "Policy created", body = CreatedPolicyId),
+        (status = 400, description = "Invalid editor input or missing policy name", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:create permission", body = ErrorBody),
+        (status = 404, description = "No such policy profile", body = ErrorBody),
+        (status = 409, description = "A policy with this name already exists", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn create_policy(
     State(st): State<PolicyAdminState>,
     Auth(p): Auth,
@@ -621,6 +773,21 @@ async fn create_policy(
 }
 
 /// PUT /policies/{id} — replace a policy's body (any kind).
+#[utoipa::path(
+    put,
+    path = "/api/control-plane/policies/{id}",
+    tag = "policy-admin",
+    params(("id" = i64, Path, description = "Policy id")),
+    request_body = Object,
+    responses(
+        (status = 200, description = "Policy replaced", body = CreatedPolicyId),
+        (status = 400, description = "Invalid editor input or missing policy name", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 404, description = "No such policy", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn update_policy(
     State(st): State<PolicyAdminState>,
     Auth(p): Auth,
@@ -641,6 +808,19 @@ async fn update_policy(
 }
 
 /// DELETE /policies/{id}
+#[utoipa::path(
+    delete,
+    path = "/api/control-plane/policies/{id}",
+    tag = "policy-admin",
+    params(("id" = i64, Path, description = "Policy id")),
+    responses(
+        (status = 204, description = "Policy deleted"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:delete permission", body = ErrorBody),
+        (status = 404, description = "No such policy", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn delete_policy_handler(
     State(st): State<PolicyAdminState>,
     Auth(p): Auth,
@@ -651,12 +831,26 @@ async fn delete_policy_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct EnabledBody {
     pub enabled: bool,
 }
 
 /// PUT /policies/{id}/enabled — toggle a policy's enabled flag.
+#[utoipa::path(
+    put,
+    path = "/api/control-plane/policies/{id}/enabled",
+    tag = "policy-admin",
+    params(("id" = i64, Path, description = "Policy id")),
+    request_body = EnabledBody,
+    responses(
+        (status = 204, description = "Policy enabled flag updated"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:update permission", body = ErrorBody),
+        (status = 404, description = "No such policy", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn set_policy_enabled(
     State(st): State<PolicyAdminState>,
     Auth(p): Auth,
@@ -667,6 +861,50 @@ async fn set_policy_enabled(
     st.store.set_policy_enabled(id, b.enabled).await?;
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// OpenAPI fragment for the admin Policies console router (mounted at
+/// `/api/control-plane`). Merged into `egret_policy::openapi()`. The
+/// `AccessPolicyInput` / `MaskingPolicyInput` / `RowFilterPolicyInput` editor
+/// unions are published as exported vocabulary (like the reference seam's
+/// `Database`) so the FE gets typed inputs even though the create/update
+/// handlers accept any object and dispatch on `kind`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        list_policies,
+        create_policy,
+        get_policy,
+        update_policy,
+        delete_policy_handler,
+        set_policy_enabled,
+        list_profiles,
+        trino_config,
+        seed_defaults,
+        get_service_def,
+        resource_lookup,
+        list_principals,
+    ),
+    components(schemas(
+        PolicySummary,
+        ProfileDto,
+        ProfileEngine,
+        ConfigFile,
+        Principal,
+        EnabledBody,
+        CreatedPolicyId,
+        SeedResult,
+        ranger_json::AccessPolicyInput,
+        ranger_json::AccessItemInput,
+        ranger_json::ResourceLevel,
+        ranger_json::MaskingPolicyInput,
+        ranger_json::MaskItemInput,
+        ranger_json::RowFilterPolicyInput,
+        ranger_json::RowFilterItemInput,
+        ErrorBody,
+    )),
+    tags((name = "policy-admin", description = "Data-governance policy console: access/masking/row-filter policy CRUD, profiles, and the principal picker")),
+)]
+pub struct PolicyAdminApi;
 
 #[cfg(test)]
 mod tests {

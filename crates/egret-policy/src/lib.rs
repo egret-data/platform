@@ -17,3 +17,15 @@ pub use error::PolicyStoreError;
 pub use ranger::{ranger_router, RangerState};
 pub use service_def::{seed_trino, trino_service_def, TRINO_DEF_NAME};
 pub use store::{PolicyRow, PolicyStore};
+
+/// The Policy/Ranger seam's OpenAPI document (E0·P4b-5): the admin Policies
+/// console router (`/api/control-plane`) and the Ranger Admin REST serving
+/// surface (`/service`) merged into one `OpenApi`. `egret-server` merges this
+/// into the top-level API doc. This is the per-crate `openapi()` convention
+/// every annotated seam exposes.
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    use utoipa::OpenApi as _;
+    let mut doc = admin::PolicyAdminApi::openapi();
+    doc.merge(ranger::routes::RangerApi::openapi());
+    doc
+}
