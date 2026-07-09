@@ -15,14 +15,17 @@ use egret_auth::principal::Auth;
 use egret_auth::require_permission;
 use serde::Serialize;
 use serde_json::Value;
+use utoipa::ToSchema;
 use uuid::Uuid;
+
+use egret_core::http::ErrorBody;
 
 use crate::engines::monitor_password;
 use crate::Engine;
 use crate::EngineHttpError as CpError;
 use crate::EngineMgmtState as CpState;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryDto {
     pub id: String,
@@ -35,23 +38,24 @@ pub struct QueryDto {
     pub progress_percent: f64,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryDetailDto {
     #[serde(flatten)]
     pub base: QueryDto,
     pub error_message: Option<String>,
+    #[schema(value_type = Object)]
     pub output_stage: Option<Value>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeDto {
     pub uri: String,
     pub recent_failures: f64,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ClusterDto {
     pub running: u32,
@@ -249,6 +253,20 @@ async fn coordinator_json(
     serde_json::from_slice(&body).map_err(|_| CpError::BadGateway)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/engines/{id}/queries",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    responses(
+        (status = 200, description = "Live queries on the engine's Trino coordinator", body = Vec<QueryDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 502, description = "Trino coordinator unreachable or returned a non-JSON error", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list_queries(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -264,6 +282,23 @@ async fn list_queries(
     Ok(Json(list))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/engines/{id}/queries/{qid}",
+    tag = "control-plane-engines",
+    params(
+        ("id" = Uuid, Path, description = "Engine id"),
+        ("qid" = String, Path, description = "Trino query id"),
+    ),
+    responses(
+        (status = 200, description = "Query detail including error message and output-stage plan", body = QueryDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 502, description = "Trino coordinator unreachable or returned a non-JSON error", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn get_query(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -275,6 +310,23 @@ async fn get_query(
     Ok(Json(query_detail_dto(&v)))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/control-plane/engines/{id}/queries/{qid}",
+    tag = "control-plane-engines",
+    params(
+        ("id" = Uuid, Path, description = "Engine id"),
+        ("qid" = String, Path, description = "Trino query id"),
+    ),
+    responses(
+        (status = 200, description = "Query cancelled on the coordinator"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:kill permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 502, description = "Trino coordinator unreachable or rejected the cancel", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn kill_query(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -290,6 +342,20 @@ async fn kill_query(
     Ok(StatusCode::OK)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/engines/{id}/cluster",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    responses(
+        (status = 200, description = "Cluster summary: running/queued/blocked query tallies + node list", body = ClusterDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 502, description = "Trino coordinator unreachable or returned a non-JSON error", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn get_cluster(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -301,6 +367,18 @@ async fn get_cluster(
     let queries = coordinator_json(&st, &engine, "GET", "/v1/query").await?;
     Ok(Json(cluster_dto(&queries, &nodes)))
 }
+
+/// OpenAPI fragment for the native-Trino monitor routes merged onto the engines
+/// router (query list/detail/kill + cluster summary). Shares the
+/// `control-plane-engines` tag with [`crate::engines::EngineMgmtApi`] and is
+/// unioned into `egret_engine_mgmt::openapi()`. Errors use the shared
+/// [`egret_core::http::ErrorBody`].
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(list_queries, get_query, kill_query, get_cluster),
+    components(schemas(QueryDto, QueryDetailDto, NodeDto, ClusterDto, ErrorBody))
+)]
+pub struct MonitorApi;
 
 #[cfg(test)]
 mod tests {
