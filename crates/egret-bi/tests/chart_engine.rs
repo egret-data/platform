@@ -2,9 +2,9 @@
 
 use egret_bi::chartquery::{build, QuerySpec};
 use egret_bi::{DatasetColumn, Metric, SourceSpec};
-use egret_database::model::{ConnOptions, Engine};
-use egret_engine::connector::{build_connector, ConnSpec};
-use egret_engine::model::Limits;
+use egret_query::execution::connector::{build_connector, ConnSpec};
+use egret_query::execution::model::Limits;
+use egret_query_api::{ConnOptions, Engine};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -60,7 +60,7 @@ fn orders() -> SourceSpec {
     }
 }
 
-async fn run(spec: &ConnSpec, sql: &str) -> egret_engine::model::QueryResult {
+async fn run(spec: &ConnSpec, sql: &str) -> egret_core::TabularResult {
     build_connector(spec)
         .execute(
             sql,

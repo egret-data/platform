@@ -107,7 +107,7 @@ impl WorkspaceSecretStore {
         let rows: Vec<MetaRow> = sqlx::query_as(
             "SELECT ws.id, ws.name, ws.description, ws.created_at, \
              (SELECT count(*) FROM storage.storage_connections WHERE secret_ref = ws.id) \
-             + (SELECT count(*) FROM databases WHERE secret_id = ws.id) AS used_by \
+             + (SELECT count(*) FROM query.databases WHERE secret_id = ws.id) AS used_by \
              FROM workspace_secrets ws \
              WHERE ws.workspace_id IS NOT DISTINCT FROM $1 \
              ORDER BY ws.name",
@@ -127,7 +127,7 @@ impl WorkspaceSecretStore {
         let row: Option<MetaRow> = sqlx::query_as(
             "SELECT ws.id, ws.name, ws.description, ws.created_at, \
              (SELECT count(*) FROM storage.storage_connections WHERE secret_ref = ws.id) \
-             + (SELECT count(*) FROM databases WHERE secret_id = ws.id) AS used_by \
+             + (SELECT count(*) FROM query.databases WHERE secret_id = ws.id) AS used_by \
              FROM workspace_secrets ws \
              WHERE ws.id = $1 AND ws.workspace_id IS NOT DISTINCT FROM $2",
         )

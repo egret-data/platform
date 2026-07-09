@@ -146,7 +146,7 @@ async fn workspace_cmd(config: Config, action: WorkspaceAction) -> anyhow::Resul
 /// Daft connection. Backed by the same `DatabaseRepo` registry the query runner
 /// uses; the engine label matches `EngineOption.engine` via `Engine::as_str`.
 struct EngineConnResolverImpl {
-    databases: egret_database::DatabaseRepo,
+    databases: egret_query::DatabaseRepo,
 }
 
 #[async_trait::async_trait]
@@ -975,9 +975,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // `secrets` (the SecretStore) is shared: the per-workspace storage layer and
     // the database block reuse the same instance for their secrets.
     let databases =
-        egret_database::DatabaseRepo::new(db.clone(), secrets.clone(), workspace_secrets.clone());
+        egret_query::DatabaseRepo::new(db.clone(), secrets.clone(), workspace_secrets.clone());
 
-    let database = Some(egret_database::DatabaseState {
+    let database = Some(egret_query::DatabaseState {
         repo: databases.clone(),
         authz: Authorizer::new(db.clone()),
         sessions: sessions.clone(),
@@ -996,23 +996,23 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         };
         let storage: std::sync::Arc<dyn egret_storage::ObjectStore> =
             std::sync::Arc::new(egret_storage::S3Store::new(&storage_cfg).await?);
-        let store = egret_engine::QueryStore::new(db.clone());
-        let limits = egret_engine::model::Limits {
+        let store = egret_query::QueryStore::new(db.clone());
+        let limits = egret_query::execution::model::Limits {
             max_rows: config.engine.max_rows,
             timeout: std::time::Duration::from_secs(config.engine.query_timeout_secs),
         };
         let bucket_uri = format!("s3://{}", config.storage.bucket);
-        let jobs = egret_engine::JobManager::new(
+        let jobs = egret_query::JobManager::new(
             store.clone(),
             databases.clone(),
-            std::sync::Arc::new(egret_engine::connector::DefaultConnectorFactory),
+            std::sync::Arc::new(egret_query::execution::connector::DefaultConnectorFactory),
             storage.clone(),
             bucket_uri.clone(),
             config.engine.results_prefix.clone(),
             limits.clone(),
             config.engine.preview_rows,
         );
-        Some(egret_engine::EngineState {
+        Some(egret_query::EngineState {
             store,
             jobs,
             databases: databases.clone(),

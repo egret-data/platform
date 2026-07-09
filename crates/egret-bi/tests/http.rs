@@ -12,7 +12,7 @@ fn build_state(db: Db) -> BiState {
     BiState {
         saved: SavedQueryRepo::new(db.clone()),
         schema: SchemaService::new(),
-        databases: egret_database::DatabaseRepo::new(
+        databases: egret_query::DatabaseRepo::new(
             db.clone(),
             egret_secrets::SecretStore::new(db.clone(), None),
             egret_secrets::WorkspaceSecretStore::new(

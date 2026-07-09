@@ -177,7 +177,7 @@ async fn seed_notebook(db: &Db, ws: WorkspaceId, owner: UserId) -> Uuid {
 /// Seed a database (engine) row + enable it for notebooks; return its database id.
 async fn seed_enabled_engine(db: &Db, ws: WorkspaceId) -> Uuid {
     let dbid: Uuid = sqlx::query_scalar(
-        "INSERT INTO databases (workspace_id, name, engine, host, port) \
+        "INSERT INTO query.databases (workspace_id, name, engine, host, port) \
          VALUES ($1,'trino-dev','trino','localhost',8080) RETURNING id",
     )
     .bind(ws.0)
@@ -1217,7 +1217,7 @@ async fn engine_token_disabled_engine_is_404(pool: sqlx::PgPool) {
     // A database present in the workspace but with NO notebook_engine_access row,
     // so `list_engine_options` reports it with enabled=false.
     let dbid: Uuid = sqlx::query_scalar(
-        "INSERT INTO databases (workspace_id, name, engine, host, port) \
+        "INSERT INTO query.databases (workspace_id, name, engine, host, port) \
          VALUES ($1,'secret','trino','localhost',8080) RETURNING id",
     )
     .bind(f.ws.0)

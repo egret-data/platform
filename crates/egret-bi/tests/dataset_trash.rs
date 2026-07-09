@@ -24,9 +24,10 @@ async fn setup() -> Option<(DatasetRepo, Uuid, Uuid, Uuid)> {
     .await
     .unwrap();
     let db_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO databases (name, engine, host, port) VALUES ($1,'trino','localhost',8080) RETURNING id",
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id) VALUES ($1,'trino','localhost',8080,$2) RETURNING id",
     )
     .bind(format!("db-{}", Uuid::new_v4().simple()))
+    .bind(wid)
     .fetch_one(&db.pool)
     .await
     .unwrap();

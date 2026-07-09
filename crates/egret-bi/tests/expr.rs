@@ -1,7 +1,7 @@
 //! Engine-gated expression-validation tests. Self-skip unless EGRET_TEST_TRINO_URL is set.
 
-use egret_database::model::{ConnOptions, Engine};
-use egret_engine::connector::ConnSpec;
+use egret_query::execution::connector::ConnSpec;
+use egret_query_api::{ConnOptions, Engine};
 
 fn trino_spec() -> Option<ConnSpec> {
     let base = std::env::var("EGRET_TEST_TRINO_URL").ok()?;

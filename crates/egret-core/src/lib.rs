@@ -7,6 +7,7 @@ pub mod http;
 pub mod ids;
 pub mod pagination;
 pub mod rbac;
+pub mod tabular;
 #[cfg(feature = "token")]
 pub mod token;
 
@@ -16,3 +17,4 @@ pub use error::{Error, Result};
 pub use http::ApiError;
 pub use ids::{UserId, WorkspaceId};
 pub use pagination::Pagination;
+pub use tabular::{ColumnMeta, TabularResult};

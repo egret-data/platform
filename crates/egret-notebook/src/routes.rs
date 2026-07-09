@@ -5,7 +5,7 @@
 //!     AND (the caller owns it OR it is public). Cross-workspace → 404,
 //!     not-own-not-public → 403.
 //!   - **write** (PATCH / DELETE / all cell mutations): owner ONLY — there is
-//!     deliberately **no** `platform_admin` override (unlike egret-engine).
+//!     deliberately **no** `platform_admin` override (unlike the query seam).
 //!   - every cell route resolves its parent notebook and runs `write_scoped`
 //!     before mutating, and the store additionally scopes by `notebook_id`.
 

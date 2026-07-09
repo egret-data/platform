@@ -22,8 +22,8 @@ egret-controlplane = { path = "crates/egret-controlplane" }
 egret-policy-api = { path = "crates/egret-policy-api" }
 egret-policy = { path = "crates/egret-policy" }
 egret-secrets = { path = "crates/egret-secrets" }
-egret-database = { path = "crates/egret-database" }
-egret-engine = { path = "crates/egret-engine" }
+egret-query-api = { path = "crates/egret-query-api" }
+egret-query = { path = "crates/egret-query" }
 egret-bi = { path = "crates/egret-bi" }
 egret-notebook = { path = "crates/egret-notebook" }
 egret-kernel = { path = "crates/egret-kernel" }

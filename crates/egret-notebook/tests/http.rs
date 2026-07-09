@@ -942,7 +942,7 @@ async fn set_folder_happy_path_and_guards(pool: sqlx::PgPool) {
 
 async fn seed_database_http(db: &Db, ws_id: WorkspaceId) -> Uuid {
     sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO databases (name, engine, host, port, workspace_id) \
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id) \
          VALUES ($1, 'trino', 'localhost', 8080, $2) RETURNING id",
     )
     .bind(format!("httpdb-{}", Uuid::new_v4().simple()))
@@ -1154,7 +1154,7 @@ async fn get_settings_allowed_for_notebook_read_member(pool: sqlx::PgPool) {
 /// Seed a database (engine) row and return its id.
 async fn seed_engine_runtime(db: &Db, ws_id: WorkspaceId) -> Uuid {
     sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO databases (name, engine, host, port, workspace_id) \
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id) \
          VALUES ($1, 'trino', 'localhost', 8080, $2) RETURNING id",
     )
     .bind(format!("rt-eng-{}", Uuid::new_v4().simple()))
