@@ -408,65 +408,71 @@ async fn scoped_permission_secrets_read_and_create() {
 
 // ── Access (Users / Groups / Roles / Permissions) ─────────────────────────────
 
-/// Build a `Fixture` backed by a dedicated, freshly-migrated Postgres SCHEMA
-/// (not the shared `public` one every other test in this file uses) via a
-/// pool-level `search_path` pin — the same per-connection isolation
-/// `egret-catalog-engine::pool::build_isolated_pool` uses to keep lakekeeper's
-/// tables out of `public`.
+/// Build a `Fixture` backed by a dedicated, freshly-migrated Postgres DATABASE
+/// (not the shared one every other test in this file uses).
 ///
 /// `last_admin_guard` needs this: `guard_last_admin` blocks on
 /// `RoleRepo::count_platform_admins()` being GLOBALLY exactly 1, but dozens of
 /// other `#[tokio::test]`s in this file call `session_for(.., true)`, each
-/// inserting its own `platform_admin` assignment into the shared `public`
-/// schema, and tests run concurrently — so the ambient count there is never
-/// reliably 1. A private schema (starting at 0 assignments) sidesteps the
-/// race instead of asserting on an unstable global.
+/// inserting its own `platform_admin` assignment into the shared database, and
+/// tests run concurrently — so the ambient count there is never reliably 1. A
+/// private database (starting at 0 assignments) sidesteps the race instead of
+/// asserting on an unstable global.
+///
+/// Isolation is by **database**, not by `search_path` schema: the seam
+/// migrations (0062-0066) do `ALTER TABLE … SET SCHEMA <global>` into shared
+/// schemas (`engine_mgmt`/`policy`/`storage`/`catalog`/`query`) whose names a
+/// `search_path` pin cannot rename, so a schema-isolated pool collides with the
+/// shared-database tests' already-moved tables ("relation … already exists in
+/// schema …"). A per-database pool gives every schema — public AND the seam
+/// schemas — its own namespace, so `migrate()` runs cleanly. The database name
+/// is fixed and DROP+CREATE'd each run (drop stale backends first), so temp
+/// databases don't accumulate.
 async fn setup_isolated_schema() -> Option<Fixture> {
-    // NB: this workspace pins `sqlx = "0.8"` (see egret-controlplane's
-    // Cargo.toml), which predates the 0.9 `AssertSqlSafe`/`sql_str` API that
-    // `egret-catalog-engine::pool::build_isolated_pool` uses (that crate
-    // pulls in its own separate sqlx 0.9 dependency just for this trick — see
-    // the `sqlx = { version = "0.9", ... }` comment in its Cargo.toml). On
-    // 0.8, `sqlx::query(&str)` runs unparameterized SQL directly, no wrapper
-    // needed.
     use sqlx::{ConnectOptions, Connection};
     use std::str::FromStr;
 
     let dsn = std::env::var("DATABASE_URL").ok()?;
-    let schema = format!("rbac_isolated_{}", Uuid::new_v4().simple());
-    let opts = sqlx::postgres::PgConnectOptions::from_str(&dsn).expect("parse DATABASE_URL");
+    let iso_db = "egret_test_iso_last_admin";
+    let base_opts = sqlx::postgres::PgConnectOptions::from_str(&dsn).expect("parse DATABASE_URL");
 
-    // Create the schema via a one-shot connection on the default search_path.
-    let mut conn = opts
+    // On a maintenance connection (the DATABASE_URL's own db), drop any stale
+    // backends holding the isolated db open, then DROP+CREATE it fresh. (CREATE/
+    // DROP DATABASE cannot run inside a transaction; `sqlx::query` runs the
+    // statement directly on 0.8, so no wrapper is needed.)
+    let mut admin = base_opts
         .clone()
         .connect()
         .await
-        .expect("connect for schema setup");
-    sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\""))
-        .execute(&mut conn)
+        .expect("connect for isolated-db setup");
+    sqlx::query(&format!(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+         WHERE datname = '{iso_db}' AND pid <> pg_backend_pid()"
+    ))
+    .execute(&mut admin)
+    .await
+    .ok();
+    sqlx::query(&format!("DROP DATABASE IF EXISTS {iso_db}"))
+        .execute(&mut admin)
         .await
-        .expect("create isolated schema");
-    conn.close().await.ok();
+        .expect("drop isolated db");
+    sqlx::query(&format!("CREATE DATABASE {iso_db}"))
+        .execute(&mut admin)
+        .await
+        .expect("create isolated db");
+    admin.close().await.ok();
 
-    // Every pooled connection pins search_path to the fresh schema, so
-    // unqualified DDL/DML (including `_sqlx_migrations`) lands there instead
-    // of `public`.
-    let set_search_path = format!("SET search_path = \"{schema}\", public");
+    // Connect the fixture pool to the fresh, empty database and migrate it. Every
+    // schema (public + the seam schemas) is private to this db, so the seam
+    // `SET SCHEMA` migrations apply without colliding.
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
-        .after_connect(move |conn, _meta| {
-            let stmt = set_search_path.clone();
-            Box::pin(async move {
-                sqlx::query(&stmt).execute(&mut *conn).await?;
-                Ok(())
-            })
-        })
-        .connect_with(opts)
+        .connect_with(base_opts.database(iso_db))
         .await
-        .expect("connect isolated pool");
+        .expect("connect isolated db pool");
 
     let db = Db { pool };
-    db.migrate().await.expect("migrate isolated schema");
+    db.migrate().await.expect("migrate isolated db");
 
     let crypto =
         egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
