@@ -70,6 +70,18 @@ pub async fn build_notebook_runtime(
 /// Steps:
 /// 1. Require `notebook:read`.
 ///    2–6. Delegate to [`build_notebook_runtime`].
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/notebook-runtime",
+    tag = "notebooks",
+    params(egret_core::WorkspacePath),
+    responses(
+        (status = 200, description = "Per-user kernel runtime manifest (username, engines, engine JWT)", body = NotebookRuntime),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing notebook:read permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
 pub async fn runtime(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,

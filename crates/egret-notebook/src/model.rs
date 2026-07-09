@@ -32,7 +32,7 @@ impl CellType {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct Cell {
     pub id: Uuid,
     pub cell_type: String,
@@ -45,44 +45,49 @@ pub struct Cell {
 
 /// Body for `PATCH /notebooks/{id}/folder`: move a notebook into a folder
 /// (or back to Uncategorized with `folder_id: null`).
-#[derive(Debug, Deserialize)]
+///
+/// Renamed in the OpenAPI doc to `NotebookSetFolder` to avoid a global schema
+/// collision with `egret_analytics_api::bi::SetFolder` (the BI seam's identically
+/// named body); the wire shape is unchanged.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[schema(as = NotebookSetFolder)]
 pub struct SetFolder {
     pub folder_id: Option<Uuid>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct NotebookDetail {
     #[serde(flatten)]
     pub summary: NotebookSummary,
     pub cells: Vec<Cell>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateNotebook {
     pub name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateNotebook {
     pub name: Option<String>,
     pub description: Option<String>,
     pub is_public: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateCell {
     pub cell_type: String,
     pub source: Option<String>,
     pub cell_order: Option<i32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateCell {
     pub cell_type: Option<String>,
     pub source: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ReorderCells {
     pub order: Vec<Uuid>,
 }
@@ -90,13 +95,13 @@ pub struct ReorderCells {
 // ── Notebook settings DTOs ───────────────────────────────────────────────────
 
 /// Response DTO for GET /ws/{workspace}/notebook-settings.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct NotebookSettings {
     pub engines: Vec<EngineOption>,
 }
 
 /// Request body for PUT /ws/{workspace}/notebook-settings.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateNotebookSettings {
     pub engine_ids: Vec<Uuid>,
 }

@@ -6228,6 +6228,67 @@
         }
       }
     },
+    "/api/kernel/engine-token": {
+      "post": {
+        "tags": [
+          "kernel-callback"
+        ],
+        "summary": "`POST /kernel/engine-token` — mint a fresh per-user engine JWT and return the\nengine's connection coordinates so the Daft kernel can open a direct\nconnection. Auth = `EGRET_KERNEL_TOKEN` bearer; identity + workspace come ONLY\nfrom `KernelIdentity`. The engine must be enabled for notebooks in the token's\nworkspace; unknown/disabled engines → 404.",
+        "operationId": "engine_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EngineTokenReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Fresh per-user engine JWT + the engine's connection coordinates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineTokenResp"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid EGRET_KERNEL_TOKEN bearer, or the user has no stored refresh token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Engine not enabled for notebooks in the token's workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/me/workspaces": {
       "get": {
         "tags": [
@@ -10898,6 +10959,184 @@
         }
       }
     },
+    "/api/ws/{workspace}/kernel": {
+      "get": {
+        "tags": [
+          "kernel"
+        ],
+        "summary": "`GET /ws/{workspace}/kernel` — current kernel status for the caller.",
+        "description": "Returns 200 `{phase, url}` if a row exists, or 200 `{phase:\"none\"}` if not.",
+        "operationId": "status",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current kernel status; when no kernel exists the body is the sentinel `{ \"phase\": \"none\" }`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KernelStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing notebook:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "kernel"
+        ],
+        "summary": "`POST /ws/{workspace}/kernel` — start (or reuse) the caller's kernel.",
+        "description": "Gate: `notebook:read`.\nKey: `(ctx.principal.user_id, ctx.workspace_id)` — always the caller's own.",
+        "operationId": "start",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Kernel started (or the running one reused)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KernelStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing notebook:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "kernel"
+        ],
+        "summary": "`DELETE /ws/{workspace}/kernel` — stop the caller's kernel and remove its row.",
+        "description": "Returns 204 No Content.",
+        "operationId": "stop",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Kernel stopped and its row removed"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing notebook:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/members": {
       "get": {
         "tags": [
@@ -11098,6 +11337,1963 @@
           },
           "403": {
             "description": "Missing workspace permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notebook-runtime": {
+      "get": {
+        "tags": [
+          "notebooks"
+        ],
+        "summary": "`GET /ws/{workspace}/notebook-runtime`",
+        "description": "Steps:\n1. Require `notebook:read`.\n   2–6. Delegate to [`build_notebook_runtime`].",
+        "operationId": "runtime",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-user kernel runtime manifest (username, engines, engine JWT)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotebookRuntime"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing notebook:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notebook-runtime/token": {
+      "post": {
+        "tags": [
+          "kernel-callback"
+        ],
+        "summary": "`POST /ws/{workspace}/notebook-runtime/token` — mint a fresh short-lived engine\nJWT for the kernel-token's user. Auth = `EGRET_KERNEL_TOKEN` bearer; identity\ncomes ONLY from `KernelIdentity` — the `{workspace}` path segment is accepted\nfor URL symmetry but never trusted for auth. Returns ONLY the caller's token.",
+        "operationId": "notebook_runtime_token",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Fresh short-lived engine JWT for the kernel-token's user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineToken"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing/invalid EGRET_KERNEL_TOKEN bearer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notebook-settings": {
+      "get": {
+        "tags": [
+          "notebooks"
+        ],
+        "operationId": "get_settings",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Notebook engine settings for the workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotebookSettings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing notebook:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "notebooks"
+        ],
+        "operationId": "update_settings",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateNotebookSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Notebook engine settings replaced",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotebookSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An engine id does not belong to this workspace (whole PUT rejected)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workspace:manage_members permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notebooks": {
+      "get": {
+        "tags": [
+          "notebooks"
+        ],
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "trashed",
+            "in": "query",
+            "description": "List the trash bin instead of live notebooks when true",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Notebooks visible to the caller (own + public)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/NotebookSummary"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing notebook:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "notebooks"
+        ],
+        "operationId": "create",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateNotebook"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Notebook created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotebookDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing notebook:write permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notebooks/{id}": {
+      "get": {
+        "tags": [
+          "notebooks"
+        ],
+        "operationId": "get_one",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Notebook id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Notebook detail (summary + cells)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotebookDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Notebook is private and not owned by the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "notebooks"
+        ],
+        "operationId": "remove",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Notebook id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Notebook deleted"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing notebook:write permission, or not the notebook owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "notebooks"
+        ],
+        "operationId": "update",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Notebook id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateNotebook"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Notebook updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotebookDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing notebook:write permission, or not the notebook owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notebooks/{id}/bookmark": {
+      "post": {
+        "tags": [
+          "notebooks"
+        ],
+        "summary": "Bookmark a notebook for the calling user. Read scope (any readable notebook).",
+        "operationId": "bookmark_add",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Notebook id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Notebook bookmarked for the caller"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Notebook is private and not owned by the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "notebooks"
+        ],
+        "summary": "Remove the calling user's bookmark. Read scope.",
+        "operationId": "bookmark_remove",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Notebook id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Notebook bookmark removed for the caller"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Notebook is private and not owned by the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notebooks/{id}/cells": {
+      "post": {
+        "tags": [
+          "notebooks"
+        ],
+        "operationId": "add_cell",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Notebook id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCell"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Cell added; the full notebook is returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotebookDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid cell_type (must be code/markdown/sql)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing notebook:write permission, or not the notebook owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notebooks/{id}/cells/order": {
+      "put": {
+        "tags": [
+          "notebooks"
+        ],
+        "operationId": "reorder",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Notebook id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReorderCells"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Cells reordered"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing notebook:write permission, or not the notebook owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notebooks/{id}/cells/{cid}": {
+      "delete": {
+        "tags": [
+          "notebooks"
+        ],
+        "operationId": "delete_cell",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Notebook id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "cid",
+            "in": "path",
+            "description": "Cell id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Cell deleted"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing notebook:write permission, or not the notebook owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "notebooks"
+        ],
+        "operationId": "update_cell",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Notebook id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "cid",
+            "in": "path",
+            "description": "Cell id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateCell"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Cell updated"
+          },
+          "400": {
+            "description": "Invalid cell_type (must be code/markdown/sql)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing notebook:write permission, or not the notebook owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notebooks/{id}/folder": {
+      "patch": {
+        "tags": [
+          "notebooks"
+        ],
+        "summary": "Move into a folder (or back to Uncategorized with `folder_id: null`).\nOwner only; when a folder is given it must belong to this workspace and\ncarry `entity_type='notebook'`, else 404 (don't leak foreign folders).",
+        "operationId": "set_folder",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Notebook id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotebookSetFolder"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Notebook moved to the folder (or back to Uncategorized)"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing notebook:write permission, or not the notebook owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook, or target folder not in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notebooks/{id}/restore": {
+      "post": {
+        "tags": [
+          "notebooks"
+        ],
+        "summary": "Restore from trash. Owner only.",
+        "operationId": "restore",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Notebook id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Notebook restored from trash"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing notebook:write permission, or not the notebook owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notebooks/{id}/trash": {
+      "post": {
+        "tags": [
+          "notebooks"
+        ],
+        "summary": "Soft-delete (move to trash). Owner only.",
+        "operationId": "trash",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Notebook id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Notebook moved to trash"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing notebook:write permission, or not the notebook owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notebooks/{notebook}/kernel/active-executions": {
+      "get": {
+        "tags": [
+          "kernel"
+        ],
+        "summary": "`GET /ws/{workspace}/notebooks/{notebook}/kernel/active-executions` — returns\nthe cell_ids currently executing for the caller's notebook from the in-memory\n`ActiveExecutions` registry, so the frontend can restore in-flight cells on\nreopen.",
+        "description": "Gate: `notebook:read`; the notebook must belong to this workspace and be\nreadable by the caller (owner or public). No kernel resolution needed — this\nis a pure registry lookup; even if the kernel has since died, the registry\nwill be empty (the `Recorder` drop impl clears stale entries).",
+        "operationId": "active_executions",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "notebook",
+            "in": "path",
+            "description": "Notebook id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cell ids currently executing for the caller's notebook: `{ running: [uuid] }`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Notebook is private and not owned by the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notebooks/{notebook}/kernel/channels": {
+      "get": {
+        "tags": [
+          "kernel"
+        ],
+        "summary": "`GET /ws/{workspace}/notebooks/{notebook}/kernel/channels` — authenticate via the\nsession cookie + `notebook:read`, require a Ready kernel, resolve the per-notebook\nkernel id, then upgrade and proxy the Jupyter channels WS to the gateway. Touches\nthe kernel (throttled) per message so the idle reaper keeps it alive, and records\nkernel outputs to the DB (the recorder owns output persistence).",
+        "operationId": "channels",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "notebook",
+            "in": "path",
+            "description": "Notebook id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "101": {
+            "description": "WebSocket upgrade for the Jupyter channels stream"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Notebook is private and not owned by the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Kernel not started; call connect first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notebooks/{notebook}/kernel/connect": {
+      "post": {
+        "tags": [
+          "kernel"
+        ],
+        "summary": "`POST /ws/{workspace}/notebooks/{notebook}/kernel/connect` — ensure the gateway\nand resolve/create the per-notebook kernel id.",
+        "description": "Gate: `notebook:read`; the notebook must belong to this workspace and be\nreadable by the caller (owner or public). The kernel is always the caller's own.",
+        "operationId": "connect",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "notebook",
+            "in": "path",
+            "description": "Notebook id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Gateway ensured; body is `{ phase, kernel_id }` when ready, else `{ phase }`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Notebook is private and not owned by the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notebooks/{notebook}/kernel/interrupt": {
+      "post": {
+        "tags": [
+          "kernel"
+        ],
+        "summary": "`POST /ws/{workspace}/notebooks/{notebook}/kernel/interrupt` — interrupt the\nper-notebook kernel via the Jupyter Kernel Gateway REST API. Returns 204.",
+        "operationId": "kernel_interrupt",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "notebook",
+            "in": "path",
+            "description": "Notebook id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Interrupt sent to the per-notebook kernel"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Notebook is private and not owned by the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No running kernel for this notebook; call connect first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/notebooks/{notebook}/kernel/restart": {
+      "post": {
+        "tags": [
+          "kernel"
+        ],
+        "summary": "`POST /ws/{workspace}/notebooks/{notebook}/kernel/restart` — restart the\nper-notebook kernel via the gateway REST API. Returns `{kernel_id}`.",
+        "operationId": "kernel_restart",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "notebook",
+            "in": "path",
+            "description": "Notebook id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Kernel restarted; body is `{ kernel_id }`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Notebook is private and not owned by the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No running kernel for this notebook; call connect first",
             "content": {
               "application/json": {
                 "schema": {
@@ -13148,6 +15344,46 @@
           }
         }
       },
+      "Cell": {
+        "type": "object",
+        "required": [
+          "id",
+          "cell_type",
+          "source",
+          "cell_order"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "cell_type": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "cell_order": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "execution_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "last_output": {},
+          "last_execution_time_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
       "ChartDataBody": {
         "type": "object",
         "description": "Build-only data request: produce SQL for a dataset + QuerySpec; the client submits it\nto the existing /queries endpoint and polls.\n\nStays in `egret-bi` (not the leaf contract crate): its `query_spec` field is the\n`egret-bi`-local [`QuerySpec`] query builder, which references `egret-query-api`\nand other in-crate types and so cannot move to the leaf.",
@@ -13398,6 +15634,30 @@
           }
         }
       },
+      "CreateCell": {
+        "type": "object",
+        "required": [
+          "cell_type"
+        ],
+        "properties": {
+          "cell_type": {
+            "type": "string"
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cell_order": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
       "CreateChart": {
         "type": "object",
         "required": [
@@ -13504,6 +15764,17 @@
         "properties": {
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "CreateNotebook": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -14321,6 +16592,89 @@
           "starrocks"
         ]
       },
+      "EngineOption": {
+        "type": "object",
+        "description": "An engine (DB connection) option shown in notebook settings.",
+        "required": [
+          "id",
+          "name",
+          "engine",
+          "enabled"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "engine": {
+            "type": "string",
+            "description": "Engine type label: \"trino\" or \"starrocks\"."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether this engine is currently enabled for notebooks in this workspace."
+          }
+        }
+      },
+      "EngineToken": {
+        "type": "object",
+        "required": [
+          "access_token",
+          "expires_at"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "EngineTokenReq": {
+        "type": "object",
+        "required": [
+          "engine"
+        ],
+        "properties": {
+          "engine": {
+            "type": "string"
+          }
+        }
+      },
+      "EngineTokenResp": {
+        "type": "object",
+        "required": [
+          "jwt",
+          "expires_at",
+          "kind",
+          "host",
+          "port"
+        ],
+        "properties": {
+          "jwt": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
       "ErrorBody": {
         "type": "object",
         "description": "The JSON body every error response carries: `{ \"error\": \"<message>\" }`.\n\nThis is the OpenAPI schema counterpart of the body produced by\n`IntoResponse for Error` above — the single shape returned for every 4xx/5xx\nacross the API. Handlers reference it in their `#[utoipa::path]`\n`responses(...)` for the error statuses. 5xx messages are redacted to\n`\"internal error\"`; client-facing errors pass their `Display` message.",
@@ -14501,6 +16855,24 @@
             "items": {
               "type": "object"
             }
+          }
+        }
+      },
+      "KernelStatus": {
+        "type": "object",
+        "description": "Public snapshot of a kernel: phase + gateway URL.\n\nSerializes as `{ \"phase\": \"ready\", \"url\": \"http://...\" }`.",
+        "required": [
+          "phase",
+          "url"
+        ],
+        "properties": {
+          "phase": {
+            "type": "string",
+            "description": "Lifecycle phase, serialized as a lowercase string\n(`spawning` / `ready` / `dead`).",
+            "example": "ready"
+          },
+          "url": {
+            "type": "string"
           }
         }
       },
@@ -14778,6 +17150,151 @@
           "position": {
             "type": "integer",
             "format": "int32"
+          }
+        }
+      },
+      "NotebookDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/NotebookSummary"
+          },
+          {
+            "type": "object",
+            "required": [
+              "cells"
+            ],
+            "properties": {
+              "cells": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Cell"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "NotebookRuntime": {
+        "type": "object",
+        "description": "Full kernel manifest returned by `GET /ws/{workspace}/notebook-runtime` and\nconsumed by `egret-kernel` to build the kernel process environment.",
+        "required": [
+          "username",
+          "engines"
+        ],
+        "properties": {
+          "username": {
+            "type": "string",
+            "description": "The caller's stable username (email local-part, collision-suffixed)."
+          },
+          "engines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EngineOption"
+            },
+            "description": "Workspace engines (DB connections) enabled for notebooks."
+          },
+          "engine_jwt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Short-lived per-user engine JWT the kernel presents to query engines.\n`None` when the caller has no stored refresh token (e.g. password/local\nusers or OIDC logins without an offline token) — minting is best-effort\nsince no P1 engine consumes this yet."
+          },
+          "engine_jwt_expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Expiry of `engine_jwt` (RFC3339); kernels re-mint before this time.\n`None` whenever `engine_jwt` is `None`."
+          }
+        }
+      },
+      "NotebookSetFolder": {
+        "type": "object",
+        "description": "Body for `PATCH /notebooks/{id}/folder`: move a notebook into a folder\n(or back to Uncategorized with `folder_id: null`).\n\nRenamed in the OpenAPI doc to `NotebookSetFolder` to avoid a global schema\ncollision with `egret_analytics_api::bi::SetFolder` (the BI seam's identically\nnamed body); the wire shape is unchanged.",
+        "properties": {
+          "folder_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
+      "NotebookSettings": {
+        "type": "object",
+        "description": "Response DTO for GET /ws/{workspace}/notebook-settings.",
+        "required": [
+          "engines"
+        ],
+        "properties": {
+          "engines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EngineOption"
+            }
+          }
+        }
+      },
+      "NotebookSummary": {
+        "type": "object",
+        "description": "Summary view of a notebook (no cells). Used by ownership/IDOR gates.",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "is_public",
+          "owner_user_id",
+          "is_owner",
+          "updated_at",
+          "bookmarked"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "is_public": {
+            "type": "boolean"
+          },
+          "owner_user_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_owner": {
+            "type": "boolean"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "bookmarked": {
+            "type": "boolean",
+            "description": "Whether the requesting viewer has bookmarked this notebook."
+          },
+          "folder_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Folder this notebook lives in; `None` = Uncategorized."
+          },
+          "deleted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Soft-delete marker; `None` = live, `Some(..)` = trashed."
           }
         }
       },
@@ -15381,6 +17898,21 @@
         "properties": {
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "ReorderCells": {
+        "type": "object",
+        "required": [
+          "order"
+        ],
+        "properties": {
+          "order": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         }
       },
@@ -16281,6 +18813,23 @@
           }
         }
       },
+      "UpdateCell": {
+        "type": "object",
+        "properties": {
+          "cell_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "UpdateChart": {
         "type": "object",
         "required": [
@@ -16376,6 +18925,45 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "UpdateNotebook": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_public": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "UpdateNotebookSettings": {
+        "type": "object",
+        "description": "Request body for PUT /ws/{workspace}/notebook-settings.",
+        "required": [
+          "engine_ids"
+        ],
+        "properties": {
+          "engine_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         }
       },
@@ -16611,6 +19199,18 @@
     {
       "name": "workspace-members",
       "description": "Workspace membership (add/remove principals)"
+    },
+    {
+      "name": "notebooks",
+      "description": "Per-workspace notebooks: CRUD, cells, folders, trash, bookmarks, settings + kernel runtime manifest"
+    },
+    {
+      "name": "kernel",
+      "description": "Per-(user×workspace) Jupyter kernel lifecycle + per-notebook channels (WebSocket), interrupt/restart, active executions"
+    },
+    {
+      "name": "kernel-callback",
+      "description": "Machine-facing kernel-subprocess callbacks (EGRET_KERNEL_TOKEN bearer, CSRF-exempt): engine-token + runtime-token refresh"
     },
     {
       "name": "control-plane-access",

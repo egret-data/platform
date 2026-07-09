@@ -25,3 +25,15 @@ pub use reaper::{reap_once, spawn_reaper};
 pub use registry::KernelRegistry;
 pub use routes::{kernel_callback_router, kernel_router, KernelState};
 pub use subprocess::SubprocessLauncher;
+
+/// The Kernel seam's OpenAPI document (E0·P4b-8): the session-cookie kernel
+/// lifecycle/channels router (`KernelApi`) merged with the kernel-token bearer
+/// callback router (`KernelCallbackApi`). `egret-server` calls this and merges it
+/// into the top-level API doc — the per-crate `openapi()` convention every
+/// annotated seam exposes.
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    use utoipa::OpenApi as _;
+    let mut doc = routes::KernelApi::openapi();
+    doc.merge(routes::KernelCallbackApi::openapi());
+    doc
+}

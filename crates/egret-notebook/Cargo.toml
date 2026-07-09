@@ -20,6 +20,7 @@ chrono.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+utoipa.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

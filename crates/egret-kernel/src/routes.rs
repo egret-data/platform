@@ -17,6 +17,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use egret_analytics_api::{CellOutput, NotebookDocsPort};
 use egret_auth::session::SessionService;
+use egret_core::http::ErrorBody;
+use egret_core::WorkspacePath;
 use egret_workspace::context::WsContext;
 use egret_workspace::rbac::Authorizer;
 use egret_workspace::workspaces::WorkspaceRepo;
@@ -148,6 +150,18 @@ struct NoKernel {
 ///
 /// Gate: `notebook:read`.
 /// Key: `(ctx.principal.user_id, ctx.workspace_id)` — always the caller's own.
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/kernel",
+    tag = "kernel",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "Kernel started (or the running one reused)", body = crate::manager::KernelStatus),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing notebook:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn start(
     State(st): State<KernelState>,
     WsContext(ctx): WsContext,
@@ -182,6 +196,18 @@ async fn start(
 /// `GET /ws/{workspace}/kernel` — current kernel status for the caller.
 ///
 /// Returns 200 `{phase, url}` if a row exists, or 200 `{phase:"none"}` if not.
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/kernel",
+    tag = "kernel",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "Current kernel status; when no kernel exists the body is the sentinel `{ \"phase\": \"none\" }`", body = crate::manager::KernelStatus),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing notebook:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn status(
     State(st): State<KernelState>,
     WsContext(ctx): WsContext,
@@ -205,6 +231,18 @@ async fn status(
 /// `DELETE /ws/{workspace}/kernel` — stop the caller's kernel and remove its row.
 ///
 /// Returns 204 No Content.
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/kernel",
+    tag = "kernel",
+    params(WorkspacePath),
+    responses(
+        (status = 204, description = "Kernel stopped and its row removed"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing notebook:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn stop(
     State(st): State<KernelState>,
     WsContext(ctx): WsContext,
@@ -229,6 +267,22 @@ async fn stop(
 ///
 /// Gate: `notebook:read`; the notebook must belong to this workspace and be
 /// readable by the caller (owner or public). The kernel is always the caller's own.
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/notebooks/{notebook}/kernel/connect",
+    tag = "kernel",
+    params(
+        WorkspacePath,
+        ("notebook" = Uuid, Path, description = "Notebook id"),
+    ),
+    responses(
+        (status = 200, description = "Gateway ensured; body is `{ phase, kernel_id }` when ready, else `{ phase }`", body = Object),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Notebook is private and not owned by the caller", body = ErrorBody),
+        (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn connect(
     State(st): State<KernelState>,
     WsContext(ctx): WsContext,
@@ -330,6 +384,27 @@ impl crate::recorder::ChannelTap for ChannelsTap {
 /// kernel id, then upgrade and proxy the Jupyter channels WS to the gateway. Touches
 /// the kernel (throttled) per message so the idle reaper keeps it alive, and records
 /// kernel outputs to the DB (the recorder owns output persistence).
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/notebooks/{notebook}/kernel/channels",
+    tag = "kernel",
+    params(
+        WorkspacePath,
+        ("notebook" = Uuid, Path, description = "Notebook id"),
+    ),
+    responses(
+        // This endpoint is NOT a REST/JSON call: the frontend opens a WebSocket,
+        // not a fetch. On success the server replies 101 Switching Protocols and
+        // proxies the Jupyter channels WS to the kernel gateway — there is no JSON
+        // response body. The error statuses below are returned before the upgrade.
+        (status = 101, description = "WebSocket upgrade for the Jupyter channels stream"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Notebook is private and not owned by the caller", body = ErrorBody),
+        (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
+        (status = 409, description = "Kernel not started; call connect first", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn channels(
     State(st): State<KernelState>,
     WsContext(ctx): WsContext,
@@ -516,6 +591,23 @@ async fn resolve_running_notebook_kernel(
 
 /// `POST /ws/{workspace}/notebooks/{notebook}/kernel/interrupt` — interrupt the
 /// per-notebook kernel via the Jupyter Kernel Gateway REST API. Returns 204.
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/notebooks/{notebook}/kernel/interrupt",
+    tag = "kernel",
+    params(
+        WorkspacePath,
+        ("notebook" = Uuid, Path, description = "Notebook id"),
+    ),
+    responses(
+        (status = 204, description = "Interrupt sent to the per-notebook kernel"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Notebook is private and not owned by the caller", body = ErrorBody),
+        (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
+        (status = 409, description = "No running kernel for this notebook; call connect first", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn kernel_interrupt(
     State(st): State<KernelState>,
     WsContext(ctx): WsContext,
@@ -530,6 +622,23 @@ async fn kernel_interrupt(
 
 /// `POST /ws/{workspace}/notebooks/{notebook}/kernel/restart` — restart the
 /// per-notebook kernel via the gateway REST API. Returns `{kernel_id}`.
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/notebooks/{notebook}/kernel/restart",
+    tag = "kernel",
+    params(
+        WorkspacePath,
+        ("notebook" = Uuid, Path, description = "Notebook id"),
+    ),
+    responses(
+        (status = 200, description = "Kernel restarted; body is `{ kernel_id }`", body = Object),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Notebook is private and not owned by the caller", body = ErrorBody),
+        (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
+        (status = 409, description = "No running kernel for this notebook; call connect first", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn kernel_restart(
     State(st): State<KernelState>,
     WsContext(ctx): WsContext,
@@ -551,6 +660,22 @@ async fn kernel_restart(
 /// readable by the caller (owner or public). No kernel resolution needed — this
 /// is a pure registry lookup; even if the kernel has since died, the registry
 /// will be empty (the `Recorder` drop impl clears stale entries).
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/notebooks/{notebook}/kernel/active-executions",
+    tag = "kernel",
+    params(
+        WorkspacePath,
+        ("notebook" = Uuid, Path, description = "Notebook id"),
+    ),
+    responses(
+        (status = 200, description = "Cell ids currently executing for the caller's notebook: `{ running: [uuid] }`", body = Object),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Notebook is private and not owned by the caller", body = ErrorBody),
+        (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn active_executions(
     State(st): State<KernelState>,
     WsContext(ctx): WsContext,
@@ -598,12 +723,12 @@ impl FromRequestParts<KernelState> for KernelIdentity {
 
 // ── engine-token callback ─────────────────────────────────────────────────────
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 struct EngineTokenReq {
     engine: String,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, utoipa::ToSchema)]
 struct EngineTokenResp {
     jwt: String,
     expires_at: chrono::DateTime<chrono::Utc>,
@@ -617,6 +742,18 @@ struct EngineTokenResp {
 /// connection. Auth = `EGRET_KERNEL_TOKEN` bearer; identity + workspace come ONLY
 /// from `KernelIdentity`. The engine must be enabled for notebooks in the token's
 /// workspace; unknown/disabled engines → 404.
+#[utoipa::path(
+    post,
+    path = "/api/kernel/engine-token",
+    tag = "kernel-callback",
+    request_body = EngineTokenReq,
+    responses(
+        (status = 200, description = "Fresh per-user engine JWT + the engine's connection coordinates", body = EngineTokenResp),
+        (status = 401, description = "Missing/invalid EGRET_KERNEL_TOKEN bearer, or the user has no stored refresh token", body = ErrorBody),
+        (status = 404, description = "Engine not enabled for notebooks in the token's workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn engine_token(
     State(st): State<KernelState>,
     id: KernelIdentity,
@@ -675,6 +812,17 @@ async fn engine_token(
 /// JWT for the kernel-token's user. Auth = `EGRET_KERNEL_TOKEN` bearer; identity
 /// comes ONLY from `KernelIdentity` — the `{workspace}` path segment is accepted
 /// for URL symmetry but never trusted for auth. Returns ONLY the caller's token.
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/notebook-runtime/token",
+    tag = "kernel-callback",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "Fresh short-lived engine JWT for the kernel-token's user", body = egret_analytics_api::EngineToken),
+        (status = 401, description = "Missing/invalid EGRET_KERNEL_TOKEN bearer", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn notebook_runtime_token(
     id: KernelIdentity,
     State(st): State<KernelState>,
@@ -690,3 +838,54 @@ async fn notebook_runtime_token(
 // ── bring IntoResponse into scope for the status handler ─────────────────────
 
 use axum::response::IntoResponse;
+
+// ── OpenAPI fragments (E0·P4b-8) ─────────────────────────────────────────────
+//
+// Two `#[derive(utoipa::OpenApi)]` doc structs, merged into `egret_kernel::openapi()`:
+//   - `KernelApi` — the browser/session kernel-lifecycle + notebook-channels
+//     router (mounted `/api`, CSRF-protected). `channels` is a WebSocket upgrade,
+//     documented as a `GET` returning `101 Switching Protocols` with no JSON body.
+//   - `KernelCallbackApi` — the kernel-token bearer callbacks (mounted at the
+//     root, CSRF-exempt) invoked by the kernel subprocess, not a browser.
+// Free-form `{ … }` JSON bodies are documented as `Object` (the codebase-wide
+// convention for `Json<serde_json::Value>` responses).
+
+/// OpenAPI fragment for the session-cookie kernel router
+/// (`/api/ws/{workspace}/kernel`, `/notebooks/{notebook}/kernel/*`).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        start,
+        status,
+        stop,
+        connect,
+        channels,
+        kernel_interrupt,
+        kernel_restart,
+        active_executions,
+    ),
+    components(schemas(
+        crate::manager::KernelStatus,
+        ErrorBody,
+    )),
+    tags((name = "kernel", description = "Per-(user×workspace) Jupyter kernel lifecycle + per-notebook channels (WebSocket), interrupt/restart, active executions")),
+)]
+pub struct KernelApi;
+
+/// OpenAPI fragment for the kernel-token bearer callback router
+/// (`/kernel/engine-token`, `/ws/{workspace}/notebook-runtime/token`).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        engine_token,
+        notebook_runtime_token,
+    ),
+    components(schemas(
+        EngineTokenReq,
+        EngineTokenResp,
+        egret_analytics_api::EngineToken,
+        ErrorBody,
+    )),
+    tags((name = "kernel-callback", description = "Machine-facing kernel-subprocess callbacks (EGRET_KERNEL_TOKEN bearer, CSRF-exempt): engine-token + runtime-token refresh")),
+)]
+pub struct KernelCallbackApi;

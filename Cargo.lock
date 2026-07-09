@@ -2717,6 +2717,7 @@ dependencies = [
  "tokio-util",
  "tower",
  "tracing",
+ "utoipa",
  "uuid",
 ]
 
@@ -2773,6 +2774,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "utoipa",
  "uuid",
 ]
 

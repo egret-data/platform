@@ -117,6 +117,8 @@ pub fn openapi_doc() -> utoipa::openapi::OpenApi {
     doc.merge(egret_bi::openapi());
     doc.merge(egret_auth::openapi());
     doc.merge(egret_workspace::openapi());
+    doc.merge(egret_notebook::openapi());
+    doc.merge(egret_kernel::openapi());
     doc.merge(egret_controlplane::openapi());
     doc.merge(egret_catalog_engine::openapi());
     doc.merge(egret_policy::openapi());
