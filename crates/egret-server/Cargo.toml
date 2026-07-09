@@ -23,6 +23,9 @@ axum.workspace = true
 tower-http.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+# OpenAPI aggregator (E0·P4): base doc + `.merge(egret_query::openapi())`,
+# served at GET /api-docs/openapi.json. P4b adds one `.merge(...)` per crate.
+utoipa.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

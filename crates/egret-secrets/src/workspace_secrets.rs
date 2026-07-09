@@ -17,9 +17,10 @@ use crate::store::SecretStore;
 /// connection (storage or database): `{ "name": ..., "value": ... }`. The value
 /// is plaintext, accepted only on write and never returned. Shared across the
 /// HTTP layers so each connection type can mint a named secret in one request.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct NewSecret {
     pub name: String,
+    /// Plaintext secret value; accepted only on write, never returned.
     pub value: String,
 }
 

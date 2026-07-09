@@ -26,6 +26,9 @@ tokio.workspace = true
 tokio-util.workspace = true
 async-trait.workspace = true
 hex.workspace = true
+# OpenAPI emit (E0·P4): `#[utoipa::path]` on the two routers' handlers +
+# `QueryRegistryApi`/`QueryExecutionApi` doc structs merged in `openapi()`.
+utoipa.workspace = true
 
 [dev-dependencies]
 tower.workspace = true

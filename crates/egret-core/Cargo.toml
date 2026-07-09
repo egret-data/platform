@@ -10,6 +10,11 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
+# OpenAPI (E0·P4): `ToSchema` on the shared tabular types + the `ErrorBody`
+# envelope. Kept unconditional (not behind a feature) so the light `*-api`
+# contract crates can derive schemas over re-exported core types without pulling
+# the `http`/axum stack.
+utoipa.workspace = true
 axum = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }

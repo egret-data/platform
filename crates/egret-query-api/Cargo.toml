@@ -11,8 +11,11 @@ license.workspace = true
 # reaching through `egret_query::registry::model::…`. Mirrors egret-catalog-api
 # (E3b) / egret-policy-api (E2a). Depending on egret-core is fine — it's the
 # foundation crate; the leaf stays light.
-# `utoipa`/ToSchema is intentionally absent until E0·P4 wires OpenAPI emit.
+# `utoipa` (E0·P4): the contract crate carries the `ToSchema` derives for the
+# seam's wire vocabulary. utoipa is pure (proc-macro + light runtime), so the
+# leaf stays axum/sqlx-free.
 [dependencies]
 egret-core.workspace = true
 serde.workspace = true
 uuid.workspace = true
+utoipa.workspace = true

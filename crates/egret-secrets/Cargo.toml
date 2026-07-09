@@ -15,6 +15,9 @@ chrono.workspace = true
 serde = { workspace = true, features = ["derive"] }
 sqlx.workspace = true
 thiserror.workspace = true
+# OpenAPI (E0·P4): `NewSecret` is a wire field of the Query seam's database
+# registration body, so it carries a `ToSchema` derive.
+utoipa.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

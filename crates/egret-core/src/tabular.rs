@@ -7,7 +7,7 @@
 //! that persist or forward these values see no wire change.
 
 /// One column's name + engine-reported type name.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, utoipa::ToSchema)]
 pub struct ColumnMeta {
     pub name: String,
     #[serde(rename = "type")]
@@ -19,9 +19,11 @@ pub struct ColumnMeta {
 /// `Serialize`/`Deserialize` are for the E4b contract crate + BI forwarding this
 /// result directly across the seam boundary; today the store persists `columns`
 /// and `rows` individually, so the whole-struct codecs are not yet exercised.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct TabularResult {
     pub columns: Vec<ColumnMeta>,
+    /// Row-major cell values; each inner vec is one row aligned to `columns`.
+    #[schema(value_type = Vec<Vec<Object>>)]
     pub rows: Vec<Vec<serde_json::Value>>,
     pub row_count: u64,
     pub bytes_scanned: Option<u64>,

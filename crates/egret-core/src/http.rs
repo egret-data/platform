@@ -24,6 +24,20 @@ impl Error {
     }
 }
 
+/// The JSON body every error response carries: `{ "error": "<message>" }`.
+///
+/// This is the OpenAPI schema counterpart of the body produced by
+/// `IntoResponse for Error` above — the single shape returned for every 4xx/5xx
+/// across the API. Handlers reference it in their `#[utoipa::path]`
+/// `responses(...)` for the error statuses. 5xx messages are redacted to
+/// `"internal error"`; client-facing errors pass their `Display` message.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct ErrorBody {
+    /// Public-safe error message.
+    #[schema(example = "not found: user")]
+    pub error: String,
+}
+
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let status = self.status_code();

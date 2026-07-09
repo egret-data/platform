@@ -31,12 +31,23 @@ async fn main() -> anyhow::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let cli = Cli::parse();
+
+    // The `openapi` command is pure: emit the spec and exit before touching
+    // config, tracing, or the database.
+    if let Command::Openapi = cli.command {
+        let doc = egret_server::openapi_doc();
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+        return Ok(());
+    }
+
     let config = Config::load().context("loading configuration")?;
     config.validate().map_err(|e| anyhow::anyhow!(e))?;
     init_tracing(&config);
 
     match cli.command {
         Command::Serve => serve(config).await,
+        // Handled above, before config load.
+        Command::Openapi => unreachable!("openapi handled before config load"),
         Command::Migrate => migrate(config).await,
         Command::Init { force } => init(config, force).await,
         Command::Workspace { action } => workspace_cmd(config, action).await,

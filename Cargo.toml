@@ -43,6 +43,13 @@ aws-sigv4 = { version = "1.2" }
 url = { version = "2", features = ["serde"] }
 http = "1"
 typed-builder = "0.20"
+# OpenAPI emit (E0·P4): per-crate `#[derive(OpenApi)]` + `ToSchema`, merged in
+# egret-server. utoipa 5 emits OpenAPI 3.1. `preserve_order` keeps property order
+# stable across emits so the committed `openapi.json` diff stays minimal.
+utoipa = { version = "5", features = ["uuid", "chrono", "preserve_order"] }
+# Swagger-UI axum integration (utoipa 5 → utoipa-swagger-ui 9, axum 0.8). Declared
+# here so P4b can opt a UI in with one line; the JSON endpoint is the deliverable.
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"

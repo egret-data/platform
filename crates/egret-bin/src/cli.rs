@@ -13,6 +13,9 @@ pub struct Cli {
 pub enum Command {
     /// Run the HTTP server.
     Serve,
+    /// Print the aggregated OpenAPI 3.1 document as JSON to stdout and exit.
+    /// Pure — no database or network — so it can run in CI / codegen.
+    Openapi,
     /// Apply database migrations and exit.
     Migrate,
     /// Bootstrap the initial admin user and default workspace.
