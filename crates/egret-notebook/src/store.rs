@@ -467,7 +467,7 @@ impl NotebookStore {
         let rows = sqlx::query_as::<_, Row>(
             "SELECT d.id, d.name, d.engine, \
              (nea.database_id IS NOT NULL) AS enabled \
-             FROM databases d \
+             FROM query.databases d \
              LEFT JOIN notebook_engine_access nea \
                  ON nea.database_id = d.id AND nea.workspace_id = $1 \
              WHERE d.workspace_id = $1 \
@@ -505,7 +505,7 @@ impl NotebookStore {
     ) -> Result<(), NotebookApiError> {
         if !engine_ids.is_empty() {
             let count: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM databases WHERE id = ANY($1) AND workspace_id = $2",
+                "SELECT COUNT(*) FROM query.databases WHERE id = ANY($1) AND workspace_id = $2",
             )
             .bind(engine_ids)
             .bind(ws)
@@ -551,7 +551,7 @@ impl NotebookStore {
         // ── Validate everything before mutating anything ─────────────────────
         if !engine_ids.is_empty() {
             let count: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM databases WHERE id = ANY($1) AND workspace_id = $2",
+                "SELECT COUNT(*) FROM query.databases WHERE id = ANY($1) AND workspace_id = $2",
             )
             .bind(engine_ids)
             .bind(ws)
@@ -878,7 +878,7 @@ mod tests {
     /// Seed a database for this workspace in the DB. Returns the database id.
     async fn seed_database(db: &Db, ws: Uuid) -> Uuid {
         sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO databases (name, engine, host, port, workspace_id) \
+            "INSERT INTO query.databases (name, engine, host, port, workspace_id) \
              VALUES ($1, 'trino', 'localhost', 8080, $2) RETURNING id",
         )
         .bind(format!("db-{}", uuid::Uuid::new_v4().simple()))

@@ -90,7 +90,7 @@ impl QueryStore {
         sql: &str,
     ) -> Result<Uuid, EngineError> {
         let id: Uuid = sqlx::query_scalar(
-            "INSERT INTO queries (workspace_id, database_id, user_id, sql) \
+            "INSERT INTO query.queries (workspace_id, database_id, user_id, sql) \
              VALUES ($1,$2,$3,$4) RETURNING id",
         )
         .bind(ws)
@@ -103,10 +103,11 @@ impl QueryStore {
     }
 
     pub async fn get(&self, id: Uuid) -> Result<Option<Query>, EngineError> {
-        let row = sqlx::query_as::<_, QueryRow>(&format!("SELECT {COLS} FROM queries WHERE id=$1"))
-            .bind(id)
-            .fetch_optional(&self.db.pool)
-            .await?;
+        let row =
+            sqlx::query_as::<_, QueryRow>(&format!("SELECT {COLS} FROM query.queries WHERE id=$1"))
+                .bind(id)
+                .fetch_optional(&self.db.pool)
+                .await?;
         Ok(row.map(QueryRow::into_query))
     }
 
@@ -117,7 +118,7 @@ impl QueryStore {
         limit: i64,
     ) -> Result<Vec<Query>, EngineError> {
         let rows = sqlx::query_as::<_, QueryRow>(&format!(
-            "SELECT {COLS} FROM queries WHERE workspace_id=$1 AND user_id=$2 \
+            "SELECT {COLS} FROM query.queries WHERE workspace_id=$1 AND user_id=$2 \
              ORDER BY submitted_at DESC LIMIT $3"
         ))
         .bind(ws)
@@ -129,7 +130,7 @@ impl QueryStore {
     }
 
     pub async fn set_running(&self, id: Uuid) -> Result<(), EngineError> {
-        sqlx::query("UPDATE queries SET status='running', started_at=now() WHERE id=$1")
+        sqlx::query("UPDATE query.queries SET status='running', started_at=now() WHERE id=$1")
             .bind(id)
             .execute(&self.db.pool)
             .await?;
@@ -137,7 +138,7 @@ impl QueryStore {
     }
 
     pub async fn set_cancelled(&self, id: Uuid) -> Result<(), EngineError> {
-        sqlx::query("UPDATE queries SET status='cancelled', finished_at=now() WHERE id=$1")
+        sqlx::query("UPDATE query.queries SET status='cancelled', finished_at=now() WHERE id=$1")
             .bind(id)
             .execute(&self.db.pool)
             .await?;
@@ -145,11 +146,13 @@ impl QueryStore {
     }
 
     pub async fn fail(&self, id: Uuid, error: &str) -> Result<(), EngineError> {
-        sqlx::query("UPDATE queries SET status='failed', error=$2, finished_at=now() WHERE id=$1")
-            .bind(id)
-            .bind(error)
-            .execute(&self.db.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE query.queries SET status='failed', error=$2, finished_at=now() WHERE id=$1",
+        )
+        .bind(id)
+        .bind(error)
+        .execute(&self.db.pool)
+        .await?;
         Ok(())
     }
 
@@ -165,7 +168,7 @@ impl QueryStore {
             serde_json::to_value(result.rows.iter().take(preview_rows).collect::<Vec<_>>())
                 .unwrap_or(serde_json::json!([]));
         sqlx::query(
-            "UPDATE queries SET status='finished', columns_jsonb=$2, preview_jsonb=$3, \
+            "UPDATE query.queries SET status='finished', columns_jsonb=$2, preview_jsonb=$3, \
              row_count=$4, bytes_scanned=$5, truncated=$6, result_ref=$7, finished_at=now() WHERE id=$1")
             .bind(id).bind(columns).bind(preview)
             .bind(result.row_count as i64)

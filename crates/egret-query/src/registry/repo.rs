@@ -80,7 +80,7 @@ impl DatabaseRepo {
     ) -> Result<Database, DatabaseError> {
         let opts = serde_json::to_value(&input.options).unwrap_or(serde_json::json!({}));
         sqlx::query_as::<_, Row>(
-            "INSERT INTO databases (name, engine, host, port, options, secret_id, created_by, workspace_id) \
+            "INSERT INTO query.databases (name, engine, host, port, options, secret_id, created_by, workspace_id) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
              RETURNING id, name, engine, host, port, options, secret_id, status",
         )
@@ -106,7 +106,7 @@ impl DatabaseRepo {
     pub async fn get(&self, id: Uuid) -> Result<Database, DatabaseError> {
         sqlx::query_as::<_, Row>(
             "SELECT id, name, engine, host, port, options, secret_id, status \
-             FROM databases WHERE id = $1",
+             FROM query.databases WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.db.pool)
@@ -126,7 +126,7 @@ impl DatabaseRepo {
     ) -> Result<Vec<Database>, DatabaseError> {
         let rows = sqlx::query_as::<_, Row>(
             "SELECT id, name, engine, host, port, options, secret_id, status \
-             FROM databases WHERE workspace_id = $1 ORDER BY name",
+             FROM query.databases WHERE workspace_id = $1 ORDER BY name",
         )
         .bind(workspace_id)
         .fetch_all(&self.db.pool)
@@ -141,7 +141,7 @@ impl DatabaseRepo {
     /// (or no row) → `Ok(None)`.
     pub async fn open_secret(&self, id: Uuid) -> Result<Option<String>, DatabaseError> {
         let row: Option<(Option<Uuid>, Uuid)> =
-            sqlx::query_as("SELECT secret_id, workspace_id FROM databases WHERE id = $1")
+            sqlx::query_as("SELECT secret_id, workspace_id FROM query.databases WHERE id = $1")
                 .bind(id)
                 .fetch_optional(&self.db.pool)
                 .await?;
@@ -165,7 +165,7 @@ impl DatabaseRepo {
         id: Uuid,
     ) -> Result<Option<Uuid>, DatabaseError> {
         let row: Option<Option<Uuid>> = sqlx::query_scalar(
-            "SELECT secret_id FROM databases WHERE id = $1 AND workspace_id = $2",
+            "SELECT secret_id FROM query.databases WHERE id = $1 AND workspace_id = $2",
         )
         .bind(id)
         .bind(workspace_id)
@@ -185,7 +185,7 @@ impl DatabaseRepo {
     ) -> Result<Database, DatabaseError> {
         sqlx::query_as::<_, Row>(
             "SELECT id, name, engine, host, port, options, secret_id, status \
-             FROM databases WHERE id = $1 AND workspace_id = $2",
+             FROM query.databases WHERE id = $1 AND workspace_id = $2",
         )
         .bind(id)
         .bind(workspace_id)
@@ -215,7 +215,7 @@ impl DatabaseRepo {
         let opts = serde_json::to_value(&input.options).unwrap_or(serde_json::json!({}));
 
         sqlx::query(
-            "UPDATE databases SET name=$2, engine=$3, host=$4, port=$5, options=$6, \
+            "UPDATE query.databases SET name=$2, engine=$3, host=$4, port=$5, options=$6, \
                  secret_id=$7, updated_at=now() WHERE id=$1 AND workspace_id=$8",
         )
         .bind(id)
@@ -251,7 +251,7 @@ impl DatabaseRepo {
         id: Uuid,
     ) -> Result<(), DatabaseError> {
         self.get_in_workspace(workspace_id, id).await?; // 404 if not owned
-        sqlx::query("DELETE FROM databases WHERE id = $1 AND workspace_id = $2")
+        sqlx::query("DELETE FROM query.databases WHERE id = $1 AND workspace_id = $2")
             .bind(id)
             .bind(workspace_id)
             .execute(&self.db.pool)
@@ -268,7 +268,7 @@ impl DatabaseRepo {
         status: &str,
     ) -> Result<(), DatabaseError> {
         sqlx::query(
-            "UPDATE databases SET status=$3, updated_at=now() WHERE id=$1 AND workspace_id=$2",
+            "UPDATE query.databases SET status=$3, updated_at=now() WHERE id=$1 AND workspace_id=$2",
         )
         .bind(id)
         .bind(workspace_id)

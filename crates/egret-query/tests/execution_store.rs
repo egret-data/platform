@@ -23,8 +23,8 @@ async fn setup() -> Option<(QueryStore, Uuid, Uuid, Uuid)> {
     .fetch_one(&db.pool)
     .await
     .unwrap();
-    let did: Uuid = sqlx::query_scalar("INSERT INTO databases (name, engine, host, port) VALUES ($1,'trino','h',8080) RETURNING id")
-        .bind(format!("db_{}", Uuid::new_v4().simple())).fetch_one(&db.pool).await.unwrap();
+    let did: Uuid = sqlx::query_scalar("INSERT INTO query.databases (name, engine, host, port, workspace_id) VALUES ($1,'trino','h',8080,$2) RETURNING id")
+        .bind(format!("db_{}", Uuid::new_v4().simple())).bind(wid).fetch_one(&db.pool).await.unwrap();
     Some((QueryStore::new(db), wid, did, uid))
 }
 
