@@ -6,9 +6,17 @@ import { MemoryRouter } from "react-router-dom";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { createElement, type ReactNode } from "react";
 
-const apiJson = vi.fn();
-const apiFetch = vi.fn().mockResolvedValue({});
-vi.mock("@/api/client", () => ({ apiJson: (...a: unknown[]) => apiJson(...a), apiFetch: (...a: unknown[]) => apiFetch(...a) }));
+// The dashboards module is migrated to the generated client, so every call
+// (list read, trash, hard delete) flows through `apiFetch` → the mutator.
+const apiFetch = vi.fn();
+const listData = { current: [] as unknown[] };
+const jsonRes = (body: unknown) => ({ status: 200, headers: new Headers({ "content-type": "application/json" }), json: () => Promise.resolve(body) });
+vi.mock("@/api/client", () => ({
+  apiJson: vi.fn(),
+  apiFetch: (...a: unknown[]) => apiFetch(...a),
+  ApiError: class ApiError extends Error {},
+  UnauthorizedError: class UnauthorizedError extends Error {},
+}));
 vi.mock("react-router-dom", async (orig) => ({ ...(await orig() as object), useParams: () => ({ workspace: "eng" }) }));
 vi.mock("@/api/folders", () => ({
   useFolders: () => ({ data: [] }),
@@ -26,20 +34,26 @@ const wrap = ({ children }: { children: ReactNode }) =>
   createElement(QueryClientProvider, { client: new QueryClient() }, createElement(TooltipProvider, null, createElement(MemoryRouter, null, children)));
 
 describe("Dashboards trash", () => {
-  beforeEach(() => { apiJson.mockReset(); apiFetch.mockReset(); apiFetch.mockResolvedValue({}); });
+  beforeEach(() => {
+    apiFetch.mockReset();
+    listData.current = [];
+    apiFetch.mockImplementation((url: string) =>
+      Promise.resolve(jsonRes(/\/dashboards(\?|$)/.test(url) ? listData.current : null)),
+    );
+  });
   it("row Move to Trash moves to trash (POST /trash), not hard delete", async () => {
-    apiJson.mockResolvedValue([{ id: "d1", name: "One", description: "", created_by: null, card_count: 0, updated_at: new Date().toISOString() }]);
+    listData.current = [{ id: "d1", name: "One", description: "", created_by: null, card_count: 0, updated_at: new Date().toISOString() }];
     const user = userEvent.setup();
     render(<Dashboards />, { wrapper: wrap });
     await screen.findByText("One");
     // Row actions now live inside the kebab menu.
     await user.click(screen.getByRole("button", { name: "Actions" }));
     await user.click(await screen.findByText("Move to Trash"));
-    await waitFor(() => expect(apiJson).toHaveBeenCalledWith("/ws/eng/dashboards/d1/trash", expect.objectContaining({ method: "POST" })));
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith("/ws/eng/dashboards/d1/trash", expect.objectContaining({ method: "POST" })));
   });
 
-  it("permanent delete uses ConfirmDeleteDialog and routes to hard DELETE (apiFetch), not trash/restore", async () => {
-    apiJson.mockResolvedValue([{ id: "d1", name: "One", description: "", created_by: null, card_count: 0, updated_at: new Date().toISOString() }]);
+  it("permanent delete uses ConfirmDeleteDialog and routes to hard DELETE, not trash/restore", async () => {
+    listData.current = [{ id: "d1", name: "One", description: "", created_by: null, card_count: 0, updated_at: new Date().toISOString() }];
     const user = userEvent.setup();
     render(<Dashboards />, { wrapper: wrap });
     await screen.findByText("One");
@@ -55,8 +69,8 @@ describe("Dashboards trash", () => {
     const confirmBtn = screen.getByRole("button", { name: /^Delete$/ });
     fireEvent.click(confirmBtn);
     await waitFor(() => expect(apiFetch).toHaveBeenCalledWith("/ws/eng/dashboards/d1", expect.objectContaining({ method: "DELETE" })));
-    // It must NOT have gone through the trash/restore (apiJson) path for this action.
-    const jsonPaths = apiJson.mock.calls.map((c) => c[0] as string);
-    expect(jsonPaths.some((p) => p.includes("/trash") || p.includes("/restore"))).toBe(false);
+    // It must NOT have gone through the trash/restore path for this action.
+    const paths = apiFetch.mock.calls.map((c) => c[0] as string);
+    expect(paths.some((p) => p.includes("/trash") || p.includes("/restore"))).toBe(false);
   });
 });

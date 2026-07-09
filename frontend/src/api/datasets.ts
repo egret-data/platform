@@ -1,5 +1,39 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiFetch, apiJson } from "./client";
+/**
+ * Datasets API — MIGRATED to the orval-generated client (E0·P4d-1).
+ *
+ * Thin adapter over `./generated/datasets/datasets`, following the P4c pattern
+ * (see `databases.ts`): hooks keep their old names/signatures so call sites and
+ * tests don't churn; reads wrap the generated query hook (unwrapping orval's
+ * `{ status, data, headers }` envelope via `select`); writes run `useMutation`
+ * over the generated fetch fns and invalidate the GENERATED query keys.
+ *
+ * The domain TS types stay FE-local: the spec models `kind`/`source` more
+ * loosely (plain `string`) than the FE unions (`DatasetKind`, `CreateSource`),
+ * so aliasing to the generated DTOs would widen them and churn call sites.
+ */
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+
+import { ApiError } from "./client";
+import {
+  datasetsDsAddColumn,
+  datasetsDsAddMetric,
+  datasetsDsBookmarkAdd,
+  datasetsDsBookmarkRemove,
+  datasetsDsCreate,
+  datasetsDsDeleteColumn,
+  datasetsDsDeleteMetric,
+  datasetsDsRefresh,
+  datasetsDsRemove,
+  datasetsDsRestore,
+  datasetsDsTrash,
+  datasetsDsUpdate,
+  datasetsDsUpdateColumn,
+  datasetsDsUpdateMetric,
+  getDatasetsDsGetQueryKey,
+  getDatasetsDsListQueryKey,
+  useDatasetsDsGet,
+  useDatasetsDsList,
+} from "./generated/datasets/datasets";
 
 export type DatasetKind = "physical" | "virtual";
 export interface DatasetSummary {
@@ -30,101 +64,86 @@ export interface CreateDatasetBody {
   name: string; database_id: string; description?: string; source: CreateSource;
 }
 
+/** Back-compat query-key helpers; delegate to the generated key factories. */
 export const dsKeys = {
-  list: (ws: string) => ["datasets", ws, "list"] as const,
-  detail: (ws: string, id: string) => ["datasets", ws, "detail", id] as const,
+  list: (ws: string) => getDatasetsDsListQueryKey(ws),
+  detail: (ws: string, id: string) => getDatasetsDsGetQueryKey(ws, id),
 };
 
 export function useDatasets(ws: string, opts?: { trashed?: boolean }) {
   const trashed = !!opts?.trashed;
-  return useQuery<DatasetSummary[]>({
-    queryKey: [...dsKeys.list(ws), { trashed }],
-    queryFn: () => apiJson<DatasetSummary[]>(`/ws/${ws}/datasets${trashed ? "?trashed=true" : ""}`),
+  return useDatasetsDsList<DatasetSummary[], ApiError>(ws, trashed ? { trashed: true } : undefined, {
+    query: { select: (r) => r.data as DatasetSummary[] },
   });
 }
 export function useDataset(ws: string, id: string | null) {
-  return useQuery<DatasetDetail>({
-    queryKey: id ? dsKeys.detail(ws, id) : ["datasets", ws, "detail", "none"],
-    queryFn: () => apiJson<DatasetDetail>(`/ws/${ws}/datasets/${id}`),
-    enabled: !!id,
+  return useDatasetsDsGet<DatasetDetail, ApiError>(ws, id ?? "", {
+    query: { enabled: !!id, select: (r) => r.data as DatasetDetail },
   });
 }
 export function useCreateDataset(ws: string) {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (body: CreateDatasetBody) =>
-      apiJson<DatasetDetail>(`/ws/${ws}/datasets`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: dsKeys.list(ws) }),
+  return useMutation<DatasetDetail, ApiError, CreateDatasetBody>({
+    mutationFn: async (body) => (await datasetsDsCreate(ws, body)).data as DatasetDetail,
+    onSuccess: () => qc.invalidateQueries({ queryKey: getDatasetsDsListQueryKey(ws) }),
   });
 }
 export function useUpdateDataset(ws: string, id: string) {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (body: { name: string; description?: string; sql?: string | null }) =>
-      apiJson<DatasetDetail>(`/ws/${ws}/datasets/${id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: dsKeys.detail(ws, id) }); qc.invalidateQueries({ queryKey: dsKeys.list(ws) }); },
+  return useMutation<DatasetDetail, ApiError, { name: string; description?: string; sql?: string | null }>({
+    mutationFn: async (body) => (await datasetsDsUpdate(ws, id, body)).data as DatasetDetail,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: getDatasetsDsGetQueryKey(ws, id) });
+      qc.invalidateQueries({ queryKey: getDatasetsDsListQueryKey(ws) });
+    },
   });
 }
 export function useRefreshDataset(ws: string, id: string) {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: () => apiJson<DatasetDetail>(`/ws/${ws}/datasets/${id}/refresh`, { method: "POST" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: dsKeys.detail(ws, id) }),
+  return useMutation<DatasetDetail, ApiError, void>({
+    mutationFn: async () => (await datasetsDsRefresh(ws, id)).data as DatasetDetail,
+    onSuccess: () => qc.invalidateQueries({ queryKey: getDatasetsDsGetQueryKey(ws, id) }),
   });
 }
 export function useDeleteDataset(ws: string) {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) => apiFetch(`/ws/${ws}/datasets/${id}`, { method: "DELETE" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: dsKeys.list(ws) }),
+  return useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await datasetsDsRemove(ws, id); },
+    onSuccess: () => qc.invalidateQueries({ queryKey: getDatasetsDsListQueryKey(ws) }),
   });
 }
 
 export function useDatasetListMutations(ws: string) {
   const qc = useQueryClient();
-  const invalidate = () => qc.invalidateQueries({ queryKey: dsKeys.list(ws) });
-  const trash = useMutation({
-    mutationFn: (id: string) => apiJson(`/ws/${ws}/datasets/${id}/trash`, { method: "POST" }),
+  const invalidate = () => qc.invalidateQueries({ queryKey: getDatasetsDsListQueryKey(ws) });
+  const trash = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await datasetsDsTrash(ws, id); },
     onSuccess: invalidate,
   });
-  const restore = useMutation({
-    mutationFn: (id: string) => apiJson(`/ws/${ws}/datasets/${id}/restore`, { method: "POST" }),
+  const restore = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await datasetsDsRestore(ws, id); },
     onSuccess: invalidate,
   });
-  const addBookmark = useMutation({
-    mutationFn: (id: string) => apiJson(`/ws/${ws}/datasets/${id}/bookmark`, { method: "POST" }),
+  const addBookmark = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await datasetsDsBookmarkAdd(ws, id); },
     onSuccess: invalidate,
   });
-  const removeBookmark = useMutation({
-    mutationFn: (id: string) => apiJson(`/ws/${ws}/datasets/${id}/bookmark`, { method: "DELETE" }),
+  const removeBookmark = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await datasetsDsBookmarkRemove(ws, id); },
     onSuccess: invalidate,
   });
   return { trash, restore, addBookmark, removeBookmark };
 }
 
-function mutateDetail(ws: string, id: string) {
-  return (path: string, method: string, body?: unknown) => {
-    if (body !== undefined) {
-      return apiJson<DatasetDetail>(`/ws/${ws}/datasets/${id}${path}`, {
-        method,
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-    }
-    return apiJson<DatasetDetail>(`/ws/${ws}/datasets/${id}${path}`, { method });
-  };
-}
-
 export function useDatasetMutations(ws: string, id: string) {
   const qc = useQueryClient();
-  const inval = () => qc.invalidateQueries({ queryKey: dsKeys.detail(ws, id) });
-  const m = mutateDetail(ws, id);
+  const inval = () => qc.invalidateQueries({ queryKey: getDatasetsDsGetQueryKey(ws, id) });
   return {
-    addMetric: useMutation({ mutationFn: (b: { metric_name: string; expression: string; verbose_name?: string; description?: string }) => m(`/metrics`, "POST", b), onSuccess: inval }),
-    updateMetric: useMutation({ mutationFn: (a: { metricId: string; body: { metric_name: string; expression: string; verbose_name?: string; description?: string } }) => m(`/metrics/${a.metricId}`, "PUT", a.body), onSuccess: inval }),
-    deleteMetric: useMutation({ mutationFn: (metricId: string) => m(`/metrics/${metricId}`, "DELETE"), onSuccess: inval }),
-    addColumn: useMutation({ mutationFn: (b: { column_name: string; expression: string; verbose_name?: string; description?: string }) => m(`/columns`, "POST", b), onSuccess: inval }),
-    updateColumn: useMutation({ mutationFn: (a: { name: string; body: { verbose_name?: string; description?: string; expression?: string } }) => m(`/columns/${encodeURIComponent(a.name)}`, "PUT", a.body), onSuccess: inval }),
-    deleteColumn: useMutation({ mutationFn: (name: string) => m(`/columns/${encodeURIComponent(name)}`, "DELETE"), onSuccess: inval }),
+    addMetric: useMutation({ mutationFn: (b: { metric_name: string; expression: string; verbose_name?: string; description?: string }) => datasetsDsAddMetric(ws, id, b), onSuccess: inval }),
+    updateMetric: useMutation({ mutationFn: (a: { metricId: string; body: { metric_name: string; expression: string; verbose_name?: string; description?: string } }) => datasetsDsUpdateMetric(ws, id, a.metricId, a.body), onSuccess: inval }),
+    deleteMetric: useMutation({ mutationFn: (metricId: string) => datasetsDsDeleteMetric(ws, id, metricId), onSuccess: inval }),
+    addColumn: useMutation({ mutationFn: (b: { column_name: string; expression: string; verbose_name?: string; description?: string }) => datasetsDsAddColumn(ws, id, b), onSuccess: inval }),
+    updateColumn: useMutation({ mutationFn: (a: { name: string; body: { verbose_name?: string; description?: string; expression?: string } }) => datasetsDsUpdateColumn(ws, id, a.name, a.body), onSuccess: inval }),
+    deleteColumn: useMutation({ mutationFn: (name: string) => datasetsDsDeleteColumn(ws, id, name), onSuccess: inval }),
   };
 }

@@ -1,5 +1,20 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiFetch, apiJson } from "./client";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+
+import { ApiError } from "./client";
+import {
+  dashboardsDbBookmarkAdd,
+  dashboardsDbBookmarkRemove,
+  dashboardsDbCreate,
+  dashboardsDbDuplicate,
+  dashboardsDbRemove,
+  dashboardsDbRestore,
+  dashboardsDbTrash,
+  dashboardsDbUpdate,
+  getDashboardsDbGetQueryKey,
+  getDashboardsDbListQueryKey,
+  useDashboardsDbGet,
+  useDashboardsDbList,
+} from "./generated/dashboards/dashboards";
 
 export interface DashboardCard {
   id: string;
@@ -70,66 +85,61 @@ export interface CardInput {
   tab_index: number | null;
 }
 
+/** Back-compat query-key helpers; delegate to the generated key factories. */
 export const dashboardKeys = {
-  list: (ws: string) => ["dashboards", ws] as const,
-  one: (ws: string, id: string) => ["dashboards", ws, id] as const,
+  list: (ws: string) => getDashboardsDbListQueryKey(ws),
+  one: (ws: string, id: string) => getDashboardsDbGetQueryKey(ws, id),
 };
 
 export function useDashboards(ws: string, opts?: { trashed?: boolean }) {
   const trashed = !!opts?.trashed;
-  return useQuery<DashboardSummary[]>({
-    queryKey: [...dashboardKeys.list(ws), { trashed }],
-    queryFn: () => apiJson<DashboardSummary[]>(`/ws/${ws}/dashboards${trashed ? "?trashed=true" : ""}`),
+  return useDashboardsDbList<DashboardSummary[], ApiError>(ws, trashed ? { trashed: true } : undefined, {
+    query: { select: (r) => r.data as DashboardSummary[] },
   });
 }
 
 export function useDashboard(ws: string, id: string | null) {
-  return useQuery<DashboardDetail>({
-    queryKey: id ? dashboardKeys.one(ws, id) : ["dashboards", ws, "none"],
-    queryFn: () => apiJson<DashboardDetail>(`/ws/${ws}/dashboards/${id}`),
-    enabled: !!id,
+  return useDashboardsDbGet<DashboardDetail, ApiError>(ws, id ?? "", {
+    query: { enabled: !!id, select: (r) => r.data as DashboardDetail },
   });
 }
 
 export function useDashboardMutations(ws: string) {
   const qc = useQueryClient();
   const invalidate = (id?: string) => {
-    qc.invalidateQueries({ queryKey: dashboardKeys.list(ws) });
-    if (id) qc.invalidateQueries({ queryKey: dashboardKeys.one(ws, id) });
+    qc.invalidateQueries({ queryKey: getDashboardsDbListQueryKey(ws) });
+    if (id) qc.invalidateQueries({ queryKey: getDashboardsDbGetQueryKey(ws, id) });
   };
-  const create = useMutation({
-    mutationFn: (b: { name: string; description?: string }) =>
-      apiJson<DashboardDetail>(`/ws/${ws}/dashboards`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b) }),
+  const create = useMutation<DashboardDetail, ApiError, { name: string; description?: string }>({
+    mutationFn: async (b) => (await dashboardsDbCreate(ws, b)).data as DashboardDetail,
     onSuccess: () => invalidate(),
   });
-  const update = useMutation({
-    mutationFn: ({ id, ...b }: { id: string; name: string; description?: string; parameters: DashboardParameter[]; tabs: { name: string; position: number }[]; width: "fixed" | "full"; cards: CardInput[] }) =>
-      apiJson<DashboardDetail>(`/ws/${ws}/dashboards/${id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(b) }),
+  const update = useMutation<DashboardDetail, ApiError, { id: string; name: string; description?: string; parameters: DashboardParameter[]; tabs: { name: string; position: number }[]; width: "fixed" | "full"; cards: CardInput[] }>({
+    mutationFn: async ({ id, ...b }) => (await dashboardsDbUpdate(ws, id, b)).data as DashboardDetail,
     onSuccess: (d) => invalidate(d.id),
   });
-  const remove = useMutation({
-    mutationFn: (id: string) => apiFetch(`/ws/${ws}/dashboards/${id}`, { method: "DELETE" }),
+  const remove = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await dashboardsDbRemove(ws, id); },
     onSuccess: () => invalidate(),
   });
-  const duplicate = useMutation({
-    mutationFn: (id: string) =>
-      apiJson<DashboardDetail>(`/ws/${ws}/dashboards/${id}/duplicate`, { method: "POST" }),
+  const duplicate = useMutation<DashboardDetail, ApiError, string>({
+    mutationFn: async (id) => (await dashboardsDbDuplicate(ws, id)).data as DashboardDetail,
     onSuccess: () => invalidate(),
   });
-  const trash = useMutation({
-    mutationFn: (id: string) => apiJson(`/ws/${ws}/dashboards/${id}/trash`, { method: "POST" }),
+  const trash = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await dashboardsDbTrash(ws, id); },
     onSuccess: () => invalidate(),
   });
-  const restore = useMutation({
-    mutationFn: (id: string) => apiJson(`/ws/${ws}/dashboards/${id}/restore`, { method: "POST" }),
+  const restore = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await dashboardsDbRestore(ws, id); },
     onSuccess: () => invalidate(),
   });
-  const addBookmark = useMutation({
-    mutationFn: (id: string) => apiJson(`/ws/${ws}/dashboards/${id}/bookmark`, { method: "POST" }),
+  const addBookmark = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await dashboardsDbBookmarkAdd(ws, id); },
     onSuccess: () => invalidate(),
   });
-  const removeBookmark = useMutation({
-    mutationFn: (id: string) => apiJson(`/ws/${ws}/dashboards/${id}/bookmark`, { method: "DELETE" }),
+  const removeBookmark = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await dashboardsDbBookmarkRemove(ws, id); },
     onSuccess: () => invalidate(),
   });
   return { create, update, remove, duplicate, trash, restore, addBookmark, removeBookmark };

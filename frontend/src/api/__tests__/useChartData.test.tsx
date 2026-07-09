@@ -3,8 +3,22 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import React from "react";
 
-const apiJson = vi.fn();
-vi.mock("@/api/client", () => ({ apiJson: (...a: unknown[]) => apiJson(...a), apiFetch: vi.fn() }));
+// The BI modules now route through the orval-generated client → the mutator →
+// `apiFetch` (which returns a raw `Response`). We stub `apiFetch` and assert on
+// its calls; the mutator builds the `{ status, data, headers }` envelope.
+const apiFetch = vi.fn();
+vi.mock("@/api/client", () => ({
+  apiJson: vi.fn(),
+  apiFetch: (...a: unknown[]) => apiFetch(...a),
+  ApiError: class ApiError extends Error {},
+  UnauthorizedError: class UnauthorizedError extends Error {},
+}));
+
+const jsonRes = (body: unknown) => ({
+  status: 200,
+  headers: new Headers({ "content-type": "application/json" }),
+  json: () => Promise.resolve(body),
+});
 
 import { useChartData } from "../useChartData";
 import type { Chart } from "@/api/charts";
@@ -21,12 +35,12 @@ function wrapper({ children }: { children: React.ReactNode }) {
 }
 
 beforeEach(() => {
-  apiJson.mockReset();
-  apiJson.mockImplementation((url: string, opts?: { method?: string }) => {
-    if (url.endsWith("/charts/data")) return Promise.resolve({ sql: "SELECT 1", database_id: "db1" });
-    if (url.endsWith("/queries") && opts?.method === "POST") return Promise.resolve({ id: "q1", status: "finished" });
-    if (url.includes("/queries/q1/results")) return Promise.resolve({ columns: [{ name: "rev", type: "double" }], rows: [[5]], page: 0, page_size: 100, row_count: 1, truncated: false });
-    if (url.includes("/queries/q1")) return Promise.resolve({ id: "q1", database_id: "db1", status: "finished", columns: null, preview: null, row_count: 1, truncated: false, error: null });
+  apiFetch.mockReset();
+  apiFetch.mockImplementation((url: string, opts?: { method?: string }) => {
+    if (url.endsWith("/charts/data")) return Promise.resolve(jsonRes({ sql: "SELECT 1", database_id: "db1" }));
+    if (url.endsWith("/queries") && opts?.method === "POST") return Promise.resolve(jsonRes({ id: "q1", status: "finished" }));
+    if (url.includes("/queries/q1/results")) return Promise.resolve(jsonRes({ columns: [{ name: "rev", type: "double" }], rows: [[5]], page: 0, page_size: 100, row_count: 1, truncated: false }));
+    if (url.includes("/queries/q1")) return Promise.resolve(jsonRes({ id: "q1", database_id: "db1", status: "finished", columns: null, preview: null, row_count: 1, truncated: false, error: null }));
     return Promise.reject(new Error("unexpected " + url));
   });
 });
@@ -44,11 +58,11 @@ describe("useChartData", () => {
     let nonce = 0;
     const { result, rerender } = renderHook(() => useChartData("eng", chart, nonce), { wrapper });
     await waitFor(() => expect(result.current.rows).toEqual([[5]]));
-    const buildCalls = apiJson.mock.calls.filter((c: unknown[]) => String(c[0]).endsWith("/charts/data")).length;
+    const buildCalls = apiFetch.mock.calls.filter((c: unknown[]) => String(c[0]).endsWith("/charts/data")).length;
     nonce = 1;
     rerender();
     await waitFor(() => {
-      const after = apiJson.mock.calls.filter((c: unknown[]) => String(c[0]).endsWith("/charts/data")).length;
+      const after = apiFetch.mock.calls.filter((c: unknown[]) => String(c[0]).endsWith("/charts/data")).length;
       expect(after).toBe(buildCalls + 1);
     });
   });

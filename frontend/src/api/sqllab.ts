@@ -1,5 +1,36 @@
+/**
+ * SQL Lab API — MIGRATED to the orval-generated client (E0·P4d-1).
+ *
+ * These hooks route through the generated FETCH fns (the `queries`, `sqllab`
+ * and `databases` tags) but KEEP their hand-written query keys, `staleTime`,
+ * `refetchInterval` and `enabled` gates: the polling status hook, the paginated
+ * results hook, and the hierarchical schema cache (whose `["sqllab", ws,
+ * "schema", db, …]` prefix `useRefreshSchema` invalidates in one call) can't be
+ * expressed through the generated hooks' fixed per-operation keys. Using the
+ * generated fetch fns underneath preserves every URL/param + behavior while
+ * still sourcing the wire contract from the spec.
+ */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiFetch, apiJson } from "./client";
+
+import { databasesList } from "./generated/databases/databases";
+import {
+  getQueriesResultsCsvUrl,
+  queriesCancel,
+  queriesHistory,
+  queriesResults,
+  queriesStatus,
+  queriesSubmit,
+} from "./generated/queries/queries";
+import {
+  sqllabCatalogs,
+  sqllabColumns,
+  sqllabList,
+  sqllabRemove,
+  sqllabSave,
+  sqllabSchemas,
+  sqllabTables,
+  sqllabUpdate,
+} from "./generated/sqllab/sqllab";
 
 // ── types ──
 export interface DatabaseListItem { id: string; name: string; engine: string }
@@ -23,27 +54,27 @@ export const qk = {
   schema: (ws: string, db: string, level: string, ...rest: string[]) => ["sqllab", ws, "schema", db, level, ...rest] as const,
 };
 
-export const csvUrl = (ws: string, id: string) => `/api/ws/${ws}/queries/${id}/results.csv`;
+export const csvUrl = (ws: string, id: string) => getQueriesResultsCsvUrl(ws, id);
 
 // ── databases granted to the workspace ──
 export function useDatabases(ws: string) {
   return useQuery<DatabaseListItem[]>({
     queryKey: qk.databases(ws),
-    queryFn: () => apiJson<DatabaseListItem[]>(`/ws/${encodeURIComponent(ws)}/databases`),
+    queryFn: async () => (await databasesList(ws)).data as unknown as DatabaseListItem[],
   });
 }
 
 // ── run / poll / results (engine API) ──
 export function useSubmitQuery(ws: string) {
   return useMutation({
-    mutationFn: (body: { database_id: string; sql: string; limit?: number }) =>
-      apiJson<{ id: string; status: QueryStatus }>(`/ws/${ws}/queries`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+    mutationFn: async (body: { database_id: string; sql: string; limit?: number }) =>
+      (await queriesSubmit(ws, body)).data as { id: string; status: QueryStatus },
   });
 }
 export function useQueryStatus(ws: string, id: string | null) {
   return useQuery<QueryView>({
     queryKey: id ? qk.status(ws, id) : ["sqllab", ws, "status", "none"],
-    queryFn: () => apiJson<QueryView>(`/ws/${ws}/queries/${id}`),
+    queryFn: async () => (await queriesStatus(ws, id!)).data as unknown as QueryView,
     enabled: !!id,
     refetchInterval: (q) => {
       const s = q.state.data?.status;
@@ -51,14 +82,14 @@ export function useQueryStatus(ws: string, id: string | null) {
     },
   });
 }
-export function fetchResults(ws: string, id: string, page: number, pageSize: number) {
-  return apiJson<ResultsPage>(`/ws/${ws}/queries/${id}/results?page=${page}&page_size=${pageSize}`);
+export async function fetchResults(ws: string, id: string, page: number, pageSize: number) {
+  return (await queriesResults(ws, id, { page, page_size: pageSize })).data as unknown as ResultsPage;
 }
 export function useCancelQuery(ws: string) {
-  return useMutation({ mutationFn: (id: string) => apiFetch(`/ws/${ws}/queries/${id}/cancel`, { method: "POST" }) });
+  return useMutation({ mutationFn: (id: string) => queriesCancel(ws, id) });
 }
 export function useHistory(ws: string) {
-  return useQuery<HistoryItem[]>({ queryKey: qk.history(ws), queryFn: () => apiJson<HistoryItem[]>(`/ws/${ws}/queries`) });
+  return useQuery<HistoryItem[]>({ queryKey: qk.history(ws), queryFn: async () => (await queriesHistory(ws)).data as unknown as HistoryItem[] });
 }
 export function useResults(ws: string, queryId: string | null, page: number, enabled: boolean) {
   return useQuery<ResultsPage>({
@@ -70,28 +101,28 @@ export function useResults(ws: string, queryId: string | null, page: number, ena
 
 // ── saved queries (egret-bi) ──
 export function useSavedQueries(ws: string) {
-  return useQuery<SavedQuery[]>({ queryKey: qk.saved(ws), queryFn: () => apiJson<SavedQuery[]>(`/ws/${ws}/sqllab/queries`) });
+  return useQuery<SavedQuery[]>({ queryKey: qk.saved(ws), queryFn: async () => (await sqllabList(ws)).data as unknown as SavedQuery[] });
 }
 export function useSaveQuery(ws: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { database_id: string | null; name: string; sql: string; description?: string }) =>
-      apiJson<SavedQuery>(`/ws/${ws}/sqllab/queries`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+    mutationFn: async (body: { database_id: string | null; name: string; sql: string; description?: string }) =>
+      (await sqllabSave(ws, body)).data as unknown as SavedQuery,
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.saved(ws) }),
   });
 }
 export function useUpdateSavedQuery(ws: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, ...body }: { id: string; database_id: string | null; name: string; sql: string; description?: string }) =>
-      apiJson<SavedQuery>(`/ws/${ws}/sqllab/queries/${id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+    mutationFn: async ({ id, ...body }: { id: string; database_id: string | null; name: string; sql: string; description?: string }) =>
+      (await sqllabUpdate(ws, id, body)).data as unknown as SavedQuery,
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.saved(ws) }),
   });
 }
 export function useDeleteSavedQuery(ws: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => apiFetch(`/ws/${ws}/sqllab/queries/${id}`, { method: "DELETE" }),
+    mutationFn: (id: string) => sqllabRemove(ws, id),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.saved(ws) }),
   });
 }
@@ -100,19 +131,19 @@ export function useDeleteSavedQuery(ws: string) {
 const SCHEMA_STALE = 5 * 60 * 1000; // 5 min (schema cache)
 export function useCatalogs(ws: string, db: string | null) {
   return useQuery<string[]>({ queryKey: qk.schema(ws, db ?? "", "catalogs"), enabled: !!db, staleTime: SCHEMA_STALE,
-    queryFn: () => apiJson<string[]>(`/ws/${ws}/sqllab/databases/${db}/catalogs`) });
+    queryFn: async () => (await sqllabCatalogs(ws, db!)).data as unknown as string[] });
 }
 export function useSchemas(ws: string, db: string | null, catalog: string) {
   return useQuery<string[]>({ queryKey: qk.schema(ws, db ?? "", "schemas", catalog), enabled: !!db, staleTime: SCHEMA_STALE,
-    queryFn: () => apiJson<string[]>(`/ws/${ws}/sqllab/databases/${db}/schemas?catalog=${encodeURIComponent(catalog)}`) });
+    queryFn: async () => (await sqllabSchemas(ws, db!, { catalog })).data as unknown as string[] });
 }
 export function useTables(ws: string, db: string | null, catalog: string, schema: string) {
   return useQuery<string[]>({ queryKey: qk.schema(ws, db ?? "", "tables", catalog, schema), enabled: !!db && !!schema, staleTime: SCHEMA_STALE,
-    queryFn: () => apiJson<string[]>(`/ws/${ws}/sqllab/databases/${db}/tables?catalog=${encodeURIComponent(catalog)}&schema=${encodeURIComponent(schema)}`) });
+    queryFn: async () => (await sqllabTables(ws, db!, { catalog, schema })).data as unknown as string[] });
 }
 export function useColumns(ws: string, db: string | null, catalog: string, schema: string, table: string, enabled: boolean) {
   return useQuery<SchemaColumn[]>({ queryKey: qk.schema(ws, db ?? "", "columns", catalog, schema, table), enabled: !!db && enabled, staleTime: SCHEMA_STALE,
-    queryFn: () => apiJson<SchemaColumn[]>(`/ws/${ws}/sqllab/databases/${db}/columns?catalog=${encodeURIComponent(catalog)}&schema=${encodeURIComponent(schema)}&table=${encodeURIComponent(table)}`) });
+    queryFn: async () => (await sqllabColumns(ws, db!, { catalog, schema, table })).data as unknown as SchemaColumn[] });
 }
 export function useRefreshSchema(ws: string) {
   const qc = useQueryClient();
