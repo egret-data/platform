@@ -114,6 +114,7 @@ pub fn openapi_doc() -> utoipa::openapi::OpenApi {
 
     let mut doc = BaseApiDoc::openapi();
     doc.merge(egret_query::openapi());
+    doc.merge(egret_bi::openapi());
     doc.merge(egret_auth::openapi());
     doc.merge(egret_workspace::openapi());
     doc.merge(egret_controlplane::openapi());

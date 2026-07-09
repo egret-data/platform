@@ -30,32 +30,32 @@ pub struct SavedQueryDto {
 }
 
 /// A single column in a DESCRIBE result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SchemaColumn {
     pub name: String,
     #[serde(rename = "type")]
     pub ty: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct FolderDto {
     pub id: String,
     pub name: String,
 }
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateFolder {
     pub name: String,
 }
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RenameFolder {
     pub name: String,
 }
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SetFolder {
     pub folder_id: Option<Uuid>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum CreateSource {
     Physical {
@@ -68,7 +68,7 @@ pub enum CreateSource {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateDataset {
     pub name: String,
     pub database_id: Uuid,
@@ -77,7 +77,7 @@ pub struct CreateDataset {
     pub source: CreateSource,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateDataset {
     pub name: String,
     #[serde(default)]
@@ -86,7 +86,7 @@ pub struct UpdateDataset {
     pub sql: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DatasetColumnDto {
     pub column_name: String,
     pub data_type: String,
@@ -99,12 +99,13 @@ pub struct DatasetColumnDto {
     pub is_calculated: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DatasetSummaryDto {
     pub id: String,
     pub name: String,
     pub description: String,
     pub database_id: String,
+    #[schema(value_type = String)]
     pub kind: &'static str,
     pub catalog: Option<String>,
     pub schema: Option<String>,
@@ -116,12 +117,13 @@ pub struct DatasetSummaryDto {
     pub bookmarked: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DatasetDetailDto {
     pub id: String,
     pub name: String,
     pub description: String,
     pub database_id: String,
+    #[schema(value_type = String)]
     pub kind: &'static str,
     pub catalog: Option<String>,
     pub schema: Option<String>,
@@ -132,7 +134,7 @@ pub struct DatasetDetailDto {
     pub metrics: Vec<MetricDto>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct MetricDto {
     pub id: String,
     pub metric_name: String,
@@ -144,7 +146,7 @@ pub struct MetricDto {
     pub ordinal: i32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct MetricBody {
     pub metric_name: String,
     pub expression: String,
@@ -154,7 +156,7 @@ pub struct MetricBody {
     pub description: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AddColumnBody {
     pub column_name: String,
     pub expression: String,
@@ -164,7 +166,7 @@ pub struct AddColumnBody {
     pub description: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateColumnBody {
     #[serde(default)]
     pub verbose_name: Option<String>,
@@ -174,7 +176,7 @@ pub struct UpdateColumnBody {
     pub expression: Option<String>,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct ChartDto {
     pub id: String,
     pub dataset_id: String,
@@ -189,7 +191,7 @@ pub struct ChartDto {
     pub bookmarked: bool,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct CreateChart {
     pub dataset_id: uuid::Uuid,
     pub name: String,
@@ -199,7 +201,7 @@ pub struct CreateChart {
     pub params: serde_json::Value,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct UpdateChart {
     pub dataset_id: uuid::Uuid,
     pub name: String,
@@ -209,7 +211,7 @@ pub struct UpdateChart {
     pub params: serde_json::Value,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct ChartDataResponse {
     pub sql: String,
     pub database_id: String,

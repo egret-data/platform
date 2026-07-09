@@ -21,3 +21,7 @@ uuid.workspace = true
 chrono.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
+# OpenAPI emit (E0·P4b-6): the leaf contract crate carries the `ToSchema` derives
+# for the BI wire DTOs (dataset/chart/folder), mirroring egret-query-api. utoipa
+# is pure (proc-macro + light runtime), so the leaf stays axum/sqlx-free.
+utoipa.workspace = true
