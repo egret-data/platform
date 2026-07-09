@@ -1,5 +1,51 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiFetch, apiJson } from "./client";
+/**
+ * Notebooks API — MIGRATED to the orval-generated client (E0·P4d-2).
+ *
+ * Thin adapter over `./generated/notebooks/notebooks` (+ the kernel
+ * active-executions read from `./generated/kernel/kernel`), following the P4c/
+ * P4d-1 pattern (see `databases.ts` / `datasets.ts`): hooks keep their old
+ * names/signatures so call sites and tests don't churn; reads wrap the generated
+ * query hook (unwrapping orval's `{ status, data, headers }` envelope via
+ * `select`); writes run `useMutation` over the generated fetch fns and
+ * invalidate the GENERATED query keys.
+ *
+ * The domain TS types stay FE-local: the spec models `cell_type` loosely (plain
+ * `string`) and makes several notebook fields optional, so aliasing to the
+ * generated DTOs would widen the `CellType` union / churn call sites. We keep
+ * the hand-written types exactly as before.
+ *
+ * KERNEL: only the REST kernel `active-executions` GET is wired here. The
+ * kernel channels WebSocket + the connect/interrupt/restart REST calls live in
+ * `@/lib/kernel/KernelConnection` — the WS upgrade cannot be expressed by the
+ * generated fetch client, so that connection code stays hand-written (its REST
+ * calls now go through the generated kernel fetch fns; see that file).
+ */
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+
+import { ApiError } from "./client";
+import {
+  getKernelActiveExecutionsQueryKey,
+  useKernelActiveExecutions,
+} from "./generated/kernel/kernel";
+import {
+  getNotebooksGetOneQueryKey,
+  getNotebooksListQueryKey,
+  getNotebooksRuntimeQueryKey,
+  notebooksAddCell,
+  notebooksBookmarkAdd,
+  notebooksBookmarkRemove,
+  notebooksCreate,
+  notebooksDeleteCell,
+  notebooksRemove,
+  notebooksReorder,
+  notebooksRestore,
+  notebooksTrash,
+  notebooksUpdate,
+  notebooksUpdateCell,
+  useNotebooksGetOne,
+  useNotebooksList,
+  useNotebooksRuntime,
+} from "./generated/notebooks/notebooks";
 
 export type CellType = "code" | "markdown" | "sql";
 
@@ -30,144 +76,151 @@ export interface NotebookDetail extends NotebookSummary {
   cells: Cell[];
 }
 
+/** Back-compat query-key helpers; delegate to the generated key factories. */
 export const qk = {
-  list: (ws: string) => ["notebooks", ws] as const,
-  detail: (ws: string, id: string) => ["notebooks", ws, id] as const,
+  list: (ws: string) => getNotebooksListQueryKey(ws),
+  detail: (ws: string, id: string) => getNotebooksGetOneQueryKey(ws, id),
 };
-
-const base = (ws: string) => `/ws/${encodeURIComponent(ws)}/notebooks`;
-
-function jsonBody(method: string, body?: unknown): RequestInit {
-  return {
-    method,
-    headers: { "content-type": "application/json" },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  };
-}
 
 export function useNotebooks(ws: string, opts?: { trashed?: boolean }) {
   const trashed = !!opts?.trashed;
-  return useQuery<NotebookSummary[]>({
-    queryKey: [...qk.list(ws), { trashed }],
-    queryFn: () => apiJson<NotebookSummary[]>(`${base(ws)}${trashed ? "?trashed=true" : ""}`),
-  });
+  return useNotebooksList<NotebookSummary[], ApiError>(
+    ws,
+    trashed ? { trashed: true } : undefined,
+    { query: { select: (r) => r.data as NotebookSummary[] } },
+  );
 }
 
 // POST /{id}/trash → 204
 export function useTrashNotebook(ws: string) {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) => apiFetch(`${base(ws)}/${id}/trash`, { method: "POST" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.list(ws) }),
+  return useMutation<void, ApiError, string>({
+    mutationFn: async (id) => {
+      await notebooksTrash(ws, id);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: getNotebooksListQueryKey(ws) }),
   });
 }
 
 // POST /{id}/restore → 204
 export function useRestoreNotebook(ws: string) {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) => apiFetch(`${base(ws)}/${id}/restore`, { method: "POST" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.list(ws) }),
+  return useMutation<void, ApiError, string>({
+    mutationFn: async (id) => {
+      await notebooksRestore(ws, id);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: getNotebooksListQueryKey(ws) }),
   });
 }
 
 // POST /{id}/bookmark → 204
 export function useAddNotebookBookmark(ws: string) {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) => apiFetch(`${base(ws)}/${id}/bookmark`, { method: "POST" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.list(ws) }),
+  return useMutation<void, ApiError, string>({
+    mutationFn: async (id) => {
+      await notebooksBookmarkAdd(ws, id);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: getNotebooksListQueryKey(ws) }),
   });
 }
 
 // DELETE /{id}/bookmark → 204
 export function useRemoveNotebookBookmark(ws: string) {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) => apiFetch(`${base(ws)}/${id}/bookmark`, { method: "DELETE" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.list(ws) }),
+  return useMutation<void, ApiError, string>({
+    mutationFn: async (id) => {
+      await notebooksBookmarkRemove(ws, id);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: getNotebooksListQueryKey(ws) }),
   });
 }
 
 export function useNotebook(ws: string, id: string | null) {
-  return useQuery<NotebookDetail>({
-    queryKey: id ? qk.detail(ws, id) : ["notebooks", ws, "none"],
-    queryFn: () => apiJson<NotebookDetail>(`${base(ws)}/${id}`),
-    enabled: !!id,
+  return useNotebooksGetOne<NotebookDetail, ApiError>(ws, id ?? "", {
+    query: { enabled: !!id, select: (r) => r.data as NotebookDetail },
   });
 }
 
 export function useCreateNotebook(ws: string) {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (b: { name?: string }) =>
-      apiJson<NotebookDetail>(base(ws), jsonBody("POST", b)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.list(ws) }),
+  return useMutation<NotebookDetail, ApiError, { name?: string }>({
+    mutationFn: async (b) => (await notebooksCreate(ws, b)).data as NotebookDetail,
+    onSuccess: () => qc.invalidateQueries({ queryKey: getNotebooksListQueryKey(ws) }),
   });
 }
 
 export function useUpdateNotebook(ws: string, id: string) {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (
-      b: Partial<Pick<NotebookSummary, "name" | "description" | "is_public">>,
-    ) => apiJson<NotebookDetail>(`${base(ws)}/${id}`, jsonBody("PATCH", b)),
+  return useMutation<
+    NotebookDetail,
+    ApiError,
+    Partial<Pick<NotebookSummary, "name" | "description" | "is_public">>
+  >({
+    mutationFn: async (b) => (await notebooksUpdate(ws, id, b)).data as NotebookDetail,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.detail(ws, id) });
-      qc.invalidateQueries({ queryKey: qk.list(ws) });
+      qc.invalidateQueries({ queryKey: getNotebooksGetOneQueryKey(ws, id) });
+      qc.invalidateQueries({ queryKey: getNotebooksListQueryKey(ws) });
     },
   });
 }
 
-// DELETE notebook → 204, use apiFetch (no body parse)
+// DELETE notebook → 204
 export function useDeleteNotebook(ws: string) {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) => apiFetch(`${base(ws)}/${id}`, { method: "DELETE" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.list(ws) }),
+  return useMutation<void, ApiError, string>({
+    mutationFn: async (id) => {
+      await notebooksRemove(ws, id);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: getNotebooksListQueryKey(ws) }),
   });
 }
 
 // POST cells → 201 with NotebookDetail body
 export function useAddCell(ws: string, id: string) {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (b: { cell_type: CellType; source?: string; cell_order?: number }) =>
-      apiJson<NotebookDetail>(`${base(ws)}/${id}/cells`, jsonBody("POST", b)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.detail(ws, id) }),
+  return useMutation<
+    NotebookDetail,
+    ApiError,
+    { cell_type: CellType; source?: string; cell_order?: number }
+  >({
+    mutationFn: async (b) => (await notebooksAddCell(ws, id, b)).data as NotebookDetail,
+    onSuccess: () => qc.invalidateQueries({ queryKey: getNotebooksGetOneQueryKey(ws, id) }),
   });
 }
 
-// PATCH cell → 204, use apiFetch (no body parse)
+// PATCH cell → 204
 export function useUpdateCell(ws: string, id: string) {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (a: { cid: string; cell_type?: CellType; source?: string }) =>
-      apiFetch(
-        `${base(ws)}/${id}/cells/${a.cid}`,
-        jsonBody("PATCH", { cell_type: a.cell_type, source: a.source }),
-      ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.detail(ws, id) }),
+  return useMutation<void, ApiError, { cid: string; cell_type?: CellType; source?: string }>({
+    mutationFn: async (a) => {
+      await notebooksUpdateCell(ws, id, a.cid, {
+        cell_type: a.cell_type,
+        source: a.source,
+      });
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: getNotebooksGetOneQueryKey(ws, id) }),
   });
 }
 
-// DELETE cell → 204, use apiFetch (no body parse)
+// DELETE cell → 204
 export function useDeleteCell(ws: string, id: string) {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (cid: string) =>
-      apiFetch(`${base(ws)}/${id}/cells/${cid}`, { method: "DELETE" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.detail(ws, id) }),
+  return useMutation<void, ApiError, string>({
+    mutationFn: async (cid) => {
+      await notebooksDeleteCell(ws, id, cid);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: getNotebooksGetOneQueryKey(ws, id) }),
   });
 }
 
-// PUT cells/order → 204, use apiFetch (no body parse)
+// PUT cells/order → 204
 export function useReorderCells(ws: string, id: string) {
   const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (order: string[]) =>
-      apiFetch(`${base(ws)}/${id}/cells/order`, jsonBody("PUT", { order })),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.detail(ws, id) }),
+  return useMutation<void, ApiError, string[]>({
+    mutationFn: async (order) => {
+      await notebooksReorder(ws, id, { order });
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: getNotebooksGetOneQueryKey(ws, id) }),
   });
 }
 
@@ -187,17 +240,21 @@ export interface NotebookRuntime {
 
 // GET /ws/{ws}/notebook-runtime → NotebookRuntime
 export function useNotebookRuntime(ws: string) {
-  return useQuery({
-    queryKey: ["notebook-runtime", ws],
-    queryFn: () => apiJson<NotebookRuntime>(`/ws/${encodeURIComponent(ws)}/notebook-runtime`),
-    staleTime: 60_000,
+  return useNotebooksRuntime<NotebookRuntime, ApiError>(ws, {
+    query: {
+      staleTime: 60_000,
+      queryKey: getNotebooksRuntimeQueryKey(ws),
+      select: (r) => r.data as NotebookRuntime,
+    },
   });
 }
 
 // GET /ws/{ws}/notebooks/{id}/kernel/active-executions → { running: string[] }
 export function useActiveExecutions(ws: string, id: string) {
-  return useQuery({
-    queryKey: ["active-executions", ws, id],
-    queryFn: () => apiJson<{ running: string[] }>(`${base(ws)}/${id}/kernel/active-executions`),
+  return useKernelActiveExecutions<{ running: string[] }, ApiError>(ws, id, {
+    query: {
+      queryKey: getKernelActiveExecutionsQueryKey(ws, id),
+      select: (r) => r.data as { running: string[] },
+    },
   });
 }
