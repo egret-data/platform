@@ -1,4 +1,5 @@
-//! SQL Lab DTOs and Dataset DTOs.
+//! BI domain→wire conversions, `From<Row>` impls, and re-exports of the wire
+//! DTOs (which now live in `egret-analytics-api::bi`).
 //!
 //! The pure-serde wire DTOs now live in the leaf contract crate
 //! `egret-analytics-api` (module `bi`) and are re-exported below so every

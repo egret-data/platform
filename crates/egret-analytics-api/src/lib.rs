@@ -23,7 +23,11 @@ pub mod dto;
 pub mod engine_token;
 pub mod port;
 
-pub use bi::*;
+// The BI wire DTOs stay namespaced under `egret_analytics_api::bi::…` (29 types
+// with generic names like `CreateChart`/`CardInput` — a root glob would pollute
+// the crate root and risk colliding with `dto::*`); `egret-bi` imports them via
+// the `bi` module path. The notebook-docs types below are few and distinctive,
+// so they're re-exported flat for `egret-kernel`/`egret-notebook` ergonomics.
 pub use dto::{CellOutput, EngineOption, NotebookRuntime, NotebookSummary};
 pub use engine_token::{BrokerError, EngineToken, EngineTokenMinter};
 pub use port::NotebookDocsPort;
