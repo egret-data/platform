@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-egret-core.workspace = true
+# `http` feature: reference `egret_core::http::ErrorBody` in the OpenAPI
+# annotations (E0·P4b-2).
+egret-core = { workspace = true, features = ["http"] }
 egret-metastore.workspace = true
 egret-auth.workspace = true
 axum.workspace = true
@@ -17,6 +19,9 @@ uuid.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
+# OpenAPI emit (E0·P4b-2): `#[utoipa::path]` on the me/admin/ws-member routers'
+# handlers + the per-router doc structs merged in `openapi()`.
+utoipa.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
