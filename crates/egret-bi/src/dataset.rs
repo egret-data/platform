@@ -126,7 +126,7 @@ impl DatasetRepo {
 
         let mut tx = self.db.pool.begin().await?;
         let ds = match sqlx::query_as::<_, Dataset>(&format!(
-            "INSERT INTO datasets (workspace_id, database_id, name, description, catalog, schema_name, table_name, sql, created_by) \
+            "INSERT INTO analytics.datasets (workspace_id, database_id, name, description, catalog, schema_name, table_name, sql, created_by) \
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING {COLS}"
         ))
         .bind(ws)
@@ -156,8 +156,8 @@ impl DatasetRepo {
     pub async fn list(&self, ws: Uuid) -> Result<Vec<(Dataset, i64)>, BiError> {
         let rows = sqlx::query_as::<_, DatasetWithCount>(&format!(
             "SELECT {COLS}, \
-             (SELECT count(*) FROM dataset_columns c WHERE c.dataset_id = datasets.id) AS column_count \
-             FROM datasets WHERE workspace_id = $1 ORDER BY updated_at DESC"
+             (SELECT count(*) FROM analytics.dataset_columns c WHERE c.dataset_id = datasets.id) AS column_count \
+             FROM analytics.datasets WHERE workspace_id = $1 ORDER BY updated_at DESC"
         ))
         .bind(ws)
         .fetch_all(&self.db.pool)
@@ -181,9 +181,9 @@ impl DatasetRepo {
         };
         let sql = format!(
             "SELECT {COLS}, \
-             (SELECT count(*) FROM dataset_columns c WHERE c.dataset_id = datasets.id) AS column_count, \
-             EXISTS (SELECT 1 FROM bookmarks b WHERE b.user_id = $2 AND b.entity_type='dataset' AND b.entity_id = datasets.id) AS bookmarked \
-             FROM datasets WHERE workspace_id = $1 AND {pred} ORDER BY updated_at DESC"
+             (SELECT count(*) FROM analytics.dataset_columns c WHERE c.dataset_id = datasets.id) AS column_count, \
+             EXISTS (SELECT 1 FROM analytics.bookmarks b WHERE b.user_id = $2 AND b.entity_type='dataset' AND b.entity_id = datasets.id) AS bookmarked \
+             FROM analytics.datasets WHERE workspace_id = $1 AND {pred} ORDER BY updated_at DESC"
         );
         let rows = sqlx::query_as::<_, DatasetWithBm>(&sql)
             .bind(ws)
@@ -199,9 +199,9 @@ impl DatasetRepo {
     /// Soft-delete (trashed=true → deleted_at=now()) or restore (false → NULL).
     pub async fn set_trashed(&self, id: Uuid, trashed: bool) -> Result<(), BiError> {
         let sql = if trashed {
-            "UPDATE datasets SET deleted_at = now() WHERE id = $1"
+            "UPDATE analytics.datasets SET deleted_at = now() WHERE id = $1"
         } else {
-            "UPDATE datasets SET deleted_at = NULL WHERE id = $1"
+            "UPDATE analytics.datasets SET deleted_at = NULL WHERE id = $1"
         };
         sqlx::query(sql).bind(id).execute(&self.db.pool).await?;
         Ok(())
@@ -209,7 +209,7 @@ impl DatasetRepo {
 
     pub async fn add_bookmark(&self, user: Uuid, entity_id: Uuid) -> Result<(), BiError> {
         sqlx::query(
-            "INSERT INTO bookmarks (user_id, entity_type, entity_id) VALUES ($1,'dataset',$2) \
+            "INSERT INTO analytics.bookmarks (user_id, entity_type, entity_id) VALUES ($1,'dataset',$2) \
              ON CONFLICT (user_id, entity_type, entity_id) DO NOTHING",
         )
         .bind(user)
@@ -221,7 +221,7 @@ impl DatasetRepo {
 
     pub async fn remove_bookmark(&self, user: Uuid, entity_id: Uuid) -> Result<(), BiError> {
         sqlx::query(
-            "DELETE FROM bookmarks WHERE user_id=$1 AND entity_type='dataset' AND entity_id=$2",
+            "DELETE FROM analytics.bookmarks WHERE user_id=$1 AND entity_type='dataset' AND entity_id=$2",
         )
         .bind(user)
         .bind(entity_id)
@@ -231,18 +231,18 @@ impl DatasetRepo {
     }
 
     pub async fn get(&self, id: Uuid) -> Result<Option<Dataset>, BiError> {
-        Ok(
-            sqlx::query_as::<_, Dataset>(&format!("SELECT {COLS} FROM datasets WHERE id = $1"))
-                .bind(id)
-                .fetch_optional(&self.db.pool)
-                .await?,
-        )
+        Ok(sqlx::query_as::<_, Dataset>(&format!(
+            "SELECT {COLS} FROM analytics.datasets WHERE id = $1"
+        ))
+        .bind(id)
+        .fetch_optional(&self.db.pool)
+        .await?)
     }
 
     pub async fn columns(&self, dataset_id: Uuid) -> Result<Vec<DatasetColumn>, BiError> {
         Ok(sqlx::query_as::<_, DatasetColumn>(
             "SELECT column_name, data_type, type_generic, is_temporal, ordinal, expression, verbose_name, description \
-             FROM dataset_columns WHERE dataset_id = $1 ORDER BY ordinal",
+             FROM analytics.dataset_columns WHERE dataset_id = $1 ORDER BY ordinal",
         )
         .bind(dataset_id)
         .fetch_all(&self.db.pool)
@@ -258,7 +258,7 @@ impl DatasetRepo {
         sql: Option<&str>,
     ) -> Result<Dataset, BiError> {
         let ds = sqlx::query_as::<_, Dataset>(&format!(
-            "UPDATE datasets SET name=$2, description=$3, \
+            "UPDATE analytics.datasets SET name=$2, description=$3, \
              sql = CASE WHEN sql IS NULL THEN sql ELSE COALESCE($4, sql) END, \
              updated_at = now() WHERE id=$1 RETURNING {COLS}"
         ))
@@ -293,7 +293,7 @@ impl DatasetRepo {
 
         for (i, c) in fresh.iter().enumerate() {
             sqlx::query(
-                "INSERT INTO dataset_columns \
+                "INSERT INTO analytics.dataset_columns \
                    (dataset_id, column_name, data_type, type_generic, is_temporal, ordinal, expression, verbose_name, description) \
                  VALUES ($1,$2,$3,$4,$5,$6, NULL, '', '') \
                  ON CONFLICT (dataset_id, column_name) DO UPDATE SET \
@@ -315,7 +315,7 @@ impl DatasetRepo {
 
         let fresh_names: Vec<String> = fresh.iter().map(|c| c.column_name.clone()).collect();
         sqlx::query(
-            "DELETE FROM dataset_columns \
+            "DELETE FROM analytics.dataset_columns \
              WHERE dataset_id = $1 AND expression IS NULL AND column_name <> ALL($2)",
         )
         .bind(id)
@@ -327,17 +327,17 @@ impl DatasetRepo {
         // column (with a 0-based rank); `phys` is a single scalar count — the cross-join just
         // attaches that scalar to each `sub` row (not a Cartesian blow-up).
         sqlx::query(
-            "UPDATE dataset_columns AS c SET ordinal = sub.rn + phys.n \
+            "UPDATE analytics.dataset_columns AS c SET ordinal = sub.rn + phys.n \
              FROM (SELECT id, (row_number() OVER (ORDER BY ordinal)) - 1 AS rn \
-                   FROM dataset_columns WHERE dataset_id = $1 AND expression IS NOT NULL) sub, \
-                  (SELECT count(*) AS n FROM dataset_columns WHERE dataset_id = $1 AND expression IS NULL) phys \
+                   FROM analytics.dataset_columns WHERE dataset_id = $1 AND expression IS NOT NULL) sub, \
+                  (SELECT count(*) AS n FROM analytics.dataset_columns WHERE dataset_id = $1 AND expression IS NULL) phys \
              WHERE c.id = sub.id",
         )
         .bind(id)
         .execute(&mut *tx)
         .await?;
 
-        sqlx::query("UPDATE datasets SET updated_at = now() WHERE id = $1")
+        sqlx::query("UPDATE analytics.datasets SET updated_at = now() WHERE id = $1")
             .bind(id)
             .execute(&mut *tx)
             .await?;
@@ -346,7 +346,7 @@ impl DatasetRepo {
     }
 
     pub async fn delete(&self, id: Uuid) -> Result<(), BiError> {
-        sqlx::query("DELETE FROM datasets WHERE id = $1")
+        sqlx::query("DELETE FROM analytics.datasets WHERE id = $1")
             .bind(id)
             .execute(&self.db.pool)
             .await?;
@@ -354,7 +354,7 @@ impl DatasetRepo {
     }
 
     pub async fn set_folder(&self, id: Uuid, folder_id: Option<Uuid>) -> Result<(), BiError> {
-        sqlx::query("UPDATE datasets SET folder_id=$2 WHERE id=$1")
+        sqlx::query("UPDATE analytics.datasets SET folder_id=$2 WHERE id=$1")
             .bind(id)
             .bind(folder_id)
             .execute(&self.db.pool)
@@ -364,7 +364,7 @@ impl DatasetRepo {
 
     pub async fn owner(&self, id: Uuid) -> Result<Option<Uuid>, BiError> {
         Ok(
-            sqlx::query_scalar("SELECT created_by FROM datasets WHERE id = $1")
+            sqlx::query_scalar("SELECT created_by FROM analytics.datasets WHERE id = $1")
                 .bind(id)
                 .fetch_optional(&self.db.pool)
                 .await?
@@ -375,7 +375,7 @@ impl DatasetRepo {
     pub async fn metrics(&self, dataset_id: Uuid) -> Result<Vec<Metric>, BiError> {
         Ok(sqlx::query_as::<_, Metric>(
             "SELECT id, metric_name, expression, data_type, type_generic, verbose_name, description, ordinal \
-             FROM dataset_metrics WHERE dataset_id = $1 ORDER BY ordinal",
+             FROM analytics.dataset_metrics WHERE dataset_id = $1 ORDER BY ordinal",
         )
         .bind(dataset_id)
         .fetch_all(&self.db.pool)
@@ -394,10 +394,10 @@ impl DatasetRepo {
         description: &str,
     ) -> Result<(), BiError> {
         let r = sqlx::query(
-            "INSERT INTO dataset_metrics \
+            "INSERT INTO analytics.dataset_metrics \
                (dataset_id, metric_name, expression, data_type, type_generic, verbose_name, description, ordinal) \
              VALUES ($1,$2,$3,$4,$5,$6,$7, \
-               (SELECT COALESCE(MAX(ordinal),-1)+1 FROM dataset_metrics WHERE dataset_id=$1))",
+               (SELECT COALESCE(MAX(ordinal),-1)+1 FROM analytics.dataset_metrics WHERE dataset_id=$1))",
         )
         .bind(dataset_id)
         .bind(name)
@@ -423,7 +423,7 @@ impl DatasetRepo {
         description: &str,
     ) -> Result<(), BiError> {
         let r = sqlx::query(
-            "UPDATE dataset_metrics SET metric_name=$2, expression=$3, data_type=$4, \
+            "UPDATE analytics.dataset_metrics SET metric_name=$2, expression=$3, data_type=$4, \
                type_generic=$5, verbose_name=$6, description=$7 WHERE id=$1",
         )
         .bind(metric_id)
@@ -439,7 +439,7 @@ impl DatasetRepo {
     }
 
     pub async fn delete_metric(&self, metric_id: Uuid) -> Result<(), BiError> {
-        sqlx::query("DELETE FROM dataset_metrics WHERE id=$1")
+        sqlx::query("DELETE FROM analytics.dataset_metrics WHERE id=$1")
             .bind(metric_id)
             .execute(&self.db.pool)
             .await?;
@@ -448,7 +448,7 @@ impl DatasetRepo {
 
     pub async fn metric_dataset(&self, metric_id: Uuid) -> Result<Option<Uuid>, BiError> {
         Ok(
-            sqlx::query_scalar("SELECT dataset_id FROM dataset_metrics WHERE id=$1")
+            sqlx::query_scalar("SELECT dataset_id FROM analytics.dataset_metrics WHERE id=$1")
                 .bind(metric_id)
                 .fetch_optional(&self.db.pool)
                 .await?,
@@ -468,10 +468,10 @@ impl DatasetRepo {
         description: &str,
     ) -> Result<(), BiError> {
         let r = sqlx::query(
-            "INSERT INTO dataset_columns \
+            "INSERT INTO analytics.dataset_columns \
                (dataset_id, column_name, data_type, type_generic, is_temporal, ordinal, expression, verbose_name, description) \
              VALUES ($1,$2,$3,$4,$5, \
-               (SELECT COALESCE(MAX(ordinal),-1)+1 FROM dataset_columns WHERE dataset_id=$1), $6,$7,$8)",
+               (SELECT COALESCE(MAX(ordinal),-1)+1 FROM analytics.dataset_columns WHERE dataset_id=$1), $6,$7,$8)",
         )
         .bind(dataset_id)
         .bind(name)
@@ -497,7 +497,7 @@ impl DatasetRepo {
         // Both updates in one tx so a metadata+expression edit applies atomically.
         let mut tx = self.db.pool.begin().await?;
         sqlx::query(
-            "UPDATE dataset_columns SET \
+            "UPDATE analytics.dataset_columns SET \
                verbose_name = COALESCE($3, verbose_name), \
                description  = COALESCE($4, description) \
              WHERE dataset_id=$1 AND column_name=$2",
@@ -511,7 +511,7 @@ impl DatasetRepo {
 
         if let Some((expr, dt, tg, temporal)) = expr_update {
             sqlx::query(
-                "UPDATE dataset_columns SET expression=$3, data_type=$4, type_generic=$5, is_temporal=$6 \
+                "UPDATE analytics.dataset_columns SET expression=$3, data_type=$4, type_generic=$5, is_temporal=$6 \
                  WHERE dataset_id=$1 AND column_name=$2 AND expression IS NOT NULL",
             )
             .bind(dataset_id)
@@ -533,7 +533,7 @@ impl DatasetRepo {
         column_name: &str,
     ) -> Result<(), BiError> {
         let n = sqlx::query(
-            "DELETE FROM dataset_columns WHERE dataset_id=$1 AND column_name=$2 AND expression IS NOT NULL",
+            "DELETE FROM analytics.dataset_columns WHERE dataset_id=$1 AND column_name=$2 AND expression IS NOT NULL",
         )
         .bind(dataset_id)
         .bind(column_name)
@@ -554,7 +554,7 @@ impl DatasetRepo {
         column_name: &str,
     ) -> Result<Option<bool>, BiError> {
         Ok(sqlx::query_scalar::<_, bool>(
-            "SELECT (expression IS NOT NULL) FROM dataset_columns WHERE dataset_id=$1 AND column_name=$2",
+            "SELECT (expression IS NOT NULL) FROM analytics.dataset_columns WHERE dataset_id=$1 AND column_name=$2",
         )
         .bind(dataset_id)
         .bind(column_name)
@@ -570,7 +570,7 @@ async fn insert_columns(
 ) -> Result<(), BiError> {
     for (i, c) in columns.iter().enumerate() {
         sqlx::query(
-            "INSERT INTO dataset_columns (dataset_id, column_name, data_type, type_generic, is_temporal, ordinal, expression, verbose_name, description) \
+            "INSERT INTO analytics.dataset_columns (dataset_id, column_name, data_type, type_generic, is_temporal, ordinal, expression, verbose_name, description) \
              VALUES ($1,$2,$3,$4,$5,$6, NULL, '', '')",
         )
         .bind(dataset_id)

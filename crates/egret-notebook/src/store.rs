@@ -121,7 +121,7 @@ impl NotebookStore {
     ) -> Result<Uuid, NotebookApiError> {
         let mut tx = self.db.pool.begin().await?;
         let id: Uuid = sqlx::query_scalar(
-            "INSERT INTO notebooks (workspace_id, owner_user_id, name) \
+            "INSERT INTO analytics.notebooks (workspace_id, owner_user_id, name) \
              VALUES ($1,$2,$3) RETURNING id",
         )
         .bind(ws)
@@ -132,7 +132,7 @@ impl NotebookStore {
 
         // Seed one empty code cell (spec requirement).
         sqlx::query(
-            "INSERT INTO notebook_cells (notebook_id, cell_type, source, cell_order) \
+            "INSERT INTO analytics.notebook_cells (notebook_id, cell_type, source, cell_order) \
              VALUES ($1,'code','',0)",
         )
         .bind(id)
@@ -159,9 +159,9 @@ impl NotebookStore {
         };
         let rows = sqlx::query_as::<_, NotebookListRow>(&format!(
             "SELECT {NB_COLS}, \
-             EXISTS (SELECT 1 FROM bookmarks b WHERE b.user_id=$2 \
+             EXISTS (SELECT 1 FROM analytics.bookmarks b WHERE b.user_id=$2 \
                  AND b.entity_type='notebook' AND b.entity_id=notebooks.id) AS bookmarked \
-             FROM notebooks \
+             FROM analytics.notebooks \
              WHERE workspace_id=$1 AND (owner_user_id=$2 OR is_public) AND {pred} \
              ORDER BY updated_at DESC"
         ))
@@ -182,7 +182,7 @@ impl NotebookStore {
         id: Uuid,
     ) -> Result<Option<(NotebookSummary, Uuid)>, NotebookApiError> {
         let row = sqlx::query_as::<_, NotebookRow>(&format!(
-            "SELECT {NB_COLS} FROM notebooks WHERE id=$1"
+            "SELECT {NB_COLS} FROM analytics.notebooks WHERE id=$1"
         ))
         .bind(id)
         .fetch_optional(&self.db.pool)
@@ -204,7 +204,7 @@ impl NotebookStore {
         let cells = sqlx::query_as::<_, CellRow>(
             "SELECT id, cell_type, source, cell_order, execution_count, \
              last_output, last_execution_time_ms \
-             FROM notebook_cells \
+             FROM analytics.notebook_cells \
              WHERE notebook_id=$1 \
              ORDER BY cell_order ASC, created_at ASC",
         )
@@ -220,7 +220,7 @@ impl NotebookStore {
     /// Partial update: only non-None fields are changed. Sets `updated_at=now()`.
     pub async fn update(&self, id: Uuid, p: &UpdateNotebook) -> Result<(), NotebookApiError> {
         sqlx::query(
-            "UPDATE notebooks SET \
+            "UPDATE analytics.notebooks SET \
              name        = COALESCE($2, name), \
              description = COALESCE($3, description), \
              is_public   = COALESCE($4, is_public), \
@@ -240,11 +240,13 @@ impl NotebookStore {
     /// bookmark rows have no FK on entity_id, so purge them in the same tx.
     pub async fn delete(&self, id: Uuid) -> Result<(), NotebookApiError> {
         let mut tx = self.db.pool.begin().await?;
-        sqlx::query("DELETE FROM bookmarks WHERE entity_type='notebook' AND entity_id=$1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM notebooks WHERE id=$1")
+        sqlx::query(
+            "DELETE FROM analytics.bookmarks WHERE entity_type='notebook' AND entity_id=$1",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM analytics.notebooks WHERE id=$1")
             .bind(id)
             .execute(&mut *tx)
             .await?;
@@ -254,16 +256,18 @@ impl NotebookStore {
 
     /// Soft-delete: move the notebook to the trash bin.
     pub async fn trash(&self, id: Uuid) -> Result<(), NotebookApiError> {
-        sqlx::query("UPDATE notebooks SET deleted_at=now(), updated_at=now() WHERE id=$1")
-            .bind(id)
-            .execute(&self.db.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE analytics.notebooks SET deleted_at=now(), updated_at=now() WHERE id=$1",
+        )
+        .bind(id)
+        .execute(&self.db.pool)
+        .await?;
         Ok(())
     }
 
     /// Restore a soft-deleted notebook from the trash bin.
     pub async fn restore(&self, id: Uuid) -> Result<(), NotebookApiError> {
-        sqlx::query("UPDATE notebooks SET deleted_at=NULL, updated_at=now() WHERE id=$1")
+        sqlx::query("UPDATE analytics.notebooks SET deleted_at=NULL, updated_at=now() WHERE id=$1")
             .bind(id)
             .execute(&self.db.pool)
             .await?;
@@ -276,7 +280,7 @@ impl NotebookStore {
         id: Uuid,
         folder_id: Option<Uuid>,
     ) -> Result<(), NotebookApiError> {
-        sqlx::query("UPDATE notebooks SET folder_id=$2 WHERE id=$1")
+        sqlx::query("UPDATE analytics.notebooks SET folder_id=$2 WHERE id=$1")
             .bind(id)
             .bind(folder_id)
             .execute(&self.db.pool)
@@ -291,7 +295,7 @@ impl NotebookStore {
         folder_id: Uuid,
     ) -> Result<Option<(Uuid, String)>, NotebookApiError> {
         Ok(sqlx::query_as::<_, (Uuid, String)>(
-            "SELECT workspace_id, entity_type FROM folders WHERE id=$1",
+            "SELECT workspace_id, entity_type FROM analytics.folders WHERE id=$1",
         )
         .bind(folder_id)
         .fetch_optional(&self.db.pool)
@@ -301,7 +305,7 @@ impl NotebookStore {
     /// Per-user bookmark on a notebook (idempotent).
     pub async fn add_bookmark(&self, user: Uuid, id: Uuid) -> Result<(), NotebookApiError> {
         sqlx::query(
-            "INSERT INTO bookmarks (user_id, entity_type, entity_id) VALUES ($1,'notebook',$2) \
+            "INSERT INTO analytics.bookmarks (user_id, entity_type, entity_id) VALUES ($1,'notebook',$2) \
              ON CONFLICT (user_id, entity_type, entity_id) DO NOTHING",
         )
         .bind(user)
@@ -314,7 +318,7 @@ impl NotebookStore {
     /// Remove a per-user bookmark on a notebook (idempotent).
     pub async fn remove_bookmark(&self, user: Uuid, id: Uuid) -> Result<(), NotebookApiError> {
         sqlx::query(
-            "DELETE FROM bookmarks WHERE user_id=$1 AND entity_type='notebook' AND entity_id=$2",
+            "DELETE FROM analytics.bookmarks WHERE user_id=$1 AND entity_type='notebook' AND entity_id=$2",
         )
         .bind(user)
         .bind(id)
@@ -332,7 +336,7 @@ impl NotebookStore {
         order: i32,
     ) -> Result<Uuid, NotebookApiError> {
         let id = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO notebook_cells (notebook_id, cell_type, source, cell_order) \
+            "INSERT INTO analytics.notebook_cells (notebook_id, cell_type, source, cell_order) \
              VALUES ($1,$2,$3,$4) RETURNING id",
         )
         .bind(nb)
@@ -355,7 +359,7 @@ impl NotebookStore {
         p: &UpdateCell,
     ) -> Result<(), NotebookApiError> {
         let result = sqlx::query(
-            "UPDATE notebook_cells SET \
+            "UPDATE analytics.notebook_cells SET \
              cell_type  = COALESCE($3, cell_type), \
              source     = COALESCE($4, source), \
              updated_at = now() \
@@ -390,7 +394,7 @@ impl NotebookStore {
         let json = serde_json::to_value(&capped)
             .map_err(|e| NotebookApiError::from(egret_core::Error::Internal(anyhow::anyhow!(e))))?;
         sqlx::query(
-            "UPDATE notebook_cells SET \
+            "UPDATE analytics.notebook_cells SET \
              last_output = $3, execution_count = $4, last_execution_time_ms = $5, \
              updated_at = now() \
              WHERE id=$1 AND notebook_id=$2",
@@ -408,11 +412,12 @@ impl NotebookStore {
     /// Delete a cell. Includes `AND notebook_id=$2` (cross-notebook IDOR defense);
     /// a row that doesn't belong to `nb` matches nothing → `NotFound` (404).
     pub async fn delete_cell(&self, nb: Uuid, cid: Uuid) -> Result<(), NotebookApiError> {
-        let result = sqlx::query("DELETE FROM notebook_cells WHERE id=$1 AND notebook_id=$2")
-            .bind(cid)
-            .bind(nb)
-            .execute(&self.db.pool)
-            .await?;
+        let result =
+            sqlx::query("DELETE FROM analytics.notebook_cells WHERE id=$1 AND notebook_id=$2")
+                .bind(cid)
+                .bind(nb)
+                .execute(&self.db.pool)
+                .await?;
         if result.rows_affected() == 0 {
             return Err(NotebookApiError::from(egret_core::Error::NotFound(
                 "cell".into(),
@@ -428,7 +433,7 @@ impl NotebookStore {
         let mut tx = self.db.pool.begin().await?;
         for (i, cid) in order.iter().enumerate() {
             sqlx::query(
-                "UPDATE notebook_cells SET cell_order=$1, updated_at=now() \
+                "UPDATE analytics.notebook_cells SET cell_order=$1, updated_at=now() \
                  WHERE id=$2 AND notebook_id=$3",
             )
             .bind(i as i32)
@@ -443,7 +448,7 @@ impl NotebookStore {
     }
 
     async fn touch(&self, nb: Uuid) -> Result<(), NotebookApiError> {
-        sqlx::query("UPDATE notebooks SET updated_at=now() WHERE id=$1")
+        sqlx::query("UPDATE analytics.notebooks SET updated_at=now() WHERE id=$1")
             .bind(nb)
             .execute(&self.db.pool)
             .await?;
@@ -468,7 +473,7 @@ impl NotebookStore {
             "SELECT d.id, d.name, d.engine, \
              (nea.database_id IS NOT NULL) AS enabled \
              FROM query.databases d \
-             LEFT JOIN notebook_engine_access nea \
+             LEFT JOIN analytics.notebook_engine_access nea \
                  ON nea.database_id = d.id AND nea.workspace_id = $1 \
              WHERE d.workspace_id = $1 \
              ORDER BY d.name",
@@ -519,13 +524,13 @@ impl NotebookStore {
             }
         }
         let mut tx = self.db.pool.begin().await?;
-        sqlx::query("DELETE FROM notebook_engine_access WHERE workspace_id = $1")
+        sqlx::query("DELETE FROM analytics.notebook_engine_access WHERE workspace_id = $1")
             .bind(ws)
             .execute(&mut *tx)
             .await?;
         for &db_id in engine_ids {
             sqlx::query(
-                "INSERT INTO notebook_engine_access (workspace_id, database_id) VALUES ($1, $2)",
+                "INSERT INTO analytics.notebook_engine_access (workspace_id, database_id) VALUES ($1, $2)",
             )
             .bind(ws)
             .bind(db_id)
@@ -567,13 +572,13 @@ impl NotebookStore {
 
         // ── One transaction: replace the set atomically ──────────────────────
         let mut tx = self.db.pool.begin().await?;
-        sqlx::query("DELETE FROM notebook_engine_access WHERE workspace_id = $1")
+        sqlx::query("DELETE FROM analytics.notebook_engine_access WHERE workspace_id = $1")
             .bind(ws)
             .execute(&mut *tx)
             .await?;
         for &db_id in engine_ids {
             sqlx::query(
-                "INSERT INTO notebook_engine_access (workspace_id, database_id) VALUES ($1, $2)",
+                "INSERT INTO analytics.notebook_engine_access (workspace_id, database_id) VALUES ($1, $2)",
             )
             .bind(ws)
             .bind(db_id)
@@ -727,7 +732,7 @@ mod tests {
         let id = store.create(ws, alice, "nb").await.unwrap();
 
         let fid: Uuid = sqlx::query_scalar(
-            "INSERT INTO folders (workspace_id, entity_type, name, created_by) \
+            "INSERT INTO analytics.folders (workspace_id, entity_type, name, created_by) \
              VALUES ($1,'notebook','F',$2) RETURNING id",
         )
         .bind(ws)
@@ -1010,7 +1015,7 @@ mod tests {
             .unwrap();
         let (lo, ec, ms): (Option<serde_json::Value>, Option<i32>, Option<i32>) = sqlx::query_as(
             "SELECT last_output, execution_count, last_execution_time_ms \
-             FROM notebook_cells WHERE id=$1",
+             FROM analytics.notebook_cells WHERE id=$1",
         )
         .bind(cid)
         .fetch_one(&db.pool)

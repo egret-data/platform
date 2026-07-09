@@ -836,7 +836,7 @@ async fn bookmark_is_per_user_and_allowed_on_public(pool: sqlx::PgPool) {
 /// Create a folder of `entity_type` under workspace `ws_id` directly in the DB.
 async fn create_folder(db: &Db, ws_id: WorkspaceId, entity_type: &str) -> Uuid {
     sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO folders (workspace_id, entity_type, name) VALUES ($1,$2,$3) RETURNING id",
+        "INSERT INTO analytics.folders (workspace_id, entity_type, name) VALUES ($1,$2,$3) RETURNING id",
     )
     .bind(ws_id.0)
     .bind(entity_type)
