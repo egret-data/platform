@@ -7,7 +7,7 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "gen:api": "orval",
+    "gen:api": "orval && node scripts/encode-path-params.mjs",
     "lint": "eslint .",
     "test:e2e": "playwright test"
   },

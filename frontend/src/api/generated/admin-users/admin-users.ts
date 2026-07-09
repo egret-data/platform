@@ -223,7 +223,7 @@ export const getAdminUsersGetUserUrl = (id: string,) => {
 
 
 
-  return `/api/admin/users/${id}`
+  return `/api/admin/users/${encodeURIComponent(id)}`
 }
 
 export const adminUsersGetUser = async (id: string, options?: RequestInit): Promise<adminUsersGetUserResponse> => {
@@ -243,7 +243,7 @@ export const adminUsersGetUser = async (id: string, options?: RequestInit): Prom
 
 export const getAdminUsersGetUserQueryKey = (id: string,) => {
     return [
-    `/api/admin/users/${id}`
+    `/api/admin/users/${encodeURIComponent(id)}`
     ] as const;
     }
 
@@ -346,7 +346,7 @@ export const getAdminUsersSetPlatformRolesUrl = (id: string,) => {
 
 
 
-  return `/api/admin/users/${id}/platform-roles`
+  return `/api/admin/users/${encodeURIComponent(id)}/platform-roles`
 }
 
 export const adminUsersSetPlatformRoles = async (id: string,

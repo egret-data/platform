@@ -89,7 +89,7 @@ export const getDatabasesListUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/databases`
+  return `/api/ws/${encodeURIComponent(workspace)}/databases`
 }
 
 export const databasesList = async (workspace: string, options?: RequestInit): Promise<databasesListResponse> => {
@@ -109,7 +109,7 @@ export const databasesList = async (workspace: string, options?: RequestInit): P
 
 export const getDatabasesListQueryKey = (workspace: string,) => {
     return [
-    `/api/ws/${workspace}/databases`
+    `/api/ws/${encodeURIComponent(workspace)}/databases`
     ] as const;
     }
 
@@ -217,7 +217,7 @@ export const getDatabasesCreateUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/databases`
+  return `/api/ws/${encodeURIComponent(workspace)}/databases`
 }
 
 export const databasesCreate = async (workspace: string,
@@ -316,7 +316,7 @@ export const getDatabasesTestUnsavedUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/databases/test`
+  return `/api/ws/${encodeURIComponent(workspace)}/databases/test`
 }
 
 export const databasesTestUnsaved = async (workspace: string,
@@ -416,7 +416,7 @@ export const getDatabasesDetailUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/databases/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/databases/${encodeURIComponent(id)}`
 }
 
 export const databasesDetail = async (workspace: string,
@@ -438,7 +438,7 @@ export const databasesDetail = async (workspace: string,
 export const getDatabasesDetailQueryKey = (workspace: string,
     id: string,) => {
     return [
-    `/api/ws/${workspace}/databases/${id}`
+    `/api/ws/${encodeURIComponent(workspace)}/databases/${encodeURIComponent(id)}`
     ] as const;
     }
 
@@ -557,7 +557,7 @@ export const getDatabasesUpdateUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/databases/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/databases/${encodeURIComponent(id)}`
 }
 
 export const databasesUpdate = async (workspace: string,
@@ -658,7 +658,7 @@ export const getDatabasesRemoveUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/databases/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/databases/${encodeURIComponent(id)}`
 }
 
 export const databasesRemove = async (workspace: string,
@@ -758,7 +758,7 @@ export const getDatabasesTestSavedUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/databases/${id}/test`
+  return `/api/ws/${encodeURIComponent(workspace)}/databases/${encodeURIComponent(id)}/test`
 }
 
 export const databasesTestSaved = async (workspace: string,

@@ -321,7 +321,7 @@ export const getControlPlaneStorageDetailUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/storage/${id}`
+  return `/api/control-plane/storage/${encodeURIComponent(id)}`
 }
 
 export const controlPlaneStorageDetail = async (id: string, options?: RequestInit): Promise<controlPlaneStorageDetailResponse> => {
@@ -341,7 +341,7 @@ export const controlPlaneStorageDetail = async (id: string, options?: RequestIni
 
 export const getControlPlaneStorageDetailQueryKey = (id: string,) => {
     return [
-    `/api/control-plane/storage/${id}`
+    `/api/control-plane/storage/${encodeURIComponent(id)}`
     ] as const;
     }
 
@@ -459,7 +459,7 @@ export const getControlPlaneStorageUpdateUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/storage/${id}`
+  return `/api/control-plane/storage/${encodeURIComponent(id)}`
 }
 
 export const controlPlaneStorageUpdate = async (id: string,
@@ -558,7 +558,7 @@ export const getControlPlaneStorageRemoveUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/storage/${id}`
+  return `/api/control-plane/storage/${encodeURIComponent(id)}`
 }
 
 export const controlPlaneStorageRemove = async (id: string, options?: RequestInit): Promise<controlPlaneStorageRemoveResponse> => {
@@ -669,7 +669,7 @@ export const getControlPlaneStorageDownloadObjectUrl = (id: string,
 
   const stringifiedParams = normalizedParams.toString();
 
-  return stringifiedParams.length > 0 ? `/api/control-plane/storage/${id}/download?${stringifiedParams}` : `/api/control-plane/storage/${id}/download`
+  return stringifiedParams.length > 0 ? `/api/control-plane/storage/${encodeURIComponent(id)}/download?${stringifiedParams}` : `/api/control-plane/storage/${encodeURIComponent(id)}/download`
 }
 
 /**
@@ -694,7 +694,7 @@ export const controlPlaneStorageDownloadObject = async (id: string,
 export const getControlPlaneStorageDownloadObjectQueryKey = (id: string,
     params?: ControlPlaneStorageDownloadObjectParams,) => {
     return [
-    `/api/control-plane/storage/${id}/download`, ...(params ? [params] : [])
+    `/api/control-plane/storage/${encodeURIComponent(id)}/download`, ...(params ? [params] : [])
     ] as const;
     }
 
@@ -823,7 +823,7 @@ export const getControlPlaneStorageBrowseObjectsUrl = (id: string,
 
   const stringifiedParams = normalizedParams.toString();
 
-  return stringifiedParams.length > 0 ? `/api/control-plane/storage/${id}/objects?${stringifiedParams}` : `/api/control-plane/storage/${id}/objects`
+  return stringifiedParams.length > 0 ? `/api/control-plane/storage/${encodeURIComponent(id)}/objects?${stringifiedParams}` : `/api/control-plane/storage/${encodeURIComponent(id)}/objects`
 }
 
 /**
@@ -848,7 +848,7 @@ export const controlPlaneStorageBrowseObjects = async (id: string,
 export const getControlPlaneStorageBrowseObjectsQueryKey = (id: string,
     params?: ControlPlaneStorageBrowseObjectsParams,) => {
     return [
-    `/api/control-plane/storage/${id}/objects`, ...(params ? [params] : [])
+    `/api/control-plane/storage/${encodeURIComponent(id)}/objects`, ...(params ? [params] : [])
     ] as const;
     }
 

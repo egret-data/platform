@@ -109,7 +109,7 @@ export const getControlPlaneCatalogRevokeClientUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/clients/${id}`
+  return `/api/control-plane/clients/${encodeURIComponent(id)}`
 }
 
 export const controlPlaneCatalogRevokeClient = async (id: string, options?: RequestInit): Promise<controlPlaneCatalogRevokeClientResponse> => {
@@ -202,7 +202,7 @@ export const getControlPlaneCatalogRevokeGrantUrl = (grantId: string,) => {
 
 
 
-  return `/api/control-plane/grants/${grantId}`
+  return `/api/control-plane/grants/${encodeURIComponent(grantId)}`
 }
 
 export const controlPlaneCatalogRevokeGrant = async (grantId: string, options?: RequestInit): Promise<controlPlaneCatalogRevokeGrantResponse> => {
@@ -300,7 +300,7 @@ export const getControlPlaneCatalogDeleteRoleUrl = (roleId: string,) => {
 
 
 
-  return `/api/control-plane/roles/${roleId}`
+  return `/api/control-plane/roles/${encodeURIComponent(roleId)}`
 }
 
 export const controlPlaneCatalogDeleteRole = async (roleId: string, options?: RequestInit): Promise<controlPlaneCatalogDeleteRoleResponse> => {
@@ -393,7 +393,7 @@ export const getControlPlaneCatalogListGrantsUrl = (roleId: string,) => {
 
 
 
-  return `/api/control-plane/roles/${roleId}/grants`
+  return `/api/control-plane/roles/${encodeURIComponent(roleId)}/grants`
 }
 
 export const controlPlaneCatalogListGrants = async (roleId: string, options?: RequestInit): Promise<controlPlaneCatalogListGrantsResponse> => {
@@ -413,7 +413,7 @@ export const controlPlaneCatalogListGrants = async (roleId: string, options?: Re
 
 export const getControlPlaneCatalogListGrantsQueryKey = (roleId: string,) => {
     return [
-    `/api/control-plane/roles/${roleId}/grants`
+    `/api/control-plane/roles/${encodeURIComponent(roleId)}/grants`
     ] as const;
     }
 
@@ -521,7 +521,7 @@ export const getControlPlaneCatalogAddGrantUrl = (roleId: string,) => {
 
 
 
-  return `/api/control-plane/roles/${roleId}/grants`
+  return `/api/control-plane/roles/${encodeURIComponent(roleId)}/grants`
 }
 
 export const controlPlaneCatalogAddGrant = async (roleId: string,
@@ -851,7 +851,7 @@ export const getControlPlaneCatalogGetWarehouseUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/warehouses/${id}`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}`
 }
 
 export const controlPlaneCatalogGetWarehouse = async (id: string, options?: RequestInit): Promise<controlPlaneCatalogGetWarehouseResponse> => {
@@ -871,7 +871,7 @@ export const controlPlaneCatalogGetWarehouse = async (id: string, options?: Requ
 
 export const getControlPlaneCatalogGetWarehouseQueryKey = (id: string,) => {
     return [
-    `/api/control-plane/warehouses/${id}`
+    `/api/control-plane/warehouses/${encodeURIComponent(id)}`
     ] as const;
     }
 
@@ -974,7 +974,7 @@ export const getControlPlaneCatalogDeleteWarehouseUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/warehouses/${id}`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}`
 }
 
 export const controlPlaneCatalogDeleteWarehouse = async (id: string, options?: RequestInit): Promise<controlPlaneCatalogDeleteWarehouseResponse> => {
@@ -1067,7 +1067,7 @@ export const getControlPlaneCatalogListClientsUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/warehouses/${id}/clients`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}/clients`
 }
 
 export const controlPlaneCatalogListClients = async (id: string, options?: RequestInit): Promise<controlPlaneCatalogListClientsResponse> => {
@@ -1087,7 +1087,7 @@ export const controlPlaneCatalogListClients = async (id: string, options?: Reque
 
 export const getControlPlaneCatalogListClientsQueryKey = (id: string,) => {
     return [
-    `/api/control-plane/warehouses/${id}/clients`
+    `/api/control-plane/warehouses/${encodeURIComponent(id)}/clients`
     ] as const;
     }
 
@@ -1195,7 +1195,7 @@ export const getControlPlaneCatalogCreateClientUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/warehouses/${id}/clients`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}/clients`
 }
 
 export const controlPlaneCatalogCreateClient = async (id: string,
@@ -1299,7 +1299,7 @@ export const getControlPlaneCatalogWarehouseConfigUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/warehouses/${id}/config`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}/config`
 }
 
 export const controlPlaneCatalogWarehouseConfig = async (id: string, options?: RequestInit): Promise<controlPlaneCatalogWarehouseConfigResponse> => {
@@ -1319,7 +1319,7 @@ export const controlPlaneCatalogWarehouseConfig = async (id: string, options?: R
 
 export const getControlPlaneCatalogWarehouseConfigQueryKey = (id: string,) => {
     return [
-    `/api/control-plane/warehouses/${id}/config`
+    `/api/control-plane/warehouses/${encodeURIComponent(id)}/config`
     ] as const;
     }
 
@@ -1432,7 +1432,7 @@ export const getControlPlaneCatalogSetDeleteProfileRouteUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/warehouses/${id}/delete-profile`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}/delete-profile`
 }
 
 export const controlPlaneCatalogSetDeleteProfileRoute = async (id: string,
@@ -1531,7 +1531,7 @@ export const getControlPlaneCatalogBrowseDeletedUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/warehouses/${id}/deleted-tabulars`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}/deleted-tabulars`
 }
 
 export const controlPlaneCatalogBrowseDeleted = async (id: string, options?: RequestInit): Promise<controlPlaneCatalogBrowseDeletedResponse> => {
@@ -1551,7 +1551,7 @@ export const controlPlaneCatalogBrowseDeleted = async (id: string, options?: Req
 
 export const getControlPlaneCatalogBrowseDeletedQueryKey = (id: string,) => {
     return [
-    `/api/control-plane/warehouses/${id}/deleted-tabulars`
+    `/api/control-plane/warehouses/${encodeURIComponent(id)}/deleted-tabulars`
     ] as const;
     }
 
@@ -1669,7 +1669,7 @@ export const getControlPlaneCatalogSetFormatPolicyUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/warehouses/${id}/format-policy`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}/format-policy`
 }
 
 export const controlPlaneCatalogSetFormatPolicy = async (id: string,
@@ -1768,7 +1768,7 @@ export const getControlPlaneCatalogBrowseNamespacesUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/warehouses/${id}/namespaces`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}/namespaces`
 }
 
 export const controlPlaneCatalogBrowseNamespaces = async (id: string, options?: RequestInit): Promise<controlPlaneCatalogBrowseNamespacesResponse> => {
@@ -1788,7 +1788,7 @@ export const controlPlaneCatalogBrowseNamespaces = async (id: string, options?: 
 
 export const getControlPlaneCatalogBrowseNamespacesQueryKey = (id: string,) => {
     return [
-    `/api/control-plane/warehouses/${id}/namespaces`
+    `/api/control-plane/warehouses/${encodeURIComponent(id)}/namespaces`
     ] as const;
     }
 
@@ -1897,7 +1897,7 @@ export const getControlPlaneCatalogBrowseTablesUrl = (id: string,
 
 
 
-  return `/api/control-plane/warehouses/${id}/namespaces/${ns}/tables`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}/namespaces/${encodeURIComponent(ns)}/tables`
 }
 
 export const controlPlaneCatalogBrowseTables = async (id: string,
@@ -1919,7 +1919,7 @@ export const controlPlaneCatalogBrowseTables = async (id: string,
 export const getControlPlaneCatalogBrowseTablesQueryKey = (id: string,
     ns: string,) => {
     return [
-    `/api/control-plane/warehouses/${id}/namespaces/${ns}/tables`
+    `/api/control-plane/warehouses/${encodeURIComponent(id)}/namespaces/${encodeURIComponent(ns)}/tables`
     ] as const;
     }
 
@@ -2039,7 +2039,7 @@ export const getControlPlaneCatalogBrowseSchemaUrl = (id: string,
 
 
 
-  return `/api/control-plane/warehouses/${id}/namespaces/${ns}/tables/${table}`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}/namespaces/${encodeURIComponent(ns)}/tables/${encodeURIComponent(table)}`
 }
 
 export const controlPlaneCatalogBrowseSchema = async (id: string,
@@ -2063,7 +2063,7 @@ export const getControlPlaneCatalogBrowseSchemaQueryKey = (id: string,
     ns: string,
     table: string,) => {
     return [
-    `/api/control-plane/warehouses/${id}/namespaces/${ns}/tables/${table}`
+    `/api/control-plane/warehouses/${encodeURIComponent(id)}/namespaces/${encodeURIComponent(ns)}/tables/${encodeURIComponent(table)}`
     ] as const;
     }
 
@@ -2188,7 +2188,7 @@ export const getControlPlaneCatalogBrowseViewUrl = (id: string,
 
 
 
-  return `/api/control-plane/warehouses/${id}/namespaces/${ns}/views/${view}`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}/namespaces/${encodeURIComponent(ns)}/views/${encodeURIComponent(view)}`
 }
 
 export const controlPlaneCatalogBrowseView = async (id: string,
@@ -2212,7 +2212,7 @@ export const getControlPlaneCatalogBrowseViewQueryKey = (id: string,
     ns: string,
     view: string,) => {
     return [
-    `/api/control-plane/warehouses/${id}/namespaces/${ns}/views/${view}`
+    `/api/control-plane/warehouses/${encodeURIComponent(id)}/namespaces/${encodeURIComponent(ns)}/views/${encodeURIComponent(view)}`
     ] as const;
     }
 
@@ -2335,7 +2335,7 @@ export const getControlPlaneCatalogSetProtectionUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/warehouses/${id}/protection`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}/protection`
 }
 
 export const controlPlaneCatalogSetProtection = async (id: string,
@@ -2429,7 +2429,7 @@ export const getControlPlaneCatalogListRolesUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/warehouses/${id}/roles`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}/roles`
 }
 
 export const controlPlaneCatalogListRoles = async (id: string, options?: RequestInit): Promise<controlPlaneCatalogListRolesResponse> => {
@@ -2449,7 +2449,7 @@ export const controlPlaneCatalogListRoles = async (id: string, options?: Request
 
 export const getControlPlaneCatalogListRolesQueryKey = (id: string,) => {
     return [
-    `/api/control-plane/warehouses/${id}/roles`
+    `/api/control-plane/warehouses/${encodeURIComponent(id)}/roles`
     ] as const;
     }
 
@@ -2557,7 +2557,7 @@ export const getControlPlaneCatalogCreateRoleUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/warehouses/${id}/roles`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}/roles`
 }
 
 export const controlPlaneCatalogCreateRole = async (id: string,
@@ -2664,7 +2664,7 @@ export const getControlPlaneCatalogSearchTabularsUrl = (id: string,
 
   const stringifiedParams = normalizedParams.toString();
 
-  return stringifiedParams.length > 0 ? `/api/control-plane/warehouses/${id}/search?${stringifiedParams}` : `/api/control-plane/warehouses/${id}/search`
+  return stringifiedParams.length > 0 ? `/api/control-plane/warehouses/${encodeURIComponent(id)}/search?${stringifiedParams}` : `/api/control-plane/warehouses/${encodeURIComponent(id)}/search`
 }
 
 export const controlPlaneCatalogSearchTabulars = async (id: string,
@@ -2686,7 +2686,7 @@ export const controlPlaneCatalogSearchTabulars = async (id: string,
 export const getControlPlaneCatalogSearchTabularsQueryKey = (id: string,
     params?: ControlPlaneCatalogSearchTabularsParams,) => {
     return [
-    `/api/control-plane/warehouses/${id}/search`, ...(params ? [params] : [])
+    `/api/control-plane/warehouses/${encodeURIComponent(id)}/search`, ...(params ? [params] : [])
     ] as const;
     }
 
@@ -2804,7 +2804,7 @@ export const getControlPlaneCatalogSetWarehouseStatusUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/warehouses/${id}/status`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}/status`
 }
 
 export const controlPlaneCatalogSetWarehouseStatus = async (id: string,
@@ -2908,7 +2908,7 @@ export const getControlPlaneCatalogRotateCredentialUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/warehouses/${id}/storage-credential`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}/storage-credential`
 }
 
 export const controlPlaneCatalogRotateCredential = async (id: string,
@@ -3007,7 +3007,7 @@ export const getControlPlaneCatalogListTasksUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/warehouses/${id}/tasks`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}/tasks`
 }
 
 export const controlPlaneCatalogListTasks = async (id: string, options?: RequestInit): Promise<controlPlaneCatalogListTasksResponse> => {
@@ -3027,7 +3027,7 @@ export const controlPlaneCatalogListTasks = async (id: string, options?: Request
 
 export const getControlPlaneCatalogListTasksQueryKey = (id: string,) => {
     return [
-    `/api/control-plane/warehouses/${id}/tasks`
+    `/api/control-plane/warehouses/${encodeURIComponent(id)}/tasks`
     ] as const;
     }
 
@@ -3140,7 +3140,7 @@ export const getControlPlaneCatalogUndropTabularUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/warehouses/${id}/undrop`
+  return `/api/control-plane/warehouses/${encodeURIComponent(id)}/undrop`
 }
 
 export const controlPlaneCatalogUndropTabular = async (id: string,

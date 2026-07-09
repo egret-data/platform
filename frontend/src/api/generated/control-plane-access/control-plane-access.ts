@@ -335,7 +335,7 @@ export const getControlPlaneAccessDeleteRoleUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/access/roles/${id}`
+  return `/api/control-plane/access/roles/${encodeURIComponent(id)}`
 }
 
 export const controlPlaneAccessDeleteRole = async (id: string, options?: RequestInit): Promise<controlPlaneAccessDeleteRoleResponse> => {
@@ -433,7 +433,7 @@ export const getControlPlaneAccessUpdateRoleUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/access/roles/${id}`
+  return `/api/control-plane/access/roles/${encodeURIComponent(id)}`
 }
 
 export const controlPlaneAccessUpdateRole = async (id: string,
@@ -527,7 +527,7 @@ export const getControlPlaneAccessListRoleAssigneesUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/access/roles/${id}/assignees`
+  return `/api/control-plane/access/roles/${encodeURIComponent(id)}/assignees`
 }
 
 /**
@@ -552,7 +552,7 @@ export const controlPlaneAccessListRoleAssignees = async (id: string, options?: 
 
 export const getControlPlaneAccessListRoleAssigneesQueryKey = (id: string,) => {
     return [
-    `/api/control-plane/access/roles/${id}/assignees`
+    `/api/control-plane/access/roles/${encodeURIComponent(id)}/assignees`
     ] as const;
     }
 
@@ -665,7 +665,7 @@ export const getControlPlaneAccessSetRolePermissionsUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/access/roles/${id}/permissions`
+  return `/api/control-plane/access/roles/${encodeURIComponent(id)}/permissions`
 }
 
 export const controlPlaneAccessSetRolePermissions = async (id: string,
@@ -990,7 +990,7 @@ export const getControlPlaneAccessDeleteGroupUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/groups/${id}`
+  return `/api/control-plane/groups/${encodeURIComponent(id)}`
 }
 
 export const controlPlaneAccessDeleteGroup = async (id: string, options?: RequestInit): Promise<controlPlaneAccessDeleteGroupResponse> => {
@@ -1088,7 +1088,7 @@ export const getControlPlaneAccessRenameGroupUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/groups/${id}`
+  return `/api/control-plane/groups/${encodeURIComponent(id)}`
 }
 
 export const controlPlaneAccessRenameGroup = async (id: string,
@@ -1182,7 +1182,7 @@ export const getControlPlaneAccessListGroupMembersUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/groups/${id}/members`
+  return `/api/control-plane/groups/${encodeURIComponent(id)}/members`
 }
 
 /**
@@ -1207,7 +1207,7 @@ export const controlPlaneAccessListGroupMembers = async (id: string, options?: R
 
 export const getControlPlaneAccessListGroupMembersQueryKey = (id: string,) => {
     return [
-    `/api/control-plane/groups/${id}/members`
+    `/api/control-plane/groups/${encodeURIComponent(id)}/members`
     ] as const;
     }
 
@@ -1320,7 +1320,7 @@ export const getControlPlaneAccessAddGroupMemberUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/groups/${id}/members`
+  return `/api/control-plane/groups/${encodeURIComponent(id)}/members`
 }
 
 export const controlPlaneAccessAddGroupMember = async (id: string,
@@ -1415,7 +1415,7 @@ export const getControlPlaneAccessRemoveGroupMemberUrl = (id: string,
 
 
 
-  return `/api/control-plane/groups/${id}/members/${userId}`
+  return `/api/control-plane/groups/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`
 }
 
 export const controlPlaneAccessRemoveGroupMember = async (id: string,
@@ -1514,7 +1514,7 @@ export const getControlPlaneAccessAssignGroupRoleUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/groups/${id}/roles`
+  return `/api/control-plane/groups/${encodeURIComponent(id)}/roles`
 }
 
 export const controlPlaneAccessAssignGroupRole = async (id: string,
@@ -1619,7 +1619,7 @@ export const getControlPlaneAccessUnassignGroupRoleUrl = (id: string,
 
 
 
-  return `/api/control-plane/groups/${id}/roles/${roleId}`
+  return `/api/control-plane/groups/${encodeURIComponent(id)}/roles/${encodeURIComponent(roleId)}`
 }
 
 export const controlPlaneAccessUnassignGroupRole = async (id: string,
@@ -2080,7 +2080,7 @@ export const getControlPlaneAccessUpdateUserUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/users/${id}`
+  return `/api/control-plane/users/${encodeURIComponent(id)}`
 }
 
 export const controlPlaneAccessUpdateUser = async (id: string,
@@ -2179,7 +2179,7 @@ export const getControlPlaneAccessAssignUserRoleUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/users/${id}/roles`
+  return `/api/control-plane/users/${encodeURIComponent(id)}/roles`
 }
 
 export const controlPlaneAccessAssignUserRole = async (id: string,
@@ -2284,7 +2284,7 @@ export const getControlPlaneAccessUnassignUserRoleUrl = (id: string,
 
 
 
-  return `/api/control-plane/users/${id}/roles/${roleId}`
+  return `/api/control-plane/users/${encodeURIComponent(id)}/roles/${encodeURIComponent(roleId)}`
 }
 
 export const controlPlaneAccessUnassignUserRole = async (id: string,

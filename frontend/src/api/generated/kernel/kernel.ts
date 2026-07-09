@@ -88,7 +88,7 @@ export const getKernelStatusUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/kernel`
+  return `/api/ws/${encodeURIComponent(workspace)}/kernel`
 }
 
 /**
@@ -112,7 +112,7 @@ export const kernelStatus = async (workspace: string, options?: RequestInit): Pr
 
 export const getKernelStatusQueryKey = (workspace: string,) => {
     return [
-    `/api/ws/${workspace}/kernel`
+    `/api/ws/${encodeURIComponent(workspace)}/kernel`
     ] as const;
     }
 
@@ -218,7 +218,7 @@ export const getKernelStartUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/kernel`
+  return `/api/ws/${encodeURIComponent(workspace)}/kernel`
 }
 
 /**
@@ -319,7 +319,7 @@ export const getKernelStopUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/kernel`
+  return `/api/ws/${encodeURIComponent(workspace)}/kernel`
 }
 
 /**
@@ -425,7 +425,7 @@ export const getKernelActiveExecutionsUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/notebooks/${notebook}/kernel/active-executions`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(notebook)}/kernel/active-executions`
 }
 
 /**
@@ -457,7 +457,7 @@ export const kernelActiveExecutions = async (workspace: string,
 export const getKernelActiveExecutionsQueryKey = (workspace: string,
     notebook: string,) => {
     return [
-    `/api/ws/${workspace}/notebooks/${notebook}/kernel/active-executions`
+    `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(notebook)}/kernel/active-executions`
     ] as const;
     }
 
@@ -580,7 +580,7 @@ export const getKernelChannelsUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/notebooks/${notebook}/kernel/channels`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(notebook)}/kernel/channels`
 }
 
 /**
@@ -609,7 +609,7 @@ export const kernelChannels = async (workspace: string,
 export const getKernelChannelsQueryKey = (workspace: string,
     notebook: string,) => {
     return [
-    `/api/ws/${workspace}/notebooks/${notebook}/kernel/channels`
+    `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(notebook)}/kernel/channels`
     ] as const;
     }
 
@@ -730,7 +730,7 @@ export const getKernelConnectUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/notebooks/${notebook}/kernel/connect`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(notebook)}/kernel/connect`
 }
 
 /**
@@ -845,7 +845,7 @@ export const getKernelKernelInterruptUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/notebooks/${notebook}/kernel/interrupt`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(notebook)}/kernel/interrupt`
 }
 
 /**
@@ -958,7 +958,7 @@ export const getKernelKernelRestartUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/notebooks/${notebook}/kernel/restart`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(notebook)}/kernel/restart`
 }
 
 /**

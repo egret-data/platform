@@ -317,7 +317,7 @@ export const getAdminWorkspacesGetWsUrl = (id: string,) => {
 
 
 
-  return `/api/admin/workspaces/${id}`
+  return `/api/admin/workspaces/${encodeURIComponent(id)}`
 }
 
 export const adminWorkspacesGetWs = async (id: string, options?: RequestInit): Promise<adminWorkspacesGetWsResponse> => {
@@ -337,7 +337,7 @@ export const adminWorkspacesGetWs = async (id: string, options?: RequestInit): P
 
 export const getAdminWorkspacesGetWsQueryKey = (id: string,) => {
     return [
-    `/api/admin/workspaces/${id}`
+    `/api/admin/workspaces/${encodeURIComponent(id)}`
     ] as const;
     }
 
@@ -440,7 +440,7 @@ export const getAdminWorkspacesUpdateWsUrl = (id: string,) => {
 
 
 
-  return `/api/admin/workspaces/${id}`
+  return `/api/admin/workspaces/${encodeURIComponent(id)}`
 }
 
 export const adminWorkspacesUpdateWs = async (id: string,
@@ -534,7 +534,7 @@ export const getAdminWorkspacesArchiveWsUrl = (id: string,) => {
 
 
 
-  return `/api/admin/workspaces/${id}`
+  return `/api/admin/workspaces/${encodeURIComponent(id)}`
 }
 
 export const adminWorkspacesArchiveWs = async (id: string, options?: RequestInit): Promise<adminWorkspacesArchiveWsResponse> => {

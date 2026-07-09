@@ -87,7 +87,7 @@ export const getWorkspaceMembersListMembersUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/members`
+  return `/api/ws/${encodeURIComponent(workspace)}/members`
 }
 
 export const workspaceMembersListMembers = async (workspace: string, options?: RequestInit): Promise<workspaceMembersListMembersResponse> => {
@@ -107,7 +107,7 @@ export const workspaceMembersListMembers = async (workspace: string, options?: R
 
 export const getWorkspaceMembersListMembersQueryKey = (workspace: string,) => {
     return [
-    `/api/ws/${workspace}/members`
+    `/api/ws/${encodeURIComponent(workspace)}/members`
     ] as const;
     }
 
@@ -210,7 +210,7 @@ export const getWorkspaceMembersAddMemberUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/members`
+  return `/api/ws/${encodeURIComponent(workspace)}/members`
 }
 
 export const workspaceMembersAddMember = async (workspace: string,
@@ -306,7 +306,7 @@ export const getWorkspaceMembersRemoveMemberUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/members/${ptype}/${pid}`
+  return `/api/ws/${encodeURIComponent(workspace)}/members/${encodeURIComponent(ptype)}/${encodeURIComponent(pid)}`
 }
 
 export const workspaceMembersRemoveMember = async (workspace: string,

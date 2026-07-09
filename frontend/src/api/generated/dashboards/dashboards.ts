@@ -99,7 +99,7 @@ export const getDashboardsDbListUrl = (workspace: string,
 
   const stringifiedParams = normalizedParams.toString();
 
-  return stringifiedParams.length > 0 ? `/api/ws/${workspace}/dashboards?${stringifiedParams}` : `/api/ws/${workspace}/dashboards`
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/dashboards?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/dashboards`
 }
 
 export const dashboardsDbList = async (workspace: string,
@@ -121,7 +121,7 @@ export const dashboardsDbList = async (workspace: string,
 export const getDashboardsDbListQueryKey = (workspace: string,
     params?: DashboardsDbListParams,) => {
     return [
-    `/api/ws/${workspace}/dashboards`, ...(params ? [params] : [])
+    `/api/ws/${encodeURIComponent(workspace)}/dashboards`, ...(params ? [params] : [])
     ] as const;
     }
 
@@ -229,7 +229,7 @@ export const getDashboardsDbCreateUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/dashboards`
+  return `/api/ws/${encodeURIComponent(workspace)}/dashboards`
 }
 
 export const dashboardsDbCreate = async (workspace: string,
@@ -329,7 +329,7 @@ export const getDashboardsDbGetUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/dashboards/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/dashboards/${encodeURIComponent(id)}`
 }
 
 export const dashboardsDbGet = async (workspace: string,
@@ -351,7 +351,7 @@ export const dashboardsDbGet = async (workspace: string,
 export const getDashboardsDbGetQueryKey = (workspace: string,
     id: string,) => {
     return [
-    `/api/ws/${workspace}/dashboards/${id}`
+    `/api/ws/${encodeURIComponent(workspace)}/dashboards/${encodeURIComponent(id)}`
     ] as const;
     }
 
@@ -470,7 +470,7 @@ export const getDashboardsDbUpdateUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/dashboards/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/dashboards/${encodeURIComponent(id)}`
 }
 
 export const dashboardsDbUpdate = async (workspace: string,
@@ -571,7 +571,7 @@ export const getDashboardsDbRemoveUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/dashboards/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/dashboards/${encodeURIComponent(id)}`
 }
 
 export const dashboardsDbRemove = async (workspace: string,
@@ -671,7 +671,7 @@ export const getDashboardsDbBookmarkAddUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/dashboards/${id}/bookmark`
+  return `/api/ws/${encodeURIComponent(workspace)}/dashboards/${encodeURIComponent(id)}/bookmark`
 }
 
 export const dashboardsDbBookmarkAdd = async (workspace: string,
@@ -771,7 +771,7 @@ export const getDashboardsDbBookmarkRemoveUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/dashboards/${id}/bookmark`
+  return `/api/ws/${encodeURIComponent(workspace)}/dashboards/${encodeURIComponent(id)}/bookmark`
 }
 
 export const dashboardsDbBookmarkRemove = async (workspace: string,
@@ -871,7 +871,7 @@ export const getDashboardsDbDuplicateUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/dashboards/${id}/duplicate`
+  return `/api/ws/${encodeURIComponent(workspace)}/dashboards/${encodeURIComponent(id)}/duplicate`
 }
 
 export const dashboardsDbDuplicate = async (workspace: string,
@@ -971,7 +971,7 @@ export const getDashboardsDbSetFolderUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/dashboards/${id}/folder`
+  return `/api/ws/${encodeURIComponent(workspace)}/dashboards/${encodeURIComponent(id)}/folder`
 }
 
 export const dashboardsDbSetFolder = async (workspace: string,
@@ -1072,7 +1072,7 @@ export const getDashboardsDbRestoreUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/dashboards/${id}/restore`
+  return `/api/ws/${encodeURIComponent(workspace)}/dashboards/${encodeURIComponent(id)}/restore`
 }
 
 export const dashboardsDbRestore = async (workspace: string,
@@ -1172,7 +1172,7 @@ export const getDashboardsDbTrashUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/dashboards/${id}/trash`
+  return `/api/ws/${encodeURIComponent(workspace)}/dashboards/${encodeURIComponent(id)}/trash`
 }
 
 export const dashboardsDbTrash = async (workspace: string,

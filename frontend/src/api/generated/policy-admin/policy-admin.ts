@@ -512,7 +512,7 @@ export const getPolicyAdminGetServiceDefUrl = (name: string,) => {
 
 
 
-  return `/api/control-plane/policies/service-def/${name}`
+  return `/api/control-plane/policies/service-def/${encodeURIComponent(name)}`
 }
 
 /**
@@ -538,7 +538,7 @@ export const policyAdminGetServiceDef = async (name: string, options?: RequestIn
 
 export const getPolicyAdminGetServiceDefQueryKey = (name: string,) => {
     return [
-    `/api/control-plane/policies/service-def/${name}`
+    `/api/control-plane/policies/service-def/${encodeURIComponent(name)}`
     ] as const;
     }
 
@@ -781,7 +781,7 @@ export const getPolicyAdminSeedDefaultsUrl = (service: string,) => {
 
 
 
-  return `/api/control-plane/policies/services/${service}/seed-defaults`
+  return `/api/control-plane/policies/services/${encodeURIComponent(service)}/seed-defaults`
 }
 
 /**
@@ -891,7 +891,7 @@ export const getPolicyAdminTrinoConfigUrl = (service: string,) => {
 
 
 
-  return `/api/control-plane/policies/services/${service}/trino-config`
+  return `/api/control-plane/policies/services/${encodeURIComponent(service)}/trino-config`
 }
 
 /**
@@ -915,7 +915,7 @@ export const policyAdminTrinoConfig = async (service: string, options?: RequestI
 
 export const getPolicyAdminTrinoConfigQueryKey = (service: string,) => {
     return [
-    `/api/control-plane/policies/services/${service}/trino-config`
+    `/api/control-plane/policies/services/${encodeURIComponent(service)}/trino-config`
     ] as const;
     }
 
@@ -1027,7 +1027,7 @@ export const getPolicyAdminGetPolicyUrl = (id: number,) => {
 
 
 
-  return `/api/control-plane/policies/${id}`
+  return `/api/control-plane/policies/${encodeURIComponent(id)}`
 }
 
 /**
@@ -1050,7 +1050,7 @@ export const policyAdminGetPolicy = async (id: number, options?: RequestInit): P
 
 export const getPolicyAdminGetPolicyQueryKey = (id: number,) => {
     return [
-    `/api/control-plane/policies/${id}`
+    `/api/control-plane/policies/${encodeURIComponent(id)}`
     ] as const;
     }
 
@@ -1166,7 +1166,7 @@ export const getPolicyAdminUpdatePolicyUrl = (id: number,) => {
 
 
 
-  return `/api/control-plane/policies/${id}`
+  return `/api/control-plane/policies/${encodeURIComponent(id)}`
 }
 
 /**
@@ -1271,7 +1271,7 @@ export const getPolicyAdminDeletePolicyHandlerUrl = (id: number,) => {
 
 
 
-  return `/api/control-plane/policies/${id}`
+  return `/api/control-plane/policies/${encodeURIComponent(id)}`
 }
 
 /**
@@ -1375,7 +1375,7 @@ export const getPolicyAdminSetPolicyEnabledUrl = (id: number,) => {
 
 
 
-  return `/api/control-plane/policies/${id}/enabled`
+  return `/api/control-plane/policies/${encodeURIComponent(id)}/enabled`
 }
 
 /**

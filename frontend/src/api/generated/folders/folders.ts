@@ -94,7 +94,7 @@ export const getFoldersFoldersListUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/folders/${kind}`
+  return `/api/ws/${encodeURIComponent(workspace)}/folders/${encodeURIComponent(kind)}`
 }
 
 export const foldersFoldersList = async (workspace: string,
@@ -116,7 +116,7 @@ export const foldersFoldersList = async (workspace: string,
 export const getFoldersFoldersListQueryKey = (workspace: string,
     kind: string,) => {
     return [
-    `/api/ws/${workspace}/folders/${kind}`
+    `/api/ws/${encodeURIComponent(workspace)}/folders/${encodeURIComponent(kind)}`
     ] as const;
     }
 
@@ -230,7 +230,7 @@ export const getFoldersFoldersCreateUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/folders/${kind}`
+  return `/api/ws/${encodeURIComponent(workspace)}/folders/${encodeURIComponent(kind)}`
 }
 
 export const foldersFoldersCreate = async (workspace: string,
@@ -332,7 +332,7 @@ export const getFoldersFoldersDeleteUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/folders/${kind}/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/folders/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`
 }
 
 export const foldersFoldersDelete = async (workspace: string,
@@ -434,7 +434,7 @@ export const getFoldersFoldersRenameUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/folders/${kind}/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/folders/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`
 }
 
 export const foldersFoldersRename = async (workspace: string,

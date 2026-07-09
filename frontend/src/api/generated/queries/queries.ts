@@ -91,7 +91,7 @@ export const getQueriesHistoryUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/queries`
+  return `/api/ws/${encodeURIComponent(workspace)}/queries`
 }
 
 export const queriesHistory = async (workspace: string, options?: RequestInit): Promise<queriesHistoryResponse> => {
@@ -111,7 +111,7 @@ export const queriesHistory = async (workspace: string, options?: RequestInit): 
 
 export const getQueriesHistoryQueryKey = (workspace: string,) => {
     return [
-    `/api/ws/${workspace}/queries`
+    `/api/ws/${encodeURIComponent(workspace)}/queries`
     ] as const;
     }
 
@@ -224,7 +224,7 @@ export const getQueriesSubmitUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/queries`
+  return `/api/ws/${encodeURIComponent(workspace)}/queries`
 }
 
 export const queriesSubmit = async (workspace: string,
@@ -324,7 +324,7 @@ export const getQueriesStatusUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/queries/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/queries/${encodeURIComponent(id)}`
 }
 
 export const queriesStatus = async (workspace: string,
@@ -346,7 +346,7 @@ export const queriesStatus = async (workspace: string,
 export const getQueriesStatusQueryKey = (workspace: string,
     id: string,) => {
     return [
-    `/api/ws/${workspace}/queries/${id}`
+    `/api/ws/${encodeURIComponent(workspace)}/queries/${encodeURIComponent(id)}`
     ] as const;
     }
 
@@ -460,7 +460,7 @@ export const getQueriesCancelUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/queries/${id}/cancel`
+  return `/api/ws/${encodeURIComponent(workspace)}/queries/${encodeURIComponent(id)}/cancel`
 }
 
 export const queriesCancel = async (workspace: string,
@@ -568,7 +568,7 @@ export const getQueriesResultsUrl = (workspace: string,
 
   const stringifiedParams = normalizedParams.toString();
 
-  return stringifiedParams.length > 0 ? `/api/ws/${workspace}/queries/${id}/results?${stringifiedParams}` : `/api/ws/${workspace}/queries/${id}/results`
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/queries/${encodeURIComponent(id)}/results?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/queries/${encodeURIComponent(id)}/results`
 }
 
 export const queriesResults = async (workspace: string,
@@ -592,7 +592,7 @@ export const getQueriesResultsQueryKey = (workspace: string,
     id: string,
     params?: QueriesResultsParams,) => {
     return [
-    `/api/ws/${workspace}/queries/${id}/results`, ...(params ? [params] : [])
+    `/api/ws/${encodeURIComponent(workspace)}/queries/${encodeURIComponent(id)}/results`, ...(params ? [params] : [])
     ] as const;
     }
 
@@ -711,7 +711,7 @@ export const getQueriesResultsCsvUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/queries/${id}/results.csv`
+  return `/api/ws/${encodeURIComponent(workspace)}/queries/${encodeURIComponent(id)}/results.csv`
 }
 
 export const queriesResultsCsv = async (workspace: string,
@@ -733,7 +733,7 @@ export const queriesResultsCsv = async (workspace: string,
 export const getQueriesResultsCsvQueryKey = (workspace: string,
     id: string,) => {
     return [
-    `/api/ws/${workspace}/queries/${id}/results.csv`
+    `/api/ws/${encodeURIComponent(workspace)}/queries/${encodeURIComponent(id)}/results.csv`
     ] as const;
     }
 

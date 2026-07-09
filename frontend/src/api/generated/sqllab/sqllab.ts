@@ -97,7 +97,7 @@ export const getSqllabCatalogsUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/sqllab/databases/${db}/catalogs`
+  return `/api/ws/${encodeURIComponent(workspace)}/sqllab/databases/${encodeURIComponent(db)}/catalogs`
 }
 
 export const sqllabCatalogs = async (workspace: string,
@@ -119,7 +119,7 @@ export const sqllabCatalogs = async (workspace: string,
 export const getSqllabCatalogsQueryKey = (workspace: string,
     db: string,) => {
     return [
-    `/api/ws/${workspace}/sqllab/databases/${db}/catalogs`
+    `/api/ws/${encodeURIComponent(workspace)}/sqllab/databases/${encodeURIComponent(db)}/catalogs`
     ] as const;
     }
 
@@ -241,7 +241,7 @@ export const getSqllabColumnsUrl = (workspace: string,
 
   const stringifiedParams = normalizedParams.toString();
 
-  return stringifiedParams.length > 0 ? `/api/ws/${workspace}/sqllab/databases/${db}/columns?${stringifiedParams}` : `/api/ws/${workspace}/sqllab/databases/${db}/columns`
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/sqllab/databases/${encodeURIComponent(db)}/columns?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/sqllab/databases/${encodeURIComponent(db)}/columns`
 }
 
 export const sqllabColumns = async (workspace: string,
@@ -265,7 +265,7 @@ export const getSqllabColumnsQueryKey = (workspace: string,
     db: string,
     params?: SqllabColumnsParams,) => {
     return [
-    `/api/ws/${workspace}/sqllab/databases/${db}/columns`, ...(params ? [params] : [])
+    `/api/ws/${encodeURIComponent(workspace)}/sqllab/databases/${encodeURIComponent(db)}/columns`, ...(params ? [params] : [])
     ] as const;
     }
 
@@ -392,7 +392,7 @@ export const getSqllabSchemasUrl = (workspace: string,
 
   const stringifiedParams = normalizedParams.toString();
 
-  return stringifiedParams.length > 0 ? `/api/ws/${workspace}/sqllab/databases/${db}/schemas?${stringifiedParams}` : `/api/ws/${workspace}/sqllab/databases/${db}/schemas`
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/sqllab/databases/${encodeURIComponent(db)}/schemas?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/sqllab/databases/${encodeURIComponent(db)}/schemas`
 }
 
 export const sqllabSchemas = async (workspace: string,
@@ -416,7 +416,7 @@ export const getSqllabSchemasQueryKey = (workspace: string,
     db: string,
     params?: SqllabSchemasParams,) => {
     return [
-    `/api/ws/${workspace}/sqllab/databases/${db}/schemas`, ...(params ? [params] : [])
+    `/api/ws/${encodeURIComponent(workspace)}/sqllab/databases/${encodeURIComponent(db)}/schemas`, ...(params ? [params] : [])
     ] as const;
     }
 
@@ -543,7 +543,7 @@ export const getSqllabTablesUrl = (workspace: string,
 
   const stringifiedParams = normalizedParams.toString();
 
-  return stringifiedParams.length > 0 ? `/api/ws/${workspace}/sqllab/databases/${db}/tables?${stringifiedParams}` : `/api/ws/${workspace}/sqllab/databases/${db}/tables`
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/sqllab/databases/${encodeURIComponent(db)}/tables?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/sqllab/databases/${encodeURIComponent(db)}/tables`
 }
 
 export const sqllabTables = async (workspace: string,
@@ -567,7 +567,7 @@ export const getSqllabTablesQueryKey = (workspace: string,
     db: string,
     params?: SqllabTablesParams,) => {
     return [
-    `/api/ws/${workspace}/sqllab/databases/${db}/tables`, ...(params ? [params] : [])
+    `/api/ws/${encodeURIComponent(workspace)}/sqllab/databases/${encodeURIComponent(db)}/tables`, ...(params ? [params] : [])
     ] as const;
     }
 
@@ -680,7 +680,7 @@ export const getSqllabListUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/sqllab/queries`
+  return `/api/ws/${encodeURIComponent(workspace)}/sqllab/queries`
 }
 
 export const sqllabList = async (workspace: string, options?: RequestInit): Promise<sqllabListResponse> => {
@@ -700,7 +700,7 @@ export const sqllabList = async (workspace: string, options?: RequestInit): Prom
 
 export const getSqllabListQueryKey = (workspace: string,) => {
     return [
-    `/api/ws/${workspace}/sqllab/queries`
+    `/api/ws/${encodeURIComponent(workspace)}/sqllab/queries`
     ] as const;
     }
 
@@ -803,7 +803,7 @@ export const getSqllabSaveUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/sqllab/queries`
+  return `/api/ws/${encodeURIComponent(workspace)}/sqllab/queries`
 }
 
 export const sqllabSave = async (workspace: string,
@@ -903,7 +903,7 @@ export const getSqllabLoadUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/sqllab/queries/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/sqllab/queries/${encodeURIComponent(id)}`
 }
 
 export const sqllabLoad = async (workspace: string,
@@ -925,7 +925,7 @@ export const sqllabLoad = async (workspace: string,
 export const getSqllabLoadQueryKey = (workspace: string,
     id: string,) => {
     return [
-    `/api/ws/${workspace}/sqllab/queries/${id}`
+    `/api/ws/${encodeURIComponent(workspace)}/sqllab/queries/${encodeURIComponent(id)}`
     ] as const;
     }
 
@@ -1039,7 +1039,7 @@ export const getSqllabUpdateUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/sqllab/queries/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/sqllab/queries/${encodeURIComponent(id)}`
 }
 
 export const sqllabUpdate = async (workspace: string,
@@ -1140,7 +1140,7 @@ export const getSqllabRemoveUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/sqllab/queries/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/sqllab/queries/${encodeURIComponent(id)}`
 }
 
 export const sqllabRemove = async (workspace: string,

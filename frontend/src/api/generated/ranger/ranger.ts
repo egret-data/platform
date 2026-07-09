@@ -206,7 +206,7 @@ export const getRangerGetDefUrl = (name: string,) => {
 
 
 
-  return `/service/plugins/definitions/name/${name}`
+  return `/service/plugins/definitions/name/${encodeURIComponent(name)}`
 }
 
 export const rangerGetDef = async (name: string, options?: RequestInit): Promise<rangerGetDefResponse> => {
@@ -226,7 +226,7 @@ export const rangerGetDef = async (name: string, options?: RequestInit): Promise
 
 export const getRangerGetDefQueryKey = (name: string,) => {
     return [
-    `/service/plugins/definitions/name/${name}`
+    `/service/plugins/definitions/name/${encodeURIComponent(name)}`
     ] as const;
     }
 
@@ -342,7 +342,7 @@ export const getRangerDownloadPoliciesUrl = (service: string,
 
   const stringifiedParams = normalizedParams.toString();
 
-  return stringifiedParams.length > 0 ? `/service/plugins/policies/download/${service}?${stringifiedParams}` : `/service/plugins/policies/download/${service}`
+  return stringifiedParams.length > 0 ? `/service/plugins/policies/download/${encodeURIComponent(service)}?${stringifiedParams}` : `/service/plugins/policies/download/${encodeURIComponent(service)}`
 }
 
 /**
@@ -368,7 +368,7 @@ export const rangerDownloadPolicies = async (service: string,
 export const getRangerDownloadPoliciesQueryKey = (service: string,
     params?: RangerDownloadPoliciesParams,) => {
     return [
-    `/service/plugins/policies/download/${service}`, ...(params ? [params] : [])
+    `/service/plugins/policies/download/${encodeURIComponent(service)}`, ...(params ? [params] : [])
     ] as const;
     }
 
@@ -479,7 +479,7 @@ export const getRangerGetPolicyUrl = (id: number,) => {
 
 
 
-  return `/service/plugins/policies/${id}`
+  return `/service/plugins/policies/${encodeURIComponent(id)}`
 }
 
 export const rangerGetPolicy = async (id: number, options?: RequestInit): Promise<rangerGetPolicyResponse> => {
@@ -499,7 +499,7 @@ export const rangerGetPolicy = async (id: number, options?: RequestInit): Promis
 
 export const getRangerGetPolicyQueryKey = (id: number,) => {
     return [
-    `/service/plugins/policies/${id}`
+    `/service/plugins/policies/${encodeURIComponent(id)}`
     ] as const;
     }
 
@@ -728,7 +728,7 @@ export const getRangerDownloadTagsUrl = (service: string,
 
   const stringifiedParams = normalizedParams.toString();
 
-  return stringifiedParams.length > 0 ? `/service/tags/download/${service}?${stringifiedParams}` : `/service/tags/download/${service}`
+  return stringifiedParams.length > 0 ? `/service/tags/download/${encodeURIComponent(service)}?${stringifiedParams}` : `/service/tags/download/${encodeURIComponent(service)}`
 }
 
 /**
@@ -754,7 +754,7 @@ export const rangerDownloadTags = async (service: string,
 export const getRangerDownloadTagsQueryKey = (service: string,
     params?: RangerDownloadTagsParams,) => {
     return [
-    `/service/tags/download/${service}`, ...(params ? [params] : [])
+    `/service/tags/download/${encodeURIComponent(service)}`, ...(params ? [params] : [])
     ] as const;
     }
 

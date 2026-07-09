@@ -100,7 +100,7 @@ export const getChartsChListUrl = (workspace: string,
 
   const stringifiedParams = normalizedParams.toString();
 
-  return stringifiedParams.length > 0 ? `/api/ws/${workspace}/charts?${stringifiedParams}` : `/api/ws/${workspace}/charts`
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/charts?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/charts`
 }
 
 export const chartsChList = async (workspace: string,
@@ -122,7 +122,7 @@ export const chartsChList = async (workspace: string,
 export const getChartsChListQueryKey = (workspace: string,
     params?: ChartsChListParams,) => {
     return [
-    `/api/ws/${workspace}/charts`, ...(params ? [params] : [])
+    `/api/ws/${encodeURIComponent(workspace)}/charts`, ...(params ? [params] : [])
     ] as const;
     }
 
@@ -235,7 +235,7 @@ export const getChartsChCreateUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/charts`
+  return `/api/ws/${encodeURIComponent(workspace)}/charts`
 }
 
 export const chartsChCreate = async (workspace: string,
@@ -339,7 +339,7 @@ export const getChartsChDataUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/charts/data`
+  return `/api/ws/${encodeURIComponent(workspace)}/charts/data`
 }
 
 export const chartsChData = async (workspace: string,
@@ -439,7 +439,7 @@ export const getChartsChGetUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/charts/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/charts/${encodeURIComponent(id)}`
 }
 
 export const chartsChGet = async (workspace: string,
@@ -461,7 +461,7 @@ export const chartsChGet = async (workspace: string,
 export const getChartsChGetQueryKey = (workspace: string,
     id: string,) => {
     return [
-    `/api/ws/${workspace}/charts/${id}`
+    `/api/ws/${encodeURIComponent(workspace)}/charts/${encodeURIComponent(id)}`
     ] as const;
     }
 
@@ -575,7 +575,7 @@ export const getChartsChUpdateUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/charts/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/charts/${encodeURIComponent(id)}`
 }
 
 export const chartsChUpdate = async (workspace: string,
@@ -676,7 +676,7 @@ export const getChartsChRemoveUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/charts/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/charts/${encodeURIComponent(id)}`
 }
 
 export const chartsChRemove = async (workspace: string,
@@ -776,7 +776,7 @@ export const getChartsChBookmarkAddUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/charts/${id}/bookmark`
+  return `/api/ws/${encodeURIComponent(workspace)}/charts/${encodeURIComponent(id)}/bookmark`
 }
 
 export const chartsChBookmarkAdd = async (workspace: string,
@@ -876,7 +876,7 @@ export const getChartsChBookmarkRemoveUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/charts/${id}/bookmark`
+  return `/api/ws/${encodeURIComponent(workspace)}/charts/${encodeURIComponent(id)}/bookmark`
 }
 
 export const chartsChBookmarkRemove = async (workspace: string,
@@ -976,7 +976,7 @@ export const getChartsChDuplicateUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/charts/${id}/duplicate`
+  return `/api/ws/${encodeURIComponent(workspace)}/charts/${encodeURIComponent(id)}/duplicate`
 }
 
 export const chartsChDuplicate = async (workspace: string,
@@ -1076,7 +1076,7 @@ export const getChartsChSetFolderUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/charts/${id}/folder`
+  return `/api/ws/${encodeURIComponent(workspace)}/charts/${encodeURIComponent(id)}/folder`
 }
 
 export const chartsChSetFolder = async (workspace: string,
@@ -1177,7 +1177,7 @@ export const getChartsChRestoreUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/charts/${id}/restore`
+  return `/api/ws/${encodeURIComponent(workspace)}/charts/${encodeURIComponent(id)}/restore`
 }
 
 export const chartsChRestore = async (workspace: string,
@@ -1277,7 +1277,7 @@ export const getChartsChTrashUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/charts/${id}/trash`
+  return `/api/ws/${encodeURIComponent(workspace)}/charts/${encodeURIComponent(id)}/trash`
 }
 
 export const chartsChTrash = async (workspace: string,

@@ -96,7 +96,7 @@ export const getNotebooksRuntimeUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/notebook-runtime`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebook-runtime`
 }
 
 /**
@@ -122,7 +122,7 @@ export const notebooksRuntime = async (workspace: string, options?: RequestInit)
 
 export const getNotebooksRuntimeQueryKey = (workspace: string,) => {
     return [
-    `/api/ws/${workspace}/notebook-runtime`
+    `/api/ws/${encodeURIComponent(workspace)}/notebook-runtime`
     ] as const;
     }
 
@@ -228,7 +228,7 @@ export const getNotebooksGetSettingsUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/notebook-settings`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebook-settings`
 }
 
 export const notebooksGetSettings = async (workspace: string, options?: RequestInit): Promise<notebooksGetSettingsResponse> => {
@@ -248,7 +248,7 @@ export const notebooksGetSettings = async (workspace: string, options?: RequestI
 
 export const getNotebooksGetSettingsQueryKey = (workspace: string,) => {
     return [
-    `/api/ws/${workspace}/notebook-settings`
+    `/api/ws/${encodeURIComponent(workspace)}/notebook-settings`
     ] as const;
     }
 
@@ -356,7 +356,7 @@ export const getNotebooksUpdateSettingsUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/notebook-settings`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebook-settings`
 }
 
 export const notebooksUpdateSettings = async (workspace: string,
@@ -458,7 +458,7 @@ export const getNotebooksListUrl = (workspace: string,
 
   const stringifiedParams = normalizedParams.toString();
 
-  return stringifiedParams.length > 0 ? `/api/ws/${workspace}/notebooks?${stringifiedParams}` : `/api/ws/${workspace}/notebooks`
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/notebooks?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/notebooks`
 }
 
 export const notebooksList = async (workspace: string,
@@ -480,7 +480,7 @@ export const notebooksList = async (workspace: string,
 export const getNotebooksListQueryKey = (workspace: string,
     params?: NotebooksListParams,) => {
     return [
-    `/api/ws/${workspace}/notebooks`, ...(params ? [params] : [])
+    `/api/ws/${encodeURIComponent(workspace)}/notebooks`, ...(params ? [params] : [])
     ] as const;
     }
 
@@ -588,7 +588,7 @@ export const getNotebooksCreateUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/notebooks`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebooks`
 }
 
 export const notebooksCreate = async (workspace: string,
@@ -688,7 +688,7 @@ export const getNotebooksGetOneUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/notebooks/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(id)}`
 }
 
 export const notebooksGetOne = async (workspace: string,
@@ -710,7 +710,7 @@ export const notebooksGetOne = async (workspace: string,
 export const getNotebooksGetOneQueryKey = (workspace: string,
     id: string,) => {
     return [
-    `/api/ws/${workspace}/notebooks/${id}`
+    `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(id)}`
     ] as const;
     }
 
@@ -824,7 +824,7 @@ export const getNotebooksRemoveUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/notebooks/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(id)}`
 }
 
 export const notebooksRemove = async (workspace: string,
@@ -924,7 +924,7 @@ export const getNotebooksUpdateUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/notebooks/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(id)}`
 }
 
 export const notebooksUpdate = async (workspace: string,
@@ -1025,7 +1025,7 @@ export const getNotebooksBookmarkAddUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/notebooks/${id}/bookmark`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(id)}/bookmark`
 }
 
 /**
@@ -1131,7 +1131,7 @@ export const getNotebooksBookmarkRemoveUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/notebooks/${id}/bookmark`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(id)}/bookmark`
 }
 
 /**
@@ -1242,7 +1242,7 @@ export const getNotebooksAddCellUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/notebooks/${id}/cells`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(id)}/cells`
 }
 
 export const notebooksAddCell = async (workspace: string,
@@ -1343,7 +1343,7 @@ export const getNotebooksReorderUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/notebooks/${id}/cells/order`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(id)}/cells/order`
 }
 
 export const notebooksReorder = async (workspace: string,
@@ -1445,7 +1445,7 @@ export const getNotebooksDeleteCellUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/notebooks/${id}/cells/${cid}`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(id)}/cells/${encodeURIComponent(cid)}`
 }
 
 export const notebooksDeleteCell = async (workspace: string,
@@ -1552,7 +1552,7 @@ export const getNotebooksUpdateCellUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/notebooks/${id}/cells/${cid}`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(id)}/cells/${encodeURIComponent(cid)}`
 }
 
 export const notebooksUpdateCell = async (workspace: string,
@@ -1654,7 +1654,7 @@ export const getNotebooksSetFolderUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/notebooks/${id}/folder`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(id)}/folder`
 }
 
 /**
@@ -1765,7 +1765,7 @@ export const getNotebooksRestoreUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/notebooks/${id}/restore`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(id)}/restore`
 }
 
 /**
@@ -1871,7 +1871,7 @@ export const getNotebooksTrashUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/notebooks/${id}/trash`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebooks/${encodeURIComponent(id)}/trash`
 }
 
 /**

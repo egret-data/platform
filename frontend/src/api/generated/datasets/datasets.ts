@@ -102,7 +102,7 @@ export const getDatasetsDsListUrl = (workspace: string,
 
   const stringifiedParams = normalizedParams.toString();
 
-  return stringifiedParams.length > 0 ? `/api/ws/${workspace}/datasets?${stringifiedParams}` : `/api/ws/${workspace}/datasets`
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/datasets?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/datasets`
 }
 
 export const datasetsDsList = async (workspace: string,
@@ -124,7 +124,7 @@ export const datasetsDsList = async (workspace: string,
 export const getDatasetsDsListQueryKey = (workspace: string,
     params?: DatasetsDsListParams,) => {
     return [
-    `/api/ws/${workspace}/datasets`, ...(params ? [params] : [])
+    `/api/ws/${encodeURIComponent(workspace)}/datasets`, ...(params ? [params] : [])
     ] as const;
     }
 
@@ -237,7 +237,7 @@ export const getDatasetsDsCreateUrl = (workspace: string,) => {
 
 
 
-  return `/api/ws/${workspace}/datasets`
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets`
 }
 
 export const datasetsDsCreate = async (workspace: string,
@@ -337,7 +337,7 @@ export const getDatasetsDsGetUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/datasets/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}`
 }
 
 export const datasetsDsGet = async (workspace: string,
@@ -359,7 +359,7 @@ export const datasetsDsGet = async (workspace: string,
 export const getDatasetsDsGetQueryKey = (workspace: string,
     id: string,) => {
     return [
-    `/api/ws/${workspace}/datasets/${id}`
+    `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}`
     ] as const;
     }
 
@@ -473,7 +473,7 @@ export const getDatasetsDsUpdateUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/datasets/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}`
 }
 
 export const datasetsDsUpdate = async (workspace: string,
@@ -574,7 +574,7 @@ export const getDatasetsDsRemoveUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/datasets/${id}`
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}`
 }
 
 export const datasetsDsRemove = async (workspace: string,
@@ -674,7 +674,7 @@ export const getDatasetsDsBookmarkAddUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/datasets/${id}/bookmark`
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/bookmark`
 }
 
 export const datasetsDsBookmarkAdd = async (workspace: string,
@@ -774,7 +774,7 @@ export const getDatasetsDsBookmarkRemoveUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/datasets/${id}/bookmark`
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/bookmark`
 }
 
 export const datasetsDsBookmarkRemove = async (workspace: string,
@@ -879,7 +879,7 @@ export const getDatasetsDsAddColumnUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/datasets/${id}/columns`
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/columns`
 }
 
 export const datasetsDsAddColumn = async (workspace: string,
@@ -986,7 +986,7 @@ export const getDatasetsDsUpdateColumnUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/datasets/${id}/columns/${columnName}`
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/columns/${encodeURIComponent(columnName)}`
 }
 
 export const datasetsDsUpdateColumn = async (workspace: string,
@@ -1089,7 +1089,7 @@ export const getDatasetsDsDeleteColumnUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/datasets/${id}/columns/${columnName}`
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/columns/${encodeURIComponent(columnName)}`
 }
 
 export const datasetsDsDeleteColumn = async (workspace: string,
@@ -1190,7 +1190,7 @@ export const getDatasetsDsSetFolderUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/datasets/${id}/folder`
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/folder`
 }
 
 export const datasetsDsSetFolder = async (workspace: string,
@@ -1296,7 +1296,7 @@ export const getDatasetsDsAddMetricUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/datasets/${id}/metrics`
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/metrics`
 }
 
 export const datasetsDsAddMetric = async (workspace: string,
@@ -1403,7 +1403,7 @@ export const getDatasetsDsUpdateMetricUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/datasets/${id}/metrics/${metricId}`
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/metrics/${encodeURIComponent(metricId)}`
 }
 
 export const datasetsDsUpdateMetric = async (workspace: string,
@@ -1506,7 +1506,7 @@ export const getDatasetsDsDeleteMetricUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/datasets/${id}/metrics/${metricId}`
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/metrics/${encodeURIComponent(metricId)}`
 }
 
 export const datasetsDsDeleteMetric = async (workspace: string,
@@ -1607,7 +1607,7 @@ export const getDatasetsDsRefreshUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/datasets/${id}/refresh`
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/refresh`
 }
 
 export const datasetsDsRefresh = async (workspace: string,
@@ -1707,7 +1707,7 @@ export const getDatasetsDsRestoreUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/datasets/${id}/restore`
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/restore`
 }
 
 export const datasetsDsRestore = async (workspace: string,
@@ -1807,7 +1807,7 @@ export const getDatasetsDsTrashUrl = (workspace: string,
 
 
 
-  return `/api/ws/${workspace}/datasets/${id}/trash`
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/trash`
 }
 
 export const datasetsDsTrash = async (workspace: string,

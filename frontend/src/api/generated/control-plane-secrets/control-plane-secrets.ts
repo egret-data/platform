@@ -329,7 +329,7 @@ export const getControlPlaneSecretsUpdateUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/secrets/${id}`
+  return `/api/control-plane/secrets/${encodeURIComponent(id)}`
 }
 
 export const controlPlaneSecretsUpdate = async (id: string,
@@ -433,7 +433,7 @@ export const getControlPlaneSecretsRemoveUrl = (id: string,) => {
 
 
 
-  return `/api/control-plane/secrets/${id}`
+  return `/api/control-plane/secrets/${encodeURIComponent(id)}`
 }
 
 export const controlPlaneSecretsRemove = async (id: string, options?: RequestInit): Promise<controlPlaneSecretsRemoveResponse> => {

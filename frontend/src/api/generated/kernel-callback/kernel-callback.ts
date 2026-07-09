@@ -165,7 +165,7 @@ export const getKernelCallbackNotebookRuntimeTokenUrl = (workspace: string,) => 
 
 
 
-  return `/api/ws/${workspace}/notebook-runtime/token`
+  return `/api/ws/${encodeURIComponent(workspace)}/notebook-runtime/token`
 }
 
 /**
