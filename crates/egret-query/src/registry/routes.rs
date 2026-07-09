@@ -16,8 +16,13 @@ use egret_workspace::rbac::Authorizer;
 use egret_workspace::workspaces::WorkspaceRepo;
 use uuid::Uuid;
 
+use egret_core::http::ErrorBody;
+use egret_core::{Ack, WorkspacePath};
+
 use crate::registry::error::{DatabaseError, DbApiError};
-use crate::registry::model::{DatabaseDetailDto, DatabaseInput, TestInput, TestOutcome};
+use crate::registry::model::{
+    DatabaseDetailDto, DatabaseInput, DatabaseListDto, TestInput, TestOutcome,
+};
 use crate::registry::repo::DatabaseRepo;
 
 #[derive(Clone)]
@@ -63,6 +68,18 @@ pub fn workspace_database_router() -> Router<DatabaseState> {
         .route("/ws/{workspace}/databases/{id}/test", post(test_saved))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/databases",
+    tag = "databases",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "Registered databases in the workspace", body = Vec<DatabaseDetailDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list(
     State(st): State<DatabaseState>,
     WsContext(ctx): WsContext,
@@ -104,6 +121,20 @@ async fn resolve_secret_id(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/databases",
+    tag = "databases",
+    params(WorkspacePath),
+    request_body = DatabaseInput,
+    responses(
+        (status = 200, description = "Database registered", body = DatabaseDetailDto),
+        (status = 400, description = "Invalid input", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn create(
     State(st): State<DatabaseState>,
     WsContext(ctx): WsContext,
@@ -123,6 +154,22 @@ async fn create(
     Ok(Json(db.into()))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/databases/{id}",
+    tag = "databases",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Database id"),
+    ),
+    responses(
+        (status = 200, description = "Database detail", body = DatabaseDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 404, description = "No such database in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn detail(
     State(st): State<DatabaseState>,
     WsContext(ctx): WsContext,
@@ -137,6 +184,24 @@ async fn detail(
     ))
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/ws/{workspace}/databases/{id}",
+    tag = "databases",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Database id"),
+    ),
+    request_body = DatabaseInput,
+    responses(
+        (status = 200, description = "Database updated", body = DatabaseDetailDto),
+        (status = 400, description = "Invalid input", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 404, description = "No such database in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn update(
     State(st): State<DatabaseState>,
     WsContext(ctx): WsContext,
@@ -161,6 +226,22 @@ async fn update(
     ))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/databases/{id}",
+    tag = "databases",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Database id"),
+    ),
+    responses(
+        (status = 200, description = "Deleted", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 404, description = "No such database in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn remove(
     State(st): State<DatabaseState>,
     WsContext(ctx): WsContext,
@@ -171,6 +252,22 @@ async fn remove(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/databases/{id}/test",
+    tag = "databases",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Database id"),
+    ),
+    responses(
+        (status = 200, description = "Connection test outcome for the saved database", body = TestOutcome),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 404, description = "No such database in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn test_saved(
     State(st): State<DatabaseState>,
     WsContext(ctx): WsContext,
@@ -199,6 +296,20 @@ async fn test_saved(
     Ok(Json(outcome))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/databases/test",
+    tag = "databases",
+    params(WorkspacePath),
+    request_body = TestInput,
+    responses(
+        (status = 200, description = "Connection test outcome for the unsaved connection", body = TestOutcome),
+        (status = 400, description = "Invalid input", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn test_unsaved(
     State(st): State<DatabaseState>,
     WsContext(ctx): WsContext,
@@ -215,3 +326,27 @@ async fn test_unsaved(
     .await;
     Ok(Json(outcome))
 }
+
+/// OpenAPI fragment for the workspace database-registry router. Merged into the
+/// Query seam's `egret_query::openapi()`; nested request/response schemas
+/// (`Engine`, `ConnOptions`, `NewSecret`, …) are collected automatically by
+/// utoipa from the listed component + path types.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(list, create, detail, update, remove, test_saved, test_unsaved),
+    components(schemas(
+        DatabaseInput,
+        DatabaseDetailDto,
+        DatabaseListDto,
+        TestInput,
+        TestOutcome,
+        // Exported contract vocabulary (egret-query-api). `Database` is the
+        // domain row; not a direct path body but part of the seam's public
+        // schema surface, so it's published explicitly.
+        egret_query_api::Database,
+        Ack,
+        ErrorBody,
+    )),
+    tags((name = "databases", description = "Workspace database registry (engines + connection secrets)")),
+)]
+pub struct QueryRegistryApi;

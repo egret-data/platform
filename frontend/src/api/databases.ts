@@ -1,70 +1,75 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ApiError, apiFetch, apiJson } from "./client";
+/**
+ * Engine (database) connections API — MIGRATED to the orval-generated client
+ * (E0·P4c reference module).
+ *
+ * This file is now a thin adapter over `./generated/databases/databases`:
+ *   - Types are re-exported under the names the app already uses
+ *     (`DatabaseConn` = `DatabaseDetailDto`, `DatabaseConnInput` = `DatabaseInput`).
+ *   - Hooks keep their old names + signatures (`useDatabases(ws)`,
+ *     `useCreateDatabase(ws)`, …) so call sites and tests don't churn.
+ *
+ * PATTERN FOR P4d
+ * ---------------
+ * The generated mutation hooks bake path params into the mutation *variables*
+ * (`{ workspace, id, data }`), whereas this codebase currys `ws` (and `id`) at
+ * hook-construction and passes only the payload as the variable. To preserve
+ * that ergonomics across ~144 call sites we wrap:
+ *   - READS  → the generated query hook (`useDatabasesList`) with a `select`
+ *              that unwraps orval's `{ data, status, headers }` envelope.
+ *   - WRITES → a plain `useMutation` over the generated fetch fn
+ *              (`databasesCreate`, …), unwrapping `.data`, and invalidating the
+ *              generated query key via `getDatabasesListQueryKey(ws)`.
+ * Errors: the custom mutator (see `mutator.ts`) delegates to `apiFetch`, which
+ * throws `ApiError`/`UnauthorizedError`; we type `TError = ApiError` so call
+ * sites keep reading `.status` off the error exactly as before.
+ */
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 
-export type Engine = "trino" | "starrocks";
+import { ApiError } from "./client";
+import {
+  databasesCreate,
+  databasesRemove,
+  databasesTestSaved,
+  databasesUpdate,
+  getDatabasesListQueryKey,
+  useDatabasesList,
+} from "./generated/databases/databases";
+import type {
+  ConnOptions,
+  DatabaseDetailDto,
+  DatabaseInput,
+  Engine,
+  TestOutcome,
+} from "./generated/model";
 
-export interface ConnOptions {
-  user?: string;
-  http_scheme?: string;
-  catalog?: string;
-  database?: string;
-  /** Trino only: run each query as the logged-in user (X-Trino-User). */
-  impersonate?: boolean;
-}
+// Re-export generated types under the names the app already imports.
+export type { ConnOptions, Engine, TestOutcome };
+export type DatabaseConn = DatabaseDetailDto;
+export type DatabaseConnInput = DatabaseInput;
 
-export interface DatabaseConn {
-  id: string;
-  name: string;
-  engine: Engine;
-  host: string;
-  port: number;
-  options: ConnOptions;
-  has_secret: boolean;
-  status: string;
-}
-
-export interface DatabaseConnInput {
-  name: string;
-  engine: Engine;
-  host: string;
-  port: number;
-  options: ConnOptions;
-  // Reference an existing named secret, or create-and-reference a new one.
-  // Both omitted on update keeps the current secret.
-  secret_id?: string;
-  new_secret?: { name: string; value: string };
-}
-
-export interface TestOutcome {
-  ok: boolean;
-  message?: string;
-}
-
+/** Back-compat query-key helper; delegates to the generated key factory. */
 export const databaseKeys = {
-  all: (ws: string) => ["databases", ws] as const,
+  all: (ws: string) => getDatabasesListQueryKey(ws),
 };
 
 export function useDatabases(ws: string) {
-  return useQuery<DatabaseConn[], ApiError>({
-    queryKey: databaseKeys.all(ws),
-    queryFn: () => apiJson<DatabaseConn[]>(`/ws/${ws}/databases`),
-    // 403 (non-admin) is an expected outcome — surface it immediately instead
-    // of retrying 3× before the workspace-admin notice can render.
-    retry: false,
+  return useDatabasesList<DatabaseConn[], ApiError>(ws, {
+    query: {
+      // 403 (non-admin) is an expected outcome — surface it immediately instead
+      // of retrying 3× before the workspace-admin notice can render.
+      retry: false,
+      // Unwrap orval's `{ data, status, headers }` envelope to the list body.
+      select: (r) => r.data as DatabaseConn[],
+    },
   });
 }
 
 export function useCreateDatabase(ws: string) {
   const queryClient = useQueryClient();
   return useMutation<DatabaseConn, ApiError, DatabaseConnInput>({
-    mutationFn: (req) =>
-      apiJson<DatabaseConn>(`/ws/${ws}/databases`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req),
-      }),
+    mutationFn: async (req) => (await databasesCreate(ws, req)).data as DatabaseConn,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: databaseKeys.all(ws) });
+      queryClient.invalidateQueries({ queryKey: getDatabasesListQueryKey(ws) });
     },
   });
 }
@@ -77,14 +82,10 @@ export interface UpdateDatabaseArgs {
 export function useUpdateDatabase(ws: string) {
   const queryClient = useQueryClient();
   return useMutation<DatabaseConn, ApiError, UpdateDatabaseArgs>({
-    mutationFn: ({ id, input }) =>
-      apiJson<DatabaseConn>(`/ws/${ws}/databases/${id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(input),
-      }),
+    mutationFn: async ({ id, input }) =>
+      (await databasesUpdate(ws, id, input)).data as DatabaseConn,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: databaseKeys.all(ws) });
+      queryClient.invalidateQueries({ queryKey: getDatabasesListQueryKey(ws) });
     },
   });
 }
@@ -93,19 +94,16 @@ export function useDeleteDatabase(ws: string) {
   const queryClient = useQueryClient();
   return useMutation<void, ApiError, string>({
     mutationFn: async (id) => {
-      await apiFetch(`/ws/${ws}/databases/${id}`, { method: "DELETE" });
+      await databasesRemove(ws, id);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: databaseKeys.all(ws) });
+      queryClient.invalidateQueries({ queryKey: getDatabasesListQueryKey(ws) });
     },
   });
 }
 
 export function useTestDatabase(ws: string) {
   return useMutation<TestOutcome, ApiError, string>({
-    mutationFn: (id) =>
-      apiJson<TestOutcome>(`/ws/${ws}/databases/${id}/test`, {
-        method: "POST",
-      }),
+    mutationFn: async (id) => (await databasesTestSaved(ws, id)).data as TestOutcome,
   });
 }

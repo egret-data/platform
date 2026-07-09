@@ -5,6 +5,7 @@ pub mod error;
 #[cfg(feature = "http")]
 pub mod http;
 pub mod ids;
+pub mod openapi;
 pub mod pagination;
 pub mod rbac;
 pub mod tabular;
@@ -14,7 +15,8 @@ pub mod token;
 pub use context::{Principal, WorkspaceContext};
 pub use error::{Error, Result};
 #[cfg(feature = "http")]
-pub use http::ApiError;
+pub use http::{ApiError, ErrorBody};
 pub use ids::{UserId, WorkspaceId};
+pub use openapi::{Ack, WorkspacePath};
 pub use pagination::Pagination;
 pub use tabular::{ColumnMeta, TabularResult};

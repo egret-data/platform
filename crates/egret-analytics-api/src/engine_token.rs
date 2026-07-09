@@ -4,7 +4,7 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct EngineToken {
     pub access_token: String,
     pub expires_at: DateTime<Utc>,

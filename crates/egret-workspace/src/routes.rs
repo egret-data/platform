@@ -6,7 +6,8 @@ use axum::{Json, Router};
 use egret_auth::principal::{Auth, AuthError};
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
-use egret_core::{Error, Pagination, UserId, WorkspaceId};
+use egret_core::http::ErrorBody;
+use egret_core::{Ack, Error, Pagination, UserId, WorkspaceId, WorkspacePath};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -40,7 +41,7 @@ impl FromRef<WorkspaceState> for SessionService {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct WorkspaceDto {
     pub id: String,
     pub slug: String,
@@ -58,12 +59,12 @@ impl From<crate::model::Workspace> for WorkspaceDto {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateWorkspace {
     pub slug: String,
     pub name: String,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct UpdateWorkspace {
     pub name: String,
 }
@@ -82,6 +83,18 @@ pub fn admin_workspace_router() -> Router<WorkspaceState> {
         )
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/workspaces",
+    tag = "admin-workspaces",
+    request_body = CreateWorkspace,
+    responses(
+        (status = 200, description = "Workspace created", body = WorkspaceDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing platform permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn create_ws(
     State(st): State<WorkspaceState>,
     Auth(p): Auth,
@@ -104,6 +117,21 @@ async fn create_ws(
     Ok(Json(ws.into()))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/workspaces",
+    tag = "admin-workspaces",
+    params(
+        ("page" = Option<u32>, Query, description = "Page number (1-based)"),
+        ("per_page" = Option<u32>, Query, description = "Items per page"),
+    ),
+    responses(
+        (status = 200, description = "All workspaces", body = Vec<WorkspaceDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing platform permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list_ws(
     State(st): State<WorkspaceState>,
     Auth(p): Auth,
@@ -121,6 +149,19 @@ async fn list_ws(
     Ok(Json(list.into_iter().map(Into::into).collect()))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/workspaces/{id}",
+    tag = "admin-workspaces",
+    params(("id" = Uuid, Path, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Workspace detail", body = WorkspaceDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing platform permission", body = ErrorBody),
+        (status = 404, description = "No such workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn get_ws(
     State(st): State<WorkspaceState>,
     Auth(p): Auth,
@@ -139,6 +180,19 @@ async fn get_ws(
     Ok(Json(ws.into()))
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/admin/workspaces/{id}",
+    tag = "admin-workspaces",
+    params(("id" = Uuid, Path, description = "Workspace id")),
+    request_body = UpdateWorkspace,
+    responses(
+        (status = 200, description = "Workspace updated", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing platform permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn update_ws(
     State(st): State<WorkspaceState>,
     Auth(p): Auth,
@@ -156,6 +210,18 @@ async fn update_ws(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/admin/workspaces/{id}",
+    tag = "admin-workspaces",
+    params(("id" = Uuid, Path, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Workspace archived", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing platform permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn archive_ws(
     State(st): State<WorkspaceState>,
     Auth(p): Auth,
@@ -174,6 +240,16 @@ async fn archive_ws(
 
 // ── Me routes (Task 1 / Phase 0b) ────────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/api/me/workspaces",
+    tag = "me",
+    responses(
+        (status = 200, description = "Workspaces the caller can see (all, if platform admin)", body = Vec<WorkspaceDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list_my_workspaces(
     State(st): State<WorkspaceState>,
     Auth(p): Auth,
@@ -193,7 +269,7 @@ pub fn me_router() -> Router<WorkspaceState> {
 
 // ── Admin user routes (Task 8) ───────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct UserDto {
     pub id: String,
     pub email: String,
@@ -202,7 +278,7 @@ pub struct UserDto {
     pub status: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct SetPlatformRoles {
     pub roles: Vec<String>,
 }
@@ -214,6 +290,21 @@ pub fn admin_user_router() -> Router<WorkspaceState> {
         .route("/users/{id}/platform-roles", put(set_platform_roles))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/users",
+    tag = "admin-users",
+    params(
+        ("page" = Option<u32>, Query, description = "Page number (1-based)"),
+        ("per_page" = Option<u32>, Query, description = "Items per page"),
+    ),
+    responses(
+        (status = 200, description = "All users", body = Vec<UserDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing platform permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list_users(
     State(st): State<WorkspaceState>,
     Auth(p): Auth,
@@ -246,6 +337,19 @@ async fn list_users(
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/users/{id}",
+    tag = "admin-users",
+    params(("id" = Uuid, Path, description = "User id")),
+    responses(
+        (status = 200, description = "User detail", body = UserDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing platform permission", body = ErrorBody),
+        (status = 404, description = "No such user", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn get_user(
     State(st): State<WorkspaceState>,
     Auth(p): Auth,
@@ -270,6 +374,19 @@ async fn get_user(
     }))
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/admin/users/{id}/platform-roles",
+    tag = "admin-users",
+    params(("id" = Uuid, Path, description = "User id")),
+    request_body = SetPlatformRoles,
+    responses(
+        (status = 200, description = "Platform roles replaced", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Not a platform admin (role assignment is not delegatable)", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn set_platform_roles(
     State(st): State<WorkspaceState>,
     Auth(p): Auth,
@@ -294,14 +411,14 @@ async fn set_platform_roles(
 
 // ── Workspace member routes (Task 9) ─────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct AddMember {
     pub principal_type: String,
     pub principal_id: Uuid,
     pub role: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct MemberDto {
     pub principal_type: String,
     pub principal_id: String,
@@ -314,6 +431,18 @@ pub fn ws_member_router() -> Router<WorkspaceState> {
         .route("/{workspace}/members/{ptype}/{pid}", delete(remove_member))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/members",
+    tag = "workspace-members",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "Members of the workspace", body = Vec<MemberDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list_members(
     State(st): State<WorkspaceState>,
     WsContext(ctx): WsContext,
@@ -335,6 +464,19 @@ async fn list_members(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/members",
+    tag = "workspace-members",
+    params(WorkspacePath),
+    request_body = AddMember,
+    responses(
+        (status = 200, description = "Member added", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn add_member(
     State(st): State<WorkspaceState>,
     WsContext(ctx): WsContext,
@@ -357,6 +499,22 @@ async fn add_member(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/members/{ptype}/{pid}",
+    tag = "workspace-members",
+    params(
+        WorkspacePath,
+        ("ptype" = String, Path, description = "Principal type (user | group)"),
+        ("pid" = Uuid, Path, description = "Principal id"),
+    ),
+    responses(
+        (status = 200, description = "Member removed", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn remove_member(
     State(st): State<WorkspaceState>,
     WsContext(ctx): WsContext,
@@ -372,3 +530,46 @@ async fn remove_member(
         .map_err(AuthError)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
+
+// ── OpenAPI fragments (E0·P4b-2) ─────────────────────────────────────────────
+//
+// One doc struct per router, merged in `egret_workspace::openapi()`. Full mounted
+// paths are traced in `egret-server`'s `build_router`: `admin_workspace_router` +
+// `admin_user_router` nested at `/api/admin`, `ws_member_router` at `/api/ws`,
+// `me_router` at `/api/me`.
+
+/// OpenAPI fragment for the "me" router (`/api/me`).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(list_my_workspaces),
+    components(schemas(WorkspaceDto, ErrorBody)),
+    tags((name = "me", description = "The caller's own workspaces")),
+)]
+pub struct MeApi;
+
+/// OpenAPI fragment for the platform-admin workspace router (`/api/admin/workspaces`).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(create_ws, list_ws, get_ws, update_ws, archive_ws),
+    components(schemas(WorkspaceDto, CreateWorkspace, UpdateWorkspace, Ack, ErrorBody)),
+    tags((name = "admin-workspaces", description = "Platform-admin workspace lifecycle")),
+)]
+pub struct AdminWorkspaceApi;
+
+/// OpenAPI fragment for the platform-admin user router (`/api/admin/users`).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(list_users, get_user, set_platform_roles),
+    components(schemas(UserDto, SetPlatformRoles, Ack, ErrorBody)),
+    tags((name = "admin-users", description = "Platform-admin user directory + platform-role assignment")),
+)]
+pub struct AdminUserApi;
+
+/// OpenAPI fragment for the workspace-membership router (`/api/ws/{workspace}/members`).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(list_members, add_member, remove_member),
+    components(schemas(MemberDto, AddMember, Ack, ErrorBody)),
+    tags((name = "workspace-members", description = "Workspace membership (add/remove principals)")),
+)]
+pub struct WsMemberApi;

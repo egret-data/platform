@@ -1,54 +1,64 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ApiError, apiFetch, apiJson } from "./client";
+/**
+ * Named secrets API — MIGRATED to the orval-generated client (E0·P4d-3).
+ *
+ * Thin adapter over `./generated/control-plane-secrets/control-plane-secrets`
+ * (tag `control-plane-secrets`), following the P4c/P4d pattern: hooks keep their
+ * old names/signatures so call sites (`SecretPicker`) and the module-mocking
+ * tests don't churn. Reads wrap the generated query hook (unwrapping orval's
+ * `{ status, data, headers }` envelope via `select`); writes run `useMutation`
+ * over the generated fetch fns and invalidate the GENERATED query key.
+ *
+ * NOTE — endpoint reconcile: the hand-written module targeted `/ws/{ws}/secrets`,
+ * but the backend exposes these secrets ONLY at `/api/control-plane/secrets`
+ * (global named secrets with a NULL `workspace_id`; there is no workspace-scoped
+ * secrets HTTP route). The generated client hits the real control-plane path, so
+ * the `ws` argument is now vestigial — retained on the hook signatures purely to
+ * avoid churning the one caller. See the P4d-3 report.
+ */
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 
-export interface WorkspaceSecret {
-  id: string;
-  name: string;
-  description?: string | null;
-  created_at: string;
-  // Number of connections referencing this secret. 0 = safe to delete.
-  used_by: number;
-}
+import { ApiError } from "./client";
+import {
+  controlPlaneSecretsCreate,
+  controlPlaneSecretsRemove,
+  controlPlaneSecretsUpdate,
+  getControlPlaneSecretsListQueryKey,
+  useControlPlaneSecretsList,
+} from "./generated/control-plane-secrets/control-plane-secrets";
+import type {
+  CreateSecretInput,
+  SecretDto,
+  UpdateSecretInput,
+} from "./generated/model";
 
-export interface SecretInput {
-  name: string;
-  description?: string | null;
-  // Write-only — never returned by the API.
-  value: string;
-}
+// Re-export generated types under the names the app already imports.
+export type WorkspaceSecret = SecretDto;
+export type SecretInput = CreateSecretInput;
+export type SecretUpdate = UpdateSecretInput;
 
-export interface SecretUpdate {
-  name?: string;
-  description?: string | null;
-  // Write-only. Omit/blank to keep the existing value; a value rotates it.
-  value?: string;
-}
-
+/** Back-compat query-key helper; delegates to the generated key factory. */
 export const secretKeys = {
-  all: (ws: string) => ["secrets", ws] as const,
+  // `ws` is vestigial (secrets are global control-plane rows); ignored.
+  all: (_ws: string) => getControlPlaneSecretsListQueryKey(),
 };
 
-export function useSecrets(ws: string) {
-  return useQuery<WorkspaceSecret[], ApiError>({
-    queryKey: secretKeys.all(ws),
-    queryFn: () => apiJson<WorkspaceSecret[]>(`/ws/${ws}/secrets`),
-    // 403 (non-admin) is an expected outcome — surface it immediately instead
-    // of retrying 3× before the workspace-admin notice can render.
-    retry: false,
+export function useSecrets(_ws: string) {
+  return useControlPlaneSecretsList<WorkspaceSecret[], ApiError>({
+    query: {
+      // 403 (non-admin) is an expected outcome — surface it immediately instead
+      // of retrying 3× before the workspace-admin notice can render.
+      retry: false,
+      select: (r) => r.data as WorkspaceSecret[],
+    },
   });
 }
 
-export function useCreateSecret(ws: string) {
+export function useCreateSecret(_ws: string) {
   const queryClient = useQueryClient();
   return useMutation<WorkspaceSecret, ApiError, SecretInput>({
-    mutationFn: (req) =>
-      apiJson<WorkspaceSecret>(`/ws/${ws}/secrets`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req),
-      }),
+    mutationFn: async (req) => (await controlPlaneSecretsCreate(req)).data as WorkspaceSecret,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: secretKeys.all(ws) });
+      queryClient.invalidateQueries({ queryKey: getControlPlaneSecretsListQueryKey() });
     },
   });
 }
@@ -58,29 +68,25 @@ export interface UpdateSecretArgs {
   input: SecretUpdate;
 }
 
-export function useUpdateSecret(ws: string) {
+export function useUpdateSecret(_ws: string) {
   const queryClient = useQueryClient();
   return useMutation<WorkspaceSecret, ApiError, UpdateSecretArgs>({
-    mutationFn: ({ id, input }) =>
-      apiJson<WorkspaceSecret>(`/ws/${ws}/secrets/${id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(input),
-      }),
+    mutationFn: async ({ id, input }) =>
+      (await controlPlaneSecretsUpdate(id, input)).data as WorkspaceSecret,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: secretKeys.all(ws) });
+      queryClient.invalidateQueries({ queryKey: getControlPlaneSecretsListQueryKey() });
     },
   });
 }
 
-export function useDeleteSecret(ws: string) {
+export function useDeleteSecret(_ws: string) {
   const queryClient = useQueryClient();
   return useMutation<void, ApiError, string>({
     mutationFn: async (id) => {
-      await apiFetch(`/ws/${ws}/secrets/${id}`, { method: "DELETE" });
+      await controlPlaneSecretsRemove(id);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: secretKeys.all(ws) });
+      queryClient.invalidateQueries({ queryKey: getControlPlaneSecretsListQueryKey() });
     },
   });
 }

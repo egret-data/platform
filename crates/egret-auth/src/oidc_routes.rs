@@ -49,6 +49,25 @@ pub fn oidc_router() -> Router<OidcRoutesState> {
         .route("/callback", get(oidc_callback))
 }
 
+/// OpenAPI fragment for the OIDC login/callback router (`/api/auth/oidc`). Both
+/// endpoints are browser-facing redirects (303) whose error paths return
+/// `text/plain` bodies — not the JSON `ErrorBody` envelope — so no response
+/// schemas are declared. Merged into `egret_auth::openapi()` (E0·P4b-1).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(oidc_login, oidc_callback),
+    tags((name = "oidc", description = "OIDC single-sign-on login initiation and provider callback")),
+)]
+pub struct OidcApi;
+
+#[utoipa::path(
+    get,
+    path = "/api/auth/oidc/login",
+    tag = "oidc",
+    responses(
+        (status = 303, description = "Redirect to the OIDC provider's authorize endpoint (sets the encrypted state cookie)"),
+    ),
+)]
 async fn oidc_login(State(st): State<OidcRoutesState>, jar: PrivateCookieJar) -> Response {
     let start = st.oidc.start();
     let cookie = build_state_cookie(
@@ -98,6 +117,22 @@ fn persist_failed(jar: PrivateCookieJar) -> Response {
         .into_response()
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/auth/oidc/callback",
+    tag = "oidc",
+    params(
+        ("code" = String, Query, description = "Authorization code from the OIDC provider"),
+        ("state" = String, Query, description = "Opaque state value echoed back for CSRF protection"),
+    ),
+    responses(
+        (status = 303, description = "Login succeeded; sets session + CSRF cookies and redirects to the post-login page"),
+        (status = 400, description = "Missing, malformed, or mismatched OIDC state cookie (text/plain body)"),
+        (status = 401, description = "OIDC code exchange failed (text/plain body)"),
+        (status = 409, description = "Email already used by another account (text/plain body)"),
+        (status = 500, description = "Provisioning, session, or refresh-token persistence failure (text/plain body)"),
+    ),
+)]
 async fn oidc_callback(
     State(st): State<OidcRoutesState>,
     jar: PrivateCookieJar,

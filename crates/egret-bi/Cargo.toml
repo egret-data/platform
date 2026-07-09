@@ -24,6 +24,11 @@ tracing.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 async-trait.workspace = true
+# OpenAPI emit (E0·P4b-6): `#[utoipa::path]` on the dataset/chart/folder routers'
+# handlers + per-router `#[derive(utoipa::OpenApi)]` doc structs merged into
+# `egret_bi::openapi()`, plus `ToSchema` on the crate-local `ChartDataBody` /
+# `QuerySpec` chart-query builder types.
+utoipa.workspace = true
 
 [dev-dependencies]
 tower.workspace = true

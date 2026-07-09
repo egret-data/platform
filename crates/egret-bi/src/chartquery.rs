@@ -13,7 +13,7 @@ use crate::schema::quote_ident;
 /// Hard ceiling on rows a chart query may request.
 pub const MAX_CHART_ROWS: i64 = 10_000;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct QuerySpec {
     #[serde(default)]
     pub metrics: Vec<String>,
@@ -34,22 +34,25 @@ pub struct QuerySpec {
     pub temporal_units: std::collections::HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct Filter {
     pub col: String,
     pub op: FilterOp,
+    /// Comparison operand. Scalar for most operators; a JSON array for `in`/`not_in`;
+    /// ignored for `is_null`/`is_not_null`. Validated against the column's generic type.
     #[serde(default)]
+    #[schema(value_type = Object)]
     pub value: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct OrderBy {
     pub field: String,
     #[serde(default)]
     pub desc: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FilterOp {
     Eq,

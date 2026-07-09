@@ -32,7 +32,10 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use utoipa::ToSchema;
 use uuid::Uuid;
+
+use egret_core::http::ErrorBody;
 
 use crate::EngineHttpError as CpError;
 use crate::EngineMgmtState as CpState;
@@ -95,7 +98,7 @@ pub fn router() -> Router<CpState> {
 
 // ── DTOs (camelCase on the wire) ───────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct CreateEngineBody {
     name: String,
@@ -113,6 +116,7 @@ struct CreateEngineBody {
     /// additionalJvmConfig, probes}, worker{... , gracefulShutdown} }`. On create
     /// the simple wizard fields seed this; `update` sends the full per-role block.
     #[serde(default)]
+    #[schema(value_type = Object)]
     trino_config: Option<serde_json::Value>,
     /// Link the new engine to an EXISTING Ranger profile (authz_services id).
     /// When omitted, provisioning creates a fresh profile named after the engine.
@@ -122,7 +126,7 @@ struct CreateEngineBody {
 
 /// The provisioning parameters surfaced back to clients (subset of the stored
 /// `spec` jsonb; internal bookkeeping keys are ignored on deserialize).
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, ToSchema)]
 #[serde(rename_all = "camelCase", default)]
 struct EngineSpecDto {
     coordinator_replicas: u32,
@@ -133,10 +137,11 @@ struct EngineSpecDto {
     image_version: String,
     /// Surfaced back so the UI can prefill the config editor on reload.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
     trino_config: Option<serde_json::Value>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct EngineDto {
     id: Uuid,
@@ -163,7 +168,7 @@ impl From<Engine> for EngineDto {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct EngineCatalogDto {
     id: Uuid,
@@ -186,7 +191,7 @@ impl From<EngineCatalog> for EngineCatalogDto {
 
 /// `GET /engines/{id}/catalogs/{cid}` payload: full stored config + secretRef,
 /// with system-minted secret material redacted (see [`redact_catalog_config`]).
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct EngineCatalogDetailDto {
     id: Uuid,
@@ -194,6 +199,7 @@ struct EngineCatalogDetailDto {
     kind: String,
     is_primary: bool,
     secret_ref: Option<Uuid>,
+    #[schema(value_type = Object)]
     config: serde_json::Value,
 }
 
@@ -210,12 +216,13 @@ fn redact_catalog_config(kind: &str, mut config: serde_json::Value) -> serde_jso
     config
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct AddCatalogBody {
     name: String,
     kind: String,
     #[serde(default)]
+    #[schema(value_type = Object)]
     config: serde_json::Value,
     #[serde(default)]
     secret_ref: Option<Uuid>,
@@ -223,16 +230,17 @@ struct AddCatalogBody {
 
 /// `PUT /engines/{id}/catalogs/{cid}` body: replaces the stored `config` +
 /// `secret_ref` in full (not a partial patch).
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct UpdateCatalogBody {
     #[serde(default)]
+    #[schema(value_type = Object)]
     config: serde_json::Value,
     #[serde(default)]
     secret_ref: Option<Uuid>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct EnginePodDto {
     name: String,
@@ -240,7 +248,7 @@ struct EnginePodDto {
     ready: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct EngineStatusDto {
     phase: String,
@@ -249,7 +257,7 @@ struct EngineStatusDto {
 }
 
 /// `GET /engines/{id}` payload: the engine row flattened with live status.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct EngineDetailDto {
     #[serde(flatten)]
     engine: EngineDto,
@@ -1194,6 +1202,17 @@ fn inject_monitor_user(auth: &mut Option<AuthReq>, engine_id: Uuid) -> Result<()
 
 // ── handlers ───────────────────────────────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/engines",
+    tag = "control-plane-engines",
+    responses(
+        (status = 200, description = "Provisioned query engines (Trino on Kubernetes)", body = Vec<EngineDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list_engines(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -1261,6 +1280,20 @@ fn is_minted_client(config: &serde_json::Value) -> bool {
     config.get("mintedClient").and_then(|v| v.as_bool()) != Some(false)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/engines",
+    tag = "control-plane-engines",
+    request_body = CreateEngineBody,
+    responses(
+        (status = 201, description = "Engine created and provisioned; primary catalog auto-wired to the warehouse", body = EngineDto),
+        (status = 400, description = "Unknown/unprovisioned warehouse, invalid input, or provisioning failed", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:create permission", body = ErrorBody),
+        (status = 409, description = "An engine with this name already exists", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn create_engine(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -1442,6 +1475,19 @@ async fn create_engine(
     Ok((StatusCode::CREATED, Json(engine.into())))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/engines/{id}",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    responses(
+        (status = 200, description = "The engine row flattened with live Kubernetes status", body = EngineDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn get_engine(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -1488,6 +1534,21 @@ async fn get_engine(
     }))
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/control-plane/engines/{id}",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    request_body = CreateEngineBody,
+    responses(
+        (status = 200, description = "Engine spec updated and pods rolled", body = EngineDto),
+        (status = 400, description = "Invalid config or engine update failed", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:update permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn update_engine(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -1542,6 +1603,20 @@ async fn update_engine(
     Ok(Json(engine.into()))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/control-plane/engines/{id}",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    responses(
+        (status = 204, description = "Engine deprovisioned; catalogs and minted Catalog Clients cleaned up"),
+        (status = 400, description = "Engine delete failed on Kubernetes", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:delete permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn delete_engine(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -1579,6 +1654,20 @@ async fn delete_engine(
 /// always forces a roll: `prov.restart` patches a fresh timestamp annotation
 /// onto both Deployments' pod templates regardless of whether the rendered
 /// config changed.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/engines/{id}/restart",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    responses(
+        (status = 200, description = "Coordinator + worker pods rolled (rollout restart)"),
+        (status = 400, description = "Kubernetes not configured or restart failed", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:provision permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn restart_engine(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -1601,6 +1690,19 @@ async fn restart_engine(
 
 // ── catalog sub-routes ───────────────────────────────────────────────────────────
 
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/engines/{id}/catalogs",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    responses(
+        (status = 200, description = "Catalogs attached to the engine", body = Vec<EngineCatalogDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list_catalogs(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -1622,6 +1724,21 @@ async fn list_catalogs(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/engines/{id}/catalogs",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    request_body = AddCatalogBody,
+    responses(
+        (status = 201, description = "Catalog added and engine re-provisioned", body = EngineCatalogDto),
+        (status = 400, description = "Missing/invalid catalog kind, warehouse, or engine update failed", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:create permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn add_catalog(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -1775,6 +1892,22 @@ async fn add_catalog(
     Ok((StatusCode::CREATED, Json(cat.into())))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/engines/{id}/catalogs/{cid}",
+    tag = "control-plane-engines",
+    params(
+        ("id" = Uuid, Path, description = "Engine id"),
+        ("cid" = Uuid, Path, description = "Catalog id"),
+    ),
+    responses(
+        (status = 200, description = "Full catalog config (system-minted secret material redacted)", body = EngineCatalogDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+        (status = 404, description = "No such engine or catalog (or catalog not on this engine)", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn get_catalog(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -1805,7 +1938,7 @@ async fn get_catalog(
 }
 
 /// `POST /engines/{id}/catalogs/{cid}/test` payload.
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct CatalogTestDto {
     ok: bool,
@@ -1855,6 +1988,23 @@ fn coordinator_error_message(code: u16, body: &[u8]) -> String {
 /// EXCEPT when the coordinator itself is unreachable or kubernetes isn't
 /// configured, which surface as the usual `CpError` (mirrors the other
 /// coordinator-proxied routes in this file and in `monitor.rs`).
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/engines/{id}/catalogs/{cid}/test",
+    tag = "control-plane-engines",
+    params(
+        ("id" = Uuid, Path, description = "Engine id"),
+        ("cid" = Uuid, Path, description = "Catalog id"),
+    ),
+    responses(
+        (status = 200, description = "Test-connection result (ok=false with a message on a coordinator/query failure)", body = CatalogTestDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+        (status = 404, description = "No such engine or catalog (or catalog not on this engine)", body = ErrorBody),
+        (status = 502, description = "Trino coordinator unreachable", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn test_catalog(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -1946,6 +2096,23 @@ async fn test_catalog(
     }))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/control-plane/engines/{id}/catalogs/{cid}",
+    tag = "control-plane-engines",
+    params(
+        ("id" = Uuid, Path, description = "Engine id"),
+        ("cid" = Uuid, Path, description = "Catalog id"),
+    ),
+    responses(
+        (status = 200, description = "Catalog removed and engine re-provisioned"),
+        (status = 400, description = "Cannot delete the primary catalog or engine update failed", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:delete permission", body = ErrorBody),
+        (status = 404, description = "No such engine or catalog (or catalog not on this engine)", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn remove_catalog(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -1994,6 +2161,24 @@ async fn remove_catalog(
     Ok(StatusCode::OK)
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/control-plane/engines/{id}/catalogs/{cid}",
+    tag = "control-plane-engines",
+    params(
+        ("id" = Uuid, Path, description = "Engine id"),
+        ("cid" = Uuid, Path, description = "Catalog id"),
+    ),
+    request_body = UpdateCatalogBody,
+    responses(
+        (status = 200, description = "Catalog config replaced and engine re-provisioned", body = EngineCatalogDto),
+        (status = 400, description = "Primary or managed egret-warehouse catalogs are not editable, or engine update failed", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:update permission", body = ErrorBody),
+        (status = 404, description = "No such engine or catalog (or catalog not on this engine)", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn update_catalog(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -2070,7 +2255,7 @@ struct PodLogsQuery {
     container: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct PodLogsDto {
     logs: String,
@@ -2080,6 +2265,26 @@ struct PodLogsDto {
 /// of a pod's logs. The pod must belong to the engine (verified against the live
 /// pod list from `EngineProvisioner::status`), so one platform admin can't read
 /// an arbitrary pod's logs by guessing a name.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/engines/{id}/pods/{pod}/logs",
+    tag = "control-plane-engines",
+    params(
+        ("id" = Uuid, Path, description = "Engine id"),
+        ("pod" = String, Path, description = "Pod name (must belong to the engine)"),
+        ("tail" = Option<i64>, Query, description = "Number of trailing lines (1..=5000, default 1000)"),
+        ("previous" = Option<bool>, Query, description = "Read the previous (crashed) container instance"),
+        ("container" = Option<String>, Query, description = "Container name (defaults to the pod's main container)"),
+    ),
+    responses(
+        (status = 200, description = "Bounded tail of the pod's logs", body = PodLogsDto),
+        (status = 400, description = "Kubernetes not configured or log read failed", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+        (status = 404, description = "No such engine, or pod does not belong to the engine", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn pod_logs(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -2136,6 +2341,27 @@ struct PodLogsFollowQuery {
 /// the pod must be one of the engine's live pods, checked BEFORE the WS
 /// upgrade so an unknown pod 404s instead of upgrading and failing inside
 /// the socket.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/engines/{id}/pods/{pod}/logs/follow",
+    tag = "control-plane-engines",
+    params(
+        ("id" = Uuid, Path, description = "Engine id"),
+        ("pod" = String, Path, description = "Pod name (must belong to the engine)"),
+        ("tail" = Option<i64>, Query, description = "Number of trailing lines to backfill (1..=5000, default 1000)"),
+    ),
+    responses(
+        // Not a REST/JSON call: the frontend opens a WebSocket (PodLogs) and reads
+        // log byte chunks as Binary frames; there is no JSON response body. The
+        // error statuses below are returned BEFORE the upgrade.
+        (status = 101, description = "WebSocket upgrade streaming the pod's logs (kubectl logs -f equivalent)"),
+        (status = 400, description = "Kubernetes not configured", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+        (status = 404, description = "No such engine, or pod does not belong to the engine", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn pod_logs_follow(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -2247,6 +2473,27 @@ struct ExecResize {
 /// ownership guard as [`pod_logs`]: the pod must be one of the engine's live
 /// pods, checked BEFORE the WS upgrade so an unknown pod 404s instead of
 /// upgrading and failing inside the socket.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/engines/{id}/pods/{pod}/exec",
+    tag = "control-plane-engines",
+    params(
+        ("id" = Uuid, Path, description = "Engine id"),
+        ("pod" = String, Path, description = "Pod name (must belong to the engine)"),
+    ),
+    responses(
+        // Not a REST/JSON call: the frontend opens a WebSocket (PodTerminal) and
+        // bridges it bidirectionally to a `/bin/sh` session in the pod (stdin +
+        // resize control frames up, stdout Binary frames down). No JSON body. The
+        // error statuses below are returned BEFORE the upgrade.
+        (status = 101, description = "WebSocket upgrade bridging an interactive exec session in the pod"),
+        (status = 400, description = "Kubernetes not configured", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:provision permission", body = ErrorBody),
+        (status = 404, description = "No such engine, or pod does not belong to the engine", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn pod_exec(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -2380,6 +2627,52 @@ async fn bridge_exec(
     }
     let _ = socket.close().await;
 }
+
+/// OpenAPI fragment for the engine-provisioning API (engines CRUD + lifecycle,
+/// catalog auto-wiring + management, and the pod logs/exec bridges). Nested at
+/// `/api/control-plane` in `egret-server`, so every `#[utoipa::path]` above
+/// carries the FULL mounted path. The native-Trino monitor routes merged into
+/// the same router carry their own [`crate::monitor::MonitorApi`] fragment,
+/// unioned in `egret_engine_mgmt::openapi()`. Errors use the shared
+/// [`egret_core::http::ErrorBody`]. No schema name here collides with the merged
+/// doc's other seams (verified against the committed `openapi.json`).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        list_engines,
+        create_engine,
+        get_engine,
+        update_engine,
+        delete_engine,
+        restart_engine,
+        list_catalogs,
+        add_catalog,
+        get_catalog,
+        test_catalog,
+        remove_catalog,
+        update_catalog,
+        pod_logs,
+        pod_logs_follow,
+        pod_exec,
+    ),
+    components(schemas(
+        CreateEngineBody,
+        EngineSpecDto,
+        EngineDto,
+        EngineDetailDto,
+        EngineStatusDto,
+        EnginePodDto,
+        EngineCatalogDto,
+        EngineCatalogDetailDto,
+        AddCatalogBody,
+        UpdateCatalogBody,
+        CatalogTestDto,
+        PodLogsDto,
+        ErrorBody,
+    )),
+    tags((name = "control-plane-engines", description = "Engine provisioning: Trino-on-Kubernetes clusters, their catalogs, native query monitor, and pod logs/exec")),
+)]
+pub struct EngineMgmtApi;
 
 #[cfg(test)]
 mod tests {

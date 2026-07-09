@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Summary view of a notebook (no cells). Used by ownership/IDOR gates.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct NotebookSummary {
     pub id: Uuid,
     pub name: String,
@@ -26,7 +26,7 @@ pub struct NotebookSummary {
 }
 
 /// An engine (DB connection) option shown in notebook settings.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct EngineOption {
     pub id: Uuid,
     pub name: String,
@@ -38,7 +38,7 @@ pub struct EngineOption {
 
 /// Full kernel manifest returned by `GET /ws/{workspace}/notebook-runtime` and
 /// consumed by `egret-kernel` to build the kernel process environment.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct NotebookRuntime {
     /// The caller's stable username (email local-part, collision-suffixed).
     pub username: String,
@@ -56,7 +56,7 @@ pub struct NotebookRuntime {
 
 /// The `notebook_cells.last_output` contract: a trimmed nbformat-style output
 /// list, shared by the E-P2 recorder (writer) and the frontend renderer (reader).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CellOutput {
     Stream {

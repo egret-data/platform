@@ -58,4 +58,5 @@ base64.workspace = true
 uuid.workspace = true
 reqwest.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 axum-extra = { version = "0.10", features = ["cookie", "cookie-private"] }

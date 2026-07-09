@@ -1,7 +1,50 @@
-import { apiFetch, apiJson } from "./client";
+/**
+ * Policies (Ranger-backed / control-plane) API — MIGRATED to the orval-generated
+ * client (E0·P4d-3).
+ *
+ * Thin adapter over `./generated/policy-admin/policy-admin` (tag `policy-admin`),
+ * following the P4c/P4d pattern: the plain async helpers keep their old
+ * names/signatures so call sites and the module-mocking tests don't churn. Each
+ * helper calls the generated fetch fn and unwraps orval's `{ status, data,
+ * headers }` envelope.
+ *
+ * Most policy domain types stay FE-local:
+ *   - The three `*PolicyInput` editor types form a `kind`-discriminated union.
+ *     The spec publishes `AccessPolicyInput`/`MaskingPolicyInput`/
+ *     `RowFilterPolicyInput` only as loose *vocabulary* (every field optional),
+ *     and create/update take a bare `Object` body, so we keep the strict FE union
+ *     and cast at the adapter boundary (like P4d-1's ChartDataBody).
+ *   - `getServiceDef`/`getPolicy` return verbatim jsonb (`Object` in the spec),
+ *     so we keep the FE `ServiceDef`/`Record<string, unknown>` shapes and cast.
+ *   - `PolicySummary.policy_type` and `Principal.kind` are narrow FE unions the
+ *     spec widens to `string`; aliasing would churn call sites.
+ * `Profile`/`ProfileEngine` map cleanly and are re-exported from the generated
+ * model.
+ */
+import {
+  policyAdminCreatePolicy,
+  policyAdminDeletePolicyHandler,
+  policyAdminGetPolicy,
+  policyAdminGetServiceDef,
+  policyAdminListPolicies,
+  policyAdminListPrincipals,
+  policyAdminListProfiles,
+  policyAdminResourceLookup,
+  policyAdminSeedDefaults,
+  policyAdminSetPolicyEnabled,
+  policyAdminTrinoConfig,
+  policyAdminUpdatePolicy,
+} from "./generated/policy-admin/policy-admin";
+import type {
+  PolicyAdminCreatePolicyBody,
+  PolicyAdminUpdatePolicyBody,
+  ProfileDto,
+  ProfileEngine,
+} from "./generated/model";
 
 // ── Policies (Ranger-backed / control-plane) ─────────────────────────────────
 
+// FE-local: the spec widens `policy_type` to a bare `string`; keep the union.
 export interface PolicySummary {
   id: number;
   name: string;
@@ -15,29 +58,16 @@ export interface PolicySummary {
   labels: string[];
 }
 
-export interface ProfileEngine {
-  id: string;
-  name: string;
-  status: string;
+// Re-export generated DTOs under the app's existing names.
+export type { ProfileEngine };
+export type Profile = ProfileDto;
+
+export async function listProfiles(): Promise<Profile[]> {
+  return (await policyAdminListProfiles()).data as Profile[];
 }
 
-export interface Profile {
-  id: number;
-  name: string;
-  type: string;
-  policy_version: number;
-  policy_count: number;
-  engines: ProfileEngine[];
-}
-
-export function listProfiles(): Promise<Profile[]> {
-  return apiJson<Profile[]>("/control-plane/policies/services");
-}
-
-export function listPolicies(service: string, type?: string): Promise<PolicySummary[]> {
-  const p = new URLSearchParams({ service });
-  if (type) p.set("type", type);
-  return apiJson<PolicySummary[]>(`/control-plane/policies?${p.toString()}`);
+export async function listPolicies(service: string, type?: string): Promise<PolicySummary[]> {
+  return (await policyAdminListPolicies({ service, type: type || undefined })).data as PolicySummary[];
 }
 
 // ── Policy editor (Task 4) ────────────────────────────────────────────────
@@ -96,18 +126,16 @@ export interface ServiceDef {
   [k: string]: unknown;
 }
 
-export function getServiceDef(name: string): Promise<ServiceDef> {
-  return apiJson<ServiceDef>(`/control-plane/policies/service-def/${encodeURIComponent(name)}`);
+export async function getServiceDef(name: string): Promise<ServiceDef> {
+  return (await policyAdminGetServiceDef(name)).data as ServiceDef;
 }
 
-export function getPolicy(id: number): Promise<Record<string, unknown>> {
-  return apiJson<Record<string, unknown>>(`/control-plane/policies/${id}`);
+export async function getPolicy(id: number): Promise<Record<string, unknown>> {
+  return (await policyAdminGetPolicy(id)).data as Record<string, unknown>;
 }
 
-export function listPrincipals(q: string, kind?: "user" | "group"): Promise<Principal[]> {
-  const p = new URLSearchParams({ q });
-  if (kind) p.set("kind", kind);
-  return apiJson<Principal[]>(`/control-plane/principals?${p.toString()}`);
+export async function listPrincipals(q: string, kind?: "user" | "group"): Promise<Principal[]> {
+  return (await policyAdminListPrincipals({ q, kind: kind || undefined })).data as Principal[];
 }
 
 export interface MaskItem { users: string[]; groups: string[]; maskType: string; valueExpr?: string; }
@@ -133,16 +161,13 @@ export interface RowFilterPolicyInput {
 export type PolicyInput = (AccessPolicyInput & { kind: "access" }) | MaskingPolicyInput | RowFilterPolicyInput;
 
 export interface ConfigFile { name: string; content: string; }
-export function getTrinoConfig(service: string): Promise<ConfigFile[]> {
-  return apiJson<ConfigFile[]>(`/control-plane/policies/services/${encodeURIComponent(service)}/trino-config`);
+export async function getTrinoConfig(service: string): Promise<ConfigFile[]> {
+  return (await policyAdminTrinoConfig(service)).data as ConfigFile[];
 }
 
 /** Seed default "admin has all access" policies (one per Trino resource hierarchy). Idempotent. */
-export function seedDefaultPolicies(service: string): Promise<{ created: number }> {
-  return apiJson<{ created: number }>(
-    `/control-plane/policies/services/${encodeURIComponent(service)}/seed-defaults`,
-    { method: "POST" },
-  );
+export async function seedDefaultPolicies(service: string): Promise<{ created: number }> {
+  return (await policyAdminSeedDefaults(service)).data as { created: number };
 }
 
 export const MASK_TYPES = [
@@ -156,38 +181,37 @@ export const MASK_TYPES = [
   { name: "CUSTOM", label: "Custom expression" },
 ] as const;
 
-export function createPolicy(input: PolicyInput): Promise<{ id: number }> {
-  return apiJson<{ id: number }>("/control-plane/policies", {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
-  });
+export async function createPolicy(input: PolicyInput): Promise<{ id: number }> {
+  // The spec types the body as a loose `Object`; cast the strict FE union.
+  return (await policyAdminCreatePolicy(input as unknown as PolicyAdminCreatePolicyBody)).data as { id: number };
 }
 
-export function updatePolicy(id: number, input: PolicyInput): Promise<{ id: number }> {
-  return apiJson<{ id: number }>(`/control-plane/policies/${id}`, {
-    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
-  });
+export async function updatePolicy(id: number, input: PolicyInput): Promise<{ id: number }> {
+  return (await policyAdminUpdatePolicy(id, input as unknown as PolicyAdminUpdatePolicyBody)).data as { id: number };
 }
 
-export function deletePolicy(id: number): Promise<void> {
-  return apiFetch(`/control-plane/policies/${id}`, { method: "DELETE" }).then(() => undefined);
+export async function deletePolicy(id: number): Promise<void> {
+  await policyAdminDeletePolicyHandler(id);
 }
 
-export function resourceLookup(
+export async function resourceLookup(
   service: string,
   level: string,
   parents: { catalog?: string; schema?: string; table?: string } = {},
   q = "",
 ): Promise<string[]> {
-  const p = new URLSearchParams({ service, level });
-  if (parents.catalog) p.set("catalog", parents.catalog);
-  if (parents.schema) p.set("schema", parents.schema);
-  if (parents.table) p.set("table", parents.table);
-  if (q) p.set("q", q);
-  return apiJson<string[]>(`/control-plane/policies/resource-lookup?${p.toString()}`);
+  return (
+    await policyAdminResourceLookup({
+      service,
+      level,
+      catalog: parents.catalog || undefined,
+      schema: parents.schema || undefined,
+      table: parents.table || undefined,
+      q: q || undefined,
+    })
+  ).data as string[];
 }
 
-export function setPolicyEnabled(id: number, enabled: boolean): Promise<void> {
-  return apiFetch(`/control-plane/policies/${id}/enabled`, {
-    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled }),
-  }).then(() => undefined);
+export async function setPolicyEnabled(id: number, enabled: boolean): Promise<void> {
+  await policyAdminSetPolicyEnabled(id, { enabled });
 }

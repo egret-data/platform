@@ -19,7 +19,7 @@ use uuid::Uuid;
 pub use egret_core::{ColumnMeta, TabularResult};
 
 /// Supported query engines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Engine {
     Trino,
@@ -44,7 +44,7 @@ impl Engine {
 }
 
 /// Non-secret connection options stored in `databases.options` (jsonb).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ConnOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
@@ -69,7 +69,7 @@ pub struct ConnOptions {
 /// wire type is the separate `DatabaseDetailDto` and the store builds `Database`
 /// field-by-field from sqlx rows, so these codecs are not yet exercised — they
 /// let a future out-of-process query-seam client exchange this domain type.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Database {
     pub id: Uuid,
     pub name: String,

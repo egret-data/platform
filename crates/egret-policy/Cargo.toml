@@ -8,7 +8,7 @@ license.workspace = true
 # Ranger Admin REST serving surface (ranger module), merged from the former
 # standalone egret-ranger crate. Implements PolicyPort (egret-policy-api).
 [dependencies]
-egret-core.workspace = true
+egret-core = { workspace = true, features = ["http"] }
 egret-metastore.workspace = true
 egret-policy-api.workspace = true
 # The admin Policies router (E2d) needs the Auth extractor + require_permission
@@ -23,6 +23,10 @@ uuid.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 axum.workspace = true
+# OpenAPI emit (E0·P4b-5): `#[utoipa::path]` on the policy-admin + ranger routers'
+# handlers + per-router `#[derive(utoipa::OpenApi)]` doc structs, merged into
+# `egret_policy::openapi()`.
+utoipa.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

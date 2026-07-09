@@ -19,3 +19,14 @@ pub mod token;
 pub mod users;
 
 pub use authz::{require_permission, require_platform_admin};
+
+/// The Auth seam's OpenAPI document (E0·P4b-1): the local-auth router
+/// (`/api/auth`) and the OIDC router (`/api/auth/oidc`) merged into one
+/// `OpenApi`. `egret-server` merges this into the top-level API doc. This is the
+/// per-crate `openapi()` convention every annotated seam exposes.
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    use utoipa::OpenApi as _;
+    let mut doc = routes::AuthApi::openapi();
+    doc.merge(oidc_routes::OidcApi::openapi());
+    doc
+}

@@ -10,4 +10,4 @@ pub mod tester;
 pub use error::{DatabaseError, DbApiError};
 pub use model::Engine;
 pub use repo::DatabaseRepo;
-pub use routes::{workspace_database_router, DatabaseState};
+pub use routes::{workspace_database_router, DatabaseState, QueryRegistryApi};

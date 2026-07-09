@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ResourceLevel {
     #[serde(default)]
     pub values: Vec<String>,
@@ -25,7 +25,7 @@ pub struct ResourceLevel {
     pub is_recursive: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AccessItemInput {
     #[serde(default)]
     pub users: Vec<String>,
@@ -46,7 +46,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AccessPolicyInput {
     pub name: String,
     pub service: String,
@@ -142,7 +142,7 @@ pub fn access_to_ranger_json(input: &AccessPolicyInput) -> Value {
     })
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct MaskItemInput {
     #[serde(default)]
     pub users: Vec<String>,
@@ -154,7 +154,7 @@ pub struct MaskItemInput {
     pub value_expr: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct MaskingPolicyInput {
     #[serde(default = "kind_masking")]
     pub kind: String,
@@ -206,7 +206,7 @@ pub fn masking_to_ranger_json(input: &MaskingPolicyInput) -> Value {
     })
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct RowFilterItemInput {
     #[serde(default)]
     pub users: Vec<String>,
@@ -216,7 +216,7 @@ pub struct RowFilterItemInput {
     pub filter_expr: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct RowFilterPolicyInput {
     #[serde(default = "kind_rowfilter")]
     pub kind: String,

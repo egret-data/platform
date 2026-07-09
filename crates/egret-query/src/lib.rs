@@ -26,3 +26,14 @@ pub use registry::{
 // `egret_query::{Engine, Database, ConnOptions}` too (it's also still at
 // `registry::model::…` via a re-export there).
 pub use egret_query_api::{ConnOptions, Database, Engine};
+
+/// The Query seam's OpenAPI document (E0·P4): the database-registry router and
+/// the query-execution router merged into one `OpenApi`. `egret-server` calls
+/// this and merges it into the top-level API doc. This is the per-crate
+/// `openapi()` convention every annotated seam exposes.
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    use utoipa::OpenApi as _;
+    let mut doc = registry::QueryRegistryApi::openapi();
+    doc.merge(execution::QueryExecutionApi::openapi());
+    doc
+}

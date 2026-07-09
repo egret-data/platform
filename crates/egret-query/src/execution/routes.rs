@@ -16,10 +16,13 @@ use egret_workspace::workspaces::WorkspaceRepo;
 use serde::Deserialize;
 use uuid::Uuid;
 
+use egret_core::http::ErrorBody;
+use egret_core::{Ack, WorkspacePath};
+
 use crate::execution::error::EngineApiError;
 use crate::execution::job::JobManager;
 use crate::execution::model::{
-    Limits, QueryListItem, QueryStatusDto, ResultsPage, SubmitAck, SubmitQuery,
+    Limits, QueryListItem, QueryStatus, QueryStatusDto, ResultsPage, SubmitAck, SubmitQuery,
 };
 use crate::execution::store::{Query, QueryStore};
 
@@ -85,6 +88,21 @@ async fn authorize(
     Ok(())
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/queries",
+    tag = "queries",
+    params(WorkspacePath),
+    request_body = SubmitQuery,
+    responses(
+        (status = 202, description = "Query accepted; poll status by id", body = SubmitAck),
+        (status = 400, description = "Invalid input", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 404, description = "Database not granted to workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn submit(
     State(st): State<EngineState>,
     WsContext(ctx): WsContext,
@@ -143,6 +161,22 @@ async fn owned(
     Ok(q)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/queries/{id}",
+    tag = "queries",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Query id"),
+    ),
+    responses(
+        (status = 200, description = "Query status (with inline preview once finished)", body = QueryStatusDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Not the owner / missing permission", body = ErrorBody),
+        (status = 404, description = "No such query in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn status(
     State(st): State<EngineState>,
     WsContext(ctx): WsContext,
@@ -172,6 +206,24 @@ struct Page {
     page_size: Option<usize>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/queries/{id}/results",
+    tag = "queries",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Query id"),
+        ("page" = Option<usize>, Query, description = "Zero-based page index (default 0)"),
+        ("page_size" = Option<usize>, Query, description = "Rows per page (default 100, clamped 1..=1000)"),
+    ),
+    responses(
+        (status = 200, description = "A page of the full result set", body = ResultsPage),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Not the owner / missing permission", body = ErrorBody),
+        (status = 404, description = "No such query in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn results(
     State(st): State<EngineState>,
     WsContext(ctx): WsContext,
@@ -203,6 +255,22 @@ async fn results(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/queries/{id}/results.csv",
+    tag = "queries",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Query id"),
+    ),
+    responses(
+        (status = 200, description = "The full result set as a CSV download", content_type = "text/csv", body = String),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Not the owner / missing permission", body = ErrorBody),
+        (status = 404, description = "No such query in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn results_csv(
     State(st): State<EngineState>,
     WsContext(ctx): WsContext,
@@ -294,6 +362,22 @@ fn csv_field(s: &str) -> String {
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/queries/{id}/cancel",
+    tag = "queries",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Query id"),
+    ),
+    responses(
+        (status = 200, description = "Cancellation requested", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Not the owner / missing permission", body = ErrorBody),
+        (status = 404, description = "No such query in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn cancel(
     State(st): State<EngineState>,
     WsContext(ctx): WsContext,
@@ -308,6 +392,18 @@ async fn cancel(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/queries",
+    tag = "queries",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "Recent queries submitted by the caller (max 50)", body = Vec<QueryListItem>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn history(
     State(st): State<EngineState>,
     WsContext(ctx): WsContext,
@@ -334,3 +430,27 @@ async fn history(
             .collect(),
     ))
 }
+
+/// OpenAPI fragment for the workspace query-execution router. Merged into the
+/// Query seam's `egret_query::openapi()`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(submit, history, status, results, results_csv, cancel),
+    components(schemas(
+        SubmitQuery,
+        SubmitAck,
+        QueryStatus,
+        QueryStatusDto,
+        QueryListItem,
+        ResultsPage,
+        // Exported result vocabulary (egret-core). The paged result endpoints
+        // carry columns/rows as free-form JSON, but `TabularResult`/`ColumnMeta`
+        // are the seam's canonical typed result shape, so they're published too.
+        egret_core::TabularResult,
+        egret_core::ColumnMeta,
+        Ack,
+        ErrorBody,
+    )),
+    tags((name = "queries", description = "Workspace query submission, status, results, and history")),
+)]
+pub struct QueryExecutionApi;

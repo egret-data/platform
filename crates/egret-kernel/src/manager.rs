@@ -15,9 +15,12 @@ use crate::registry::{KernelKey, KernelRegistry};
 /// Public snapshot of a kernel: phase + gateway URL.
 ///
 /// Serializes as `{ "phase": "ready", "url": "http://..." }`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct KernelStatus {
+    /// Lifecycle phase, serialized as a lowercase string
+    /// (`spawning` / `ready` / `dead`).
     #[serde(serialize_with = "serialize_phase")]
+    #[schema(value_type = String, example = "ready")]
     pub phase: KernelPhase,
     pub url: String,
 }

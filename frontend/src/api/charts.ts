@@ -1,5 +1,22 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiFetch, apiJson } from "./client";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+
+import { ApiError } from "./client";
+import {
+  chartsChBookmarkAdd,
+  chartsChBookmarkRemove,
+  chartsChCreate,
+  chartsChData,
+  chartsChDuplicate,
+  chartsChRemove,
+  chartsChRestore,
+  chartsChTrash,
+  chartsChUpdate,
+  getChartsChGetQueryKey,
+  getChartsChListQueryKey,
+  useChartsChGet,
+  useChartsChList,
+} from "./generated/charts/charts";
+import type { ChartDataBody } from "./generated/model";
 import type { ColumnFormat, Rule } from "@/components/chart/format-types";
 
 export type VizType =
@@ -163,63 +180,58 @@ export interface Chart {
   deleted_at?: string | null;
 }
 
+/** Back-compat query-key helpers; delegate to the generated key factories. */
 export const chartKeys = {
-  list: (ws: string) => ["charts", ws] as const,
-  one: (ws: string, id: string) => ["charts", ws, id] as const,
+  list: (ws: string) => getChartsChListQueryKey(ws),
+  one: (ws: string, id: string) => getChartsChGetQueryKey(ws, id),
 };
 
 export function useCharts(ws: string, opts?: { trashed?: boolean }) {
   const trashed = !!opts?.trashed;
-  return useQuery<Chart[]>({
-    queryKey: [...chartKeys.list(ws), { trashed }],
-    queryFn: () => apiJson<Chart[]>(`/ws/${ws}/charts${trashed ? "?trashed=true" : ""}`),
+  return useChartsChList<Chart[], ApiError>(ws, trashed ? { trashed: true } : undefined, {
+    query: { select: (r) => r.data as Chart[] },
   });
 }
 
 export function useChart(ws: string, id: string | null) {
-  return useQuery<Chart>({
-    queryKey: id ? chartKeys.one(ws, id) : ["charts", ws, "none"],
-    queryFn: () => apiJson<Chart>(`/ws/${ws}/charts/${id}`),
-    enabled: !!id,
+  return useChartsChGet<Chart, ApiError>(ws, id ?? "", {
+    query: { enabled: !!id, select: (r) => r.data as Chart },
   });
 }
 
 export function useChartMutations(ws: string) {
   const qc = useQueryClient();
-  const invalidate = () => qc.invalidateQueries({ queryKey: chartKeys.list(ws) });
-  const create = useMutation({
-    mutationFn: (b: { dataset_id: string; name: string; description?: string; viz_type: VizType; params: ChartParams }) =>
-      apiJson<Chart>(`/ws/${ws}/charts`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b) }),
+  const invalidate = () => qc.invalidateQueries({ queryKey: getChartsChListQueryKey(ws) });
+  const create = useMutation<Chart, ApiError, { dataset_id: string; name: string; description?: string; viz_type: VizType; params: ChartParams }>({
+    mutationFn: async (b) => (await chartsChCreate(ws, b)).data as Chart,
     onSuccess: invalidate,
   });
-  const update = useMutation({
-    mutationFn: ({ id, ...b }: { id: string; dataset_id: string; name: string; description: string; viz_type: VizType; params: ChartParams }) =>
-      apiJson<Chart>(`/ws/${ws}/charts/${id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(b) }),
+  const update = useMutation<Chart, ApiError, { id: string; dataset_id: string; name: string; description: string; viz_type: VizType; params: ChartParams }>({
+    mutationFn: async ({ id, ...b }) => (await chartsChUpdate(ws, id, b)).data as Chart,
     onSuccess: invalidate,
   });
-  const remove = useMutation({
-    mutationFn: (id: string) => apiFetch(`/ws/${ws}/charts/${id}`, { method: "DELETE" }),
+  const remove = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await chartsChRemove(ws, id); },
     onSuccess: invalidate,
   });
-  const duplicate = useMutation({
-    mutationFn: (id: string) =>
-      apiJson<Chart>(`/ws/${ws}/charts/${id}/duplicate`, { method: "POST" }),
+  const duplicate = useMutation<Chart, ApiError, string>({
+    mutationFn: async (id) => (await chartsChDuplicate(ws, id)).data as Chart,
     onSuccess: invalidate,
   });
-  const trash = useMutation({
-    mutationFn: (id: string) => apiJson(`/ws/${ws}/charts/${id}/trash`, { method: "POST" }),
+  const trash = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await chartsChTrash(ws, id); },
     onSuccess: invalidate,
   });
-  const restore = useMutation({
-    mutationFn: (id: string) => apiJson(`/ws/${ws}/charts/${id}/restore`, { method: "POST" }),
+  const restore = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await chartsChRestore(ws, id); },
     onSuccess: invalidate,
   });
-  const addBookmark = useMutation({
-    mutationFn: (id: string) => apiJson(`/ws/${ws}/charts/${id}/bookmark`, { method: "POST" }),
+  const addBookmark = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await chartsChBookmarkAdd(ws, id); },
     onSuccess: invalidate,
   });
-  const removeBookmark = useMutation({
-    mutationFn: (id: string) => apiJson(`/ws/${ws}/charts/${id}/bookmark`, { method: "DELETE" }),
+  const removeBookmark = useMutation<void, ApiError, string>({
+    mutationFn: async (id) => { await chartsChBookmarkRemove(ws, id); },
     onSuccess: invalidate,
   });
   return { create, update, remove, duplicate, trash, restore, addBookmark, removeBookmark };
@@ -227,10 +239,10 @@ export function useChartMutations(ws: string) {
 
 /** Build-only: returns the SQL + database_id; the caller submits via useSubmitQuery and polls. */
 export function useBuildChartData(ws: string) {
-  return useMutation({
-    mutationFn: (b: { dataset_id: string; query_spec: QuerySpec }) =>
-      apiJson<{ sql: string; database_id: string }>(`/ws/${ws}/charts/data`, {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b),
-      }),
+  return useMutation<{ sql: string; database_id: string }, ApiError, { dataset_id: string; query_spec: QuerySpec }>({
+    // The FE `QuerySpec` (discriminated `ChartFilter[]`) is stricter than the spec's
+    // loosely-typed `query_spec`; cast the body to the generated shape.
+    mutationFn: async (b) =>
+      (await chartsChData(ws, b as unknown as ChartDataBody)).data as { sql: string; database_id: string },
   });
 }

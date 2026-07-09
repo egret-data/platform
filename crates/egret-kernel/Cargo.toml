@@ -31,6 +31,7 @@ tokio-util.workspace = true
 sha2.workspace = true
 hex.workspace = true
 rand.workspace = true
+utoipa.workspace = true
 
 [dev-dependencies]
 tower.workspace = true

@@ -15,7 +15,8 @@ use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
-use egret_core::{Error, WorkspaceContext};
+use egret_core::http::ErrorBody;
+use egret_core::{Error, WorkspaceContext, WorkspacePath};
 use egret_workspace::context::WsContext;
 use egret_workspace::rbac::Authorizer;
 use egret_workspace::workspaces::WorkspaceRepo;
@@ -142,6 +143,21 @@ async fn write_scoped(
     Ok(())
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/notebooks",
+    tag = "notebooks",
+    params(
+        WorkspacePath,
+        ("trashed" = Option<bool>, Query, description = "List the trash bin instead of live notebooks when true"),
+    ),
+    responses(
+        (status = 200, description = "Notebooks visible to the caller (own + public)", body = Vec<NotebookSummary>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing notebook:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
@@ -158,6 +174,19 @@ async fn list(
     Ok(Json(nbs))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/notebooks",
+    tag = "notebooks",
+    params(WorkspacePath),
+    request_body = CreateNotebook,
+    responses(
+        (status = 201, description = "Notebook created", body = NotebookDetail),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing notebook:write permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn create(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
@@ -180,6 +209,22 @@ async fn create(
     Ok((StatusCode::CREATED, Json(detail)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/notebooks/{id}",
+    tag = "notebooks",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Notebook id"),
+    ),
+    responses(
+        (status = 200, description = "Notebook detail (summary + cells)", body = NotebookDetail),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Notebook is private and not owned by the caller", body = ErrorBody),
+        (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn get_one(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
@@ -199,6 +244,23 @@ async fn get_one(
     Ok(Json(detail))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/ws/{workspace}/notebooks/{id}",
+    tag = "notebooks",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Notebook id"),
+    ),
+    request_body = UpdateNotebook,
+    responses(
+        (status = 200, description = "Notebook updated", body = NotebookDetail),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing notebook:write permission, or not the notebook owner", body = ErrorBody),
+        (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn update(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
@@ -219,6 +281,22 @@ async fn update(
     Ok(Json(detail))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/notebooks/{id}",
+    tag = "notebooks",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Notebook id"),
+    ),
+    responses(
+        (status = 204, description = "Notebook deleted"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing notebook:write permission, or not the notebook owner", body = ErrorBody),
+        (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn remove(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
@@ -234,6 +312,22 @@ async fn remove(
 }
 
 /// Soft-delete (move to trash). Owner only.
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/notebooks/{id}/trash",
+    tag = "notebooks",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Notebook id"),
+    ),
+    responses(
+        (status = 204, description = "Notebook moved to trash"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing notebook:write permission, or not the notebook owner", body = ErrorBody),
+        (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn trash(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
@@ -249,6 +343,22 @@ async fn trash(
 }
 
 /// Restore from trash. Owner only.
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/notebooks/{id}/restore",
+    tag = "notebooks",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Notebook id"),
+    ),
+    responses(
+        (status = 204, description = "Notebook restored from trash"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing notebook:write permission, or not the notebook owner", body = ErrorBody),
+        (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn restore(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
@@ -266,6 +376,23 @@ async fn restore(
 /// Move into a folder (or back to Uncategorized with `folder_id: null`).
 /// Owner only; when a folder is given it must belong to this workspace and
 /// carry `entity_type='notebook'`, else 404 (don't leak foreign folders).
+#[utoipa::path(
+    patch,
+    path = "/api/ws/{workspace}/notebooks/{id}/folder",
+    tag = "notebooks",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Notebook id"),
+    ),
+    request_body = SetFolder,
+    responses(
+        (status = 204, description = "Notebook moved to the folder (or back to Uncategorized)"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing notebook:write permission, or not the notebook owner", body = ErrorBody),
+        (status = 404, description = "No such notebook, or target folder not in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn set_folder(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
@@ -288,6 +415,22 @@ async fn set_folder(
 }
 
 /// Bookmark a notebook for the calling user. Read scope (any readable notebook).
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/notebooks/{id}/bookmark",
+    tag = "notebooks",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Notebook id"),
+    ),
+    responses(
+        (status = 204, description = "Notebook bookmarked for the caller"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Notebook is private and not owned by the caller", body = ErrorBody),
+        (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn bookmark_add(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
@@ -303,6 +446,22 @@ async fn bookmark_add(
 }
 
 /// Remove the calling user's bookmark. Read scope.
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/notebooks/{id}/bookmark",
+    tag = "notebooks",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Notebook id"),
+    ),
+    responses(
+        (status = 204, description = "Notebook bookmark removed for the caller"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Notebook is private and not owned by the caller", body = ErrorBody),
+        (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn bookmark_remove(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
@@ -319,6 +478,24 @@ async fn bookmark_remove(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/notebooks/{id}/cells",
+    tag = "notebooks",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Notebook id"),
+    ),
+    request_body = CreateCell,
+    responses(
+        (status = 201, description = "Cell added; the full notebook is returned", body = NotebookDetail),
+        (status = 400, description = "Invalid cell_type (must be code/markdown/sql)", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing notebook:write permission, or not the notebook owner", body = ErrorBody),
+        (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn add_cell(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
@@ -347,6 +524,25 @@ async fn add_cell(
     Ok((StatusCode::CREATED, Json(detail)))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/ws/{workspace}/notebooks/{id}/cells/{cid}",
+    tag = "notebooks",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Notebook id"),
+        ("cid" = Uuid, Path, description = "Cell id"),
+    ),
+    request_body = UpdateCell,
+    responses(
+        (status = 204, description = "Cell updated"),
+        (status = 400, description = "Invalid cell_type (must be code/markdown/sql)", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing notebook:write permission, or not the notebook owner", body = ErrorBody),
+        (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn update_cell(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
@@ -365,6 +561,23 @@ async fn update_cell(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/notebooks/{id}/cells/{cid}",
+    tag = "notebooks",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Notebook id"),
+        ("cid" = Uuid, Path, description = "Cell id"),
+    ),
+    responses(
+        (status = 204, description = "Cell deleted"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing notebook:write permission, or not the notebook owner", body = ErrorBody),
+        (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn delete_cell(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
@@ -379,6 +592,23 @@ async fn delete_cell(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/ws/{workspace}/notebooks/{id}/cells/order",
+    tag = "notebooks",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Notebook id"),
+    ),
+    request_body = ReorderCells,
+    responses(
+        (status = 204, description = "Cells reordered"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing notebook:write permission, or not the notebook owner", body = ErrorBody),
+        (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn reorder(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
@@ -394,6 +624,18 @@ async fn reorder(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/notebook-settings",
+    tag = "notebooks",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "Notebook engine settings for the workspace", body = NotebookSettings),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing notebook:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn get_settings(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
@@ -406,6 +648,20 @@ async fn get_settings(
     Ok(Json(settings))
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/ws/{workspace}/notebook-settings",
+    tag = "notebooks",
+    params(WorkspacePath),
+    request_body = UpdateNotebookSettings,
+    responses(
+        (status = 200, description = "Notebook engine settings replaced", body = NotebookSettings),
+        (status = 400, description = "An engine id does not belong to this workspace (whole PUT rejected)", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace:manage_members permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn update_settings(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
@@ -424,3 +680,56 @@ async fn update_settings(
     let settings = st.store.get_settings(ctx.workspace_id.0).await?;
     Ok(Json(settings))
 }
+
+// ── OpenAPI fragment (E0·P4b-8) ──────────────────────────────────────────────
+//
+// The `#[derive(utoipa::OpenApi)]` doc struct for the notebook router, merged
+// into `egret_notebook::openapi()`. The `runtime` handler lives in
+// `crate::runtime`, so it's referenced by full path. Nested schemas
+// (`Cell`, `EngineOption`, …) are collected automatically from the listed
+// component + path types. `SetFolder` is published under the schema name
+// `NotebookSetFolder` (its `#[schema(as = …)]`) to avoid a global collision with
+// the BI seam's `SetFolder`.
+
+/// OpenAPI fragment for the notebook router (`/api/ws/{workspace}/notebooks…`,
+/// `/notebook-settings`, `/notebook-runtime`).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        list,
+        create,
+        get_one,
+        update,
+        remove,
+        trash,
+        restore,
+        set_folder,
+        bookmark_add,
+        bookmark_remove,
+        add_cell,
+        reorder,
+        update_cell,
+        delete_cell,
+        get_settings,
+        update_settings,
+        crate::runtime::runtime,
+    ),
+    components(schemas(
+        NotebookSummary,
+        NotebookDetail,
+        crate::model::Cell,
+        CreateNotebook,
+        UpdateNotebook,
+        CreateCell,
+        UpdateCell,
+        ReorderCells,
+        SetFolder,
+        NotebookSettings,
+        UpdateNotebookSettings,
+        crate::model::EngineOption,
+        crate::runtime::NotebookRuntime,
+        ErrorBody,
+    )),
+    tags((name = "notebooks", description = "Per-workspace notebooks: CRUD, cells, folders, trash, bookmarks, settings + kernel runtime manifest")),
+)]
+pub struct NotebookApi;

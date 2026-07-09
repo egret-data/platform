@@ -69,9 +69,24 @@ pub use warehouse::{create_lakekeeper_warehouse, S3StorageConfig};
 pub use warehouse_admin::{
     catalog_admin_router, BrowseColumn, BrowseDeletedTabular, BrowseNamespace, BrowsePartition,
     BrowseSearchResult, BrowseSnapshot, BrowseSort, BrowseTableDetail, BrowseTabular, BrowseTask,
-    BrowseWarehouseConfig, CatalogAdminState, CatalogHttpError, ProvisionS3, WarehouseBrowser,
-    WarehouseProvisioner,
+    BrowseWarehouseConfig, CatalogAdminApi, CatalogAdminState, CatalogHttpError, ProvisionS3,
+    WarehouseBrowser, WarehouseProvisioner,
 };
+
+/// The Catalog seam's OpenAPI document (E0·P4b-4): the warehouse-management
+/// admin router ([`catalog_admin_router`], mounted at `/api/control-plane`).
+/// `egret-server` calls this and merges it into the top-level API doc — the
+/// per-crate `openapi()` convention every annotated seam exposes.
+///
+/// Only the warehouse-admin (FE-facing) router is expressible here. The
+/// data-plane [`catalog_engine_router`] is lakekeeper's opaque Iceberg REST
+/// router (`new_v1_full_router`) with no egret handler functions to carry
+/// `#[utoipa::path]`, and is engine-facing (Trino/Spark/Daft via catalog
+/// tokens), not browser-facing — so it is intentionally left out of the doc.
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    use utoipa::OpenApi as _;
+    CatalogAdminApi::openapi()
+}
 
 /// Run lakekeeper's Postgres catalog migrations against an isolated
 /// `lakekeeper` schema in the database addressed by `dsn`.

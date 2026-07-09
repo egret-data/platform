@@ -161,7 +161,7 @@ pub fn chart_dto_bm(c: Chart, bookmarked: bool) -> ChartDto {
 /// Stays in `egret-bi` (not the leaf contract crate): its `query_spec` field is the
 /// `egret-bi`-local [`QuerySpec`] query builder, which references `egret-query-api`
 /// and other in-crate types and so cannot move to the leaf.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct ChartDataBody {
     pub dataset_id: uuid::Uuid,
     pub query_spec: QuerySpec,

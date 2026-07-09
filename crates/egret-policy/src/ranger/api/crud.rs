@@ -9,7 +9,7 @@
 //! only these read-only endpoints remain, so an empty token exposes reads, never
 //! writes. Re-add behind auth if external Ranger-Admin write compat is ever needed.
 use crate::ranger::error::RangerError;
-use crate::ranger::routes::RangerState;
+use crate::ranger::routes::{RangerErrorBody, RangerServiceDefs, RangerServiceRef, RangerState};
 use axum::extract::{Path, State};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -23,7 +23,17 @@ pub fn crud_routes() -> Router<RangerState> {
         .route("/plugins/policies/{id}", get(get_policy))
 }
 
-async fn list_defs(State(s): State<RangerState>) -> Result<Json<Value>, RangerError> {
+#[utoipa::path(
+    get,
+    path = "/service/plugins/definitions",
+    tag = "ranger",
+    responses(
+        (status = 200, description = "All stored Ranger service-definitions", body = RangerServiceDefs),
+        (status = 401, description = "Missing or invalid bearer token (when a ranger auth token is configured)"),
+        (status = 500, description = "Internal error", body = RangerErrorBody),
+    ),
+)]
+pub async fn list_defs(State(s): State<RangerState>) -> Result<Json<Value>, RangerError> {
     let defs: Vec<Value> = s
         .store
         .list_service_defs()
@@ -34,14 +44,36 @@ async fn list_defs(State(s): State<RangerState>) -> Result<Json<Value>, RangerEr
     Ok(Json(json!({ "serviceDefs": defs })))
 }
 
-async fn get_def(
+#[utoipa::path(
+    get,
+    path = "/service/plugins/definitions/name/{name}",
+    tag = "ranger",
+    params(("name" = String, Path, description = "Service-definition name (e.g. `trino`)")),
+    responses(
+        (status = 200, description = "The raw Ranger service-definition", body = Object),
+        (status = 401, description = "Missing or invalid bearer token (when a ranger auth token is configured)"),
+        (status = 404, description = "No such service-definition", body = RangerErrorBody),
+        (status = 500, description = "Internal error", body = RangerErrorBody),
+    ),
+)]
+pub async fn get_def(
     State(s): State<RangerState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, RangerError> {
     Ok(Json(s.store.get_service_def(&name).await?.def_jsonb))
 }
 
-async fn list_services(State(s): State<RangerState>) -> Result<Json<Value>, RangerError> {
+#[utoipa::path(
+    get,
+    path = "/service/plugins/services",
+    tag = "ranger",
+    responses(
+        (status = 200, description = "All policy profiles (Ranger services)", body = Vec<RangerServiceRef>),
+        (status = 401, description = "Missing or invalid bearer token (when a ranger auth token is configured)"),
+        (status = 500, description = "Internal error", body = RangerErrorBody),
+    ),
+)]
+pub async fn list_services(State(s): State<RangerState>) -> Result<Json<Value>, RangerError> {
     let svcs: Vec<Value> = s
         .store
         .list_services()
@@ -61,7 +93,19 @@ async fn list_services(State(s): State<RangerState>) -> Result<Json<Value>, Rang
     Ok(Json(json!(svcs)))
 }
 
-async fn get_policy(
+#[utoipa::path(
+    get,
+    path = "/service/plugins/policies/{id}",
+    tag = "ranger",
+    params(("id" = i64, Path, description = "Policy id")),
+    responses(
+        (status = 200, description = "The raw stored Ranger policy body (with id)", body = Object),
+        (status = 401, description = "Missing or invalid bearer token (when a ranger auth token is configured)"),
+        (status = 404, description = "No such policy", body = RangerErrorBody),
+        (status = 500, description = "Internal error", body = RangerErrorBody),
+    ),
+)]
+pub async fn get_policy(
     State(s): State<RangerState>,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, RangerError> {

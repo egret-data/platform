@@ -18,7 +18,7 @@ pub use egret_query_api::{ConnOptions, Database, Engine};
 /// `new_secret` (mint a new named secret inline) or `secret_id` (reference an
 /// existing named secret in the workspace). Omitting both registers a connection
 /// with no secret (or, on update, keeps the existing one).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct DatabaseInput {
     pub name: String,
     pub engine: Engine,
@@ -33,7 +33,7 @@ pub struct DatabaseInput {
 }
 
 /// Body for testing an unsaved connection (no `name`).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct TestInput {
     pub engine: Engine,
     pub host: String,
@@ -46,7 +46,7 @@ pub struct TestInput {
 
 // ── Response DTOs ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DatabaseDetailDto {
     pub id: String,
     pub name: String,
@@ -74,7 +74,7 @@ impl From<Database> for DatabaseDetailDto {
 }
 
 /// Minimal listing for the Explorer DB picker (no connection internals).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DatabaseListDto {
     pub id: String,
     pub name: String,
@@ -82,7 +82,7 @@ pub struct DatabaseListDto {
 }
 
 /// Result of a connection test.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct TestOutcome {
     pub ok: bool,
     pub latency_ms: u64,

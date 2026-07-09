@@ -23,8 +23,12 @@ egret-secrets.workspace = true
 # Ranger profile through `PolicyPort`; the concrete `egret-policy` impl is wired
 # in egret-bin and only needed here as a dev-dep for test state construction.
 egret-policy-api.workspace = true
-egret-core.workspace = true
+egret-core = { workspace = true, features = ["http"] }
 egret-orchestrator.workspace = true
+# OpenAPI emit (E0·P4b-9): `#[utoipa::path]` on the engines + monitor handlers +
+# co-located `#[derive(utoipa::OpenApi)]` doc structs merged into the top-level
+# API doc via `egret_engine_mgmt::openapi()`.
+utoipa.workspace = true
 axum = { workspace = true, features = ["ws"] }
 async-trait.workspace = true
 bytes.workspace = true

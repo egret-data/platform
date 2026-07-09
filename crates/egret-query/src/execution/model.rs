@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum QueryStatus {
     Queued,
@@ -46,7 +46,7 @@ pub struct Limits {
 
 // ── Request / response DTOs ───────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SubmitQuery {
     pub database_id: Uuid,
     pub sql: String,
@@ -54,19 +54,23 @@ pub struct SubmitQuery {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SubmitAck {
     pub id: String,
     pub status: QueryStatus,
 }
 
 /// Full status view (preview inline; full result via the results endpoint).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct QueryStatusDto {
     pub id: String,
     pub database_id: String,
     pub status: QueryStatus,
+    /// Column metadata `[{name,type}]`; `null` until the query finishes.
+    #[schema(value_type = Option<Vec<egret_core::ColumnMeta>>)]
     pub columns: Option<serde_json::Value>,
+    /// Inline preview rows (bounded, row-major); `null` until the query finishes.
+    #[schema(value_type = Option<Object>)]
     pub preview: Option<serde_json::Value>,
     pub row_count: Option<i64>,
     pub bytes_scanned: Option<i64>,
@@ -75,7 +79,7 @@ pub struct QueryStatusDto {
 }
 
 /// History list item (no result bodies).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct QueryListItem {
     pub id: String,
     pub database_id: String,
@@ -86,9 +90,13 @@ pub struct QueryListItem {
 }
 
 /// A page of the full result.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ResultsPage {
+    /// Column metadata `[{name,type}]`.
+    #[schema(value_type = Vec<egret_core::ColumnMeta>)]
     pub columns: serde_json::Value,
+    /// Row-major cell values; each element is one row (a JSON array).
+    #[schema(value_type = Vec<Object>)]
     pub rows: Vec<serde_json::Value>,
     pub page: usize,
     pub page_size: usize,

@@ -18,3 +18,7 @@ rsa.workspace = true
 rand.workspace = true
 base64.workspace = true
 egret-metastore.workspace = true
+egret-core = { workspace = true, features = ["http"] }
+# OpenAPI emit (E0·P4b-1): `#[utoipa::path]` on the IdP router's handlers +
+# the `IdpApi` doc struct merged in `openapi()`.
+utoipa.workspace = true

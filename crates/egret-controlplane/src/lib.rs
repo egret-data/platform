@@ -67,3 +67,15 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(secrets::router())
         .merge(access::router())
 }
+
+/// The control-plane seam's OpenAPI document (E0·P4b-3): the access, storage,
+/// and secrets routers' `#[utoipa::path]` handlers merged into one `OpenApi`.
+/// `egret-server` merges this into the top-level API doc. This is the per-crate
+/// `openapi()` convention every annotated seam exposes.
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    use utoipa::OpenApi as _;
+    let mut doc = access::ControlPlaneAccessApi::openapi();
+    doc.merge(storage::ControlPlaneStorageApi::openapi());
+    doc.merge(secrets::ControlPlaneSecretsApi::openapi());
+    doc
+}

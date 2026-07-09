@@ -5,7 +5,10 @@ import reactRefresh from 'eslint-plugin-react-refresh';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['dist', 'node_modules', 'public'] },
+  // `src/api/generated` is orval-emitted build output — not hand-maintained,
+  // so it's exempt from lint. All hand-written API code (mutator, the thin
+  // per-domain adapter modules) lives outside this dir and is linted normally.
+  { ignores: ['dist', 'node_modules', 'public', 'src/api/generated'] },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     files: ['**/*.{ts,tsx}'],

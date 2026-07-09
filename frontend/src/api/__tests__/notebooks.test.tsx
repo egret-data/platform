@@ -3,17 +3,17 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import React from "react";
 
+// The module is now a thin adapter over the orval-generated client, which
+// routes every request through the shared `apiFetch` (via the custom mutator).
+// So we mock only that seam; `ApiError` and the rest of `@/api/client` stay real.
 const apiFetch = vi.fn(async () => new Response(null, { status: 204 }));
-const apiJson = vi.fn(async () => ({
-  username: "u",
-  engines: [],
-  engine_jwt: null,
-  engine_jwt_expires_at: null,
-}));
-vi.mock("@/api/client", () => ({
-  apiFetch: (...a: unknown[]) => apiFetch(...(a as Parameters<typeof apiFetch>)),
-  apiJson: (...a: unknown[]) => apiJson(...(a as Parameters<typeof apiJson>)),
-}));
+vi.mock("@/api/client", async (importActual) => {
+  const actual = await importActual<typeof import("@/api/client")>();
+  return {
+    ...actual,
+    apiFetch: (...a: unknown[]) => apiFetch(...(a as Parameters<typeof apiFetch>)),
+  };
+});
 
 import { useUpdateCell, useNotebookRuntime, useActiveExecutions } from "../notebooks";
 
@@ -24,7 +24,6 @@ function wrapper({ children }: { children: React.ReactNode }) {
 
 beforeEach(() => {
   apiFetch.mockClear();
-  apiJson.mockClear();
 });
 
 describe("notebook api hooks", () => {
@@ -40,13 +39,21 @@ describe("notebook api hooks", () => {
 
   it("useNotebookRuntime GETs /ws/{ws}/notebook-runtime", async () => {
     renderHook(() => useNotebookRuntime("w"), { wrapper });
-    await waitFor(() => expect(apiJson).toHaveBeenCalledWith("/ws/w/notebook-runtime"));
+    await waitFor(() =>
+      expect(apiFetch).toHaveBeenCalledWith(
+        "/ws/w/notebook-runtime",
+        expect.objectContaining({ method: "GET" }),
+      ),
+    );
   });
 
   it("useActiveExecutions GETs the active-executions endpoint", async () => {
     renderHook(() => useActiveExecutions("w", "n1"), { wrapper });
     await waitFor(() =>
-      expect(apiJson).toHaveBeenCalledWith("/ws/w/notebooks/n1/kernel/active-executions"),
+      expect(apiFetch).toHaveBeenCalledWith(
+        "/ws/w/notebooks/n1/kernel/active-executions",
+        expect.objectContaining({ method: "GET" }),
+      ),
     );
   });
 });

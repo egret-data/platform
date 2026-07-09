@@ -1,166 +1,157 @@
-import { apiFetch, apiJson } from "./client";
+/**
+ * Access-control (control-plane) API — MIGRATED to the orval-generated client
+ * (E0·P4d-3).
+ *
+ * Thin adapter over `./generated/control-plane-access/control-plane-access`
+ * (tag `control-plane-access`), following the P4c/P4d pattern: the plain
+ * async helpers keep their old names/signatures so call sites and the
+ * module-mocking page tests (`vi.mock("@/api/access")`) don't churn. Each helper
+ * calls the generated fetch fn and unwraps orval's `{ status, data, headers }`
+ * envelope to the same body the hand-written `apiJson`/`apiFetch` returned.
+ *
+ * Types are re-exported under the app's existing names. `AccessUser` maps to the
+ * generated `ControlPlaneUserDto` (the backend renamed the DTO in P4b-3 to avoid
+ * colliding with the workspace `UserDto`). `RoleAssignee` stays FE-local because
+ * the spec types its `kind` as a bare `string`; aliasing would widen the FE
+ * `"user" | "group"` union and churn call sites.
+ */
+import {
+  controlPlaneAccessAddGroupMember,
+  controlPlaneAccessAssignGroupRole,
+  controlPlaneAccessAssignUserRole,
+  controlPlaneAccessCreateGroup,
+  controlPlaneAccessCreateRole,
+  controlPlaneAccessCreateUser,
+  controlPlaneAccessDeleteGroup,
+  controlPlaneAccessDeleteRole,
+  controlPlaneAccessListGroupMembers,
+  controlPlaneAccessListGroups,
+  controlPlaneAccessListPermissions,
+  controlPlaneAccessListRoleAssignees,
+  controlPlaneAccessListRoles,
+  controlPlaneAccessListUsers,
+  controlPlaneAccessRemoveGroupMember,
+  controlPlaneAccessRenameGroup,
+  controlPlaneAccessSetRolePermissions,
+  controlPlaneAccessUnassignGroupRole,
+  controlPlaneAccessUnassignUserRole,
+  controlPlaneAccessUpdateRole,
+  controlPlaneAccessUpdateUser,
+} from "./generated/control-plane-access/control-plane-access";
+import type {
+  ControlPlaneUserDto,
+  GroupDto,
+  GroupMemberDto,
+  PermissionGroupDto,
+  RoleDto,
+} from "./generated/model";
 
 // ── Access control (control-plane) ───────────────────────────────────────────
 
-export interface AccessUser {
-  id: string;
-  email: string;
-  name: string;
-  provider: string;
-  status: string;
-  roles: string[];
-  groups: string[];
-}
+// Re-export generated DTOs under the names the app already imports.
+export type AccessUser = ControlPlaneUserDto;
+export type AccessGroup = GroupDto;
+export type GroupMember = GroupMemberDto;
+export type AccessRole = RoleDto;
+export type PermissionCatalogGroup = PermissionGroupDto;
 
-export interface AccessGroup {
-  id: string;
-  name: string;
-  source: string;
-  memberCount: number;
-  roles: string[];
-}
-
-export interface GroupMember {
-  id: string;
-  email: string;
-  name: string;
-}
-
-export interface AccessRole {
-  id: string;
-  scope: string;
-  name: string;
-  description: string;
-  permissionCount: number;
-  assigneeCount: number;
-}
-
+// FE-local: the spec types `kind` as a bare `string`; keep the narrow union.
 export interface RoleAssignee {
   kind: "user" | "group";
   name: string;
 }
 
-export interface PermissionCatalogGroup {
-  group: string;
-  permissions: { key: string; description: string; roles: string[] }[];
-}
-
 // ── Users ─────────────────────────────────────────────────────────────────
 
-export function listUsers(): Promise<AccessUser[]> {
-  return apiJson<AccessUser[]>("/control-plane/users");
+export async function listUsers(): Promise<AccessUser[]> {
+  return (await controlPlaneAccessListUsers()).data as AccessUser[];
 }
 
-export function createUser(input: { email: string; name: string; password: string }): Promise<AccessUser> {
-  return apiJson<AccessUser>("/control-plane/users", {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
-  });
+export async function createUser(input: { email: string; name: string; password: string }): Promise<AccessUser> {
+  return (await controlPlaneAccessCreateUser(input)).data as AccessUser;
 }
 
-export function updateUser(id: string, input: { name?: string; status?: string }): Promise<AccessUser> {
-  return apiJson<AccessUser>(`/control-plane/users/${encodeURIComponent(id)}`, {
-    method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
-  });
+export async function updateUser(id: string, input: { name?: string; status?: string }): Promise<AccessUser> {
+  return (await controlPlaneAccessUpdateUser(id, input)).data as AccessUser;
 }
 
-export function assignUserRole(id: string, roleId: string): Promise<void> {
-  return apiFetch(`/control-plane/users/${encodeURIComponent(id)}/roles`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ roleId }),
-  }).then(() => undefined);
+export async function assignUserRole(id: string, roleId: string): Promise<void> {
+  await controlPlaneAccessAssignUserRole(id, { roleId });
 }
 
-export function unassignUserRole(id: string, roleId: string): Promise<void> {
-  return apiFetch(`/control-plane/users/${encodeURIComponent(id)}/roles/${encodeURIComponent(roleId)}`, {
-    method: "DELETE",
-  }).then(() => undefined);
+export async function unassignUserRole(id: string, roleId: string): Promise<void> {
+  await controlPlaneAccessUnassignUserRole(id, roleId);
 }
 
 // ── Groups ────────────────────────────────────────────────────────────────
 
-export function listGroups(): Promise<AccessGroup[]> {
-  return apiJson<AccessGroup[]>("/control-plane/groups");
+export async function listGroups(): Promise<AccessGroup[]> {
+  return (await controlPlaneAccessListGroups()).data as AccessGroup[];
 }
 
-export function createGroup(input: { name: string }): Promise<AccessGroup> {
-  return apiJson<AccessGroup>("/control-plane/groups", {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
-  });
+export async function createGroup(input: { name: string }): Promise<AccessGroup> {
+  return (await controlPlaneAccessCreateGroup(input)).data as AccessGroup;
 }
 
-export function renameGroup(id: string, name: string): Promise<AccessGroup> {
-  return apiJson<AccessGroup>(`/control-plane/groups/${encodeURIComponent(id)}`, {
-    method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }),
-  });
+export async function renameGroup(id: string, name: string): Promise<AccessGroup> {
+  // The endpoint returns 204 (no body); the return value is not consumed by
+  // callers (they invalidate on success), so cast through `unknown` to keep the
+  // long-standing `Promise<AccessGroup>` signature.
+  return (await controlPlaneAccessRenameGroup(id, { name })).data as unknown as AccessGroup;
 }
 
-export function deleteGroup(id: string): Promise<void> {
-  return apiFetch(`/control-plane/groups/${encodeURIComponent(id)}`, { method: "DELETE" }).then(() => undefined);
+export async function deleteGroup(id: string): Promise<void> {
+  await controlPlaneAccessDeleteGroup(id);
 }
 
-export function getGroupMembers(groupId: string): Promise<GroupMember[]> {
-  return apiJson<GroupMember[]>(`/control-plane/groups/${encodeURIComponent(groupId)}/members`);
+export async function getGroupMembers(groupId: string): Promise<GroupMember[]> {
+  return (await controlPlaneAccessListGroupMembers(groupId)).data as GroupMember[];
 }
 
-export function addMember(groupId: string, userId: string): Promise<void> {
-  return apiFetch(`/control-plane/groups/${encodeURIComponent(groupId)}/members`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ userId }),
-  }).then(() => undefined);
+export async function addMember(groupId: string, userId: string): Promise<void> {
+  await controlPlaneAccessAddGroupMember(groupId, { userId });
 }
 
-export function removeMember(groupId: string, userId: string): Promise<void> {
-  return apiFetch(
-    `/control-plane/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(userId)}`,
-    { method: "DELETE" },
-  ).then(() => undefined);
+export async function removeMember(groupId: string, userId: string): Promise<void> {
+  await controlPlaneAccessRemoveGroupMember(groupId, userId);
 }
 
-export function assignGroupRole(groupId: string, roleId: string): Promise<void> {
-  return apiFetch(`/control-plane/groups/${encodeURIComponent(groupId)}/roles`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ roleId }),
-  }).then(() => undefined);
+export async function assignGroupRole(groupId: string, roleId: string): Promise<void> {
+  await controlPlaneAccessAssignGroupRole(groupId, { roleId });
 }
 
-export function unassignGroupRole(groupId: string, roleId: string): Promise<void> {
-  return apiFetch(
-    `/control-plane/groups/${encodeURIComponent(groupId)}/roles/${encodeURIComponent(roleId)}`,
-    { method: "DELETE" },
-  ).then(() => undefined);
+export async function unassignGroupRole(groupId: string, roleId: string): Promise<void> {
+  await controlPlaneAccessUnassignGroupRole(groupId, roleId);
 }
 
 // ── Roles ─────────────────────────────────────────────────────────────────
 
-export function listRoles(): Promise<AccessRole[]> {
-  return apiJson<AccessRole[]>("/control-plane/access/roles");
+export async function listRoles(): Promise<AccessRole[]> {
+  return (await controlPlaneAccessListRoles()).data as AccessRole[];
 }
 
-export function createRole(input: { scope: string; name: string; description: string }): Promise<AccessRole> {
-  return apiJson<AccessRole>("/control-plane/access/roles", {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input),
-  });
+export async function createRole(input: { scope: string; name: string; description: string }): Promise<AccessRole> {
+  return (await controlPlaneAccessCreateRole(input)).data as AccessRole;
 }
 
-export function updateRole(id: string, description: string): Promise<AccessRole> {
-  return apiJson<AccessRole>(`/control-plane/access/roles/${encodeURIComponent(id)}`, {
-    method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ description }),
-  });
+export async function updateRole(id: string, description: string): Promise<AccessRole> {
+  return (await controlPlaneAccessUpdateRole(id, { description })).data as AccessRole;
 }
 
-export function deleteRole(id: string): Promise<void> {
-  return apiFetch(`/control-plane/access/roles/${encodeURIComponent(id)}`, { method: "DELETE" }).then(() => undefined);
+export async function deleteRole(id: string): Promise<void> {
+  await controlPlaneAccessDeleteRole(id);
 }
 
-export function setRolePermissions(id: string, permissions: string[]): Promise<void> {
-  return apiFetch(`/control-plane/access/roles/${encodeURIComponent(id)}/permissions`, {
-    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ permissions }),
-  }).then(() => undefined);
+export async function setRolePermissions(id: string, permissions: string[]): Promise<void> {
+  await controlPlaneAccessSetRolePermissions(id, { permissions });
 }
 
-export function getRoleAssignees(roleId: string): Promise<RoleAssignee[]> {
-  return apiJson<RoleAssignee[]>(`/control-plane/access/roles/${encodeURIComponent(roleId)}/assignees`);
+export async function getRoleAssignees(roleId: string): Promise<RoleAssignee[]> {
+  return (await controlPlaneAccessListRoleAssignees(roleId)).data as RoleAssignee[];
 }
 
 // ── Permission catalog ──────────────────────────────────────────────────────
 
-export function listPermissions(): Promise<PermissionCatalogGroup[]> {
-  return apiJson<PermissionCatalogGroup[]>("/control-plane/permissions");
+export async function listPermissions(): Promise<PermissionCatalogGroup[]> {
+  return (await controlPlaneAccessListPermissions()).data as PermissionCatalogGroup[];
 }

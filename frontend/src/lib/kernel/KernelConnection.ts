@@ -1,4 +1,8 @@
-import { apiFetch } from "@/api/client";
+import {
+  kernelConnect,
+  kernelKernelInterrupt,
+  kernelKernelRestart,
+} from "@/api/generated/kernel/kernel";
 import { newMsg, iopubToOutput, type CellOutput } from "./protocol";
 
 export type KernelStatus = "idle" | "busy" | "spawning" | "connected" | "disconnected";
@@ -27,8 +31,9 @@ export class KernelConnection {
         // ensure the kernel (retries while spawning)
         let ready = false;
         for (let i = 0; i < 30; i++) {
-          const r = await apiFetch(this.path("/connect"), { method: "POST" });
-          const body = await r.json().catch(() => ({}));
+          const body = ((await kernelConnect(this.ws_slug, this.nb)).data ?? {}) as {
+            phase?: string;
+          };
           if (body.phase === "ready" || body.phase === undefined) { ready = true; break; }
           await new Promise((res) => setTimeout(res, 1000));
         }
@@ -86,12 +91,12 @@ export class KernelConnection {
 
   /** Interrupt the running kernel (best-effort; requires a connected kernel). */
   async interrupt(): Promise<void> {
-    await apiFetch(this.path("/interrupt"), { method: "POST" });
+    await kernelKernelInterrupt(this.ws_slug, this.nb);
   }
 
   /** Restart the kernel. The channels WS drops → onclose flushes pending (clears running). */
   async restart(): Promise<void> {
-    await apiFetch(this.path("/restart"), { method: "POST" });
+    await kernelKernelRestart(this.ws_slug, this.nb);
   }
 
   disconnect(): void { this.ws?.close(); this.ws = null; this.ready = null; this.pending.clear(); }

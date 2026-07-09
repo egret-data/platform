@@ -74,11 +74,72 @@ impl AppState {
     }
 }
 
+/// The aggregated OpenAPI 3.1 document for the whole API (E0·P4).
+///
+/// Starts from a base doc (title + version) and merges each annotated seam's
+/// `openapi()`. This is the single extension point P4b grows: add one
+/// `doc.merge(egret_x::openapi());` line per newly-annotated crate. Pure — no DB
+/// or network — so the `egret openapi` subcommand can emit it offline.
+///
+/// # Conventions P4b must follow (locked in P4a's Query-seam reference)
+///
+/// - **Keep the `.merge()` list explicit** — one line per crate, do NOT loop.
+///   The order is the doc's tag order and stays readable/reviewable.
+/// - **Component names are GLOBAL after merge.** utoipa keys schemas by their
+///   Rust type name; two crates that both export a `Config`/`Status` will
+///   collide and silently overwrite each other in the merged doc. Keep schema
+///   type names unique across crates (prefix with the seam if needed).
+/// - **Standard error responses.** Every handler lists the two invariant error
+///   responses — `(status = 401, body = ErrorBody, "Not authenticated")` and
+///   `(status = 500, body = ErrorBody, "Internal error")` — plus any
+///   hand-written `403` / `404` / `409` with a *meaningful, endpoint-specific*
+///   description. The varying descriptions are intentional API documentation,
+///   not boilerplate to factor away; only the 401/500 pair is mechanical.
+/// - **Shared shapes** live in `egret_core`: [`egret_core::WorkspacePath`] for
+///   the `{workspace}` path param (`params(WorkspacePath, …)`), [`egret_core::Ack`]
+///   for `{ "ok": true }` bodies, [`egret_core::http::ErrorBody`] for errors,
+///   and [`egret_core::ColumnMeta`] for tabular column metadata.
+pub fn openapi_doc() -> utoipa::openapi::OpenApi {
+    use utoipa::OpenApi as _;
+
+    /// Base document: API-wide metadata only; every path/schema comes from a
+    /// merged seam doc.
+    #[derive(utoipa::OpenApi)]
+    #[openapi(info(
+        title = "egret API",
+        version = "0.1.0",
+        description = "egret unified data portal HTTP API."
+    ))]
+    struct BaseApiDoc;
+
+    let mut doc = BaseApiDoc::openapi();
+    doc.merge(egret_query::openapi());
+    doc.merge(egret_bi::openapi());
+    doc.merge(egret_auth::openapi());
+    doc.merge(egret_workspace::openapi());
+    doc.merge(egret_notebook::openapi());
+    doc.merge(egret_kernel::openapi());
+    doc.merge(egret_controlplane::openapi());
+    doc.merge(egret_catalog_engine::openapi());
+    doc.merge(egret_policy::openapi());
+    doc.merge(egret_engine_mgmt::openapi());
+    doc.merge(egret_machine_idp::openapi());
+    doc
+}
+
+/// Serve the aggregated OpenAPI document as JSON. Mounted unauthenticated and
+/// outside the CSRF/auth layers (dev doc surface; consumed by FE codegen).
+async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
+    Json(openapi_doc())
+}
+
 /// Build the root router. Later phases mount feature routers here.
 pub fn build_router(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz));
+        .route("/readyz", get(readyz))
+        // OpenAPI spec: no auth/CSRF so FE codegen + tooling can fetch it.
+        .route("/api-docs/openapi.json", get(openapi_json));
 
     if let Some(auth) = state.auth.clone() {
         router = router.merge(
@@ -265,6 +326,25 @@ mod tests {
     use axum::http::Request;
     use http_body_util::BodyExt;
     use tower::ServiceExt; // for `oneshot`
+
+    /// Drift gate: the committed repo-root `openapi.json` must be byte-identical
+    /// to a fresh emit. `preserve_order` makes the emit deterministic, so this
+    /// won't flap. It fails the moment someone changes a path/schema and forgets
+    /// to regenerate — guarding P4b against shipping stale FE types. Serialization
+    /// matches the `egret openapi` subcommand exactly (pretty + trailing newline).
+    #[test]
+    fn committed_openapi_json_is_current() {
+        let emitted = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&openapi_doc()).unwrap()
+        );
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../openapi.json");
+        let committed = std::fs::read_to_string(path).expect("openapi.json missing at repo root");
+        assert_eq!(
+            committed, emitted,
+            "openapi.json is stale — run `egret openapi > openapi.json`"
+        );
+    }
 
     #[tokio::test]
     async fn healthz_returns_200_ok() {

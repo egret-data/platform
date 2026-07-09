@@ -4,7 +4,9 @@ use axum::extract::{FromRef, Path, Query as AxQuery, State};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use egret_auth::session::SessionService;
+use egret_core::http::ErrorBody;
 use egret_core::Error;
+use egret_core::{Ack, WorkspacePath};
 use egret_query::execution::connector::{build_connector, ConnSpec};
 use egret_query::DatabaseRepo;
 use egret_workspace::context::WsContext;
@@ -19,9 +21,11 @@ use crate::dataset::{NewColumn, SourceSpec};
 use crate::error::BiApiError;
 use crate::expr::validate_expression;
 use crate::model::{
-    AddColumnBody, ChartDataBody, ChartDataResponse, CreateChart, CreateDashboard, CreateDataset,
-    CreateSource, DashboardDetailDto, DashboardSummaryDto, DatasetDetailDto, DatasetSummaryDto,
-    MetricBody, SaveQuery, SavedQueryDto, UpdateChart, UpdateColumnBody, UpdateDashboard,
+    AddColumnBody, CardInput, ChartDataBody, ChartDataResponse, ChartDto, CreateChart,
+    CreateDashboard, CreateDataset, CreateFolder, CreateSource, DashboardCardDto,
+    DashboardDetailDto, DashboardSummaryDto, DashboardTabDto, DatasetColumnDto, DatasetDetailDto,
+    DatasetSummaryDto, FolderDto, MetricBody, MetricDto, NewTabInput, RenameFolder, SaveQuery,
+    SavedQueryDto, SchemaColumn, SetFolder, UpdateChart, UpdateColumnBody, UpdateDashboard,
     UpdateDataset,
 };
 use crate::saved::SavedQueryRepo;
@@ -106,6 +110,19 @@ fn is_admin(ctx: &egret_core::WorkspaceContext) -> bool {
         .any(|r| r == "platform_admin")
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/sqllab/queries",
+    tag = "sqllab",
+    params(WorkspacePath),
+    request_body = SaveQuery,
+    responses(
+        (status = 200, description = "Saved query created", body = SavedQueryDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn save(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -129,6 +146,18 @@ async fn save(
         .map_err(BiApiError::from)?;
     Ok(Json(dto(q)))
 }
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/sqllab/queries",
+    tag = "sqllab",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "Saved queries in the workspace", body = Vec<SavedQueryDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -144,6 +173,22 @@ async fn list(
         .map_err(BiApiError::from)?;
     Ok(Json(qs.into_iter().map(dto).collect()))
 }
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/sqllab/queries/{id}",
+    tag = "sqllab",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Saved query id"),
+    ),
+    responses(
+        (status = 200, description = "Saved query detail", body = SavedQueryDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 404, description = "No such saved query", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn load(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -161,6 +206,23 @@ async fn load(
         .ok_or(Error::NotFound("saved query".into()))?;
     Ok(Json(dto(q)))
 }
+#[utoipa::path(
+    put,
+    path = "/api/ws/{workspace}/sqllab/queries/{id}",
+    tag = "sqllab",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Saved query id"),
+    ),
+    request_body = SaveQuery,
+    responses(
+        (status = 200, description = "Saved query updated", body = SavedQueryDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission, or not the query owner", body = ErrorBody),
+        (status = 404, description = "No such saved query", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn update(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -179,6 +241,22 @@ async fn update(
         .map_err(BiApiError::from)?;
     Ok(Json(dto(q)))
 }
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/sqllab/queries/{id}",
+    tag = "sqllab",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Saved query id"),
+    ),
+    responses(
+        (status = 200, description = "Saved query deleted", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission, or not the query owner", body = ErrorBody),
+        (status = 404, description = "No such saved query", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn remove(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -260,6 +338,22 @@ struct ColQ {
     table: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/sqllab/databases/{db}/catalogs",
+    tag = "sqllab",
+    params(
+        WorkspacePath,
+        ("db" = Uuid, Path, description = "Granted database id"),
+    ),
+    responses(
+        (status = 200, description = "Catalog names visible on the database", body = Vec<String>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 404, description = "Database not granted to this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn catalogs(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -270,6 +364,23 @@ async fn catalogs(
         st.schema.catalogs(&spec).await.map_err(BiApiError::from)?,
     ))
 }
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/sqllab/databases/{db}/schemas",
+    tag = "sqllab",
+    params(
+        WorkspacePath,
+        ("db" = Uuid, Path, description = "Granted database id"),
+        ("catalog" = Option<String>, Query, description = "Catalog to list schemas in"),
+    ),
+    responses(
+        (status = 200, description = "Schema names in the catalog", body = Vec<String>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 404, description = "Database not granted to this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn schemas(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -284,6 +395,24 @@ async fn schemas(
             .map_err(BiApiError::from)?,
     ))
 }
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/sqllab/databases/{db}/tables",
+    tag = "sqllab",
+    params(
+        WorkspacePath,
+        ("db" = Uuid, Path, description = "Granted database id"),
+        ("catalog" = Option<String>, Query, description = "Catalog to scope to"),
+        ("schema" = Option<String>, Query, description = "Schema to list tables in"),
+    ),
+    responses(
+        (status = 200, description = "Table names in the schema", body = Vec<String>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 404, description = "Database not granted to this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn tables(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -302,6 +431,25 @@ async fn tables(
             .map_err(BiApiError::from)?,
     ))
 }
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/sqllab/databases/{db}/columns",
+    tag = "sqllab",
+    params(
+        WorkspacePath,
+        ("db" = Uuid, Path, description = "Granted database id"),
+        ("catalog" = Option<String>, Query, description = "Catalog to scope to"),
+        ("schema" = Option<String>, Query, description = "Schema to scope to"),
+        ("table" = Option<String>, Query, description = "Table to describe columns for"),
+    ),
+    responses(
+        (status = 200, description = "Columns (name + type) of the table", body = Vec<SchemaColumn>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 404, description = "Database not granted to this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn columns(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -370,6 +518,23 @@ async fn require_dataset_in_ws(
     Ok(())
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/ws/{workspace}/datasets/{id}/folder",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+    ),
+    request_body = SetFolder,
+    responses(
+        (status = 200, description = "Dataset moved to folder", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:manage permission", body = ErrorBody),
+        (status = 404, description = "No such dataset or target folder in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ds_set_folder(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -432,6 +597,20 @@ async fn introspect(
         .collect())
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/datasets",
+    tag = "datasets",
+    params(WorkspacePath),
+    request_body = CreateDataset,
+    responses(
+        (status = 200, description = "Dataset created (columns introspected from the source)", body = DatasetDetailDto),
+        (status = 400, description = "Invalid source or introspection failed", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:manage permission (or the database is not granted)", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ds_create(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -468,6 +647,21 @@ async fn ds_create(
     Ok(Json(load_detail(&st, ds.id).await?))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/datasets",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("trashed" = Option<bool>, Query, description = "List only trashed datasets when true"),
+    ),
+    responses(
+        (status = 200, description = "Datasets in the workspace", body = Vec<DatasetSummaryDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ds_list(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -489,6 +683,22 @@ async fn ds_list(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/datasets/{id}/trash",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+    ),
+    responses(
+        (status = 200, description = "Dataset moved to trash", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:manage permission", body = ErrorBody),
+        (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ds_trash(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -506,6 +716,22 @@ async fn ds_trash(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/datasets/{id}/restore",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+    ),
+    responses(
+        (status = 200, description = "Dataset restored from trash", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:manage permission", body = ErrorBody),
+        (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ds_restore(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -523,6 +749,22 @@ async fn ds_restore(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/datasets/{id}/bookmark",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+    ),
+    responses(
+        (status = 200, description = "Dataset bookmarked for the caller", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:read permission", body = ErrorBody),
+        (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ds_bookmark_add(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -540,6 +782,22 @@ async fn ds_bookmark_add(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/datasets/{id}/bookmark",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+    ),
+    responses(
+        (status = 200, description = "Dataset bookmark removed for the caller", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:read permission", body = ErrorBody),
+        (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ds_bookmark_remove(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -557,6 +815,22 @@ async fn ds_bookmark_remove(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/datasets/{id}",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+    ),
+    responses(
+        (status = 200, description = "Dataset detail (columns + metrics)", body = DatasetDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:read permission", body = ErrorBody),
+        (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ds_get(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -569,6 +843,23 @@ async fn ds_get(
     Ok(Json(load_detail(&st, id).await?))
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/ws/{workspace}/datasets/{id}",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+    ),
+    request_body = UpdateDataset,
+    responses(
+        (status = 200, description = "Dataset updated", body = DatasetDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:manage permission, or not the dataset owner", body = ErrorBody),
+        (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ds_update(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -587,6 +878,22 @@ async fn ds_update(
     Ok(Json(load_detail(&st, id).await?))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/datasets/{id}/refresh",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+    ),
+    responses(
+        (status = 200, description = "Physical columns reconciled from the source", body = DatasetDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:manage permission, or not the dataset owner", body = ErrorBody),
+        (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ds_refresh(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -613,6 +920,22 @@ async fn ds_refresh(
     Ok(Json(load_detail(&st, id).await?))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/datasets/{id}",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+    ),
+    responses(
+        (status = 200, description = "Dataset deleted", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:manage permission, or not the dataset owner", body = ErrorBody),
+        (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ds_remove(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -681,6 +1004,24 @@ async fn require_metric_in_dataset(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/datasets/{id}/metrics",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+    ),
+    request_body = MetricBody,
+    responses(
+        (status = 200, description = "Metric added (expression validated)", body = DatasetDetailDto),
+        (status = 400, description = "Invalid metric expression", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:manage permission, or not the dataset owner", body = ErrorBody),
+        (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ds_add_metric(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -713,6 +1054,25 @@ async fn ds_add_metric(
     Ok(Json(load_detail(&st, id).await?))
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/ws/{workspace}/datasets/{id}/metrics/{metric_id}",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+        ("metric_id" = Uuid, Path, description = "Metric id"),
+    ),
+    request_body = MetricBody,
+    responses(
+        (status = 200, description = "Metric updated (expression validated)", body = DatasetDetailDto),
+        (status = 400, description = "Invalid metric expression", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:manage permission, or not the dataset owner", body = ErrorBody),
+        (status = 404, description = "No such dataset, or metric not in this dataset", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ds_update_metric(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -746,6 +1106,23 @@ async fn ds_update_metric(
     Ok(Json(load_detail(&st, id).await?))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/datasets/{id}/metrics/{metric_id}",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+        ("metric_id" = Uuid, Path, description = "Metric id"),
+    ),
+    responses(
+        (status = 200, description = "Metric deleted", body = DatasetDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:manage permission, or not the dataset owner", body = ErrorBody),
+        (status = 404, description = "No such dataset, or metric not in this dataset", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ds_delete_metric(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -764,6 +1141,24 @@ async fn ds_delete_metric(
     Ok(Json(load_detail(&st, id).await?))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/datasets/{id}/columns",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+    ),
+    request_body = AddColumnBody,
+    responses(
+        (status = 200, description = "Calculated column added (expression validated)", body = DatasetDetailDto),
+        (status = 400, description = "Invalid column expression", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:manage permission, or not the dataset owner", body = ErrorBody),
+        (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ds_add_column(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -797,6 +1192,25 @@ async fn ds_add_column(
     Ok(Json(load_detail(&st, id).await?))
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/ws/{workspace}/datasets/{id}/columns/{column_name}",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+        ("column_name" = String, Path, description = "Column name"),
+    ),
+    request_body = UpdateColumnBody,
+    responses(
+        (status = 200, description = "Column updated", body = DatasetDetailDto),
+        (status = 400, description = "Cannot set an expression on a physical column, or invalid expression", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:manage permission, or not the dataset owner", body = ErrorBody),
+        (status = 404, description = "No such dataset or column in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ds_update_column(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -855,6 +1269,23 @@ async fn ds_update_column(
     Ok(Json(load_detail(&st, id).await?))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/datasets/{id}/columns/{column_name}",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+        ("column_name" = String, Path, description = "Calculated column name"),
+    ),
+    responses(
+        (status = 200, description = "Calculated column deleted", body = DatasetDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:manage permission, or not the dataset owner", body = ErrorBody),
+        (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ds_delete_column(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -892,6 +1323,23 @@ pub fn chart_router() -> Router<BiState> {
         )
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/ws/{workspace}/charts/{id}/folder",
+    tag = "charts",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Chart id"),
+    ),
+    request_body = SetFolder,
+    responses(
+        (status = 200, description = "Chart moved to folder", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing chart:manage permission", body = ErrorBody),
+        (status = 404, description = "No such chart or target folder in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ch_set_folder(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -913,6 +1361,22 @@ async fn ch_set_folder(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/charts/{id}/duplicate",
+    tag = "charts",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Chart id to duplicate"),
+    ),
+    responses(
+        (status = 200, description = "Chart duplicated", body = ChartDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing chart:manage permission", body = ErrorBody),
+        (status = 404, description = "No such chart in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ch_duplicate(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -961,6 +1425,21 @@ async fn require_chart_owner(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/charts",
+    tag = "charts",
+    params(
+        WorkspacePath,
+        ("trashed" = Option<bool>, Query, description = "List only trashed charts when true"),
+    ),
+    responses(
+        (status = 200, description = "Charts in the workspace", body = Vec<ChartDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing chart:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ch_list(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -982,6 +1461,20 @@ async fn ch_list(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/charts",
+    tag = "charts",
+    params(WorkspacePath),
+    request_body = CreateChart,
+    responses(
+        (status = 200, description = "Chart created", body = ChartDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing chart:manage permission", body = ErrorBody),
+        (status = 404, description = "Referenced dataset not in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ch_create(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1016,6 +1509,22 @@ async fn ch_create(
     Ok(Json(crate::model::chart_dto(c)))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/charts/{id}",
+    tag = "charts",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Chart id"),
+    ),
+    responses(
+        (status = 200, description = "Chart detail", body = ChartDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing chart:read permission", body = ErrorBody),
+        (status = 404, description = "No such chart in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ch_get(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1035,6 +1544,23 @@ async fn ch_get(
     Ok(Json(crate::model::chart_dto(c)))
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/ws/{workspace}/charts/{id}",
+    tag = "charts",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Chart id"),
+    ),
+    request_body = UpdateChart,
+    responses(
+        (status = 200, description = "Chart updated", body = ChartDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing chart:manage permission, or not the chart owner", body = ErrorBody),
+        (status = 404, description = "No such chart, or referenced dataset not in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ch_update(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1077,6 +1603,22 @@ async fn ch_update(
     Ok(Json(crate::model::chart_dto(c)))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/charts/{id}",
+    tag = "charts",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Chart id"),
+    ),
+    responses(
+        (status = 200, description = "Chart deleted", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing chart:manage permission, or not the chart owner", body = ErrorBody),
+        (status = 404, description = "No such chart in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ch_remove(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1092,6 +1634,21 @@ async fn ch_remove(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/charts/data",
+    tag = "charts",
+    params(WorkspacePath),
+    request_body = ChartDataBody,
+    responses(
+        (status = 200, description = "Compiled SQL + target database id (the client submits it to the query seam)", body = ChartDataResponse),
+        (status = 400, description = "Invalid query spec (unknown column/metric, bad filter, …)", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing chart:read permission", body = ErrorBody),
+        (status = 404, description = "Referenced dataset not in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ch_data(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1134,6 +1691,22 @@ async fn ch_data(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/charts/{id}/trash",
+    tag = "charts",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Chart id"),
+    ),
+    responses(
+        (status = 200, description = "Chart moved to trash", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing chart:manage permission", body = ErrorBody),
+        (status = 404, description = "No such chart in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ch_trash(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1151,6 +1724,22 @@ async fn ch_trash(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/charts/{id}/restore",
+    tag = "charts",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Chart id"),
+    ),
+    responses(
+        (status = 200, description = "Chart restored from trash", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing chart:manage permission", body = ErrorBody),
+        (status = 404, description = "No such chart in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ch_restore(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1168,6 +1757,22 @@ async fn ch_restore(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/charts/{id}/bookmark",
+    tag = "charts",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Chart id"),
+    ),
+    responses(
+        (status = 200, description = "Chart bookmarked for the caller", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing chart:read permission", body = ErrorBody),
+        (status = 404, description = "No such chart in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ch_bookmark_add(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1185,6 +1790,22 @@ async fn ch_bookmark_add(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/charts/{id}/bookmark",
+    tag = "charts",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Chart id"),
+    ),
+    responses(
+        (status = 200, description = "Chart bookmark removed for the caller", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing chart:read permission", body = ErrorBody),
+        (status = 404, description = "No such chart in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn ch_bookmark_remove(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1227,6 +1848,23 @@ pub fn dashboard_router() -> Router<BiState> {
         )
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/ws/{workspace}/dashboards/{id}/folder",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+    ),
+    request_body = SetFolder,
+    responses(
+        (status = 200, description = "Dashboard moved to folder", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission", body = ErrorBody),
+        (status = 404, description = "No such dashboard or target folder in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_set_folder(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1306,6 +1944,21 @@ struct ListQuery {
     trashed: bool,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/dashboards",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("trashed" = Option<bool>, Query, description = "List only trashed dashboards when true"),
+    ),
+    responses(
+        (status = 200, description = "Dashboards in the workspace", body = Vec<DashboardSummaryDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_list(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1327,6 +1980,19 @@ async fn db_list(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/dashboards",
+    tag = "dashboards",
+    params(WorkspacePath),
+    request_body = CreateDashboard,
+    responses(
+        (status = 200, description = "Dashboard created (empty layout)", body = DashboardDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_create(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1351,6 +2017,22 @@ async fn db_create(
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/dashboards/{id}",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+    ),
+    responses(
+        (status = 200, description = "Dashboard detail (tabs + cards)", body = DashboardDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:read permission", body = ErrorBody),
+        (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_get(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1366,6 +2048,24 @@ async fn db_get(
     ))
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/ws/{workspace}/dashboards/{id}",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+    ),
+    request_body = UpdateDashboard,
+    responses(
+        (status = 200, description = "Dashboard metadata + layout replaced", body = DashboardDetailDto),
+        (status = 400, description = "Invalid layout (tab/card mismatch) or width not 'fixed'/'full'", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission, or not the dashboard owner", body = ErrorBody),
+        (status = 404, description = "No such dashboard, or a referenced chart not in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_update(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1400,6 +2100,22 @@ async fn db_update(
     ))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/dashboards/{id}",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+    ),
+    responses(
+        (status = 200, description = "Dashboard deleted", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission, or not the dashboard owner", body = ErrorBody),
+        (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_remove(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1415,6 +2131,22 @@ async fn db_remove(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/dashboards/{id}/trash",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+    ),
+    responses(
+        (status = 200, description = "Dashboard moved to trash", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission, or not the dashboard owner", body = ErrorBody),
+        (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_trash(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1433,6 +2165,22 @@ async fn db_trash(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/dashboards/{id}/restore",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+    ),
+    responses(
+        (status = 200, description = "Dashboard restored from trash", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission, or not the dashboard owner", body = ErrorBody),
+        (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_restore(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1451,6 +2199,22 @@ async fn db_restore(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/dashboards/{id}/duplicate",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id to duplicate"),
+    ),
+    responses(
+        (status = 200, description = "Dashboard duplicated (layout copied)", body = DashboardDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:read permission", body = ErrorBody),
+        (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_duplicate(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1472,6 +2236,22 @@ async fn db_duplicate(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/dashboards/{id}/bookmark",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+    ),
+    responses(
+        (status = 200, description = "Dashboard bookmarked for the caller", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:read permission", body = ErrorBody),
+        (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_bookmark_add(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1489,6 +2269,22 @@ async fn db_bookmark_add(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/dashboards/{id}/bookmark",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+    ),
+    responses(
+        (status = 200, description = "Dashboard bookmark removed for the caller", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:read permission", body = ErrorBody),
+        (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_bookmark_remove(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1557,6 +2353,22 @@ pub fn folder_router() -> Router<BiState> {
         )
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/folders/{kind}",
+    tag = "folders",
+    params(
+        WorkspacePath,
+        ("kind" = String, Path, description = "Entity kind: charts | dashboards | datasets | notebooks"),
+    ),
+    responses(
+        (status = 200, description = "Folders for the entity kind in the workspace", body = Vec<FolderDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing the entity kind's read permission", body = ErrorBody),
+        (status = 404, description = "Unknown entity kind", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn folders_list(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1577,6 +2389,23 @@ async fn folders_list(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/folders/{kind}",
+    tag = "folders",
+    params(
+        WorkspacePath,
+        ("kind" = String, Path, description = "Entity kind: charts | dashboards | datasets | notebooks"),
+    ),
+    request_body = CreateFolder,
+    responses(
+        (status = 200, description = "Folder created", body = FolderDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing the entity kind's manage permission", body = ErrorBody),
+        (status = 404, description = "Unknown entity kind", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn folders_create(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1601,6 +2430,24 @@ async fn folders_create(
     Ok(Json(crate::model::folder_dto(f)))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/ws/{workspace}/folders/{kind}/{id}",
+    tag = "folders",
+    params(
+        WorkspacePath,
+        ("kind" = String, Path, description = "Entity kind: charts | dashboards | datasets | notebooks"),
+        ("id" = Uuid, Path, description = "Folder id"),
+    ),
+    request_body = RenameFolder,
+    responses(
+        (status = 200, description = "Folder renamed", body = FolderDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing the entity kind's manage permission", body = ErrorBody),
+        (status = 404, description = "Unknown entity kind, or no such folder in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn folders_rename(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1622,6 +2469,23 @@ async fn folders_rename(
     Ok(Json(crate::model::folder_dto(f)))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/folders/{kind}/{id}",
+    tag = "folders",
+    params(
+        WorkspacePath,
+        ("kind" = String, Path, description = "Entity kind: charts | dashboards | datasets | notebooks"),
+        ("id" = Uuid, Path, description = "Folder id"),
+    ),
+    responses(
+        (status = 200, description = "Folder deleted", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing the entity kind's manage permission", body = ErrorBody),
+        (status = 404, description = "Unknown entity kind, or no such folder in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn folders_delete(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1649,3 +2513,154 @@ async fn require_folder(
         _ => Err(Error::NotFound("folder".into()).into()),
     }
 }
+
+// ── OpenAPI fragments (E0·P4b-6) ─────────────────────────────────────────────
+//
+// One `#[derive(utoipa::OpenApi)]` doc struct per router, co-located with its
+// handlers and merged into `egret_bi::openapi()`. Nested request/response
+// schemas (`CreateSource`, `MetricDto`, `QuerySpec` → `Filter`/`OrderBy`/
+// `FilterOp`, …) are collected automatically from the listed paths + component
+// types.
+
+/// OpenAPI fragment for the dataset router (`/api/ws/{workspace}/datasets…`).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        ds_create,
+        ds_list,
+        ds_get,
+        ds_update,
+        ds_remove,
+        ds_refresh,
+        ds_add_metric,
+        ds_update_metric,
+        ds_delete_metric,
+        ds_add_column,
+        ds_update_column,
+        ds_delete_column,
+        ds_set_folder,
+        ds_trash,
+        ds_restore,
+        ds_bookmark_add,
+        ds_bookmark_remove,
+    ),
+    components(schemas(
+        CreateDataset,
+        CreateSource,
+        UpdateDataset,
+        DatasetDetailDto,
+        DatasetSummaryDto,
+        DatasetColumnDto,
+        MetricDto,
+        MetricBody,
+        AddColumnBody,
+        UpdateColumnBody,
+        SetFolder,
+        Ack,
+        ErrorBody,
+    )),
+    tags((name = "datasets", description = "BI datasets: sources, columns, metrics, folders, trash + bookmarks")),
+)]
+pub struct BiDatasetApi;
+
+/// OpenAPI fragment for the chart router (`/api/ws/{workspace}/charts…`).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        ch_create,
+        ch_list,
+        ch_get,
+        ch_update,
+        ch_remove,
+        ch_data,
+        ch_set_folder,
+        ch_duplicate,
+        ch_trash,
+        ch_restore,
+        ch_bookmark_add,
+        ch_bookmark_remove,
+    ),
+    components(schemas(
+        CreateChart,
+        UpdateChart,
+        ChartDto,
+        ChartDataBody,
+        ChartDataResponse,
+        crate::chartquery::QuerySpec,
+        crate::chartquery::Filter,
+        crate::chartquery::OrderBy,
+        crate::chartquery::FilterOp,
+        SetFolder,
+        Ack,
+        ErrorBody,
+    )),
+    tags((name = "charts", description = "BI charts: CRUD, compile-to-SQL data requests, folders, trash + bookmarks")),
+)]
+pub struct BiChartApi;
+
+/// OpenAPI fragment for the folder router (`/api/ws/{workspace}/folders/{kind}…`).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(folders_list, folders_create, folders_rename, folders_delete),
+    components(schemas(FolderDto, CreateFolder, RenameFolder, Ack, ErrorBody)),
+    tags((name = "folders", description = "Generic per-kind folders (charts / dashboards / datasets / notebooks)")),
+)]
+pub struct BiFolderApi;
+
+/// OpenAPI fragment for the SQL Lab router (`/api/ws/{workspace}/sqllab…`).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        save,
+        list,
+        load,
+        update,
+        remove,
+        catalogs,
+        schemas,
+        tables,
+        columns,
+    ),
+    components(schemas(
+        SaveQuery,
+        SavedQueryDto,
+        SchemaColumn,
+        Ack,
+        ErrorBody,
+    )),
+    tags((name = "sqllab", description = "SQL Lab: saved queries + schema browse (catalogs / schemas / tables / columns)")),
+)]
+pub struct BiSqlLabApi;
+
+/// OpenAPI fragment for the dashboard router (`/api/ws/{workspace}/dashboards…`).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        db_create,
+        db_list,
+        db_get,
+        db_update,
+        db_remove,
+        db_duplicate,
+        db_trash,
+        db_restore,
+        db_bookmark_add,
+        db_bookmark_remove,
+        db_set_folder,
+    ),
+    components(schemas(
+        CreateDashboard,
+        UpdateDashboard,
+        DashboardSummaryDto,
+        DashboardDetailDto,
+        DashboardTabDto,
+        DashboardCardDto,
+        CardInput,
+        NewTabInput,
+        SetFolder,
+        Ack,
+        ErrorBody,
+    )),
+    tags((name = "dashboards", description = "BI dashboards: CRUD, layout (tabs + cards), folders, trash + bookmarks")),
+)]
+pub struct BiDashboardApi;
