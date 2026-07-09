@@ -1,65 +1,15 @@
 //! Domain types: engine enum, connection options, DB row, request/response DTOs.
+//!
+//! The shared domain vocabulary — [`Engine`], [`ConnOptions`], [`Database`] —
+//! lives in the leaf `egret-query-api` contract crate (E4d) so cross-seam
+//! consumers depend on it without reaching through this deep path. It's
+//! re-exported here so `egret_query::registry::model::…` and internal
+//! `crate::registry::model::…` call sites keep resolving unchanged.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Supported query engines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Engine {
-    Trino,
-    StarRocks,
-}
-
-impl Engine {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Engine::Trino => "trino",
-            Engine::StarRocks => "starrocks",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Engine> {
-        match s {
-            "trino" => Some(Engine::Trino),
-            "starrocks" => Some(Engine::StarRocks),
-            _ => None,
-        }
-    }
-}
-
-/// Non-secret connection options stored in `databases.options` (jsonb).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ConnOptions {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user: Option<String>,
-    /// Trino only: "http" | "https".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub http_scheme: Option<String>,
-    /// Trino default catalog (optional).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub catalog: Option<String>,
-    /// StarRocks default database (optional).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub database: Option<String>,
-    /// Trino only: run each query as the logged-in user (X-Trino-User).
-    /// Requires Trino impersonation + Ranger. Default false.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub impersonate: Option<bool>,
-}
-
-/// A full database registration row (no secret material).
-#[derive(Debug, Clone)]
-pub struct Database {
-    pub id: Uuid,
-    pub name: String,
-    pub engine: Engine,
-    pub host: String,
-    pub port: i32,
-    pub options: ConnOptions,
-    pub has_secret: bool,
-    pub status: String,
-}
+pub use egret_query_api::{ConnOptions, Database, Engine};
 
 // ── Request DTOs ──────────────────────────────────────────────────────────────
 

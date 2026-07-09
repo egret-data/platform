@@ -2445,6 +2445,7 @@ dependencies = [
  "egret-core",
  "egret-metastore",
  "egret-query",
+ "egret-query-api",
  "egret-secrets",
  "egret-workspace",
  "http-body-util",
@@ -2813,6 +2814,7 @@ dependencies = [
  "egret-auth",
  "egret-core",
  "egret-metastore",
+ "egret-query-api",
  "egret-secrets",
  "egret-storage",
  "egret-workspace",
@@ -2829,6 +2831,15 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "egret-query-api"
+version = "0.1.0"
+dependencies = [
+ "egret-core",
+ "serde",
  "uuid",
 ]
 

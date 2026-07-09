@@ -11,6 +11,7 @@ egret-metastore.workspace = true
 egret-auth.workspace = true
 egret-workspace.workspace = true
 egret-query.workspace = true
+egret-query-api.workspace = true
 axum.workspace = true
 sqlx.workspace = true
 serde.workspace = true

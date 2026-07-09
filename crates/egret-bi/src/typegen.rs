@@ -2,7 +2,7 @@
 //! This is the single source of truth charts rely on to tell dimensions,
 //! measures, and time columns apart.
 
-use egret_query::registry::model::Engine;
+use egret_query_api::Engine;
 
 /// The generic class of a column, independent of engine-specific type spelling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

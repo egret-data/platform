@@ -21,5 +21,8 @@ pub use execution::{
 pub use registry::{
     workspace_database_router, DatabaseError, DatabaseRepo, DatabaseState, DbApiError,
 };
-// The shared domain vocabulary (`Engine`/`Database`/`ConnOptions`) stays at
-// `registry::model::…`; E4d lifts it into the `egret-query-api` contract crate.
+// The shared domain vocabulary now lives in the `egret-query-api` contract crate
+// (E4d); flat-re-export it at the crate root so external call sites reach it via
+// `egret_query::{Engine, Database, ConnOptions}` too (it's also still at
+// `registry::model::…` via a re-export there).
+pub use egret_query_api::{ConnOptions, Database, Engine};

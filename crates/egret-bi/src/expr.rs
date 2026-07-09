@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use egret_query::execution::connector::{build_connector, ConnSpec};
-use egret_query::registry::model::Engine;
+use egret_query_api::Engine;
 
 use crate::dataset::SourceSpec;
 use crate::error::BiError;
