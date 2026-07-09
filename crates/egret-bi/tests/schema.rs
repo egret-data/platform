@@ -1,6 +1,6 @@
 //! Engine-gated SchemaService test. Self-skip unless EGRET_TEST_TRINO_URL is set.
 use egret_bi::SchemaService;
-use egret_query::registry::model::{ConnOptions, Engine};
+use egret_query_api::{ConnOptions, Engine};
 
 fn trino_spec() -> Option<egret_query::execution::connector::ConnSpec> {
     let base = std::env::var("EGRET_TEST_TRINO_URL").ok()?;

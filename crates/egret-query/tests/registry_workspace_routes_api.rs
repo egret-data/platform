@@ -13,7 +13,7 @@
 //!
 //! Run with:
 //!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
-//!   cargo test -p egret-database --test workspace_routes_api -- --test-threads=1
+//!   cargo test -p egret-query --test registry_workspace_routes_api -- --test-threads=1
 
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
