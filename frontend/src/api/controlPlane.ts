@@ -1,4 +1,93 @@
-import { apiFetch, apiJson } from "./client";
+/**
+ * Control-plane API (engines · warehouses/catalog · storage · secrets) —
+ * MIGRATED to the orval-generated client (E0·P4d-4).
+ *
+ * Thin adapter over the generated fetch fns for the `control-plane-engines`,
+ * `control-plane-catalog`, `control-plane-storage` and `control-plane-secrets`
+ * tags, following the P4c/P4d pattern (closest analog: `access.ts`). Every plain
+ * async helper keeps its old name/signature so call sites (ControlPlaneEngines /
+ * EngineDetail / Warehouses / WarehouseDetail / Storage / Secrets pages) and the
+ * module-mocking page tests (`vi.mock("@/api/controlPlane")`) don't churn. Each
+ * helper calls the generated fetch fn and unwraps orval's `{ status, data,
+ * headers }` envelope to the same body the hand-written `apiJson`/`apiFetch`
+ * returned.
+ *
+ * FE-only types are PRESERVED verbatim: the spec types several engine/catalog
+ * fields loosely (`serde_json::Value` → `{ [k]: unknown }` for `trinoConfig`,
+ * catalog `config`, query `outputStage`, kube specs), so the richly-typed FE
+ * interfaces (`TrinoConfig`, `EngineSpec`, `TableDetail`, `MonitorQuery*`, …) stay
+ * here and are cast at the adapter boundary — aliasing the loose generated DTOs
+ * would widen these and churn every call site.
+ *
+ * WebSocket streaming is NOT adopted: pod `logs/follow` and `exec` upgrade to a
+ * WebSocket (the generated client cannot do WS) and are opened directly with
+ * `new WebSocket(...)` in `PodLogsDialog.tsx` / `PodTerminalDialog.tsx` — outside
+ * this module, untouched. Only the bounded `pods/{pod}/logs` GET (JSON `PodLogs`
+ * tail) lives here and is migrated to `controlPlaneEnginesPodLogs`.
+ */
+import {
+  controlPlaneCatalogAddGrant,
+  controlPlaneCatalogBrowseDeleted,
+  controlPlaneCatalogBrowseNamespaces,
+  controlPlaneCatalogBrowseSchema,
+  controlPlaneCatalogBrowseTables,
+  controlPlaneCatalogBrowseView,
+  controlPlaneCatalogCreateClient,
+  controlPlaneCatalogCreateRole,
+  controlPlaneCatalogCreateWarehouse,
+  controlPlaneCatalogDeleteRole,
+  controlPlaneCatalogDeleteWarehouse,
+  controlPlaneCatalogGetWarehouse,
+  controlPlaneCatalogListClients,
+  controlPlaneCatalogListGrants,
+  controlPlaneCatalogListRoles,
+  controlPlaneCatalogListTasks,
+  controlPlaneCatalogListWarehouses,
+  controlPlaneCatalogRevokeClient,
+  controlPlaneCatalogRevokeGrant,
+  controlPlaneCatalogRotateCredential,
+  controlPlaneCatalogSearchTabulars,
+  controlPlaneCatalogSetDeleteProfileRoute,
+  controlPlaneCatalogSetFormatPolicy,
+  controlPlaneCatalogSetProtection,
+  controlPlaneCatalogSetWarehouseStatus,
+  controlPlaneCatalogUndropTabular,
+  controlPlaneCatalogWarehouseConfig,
+} from "./generated/control-plane-catalog/control-plane-catalog";
+import {
+  controlPlaneEnginesAddCatalog,
+  controlPlaneEnginesCreateEngine,
+  controlPlaneEnginesDeleteEngine,
+  controlPlaneEnginesGetCatalog,
+  controlPlaneEnginesGetCluster,
+  controlPlaneEnginesGetEngine,
+  controlPlaneEnginesGetQuery,
+  controlPlaneEnginesKillQuery,
+  controlPlaneEnginesListCatalogs,
+  controlPlaneEnginesListEngines,
+  controlPlaneEnginesListQueries,
+  controlPlaneEnginesPodLogs,
+  controlPlaneEnginesRemoveCatalog,
+  controlPlaneEnginesRestartEngine,
+  controlPlaneEnginesTestCatalog,
+  controlPlaneEnginesUpdateCatalog,
+  controlPlaneEnginesUpdateEngine,
+} from "./generated/control-plane-engines/control-plane-engines";
+import {
+  controlPlaneSecretsCreate,
+  controlPlaneSecretsList,
+  controlPlaneSecretsRemove,
+  controlPlaneSecretsUpdate,
+} from "./generated/control-plane-secrets/control-plane-secrets";
+import {
+  controlPlaneStorageBrowseObjects,
+  controlPlaneStorageCreate,
+  controlPlaneStorageDetail,
+  controlPlaneStorageList,
+  controlPlaneStorageRemove,
+  controlPlaneStorageUpdate,
+} from "./generated/control-plane-storage/control-plane-storage";
+import type { CreateEngineBody } from "./generated/model";
 
 // ── Storage (global / control-plane) ─────────────────────────────────────────
 
@@ -43,37 +132,27 @@ export interface StorageListing {
   folders: string[];
   objects: StorageObject[];
 }
-export function browseStorageObjects(id: string, prefix: string): Promise<StorageListing> {
-  return apiJson<StorageListing>(
-    `/control-plane/storage/${id}/objects?prefix=${encodeURIComponent(prefix)}`,
-  );
+export async function browseStorageObjects(id: string, prefix: string): Promise<StorageListing> {
+  return (await controlPlaneStorageBrowseObjects(id, { prefix })).data as StorageListing;
 }
-export function listStorage(): Promise<Storage[]> {
-  return apiJson<Storage[]>("/control-plane/storage");
+export async function listStorage(): Promise<Storage[]> {
+  return (await controlPlaneStorageList()).data as Storage[];
 }
 
-export function getStorage(id: string): Promise<Storage> {
-  return apiJson<Storage>(`/control-plane/storage/${id}`);
+export async function getStorage(id: string): Promise<Storage> {
+  return (await controlPlaneStorageDetail(id)).data as Storage;
 }
 
-export function createStorage(input: StorageInput): Promise<Storage> {
-  return apiJson<Storage>("/control-plane/storage", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
+export async function createStorage(input: StorageInput): Promise<Storage> {
+  return (await controlPlaneStorageCreate(input)).data as Storage;
 }
 
-export function updateStorage(id: string, input: StorageInput): Promise<Storage> {
-  return apiJson<Storage>(`/control-plane/storage/${id}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
+export async function updateStorage(id: string, input: StorageInput): Promise<Storage> {
+  return (await controlPlaneStorageUpdate(id, input)).data as Storage;
 }
 
 export async function deleteStorage(id: string): Promise<void> {
-  await apiFetch(`/control-plane/storage/${id}`, { method: "DELETE" });
+  await controlPlaneStorageRemove(id);
 }
 
 // ── Secrets (global / control-plane) ─────────────────────────────────────────
@@ -102,28 +181,20 @@ export interface SecretUpdate {
   value?: string;
 }
 
-export function listSecrets(): Promise<Secret[]> {
-  return apiJson<Secret[]>("/control-plane/secrets");
+export async function listSecrets(): Promise<Secret[]> {
+  return (await controlPlaneSecretsList()).data as Secret[];
 }
 
-export function createSecret(input: SecretInput): Promise<Secret> {
-  return apiJson<Secret>("/control-plane/secrets", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
+export async function createSecret(input: SecretInput): Promise<Secret> {
+  return (await controlPlaneSecretsCreate(input)).data as Secret;
 }
 
-export function updateSecret(id: string, input: SecretUpdate): Promise<Secret> {
-  return apiJson<Secret>(`/control-plane/secrets/${id}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
+export async function updateSecret(id: string, input: SecretUpdate): Promise<Secret> {
+  return (await controlPlaneSecretsUpdate(id, input)).data as Secret;
 }
 
 export async function deleteSecret(id: string): Promise<void> {
-  await apiFetch(`/control-plane/secrets/${id}`, { method: "DELETE" });
+  await controlPlaneSecretsRemove(id);
 }
 
 // ── Warehouses (embedded catalog / control-plane) ────────────────────────────
@@ -143,24 +214,20 @@ export interface CreateWarehouseInput {
   storageConnectionId: string;
 }
 
-export function listWarehouses(): Promise<Warehouse[]> {
-  return apiJson<Warehouse[]>("/control-plane/warehouses");
+export async function listWarehouses(): Promise<Warehouse[]> {
+  return (await controlPlaneCatalogListWarehouses()).data as Warehouse[];
 }
 
-export function getWarehouse(id: string): Promise<Warehouse> {
-  return apiJson<Warehouse>(`/control-plane/warehouses/${id}`);
+export async function getWarehouse(id: string): Promise<Warehouse> {
+  return (await controlPlaneCatalogGetWarehouse(id)).data as Warehouse;
 }
 
-export function createWarehouse(input: CreateWarehouseInput): Promise<Warehouse> {
-  return apiJson<Warehouse>("/control-plane/warehouses", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
+export async function createWarehouse(input: CreateWarehouseInput): Promise<Warehouse> {
+  return (await controlPlaneCatalogCreateWarehouse(input)).data as Warehouse;
 }
 
 export async function deleteWarehouse(id: string): Promise<void> {
-  await apiFetch(`/control-plane/warehouses/${id}`, { method: "DELETE" });
+  await controlPlaneCatalogDeleteWarehouse(id);
 }
 
 // ── Catalog roles (keyed by consumer-type) ───────────────────────────────────
@@ -178,23 +245,19 @@ export interface CreateRoleInput {
   description?: string | null;
 }
 
-export function listRoles(warehouseId: string): Promise<CatalogRole[]> {
-  return apiJson<CatalogRole[]>(`/control-plane/warehouses/${warehouseId}/roles`);
+export async function listRoles(warehouseId: string): Promise<CatalogRole[]> {
+  return (await controlPlaneCatalogListRoles(warehouseId)).data as CatalogRole[];
 }
 
-export function createRole(
+export async function createRole(
   warehouseId: string,
   input: CreateRoleInput,
 ): Promise<CatalogRole> {
-  return apiJson<CatalogRole>(`/control-plane/warehouses/${warehouseId}/roles`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
+  return (await controlPlaneCatalogCreateRole(warehouseId, input)).data as CatalogRole;
 }
 
 export async function deleteRole(roleId: string): Promise<void> {
-  await apiFetch(`/control-plane/roles/${roleId}`, { method: "DELETE" });
+  await controlPlaneCatalogDeleteRole(roleId);
 }
 
 // ── Grants (on a catalog role) ───────────────────────────────────────────────
@@ -214,20 +277,16 @@ export interface GrantInput {
   privilege: string;
 }
 
-export function listGrants(roleId: string): Promise<Grant[]> {
-  return apiJson<Grant[]>(`/control-plane/roles/${roleId}/grants`);
+export async function listGrants(roleId: string): Promise<Grant[]> {
+  return (await controlPlaneCatalogListGrants(roleId)).data as Grant[];
 }
 
 export async function addGrant(roleId: string, input: GrantInput): Promise<void> {
-  await apiFetch(`/control-plane/roles/${roleId}/grants`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
+  await controlPlaneCatalogAddGrant(roleId, input);
 }
 
 export async function revokeGrant(grantId: string): Promise<void> {
-  await apiFetch(`/control-plane/grants/${grantId}`, { method: "DELETE" });
+  await controlPlaneCatalogRevokeGrant(grantId);
 }
 
 // ── Catalog Clients (per-consumer machine credentials) ───────────────────────
@@ -254,26 +313,19 @@ export interface CreateClientInput {
   catalogRoleId: string;
 }
 
-export function listClients(warehouseId: string): Promise<CatalogClient[]> {
-  return apiJson<CatalogClient[]>(`/control-plane/warehouses/${warehouseId}/clients`);
+export async function listClients(warehouseId: string): Promise<CatalogClient[]> {
+  return (await controlPlaneCatalogListClients(warehouseId)).data as CatalogClient[];
 }
 
-export function createClient(
+export async function createClient(
   warehouseId: string,
   input: CreateClientInput,
 ): Promise<CatalogClientCreated> {
-  return apiJson<CatalogClientCreated>(
-    `/control-plane/warehouses/${warehouseId}/clients`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
-    },
-  );
+  return (await controlPlaneCatalogCreateClient(warehouseId, input)).data as CatalogClientCreated;
 }
 
 export async function revokeClient(id: string): Promise<void> {
-  await apiFetch(`/control-plane/clients/${id}`, { method: "DELETE" });
+  await controlPlaneCatalogRevokeClient(id);
 }
 
 // ── Warehouse browse (embedded catalog) ──────────────────────────────────────
@@ -334,31 +386,25 @@ export interface TableDetail {
   snapshots: TableSnapshot[];
 }
 
-export function listNamespaces(warehouseId: string): Promise<Namespace[]> {
-  return apiJson<Namespace[]>(`/control-plane/warehouses/${warehouseId}/namespaces`);
+export async function listNamespaces(warehouseId: string): Promise<Namespace[]> {
+  return (await controlPlaneCatalogBrowseNamespaces(warehouseId)).data as Namespace[];
 }
-export function listTabulars(warehouseId: string, namespace: string): Promise<Tabular[]> {
-  return apiJson<Tabular[]>(
-    `/control-plane/warehouses/${warehouseId}/namespaces/${encodeURIComponent(namespace)}/tables`,
-  );
+export async function listTabulars(warehouseId: string, namespace: string): Promise<Tabular[]> {
+  return (await controlPlaneCatalogBrowseTables(warehouseId, namespace)).data as Tabular[];
 }
-export function loadTableDetail(
+export async function loadTableDetail(
   warehouseId: string,
   namespace: string,
   table: string,
 ): Promise<TableDetail> {
-  return apiJson<TableDetail>(
-    `/control-plane/warehouses/${warehouseId}/namespaces/${encodeURIComponent(namespace)}/tables/${encodeURIComponent(table)}`,
-  );
+  return (await controlPlaneCatalogBrowseSchema(warehouseId, namespace, table)).data as TableDetail;
 }
-export function loadViewColumns(
+export async function loadViewColumns(
   warehouseId: string,
   namespace: string,
   view: string,
 ): Promise<Column[]> {
-  return apiJson<Column[]>(
-    `/control-plane/warehouses/${warehouseId}/namespaces/${encodeURIComponent(namespace)}/views/${encodeURIComponent(view)}`,
-  );
+  return (await controlPlaneCatalogBrowseView(warehouseId, namespace, view)).data as Column[];
 }
 export interface SearchResult {
   namespace: string[];
@@ -370,13 +416,11 @@ export interface WarehouseTask {
   entity: string | null;
   status: string;
 }
-export function searchTabulars(warehouseId: string, q: string): Promise<SearchResult[]> {
-  return apiJson<SearchResult[]>(
-    `/control-plane/warehouses/${warehouseId}/search?q=${encodeURIComponent(q)}`,
-  );
+export async function searchTabulars(warehouseId: string, q: string): Promise<SearchResult[]> {
+  return (await controlPlaneCatalogSearchTabulars(warehouseId, { q })).data as SearchResult[];
 }
-export function listWarehouseTasks(warehouseId: string): Promise<WarehouseTask[]> {
-  return apiJson<WarehouseTask[]>(`/control-plane/warehouses/${warehouseId}/tasks`);
+export async function listWarehouseTasks(warehouseId: string): Promise<WarehouseTask[]> {
+  return (await controlPlaneCatalogListTasks(warehouseId)).data as WarehouseTask[];
 }
 export interface WarehouseConfig {
   active: boolean;
@@ -385,70 +429,49 @@ export interface WarehouseConfig {
   numViews: number;
   statsUpdatedMs: number;
 }
-export function getWarehouseConfig(warehouseId: string): Promise<WarehouseConfig> {
-  return apiJson<WarehouseConfig>(`/control-plane/warehouses/${warehouseId}/config`);
+export async function getWarehouseConfig(warehouseId: string): Promise<WarehouseConfig> {
+  return (await controlPlaneCatalogWarehouseConfig(warehouseId)).data as WarehouseConfig;
 }
 export async function setWarehouseStatus(warehouseId: string, active: boolean): Promise<void> {
-  await apiFetch(`/control-plane/warehouses/${warehouseId}/status`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ active }),
-  });
+  await controlPlaneCatalogSetWarehouseStatus(warehouseId, { active });
 }
 export async function setDeleteProfile(warehouseId: string, seconds: number | null): Promise<void> {
-  await apiFetch(`/control-plane/warehouses/${warehouseId}/delete-profile`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ seconds }),
-  });
+  await controlPlaneCatalogSetDeleteProfileRoute(warehouseId, { seconds });
 }
 export async function setFormatPolicy(warehouseId: string, versions: number[]): Promise<void> {
-  await apiFetch(`/control-plane/warehouses/${warehouseId}/format-policy`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ versions }),
-  });
+  await controlPlaneCatalogSetFormatPolicy(warehouseId, { versions });
 }
 export async function rotateCredential(
   warehouseId: string,
   accessKey: string,
   secretKey: string,
 ): Promise<void> {
-  await apiFetch(`/control-plane/warehouses/${warehouseId}/storage-credential`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ accessKey, secretKey }),
-  });
+  await controlPlaneCatalogRotateCredential(warehouseId, { accessKey, secretKey });
 }
 
-export function listDeletedTabulars(warehouseId: string): Promise<DeletedTabular[]> {
-  return apiJson<DeletedTabular[]>(`/control-plane/warehouses/${warehouseId}/deleted-tabulars`);
+export async function listDeletedTabulars(warehouseId: string): Promise<DeletedTabular[]> {
+  return (await controlPlaneCatalogBrowseDeleted(warehouseId)).data as DeletedTabular[];
 }
 export async function undropTabular(
   warehouseId: string,
   kind: "table" | "view",
   id: string,
 ): Promise<void> {
-  await apiFetch(`/control-plane/warehouses/${warehouseId}/undrop`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ kind, id }),
-  });
+  await controlPlaneCatalogUndropTabular(warehouseId, { kind, id });
 }
-export function setProtection(
+export async function setProtection(
   warehouseId: string,
   target: "table" | "view" | "namespace",
   id: string,
   protectedFlag: boolean,
 ): Promise<{ protected: boolean }> {
-  return apiJson<{ protected: boolean }>(
-    `/control-plane/warehouses/${warehouseId}/protection`,
-    {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target, id, protected: protectedFlag }),
-    },
-  );
+  return (
+    await controlPlaneCatalogSetProtection(warehouseId, {
+      target,
+      id,
+      protected: protectedFlag,
+    })
+  ).data as { protected: boolean };
 }
 
 // ── Engines (query engines / control-plane) ──────────────────────────────────
@@ -753,40 +776,35 @@ export interface CreateEngineInput {
   trinoConfig?: TrinoConfig;
 }
 
-export function listEngines(): Promise<Engine[]> {
-  return apiJson<Engine[]>("/control-plane/engines");
+export async function listEngines(): Promise<Engine[]> {
+  return (await controlPlaneEnginesListEngines()).data as Engine[];
 }
 
-export function getEngine(
+export async function getEngine(
   id: string,
 ): Promise<Omit<Engine, "status"> & { status: EngineStatus }> {
-  return apiJson<Omit<Engine, "status"> & { status: EngineStatus }>(
-    `/control-plane/engines/${id}`,
-  );
+  return (await controlPlaneEnginesGetEngine(id)).data as Omit<Engine, "status"> & {
+    status: EngineStatus;
+  };
 }
 
-export function createEngine(input: CreateEngineInput): Promise<Engine> {
-  return apiJson<Engine>("/control-plane/engines", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
+export async function createEngine(input: CreateEngineInput): Promise<Engine> {
+  // FE `CreateEngineInput.trinoConfig` is a structured `TrinoConfig`; the spec
+  // types the body's `trinoConfig` as an open `{ [k]: unknown }` (serde Value),
+  // so cast at the boundary rather than widen the FE type.
+  return (await controlPlaneEnginesCreateEngine(input as unknown as CreateEngineBody)).data as Engine;
 }
 
-export function updateEngine(id: string, input: CreateEngineInput): Promise<Engine> {
-  return apiJson<Engine>(`/control-plane/engines/${id}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
+export async function updateEngine(id: string, input: CreateEngineInput): Promise<Engine> {
+  return (await controlPlaneEnginesUpdateEngine(id, input as unknown as CreateEngineBody)).data as Engine;
 }
 
 export async function deleteEngine(id: string): Promise<void> {
-  await apiFetch(`/control-plane/engines/${id}`, { method: "DELETE" });
+  await controlPlaneEnginesDeleteEngine(id);
 }
 
 export async function restartEngine(id: string): Promise<void> {
-  await apiFetch(`/control-plane/engines/${id}/restart`, { method: "POST" });
+  await controlPlaneEnginesRestartEngine(id);
 }
 
 // ── Engine monitor (native Trino monitor / control-plane) ────────────────────
@@ -822,25 +840,20 @@ export interface ClusterInfo {
   nodes: { uri: string; recentFailures: number }[];
 }
 
-export function listQueries(engineId: string): Promise<MonitorQuery[]> {
-  return apiJson<MonitorQuery[]>(`/control-plane/engines/${engineId}/queries`);
+export async function listQueries(engineId: string): Promise<MonitorQuery[]> {
+  return (await controlPlaneEnginesListQueries(engineId)).data as MonitorQuery[];
 }
 
-export function getQuery(engineId: string, qid: string): Promise<MonitorQueryDetail> {
-  return apiJson<MonitorQueryDetail>(
-    `/control-plane/engines/${engineId}/queries/${encodeURIComponent(qid)}`,
-  );
+export async function getQuery(engineId: string, qid: string): Promise<MonitorQueryDetail> {
+  return (await controlPlaneEnginesGetQuery(engineId, qid)).data as MonitorQueryDetail;
 }
 
 export async function killQuery(engineId: string, qid: string): Promise<void> {
-  await apiFetch(
-    `/control-plane/engines/${engineId}/queries/${encodeURIComponent(qid)}`,
-    { method: "DELETE" },
-  );
+  await controlPlaneEnginesKillQuery(engineId, qid);
 }
 
-export function getCluster(engineId: string): Promise<ClusterInfo> {
-  return apiJson<ClusterInfo>(`/control-plane/engines/${engineId}/cluster`);
+export async function getCluster(engineId: string): Promise<ClusterInfo> {
+  return (await controlPlaneEnginesGetCluster(engineId)).data as ClusterInfo;
 }
 
 // ── Engine catalogs (multi-catalog / control-plane) ──────────────────────────
@@ -865,36 +878,28 @@ export interface AddCatalogInput {
   secretRef?: string | null;
 }
 
-export function listEngineCatalogs(id: string): Promise<EngineCatalog[]> {
-  return apiJson<EngineCatalog[]>(`/control-plane/engines/${id}/catalogs`);
+export async function listEngineCatalogs(id: string): Promise<EngineCatalog[]> {
+  return (await controlPlaneEnginesListCatalogs(id)).data as EngineCatalog[];
 }
 
-export function addEngineCatalog(id: string, input: AddCatalogInput): Promise<EngineCatalog> {
-  return apiJson<EngineCatalog>(`/control-plane/engines/${id}/catalogs`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
+export async function addEngineCatalog(id: string, input: AddCatalogInput): Promise<EngineCatalog> {
+  return (await controlPlaneEnginesAddCatalog(id, input)).data as EngineCatalog;
 }
 
 export async function deleteEngineCatalog(id: string, cid: string): Promise<void> {
-  await apiFetch(`/control-plane/engines/${id}/catalogs/${cid}`, { method: "DELETE" });
+  await controlPlaneEnginesRemoveCatalog(id, cid);
 }
 
-export function getEngineCatalog(id: string, cid: string): Promise<EngineCatalogDetail> {
-  return apiJson<EngineCatalogDetail>(`/control-plane/engines/${id}/catalogs/${cid}`);
+export async function getEngineCatalog(id: string, cid: string): Promise<EngineCatalogDetail> {
+  return (await controlPlaneEnginesGetCatalog(id, cid)).data as EngineCatalogDetail;
 }
 
-export function updateEngineCatalog(
+export async function updateEngineCatalog(
   id: string,
   cid: string,
   input: { config: Record<string, unknown>; secretRef?: string | null },
 ): Promise<EngineCatalog> {
-  return apiJson<EngineCatalog>(`/control-plane/engines/${id}/catalogs/${cid}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(input),
-  });
+  return (await controlPlaneEnginesUpdateCatalog(id, cid, input)).data as EngineCatalog;
 }
 
 /** Result of a "test connection" run — always 200; `ok` reflects whether the
@@ -904,30 +909,25 @@ export interface CatalogTestResult {
   message: string;
 }
 
-export function testEngineCatalog(id: string, cid: string): Promise<CatalogTestResult> {
-  return apiJson<CatalogTestResult>(
-    `/control-plane/engines/${id}/catalogs/${cid}/test`,
-    { method: "POST" },
-  );
+export async function testEngineCatalog(id: string, cid: string): Promise<CatalogTestResult> {
+  return (await controlPlaneEnginesTestCatalog(id, cid)).data as CatalogTestResult;
 }
 
 // ── Engine pod logs (control-plane) ──────────────────────────────────────────
+//
+// Only the bounded `pods/{pod}/logs` GET (JSON tail) is adopted here. The
+// streaming `logs/follow` + `exec` endpoints upgrade to a WebSocket and are
+// opened directly with `new WebSocket(...)` in `PodLogsDialog.tsx` /
+// `PodTerminalDialog.tsx` — the generated client cannot do WebSockets.
 
 export interface PodLogs {
   logs: string;
 }
 
-export function getPodLogs(
+export async function getPodLogs(
   id: string,
   pod: string,
   opts: { tail?: number; previous?: boolean; container?: string } = {},
 ): Promise<PodLogs> {
-  const qs = new URLSearchParams();
-  if (opts.tail != null) qs.set("tail", String(opts.tail));
-  if (opts.previous) qs.set("previous", "true");
-  if (opts.container) qs.set("container", opts.container);
-  const q = qs.toString();
-  return apiJson<PodLogs>(
-    `/control-plane/engines/${id}/pods/${encodeURIComponent(pod)}/logs${q ? `?${q}` : ""}`,
-  );
+  return (await controlPlaneEnginesPodLogs(id, pod, opts)).data as PodLogs;
 }
