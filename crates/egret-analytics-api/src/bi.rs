@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SaveQuery {
     pub database_id: Option<Uuid>,
     pub name: String,
@@ -18,7 +18,7 @@ pub struct SaveQuery {
     pub description: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SavedQueryDto {
     pub id: String,
     pub database_id: Option<String>,
@@ -219,7 +219,7 @@ pub struct ChartDataResponse {
 
 // ── Dashboard DTOs ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DashboardSummaryDto {
     pub id: String,
     pub name: String,
@@ -231,7 +231,7 @@ pub struct DashboardSummaryDto {
     pub bookmarked: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DashboardCardDto {
     pub id: String,
     pub chart_id: Option<String>,
@@ -244,14 +244,14 @@ pub struct DashboardCardDto {
     pub tab_id: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DashboardTabDto {
     pub id: String,
     pub name: String,
     pub position: i32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DashboardDetailDto {
     pub id: String,
     pub name: String,
@@ -266,7 +266,7 @@ pub struct DashboardDetailDto {
     pub cards: Vec<DashboardCardDto>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateDashboard {
     pub name: String,
     #[serde(default)]
@@ -274,7 +274,7 @@ pub struct CreateDashboard {
 }
 
 /// Card as supplied by the client when saving a layout.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CardInput {
     #[serde(default)]
     pub chart_id: Option<Uuid>,
@@ -290,7 +290,7 @@ pub struct CardInput {
     pub tab_index: Option<usize>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct NewTabInput {
     pub name: String,
     pub position: i32,
@@ -309,7 +309,7 @@ fn default_width() -> String {
     "full".into()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateDashboard {
     pub name: String,
     #[serde(default)]

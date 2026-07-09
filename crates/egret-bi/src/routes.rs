@@ -21,11 +21,12 @@ use crate::dataset::{NewColumn, SourceSpec};
 use crate::error::BiApiError;
 use crate::expr::validate_expression;
 use crate::model::{
-    AddColumnBody, ChartDataBody, ChartDataResponse, ChartDto, CreateChart, CreateDashboard,
-    CreateDataset, CreateFolder, CreateSource, DashboardDetailDto, DashboardSummaryDto,
-    DatasetColumnDto, DatasetDetailDto, DatasetSummaryDto, FolderDto, MetricBody, MetricDto,
-    RenameFolder, SaveQuery, SavedQueryDto, SetFolder, UpdateChart, UpdateColumnBody,
-    UpdateDashboard, UpdateDataset,
+    AddColumnBody, CardInput, ChartDataBody, ChartDataResponse, ChartDto, CreateChart,
+    CreateDashboard, CreateDataset, CreateFolder, CreateSource, DashboardCardDto,
+    DashboardDetailDto, DashboardSummaryDto, DashboardTabDto, DatasetColumnDto, DatasetDetailDto,
+    DatasetSummaryDto, FolderDto, MetricBody, MetricDto, NewTabInput, RenameFolder, SaveQuery,
+    SavedQueryDto, SchemaColumn, SetFolder, UpdateChart, UpdateColumnBody, UpdateDashboard,
+    UpdateDataset,
 };
 use crate::saved::SavedQueryRepo;
 use crate::schema::SchemaService;
@@ -109,6 +110,19 @@ fn is_admin(ctx: &egret_core::WorkspaceContext) -> bool {
         .any(|r| r == "platform_admin")
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/sqllab/queries",
+    tag = "sqllab",
+    params(WorkspacePath),
+    request_body = SaveQuery,
+    responses(
+        (status = 200, description = "Saved query created", body = SavedQueryDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn save(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -132,6 +146,18 @@ async fn save(
         .map_err(BiApiError::from)?;
     Ok(Json(dto(q)))
 }
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/sqllab/queries",
+    tag = "sqllab",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "Saved queries in the workspace", body = Vec<SavedQueryDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -147,6 +173,22 @@ async fn list(
         .map_err(BiApiError::from)?;
     Ok(Json(qs.into_iter().map(dto).collect()))
 }
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/sqllab/queries/{id}",
+    tag = "sqllab",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Saved query id"),
+    ),
+    responses(
+        (status = 200, description = "Saved query detail", body = SavedQueryDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 404, description = "No such saved query", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn load(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -164,6 +206,23 @@ async fn load(
         .ok_or(Error::NotFound("saved query".into()))?;
     Ok(Json(dto(q)))
 }
+#[utoipa::path(
+    put,
+    path = "/api/ws/{workspace}/sqllab/queries/{id}",
+    tag = "sqllab",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Saved query id"),
+    ),
+    request_body = SaveQuery,
+    responses(
+        (status = 200, description = "Saved query updated", body = SavedQueryDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission, or not the query owner", body = ErrorBody),
+        (status = 404, description = "No such saved query", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn update(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -182,6 +241,22 @@ async fn update(
         .map_err(BiApiError::from)?;
     Ok(Json(dto(q)))
 }
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/sqllab/queries/{id}",
+    tag = "sqllab",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Saved query id"),
+    ),
+    responses(
+        (status = 200, description = "Saved query deleted", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission, or not the query owner", body = ErrorBody),
+        (status = 404, description = "No such saved query", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn remove(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -263,6 +338,22 @@ struct ColQ {
     table: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/sqllab/databases/{db}/catalogs",
+    tag = "sqllab",
+    params(
+        WorkspacePath,
+        ("db" = Uuid, Path, description = "Granted database id"),
+    ),
+    responses(
+        (status = 200, description = "Catalog names visible on the database", body = Vec<String>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 404, description = "Database not granted to this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn catalogs(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -273,6 +364,23 @@ async fn catalogs(
         st.schema.catalogs(&spec).await.map_err(BiApiError::from)?,
     ))
 }
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/sqllab/databases/{db}/schemas",
+    tag = "sqllab",
+    params(
+        WorkspacePath,
+        ("db" = Uuid, Path, description = "Granted database id"),
+        ("catalog" = Option<String>, Query, description = "Catalog to list schemas in"),
+    ),
+    responses(
+        (status = 200, description = "Schema names in the catalog", body = Vec<String>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 404, description = "Database not granted to this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn schemas(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -287,6 +395,24 @@ async fn schemas(
             .map_err(BiApiError::from)?,
     ))
 }
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/sqllab/databases/{db}/tables",
+    tag = "sqllab",
+    params(
+        WorkspacePath,
+        ("db" = Uuid, Path, description = "Granted database id"),
+        ("catalog" = Option<String>, Query, description = "Catalog to scope to"),
+        ("schema" = Option<String>, Query, description = "Schema to list tables in"),
+    ),
+    responses(
+        (status = 200, description = "Table names in the schema", body = Vec<String>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 404, description = "Database not granted to this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn tables(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -305,6 +431,25 @@ async fn tables(
             .map_err(BiApiError::from)?,
     ))
 }
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/sqllab/databases/{db}/columns",
+    tag = "sqllab",
+    params(
+        WorkspacePath,
+        ("db" = Uuid, Path, description = "Granted database id"),
+        ("catalog" = Option<String>, Query, description = "Catalog to scope to"),
+        ("schema" = Option<String>, Query, description = "Schema to scope to"),
+        ("table" = Option<String>, Query, description = "Table to describe columns for"),
+    ),
+    responses(
+        (status = 200, description = "Columns (name + type) of the table", body = Vec<SchemaColumn>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 404, description = "Database not granted to this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn columns(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1703,6 +1848,23 @@ pub fn dashboard_router() -> Router<BiState> {
         )
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/ws/{workspace}/dashboards/{id}/folder",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+    ),
+    request_body = SetFolder,
+    responses(
+        (status = 200, description = "Dashboard moved to folder", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission", body = ErrorBody),
+        (status = 404, description = "No such dashboard or target folder in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_set_folder(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1782,6 +1944,21 @@ struct ListQuery {
     trashed: bool,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/dashboards",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("trashed" = Option<bool>, Query, description = "List only trashed dashboards when true"),
+    ),
+    responses(
+        (status = 200, description = "Dashboards in the workspace", body = Vec<DashboardSummaryDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_list(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1803,6 +1980,19 @@ async fn db_list(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/dashboards",
+    tag = "dashboards",
+    params(WorkspacePath),
+    request_body = CreateDashboard,
+    responses(
+        (status = 200, description = "Dashboard created (empty layout)", body = DashboardDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_create(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1827,6 +2017,22 @@ async fn db_create(
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/dashboards/{id}",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+    ),
+    responses(
+        (status = 200, description = "Dashboard detail (tabs + cards)", body = DashboardDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:read permission", body = ErrorBody),
+        (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_get(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1842,6 +2048,24 @@ async fn db_get(
     ))
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/ws/{workspace}/dashboards/{id}",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+    ),
+    request_body = UpdateDashboard,
+    responses(
+        (status = 200, description = "Dashboard metadata + layout replaced", body = DashboardDetailDto),
+        (status = 400, description = "Invalid layout (tab/card mismatch) or width not 'fixed'/'full'", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission, or not the dashboard owner", body = ErrorBody),
+        (status = 404, description = "No such dashboard, or a referenced chart not in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_update(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1876,6 +2100,22 @@ async fn db_update(
     ))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/dashboards/{id}",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+    ),
+    responses(
+        (status = 200, description = "Dashboard deleted", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission, or not the dashboard owner", body = ErrorBody),
+        (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_remove(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1891,6 +2131,22 @@ async fn db_remove(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/dashboards/{id}/trash",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+    ),
+    responses(
+        (status = 200, description = "Dashboard moved to trash", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission, or not the dashboard owner", body = ErrorBody),
+        (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_trash(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1909,6 +2165,22 @@ async fn db_trash(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/dashboards/{id}/restore",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+    ),
+    responses(
+        (status = 200, description = "Dashboard restored from trash", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission, or not the dashboard owner", body = ErrorBody),
+        (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_restore(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1927,6 +2199,22 @@ async fn db_restore(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/dashboards/{id}/duplicate",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id to duplicate"),
+    ),
+    responses(
+        (status = 200, description = "Dashboard duplicated (layout copied)", body = DashboardDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:read permission", body = ErrorBody),
+        (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_duplicate(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1948,6 +2236,22 @@ async fn db_duplicate(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/dashboards/{id}/bookmark",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+    ),
+    responses(
+        (status = 200, description = "Dashboard bookmarked for the caller", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:read permission", body = ErrorBody),
+        (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_bookmark_add(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -1965,6 +2269,22 @@ async fn db_bookmark_add(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/dashboards/{id}/bookmark",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+    ),
+    responses(
+        (status = 200, description = "Dashboard bookmark removed for the caller", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:read permission", body = ErrorBody),
+        (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn db_bookmark_remove(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
@@ -2200,7 +2520,7 @@ async fn require_folder(
 // handlers and merged into `egret_bi::openapi()`. Nested request/response
 // schemas (`CreateSource`, `MetricDto`, `QuerySpec` → `Filter`/`OrderBy`/
 // `FilterOp`, …) are collected automatically from the listed paths + component
-// types. The sqllab + dashboard routers are annotated in a later batch.
+// types.
 
 /// OpenAPI fragment for the dataset router (`/api/ws/{workspace}/datasets…`).
 #[derive(utoipa::OpenApi)]
@@ -2286,3 +2606,61 @@ pub struct BiChartApi;
     tags((name = "folders", description = "Generic per-kind folders (charts / dashboards / datasets / notebooks)")),
 )]
 pub struct BiFolderApi;
+
+/// OpenAPI fragment for the SQL Lab router (`/api/ws/{workspace}/sqllab…`).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        save,
+        list,
+        load,
+        update,
+        remove,
+        catalogs,
+        schemas,
+        tables,
+        columns,
+    ),
+    components(schemas(
+        SaveQuery,
+        SavedQueryDto,
+        SchemaColumn,
+        Ack,
+        ErrorBody,
+    )),
+    tags((name = "sqllab", description = "SQL Lab: saved queries + schema browse (catalogs / schemas / tables / columns)")),
+)]
+pub struct BiSqlLabApi;
+
+/// OpenAPI fragment for the dashboard router (`/api/ws/{workspace}/dashboards…`).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        db_create,
+        db_list,
+        db_get,
+        db_update,
+        db_remove,
+        db_duplicate,
+        db_trash,
+        db_restore,
+        db_bookmark_add,
+        db_bookmark_remove,
+        db_set_folder,
+    ),
+    components(schemas(
+        CreateDashboard,
+        UpdateDashboard,
+        DashboardSummaryDto,
+        DashboardDetailDto,
+        DashboardTabDto,
+        DashboardCardDto,
+        CardInput,
+        NewTabInput,
+        SetFolder,
+        Ack,
+        ErrorBody,
+    )),
+    tags((name = "dashboards", description = "BI dashboards: CRUD, layout (tabs + cards), folders, trash + bookmarks")),
+)]
+pub struct BiDashboardApi;
