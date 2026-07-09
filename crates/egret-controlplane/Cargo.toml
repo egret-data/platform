@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-egret-core.workspace = true
+egret-core = { workspace = true, features = ["http"] }
 egret-auth.workspace = true
 egret-catalog-engine.workspace = true
 egret-storage.workspace = true
@@ -23,6 +23,10 @@ uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# OpenAPI emit (E0·P4b-3): `#[utoipa::path]` on the control-plane access /
+# storage / secrets routers' handlers + per-module `#[derive(utoipa::OpenApi)]`
+# doc structs, merged into `egret_controlplane::openapi()`.
+utoipa.workspace = true
 
 [dev-dependencies]
 egret-workspace.workspace = true

@@ -14,12 +14,15 @@ use egret_secrets::WorkspaceSecretMeta;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use egret_core::http::ErrorBody;
+use egret_core::Ack;
+
 use crate::auth::require_permission;
 use crate::error::CpError;
 use crate::CpState;
 
 /// Request body for creating a global named secret.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateSecretInput {
     pub name: String,
     #[serde(default)]
@@ -30,7 +33,7 @@ pub struct CreateSecretInput {
 /// Request body for updating a global named secret. Any subset may be present:
 /// a `name` triggers a rename (re-describing with `description`); a `value`
 /// rotates the underlying vault row.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateSecretInput {
     #[serde(default)]
     pub name: Option<String>,
@@ -41,7 +44,7 @@ pub struct UpdateSecretInput {
 }
 
 /// Response DTO mirroring `WorkspaceSecretMeta` (never exposes the plaintext).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SecretDto {
     pub id: Uuid,
     pub name: String,
@@ -68,6 +71,17 @@ pub fn router() -> Router<CpState> {
         .route("/secrets/{id}", axum::routing::put(update).delete(remove))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/secrets",
+    tag = "control-plane-secrets",
+    responses(
+        (status = 200, description = "Global named secrets (plaintext never exposed)", body = Vec<SecretDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing secret:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list(
     State(st): State<CpState>,
     Auth(principal): Auth,
@@ -77,6 +91,20 @@ async fn list(
     Ok(Json(metas.into_iter().map(Into::into).collect()))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/secrets",
+    tag = "control-plane-secrets",
+    request_body = CreateSecretInput,
+    responses(
+        (status = 201, description = "Secret created", body = SecretDto),
+        (status = 400, description = "Invalid input", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing secret:create permission", body = ErrorBody),
+        (status = 409, description = "A secret with this name already exists", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn create(
     State(st): State<CpState>,
     Auth(principal): Auth,
@@ -91,6 +119,22 @@ async fn create(
     Ok((StatusCode::CREATED, Json(meta.into())))
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/control-plane/secrets/{id}",
+    tag = "control-plane-secrets",
+    params(("id" = Uuid, Path, description = "Secret id")),
+    request_body = UpdateSecretInput,
+    responses(
+        (status = 200, description = "Secret updated (renamed and/or rotated)", body = SecretDto),
+        (status = 400, description = "Invalid input", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing secret:update permission", body = ErrorBody),
+        (status = 404, description = "No such secret", body = ErrorBody),
+        (status = 409, description = "The new name clashes with an existing secret", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn update(
     State(st): State<CpState>,
     Auth(principal): Auth,
@@ -110,6 +154,20 @@ async fn update(
     Ok(Json(meta.into()))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/control-plane/secrets/{id}",
+    tag = "control-plane-secrets",
+    params(("id" = Uuid, Path, description = "Secret id")),
+    responses(
+        (status = 200, description = "Secret deleted", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing secret:delete permission", body = ErrorBody),
+        (status = 404, description = "No such secret", body = ErrorBody),
+        (status = 409, description = "Secret is still referenced by one or more connections", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn remove(
     State(st): State<CpState>,
     Auth(principal): Auth,
@@ -119,3 +177,13 @@ async fn remove(
     st.secrets.delete(None, id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
+
+/// OpenAPI fragment for the control-plane Secrets router. Merged into
+/// `egret_controlplane::openapi()`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(list, create, update, remove),
+    components(schemas(CreateSecretInput, UpdateSecretInput, SecretDto, Ack, ErrorBody)),
+    tags((name = "control-plane-secrets", description = "Global named secrets (platform control plane)")),
+)]
+pub struct ControlPlaneSecretsApi;

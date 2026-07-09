@@ -17,6 +17,9 @@ use egret_storage::{StorageConn, StorageConnInput};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use egret_core::http::ErrorBody;
+use egret_core::Ack;
+
 use crate::auth::require_permission;
 use crate::error::CpError;
 use crate::CpState;
@@ -24,7 +27,7 @@ use crate::CpState;
 /// Request body for creating/updating a global storage connection. A `new_secret`
 /// takes precedence over a provided `secret_ref`: it mints a new global named
 /// secret and binds the connection to it.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct StorageInput {
     pub name: String,
     #[serde(default)]
@@ -47,7 +50,7 @@ pub struct StorageInput {
 }
 
 /// Response DTO for a storage connection.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct StorageDto {
     pub id: Uuid,
     pub name: String,
@@ -96,6 +99,23 @@ struct DownloadQuery {
 }
 
 /// Stream a single object from a storage connection's bucket as an attachment.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/storage/{id}/download",
+    tag = "control-plane-storage",
+    params(
+        ("id" = Uuid, Path, description = "Storage connection id"),
+        ("key" = String, Query, description = "Object key to download"),
+    ),
+    responses(
+        (status = 200, description = "Object bytes streamed as an attachment", content_type = "application/octet-stream"),
+        (status = 400, description = "Invalid request or object could not be read", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing storage:read permission", body = ErrorBody),
+        (status = 404, description = "No such storage connection", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn download_object(
     State(st): State<CpState>,
     Auth(principal): Auth,
@@ -156,13 +176,13 @@ async fn open_store(st: &CpState, id: Uuid) -> Result<(egret_storage::S3Store, S
     Ok((store, conn.bucket))
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct ListingDto {
     folders: Vec<String>,
     objects: Vec<ObjectDto>,
 }
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct ObjectDto {
     key: String,
@@ -177,6 +197,23 @@ struct BrowseQuery {
 }
 
 /// Browse the objects/folders in a storage connection's bucket (folder-style).
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/storage/{id}/objects",
+    tag = "control-plane-storage",
+    params(
+        ("id" = Uuid, Path, description = "Storage connection id"),
+        ("prefix" = Option<String>, Query, description = "Folder prefix to list under"),
+    ),
+    responses(
+        (status = 200, description = "Folders and objects under the prefix", body = ListingDto),
+        (status = 400, description = "Invalid request or bucket could not be listed", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing storage:read permission", body = ErrorBody),
+        (status = 404, description = "No such storage connection", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn browse_objects(
     State(st): State<CpState>,
     Auth(principal): Auth,
@@ -232,6 +269,17 @@ fn to_input(body: &StorageInput, secret_ref: Option<Uuid>) -> StorageConnInput {
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/storage",
+    tag = "control-plane-storage",
+    responses(
+        (status = 200, description = "Global storage connections", body = Vec<StorageDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing storage:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list(
     State(st): State<CpState>,
     Auth(principal): Auth,
@@ -241,6 +289,20 @@ async fn list(
     Ok(Json(conns.into_iter().map(Into::into).collect()))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/storage",
+    tag = "control-plane-storage",
+    request_body = StorageInput,
+    responses(
+        (status = 201, description = "Storage connection created", body = StorageDto),
+        (status = 400, description = "Invalid input", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing storage:create permission", body = ErrorBody),
+        (status = 409, description = "A storage connection with this name already exists", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn create(
     State(st): State<CpState>,
     Auth(principal): Auth,
@@ -255,6 +317,19 @@ async fn create(
     Ok((StatusCode::CREATED, Json(conn.into())))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/storage/{id}",
+    tag = "control-plane-storage",
+    params(("id" = Uuid, Path, description = "Storage connection id")),
+    responses(
+        (status = 200, description = "Storage connection detail", body = StorageDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing storage:read permission", body = ErrorBody),
+        (status = 404, description = "No such storage connection", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn detail(
     State(st): State<CpState>,
     Auth(principal): Auth,
@@ -269,6 +344,22 @@ async fn detail(
     Ok(Json(conn.into()))
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/control-plane/storage/{id}",
+    tag = "control-plane-storage",
+    params(("id" = Uuid, Path, description = "Storage connection id")),
+    request_body = StorageInput,
+    responses(
+        (status = 200, description = "Storage connection updated (secret rotation pushed to warehouses)", body = StorageDto),
+        (status = 400, description = "Invalid input", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing storage:update permission", body = ErrorBody),
+        (status = 404, description = "No such storage connection", body = ErrorBody),
+        (status = 409, description = "The new name clashes with an existing connection", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn update(
     State(st): State<CpState>,
     Auth(principal): Auth,
@@ -315,6 +406,19 @@ async fn update(
     Ok(Json(conn.into()))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/control-plane/storage/{id}",
+    tag = "control-plane-storage",
+    params(("id" = Uuid, Path, description = "Storage connection id")),
+    responses(
+        (status = 200, description = "Storage connection deleted", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing storage:delete permission", body = ErrorBody),
+        (status = 404, description = "No such storage connection", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn remove(
     State(st): State<CpState>,
     Auth(principal): Auth,
@@ -326,3 +430,14 @@ async fn remove(
     }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
+
+/// OpenAPI fragment for the control-plane Storage router. Merged into
+/// `egret_controlplane::openapi()`; the nested `NewSecret` schema is collected
+/// automatically from `StorageInput`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(list, create, detail, update, remove, browse_objects, download_object),
+    components(schemas(StorageInput, StorageDto, ListingDto, ObjectDto, Ack, ErrorBody)),
+    tags((name = "control-plane-storage", description = "Global storage connections (platform control plane)")),
+)]
+pub struct ControlPlaneStorageApi;

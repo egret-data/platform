@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use egret_core::http::ErrorBody;
+
 use crate::auth::{require_permission, require_platform_admin};
 use crate::error::CpError;
 use crate::CpState;
@@ -76,7 +78,12 @@ async fn guard_last_admin(st: &CpState, role_id: Uuid) -> Result<(), CpError> {
 
 // ---------- Users ----------
 
-#[derive(Debug, Serialize)]
+// Renamed in the emitted OpenAPI to `ControlPlaneUserDto`: egret-workspace
+// already publishes a different-shaped `UserDto` (no roles/groups), and utoipa
+// keys schemas by name globally after merge — an unqualified `UserDto` here
+// would silently clobber it.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = ControlPlaneUserDto)]
 #[serde(rename_all = "camelCase")]
 pub struct UserDto {
     pub id: Uuid,
@@ -88,14 +95,14 @@ pub struct UserDto {
     pub groups: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 struct CreateUserInput {
     email: String,
     name: String,
     password: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 struct UpdateUserInput {
     #[serde(default)]
     name: Option<String>,
@@ -103,12 +110,23 @@ struct UpdateUserInput {
     status: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct AssignRoleInput {
     role_id: Uuid,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/users",
+    tag = "control-plane-access",
+    responses(
+        (status = 200, description = "Platform users with their roles and groups", body = Vec<UserDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing user:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list_users(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -138,6 +156,20 @@ async fn list_users(
     Ok(Json(out))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/users",
+    tag = "control-plane-access",
+    request_body = CreateUserInput,
+    responses(
+        (status = 201, description = "Local user created", body = UserDto),
+        (status = 400, description = "Invalid input", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing user:create permission", body = ErrorBody),
+        (status = 409, description = "A user with this email already exists", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn create_user(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -163,6 +195,21 @@ async fn create_user(
     ))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/control-plane/users/{id}",
+    tag = "control-plane-access",
+    params(("id" = Uuid, Path, description = "User id")),
+    request_body = UpdateUserInput,
+    responses(
+        (status = 200, description = "User profile and/or status updated", body = UserDto),
+        (status = 400, description = "Invalid status value", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing user:update (or user:disable) permission", body = ErrorBody),
+        (status = 404, description = "No such user", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn update_user(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -217,6 +264,20 @@ async fn update_user(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/users/{id}/roles",
+    tag = "control-plane-access",
+    params(("id" = Uuid, Path, description = "User id")),
+    request_body = AssignRoleInput,
+    responses(
+        (status = 204, description = "Role assigned to the user"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Requires platform_admin", body = ErrorBody),
+        (status = 404, description = "No such user or role", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn assign_user_role(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -228,6 +289,23 @@ async fn assign_user_role(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/control-plane/users/{id}/roles/{role_id}",
+    tag = "control-plane-access",
+    params(
+        ("id" = Uuid, Path, description = "User id"),
+        ("role_id" = Uuid, Path, description = "Role id to unassign"),
+    ),
+    responses(
+        (status = 204, description = "Role unassigned from the user"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Requires platform_admin", body = ErrorBody),
+        (status = 404, description = "No such role", body = ErrorBody),
+        (status = 409, description = "Would remove the last platform admin", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn unassign_user_role(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -241,7 +319,7 @@ async fn unassign_user_role(
 
 // ---------- Groups ----------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupDto {
     pub id: Uuid,
@@ -251,22 +329,33 @@ pub struct GroupDto {
     pub roles: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 struct CreateGroupInput {
     name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 struct RenameGroupInput {
     name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 struct AddMemberInput {
     user_id: Uuid,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/groups",
+    tag = "control-plane-access",
+    responses(
+        (status = 200, description = "Platform groups with member counts and roles", body = Vec<GroupDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing group:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list_groups(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -293,6 +382,20 @@ async fn list_groups(
     Ok(Json(out))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/groups",
+    tag = "control-plane-access",
+    request_body = CreateGroupInput,
+    responses(
+        (status = 201, description = "Local group created", body = GroupDto),
+        (status = 400, description = "Invalid input", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing group:create permission", body = ErrorBody),
+        (status = 409, description = "A group with this name already exists", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn create_group(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -312,6 +415,20 @@ async fn create_group(
     ))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/control-plane/groups/{id}",
+    tag = "control-plane-access",
+    params(("id" = Uuid, Path, description = "Group id")),
+    request_body = RenameGroupInput,
+    responses(
+        (status = 204, description = "Group renamed"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing group:update permission", body = ErrorBody),
+        (status = 409, description = "Cannot rename an OIDC-synced group", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn rename_group(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -328,6 +445,19 @@ async fn rename_group(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/control-plane/groups/{id}",
+    tag = "control-plane-access",
+    params(("id" = Uuid, Path, description = "Group id")),
+    responses(
+        (status = 204, description = "Group deleted"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing group:delete permission", body = ErrorBody),
+        (status = 409, description = "Cannot delete an OIDC-synced group", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn delete_group(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -343,7 +473,7 @@ async fn delete_group(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct GroupMemberDto {
     pub id: Uuid,
     pub email: String,
@@ -353,6 +483,18 @@ pub struct GroupMemberDto {
 /// `GET /groups/{id}/members` — the group's current members, so the admin
 /// console can prefill and diff its manage-members dialog. Read-only, so it
 /// gates on `group:read` rather than `group:manage_members`.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/groups/{id}/members",
+    tag = "control-plane-access",
+    params(("id" = Uuid, Path, description = "Group id")),
+    responses(
+        (status = 200, description = "The group's current members", body = Vec<GroupMemberDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing group:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list_group_members(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -368,6 +510,20 @@ async fn list_group_members(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/groups/{id}/members",
+    tag = "control-plane-access",
+    params(("id" = Uuid, Path, description = "Group id")),
+    request_body = AddMemberInput,
+    responses(
+        (status = 204, description = "User added to the group"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Requires platform_admin", body = ErrorBody),
+        (status = 404, description = "No such group or user", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn add_group_member(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -379,6 +535,21 @@ async fn add_group_member(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/control-plane/groups/{id}/members/{user_id}",
+    tag = "control-plane-access",
+    params(
+        ("id" = Uuid, Path, description = "Group id"),
+        ("user_id" = Uuid, Path, description = "User id to remove"),
+    ),
+    responses(
+        (status = 204, description = "User removed from the group"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Requires platform_admin", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn remove_group_member(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -389,6 +560,20 @@ async fn remove_group_member(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/groups/{id}/roles",
+    tag = "control-plane-access",
+    params(("id" = Uuid, Path, description = "Group id")),
+    request_body = AssignRoleInput,
+    responses(
+        (status = 204, description = "Role assigned to the group"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Requires platform_admin", body = ErrorBody),
+        (status = 404, description = "No such group or role", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn assign_group_role(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -400,6 +585,23 @@ async fn assign_group_role(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/control-plane/groups/{id}/roles/{role_id}",
+    tag = "control-plane-access",
+    params(
+        ("id" = Uuid, Path, description = "Group id"),
+        ("role_id" = Uuid, Path, description = "Role id to unassign"),
+    ),
+    responses(
+        (status = 204, description = "Role unassigned from the group"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Requires platform_admin", body = ErrorBody),
+        (status = 404, description = "No such role", body = ErrorBody),
+        (status = 409, description = "Would remove the last platform admin", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn unassign_group_role(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -413,7 +615,7 @@ async fn unassign_group_role(
 
 // ---------- Roles ----------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RoleDto {
     pub id: Uuid,
@@ -424,7 +626,7 @@ pub struct RoleDto {
     pub assignee_count: i64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 struct CreateRoleInput {
     scope: String,
     name: String,
@@ -432,16 +634,27 @@ struct CreateRoleInput {
     description: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 struct UpdateRoleInput {
     description: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 struct SetPermissionsInput {
     permissions: Vec<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/access/roles",
+    tag = "control-plane-access",
+    responses(
+        (status = 200, description = "RBAC roles with permission and assignee counts", body = Vec<RoleDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing role:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list_roles(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -464,6 +677,20 @@ async fn list_roles(
     Ok(Json(out))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/access/roles",
+    tag = "control-plane-access",
+    request_body = CreateRoleInput,
+    responses(
+        (status = 201, description = "Role created", body = RoleDto),
+        (status = 400, description = "Invalid scope", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Requires platform_admin", body = ErrorBody),
+        (status = 409, description = "A role with this name already exists", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn create_role(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -493,6 +720,20 @@ async fn create_role(
     ))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/control-plane/access/roles/{id}",
+    tag = "control-plane-access",
+    params(("id" = Uuid, Path, description = "Role id")),
+    request_body = UpdateRoleInput,
+    responses(
+        (status = 200, description = "Role description updated", body = RoleDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Requires platform_admin", body = ErrorBody),
+        (status = 404, description = "No such role", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn update_role(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -515,6 +756,20 @@ async fn update_role(
     }))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/control-plane/access/roles/{id}",
+    tag = "control-plane-access",
+    params(("id" = Uuid, Path, description = "Role id")),
+    responses(
+        (status = 204, description = "Role deleted"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Requires platform_admin", body = ErrorBody),
+        (status = 404, description = "No such role", body = ErrorBody),
+        (status = 409, description = "Seeded roles cannot be deleted", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn delete_role(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -531,6 +786,20 @@ async fn delete_role(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/control-plane/access/roles/{id}/permissions",
+    tag = "control-plane-access",
+    params(("id" = Uuid, Path, description = "Role id")),
+    request_body = SetPermissionsInput,
+    responses(
+        (status = 204, description = "Role permission set replaced"),
+        (status = 400, description = "Unknown permission key", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Requires platform_admin", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn set_role_permissions(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -547,7 +816,7 @@ async fn set_role_permissions(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RoleAssigneeDto {
     pub kind: String,
     pub name: String,
@@ -556,6 +825,18 @@ pub struct RoleAssigneeDto {
 /// `GET /access/roles/{id}/assignees` — the role's current assignees (users
 /// by email, groups by name), so the admin console can drill into who holds
 /// a role. Read-only, so it gates on `role:read`.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/access/roles/{id}/assignees",
+    tag = "control-plane-access",
+    params(("id" = Uuid, Path, description = "Role id")),
+    responses(
+        (status = 200, description = "The role's current assignees (users and groups)", body = Vec<RoleAssigneeDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing role:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list_role_assignees(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -573,21 +854,35 @@ async fn list_role_assignees(
 
 // ---------- Permission catalog ----------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct PermissionDto {
+    #[schema(value_type = String)]
     pub key: &'static str,
+    #[schema(value_type = String)]
     pub description: &'static str,
     pub roles: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct PermissionGroupDto {
+    #[schema(value_type = String)]
     pub group: &'static str,
     pub permissions: Vec<PermissionDto>,
 }
 
 /// `GET /permissions` — the code-defined catalog (`egret_core::rbac`), each
 /// permission annotated with the role names that currently grant it.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/permissions",
+    tag = "control-plane-access",
+    responses(
+        (status = 200, description = "The code-defined permission catalog, grouped, annotated with granting roles", body = Vec<PermissionGroupDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing role:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
 async fn list_permissions(
     State(st): State<CpState>,
     Auth(p): Auth,
@@ -620,3 +915,55 @@ async fn list_permissions(
         .collect();
     Ok(Json(out))
 }
+
+/// OpenAPI fragment for the control-plane Access router (users/groups/roles/
+/// permissions). Merged into `egret_controlplane::openapi()`. `UserDto` is
+/// emitted as `ControlPlaneUserDto` (see its `#[schema(as = …)]`) to avoid
+/// clobbering egret-workspace's differently-shaped `UserDto`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(
+        list_users,
+        create_user,
+        update_user,
+        assign_user_role,
+        unassign_user_role,
+        list_groups,
+        create_group,
+        rename_group,
+        delete_group,
+        list_group_members,
+        add_group_member,
+        remove_group_member,
+        assign_group_role,
+        unassign_group_role,
+        list_roles,
+        create_role,
+        update_role,
+        delete_role,
+        set_role_permissions,
+        list_role_assignees,
+        list_permissions,
+    ),
+    components(schemas(
+        UserDto,
+        CreateUserInput,
+        UpdateUserInput,
+        AssignRoleInput,
+        GroupDto,
+        CreateGroupInput,
+        RenameGroupInput,
+        AddMemberInput,
+        GroupMemberDto,
+        RoleDto,
+        CreateRoleInput,
+        UpdateRoleInput,
+        SetPermissionsInput,
+        RoleAssigneeDto,
+        PermissionDto,
+        PermissionGroupDto,
+        ErrorBody,
+    )),
+    tags((name = "control-plane-access", description = "Platform access control: users, groups, roles, and the permission catalog")),
+)]
+pub struct ControlPlaneAccessApi;
