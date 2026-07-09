@@ -89,7 +89,7 @@ function renderTableCell(
             <div
               data-testid="mini-bar"
               className="absolute inset-y-0 left-0 rounded"
-              style={{ width: `${pct}%`, background: n < 0 ? "hsl(var(--destructive))" : "hsl(var(--primary))" }}
+              style={{ width: `${pct}%`, background: n < 0 ? "var(--destructive)" : "var(--primary)" }}
             />
           </div>
         </div>
@@ -332,7 +332,7 @@ export function ChartTable({
                           ...(sized ? { width: cell.column.getSize() } : {}),
                           ...(pinned ? { left: cell.column.getStart("left") } : {}),
                           ...(pinned
-                            ? (pinTint ? { background: `linear-gradient(${pinTint}, ${pinTint}), hsl(var(--background))` } : {})
+                            ? (pinTint ? { background: `linear-gradient(${pinTint}, ${pinTint}), var(--background)` } : {})
                             : (bg ? { backgroundColor: bg } : {})),
                         }}
                         className={`border-b border-border/50 px-3 py-2 ${isNum ? "text-right tabular-nums" : ""} ${
