@@ -6,8 +6,10 @@ use egret_metastore::Db;
 use egret_storage::ObjectStore;
 use uuid::Uuid;
 
+use egret_core::TabularResult;
+
 use crate::error::EngineError;
-use crate::model::{QueryResult, QueryStatus};
+use crate::model::QueryStatus;
 
 #[derive(Clone)]
 pub struct QueryStore {
@@ -154,7 +156,7 @@ impl QueryStore {
     pub async fn finish(
         &self,
         id: Uuid,
-        result: &QueryResult,
+        result: &TabularResult,
         result_ref: &str,
         preview_rows: usize,
     ) -> Result<(), EngineError> {
@@ -175,7 +177,7 @@ impl QueryStore {
 
     // ── JSONL result I/O ─────────────────────────────────────────────────────
 
-    pub fn result_to_jsonl(result: &QueryResult) -> Vec<u8> {
+    pub fn result_to_jsonl(result: &TabularResult) -> Vec<u8> {
         let mut buf = String::new();
         for row in &result.rows {
             buf.push_str(&serde_json::to_string(row).unwrap_or_else(|_| "[]".into()));
@@ -198,7 +200,7 @@ impl QueryStore {
         &self,
         storage: &Arc<dyn ObjectStore>,
         uri: &str,
-        result: &QueryResult,
+        result: &TabularResult,
     ) -> Result<(), EngineError> {
         storage.put(uri, Self::result_to_jsonl(result)).await?;
         Ok(())

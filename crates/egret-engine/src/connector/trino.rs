@@ -4,9 +4,11 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
+use egret_core::{ColumnMeta, TabularResult};
+
 use super::{ConnSpec, Connector};
 use crate::error::EngineError;
-use crate::model::{Column, Limits, QueryResult};
+use crate::model::Limits;
 
 pub struct TrinoConnector {
     base_url: String,
@@ -116,7 +118,7 @@ impl Connector for TrinoConnector {
         sql: &str,
         limits: &Limits,
         cancel: CancellationToken,
-    ) -> Result<QueryResult, EngineError> {
+    ) -> Result<TabularResult, EngineError> {
         let client = reqwest::Client::builder()
             .timeout(limits.timeout)
             .build()
@@ -131,7 +133,7 @@ impl Connector for TrinoConnector {
         );
 
         let cap = limits.max_rows;
-        let mut columns: Vec<Column> = Vec::new();
+        let mut columns: Vec<ColumnMeta> = Vec::new();
         let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
         let mut bytes_scanned: Option<u64> = None;
 
@@ -144,7 +146,7 @@ impl Connector for TrinoConnector {
                 if let Some(cols) = resp.columns.take() {
                     columns = cols
                         .into_iter()
-                        .map(|c| Column {
+                        .map(|c| ColumnMeta {
                             name: c.name,
                             ty: c.ty,
                         })
@@ -191,7 +193,7 @@ impl Connector for TrinoConnector {
         if truncated {
             rows.truncate(cap);
         }
-        Ok(QueryResult {
+        Ok(TabularResult {
             columns,
             row_count: rows.len() as u64,
             rows,

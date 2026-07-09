@@ -5,9 +5,11 @@ use mysql_async::prelude::Queryable;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+use egret_core::{ColumnMeta, TabularResult};
+
 use super::{ConnSpec, Connector};
 use crate::error::EngineError;
-use crate::model::{Column, Limits, QueryResult};
+use crate::model::Limits;
 
 pub struct StarRocksConnector {
     opts: mysql_async::Opts,
@@ -48,7 +50,7 @@ impl Connector for StarRocksConnector {
         sql: &str,
         limits: &Limits,
         cancel: CancellationToken,
-    ) -> Result<QueryResult, EngineError> {
+    ) -> Result<TabularResult, EngineError> {
         let mut conn = mysql_async::Conn::new(self.opts.clone())
             .await
             .map_err(|e| EngineError::Connect(e.to_string()))?;
@@ -59,10 +61,10 @@ impl Connector for StarRocksConnector {
             .map_err(|e| EngineError::Engine(e.to_string()))?;
 
         // Read columns BEFORE consuming any rows — columns_ref() accesses the pending result set.
-        let columns: Vec<Column> = result
+        let columns: Vec<ColumnMeta> = result
             .columns_ref()
             .iter()
-            .map(|c| Column {
+            .map(|c| ColumnMeta {
                 name: c.name_str().to_string(),
                 ty: format!("{:?}", c.column_type()),
             })
@@ -106,7 +108,7 @@ impl Connector for StarRocksConnector {
         if truncated {
             rows.truncate(cap);
         }
-        Ok(QueryResult {
+        Ok(TabularResult {
             columns,
             row_count: rows.len() as u64,
             rows,
@@ -115,7 +117,7 @@ impl Connector for StarRocksConnector {
         })
     }
 
-    async fn describe(&self, sql: &str, timeout: Duration) -> Result<Vec<Column>, EngineError> {
+    async fn describe(&self, sql: &str, timeout: Duration) -> Result<Vec<ColumnMeta>, EngineError> {
         let wrapped = format!("SELECT * FROM (\n{sql}\n) AS _egret_ds LIMIT 0");
         let opts = self.opts.clone();
         // Bound the whole connect+query under `timeout` — unlike `execute`, `describe`
@@ -128,17 +130,17 @@ impl Connector for StarRocksConnector {
                 .query_iter(wrapped)
                 .await
                 .map_err(|e| EngineError::Engine(e.to_string()))?;
-            let columns: Vec<Column> = result
+            let columns: Vec<ColumnMeta> = result
                 .columns_ref()
                 .iter()
-                .map(|c| Column {
+                .map(|c| ColumnMeta {
                     name: c.name_str().to_string(),
                     ty: coltype_name(c.column_type()).to_string(),
                 })
                 .collect();
             drop(result);
             let _ = conn.disconnect().await;
-            Ok::<Vec<Column>, EngineError>(columns)
+            Ok::<Vec<ColumnMeta>, EngineError>(columns)
         };
         tokio::time::timeout(timeout, fut)
             .await

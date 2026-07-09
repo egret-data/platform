@@ -6,8 +6,10 @@ use tokio_util::sync::CancellationToken;
 
 use egret_database::model::{ConnOptions, Database, Engine};
 
+use egret_core::{ColumnMeta, TabularResult};
+
 use crate::error::EngineError;
-use crate::model::{Limits, QueryResult};
+use crate::model::Limits;
 
 mod starrocks;
 mod trino;
@@ -70,17 +72,13 @@ pub trait Connector: Send + Sync {
         sql: &str,
         limits: &Limits,
         cancel: CancellationToken,
-    ) -> Result<QueryResult, EngineError>;
+    ) -> Result<TabularResult, EngineError>;
 
     /// Return the typed columns of an arbitrary `SELECT` without fetching rows.
     /// Default: wrap the query as `LIMIT 0` and reuse `execute`'s column metadata —
     /// correct for engines whose `execute` already yields clean type names (Trino).
     /// Engines whose `execute` emits protocol-level type tags override this.
-    async fn describe(
-        &self,
-        sql: &str,
-        timeout: Duration,
-    ) -> Result<Vec<crate::model::Column>, EngineError> {
+    async fn describe(&self, sql: &str, timeout: Duration) -> Result<Vec<ColumnMeta>, EngineError> {
         let wrapped = format!("SELECT * FROM (\n{sql}\n) AS _egret_ds LIMIT 0");
         let limits = Limits {
             max_rows: 0,

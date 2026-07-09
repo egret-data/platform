@@ -60,7 +60,7 @@ fn orders() -> SourceSpec {
     }
 }
 
-async fn run(spec: &ConnSpec, sql: &str) -> egret_engine::model::QueryResult {
+async fn run(spec: &ConnSpec, sql: &str) -> egret_core::TabularResult {
     build_connector(spec)
         .execute(
             sql,

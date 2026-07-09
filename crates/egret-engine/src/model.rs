@@ -37,24 +37,6 @@ impl QueryStatus {
     }
 }
 
-/// A result column: a name and an engine type label.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Column {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub ty: String,
-}
-
-/// A fully-collected query result held in memory (bounded by `max_rows`).
-#[derive(Debug, Clone)]
-pub struct QueryResult {
-    pub columns: Vec<Column>,
-    pub rows: Vec<Vec<serde_json::Value>>,
-    pub row_count: u64,
-    pub bytes_scanned: Option<u64>,
-    pub truncated: bool,
-}
-
 /// Execution guards.
 #[derive(Debug, Clone)]
 pub struct Limits {
@@ -127,18 +109,6 @@ mod tests {
             Some(QueryStatus::Cancelled)
         );
         assert_eq!(QueryStatus::parse("nope"), None);
-    }
-
-    #[test]
-    fn column_serializes_type_key() {
-        let c = Column {
-            name: "n".into(),
-            ty: "bigint".into(),
-        };
-        assert_eq!(
-            serde_json::to_value(&c).unwrap(),
-            json!({"name":"n","type":"bigint"})
-        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! DB-gated QueryStore tests. Self-skip without DATABASE_URL.
-use egret_engine::model::{Column, QueryResult, QueryStatus};
+use egret_core::{ColumnMeta, TabularResult};
+use egret_engine::model::QueryStatus;
 use egret_engine::QueryStore;
 use egret_metastore::Db;
 use uuid::Uuid;
@@ -43,8 +44,8 @@ async fn lifecycle_queued_running_finished() {
         store.get(id).await.unwrap().unwrap().status,
         QueryStatus::Running
     );
-    let result = QueryResult {
-        columns: vec![Column {
+    let result = TabularResult {
+        columns: vec![ColumnMeta {
             name: "n".into(),
             ty: "bigint".into(),
         }],
@@ -86,8 +87,8 @@ async fn fail_and_cancel_set_status() {
 
 #[tokio::test]
 async fn jsonl_serialization_roundtrip() {
-    let result = QueryResult {
-        columns: vec![Column {
+    let result = TabularResult {
+        columns: vec![ColumnMeta {
             name: "n".into(),
             ty: "bigint".into(),
         }],

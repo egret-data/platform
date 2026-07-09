@@ -3,9 +3,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use egret_core::{ColumnMeta, TabularResult};
 use egret_database::model::Database;
 use egret_engine::connector::{Connector, ConnectorFactory};
-use egret_engine::model::{Column, Limits, QueryResult, QueryStatus};
+use egret_engine::model::{Limits, QueryStatus};
 use egret_engine::{JobManager, QueryStore};
 use egret_metastore::Db;
 use egret_storage::{ObjectStore, StorageError};
@@ -22,15 +23,15 @@ impl Connector for FakeConnector {
         _sql: &str,
         _limits: &Limits,
         cancel: CancellationToken,
-    ) -> Result<QueryResult, egret_engine::EngineError> {
+    ) -> Result<TabularResult, egret_engine::EngineError> {
         for _ in 0..(self.sleep_ms / 10).max(1) {
             if cancel.is_cancelled() {
                 return Err(egret_engine::EngineError::Cancelled);
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        Ok(QueryResult {
-            columns: vec![Column {
+        Ok(TabularResult {
+            columns: vec![ColumnMeta {
                 name: "n".into(),
                 ty: "bigint".into(),
             }],
