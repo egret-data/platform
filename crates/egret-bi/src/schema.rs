@@ -2,9 +2,9 @@
 
 use std::time::Duration;
 
-use egret_database::model::Engine;
-use egret_engine::connector::{build_connector, ConnSpec};
-use egret_engine::model::Limits;
+use egret_query::execution::connector::{build_connector, ConnSpec};
+use egret_query::execution::model::Limits;
+use egret_query::registry::model::Engine;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::BiError;

@@ -3,7 +3,7 @@
 //! A single shared representation of "columns + rows" for the query path,
 //! so the engine and BI crates describe results with one type instead of
 //! several parallel structs. The serialized shape is deliberately identical
-//! to the historical `egret_engine::model::{Column, QueryResult}` so callers
+//! to the historical query-engine `{Column, QueryResult}` structs so callers
 //! that persist or forward these values see no wire change.
 
 /// One column's name + engine-reported type name.

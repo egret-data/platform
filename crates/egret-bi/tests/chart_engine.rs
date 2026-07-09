@@ -2,9 +2,9 @@
 
 use egret_bi::chartquery::{build, QuerySpec};
 use egret_bi::{DatasetColumn, Metric, SourceSpec};
-use egret_database::model::{ConnOptions, Engine};
-use egret_engine::connector::{build_connector, ConnSpec};
-use egret_engine::model::Limits;
+use egret_query::execution::connector::{build_connector, ConnSpec};
+use egret_query::execution::model::Limits;
+use egret_query::registry::model::{ConnOptions, Engine};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 

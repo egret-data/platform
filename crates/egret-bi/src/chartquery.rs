@@ -2,7 +2,7 @@
 //! untrusted input and pass through `sql_literal`; identifiers/expressions are
 //! dataset-sourced and trusted.
 
-use egret_database::model::Engine;
+use egret_query::registry::model::Engine;
 use serde::Deserialize;
 
 use crate::dataset::{DatasetColumn, Metric, SourceSpec};

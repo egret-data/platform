@@ -26,9 +26,9 @@ pub struct AppState {
     /// Present when `config.ranger.enabled`; `None` otherwise (or in unit tests).
     pub ranger: Option<egret_policy::RangerState>,
     /// Present once a database is wired (in `egret-bin`); `None` in pure health unit tests.
-    pub database: Option<egret_database::DatabaseState>,
+    pub database: Option<egret_query::DatabaseState>,
     /// Present once the engine is wired (in `egret-bin`); `None` in unit tests.
-    pub engine: Option<egret_engine::EngineState>,
+    pub engine: Option<egret_query::EngineState>,
     /// Present once the BI layer is wired (in `egret-bin`); `None` in unit tests.
     pub bi: Option<egret_bi::BiState>,
     /// Present once the notebook layer is wired (in `egret-bin`); `None` in unit tests.
@@ -119,7 +119,7 @@ pub fn build_router(state: AppState) -> Router {
 
     if let Some(database) = state.database.clone() {
         let group = Router::new()
-            .nest("/api", egret_database::workspace_database_router())
+            .nest("/api", egret_query::workspace_database_router())
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
             .with_state(database);
         router = router.merge(group);
@@ -127,7 +127,7 @@ pub fn build_router(state: AppState) -> Router {
 
     if let Some(engine) = state.engine.clone() {
         let group = Router::new()
-            .nest("/api", egret_engine::engine_router())
+            .nest("/api", egret_query::engine_router())
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
             .with_state(engine);
         router = router.merge(group);

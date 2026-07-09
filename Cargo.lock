@@ -2443,9 +2443,8 @@ dependencies = [
  "egret-auth",
  "egret-config",
  "egret-core",
- "egret-database",
- "egret-engine",
  "egret-metastore",
+ "egret-query",
  "egret-secrets",
  "egret-workspace",
  "http-body-util",
@@ -2479,8 +2478,6 @@ dependencies = [
  "egret-config",
  "egret-controlplane",
  "egret-core",
- "egret-database",
- "egret-engine",
  "egret-engine-mgmt",
  "egret-engine-mgmt-api",
  "egret-kernel",
@@ -2489,6 +2486,7 @@ dependencies = [
  "egret-notebook",
  "egret-orchestrator",
  "egret-policy",
+ "egret-query",
  "egret-secrets",
  "egret-server",
  "egret-storage",
@@ -2607,65 +2605,6 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
- "uuid",
-]
-
-[[package]]
-name = "egret-database"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "egret-auth",
- "egret-config",
- "egret-core",
- "egret-metastore",
- "egret-secrets",
- "egret-workspace",
- "http-body-util",
- "mysql_async",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sqlx 0.8.6",
- "thiserror 2.0.18",
- "tokio",
- "tower",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "egret-engine"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "chrono",
- "egret-auth",
- "egret-config",
- "egret-core",
- "egret-database",
- "egret-metastore",
- "egret-secrets",
- "egret-storage",
- "egret-workspace",
- "hex",
- "http-body-util",
- "mysql_async",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sqlx 0.8.6",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tower",
- "tracing",
- "url",
  "uuid",
 ]
 
@@ -2865,6 +2804,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "egret-query"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "egret-auth",
+ "egret-config",
+ "egret-core",
+ "egret-metastore",
+ "egret-secrets",
+ "egret-storage",
+ "egret-workspace",
+ "hex",
+ "http-body-util",
+ "mysql_async",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sqlx 0.8.6",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "egret-secrets"
 version = "0.1.0"
 dependencies = [
@@ -2892,14 +2862,13 @@ dependencies = [
  "egret-config",
  "egret-controlplane",
  "egret-core",
- "egret-database",
- "egret-engine",
  "egret-engine-mgmt",
  "egret-kernel",
  "egret-machine-idp",
  "egret-metastore",
  "egret-notebook",
  "egret-policy",
+ "egret-query",
  "egret-workspace",
  "http-body-util",
  "serde_json",

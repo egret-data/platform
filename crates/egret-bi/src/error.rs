@@ -22,18 +22,18 @@ pub enum BiError {
     Db(#[from] sqlx::Error),
 }
 
-impl From<egret_database::DatabaseError> for BiError {
-    fn from(e: egret_database::DatabaseError) -> Self {
+impl From<egret_query::DatabaseError> for BiError {
+    fn from(e: egret_query::DatabaseError) -> Self {
         match e {
-            egret_database::DatabaseError::NotFound(s) => BiError::NotFound(s),
+            egret_query::DatabaseError::NotFound(s) => BiError::NotFound(s),
             other => BiError::Engine(other.to_string()),
         }
     }
 }
-impl From<egret_engine::EngineError> for BiError {
-    fn from(e: egret_engine::EngineError) -> Self {
+impl From<egret_query::EngineError> for BiError {
+    fn from(e: egret_query::EngineError) -> Self {
         match e {
-            egret_engine::EngineError::NotFound(s) => BiError::NotFound(s),
+            egret_query::EngineError::NotFound(s) => BiError::NotFound(s),
             other => BiError::Engine(other.to_string()),
         }
     }

@@ -1,0 +1,134 @@
+//! Connector trait + per-engine construction + value mapping.
+
+use async_trait::async_trait;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
+
+use crate::registry::model::{ConnOptions, Database, Engine};
+
+use egret_core::{ColumnMeta, TabularResult};
+
+use crate::execution::error::EngineError;
+use crate::execution::model::Limits;
+
+mod starrocks;
+mod trino;
+
+/// Everything needed to open a connection for one query.
+#[derive(Debug, Clone)]
+pub struct ConnSpec {
+    pub engine: Engine,
+    pub host: String,
+    pub port: i32,
+    pub options: ConnOptions,
+    pub secret: Option<String>,
+    /// Stable per-user identity to impersonate (Trino `X-Trino-User`), when the
+    /// connection's `impersonate` flag is on. `None` = no end-user resolved.
+    pub session_user: Option<String>,
+    /// Per-user OIDC engine JWT presented to the engine as `Authorization: Bearer`.
+    /// When set, it takes precedence over `secret` (basic-auth). `None` = legacy path.
+    pub bearer_token: Option<String>,
+}
+
+impl ConnSpec {
+    /// Build from a resolved registry `Database` + its opened secret.
+    /// No end-user identity is attached (`session_user = None`, `bearer_token = None`).
+    pub fn from_database(db: &Database, secret: Option<String>) -> Self {
+        Self::from_database_as(db, secret, None, None)
+    }
+
+    /// Like `from_database`, but attaches a stable per-user `session_user`
+    /// for Trino impersonation (used only when the connection opts in), and
+    /// optionally a per-user OIDC engine JWT.
+    pub fn from_database_as(
+        db: &Database,
+        secret: Option<String>,
+        session_user: Option<String>,
+        bearer_token: Option<String>,
+    ) -> Self {
+        ConnSpec {
+            engine: db.engine,
+            host: db.host.clone(),
+            port: db.port,
+            options: db.options.clone(),
+            secret,
+            session_user,
+            bearer_token,
+        }
+    }
+}
+
+#[async_trait]
+pub trait Connector: Send + Sync {
+    /// Run `sql`, honoring `limits` and `cancel`. Fetches up to `max_rows + 1` rows;
+    /// if the extra row appears, sets `truncated` and drops it. On a triggered
+    /// `cancel`, best-effort aborts the engine query and returns `EngineError::Cancelled`.
+    ///
+    /// Cancellation is observed cooperatively between fetched pages/rows; a query
+    /// blocked in a single network read is interrupted by the JobManager's outer
+    /// timeout, which drops the future.
+    async fn execute(
+        &self,
+        sql: &str,
+        limits: &Limits,
+        cancel: CancellationToken,
+    ) -> Result<TabularResult, EngineError>;
+
+    /// Return the typed columns of an arbitrary `SELECT` without fetching rows.
+    /// Default: wrap the query as `LIMIT 0` and reuse `execute`'s column metadata —
+    /// correct for engines whose `execute` already yields clean type names (Trino).
+    /// Engines whose `execute` emits protocol-level type tags override this.
+    async fn describe(&self, sql: &str, timeout: Duration) -> Result<Vec<ColumnMeta>, EngineError> {
+        let wrapped = format!("SELECT * FROM (\n{sql}\n) AS _egret_ds LIMIT 0");
+        let limits = Limits {
+            max_rows: 0,
+            timeout,
+        };
+        let r = self
+            .execute(&wrapped, &limits, CancellationToken::new())
+            .await?;
+        Ok(r.columns)
+    }
+}
+
+/// Construct the right connector for a spec.
+pub fn build_connector(spec: &ConnSpec) -> Box<dyn Connector> {
+    match spec.engine {
+        Engine::Trino => Box::new(trino::TrinoConnector::new(spec)),
+        Engine::StarRocks => Box::new(starrocks::StarRocksConnector::new(spec)),
+    }
+}
+
+/// A production `ConnectorFactory` resolves a database id → connector via the registry.
+/// Defined here so `JobManager` can be tested with a fake factory.
+#[async_trait]
+pub trait ConnectorFactory: Send + Sync {
+    async fn build(
+        &self,
+        db: &Database,
+        secret: Option<String>,
+        session_user: Option<String>,
+        bearer_token: Option<String>,
+    ) -> Result<Box<dyn Connector>, EngineError>;
+}
+
+/// The default factory: build directly from the registry row.
+pub struct DefaultConnectorFactory;
+
+#[async_trait]
+impl ConnectorFactory for DefaultConnectorFactory {
+    async fn build(
+        &self,
+        db: &Database,
+        secret: Option<String>,
+        session_user: Option<String>,
+        bearer_token: Option<String>,
+    ) -> Result<Box<dyn Connector>, EngineError> {
+        Ok(build_connector(&ConnSpec::from_database_as(
+            db,
+            secret,
+            session_user,
+            bearer_token,
+        )))
+    }
+}
