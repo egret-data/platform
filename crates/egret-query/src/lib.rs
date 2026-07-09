@@ -19,5 +19,7 @@ pub use execution::{
     QueryStore,
 };
 pub use registry::{
-    workspace_database_router, DatabaseError, DatabaseRepo, DatabaseState, DbApiError, Engine,
+    workspace_database_router, DatabaseError, DatabaseRepo, DatabaseState, DbApiError,
 };
+// The shared domain vocabulary (`Engine`/`Database`/`ConnOptions`) stays at
+// `registry::model::…`; E4d lifts it into the `egret-query-api` contract crate.

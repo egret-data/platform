@@ -8,7 +8,8 @@
 //! named secret survives). Cross-workspace ownership isolation lives in
 //! `repo_workspace_scope.rs`.
 use egret_metastore::Db;
-use egret_query::{DatabaseRepo, Engine};
+use egret_query::registry::model::Engine;
+use egret_query::DatabaseRepo;
 use egret_secrets::{Crypto, SecretStore, WorkspaceSecretStore};
 use uuid::Uuid;
 

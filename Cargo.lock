@@ -2807,12 +2807,10 @@ dependencies = [
 name = "egret-query"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "axum",
  "chrono",
  "egret-auth",
- "egret-config",
  "egret-core",
  "egret-metastore",
  "egret-secrets",
