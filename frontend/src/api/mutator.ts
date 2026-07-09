@@ -19,9 +19,15 @@ import { apiFetch } from "./client";
  *
  * Path reconcile: the spec's paths carry the `/api` prefix (e.g.
  * `/api/ws/{workspace}/databases`), whereas `apiFetch` prepends `/api` itself.
- * We strip the leading `/api` here so the final request hits the same absolute
- * path the hand-written modules use — no double `/api/api`. Query strings are
- * already baked into `url` by the generated URL builders, so nothing else to do.
+ * We strip the leading `/api` segment here so the final request hits the same
+ * absolute path the hand-written modules use — no double `/api/api`. Query
+ * strings are already baked into `url` by the generated URL builders.
+ *
+ * CONSTRAINT — only `/api`-scoped operations are adoptable through this mutator.
+ * `apiFetch` structurally hardcodes an `/api` prefix, so the 9 non-`/api` spec
+ * paths (oidc `/.well-known/*`, `/oauth/token`, ranger `/service/*`) would be
+ * mis-routed to `/api/oauth/token` etc. Those are machine/protocol endpoints
+ * with no browser FE module, so do NOT wire oidc/idp/ranger through this mutator.
  */
 export interface FetchResponse<T> {
   status: number;
@@ -35,7 +41,8 @@ export const customInstance = async <T>(
 ): Promise<T> => {
   const method = (options?.method ?? "GET").toUpperCase();
   // Reconcile the spec's `/api`-prefixed paths with apiFetch's own `/api` prefix.
-  const path = url.replace(/^\/api/, "");
+  // Segment-anchored so a hypothetical `/apiXxx` path is never mangled.
+  const path = url.replace(/^\/api(?=\/|$)/, "");
 
   const res = await apiFetch(path, { ...options, method });
 
