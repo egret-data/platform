@@ -6,7 +6,7 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use crate::jmsg::JMsg;
-use egret_notebook::output::CellOutput;
+use egret_analytics_api::CellOutput;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FrameDir {
@@ -238,7 +238,7 @@ impl Drop for Recorder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egret_notebook::output::CellOutput;
+    use egret_analytics_api::CellOutput;
     use std::sync::Mutex as StdMutex;
     use uuid::Uuid;
 

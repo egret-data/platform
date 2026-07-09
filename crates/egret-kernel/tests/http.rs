@@ -127,7 +127,9 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
 
     let state = KernelState {
         manager,
-        notebook: notebook_state,
+        // E5c-1: kernel now holds an `Arc<dyn NotebookDocsPort>`; NotebookState
+        // impls that Port, so wrap it in an Arc for the test wiring.
+        notebook_docs: Arc::new(notebook_state),
         sessions: sessions.clone(),
         workspaces: workspaces.clone(),
         authz: Authorizer::new(db.clone()),

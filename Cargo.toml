@@ -25,6 +25,7 @@ egret-secrets = { path = "crates/egret-secrets" }
 egret-query-api = { path = "crates/egret-query-api" }
 egret-query = { path = "crates/egret-query" }
 egret-bi = { path = "crates/egret-bi" }
+egret-analytics-api = { path = "crates/egret-analytics-api" }
 egret-notebook = { path = "crates/egret-notebook" }
 egret-kernel = { path = "crates/egret-kernel" }
 egret-orchestrator = { path = "crates/egret-orchestrator" }

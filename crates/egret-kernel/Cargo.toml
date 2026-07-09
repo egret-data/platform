@@ -12,7 +12,7 @@ egret-core = { workspace = true, features = ["http", "token"] }
 egret-metastore.workspace = true
 egret-auth.workspace = true
 egret-workspace.workspace = true
-egret-notebook.workspace = true
+egret-analytics-api.workspace = true
 async-trait.workspace = true
 axum = { workspace = true, features = ["ws"] }
 tokio-tungstenite.workspace = true
@@ -37,4 +37,8 @@ tower.workspace = true
 http-body-util = "0.1"
 async-trait.workspace = true
 futures-channel.workspace = true
+# egret-notebook is a DEV-only dep: the http integration test builds the real
+# `NotebookDocsPort` impl over a concrete `NotebookState`. Production kernel code
+# depends only on the `egret-analytics-api` Port (E5c-1).
+egret-notebook.workspace = true
 egret-kernel = { path = ".", features = ["test-util"] }

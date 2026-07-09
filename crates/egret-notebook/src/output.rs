@@ -1,32 +1,14 @@
 //! The `notebook_cells.last_output` contract: a trimmed nbformat-style output
 //! list, shared by the E-P2 recorder (writer) and the frontend renderer (reader).
-use serde::{Deserialize, Serialize};
+//!
+//! The `CellOutput` TYPE moved verbatim to the leaf contract crate
+//! `egret-analytics-api` (E5c-1) so `egret-kernel`'s recorder can consume it
+//! without depending on this crate; the trimming logic (`cap_outputs`) stays
+//! here. Re-exported so existing `crate::output::CellOutput` paths keep working.
+pub use egret_analytics_api::CellOutput;
 
 /// Server-side persistence cap for a cell's outputs (before the JSONB write).
 pub const MAX_OUTPUT_BYTES: usize = 256 * 1024;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum CellOutput {
-    Stream {
-        name: String,
-        text: String,
-    },
-    ExecuteResult {
-        data: serde_json::Value,
-    },
-    DisplayData {
-        data: serde_json::Value,
-    },
-    Error {
-        ename: String,
-        evalue: String,
-        traceback: Vec<String>,
-    },
-    Truncated {
-        dropped: usize,
-    },
-}
 
 /// Keep outputs whose cumulative serialized size is within `MAX_OUTPUT_BYTES`;
 /// append a `Truncated` marker if any were dropped.

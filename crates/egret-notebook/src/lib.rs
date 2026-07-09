@@ -1,4 +1,5 @@
 //! Per-workspace notebook documents: CRUD persistence + REST API (no execution).
+pub mod docs_port;
 pub mod engine_token;
 pub mod error;
 pub mod model;

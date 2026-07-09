@@ -1,36 +1,6 @@
-//! The engine-token seam. Concrete minting (Keycloak refresh grant) is injected
-//! from egret-bin, so this crate stays free of an HTTP/IdP dependency.
-use chrono::{DateTime, Utc};
-use uuid::Uuid;
-
-#[derive(Clone, serde::Serialize)]
-pub struct EngineToken {
-    pub access_token: String,
-    pub expires_at: DateTime<Utc>,
-}
-
-// Redact the bearer token from Debug output (consistent with `OidcLogin`).
-impl std::fmt::Debug for EngineToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EngineToken")
-            .field("access_token", &"[redacted]")
-            .field("expires_at", &self.expires_at)
-            .finish()
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum BrokerError {
-    #[error("no stored refresh token for user")]
-    NoRefreshToken,
-    #[error("idp refresh failed: {0}")]
-    Idp(String),
-    #[error(transparent)]
-    Other(#[from] egret_core::Error),
-}
-
-#[async_trait::async_trait]
-pub trait EngineTokenMinter: Send + Sync {
-    /// Mint a fresh, short-lived engine access token for `user_id`.
-    async fn mint(&self, user_id: Uuid) -> Result<EngineToken, BrokerError>;
-}
+//! The engine-token seam. The types moved verbatim to the leaf contract crate
+//! `egret-analytics-api` (E5c-1) so `egret-kernel` can consume them without
+//! depending on this crate; re-exported here so existing
+//! `egret_notebook::engine_token::{EngineToken, EngineTokenMinter, BrokerError}`
+//! paths (this crate's routes, egret-bin) keep working unchanged.
+pub use egret_analytics_api::engine_token::{BrokerError, EngineToken, EngineTokenMinter};
