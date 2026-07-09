@@ -1,0 +1,53 @@
+import { apiFetch } from "./client";
+
+/**
+ * Orval custom mutator (fetch-style).
+ *
+ * Orval's `react-query` client invokes this as `customInstance<T>(url, init)`
+ * and expects back a `{ status, data, headers }` envelope (T). We keep the
+ * generated client behaviourally identical to the hand-written modules by
+ * delegating the actual request to {@link apiFetch} in `client.ts`, which owns:
+ *   - `credentials: "include"` (auth cookies),
+ *   - the `X-Egret-CSRF` header on mutating methods,
+ *   - `UnauthorizedError` on 401 and `ApiError` on other non-2xx responses.
+ *
+ * Because `apiFetch` throws on non-2xx, this mutator only ever returns the
+ * success envelope; react-query surfaces the thrown `ApiError`/`UnauthorizedError`
+ * as the query/mutation `error` — same as today. (The generated `TError` is
+ * typed `ErrorBody`, but the runtime value is an `ApiError` carrying `.status`,
+ * which call sites already rely on.)
+ *
+ * Path reconcile: the spec's paths carry the `/api` prefix (e.g.
+ * `/api/ws/{workspace}/databases`), whereas `apiFetch` prepends `/api` itself.
+ * We strip the leading `/api` here so the final request hits the same absolute
+ * path the hand-written modules use — no double `/api/api`. Query strings are
+ * already baked into `url` by the generated URL builders, so nothing else to do.
+ */
+export interface FetchResponse<T> {
+  status: number;
+  data: T;
+  headers: Headers;
+}
+
+export const customInstance = async <T>(
+  url: string,
+  options?: RequestInit,
+): Promise<T> => {
+  const method = (options?.method ?? "GET").toUpperCase();
+  // Reconcile the spec's `/api`-prefixed paths with apiFetch's own `/api` prefix.
+  const path = url.replace(/^\/api/, "");
+
+  const res = await apiFetch(path, { ...options, method });
+
+  let data: unknown = undefined;
+  if (res.status !== 204 && res.headers.get("content-length") !== "0") {
+    const contentType = res.headers.get("content-type") ?? "";
+    data = contentType.includes("application/json")
+      ? await res.json()
+      : await res.text();
+  }
+
+  return { status: res.status, data, headers: res.headers } as T;
+};
+
+export default customInstance;
