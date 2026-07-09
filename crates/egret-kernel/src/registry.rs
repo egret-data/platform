@@ -50,7 +50,7 @@ impl KernelRegistry {
         phase: &str,
     ) -> Result<(), KernelError> {
         sqlx::query(
-            "INSERT INTO kernels (user_id, workspace_id, gateway_url, pid, phase) \
+            "INSERT INTO kernel.kernels (user_id, workspace_id, gateway_url, pid, phase) \
              VALUES ($1, $2, $3, $4, $5) \
              ON CONFLICT (user_id, workspace_id) DO UPDATE \
              SET gateway_url = EXCLUDED.gateway_url, \
@@ -72,7 +72,7 @@ impl KernelRegistry {
     pub async fn get(&self, key: KernelKey) -> Result<Option<KernelRow>, KernelError> {
         let row = sqlx::query_as::<_, KernelRow>(
             "SELECT gateway_url, pid, phase, last_used_at \
-             FROM kernels WHERE user_id = $1 AND workspace_id = $2",
+             FROM kernel.kernels WHERE user_id = $1 AND workspace_id = $2",
         )
         .bind(key.user_id)
         .bind(key.workspace_id)
@@ -84,7 +84,7 @@ impl KernelRegistry {
     /// Update only the `phase` column for `key`.
     pub async fn set_phase(&self, key: KernelKey, phase: &str) -> Result<(), KernelError> {
         sqlx::query(
-            "UPDATE kernels SET phase = $3 \
+            "UPDATE kernel.kernels SET phase = $3 \
              WHERE user_id = $1 AND workspace_id = $2",
         )
         .bind(key.user_id)
@@ -98,7 +98,7 @@ impl KernelRegistry {
     /// Bump `last_used_at` to now for `key`.
     pub async fn touch(&self, key: KernelKey) -> Result<(), KernelError> {
         sqlx::query(
-            "UPDATE kernels SET last_used_at = now() \
+            "UPDATE kernel.kernels SET last_used_at = now() \
              WHERE user_id = $1 AND workspace_id = $2",
         )
         .bind(key.user_id)
@@ -110,7 +110,7 @@ impl KernelRegistry {
 
     /// Delete the kernel row for `key` (idempotent).
     pub async fn delete(&self, key: KernelKey) -> Result<(), KernelError> {
-        sqlx::query("DELETE FROM kernels WHERE user_id = $1 AND workspace_id = $2")
+        sqlx::query("DELETE FROM kernel.kernels WHERE user_id = $1 AND workspace_id = $2")
             .bind(key.user_id)
             .bind(key.workspace_id)
             .execute(&self.db.pool)
@@ -126,7 +126,7 @@ impl KernelRegistry {
         expires_at: DateTime<Utc>,
     ) -> Result<(), KernelError> {
         sqlx::query(
-            "UPDATE kernels SET token_hash = $3, token_expires_at = $4 \
+            "UPDATE kernel.kernels SET token_hash = $3, token_expires_at = $4 \
              WHERE user_id = $1 AND workspace_id = $2",
         )
         .bind(key.user_id)
@@ -142,7 +142,7 @@ impl KernelRegistry {
     /// (unexpired) kernel row carries it.
     pub async fn resolve_token(&self, token_hash: &str) -> Result<Option<KernelKey>, KernelError> {
         let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-            "SELECT user_id, workspace_id FROM kernels \
+            "SELECT user_id, workspace_id FROM kernel.kernels \
              WHERE token_hash = $1 AND token_expires_at > now()",
         )
         .bind(token_hash)
@@ -164,7 +164,7 @@ impl KernelRegistry {
             workspace_id: Uuid,
         }
         let rows = sqlx::query_as::<_, Row>(
-            "SELECT user_id, workspace_id FROM kernels WHERE last_used_at < $1",
+            "SELECT user_id, workspace_id FROM kernel.kernels WHERE last_used_at < $1",
         )
         .bind(before)
         .fetch_all(&self.db.pool)

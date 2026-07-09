@@ -1389,8 +1389,8 @@ async fn db_update(
         .update(id, &b.name, &b.description, &b.parameters, &b.width)
         .await
         .map_err(BiApiError::from)?;
-    let tabs: Vec<crate::dashboard::NewTab> = b.tabs.into_iter().map(|t| t.into_new()).collect();
-    let cards: Vec<crate::dashboard::NewCard> = b.cards.into_iter().map(|c| c.into_new()).collect();
+    let tabs: Vec<crate::dashboard::NewTab> = b.tabs.into_iter().map(Into::into).collect();
+    let cards: Vec<crate::dashboard::NewCard> = b.cards.into_iter().map(Into::into).collect();
     st.dashboards
         .replace_layout(id, &tabs, &cards)
         .await

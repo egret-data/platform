@@ -490,7 +490,7 @@ async fn permanent_delete_purges_bookmarks() {
 
     // sanity: bookmark exists
     let before: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM bookmarks WHERE entity_type='dashboard' AND entity_id=$1",
+        "SELECT count(*) FROM analytics.bookmarks WHERE entity_type='dashboard' AND entity_id=$1",
     )
     .bind(d.id)
     .fetch_one(&fx.db.pool)
@@ -501,7 +501,7 @@ async fn permanent_delete_purges_bookmarks() {
     fx.repo.delete(d.id).await.unwrap();
 
     let after: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM bookmarks WHERE entity_type='dashboard' AND entity_id=$1",
+        "SELECT count(*) FROM analytics.bookmarks WHERE entity_type='dashboard' AND entity_id=$1",
     )
     .bind(d.id)
     .fetch_one(&fx.db.pool)

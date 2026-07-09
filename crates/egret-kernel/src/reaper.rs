@@ -126,7 +126,7 @@ mod tests {
 
         // ── force kernel A's last_used_at 40 minutes into the past ───────────
         sqlx::query(
-            "UPDATE kernels SET last_used_at = now() - interval '40 minutes' \
+            "UPDATE kernel.kernels SET last_used_at = now() - interval '40 minutes' \
              WHERE user_id = $1",
         )
         .bind(user_a)

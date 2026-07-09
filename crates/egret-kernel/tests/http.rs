@@ -127,7 +127,9 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
 
     let state = KernelState {
         manager,
-        notebook: notebook_state,
+        // E5c-1: kernel now holds an `Arc<dyn NotebookDocsPort>`; NotebookState
+        // impls that Port, so wrap it in an Arc for the test wiring.
+        notebook_docs: Arc::new(notebook_state),
         sessions: sessions.clone(),
         workspaces: workspaces.clone(),
         authz: Authorizer::new(db.clone()),
@@ -165,7 +167,7 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
 /// Seed a notebook owned by `owner` in `ws`. Returns its id.
 async fn seed_notebook(db: &Db, ws: WorkspaceId, owner: UserId) -> Uuid {
     sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO notebooks (workspace_id, owner_user_id, name) VALUES ($1,$2,'nb') RETURNING id",
+        "INSERT INTO analytics.notebooks (workspace_id, owner_user_id, name) VALUES ($1,$2,'nb') RETURNING id",
     )
     .bind(ws.0)
     .bind(owner.0)
@@ -184,12 +186,14 @@ async fn seed_enabled_engine(db: &Db, ws: WorkspaceId) -> Uuid {
     .fetch_one(&db.pool)
     .await
     .expect("seed database");
-    sqlx::query("INSERT INTO notebook_engine_access (workspace_id, database_id) VALUES ($1,$2)")
-        .bind(ws.0)
-        .bind(dbid)
-        .execute(&db.pool)
-        .await
-        .expect("enable engine");
+    sqlx::query(
+        "INSERT INTO analytics.notebook_engine_access (workspace_id, database_id) VALUES ($1,$2)",
+    )
+    .bind(ws.0)
+    .bind(dbid)
+    .execute(&db.pool)
+    .await
+    .expect("enable engine");
     dbid
 }
 
@@ -610,7 +614,7 @@ async fn connect_ready_creates_kernel_and_upserts(pool: sqlx::PgPool) {
 
     // notebook_kernels row must exist for (nb, uid).
     let kid: Option<String> = sqlx::query_scalar(
-        "SELECT kernel_id FROM notebook_kernels WHERE notebook_id=$1 AND user_id=$2",
+        "SELECT kernel_id FROM kernel.notebook_kernels WHERE notebook_id=$1 AND user_id=$2",
     )
     .bind(nb)
     .bind(uid.0)
@@ -659,7 +663,7 @@ async fn connect_spawning_returns_without_kernel(pool: sqlx::PgPool) {
     );
 
     let count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM notebook_kernels WHERE notebook_id=$1 AND user_id=$2",
+        "SELECT count(*) FROM kernel.notebook_kernels WHERE notebook_id=$1 AND user_id=$2",
     )
     .bind(nb)
     .bind(uid.0)
@@ -1037,7 +1041,7 @@ async fn channels_ready_upgrades_and_resolves_kernel(pool: sqlx::PgPool) {
 
     // The per-notebook kernel id was resolved (k1 from the fake gateway) and upserted.
     let kid: Option<String> = sqlx::query_scalar(
-        "SELECT kernel_id FROM notebook_kernels WHERE notebook_id=$1 AND user_id=$2",
+        "SELECT kernel_id FROM kernel.notebook_kernels WHERE notebook_id=$1 AND user_id=$2",
     )
     .bind(nb)
     .bind(uid.0)

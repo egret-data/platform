@@ -1,7 +1,7 @@
 //! Env-var serialization helpers: convert a [`NotebookRuntime`] manifest into
 //! the [`KernelEnv`] map that is forwarded to the kernel gateway process.
 
-use egret_notebook::NotebookRuntime;
+use egret_analytics_api::NotebookRuntime;
 
 use crate::launcher::KernelEnv;
 
@@ -29,8 +29,7 @@ pub fn manifest_to_env(m: &NotebookRuntime, api_url: &str, kernel_token: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egret_notebook::model::EngineOption;
-    use egret_notebook::NotebookRuntime;
+    use egret_analytics_api::{EngineOption, NotebookRuntime};
     use uuid::Uuid;
 
     fn make_runtime() -> NotebookRuntime {

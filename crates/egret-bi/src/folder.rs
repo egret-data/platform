@@ -42,7 +42,7 @@ impl FolderRepo {
         entity_type: &str,
     ) -> Result<Vec<Folder>, BiError> {
         let sql = format!(
-            "SELECT {COLS} FROM folders WHERE workspace_id=$1 AND entity_type=$2 ORDER BY name"
+            "SELECT {COLS} FROM analytics.folders WHERE workspace_id=$1 AND entity_type=$2 ORDER BY name"
         );
         Ok(sqlx::query_as::<_, Folder>(&sql)
             .bind(workspace_id)
@@ -59,7 +59,7 @@ impl FolderRepo {
         created_by: Option<Uuid>,
     ) -> Result<Folder, BiError> {
         let sql = format!(
-            "INSERT INTO folders (workspace_id, entity_type, name, created_by) \
+            "INSERT INTO analytics.folders (workspace_id, entity_type, name, created_by) \
              VALUES ($1,$2,$3,$4) RETURNING {COLS}"
         );
         sqlx::query_as::<_, Folder>(&sql)
@@ -73,7 +73,7 @@ impl FolderRepo {
     }
 
     pub async fn rename(&self, id: Uuid, name: &str) -> Result<Option<Folder>, BiError> {
-        let sql = format!("UPDATE folders SET name=$2 WHERE id=$1 RETURNING {COLS}");
+        let sql = format!("UPDATE analytics.folders SET name=$2 WHERE id=$1 RETURNING {COLS}");
         sqlx::query_as::<_, Folder>(&sql)
             .bind(id)
             .bind(name)
@@ -83,7 +83,7 @@ impl FolderRepo {
     }
 
     pub async fn delete(&self, id: Uuid) -> Result<(), BiError> {
-        sqlx::query("DELETE FROM folders WHERE id=$1")
+        sqlx::query("DELETE FROM analytics.folders WHERE id=$1")
             .bind(id)
             .execute(&self.db.pool)
             .await?;
@@ -93,7 +93,7 @@ impl FolderRepo {
     /// (workspace_id, entity_type) of a folder, for the ownership/type guard. None if absent.
     pub async fn meta(&self, id: Uuid) -> Result<Option<(Uuid, String)>, BiError> {
         Ok(sqlx::query_as::<_, (Uuid, String)>(
-            "SELECT workspace_id, entity_type FROM folders WHERE id=$1",
+            "SELECT workspace_id, entity_type FROM analytics.folders WHERE id=$1",
         )
         .bind(id)
         .fetch_optional(&self.db.pool)

@@ -2,6 +2,11 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+// `NotebookSummary` and `EngineOption` were moved verbatim to the leaf contract
+// crate `egret-analytics-api` (E5c-1); re-exported here so this crate's handlers
+// and stores keep referencing `crate::model::{NotebookSummary, EngineOption}`.
+pub use egret_analytics_api::{EngineOption, NotebookSummary};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CellType {
@@ -36,23 +41,6 @@ pub struct Cell {
     pub execution_count: Option<i32>,
     pub last_output: Option<serde_json::Value>,
     pub last_execution_time_ms: Option<i32>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct NotebookSummary {
-    pub id: Uuid,
-    pub name: String,
-    pub description: String,
-    pub is_public: bool,
-    pub owner_user_id: Uuid,
-    pub is_owner: bool,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    /// Whether the requesting viewer has bookmarked this notebook.
-    pub bookmarked: bool,
-    /// Folder this notebook lives in; `None` = Uncategorized.
-    pub folder_id: Option<Uuid>,
-    /// Soft-delete marker; `None` = live, `Some(..)` = trashed.
-    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Body for `PATCH /notebooks/{id}/folder`: move a notebook into a folder
@@ -100,17 +88,6 @@ pub struct ReorderCells {
 }
 
 // ── Notebook settings DTOs ───────────────────────────────────────────────────
-
-/// An engine (DB connection) option shown in notebook settings.
-#[derive(Debug, Clone, Serialize)]
-pub struct EngineOption {
-    pub id: Uuid,
-    pub name: String,
-    /// Engine type label: "trino" or "starrocks".
-    pub engine: String,
-    /// Whether this engine is currently enabled for notebooks in this workspace.
-    pub enabled: bool,
-}
 
 /// Response DTO for GET /ws/{workspace}/notebook-settings.
 #[derive(Debug, Clone, Serialize)]

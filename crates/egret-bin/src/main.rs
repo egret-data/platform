@@ -1074,7 +1074,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
 
     // ── Kernel lifecycle wiring (D1b T8) ────────────────────────────────────────
     // Startup sweep: subprocess kernels from a prior run are gone — clear stale rows.
-    sqlx::query("DELETE FROM kernels")
+    sqlx::query("DELETE FROM kernel.kernels")
         .execute(&db.pool)
         .await
         .ok();
@@ -1120,7 +1120,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
 
     let kernel = Some(egret_kernel::KernelState {
         manager: kernel_manager,
-        notebook: notebook_state,
+        // E5c-1: hand kernel the notebook-docs Port over the concrete
+        // NotebookState (which impls `egret_analytics_api::NotebookDocsPort`).
+        notebook_docs: std::sync::Arc::new(notebook_state),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),

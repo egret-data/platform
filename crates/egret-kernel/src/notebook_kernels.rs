@@ -25,7 +25,7 @@ impl NotebookKernelStore {
         user_id: Uuid,
     ) -> Result<Option<String>, KernelError> {
         let row: Option<(String,)> = sqlx::query_as(
-            "SELECT kernel_id FROM notebook_kernels WHERE notebook_id=$1 AND user_id=$2",
+            "SELECT kernel_id FROM kernel.notebook_kernels WHERE notebook_id=$1 AND user_id=$2",
         )
         .bind(notebook_id)
         .bind(user_id)
@@ -42,7 +42,7 @@ impl NotebookKernelStore {
         kernel_id: &str,
     ) -> Result<(), KernelError> {
         sqlx::query(
-            "INSERT INTO notebook_kernels (notebook_id, user_id, kernel_id) VALUES ($1,$2,$3) \
+            "INSERT INTO kernel.notebook_kernels (notebook_id, user_id, kernel_id) VALUES ($1,$2,$3) \
              ON CONFLICT (notebook_id, user_id) DO UPDATE \
              SET kernel_id = EXCLUDED.kernel_id, last_used_at = now()",
         )
@@ -57,7 +57,7 @@ impl NotebookKernelStore {
     /// Bump `last_used_at` to now for `(notebook_id, user_id)`.
     pub async fn touch(&self, notebook_id: Uuid, user_id: Uuid) -> Result<(), KernelError> {
         sqlx::query(
-            "UPDATE notebook_kernels SET last_used_at = now() \
+            "UPDATE kernel.notebook_kernels SET last_used_at = now() \
              WHERE notebook_id=$1 AND user_id=$2",
         )
         .bind(notebook_id)
@@ -69,7 +69,7 @@ impl NotebookKernelStore {
 
     /// Delete the mapping for `(notebook_id, user_id)` (idempotent).
     pub async fn delete(&self, notebook_id: Uuid, user_id: Uuid) -> Result<(), KernelError> {
-        sqlx::query("DELETE FROM notebook_kernels WHERE notebook_id=$1 AND user_id=$2")
+        sqlx::query("DELETE FROM kernel.notebook_kernels WHERE notebook_id=$1 AND user_id=$2")
             .bind(notebook_id)
             .bind(user_id)
             .execute(&self.db.pool)
@@ -104,7 +104,7 @@ mod tests {
         .await
         .expect("insert workspace");
         let nb_id: Uuid = sqlx::query_scalar(
-            "INSERT INTO notebooks (workspace_id, owner_user_id, name) \
+            "INSERT INTO analytics.notebooks (workspace_id, owner_user_id, name) \
              VALUES ($1,$2,'nb') RETURNING id",
         )
         .bind(ws_id)

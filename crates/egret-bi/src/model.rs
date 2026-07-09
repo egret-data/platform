@@ -1,140 +1,32 @@
-//! SQL Lab DTOs and Dataset DTOs.
-
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+//! BI domain→wire conversions, `From<Row>` impls, and re-exports of the wire
+//! DTOs (which now live in `egret-analytics-api::bi`).
+//!
+//! The pure-serde wire DTOs now live in the leaf contract crate
+//! `egret-analytics-api` (module `bi`) and are re-exported below so every
+//! `crate::model::…` reference across this crate keeps resolving unchanged. What
+//! stays here are the pieces that reference `egret-bi`-local domain types and so
+//! cannot move to the leaf: the `*_dto` domain→wire conversions, `validate_layout`,
+//! the `From<CardInput>/From<NewTabInput>` conversions into the local `NewCard`/
+//! `NewTab` rows, and `ChartDataBody` (its `QuerySpec` field is `egret-bi`-local).
 
 use crate::chart::Chart;
 use crate::chartquery::QuerySpec;
 use crate::dashboard::{Dashboard, DashboardCard, NewCard};
 use crate::dataset::{Dataset, DatasetColumn, Metric};
 
-#[derive(Debug, Deserialize)]
-pub struct SaveQuery {
-    pub database_id: Option<Uuid>,
-    pub name: String,
-    pub sql: String,
-    #[serde(default)]
-    pub description: String,
-}
+pub use egret_analytics_api::bi::{
+    AddColumnBody, CardInput, ChartDataResponse, ChartDto, CreateChart, CreateDashboard,
+    CreateDataset, CreateFolder, CreateSource, DashboardCardDto, DashboardDetailDto,
+    DashboardSummaryDto, DashboardTabDto, DatasetColumnDto, DatasetDetailDto, DatasetSummaryDto,
+    FolderDto, MetricBody, MetricDto, NewTabInput, RenameFolder, SaveQuery, SavedQueryDto,
+    SchemaColumn, SetFolder, UpdateChart, UpdateColumnBody, UpdateDashboard, UpdateDataset,
+};
 
-#[derive(Debug, Serialize)]
-pub struct SavedQueryDto {
-    pub id: String,
-    pub database_id: Option<String>,
-    pub name: String,
-    pub sql: String,
-    pub description: String,
-    pub created_by: Option<String>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// A single column in a DESCRIBE result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SchemaColumn {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub ty: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct FolderDto {
-    pub id: String,
-    pub name: String,
-}
 pub fn folder_dto(f: crate::folder::Folder) -> FolderDto {
     FolderDto {
         id: f.id.to_string(),
         name: f.name,
     }
-}
-#[derive(Debug, Deserialize)]
-pub struct CreateFolder {
-    pub name: String,
-}
-#[derive(Debug, Deserialize)]
-pub struct RenameFolder {
-    pub name: String,
-}
-#[derive(Debug, Deserialize)]
-pub struct SetFolder {
-    pub folder_id: Option<Uuid>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum CreateSource {
-    Physical {
-        catalog: Option<String>,
-        schema: String,
-        table: String,
-    },
-    Virtual {
-        sql: String,
-    },
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreateDataset {
-    pub name: String,
-    pub database_id: Uuid,
-    #[serde(default)]
-    pub description: String,
-    pub source: CreateSource,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UpdateDataset {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub sql: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DatasetColumnDto {
-    pub column_name: String,
-    pub data_type: String,
-    pub type_generic: String,
-    pub is_temporal: bool,
-    pub ordinal: i32,
-    pub expression: Option<String>,
-    pub verbose_name: String,
-    pub description: String,
-    pub is_calculated: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DatasetSummaryDto {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub database_id: String,
-    pub kind: &'static str,
-    pub catalog: Option<String>,
-    pub schema: Option<String>,
-    pub table: Option<String>,
-    pub column_count: i64,
-    pub folder_id: Option<String>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub bookmarked: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DatasetDetailDto {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub database_id: String,
-    pub kind: &'static str,
-    pub catalog: Option<String>,
-    pub schema: Option<String>,
-    pub table: Option<String>,
-    pub sql: Option<String>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    pub columns: Vec<DatasetColumnDto>,
-    pub metrics: Vec<MetricDto>,
 }
 
 pub fn dataset_kind(ds: &Dataset) -> &'static str {
@@ -143,48 +35,6 @@ pub fn dataset_kind(ds: &Dataset) -> &'static str {
     } else {
         "physical"
     }
-}
-
-#[derive(Debug, Serialize)]
-pub struct MetricDto {
-    pub id: String,
-    pub metric_name: String,
-    pub expression: String,
-    pub data_type: String,
-    pub type_generic: String,
-    pub verbose_name: String,
-    pub description: String,
-    pub ordinal: i32,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct MetricBody {
-    pub metric_name: String,
-    pub expression: String,
-    #[serde(default)]
-    pub verbose_name: String,
-    #[serde(default)]
-    pub description: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AddColumnBody {
-    pub column_name: String,
-    pub expression: String,
-    #[serde(default)]
-    pub verbose_name: String,
-    #[serde(default)]
-    pub description: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UpdateColumnBody {
-    #[serde(default)]
-    pub verbose_name: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub expression: Option<String>,
 }
 
 pub fn metric_dto(m: Metric) -> MetricDto {
@@ -273,21 +123,6 @@ pub fn detail_dto(
     }
 }
 
-#[derive(Debug, serde::Serialize)]
-pub struct ChartDto {
-    pub id: String,
-    pub dataset_id: String,
-    pub name: String,
-    pub description: String,
-    pub viz_type: String,
-    pub params: serde_json::Value,
-    pub created_by: Option<String>,
-    pub folder_id: Option<String>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub bookmarked: bool,
-}
-
 pub fn chart_dto(c: Chart) -> ChartDto {
     ChartDto {
         id: c.id.to_string(),
@@ -320,167 +155,42 @@ pub fn chart_dto_bm(c: Chart, bookmarked: bool) -> ChartDto {
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
-pub struct CreateChart {
-    pub dataset_id: uuid::Uuid,
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    pub viz_type: String,
-    pub params: serde_json::Value,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct UpdateChart {
-    pub dataset_id: uuid::Uuid,
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    pub viz_type: String,
-    pub params: serde_json::Value,
-}
-
 /// Build-only data request: produce SQL for a dataset + QuerySpec; the client submits it
 /// to the existing /queries endpoint and polls.
+///
+/// Stays in `egret-bi` (not the leaf contract crate): its `query_spec` field is the
+/// `egret-bi`-local [`QuerySpec`] query builder, which references `egret-query-api`
+/// and other in-crate types and so cannot move to the leaf.
 #[derive(Debug, serde::Deserialize)]
 pub struct ChartDataBody {
     pub dataset_id: uuid::Uuid,
     pub query_spec: QuerySpec,
 }
 
-#[derive(Debug, serde::Serialize)]
-pub struct ChartDataResponse {
-    pub sql: String,
-    pub database_id: String,
-}
-
-// ── Dashboard DTOs ───────────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-pub struct DashboardSummaryDto {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub created_by: Option<String>,
-    pub folder_id: Option<String>,
-    pub card_count: i64,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    pub bookmarked: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DashboardCardDto {
-    pub id: String,
-    pub chart_id: Option<String>,
-    pub card_type: String,
-    pub grid_col: i32,
-    pub grid_row: i32,
-    pub size_x: i32,
-    pub size_y: i32,
-    pub options: serde_json::Value,
-    pub tab_id: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DashboardTabDto {
-    pub id: String,
-    pub name: String,
-    pub position: i32,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DashboardDetailDto {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub parameters: serde_json::Value,
-    pub created_by: Option<String>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-    pub width: String,
-    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub bookmarked: bool,
-    pub tabs: Vec<DashboardTabDto>,
-    pub cards: Vec<DashboardCardDto>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreateDashboard {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-}
-
-/// Card as supplied by the client when saving a layout.
-#[derive(Debug, Deserialize)]
-pub struct CardInput {
-    #[serde(default)]
-    pub chart_id: Option<Uuid>,
-    #[serde(default = "default_card_type")]
-    pub card_type: String,
-    pub grid_col: i32,
-    pub grid_row: i32,
-    pub size_x: i32,
-    pub size_y: i32,
-    #[serde(default = "empty_obj")]
-    pub options: serde_json::Value,
-    #[serde(default)]
-    pub tab_index: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct NewTabInput {
-    pub name: String,
-    pub position: i32,
-}
-
-fn default_card_type() -> String {
-    "chart".into()
-}
-fn empty_obj() -> serde_json::Value {
-    serde_json::json!({})
-}
-fn empty_arr() -> serde_json::Value {
-    serde_json::json!([])
-}
-fn default_width() -> String {
-    "full".into()
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UpdateDashboard {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default = "empty_arr")]
-    pub parameters: serde_json::Value,
-    #[serde(default = "default_width")]
-    pub width: String,
-    #[serde(default)]
-    pub tabs: Vec<NewTabInput>,
-    #[serde(default)]
-    pub cards: Vec<CardInput>,
-}
-
-impl CardInput {
-    pub fn into_new(self) -> NewCard {
+/// `CardInput` → local `NewCard` row. Lives here (not the leaf) because `NewCard`
+/// is an `egret-bi`-local type; the orphan rule allows `impl From<ForeignDto> for
+/// LocalRow` to stay in this crate.
+impl From<CardInput> for NewCard {
+    fn from(v: CardInput) -> Self {
         NewCard {
-            chart_id: self.chart_id,
-            card_type: self.card_type,
-            grid_col: self.grid_col,
-            grid_row: self.grid_row,
-            size_x: self.size_x,
-            size_y: self.size_y,
-            options: self.options,
-            tab_index: self.tab_index,
+            chart_id: v.chart_id,
+            card_type: v.card_type,
+            grid_col: v.grid_col,
+            grid_row: v.grid_row,
+            size_x: v.size_x,
+            size_y: v.size_y,
+            options: v.options,
+            tab_index: v.tab_index,
         }
     }
 }
 
-impl NewTabInput {
-    pub fn into_new(self) -> crate::dashboard::NewTab {
+/// `NewTabInput` → local `NewTab` row (see [`From<CardInput> for NewCard`]).
+impl From<NewTabInput> for crate::dashboard::NewTab {
+    fn from(v: NewTabInput) -> Self {
         crate::dashboard::NewTab {
-            name: self.name,
-            position: self.position,
+            name: v.name,
+            position: v.position,
         }
     }
 }
@@ -569,19 +279,6 @@ pub fn dashboard_detail_dto(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    #[test]
-    fn schema_node_serializes() {
-        let c = SchemaColumn {
-            name: "id".into(),
-            ty: "bigint".into(),
-        };
-        assert_eq!(
-            serde_json::to_value(&c).unwrap(),
-            serde_json::json!({"name":"id","type":"bigint"})
-        );
-    }
-
     #[test]
     fn validate_layout_rejects_mixed_and_out_of_range() {
         use super::{validate_layout, CardInput, NewTabInput};

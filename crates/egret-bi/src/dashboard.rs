@@ -115,7 +115,7 @@ impl DashboardRepo {
         created_by: Option<Uuid>,
     ) -> Result<Dashboard, BiError> {
         let sql = format!(
-            "INSERT INTO dashboards (workspace_id, name, description, created_by) \
+            "INSERT INTO analytics.dashboards (workspace_id, name, description, created_by) \
              VALUES ($1,$2,$3,$4) RETURNING {COLS}"
         );
         sqlx::query_as::<_, Dashboard>(&sql)
@@ -129,7 +129,7 @@ impl DashboardRepo {
     }
 
     pub async fn get(&self, id: Uuid) -> Result<Option<Dashboard>, BiError> {
-        let sql = format!("SELECT {COLS} FROM dashboards WHERE id = $1");
+        let sql = format!("SELECT {COLS} FROM analytics.dashboards WHERE id = $1");
         Ok(sqlx::query_as::<_, Dashboard>(&sql)
             .bind(id)
             .fetch_optional(&self.db.pool)
@@ -150,8 +150,8 @@ impl DashboardRepo {
         };
         let sql = format!(
             "SELECT {COLS}, \
-             (SELECT count(*) FROM dashboard_cards c WHERE c.dashboard_id = dashboards.id) AS card_count \
-             FROM dashboards WHERE workspace_id = $1 AND {pred} ORDER BY updated_at DESC"
+             (SELECT count(*) FROM analytics.dashboard_cards c WHERE c.dashboard_id = dashboards.id) AS card_count \
+             FROM analytics.dashboards WHERE workspace_id = $1 AND {pred} ORDER BY updated_at DESC"
         );
         let rows = sqlx::query_as::<_, DashboardWithCount>(&sql)
             .bind(workspace_id)
@@ -163,9 +163,9 @@ impl DashboardRepo {
     /// Soft-delete (trashed=true → deleted_at=now()) or restore (false → NULL).
     pub async fn set_trashed(&self, id: Uuid, trashed: bool) -> Result<(), BiError> {
         let sql = if trashed {
-            "UPDATE dashboards SET deleted_at = now() WHERE id = $1"
+            "UPDATE analytics.dashboards SET deleted_at = now() WHERE id = $1"
         } else {
-            "UPDATE dashboards SET deleted_at = NULL WHERE id = $1"
+            "UPDATE analytics.dashboards SET deleted_at = NULL WHERE id = $1"
         };
         sqlx::query(sql)
             .bind(id)
@@ -186,7 +186,7 @@ impl DashboardRepo {
         width: &str,
     ) -> Result<(), BiError> {
         sqlx::query(
-            "UPDATE dashboards SET name=$2, description=$3, parameters=$4, width=$5, updated_at=now() WHERE id=$1",
+            "UPDATE analytics.dashboards SET name=$2, description=$3, parameters=$4, width=$5, updated_at=now() WHERE id=$1",
         )
         .bind(id)
         .bind(name)
@@ -203,11 +203,13 @@ impl DashboardRepo {
     pub async fn delete(&self, id: Uuid) -> Result<(), BiError> {
         let mut tx = self.db.pool.begin().await?;
         // bookmarks are polymorphic (no FK on entity_id) so they don't cascade — purge manually.
-        sqlx::query("DELETE FROM bookmarks WHERE entity_type='dashboard' AND entity_id=$1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("DELETE FROM dashboards WHERE id=$1")
+        sqlx::query(
+            "DELETE FROM analytics.bookmarks WHERE entity_type='dashboard' AND entity_id=$1",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM analytics.dashboards WHERE id=$1")
             .bind(id)
             .execute(&mut *tx)
             .await?;
@@ -216,7 +218,7 @@ impl DashboardRepo {
     }
 
     pub async fn set_folder(&self, id: Uuid, folder_id: Option<Uuid>) -> Result<(), BiError> {
-        sqlx::query("UPDATE dashboards SET folder_id=$2 WHERE id=$1")
+        sqlx::query("UPDATE analytics.dashboards SET folder_id=$2 WHERE id=$1")
             .bind(id)
             .bind(folder_id)
             .execute(&self.db.pool)
@@ -231,7 +233,7 @@ impl DashboardRepo {
         entity_id: Uuid,
     ) -> Result<(), BiError> {
         sqlx::query(
-            "INSERT INTO bookmarks (user_id, entity_type, entity_id) VALUES ($1,$2,$3) \
+            "INSERT INTO analytics.bookmarks (user_id, entity_type, entity_id) VALUES ($1,$2,$3) \
              ON CONFLICT (user_id, entity_type, entity_id) DO NOTHING",
         )
         .bind(user)
@@ -248,18 +250,20 @@ impl DashboardRepo {
         entity_type: &str,
         entity_id: Uuid,
     ) -> Result<(), BiError> {
-        sqlx::query("DELETE FROM bookmarks WHERE user_id=$1 AND entity_type=$2 AND entity_id=$3")
-            .bind(user)
-            .bind(entity_type)
-            .bind(entity_id)
-            .execute(&self.db.pool)
-            .await?;
+        sqlx::query(
+            "DELETE FROM analytics.bookmarks WHERE user_id=$1 AND entity_type=$2 AND entity_id=$3",
+        )
+        .bind(user)
+        .bind(entity_type)
+        .bind(entity_id)
+        .execute(&self.db.pool)
+        .await?;
         Ok(())
     }
 
     pub async fn is_bookmarked(&self, user: Uuid, id: Uuid) -> Result<bool, BiError> {
         Ok(sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (SELECT 1 FROM bookmarks WHERE user_id=$1 AND entity_type='dashboard' AND entity_id=$2)",
+            "SELECT EXISTS (SELECT 1 FROM analytics.bookmarks WHERE user_id=$1 AND entity_type='dashboard' AND entity_id=$2)",
         )
         .bind(user)
         .bind(id)
@@ -281,9 +285,9 @@ impl DashboardRepo {
         };
         let sql = format!(
             "SELECT {COLS}, \
-             (SELECT count(*) FROM dashboard_cards c WHERE c.dashboard_id = dashboards.id) AS card_count, \
-             EXISTS (SELECT 1 FROM bookmarks b WHERE b.user_id = $2 AND b.entity_type='dashboard' AND b.entity_id = dashboards.id) AS bookmarked \
-             FROM dashboards WHERE workspace_id = $1 AND {pred} ORDER BY updated_at DESC"
+             (SELECT count(*) FROM analytics.dashboard_cards c WHERE c.dashboard_id = dashboards.id) AS card_count, \
+             EXISTS (SELECT 1 FROM analytics.bookmarks b WHERE b.user_id = $2 AND b.entity_type='dashboard' AND b.entity_id = dashboards.id) AS bookmarked \
+             FROM analytics.dashboards WHERE workspace_id = $1 AND {pred} ORDER BY updated_at DESC"
         );
         let rows = sqlx::query_as::<_, DashboardWithCountBm>(&sql)
             .bind(workspace_id)
@@ -299,7 +303,7 @@ impl DashboardRepo {
     /// All cards on a dashboard, in placement order.
     pub async fn cards(&self, dashboard_id: Uuid) -> Result<Vec<DashboardCard>, BiError> {
         let sql = format!(
-            "SELECT {CARD_COLS} FROM dashboard_cards WHERE dashboard_id = $1 ORDER BY ordinal, grid_row, grid_col"
+            "SELECT {CARD_COLS} FROM analytics.dashboard_cards WHERE dashboard_id = $1 ORDER BY ordinal, grid_row, grid_col"
         );
         Ok(sqlx::query_as::<_, DashboardCard>(&sql)
             .bind(dashboard_id)
@@ -310,7 +314,7 @@ impl DashboardRepo {
     /// All tabs on a dashboard, ordered by position.
     pub async fn tabs(&self, dashboard_id: Uuid) -> Result<Vec<DashboardTab>, BiError> {
         Ok(sqlx::query_as::<_, DashboardTab>(
-            "SELECT id, name, position FROM dashboard_tabs WHERE dashboard_id = $1 ORDER BY position, id",
+            "SELECT id, name, position FROM analytics.dashboard_tabs WHERE dashboard_id = $1 ORDER BY position, id",
         )
         .bind(dashboard_id)
         .fetch_all(&self.db.pool)
@@ -338,11 +342,11 @@ impl DashboardRepo {
         }
 
         let mut tx = self.db.pool.begin().await?;
-        sqlx::query("DELETE FROM dashboard_cards WHERE dashboard_id = $1")
+        sqlx::query("DELETE FROM analytics.dashboard_cards WHERE dashboard_id = $1")
             .bind(dashboard_id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM dashboard_tabs WHERE dashboard_id = $1")
+        sqlx::query("DELETE FROM analytics.dashboard_tabs WHERE dashboard_id = $1")
             .bind(dashboard_id)
             .execute(&mut *tx)
             .await?;
@@ -350,7 +354,7 @@ impl DashboardRepo {
         let mut tab_ids: Vec<Uuid> = Vec::with_capacity(tabs.len());
         for t in tabs {
             let id: Uuid = sqlx::query_scalar(
-                "INSERT INTO dashboard_tabs (dashboard_id, name, position) VALUES ($1,$2,$3) RETURNING id",
+                "INSERT INTO analytics.dashboard_tabs (dashboard_id, name, position) VALUES ($1,$2,$3) RETURNING id",
             )
             .bind(dashboard_id).bind(&t.name).bind(t.position)
             .fetch_one(&mut *tx).await?;
@@ -360,7 +364,7 @@ impl DashboardRepo {
         for (i, c) in cards.iter().enumerate() {
             let tab_id = c.tab_index.map(|idx| tab_ids[idx]);
             sqlx::query(
-                "INSERT INTO dashboard_cards \
+                "INSERT INTO analytics.dashboard_cards \
                  (dashboard_id, chart_id, card_type, grid_col, grid_row, size_x, size_y, options, ordinal, tab_id) \
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
             )
@@ -375,23 +379,23 @@ impl DashboardRepo {
 
     /// The workspace a dashboard belongs to (for the nested-ownership guard). None if absent.
     pub async fn dashboard_workspace(&self, id: Uuid) -> Result<Option<Uuid>, BiError> {
-        Ok(
-            sqlx::query_scalar::<_, Uuid>("SELECT workspace_id FROM dashboards WHERE id=$1")
-                .bind(id)
-                .fetch_optional(&self.db.pool)
-                .await?,
+        Ok(sqlx::query_scalar::<_, Uuid>(
+            "SELECT workspace_id FROM analytics.dashboards WHERE id=$1",
         )
+        .bind(id)
+        .fetch_optional(&self.db.pool)
+        .await?)
     }
 
     /// The owner (created_by) of a dashboard, for owner-or-admin checks.
     pub async fn owner(&self, id: Uuid) -> Result<Option<Uuid>, BiError> {
-        Ok(
-            sqlx::query_scalar::<_, Option<Uuid>>("SELECT created_by FROM dashboards WHERE id=$1")
-                .bind(id)
-                .fetch_optional(&self.db.pool)
-                .await?
-                .flatten(),
+        Ok(sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT created_by FROM analytics.dashboards WHERE id=$1",
         )
+        .bind(id)
+        .fetch_optional(&self.db.pool)
+        .await?
+        .flatten())
     }
 
     /// Deep-copy a dashboard (row + tabs + cards) under a new owner, in one transaction.
@@ -410,7 +414,7 @@ impl DashboardRepo {
 
         let mut tx = self.db.pool.begin().await?;
         let copy: Dashboard = sqlx::query_as::<_, Dashboard>(&format!(
-            "INSERT INTO dashboards (workspace_id, name, description, parameters, created_by, width) \
+            "INSERT INTO analytics.dashboards (workspace_id, name, description, parameters, created_by, width) \
              VALUES ($1,$2,$3,$4,$5,$6) RETURNING {COLS}"
         ))
         .bind(src.workspace_id)
@@ -426,7 +430,7 @@ impl DashboardRepo {
         let mut tab_map: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
         for t in &src_tabs {
             let nid: Uuid = sqlx::query_scalar(
-                "INSERT INTO dashboard_tabs (dashboard_id, name, position) VALUES ($1,$2,$3) RETURNING id",
+                "INSERT INTO analytics.dashboard_tabs (dashboard_id, name, position) VALUES ($1,$2,$3) RETURNING id",
             )
             .bind(copy.id).bind(&t.name).bind(t.position)
             .fetch_one(&mut *tx).await?;
@@ -435,7 +439,7 @@ impl DashboardRepo {
         for c in &src_cards {
             let new_tab = c.tab_id.and_then(|old| tab_map.get(&old).copied());
             sqlx::query(
-                "INSERT INTO dashboard_cards \
+                "INSERT INTO analytics.dashboard_cards \
                  (dashboard_id, chart_id, card_type, grid_col, grid_row, size_x, size_y, options, ordinal, tab_id) \
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
             )

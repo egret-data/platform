@@ -15,9 +15,8 @@ use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use egret_analytics_api::{CellOutput, NotebookDocsPort};
 use egret_auth::session::SessionService;
-use egret_notebook::build_notebook_runtime;
-use egret_notebook::NotebookState;
 use egret_workspace::context::WsContext;
 use egret_workspace::rbac::Authorizer;
 use egret_workspace::workspaces::WorkspaceRepo;
@@ -43,7 +42,10 @@ use crate::registry::KernelKey;
 #[derive(Clone)]
 pub struct KernelState {
     pub manager: Arc<KernelManager>,
-    pub notebook: NotebookState,
+    /// Notebook-docs Port (E5c-1): kernel depends on this leaf trait, not
+    /// concrete `egret-notebook`. Backs the summary/IDOR gate, engine-option
+    /// listing, output persistence, and runtime-manifest build.
+    pub notebook_docs: Arc<dyn NotebookDocsPort>,
     pub sessions: SessionService,
     pub workspaces: WorkspaceRepo,
     pub authz: Authorizer,
@@ -54,7 +56,7 @@ pub struct KernelState {
     pub proxy: Arc<dyn KernelProxy>,
     /// Mints fresh per-user engine JWTs for `POST /ws/{ws}/notebook-runtime/token`.
     /// Shares the SAME `EngineTokenBroker` Arc as `NotebookState` (wired in egret-bin).
-    pub engine_minter: std::sync::Arc<dyn egret_notebook::engine_token::EngineTokenMinter>,
+    pub engine_minter: std::sync::Arc<dyn egret_analytics_api::EngineTokenMinter>,
     /// Resolves an engine's database id to its connection coordinates for
     /// `POST /kernel/engine-token`. Concrete impl injected from egret-bin.
     pub engine_conn: std::sync::Arc<dyn crate::engine_conn::EngineConnResolver>,
@@ -160,9 +162,11 @@ async fn start(
         workspace_id: ctx.workspace_id.0,
     };
 
-    let manifest = build_notebook_runtime(&st.notebook, ctx.workspace_id.0, ctx.principal.user_id)
+    let manifest = st
+        .notebook_docs
+        .build_runtime(ctx.workspace_id.0, ctx.principal.user_id)
         .await
-        .map_err(|e| KernelApiError(e.0))?;
+        .map_err(KernelApiError)?;
 
     let env = manifest_to_env(&manifest, &st.api_url, "");
 
@@ -237,11 +241,10 @@ async fn connect(
 
     // Notebook must belong to this workspace AND be readable by the caller.
     let (summary, nb_ws) = st
-        .notebook
-        .store
+        .notebook_docs
         .get_summary(nb)
         .await
-        .map_err(|e| KernelApiError(e.0))?
+        .map_err(KernelApiError)?
         .ok_or_else(|| KernelApiError(egret_core::Error::NotFound("notebook not found".into())))?;
     if nb_ws != ctx.workspace_id.0 {
         return Err(KernelApiError(egret_core::Error::NotFound(
@@ -256,9 +259,11 @@ async fn connect(
         user_id: ctx.principal.user_id.0,
         workspace_id: ctx.workspace_id.0,
     };
-    let manifest = build_notebook_runtime(&st.notebook, ctx.workspace_id.0, ctx.principal.user_id)
+    let manifest = st
+        .notebook_docs
+        .build_runtime(ctx.workspace_id.0, ctx.principal.user_id)
         .await
-        .map_err(|e| KernelApiError(e.0))?;
+        .map_err(KernelApiError)?;
     let env = manifest_to_env(&manifest, &st.api_url, "");
     let status = st
         .manager
@@ -288,16 +293,16 @@ async fn connect(
     ))
 }
 
-/// Persistence sink for the output recorder: wraps `NotebookStore::record_output`
+/// Persistence sink for the output recorder: delegates to the notebook-docs Port
 /// so the recorder owns output persistence (the FE never PATCHes outputs).
-struct StoreSink(egret_notebook::NotebookStore);
+struct StoreSink(Arc<dyn NotebookDocsPort>);
 #[async_trait::async_trait]
 impl crate::recorder::OutputSink for StoreSink {
     async fn record(
         &self,
         nb: uuid::Uuid,
         cid: uuid::Uuid,
-        outs: Vec<egret_notebook::output::CellOutput>,
+        outs: Vec<CellOutput>,
         ec: Option<i32>,
         ms: Option<i32>,
     ) {
@@ -338,11 +343,10 @@ async fn channels(
 
     // Notebook must belong to this workspace AND be readable by the caller.
     let (summary, nb_ws) = st
-        .notebook
-        .store
+        .notebook_docs
         .get_summary(nb)
         .await
-        .map_err(|e| KernelApiError(e.0))?
+        .map_err(KernelApiError)?
         .ok_or_else(|| KernelApiError(egret_core::Error::NotFound("notebook not found".into())))?;
     if nb_ws != ctx.workspace_id.0 {
         return Err(KernelApiError(egret_core::Error::NotFound(
@@ -419,7 +423,7 @@ async fn channels(
     let rec = crate::recorder::Recorder::new(
         nb,
         user,
-        std::sync::Arc::new(StoreSink(st.notebook.store.clone())),
+        std::sync::Arc::new(StoreSink(st.notebook_docs.clone())),
         st.active.clone(),
     );
     let tap: std::sync::Arc<dyn crate::recorder::ChannelTap> =
@@ -449,11 +453,10 @@ async fn authorize_notebook(
 
     // Notebook must belong to this workspace AND be readable by the caller.
     let (summary, nb_ws) = st
-        .notebook
-        .store
+        .notebook_docs
         .get_summary(nb)
         .await
-        .map_err(|e| KernelApiError(e.0))?
+        .map_err(KernelApiError)?
         .ok_or_else(|| KernelApiError(egret_core::Error::NotFound("notebook not found".into())))?;
     if nb_ws != ctx.workspace_id.0 {
         return Err(KernelApiError(egret_core::Error::NotFound(
@@ -620,11 +623,10 @@ async fn engine_token(
     Json(req): Json<EngineTokenReq>,
 ) -> Result<Json<EngineTokenResp>, KernelApiError> {
     let engines = st
-        .notebook
-        .store
+        .notebook_docs
         .list_engine_options(id.workspace_id)
         .await
-        .map_err(|e| KernelApiError(e.0))?;
+        .map_err(KernelApiError)?;
     let engine = engines
         .into_iter()
         .filter(|e| e.enabled)
@@ -649,7 +651,7 @@ async fn engine_token(
         })?;
     let tok = match st.engine_minter.mint(id.user_id).await {
         Ok(tok) => tok,
-        Err(egret_notebook::engine_token::BrokerError::NoRefreshToken) => {
+        Err(egret_analytics_api::BrokerError::NoRefreshToken) => {
             return Err(KernelApiError(egret_core::Error::Unauthorized));
         }
         Err(e) => {
@@ -676,7 +678,7 @@ async fn engine_token(
 async fn notebook_runtime_token(
     id: KernelIdentity,
     State(st): State<KernelState>,
-) -> Result<Json<egret_notebook::engine_token::EngineToken>, KernelApiError> {
+) -> Result<Json<egret_analytics_api::EngineToken>, KernelApiError> {
     let tok = st
         .engine_minter
         .mint(id.user_id)

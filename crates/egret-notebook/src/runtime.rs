@@ -11,22 +11,10 @@ use crate::error::NotebookApiError;
 use crate::model::EngineOption;
 use crate::routes::NotebookState;
 
-/// Full kernel manifest returned by `GET /ws/{workspace}/notebook-runtime`.
-#[derive(serde::Serialize)]
-pub struct NotebookRuntime {
-    /// The caller's stable username (email local-part, collision-suffixed).
-    pub username: String,
-    /// Workspace engines (DB connections) enabled for notebooks.
-    pub engines: Vec<EngineOption>,
-    /// Short-lived per-user engine JWT the kernel presents to query engines.
-    /// `None` when the caller has no stored refresh token (e.g. password/local
-    /// users or OIDC logins without an offline token) — minting is best-effort
-    /// since no P1 engine consumes this yet.
-    pub engine_jwt: Option<String>,
-    /// Expiry of `engine_jwt` (RFC3339); kernels re-mint before this time.
-    /// `None` whenever `engine_jwt` is `None`.
-    pub engine_jwt_expires_at: Option<chrono::DateTime<chrono::Utc>>,
-}
+// `NotebookRuntime` moved verbatim to the leaf contract crate
+// `egret-analytics-api` (E5c-1); re-exported so callers keep using
+// `egret_notebook::NotebookRuntime`.
+pub use egret_analytics_api::NotebookRuntime;
 
 /// Build the [`NotebookRuntime`] manifest for `(ws, user_id)` without performing
 /// any HTTP authorization check. Steps 2–6 of the `runtime` handler.
