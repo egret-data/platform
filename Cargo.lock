@@ -2569,6 +2569,7 @@ dependencies = [
  "tower",
  "tracing",
  "url",
+ "utoipa",
  "uuid",
 ]
 
