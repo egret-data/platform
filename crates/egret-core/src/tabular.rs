@@ -15,6 +15,10 @@ pub struct ColumnMeta {
 }
 
 /// A fully-collected, in-memory query result (bounded by the caller's row limit).
+///
+/// `Serialize`/`Deserialize` are for the E4b contract crate + BI forwarding this
+/// result directly across the seam boundary; today the store persists `columns`
+/// and `rows` individually, so the whole-struct codecs are not yet exercised.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TabularResult {
     pub columns: Vec<ColumnMeta>,
