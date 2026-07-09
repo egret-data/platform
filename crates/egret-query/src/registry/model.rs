@@ -1,4 +1,5 @@
-//! Domain types: engine enum, connection options, DB row, request/response DTOs.
+//! Registry request/response DTOs, plus the shared domain vocabulary
+//! (engine enum, connection options, DB row) re-exported from `egret-query-api`.
 //!
 //! The shared domain vocabulary — [`Engine`], [`ConnOptions`], [`Database`] —
 //! lives in the leaf `egret-query-api` contract crate (E4d) so cross-seam

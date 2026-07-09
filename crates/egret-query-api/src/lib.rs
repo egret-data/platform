@@ -64,6 +64,11 @@ pub struct ConnOptions {
 }
 
 /// A full database registration row (no secret material).
+///
+/// `Serialize`/`Deserialize` are forward-looking contract surface: today the
+/// wire type is the separate `DatabaseDetailDto` and the store builds `Database`
+/// field-by-field from sqlx rows, so these codecs are not yet exercised — they
+/// let a future out-of-process query-seam client exchange this domain type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Database {
     pub id: Uuid,
