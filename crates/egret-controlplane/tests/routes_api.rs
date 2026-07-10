@@ -28,6 +28,26 @@ struct Fixture {
     db: Db,
 }
 
+/// Incidental PDP for `CpState`: these route tests gate on
+/// `require_platform_admin` / `require_permission` (session-derived), NOT on
+/// `state.pdp` — no control-plane route consults the PDP yet — so their 403
+/// assertions are independent of it. An allow-all stub keeps the fixture light.
+struct AllowAllPdp;
+#[async_trait::async_trait]
+impl egret_core::authz::Pdp for AllowAllPdp {
+    async fn authorize(
+        &self,
+        _s: &egret_core::authz::Subject,
+        _a: &str,
+        _r: &egret_core::authz::Resource,
+    ) -> egret_core::Result<egret_core::authz::Decision> {
+        Ok(egret_core::authz::Decision {
+            allow: true,
+            reasons: vec![],
+        })
+    }
+}
+
 async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -63,6 +83,7 @@ async fn setup() -> Option<Fixture> {
         secrets: workspace_secrets,
         sessions: sessions.clone(),
         browser: None,
+        pdp: std::sync::Arc::new(AllowAllPdp),
     });
 
     Some(Fixture {
@@ -495,6 +516,7 @@ async fn setup_isolated_schema() -> Option<Fixture> {
         secrets: workspace_secrets,
         sessions: sessions.clone(),
         browser: None,
+        pdp: std::sync::Arc::new(AllowAllPdp),
     });
 
     Some(Fixture {
