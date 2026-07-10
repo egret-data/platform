@@ -30,6 +30,7 @@ time = "0.3"
 # OpenAPI emit (E0·P4b-1): `#[utoipa::path]` on the auth + oidc routers'
 # handlers + the `AuthApi`/`OidcApi` doc structs merged in `openapi()`.
 utoipa.workspace = true
+cedar-policy.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
