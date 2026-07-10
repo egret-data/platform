@@ -19314,6 +19314,7 @@
         "required": [
           "key",
           "description",
+          "scope",
           "roles"
         ],
         "properties": {
@@ -19322,6 +19323,10 @@
           },
           "description": {
             "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "description": "Enforcement scope: `\"platform\"` or `\"workspace\"`."
           },
           "roles": {
             "type": "array",

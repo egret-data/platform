@@ -1,5 +1,6 @@
 //! `egret-core` — shared domain primitives and traits for the Egret workspace.
 
+pub mod authz;
 pub mod context;
 pub mod error;
 #[cfg(feature = "http")]
@@ -12,11 +13,12 @@ pub mod tabular;
 #[cfg(feature = "token")]
 pub mod token;
 
+pub use authz::{Decision, Pdp, Resource, Subject};
 pub use context::{Principal, WorkspaceContext};
 pub use error::{Error, Result};
 #[cfg(feature = "http")]
 pub use http::{ApiError, ErrorBody};
-pub use ids::{UserId, WorkspaceId};
+pub use ids::{GroupId, UserId, WorkspaceId};
 pub use openapi::{Ack, WorkspacePath};
 pub use pagination::Pagination;
 pub use tabular::{ColumnMeta, TabularResult};

@@ -1,0 +1,11 @@
+namespace Egret {
+  entity User in [Group, Role];
+  entity Group;
+  entity Role;
+  entity Platform;
+  entity Workspace in [Platform];
+  // Actions are validated dynamically; the full set is generated from the
+  // permission catalog at build time. Authorization passes `None` for the
+  // schema, so this file documents the entity model; it is not loaded in B1a.
+  action "placeholder" appliesTo { principal: [User], resource: [Platform, Workspace] };
+}

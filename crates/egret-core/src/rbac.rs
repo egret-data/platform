@@ -17,75 +17,296 @@
 //! so the keys are no longer enforced anywhere and are dropped from the
 //! catalog to keep the drift-lint honest.
 
+/// Where a permission is enforced: platform-wide (control-plane routes) or
+/// per-workspace (workspace-feature routes gated by the workspace authorizer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    Platform,
+    Workspace,
+}
+
 /// One catalog entry. `key` is the `resource:action` string checked in code.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct Permission {
     pub key: &'static str,
     pub group: &'static str,
     pub description: &'static str,
+    pub scope: Scope,
 }
 
 macro_rules! perm {
-    ($key:literal, $group:literal, $desc:literal) => {
+    ($key:literal, $group:literal, $desc:literal, $scope:expr) => {
         Permission {
             key: $key,
             group: $group,
             description: $desc,
+            scope: $scope,
         }
     };
 }
 
 /// The complete permission catalog. Add a row here when guarding a new route.
 pub static PERMISSIONS: &[Permission] = &[
-    perm!("engine:read", "Engines", "View engines"),
-    perm!("engine:create", "Engines", "Create engines"),
-    perm!("engine:update", "Engines", "Update engine config"),
-    perm!("engine:delete", "Engines", "Delete engines"),
+    perm!("engine:read", "Engines", "View engines", Scope::Platform),
+    perm!(
+        "engine:create",
+        "Engines",
+        "Create engines",
+        Scope::Platform
+    ),
+    perm!(
+        "engine:update",
+        "Engines",
+        "Update engine config",
+        Scope::Platform
+    ),
+    perm!(
+        "engine:delete",
+        "Engines",
+        "Delete engines",
+        Scope::Platform
+    ),
     perm!(
         "engine:provision",
         "Engines",
-        "Provision / restart engines on the cluster"
+        "Provision / restart engines on the cluster",
+        Scope::Platform
     ),
-    perm!("engine:kill", "Engines", "Kill running queries"),
-    perm!("warehouse:read", "Warehouses", "View catalog warehouses"),
-    perm!("warehouse:create", "Warehouses", "Create warehouses"),
-    perm!("warehouse:update", "Warehouses", "Update warehouses"),
-    perm!("warehouse:delete", "Warehouses", "Delete warehouses"),
-    perm!("storage:read", "Storage", "View storage registrations"),
-    perm!("storage:create", "Storage", "Create storage registrations"),
-    perm!("storage:update", "Storage", "Update storage registrations"),
-    perm!("storage:delete", "Storage", "Delete storage registrations"),
-    perm!("secret:read", "Secrets", "View secrets (metadata)"),
-    perm!("secret:create", "Secrets", "Create secrets"),
-    perm!("secret:update", "Secrets", "Update secrets"),
-    perm!("secret:delete", "Secrets", "Delete secrets"),
-    perm!("policy:read", "Policies", "View Ranger policies"),
-    perm!("policy:create", "Policies", "Create policies"),
-    perm!("policy:update", "Policies", "Update policies"),
-    perm!("policy:delete", "Policies", "Delete policies"),
+    perm!(
+        "engine:kill",
+        "Engines",
+        "Kill running queries",
+        Scope::Platform
+    ),
+    perm!(
+        "warehouse:read",
+        "Warehouses",
+        "View catalog warehouses",
+        Scope::Platform
+    ),
+    perm!(
+        "warehouse:create",
+        "Warehouses",
+        "Create warehouses",
+        Scope::Platform
+    ),
+    perm!(
+        "warehouse:update",
+        "Warehouses",
+        "Update warehouses",
+        Scope::Platform
+    ),
+    perm!(
+        "warehouse:delete",
+        "Warehouses",
+        "Delete warehouses",
+        Scope::Platform
+    ),
+    perm!(
+        "storage:read",
+        "Storage",
+        "View storage registrations",
+        Scope::Platform
+    ),
+    perm!(
+        "storage:create",
+        "Storage",
+        "Create storage registrations",
+        Scope::Platform
+    ),
+    perm!(
+        "storage:update",
+        "Storage",
+        "Update storage registrations",
+        Scope::Platform
+    ),
+    perm!(
+        "storage:delete",
+        "Storage",
+        "Delete storage registrations",
+        Scope::Platform
+    ),
+    perm!(
+        "secret:read",
+        "Secrets",
+        "View secrets (metadata)",
+        Scope::Platform
+    ),
+    perm!(
+        "secret:create",
+        "Secrets",
+        "Create secrets",
+        Scope::Platform
+    ),
+    perm!(
+        "secret:update",
+        "Secrets",
+        "Update secrets",
+        Scope::Platform
+    ),
+    perm!(
+        "secret:delete",
+        "Secrets",
+        "Delete secrets",
+        Scope::Platform
+    ),
+    perm!(
+        "policy:read",
+        "Policies",
+        "View Ranger policies",
+        Scope::Platform
+    ),
+    perm!(
+        "policy:create",
+        "Policies",
+        "Create policies",
+        Scope::Platform
+    ),
+    perm!(
+        "policy:update",
+        "Policies",
+        "Update policies",
+        Scope::Platform
+    ),
+    perm!(
+        "policy:delete",
+        "Policies",
+        "Delete policies",
+        Scope::Platform
+    ),
     perm!(
         "policy:seed",
         "Policies",
-        "Seed default policies for a profile"
+        "Seed default policies for a profile",
+        Scope::Platform
     ),
-    perm!("workspace:read", "Workspaces", "View workspaces"),
-    perm!("workspace:create", "Workspaces", "Create workspaces"),
-    perm!("workspace:update", "Workspaces", "Update workspaces"),
-    perm!("workspace:archive", "Workspaces", "Archive workspaces"),
-    perm!("user:read", "Users", "View users"),
-    perm!("user:create", "Users", "Create local users"),
-    perm!("user:update", "Users", "Update users (name/status)"),
-    perm!("user:disable", "Users", "Disable users"),
-    perm!("group:read", "Groups", "View groups"),
-    perm!("group:create", "Groups", "Create local groups"),
-    perm!("group:update", "Groups", "Update local groups"),
-    perm!("group:delete", "Groups", "Delete local groups"),
-    perm!("role:read", "Roles", "View roles"),
+    perm!(
+        "workspace:read",
+        "Workspaces",
+        "View workspaces",
+        Scope::Platform
+    ),
+    perm!(
+        "workspace:create",
+        "Workspaces",
+        "Create workspaces",
+        Scope::Platform
+    ),
+    perm!(
+        "workspace:update",
+        "Workspaces",
+        "Update workspaces",
+        Scope::Platform
+    ),
+    perm!(
+        "workspace:archive",
+        "Workspaces",
+        "Archive workspaces",
+        Scope::Platform
+    ),
+    perm!("user:read", "Users", "View users", Scope::Platform),
+    perm!(
+        "user:create",
+        "Users",
+        "Create local users",
+        Scope::Platform
+    ),
+    perm!(
+        "user:update",
+        "Users",
+        "Update users (name/status)",
+        Scope::Platform
+    ),
+    perm!("user:disable", "Users", "Disable users", Scope::Platform),
+    perm!("group:read", "Groups", "View groups", Scope::Platform),
+    perm!(
+        "group:create",
+        "Groups",
+        "Create local groups",
+        Scope::Platform
+    ),
+    perm!(
+        "group:update",
+        "Groups",
+        "Update local groups",
+        Scope::Platform
+    ),
+    perm!(
+        "group:delete",
+        "Groups",
+        "Delete local groups",
+        Scope::Platform
+    ),
+    perm!("role:read", "Roles", "View roles", Scope::Platform),
+    // ---- Workspace-feature actions (enforced per-workspace by the workspace
+    // authorizer via `require_workspace`/`require_platform`). Keys must match
+    // the exact string literals at those call sites. ----
+    perm!(
+        "query:run",
+        "SQL Lab",
+        "Run SQL queries in a workspace",
+        Scope::Workspace
+    ),
+    perm!(
+        "dataset:read",
+        "Datasets",
+        "View datasets",
+        Scope::Workspace
+    ),
+    perm!(
+        "dataset:manage",
+        "Datasets",
+        "Create, update, and delete datasets",
+        Scope::Workspace
+    ),
+    perm!("chart:read", "Charts", "View charts", Scope::Workspace),
+    perm!(
+        "chart:manage",
+        "Charts",
+        "Create, update, and delete charts",
+        Scope::Workspace
+    ),
+    perm!(
+        "dashboard:read",
+        "Dashboards",
+        "View dashboards",
+        Scope::Workspace
+    ),
+    perm!(
+        "dashboard:manage",
+        "Dashboards",
+        "Create, update, and delete dashboards",
+        Scope::Workspace
+    ),
+    perm!(
+        "notebook:read",
+        "Notebooks",
+        "View notebooks",
+        Scope::Workspace
+    ),
+    perm!(
+        "notebook:write",
+        "Notebooks",
+        "Create and edit notebooks",
+        Scope::Workspace
+    ),
+    perm!(
+        "workspace:manage_members",
+        "Workspaces",
+        "Manage workspace members and workspace-scoped resources",
+        Scope::Workspace
+    ),
 ];
 
 /// True if `key` is a known catalog permission.
 pub fn is_known(key: &str) -> bool {
     PERMISSIONS.iter().any(|p| p.key == key)
+}
+
+/// Permissions at a given scope, catalog order preserved.
+pub fn at_scope(scope: Scope) -> Vec<&'static Permission> {
+    PERMISSIONS.iter().filter(|p| p.scope == scope).collect()
 }
 
 /// Distinct group labels, catalog order preserved.
@@ -115,5 +336,16 @@ mod tests {
         assert!(is_known("engine:create"));
         assert!(!is_known("engine:frobnicate"));
         assert!(groups().contains(&"Engines"));
+    }
+    #[test]
+    fn workspace_actions_present_and_scoped() {
+        assert!(is_known("dashboard:read"));
+        assert!(PERMISSIONS
+            .iter()
+            .any(|p| p.key == "dashboard:read" && p.scope == Scope::Workspace));
+        assert!(!at_scope(Scope::Workspace).is_empty());
+        assert!(at_scope(Scope::Platform)
+            .iter()
+            .any(|p| p.key == "engine:create"));
     }
 }

@@ -3,6 +3,7 @@
 pub mod authz;
 pub mod cookie;
 pub mod csrf;
+pub mod grants;
 pub mod groups;
 pub mod model;
 pub mod oidc;
@@ -10,6 +11,7 @@ pub mod oidc_cookie;
 pub mod oidc_refresh;
 pub mod oidc_routes;
 pub mod password;
+pub mod pdp;
 pub mod principal;
 pub mod ratelimit;
 pub mod roles;

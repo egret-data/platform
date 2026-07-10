@@ -860,6 +860,9 @@ pub struct PermissionDto {
     pub key: &'static str,
     #[schema(value_type = String)]
     pub description: &'static str,
+    /// Enforcement scope: `"platform"` or `"workspace"`.
+    #[schema(value_type = String)]
+    pub scope: rbac::Scope,
     pub roles: Vec<String>,
 }
 
@@ -906,6 +909,7 @@ async fn list_permissions(
                     PermissionDto {
                         key: perm.key,
                         description: perm.description,
+                        scope: perm.scope,
                         roles,
                     }
                 })

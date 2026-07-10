@@ -48,11 +48,13 @@ const PERMISSIONS: api.PermissionCatalogGroup[] = [
         key: "catalog.read",
         description: "Read catalog metadata",
         roles: ["data_steward", "custom_role"],
+        scope: "platform",
       },
       {
         key: "catalog.write",
         description: "Write catalog metadata",
         roles: ["data_steward"],
+        scope: "platform",
       },
     ],
   },
