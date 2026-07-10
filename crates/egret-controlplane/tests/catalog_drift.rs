@@ -13,6 +13,14 @@
 //! `egret-engine-mgmt` seam's `engines.rs`/`monitor.rs` (E1c), `policy:*` keys in
 //! the `egret-policy` seam's `admin/mod.rs` (E2d), and `warehouse:*` keys in the
 //! `egret-catalog-engine` seam's `warehouse_admin/mod.rs` (E3d-3) — all scanned.
+//!
+//! Workspace-feature keys (`query:run`, `dataset:*`, `chart:*`, `dashboard:*`,
+//! `notebook:*`, `workspace:manage_members`) are enforced by
+//! `egret_workspace::rbac::Authorizer::require_workspace` in the feature-route
+//! crates (`egret-bi`, `egret-notebook`, `egret-query`, `egret-kernel`). Those
+//! routes usually pass a `const NAME: &str = "resource:action"` rather than an
+//! inline literal, so the scan resolves const identifiers referenced on a
+//! gate-call line back to their defining literal (see `enforced_in_file`).
 
 use std::collections::HashSet;
 
@@ -35,11 +43,23 @@ const EXTRA_FILES: &[&str] = &[
     "../egret-policy/src/admin/mod.rs",
     // `warehouse:*` keys moved into the Catalog seam's admin router (E3d-3).
     "../egret-catalog-engine/src/warehouse_admin/mod.rs",
+    // Workspace-feature keys are gated via `require_workspace` in the
+    // feature-route crates (mostly via `const` args, resolved below).
+    "../egret-bi/src/routes.rs",
+    "../egret-notebook/src/routes.rs",
+    "../egret-query/src/execution/routes.rs",
+    "../egret-query/src/registry/routes.rs",
+    "../egret-kernel/src/routes.rs",
 ];
 
-/// Gate function names whose first-string-literal argument is a
-/// `resource:action` permission key.
-const GATE_CALLS: &[&str] = &["require_permission(", "require_platform("];
+/// Gate function names whose permission-key argument (an inline
+/// `resource:action` literal, or a `const` identifier that resolves to one) is
+/// a catalog permission key.
+const GATE_CALLS: &[&str] = &[
+    "require_permission(",
+    "require_platform(",
+    "require_workspace(",
+];
 
 /// Pull every `"resource:action"`-shaped quoted literal out of a line, but
 /// only from lines that actually invoke one of `GATE_CALLS` — avoids false
@@ -65,22 +85,75 @@ fn is_resource_action_shaped(s: &str) -> bool {
     ident_ok(res) && ident_ok(action) && !action.contains(':')
 }
 
+/// Parse a `const IDENT: &str = "resource:action";` definition, returning
+/// `(IDENT, "resource:action")` when the literal is permission-shaped. This lets
+/// gate calls that pass a const (rather than an inline literal) still resolve.
+fn perm_const_def(line: &str) -> Option<(String, String)> {
+    let rest = line.trim().strip_prefix("const ")?;
+    let (ident, _) = rest.split_once(':')?;
+    let ident = ident.trim();
+    if ident.is_empty()
+        || !ident
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    {
+        return None;
+    }
+    let lit = rest.split('"').nth(1)?;
+    is_resource_action_shaped(lit).then(|| (ident.to_string(), lit.to_string()))
+}
+
+/// True if `ident` appears as a whole-word token in `line` (so `PERM` does not
+/// match inside `PERM_MANAGE`).
+fn references_ident_as_word(line: &str, ident: &str) -> bool {
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let bytes = line.as_bytes();
+    let mut from = 0;
+    while let Some(pos) = line[from..].find(ident) {
+        let start = from + pos;
+        let end = start + ident.len();
+        let before_ok = start == 0 || !is_word(bytes[start - 1]);
+        let after_ok = end == bytes.len() || !is_word(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
+}
+
+/// Every `resource:action` key enforced within a single source file: inline
+/// literals passed to a gate call, plus `const` identifiers referenced on a
+/// gate-call line resolved back to their defining literal.
+fn enforced_in_file(src: &str) -> HashSet<String> {
+    let consts: Vec<(String, String)> = src.lines().filter_map(perm_const_def).collect();
+    let mut out = HashSet::new();
+    for line in src.lines() {
+        if !GATE_CALLS.iter().any(|g| line.contains(g)) {
+            continue;
+        }
+        out.extend(resource_action_literals_in_line(line));
+        for (ident, lit) in &consts {
+            if references_ident_as_word(line, ident) {
+                out.insert(lit.clone());
+            }
+        }
+    }
+    out
+}
+
 /// Every `resource:action` key enforced somewhere in the scanned source tree.
 fn enforced_keys() -> HashSet<String> {
     let mut out = HashSet::new();
     for rel in CONTROLPLANE_FILES {
         let path = format!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/{}"), rel);
         let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
-        for line in src.lines() {
-            out.extend(resource_action_literals_in_line(line));
-        }
+        out.extend(enforced_in_file(&src));
     }
     for rel in EXTRA_FILES {
         let path = format!(concat!(env!("CARGO_MANIFEST_DIR"), "/{}"), rel);
         let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
-        for line in src.lines() {
-            out.extend(resource_action_literals_in_line(line));
-        }
+        out.extend(enforced_in_file(&src));
     }
     out
 }
@@ -127,6 +200,12 @@ fn scan_actually_finds_known_call_sites() {
         "policy:read",
         "workspace:read",
         "warehouse:read",
+        // Workspace-feature keys via `require_workspace`: `query:run` and
+        // `dashboard:read` come from a `const` arg; `notebook:read` from an
+        // inline literal (egret-kernel) — exercises both resolution paths.
+        "query:run",
+        "dashboard:read",
+        "notebook:read",
     ] {
         assert!(
             enforced.contains(key),
