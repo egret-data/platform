@@ -25,7 +25,6 @@ use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
-use egret_auth::require_permission;
 use egret_catalog_api::{GrantInput, NewClient};
 use futures_util::sink::SinkExt;
 use futures_util::StreamExt;
@@ -1217,7 +1216,7 @@ async fn list_engines(
     State(st): State<CpState>,
     Auth(p): Auth,
 ) -> Result<Json<Vec<EngineDto>>, CpError> {
-    require_permission(&p, "engine:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
     Ok(Json(
         st.engine_mgmt
             .list_engines()
@@ -1299,7 +1298,7 @@ async fn create_engine(
     Auth(p): Auth,
     Json(b): Json<CreateEngineBody>,
 ) -> Result<(StatusCode, Json<EngineDto>), CpError> {
-    require_permission(&p, "engine:create")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:create").await?;
 
     // 1. Resolve the warehouse; it must exist and be provisioned (has a
     //    lakekeeper counterpart) — engines connect by warehouse NAME.
@@ -1493,7 +1492,7 @@ async fn get_engine(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<EngineDetailDto>, CpError> {
-    require_permission(&p, "engine:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
     let engine = st
         .engine_mgmt
         .get_engine(id)
@@ -1555,7 +1554,7 @@ async fn update_engine(
     Path(id): Path<Uuid>,
     Json(b): Json<CreateEngineBody>,
 ) -> Result<Json<EngineDto>, CpError> {
-    require_permission(&p, "engine:update")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
     let engine = st
         .engine_mgmt
         .get_engine(id)
@@ -1622,7 +1621,7 @@ async fn delete_engine(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CpError> {
-    require_permission(&p, "engine:delete")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:delete").await?;
     let engine = st
         .engine_mgmt
         .get_engine(id)
@@ -1673,7 +1672,7 @@ async fn restart_engine(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CpError> {
-    require_permission(&p, "engine:provision")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:provision").await?;
     let engine = st
         .engine_mgmt
         .get_engine(id)
@@ -1708,7 +1707,7 @@ async fn list_catalogs(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<EngineCatalogDto>>, CpError> {
-    require_permission(&p, "engine:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
     let _engine = st
         .engine_mgmt
         .get_engine(id)
@@ -1745,7 +1744,7 @@ async fn add_catalog(
     Path(id): Path<Uuid>,
     Json(b): Json<AddCatalogBody>,
 ) -> Result<(StatusCode, Json<EngineCatalogDto>), CpError> {
-    require_permission(&p, "engine:create")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:create").await?;
     let engine = st
         .engine_mgmt
         .get_engine(id)
@@ -1913,7 +1912,7 @@ async fn get_catalog(
     Auth(p): Auth,
     Path((id, cid)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<EngineCatalogDetailDto>, CpError> {
-    require_permission(&p, "engine:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
     let engine = st
         .engine_mgmt
         .get_engine(id)
@@ -2010,7 +2009,7 @@ async fn test_catalog(
     Auth(p): Auth,
     Path((id, cid)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<CatalogTestDto>, CpError> {
-    require_permission(&p, "engine:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
     let engine = st
         .engine_mgmt
         .get_engine(id)
@@ -2118,7 +2117,7 @@ async fn remove_catalog(
     Auth(p): Auth,
     Path((id, cid)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, CpError> {
-    require_permission(&p, "engine:delete")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:delete").await?;
     let engine = st
         .engine_mgmt
         .get_engine(id)
@@ -2185,7 +2184,7 @@ async fn update_catalog(
     Path((id, cid)): Path<(Uuid, Uuid)>,
     Json(b): Json<UpdateCatalogBody>,
 ) -> Result<Json<EngineCatalogDto>, CpError> {
-    require_permission(&p, "engine:update")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
     let engine = st
         .engine_mgmt
         .get_engine(id)
@@ -2291,7 +2290,7 @@ async fn pod_logs(
     Path((id, pod)): Path<(Uuid, String)>,
     axum::extract::Query(q): axum::extract::Query<PodLogsQuery>,
 ) -> Result<Json<PodLogsDto>, CpError> {
-    require_permission(&p, "engine:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
     let engine = st
         .engine_mgmt
         .get_engine(id)
@@ -2369,7 +2368,7 @@ async fn pod_logs_follow(
     axum::extract::Query(q): axum::extract::Query<PodLogsFollowQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, CpError> {
-    require_permission(&p, "engine:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
     let engine = st
         .engine_mgmt
         .get_engine(id)
@@ -2500,7 +2499,7 @@ async fn pod_exec(
     Path((id, pod)): Path<(Uuid, String)>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, CpError> {
-    require_permission(&p, "engine:provision")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:provision").await?;
     let engine = st
         .engine_mgmt
         .get_engine(id)
@@ -2678,6 +2677,25 @@ pub struct EngineMgmtApi;
 mod tests {
     use super::*;
 
+    /// Allow-all PDP for these unit tests: they exercise catalog rendering /
+    /// provisioning-request building, not the authz gate, so the decision point
+    /// is incidental.
+    struct AllowAllPdp;
+    #[async_trait::async_trait]
+    impl egret_core::authz::Pdp for AllowAllPdp {
+        async fn authorize(
+            &self,
+            _s: &egret_core::authz::Subject,
+            _a: &str,
+            _r: &egret_core::authz::Resource,
+        ) -> egret_core::Result<egret_core::authz::Decision> {
+            Ok(egret_core::authz::Decision {
+                allow: true,
+                reasons: vec![],
+            })
+        }
+    }
+
     fn root(name: &str) -> ResourceGroupReq {
         ResourceGroupReq {
             name: name.into(),
@@ -2824,6 +2842,7 @@ mod tests {
                 chrono::Duration::hours(24),
                 chrono::Duration::minutes(60),
             ),
+            pdp: std::sync::Arc::new(AllowAllPdp),
             engine_provisioner: None,
             kube: None,
             engine_egret_url: "http://egret:8080".into(),

@@ -25,6 +25,78 @@ struct Fixture {
     users: UserRepo,
     sessions: SessionService,
     db: Db,
+    engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
+    kube: Option<Arc<dyn KubeClient>>,
+}
+
+/// Incidental PDP for `EngineMgmtState`: every existing route test authenticates
+/// a `platform_admin` (whose bypass predates the PDP) and asserts non-authz
+/// behavior, so an allow-all stub keeps those fixtures light. Any test that
+/// asserts a 403 (the one below) must instead build a real `CedarPdp` via
+/// `attach_real_pdp` — an allow-all stub would falsely 200.
+struct AllowAllPdp;
+#[async_trait::async_trait]
+impl egret_core::authz::Pdp for AllowAllPdp {
+    async fn authorize(
+        &self,
+        _s: &egret_core::authz::Subject,
+        _a: &str,
+        _r: &egret_core::authz::Resource,
+    ) -> egret_core::Result<egret_core::authz::Decision> {
+        Ok(egret_core::authz::Decision {
+            allow: true,
+            reasons: vec![],
+        })
+    }
+}
+
+/// Build the engine-mgmt `Router` for a given db + provisioner + kube + PDP.
+/// Shared by `setup_full` (allow-all PDP) and `attach_real_pdp` (real Cedar
+/// PDP) so the two only differ in the injected decision point.
+fn build_app(
+    db: &Db,
+    sessions: &SessionService,
+    engine_provisioner: Option<Arc<dyn EngineProvisioningPort>>,
+    kube: Option<Arc<dyn KubeClient>>,
+    pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
+) -> axum::Router {
+    let crypto =
+        egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
+    let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
+    let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
+
+    engine_mgmt_router().with_state(EngineMgmtState {
+        engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
+        catalog: std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
+        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
+        authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
+        secrets: workspace_secrets,
+        sessions: sessions.clone(),
+        pdp,
+        engine_provisioner,
+        kube,
+        engine_egret_url: "http://egret:8080".into(),
+        engine_jwks_uri: "https://idp/jwks".into(),
+    })
+}
+
+/// Rebuild `f.app` with a REAL `CedarPdp`. The PDP snapshots the
+/// `roles`/`role_permissions` catalog at build time and (in these tests) never
+/// reloads — raw-SQL seeding emits no `RolesChanged` event — so callers MUST
+/// seed any ad-hoc roles the PDP needs to know about BEFORE calling this.
+async fn attach_real_pdp(f: &mut Fixture) {
+    let pdp = std::sync::Arc::new(
+        egret_auth::pdp::CedarPdp::build(f.db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    f.app = build_app(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        pdp,
+    );
 }
 
 async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
@@ -44,11 +116,6 @@ async fn setup_full(
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
 
-    let crypto =
-        egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
-    let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
-    let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
-
     let users = UserRepo::new(db.clone());
     let sessions = SessionService::new(
         db.clone(),
@@ -56,24 +123,24 @@ async fn setup_full(
         chrono::Duration::minutes(60),
     );
 
-    let app = engine_mgmt_router().with_state(EngineMgmtState {
-        engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
-        catalog: std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
-        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
-        authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
-        secrets: workspace_secrets,
-        sessions: sessions.clone(),
-        engine_provisioner,
-        kube,
-        engine_egret_url: "http://egret:8080".into(),
-        engine_jwks_uri: "https://idp/jwks".into(),
-    });
+    // Existing route tests authenticate a platform_admin and assert non-authz
+    // behavior, so an allow-all PDP suffices. The authz test rebuilds with a real
+    // Cedar PDP via `attach_real_pdp`.
+    let app = build_app(
+        &db,
+        &sessions,
+        engine_provisioner.clone(),
+        kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+    );
 
     Some(Fixture {
         app,
         users,
         sessions,
         db,
+        engine_provisioner,
+        kube,
     })
 }
 
@@ -515,6 +582,70 @@ async fn test_catalog_reports_ok_error_and_non_2xx() {
         resp.status(),
         StatusCode::NOT_FOUND,
         "catalog from a different engine must 404"
+    );
+}
+
+/// PDP-backed engine authz (this seam migrated onto
+/// `egret_core::authz::require`): a non-`platform_admin` principal granted
+/// `engine:read` through a platform-scoped role — resolved by a real
+/// `CedarPdp`, not the allow-all stub — can GET /engines (200) but is denied
+/// POST /engines (403, it lacks `engine:create`). The 403 fires on the
+/// handler's first line, before any warehouse lookup, so the body UUIDs need
+/// not resolve.
+#[tokio::test]
+async fn pdp_backed_engine_reader_reads_but_cannot_create() {
+    let Some(mut f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    // Seed the reader's `engine:read` platform role BEFORE the PDP snapshots the
+    // roles catalog, then swap in the real Cedar PDP.
+    let reader = session_for_with_permission(&f, "pdp_engine_reader", "engine:read").await;
+    attach_real_pdp(&mut f).await;
+
+    // GET /engines → 200 (the PDP allows engine:read at platform scope).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/engines", &reader, None))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "PDP-backed engine:read must list engines; body={body}"
+    );
+
+    // POST /engines → 403 (the same principal lacks engine:create).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &reader,
+            Some(serde_json::json!({
+                "name": format!("trino-{}", Uuid::new_v4().simple()),
+                "warehouseId": Uuid::new_v4(),
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "PDP-backed engine:read alone must not create an engine (needs engine:create)"
     );
 }
 
@@ -1848,7 +1979,7 @@ async fn create_engine_unprovisioned_warehouse_400() {
 
 #[tokio::test]
 async fn scoped_permission_engines_read_and_create() {
-    let Some(f) = setup_full(
+    let Some(mut f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
         Some(Arc::new(
             egret_orchestrator::kube_client::FakeKube::default(),
@@ -1860,7 +1991,14 @@ async fn scoped_permission_engines_read_and_create() {
         return;
     };
 
+    // These 403/200 assertions gate on `state.pdp`; seed all ad-hoc scoped roles
+    // BEFORE building the Cedar PDP (it snapshots the roles catalog at build),
+    // then swap in a real PDP so the allow-all stub can't mask the scoped grants.
     let wrong = session_for_with_permission(&f, "engine_scoped_wrong", "warehouse:read").await;
+    let reader = session_for_with_permission(&f, "engine_scoped_reader", "engine:read").await;
+    let creator = session_for_with_permission(&f, "engine_scoped_creator", "engine:create").await;
+    attach_real_pdp(&mut f).await;
+
     let resp = f
         .app
         .clone()
@@ -1873,7 +2011,6 @@ async fn scoped_permission_engines_read_and_create() {
         "a principal without engine:read must not list engines"
     );
 
-    let reader = session_for_with_permission(&f, "engine_scoped_reader", "engine:read").await;
     let resp = f
         .app
         .clone()
@@ -1911,7 +2048,6 @@ async fn scoped_permission_engines_read_and_create() {
         "engine:read alone must not create an engine"
     );
 
-    let creator = session_for_with_permission(&f, "engine_scoped_creator", "engine:create").await;
     let resp = f
         .app
         .clone()
@@ -1929,7 +2065,7 @@ async fn scoped_permission_engines_read_and_create() {
 #[tokio::test]
 async fn scoped_permission_monitor_queries_and_cluster() {
     let fake = Arc::new(egret_orchestrator::kube_client::FakeKube::default());
-    let Some(f) = setup_full(
+    let Some(mut f) = setup_full(
         Some(Arc::new(FakeEnginePort::default())),
         Some(fake.clone()),
     )
@@ -1938,7 +2074,15 @@ async fn scoped_permission_monitor_queries_and_cluster() {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
+
+    // The monitor gates consult `state.pdp`; seed the admin + scoped roles BEFORE
+    // building the Cedar PDP (it snapshots the roles catalog at build), then swap
+    // in a real PDP so the under-privileged 403s are genuine (not allow-all).
     let admin_token = session_for(&f, "monitor_scoped_setup", true).await;
+    let wrong = session_for_with_permission(&f, "monitor_scoped_wrong", "warehouse:read").await;
+    let reader = session_for_with_permission(&f, "monitor_scoped_reader", "engine:read").await;
+    attach_real_pdp(&mut f).await;
+
     let wh_id = seed_provisioned_warehouse(&f).await;
     let name = format!("trino-{}", Uuid::new_v4().simple());
     let resp = f
@@ -1962,7 +2106,6 @@ async fn scoped_permission_monitor_queries_and_cluster() {
 
     fake.set_coordinator_response(200, b"[]".to_vec());
 
-    let wrong = session_for_with_permission(&f, "monitor_scoped_wrong", "warehouse:read").await;
     let resp = f
         .app
         .clone()
@@ -1996,7 +2139,6 @@ async fn scoped_permission_monitor_queries_and_cluster() {
         "a principal without engine:read must not fetch cluster state"
     );
 
-    let reader = session_for_with_permission(&f, "monitor_scoped_reader", "engine:read").await;
     let resp = f
         .app
         .clone()

@@ -12,7 +12,6 @@ use axum::routing::get;
 use axum::{Json, Router};
 use base64::Engine as _;
 use egret_auth::principal::Auth;
-use egret_auth::require_permission;
 use serde::Serialize;
 use serde_json::Value;
 use utoipa::ToSchema;
@@ -272,7 +271,7 @@ async fn list_queries(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<QueryDto>>, CpError> {
-    require_permission(&p, "engine:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
     let engine = load_engine(&st, id).await?;
     let v = coordinator_json(&st, &engine, "GET", "/v1/query").await?;
     let list = v
@@ -304,7 +303,7 @@ async fn get_query(
     Auth(p): Auth,
     Path((id, qid)): Path<(Uuid, String)>,
 ) -> Result<Json<QueryDetailDto>, CpError> {
-    require_permission(&p, "engine:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
     let engine = load_engine(&st, id).await?;
     let v = coordinator_json(&st, &engine, "GET", &format!("/v1/query/{qid}")).await?;
     Ok(Json(query_detail_dto(&v)))
@@ -332,7 +331,7 @@ async fn kill_query(
     Auth(p): Auth,
     Path((id, qid)): Path<(Uuid, String)>,
 ) -> Result<StatusCode, CpError> {
-    require_permission(&p, "engine:kill")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:kill").await?;
     let engine = load_engine(&st, id).await?;
     let (code, _) =
         coordinator_call(&st, &engine, "DELETE", &format!("/v1/query/{qid}"), None).await?;
@@ -361,7 +360,7 @@ async fn get_cluster(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ClusterDto>, CpError> {
-    require_permission(&p, "engine:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
     let engine = load_engine(&st, id).await?;
     let nodes = coordinator_json(&st, &engine, "GET", "/v1/node").await?;
     let queries = coordinator_json(&st, &engine, "GET", "/v1/query").await?;

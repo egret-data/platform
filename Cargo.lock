@@ -2753,6 +2753,7 @@ dependencies = [
  "egret-catalog-engine",
  "egret-core",
  "egret-engine-mgmt-api",
+ "egret-events",
  "egret-metastore",
  "egret-orchestrator",
  "egret-policy",

@@ -1293,6 +1293,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
         secrets: workspace_secrets.clone(),
         sessions: sessions.clone(),
+        pdp: pdp.clone(),
         engine_provisioner,
         kube,
         engine_egret_url,
