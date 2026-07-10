@@ -67,10 +67,14 @@ pub fn link_grants(
     role_names: &RoleNames,
 ) -> PolicySet {
     for (i, g) in grants.iter().enumerate() {
-        let Some(role) = role_names.get(&g.role_id) else {
+        // `role_names` is the known-role set; skip grants whose role_id has no
+        // compiled template (e.g. a role created after the PDP was built).
+        if !role_names.contains_key(&g.role_id) {
             continue;
-        };
-        let template_id: PolicyId = format!("role:{role}").parse().unwrap();
+        }
+        // Templates are keyed by role_id (UUID), matching `CedarPdp::build`, so a
+        // workspace role sharing a platform role's name links its OWN template.
+        let template_id: PolicyId = format!("role:{}", g.role_id).parse().unwrap();
         let link_id: PolicyId = format!("grant-{i}").parse().unwrap();
         let mut vals = HashMap::new();
         vals.insert(SlotId::principal(), user_uid(subject));
@@ -116,10 +120,10 @@ mod tests {
         let mut ps = PolicySet::new();
         // Cedar's `@id(...)` annotation is NOT used as the template PolicyId by
         // `FromStr`/`parse(None, ..)` (it defaults to "policy0"); the id must be
-        // set explicitly so `link_grants` can find it by `role:<name>`.
+        // set explicitly so `link_grants` can find it by `role:<role_id>`.
         let tmpl = Template::parse(
-            Some("role:ws_editor".parse().unwrap()),
-            template_for_role("ws_editor", &["dashboard:read".into()]),
+            Some(format!("role:{role_id}").parse().unwrap()),
+            template_for_role("ws_editor", "workspace", &["dashboard:read".into()]),
         )
         .unwrap();
         ps.add_template(tmpl).unwrap();

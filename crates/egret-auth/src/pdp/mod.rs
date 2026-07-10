@@ -24,13 +24,18 @@ pub struct CedarPdp {
 
 impl CedarPdp {
     pub async fn build(db: Db) -> Result<Self> {
-        let roles: Vec<(uuid::Uuid, String)> = sqlx::query_as("SELECT id, name FROM roles")
-            .fetch_all(&db.pool)
-            .await
-            .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!(e)))?;
+        // Key templates by role_id (UUID), not name: `roles` is UNIQUE(scope,
+        // name), so a workspace role can share a name with a platform role. Keying
+        // by name collided across scopes → duplicate `add_template` id → `build()`
+        // failure (a latent DoS). The role_id is globally unique.
+        let roles: Vec<(uuid::Uuid, String, String)> =
+            sqlx::query_as("SELECT id, name, scope FROM roles")
+                .fetch_all(&db.pool)
+                .await
+                .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!(e)))?;
         let mut templates = PolicySet::new();
         let mut role_names = HashMap::new();
-        for (id, name) in roles {
+        for (id, name, scope) in roles {
             let perms: Vec<(String,)> =
                 sqlx::query_as("SELECT permission FROM role_permissions WHERE role_id = $1")
                     .bind(id)
@@ -40,12 +45,15 @@ impl CedarPdp {
             let perms: Vec<String> = perms.into_iter().map(|(p,)| p).collect();
             // Cedar's `@id(...)` annotation is NOT honored as the template PolicyId
             // by `FromStr`/`parse(None, ..)` (it defaults to "policy0"); set it
-            // explicitly so `link_grants` can find the template by `role:<name>`.
-            let tid: PolicyId = format!("role:{name}")
+            // explicitly so `link_grants` can find the template by `role:<role_id>`.
+            let tid: PolicyId = format!("role:{id}")
                 .parse()
                 .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e:?}")))?;
-            let tmpl = Template::parse(Some(tid), templates::template_for_role(&name, &perms))
-                .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e:?}")))?;
+            let tmpl = Template::parse(
+                Some(tid),
+                templates::template_for_role(&name, &scope, &perms),
+            )
+            .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e:?}")))?;
             templates
                 .add_template(tmpl)
                 .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e:?}")))?;
