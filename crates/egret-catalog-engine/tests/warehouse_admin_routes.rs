@@ -30,6 +30,29 @@ struct Fixture {
     users: UserRepo,
     sessions: SessionService,
     db: Db,
+    browser: Option<Arc<dyn egret_catalog_engine::WarehouseBrowser>>,
+}
+
+/// Incidental PDP for `CatalogAdminState`: the browse tests authenticate a
+/// `platform_admin` (whose bypass predates the PDP) and assert non-authz
+/// behavior, so an allow-all stub keeps those fixtures light. Any test that
+/// asserts a 403 (`browse_non_admin_forbidden`,
+/// `scoped_permission_warehouses_read_and_create`) must instead build a real
+/// `CedarPdp` via `attach_real_pdp` — an allow-all stub would falsely 200.
+struct AllowAllPdp;
+#[async_trait::async_trait]
+impl egret_core::authz::Pdp for AllowAllPdp {
+    async fn authorize(
+        &self,
+        _s: &egret_core::authz::Subject,
+        _a: &str,
+        _r: &egret_core::authz::Resource,
+    ) -> egret_core::Result<egret_core::authz::Decision> {
+        Ok(egret_core::authz::Decision {
+            allow: true,
+            reasons: vec![],
+        })
+    }
 }
 
 async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
@@ -41,17 +64,50 @@ async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
     (status, json)
 }
 
+/// Build the catalog-admin `Router` for a given db + browser + PDP. Shared by
+/// `setup_full` (allow-all PDP) and `attach_real_pdp` (real Cedar PDP) so the two
+/// only differ in the injected decision point.
+fn build_app(
+    db: &Db,
+    sessions: &SessionService,
+    browser: Option<Arc<dyn egret_catalog_engine::WarehouseBrowser>>,
+    pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
+) -> axum::Router {
+    let crypto =
+        egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
+    let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
+    let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
+
+    catalog_admin_router().with_state(CatalogAdminState {
+        store: egret_catalog_engine::CatalogStore::new(db.clone()),
+        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
+        secrets: workspace_secrets,
+        provisioner: None,
+        browser,
+        sessions: sessions.clone(),
+        pdp,
+    })
+}
+
+/// Rebuild `f.app` with a REAL `CedarPdp`. The PDP snapshots the
+/// `roles`/`role_permissions` catalog at build time and (in these tests) never
+/// reloads — raw-SQL seeding emits no `RolesChanged` event — so callers MUST
+/// seed any ad-hoc roles the PDP needs to know about BEFORE calling this.
+async fn attach_real_pdp(f: &mut Fixture) {
+    let pdp = std::sync::Arc::new(
+        egret_auth::pdp::CedarPdp::build(f.db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    f.app = build_app(&f.db, &f.sessions, f.browser.clone(), pdp);
+}
+
 async fn setup_full(
     browser: Option<Arc<dyn egret_catalog_engine::WarehouseBrowser>>,
 ) -> Option<Fixture> {
     let dsn = std::env::var("DATABASE_URL").ok()?;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
-
-    let crypto =
-        egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
-    let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
-    let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
 
     let users = UserRepo::new(db.clone());
     let sessions = SessionService::new(
@@ -60,20 +116,22 @@ async fn setup_full(
         chrono::Duration::minutes(60),
     );
 
-    let app = catalog_admin_router().with_state(CatalogAdminState {
-        store: egret_catalog_engine::CatalogStore::new(db.clone()),
-        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
-        secrets: workspace_secrets,
-        provisioner: None,
-        browser,
-        sessions: sessions.clone(),
-    });
+    // Browse tests authenticate a platform_admin and assert non-authz behavior,
+    // so an allow-all PDP suffices. Authz tests rebuild with a real Cedar PDP via
+    // `attach_real_pdp`.
+    let app = build_app(
+        &db,
+        &sessions,
+        browser.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+    );
 
     Some(Fixture {
         app,
         users,
         sessions,
         db,
+        browser,
     })
 }
 
@@ -458,11 +516,14 @@ async fn browse_namespaces_tables_schema() {
 
 #[tokio::test]
 async fn browse_non_admin_forbidden() {
-    let Some(f) = setup_full(None).await else {
+    let Some(mut f) = setup_full(None).await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
     let token = session_for(&f, "browse_nonadmin", false).await;
+    // A real Cedar PDP (not the allow-all stub) must back this 403 — the principal
+    // holds no platform role/permission, so the PDP denies `warehouse:read`.
+    attach_real_pdp(&mut f).await;
     // 403 fires before any DB lookup — use a random UUID.
     let wh_id = Uuid::new_v4();
 
@@ -519,12 +580,21 @@ async fn browse_unprovisioned_warehouse_empty() {
 /// holding exactly the right permission succeeds — without the superuser bypass.
 #[tokio::test]
 async fn scoped_permission_warehouses_read_and_create() {
-    let Some(f) = setup().await else {
+    let Some(mut f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
 
+    // Seed all three ad-hoc platform roles BEFORE the real Cedar PDP snapshots the
+    // roles catalog (raw-SQL seeding emits no RolesChanged event, so the PDP never
+    // reloads). This is the required real-PDP authz assertion: a non-platform_admin
+    // `warehouse:read` principal lists warehouses (200) but is denied create (403),
+    // resolved by a real `CedarPdp` — not the allow-all stub.
     let wrong = session_for_with_permission(&f, "wh_scoped_wrong", "engine:read").await;
+    let reader = session_for_with_permission(&f, "wh_scoped_reader", "warehouse:read").await;
+    let creator = session_for_with_permission(&f, "wh_scoped_creator", "warehouse:create").await;
+    attach_real_pdp(&mut f).await;
+
     let resp = f
         .app
         .clone()
@@ -537,7 +607,6 @@ async fn scoped_permission_warehouses_read_and_create() {
         "a principal without warehouse:read must not list warehouses"
     );
 
-    let reader = session_for_with_permission(&f, "wh_scoped_reader", "warehouse:read").await;
     let resp = f
         .app
         .clone()
@@ -588,7 +657,6 @@ async fn scoped_permission_warehouses_read_and_create() {
         "warehouse:read alone must not create a warehouse"
     );
 
-    let creator = session_for_with_permission(&f, "wh_scoped_creator", "warehouse:create").await;
     let resp = f
         .app
         .clone()

@@ -2,8 +2,9 @@
 //! catalog-roles, grants, Catalog Clients, and warehouse browse/admin ops.
 //! Moved out of `egret-controlplane` into the Catalog seam (E3d-3); the router
 //! is still nested at `/api/control-plane` in `egret-server` (FE URLs
-//! unchanged). Every route is gated on `require_permission(&p, "warehouse:*")`
-//! (platform_admin bypasses) and operates over the egret RBAC store
+//! unchanged). Every route is gated on `egret_core::authz::require(&*st.pdp, &p,
+//! "warehouse:*")` (platform_admin bypasses inside the PDP) and operates over the
+//! egret RBAC store
 //! (`CatalogStore`). NOTE: warehouse creation here records the egret-side row;
 //! provisioning the lakekeeper warehouse itself is done through the
 //! [`WarehouseProvisioner`] seam, wired in the composition root (egret-bin).
@@ -23,7 +24,6 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
-use egret_auth::require_permission;
 use egret_auth::session::SessionService;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -54,6 +54,9 @@ pub struct CatalogAdminState {
     pub browser: Option<Arc<dyn WarehouseBrowser>>,
     /// Session service backing the `Auth` extractor.
     pub sessions: SessionService,
+    /// Policy decision point: every route gates on `egret_core::authz::require`
+    /// (B1b-2). `platform_admin` still bypasses inside the PDP.
+    pub pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
 }
 
 impl FromRef<CatalogAdminState> for SessionService {
@@ -351,7 +354,7 @@ async fn list_warehouses(
     State(st): State<CatalogAdminState>,
     Auth(p): Auth,
 ) -> Result<Json<Vec<WarehouseDto>>, CatalogHttpError> {
-    require_permission(&p, "warehouse:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
     Ok(Json(
         st.store
             .list_warehouses()
@@ -382,7 +385,7 @@ async fn create_warehouse(
     Auth(p): Auth,
     Json(b): Json<CreateWarehouseBody>,
 ) -> Result<(StatusCode, Json<WarehouseDto>), CatalogHttpError> {
-    require_permission(&p, "warehouse:create")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:create").await?;
     let w = st
         .store
         .create_warehouse(&b.name, b.workspace_id, b.storage_connection_id)
@@ -461,7 +464,7 @@ async fn get_warehouse(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<WarehouseDto>, CatalogHttpError> {
-    require_permission(&p, "warehouse:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
     let w = st
         .store
         .get_warehouse(id)
@@ -487,7 +490,7 @@ async fn delete_warehouse(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    require_permission(&p, "warehouse:delete")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:delete").await?;
     st.store.delete_warehouse(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -540,7 +543,7 @@ async fn list_roles(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<RoleDto>>, CatalogHttpError> {
-    require_permission(&p, "warehouse:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
     Ok(Json(
         st.store
             .list_roles(id)
@@ -571,7 +574,7 @@ async fn create_role(
     Path(id): Path<Uuid>,
     Json(b): Json<CreateRoleBody>,
 ) -> Result<(StatusCode, Json<RoleDto>), CatalogHttpError> {
-    require_permission(&p, "warehouse:create")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:create").await?;
     let desc = b.description.as_deref().filter(|d| !d.trim().is_empty());
     let r = st
         .store
@@ -598,7 +601,7 @@ async fn delete_role(
     Auth(p): Auth,
     Path(role_id): Path<Uuid>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    require_permission(&p, "warehouse:delete")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:delete").await?;
     st.store.delete_role(role_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -638,7 +641,7 @@ async fn list_grants(
     Auth(p): Auth,
     Path(role_id): Path<Uuid>,
 ) -> Result<Json<Vec<GrantDto>>, CatalogHttpError> {
-    require_permission(&p, "warehouse:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
     Ok(Json(
         st.store
             .list_grants(role_id)
@@ -675,7 +678,7 @@ async fn add_grant(
     Path(role_id): Path<Uuid>,
     Json(b): Json<AddGrantBody>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    require_permission(&p, "warehouse:create")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:create").await?;
     st.store
         .add_grant(
             role_id,
@@ -707,7 +710,7 @@ async fn revoke_grant(
     Auth(p): Auth,
     Path(grant_id): Path<Uuid>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    require_permission(&p, "warehouse:delete")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:delete").await?;
     st.store.revoke_grant(grant_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -755,7 +758,7 @@ async fn list_clients(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<ClientDto>>, CatalogHttpError> {
-    require_permission(&p, "warehouse:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
     Ok(Json(
         st.store
             .list_clients(id)
@@ -792,7 +795,7 @@ async fn create_client(
     Path(id): Path<Uuid>,
     Json(b): Json<CreateClientBody>,
 ) -> Result<(StatusCode, Json<CreatedClientDto>), CatalogHttpError> {
-    require_permission(&p, "warehouse:create")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:create").await?;
     let c = st
         .store
         .create_client(&NewClient {
@@ -830,7 +833,7 @@ async fn revoke_client(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    require_permission(&p, "warehouse:delete")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:delete").await?;
     st.store.revoke_client(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -948,7 +951,7 @@ async fn browse_namespaces(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<NamespaceDto>>, CatalogHttpError> {
-    require_permission(&p, "warehouse:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
     };
@@ -985,7 +988,7 @@ async fn browse_tables(
     Auth(p): Auth,
     Path((id, ns)): Path<(Uuid, String)>,
 ) -> Result<Json<Vec<TabularDto>>, CatalogHttpError> {
-    require_permission(&p, "warehouse:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
     };
@@ -1026,7 +1029,7 @@ async fn browse_schema(
     Auth(p): Auth,
     Path((id, ns, table)): Path<(Uuid, String, String)>,
 ) -> Result<Json<SchemaDto>, CatalogHttpError> {
-    require_permission(&p, "warehouse:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
     let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
     let b = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     let d = b.schema(&lk, &parse_ns(&ns), &table).await?;
@@ -1102,7 +1105,7 @@ async fn browse_view(
     Auth(p): Auth,
     Path((id, ns, view)): Path<(Uuid, String, String)>,
 ) -> Result<Json<Vec<ColumnDto>>, CatalogHttpError> {
-    require_permission(&p, "warehouse:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
     let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
     let b = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     let cols = b.view_columns(&lk, &parse_ns(&ns), &view).await?;
@@ -1135,7 +1138,7 @@ async fn browse_deleted(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<DeletedTabularDto>>, CatalogHttpError> {
-    require_permission(&p, "warehouse:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
     };
@@ -1183,7 +1186,7 @@ async fn undrop_tabular(
     Path(id): Path<Uuid>,
     Json(b): Json<UndropBody>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    require_permission(&p, "warehouse:update")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:update").await?;
     let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     browser.undrop(&lk, &b.kind, b.id).await?;
@@ -1225,7 +1228,7 @@ async fn set_protection(
     Path(id): Path<Uuid>,
     Json(b): Json<ProtectionBody>,
 ) -> Result<Json<ProtectionDto>, CatalogHttpError> {
-    require_permission(&p, "warehouse:update")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:update").await?;
     let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     let protected = browser
@@ -1263,7 +1266,7 @@ async fn warehouse_config(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<WarehouseConfigDto>, CatalogHttpError> {
-    require_permission(&p, "warehouse:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
     let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
     let b = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     let c = b.config(&lk).await?;
@@ -1302,7 +1305,7 @@ async fn set_warehouse_status(
     Path(id): Path<Uuid>,
     Json(b): Json<StatusBody>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    require_permission(&p, "warehouse:update")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:update").await?;
     let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     browser.set_active(&lk, b.active).await?;
@@ -1336,7 +1339,7 @@ async fn set_delete_profile_route(
     Path(id): Path<Uuid>,
     Json(b): Json<DeleteProfileBody>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    require_permission(&p, "warehouse:update")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:update").await?;
     let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     browser.set_delete_profile(&lk, b.seconds).await?;
@@ -1370,7 +1373,7 @@ async fn set_format_policy(
     Path(id): Path<Uuid>,
     Json(b): Json<FormatPolicyBody>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    require_permission(&p, "warehouse:update")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:update").await?;
     if b.versions.is_empty() {
         return Err(CatalogHttpError::BadRequest(
             "at least one format version required".into(),
@@ -1410,7 +1413,7 @@ async fn rotate_credential(
     Path(id): Path<Uuid>,
     Json(b): Json<RotateCredBody>,
 ) -> Result<StatusCode, CatalogHttpError> {
-    require_permission(&p, "warehouse:update")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:update").await?;
     let lk = lk_id(&st, id).await?.ok_or(CatalogHttpError::NotFound)?;
     let browser = st.browser.as_ref().ok_or(CatalogHttpError::NotFound)?;
     browser
@@ -1455,7 +1458,7 @@ async fn search_tabulars(
     Path(id): Path<Uuid>,
     axum::extract::Query(sq): axum::extract::Query<SearchQuery>,
 ) -> Result<Json<Vec<SearchResultDto>>, CatalogHttpError> {
-    require_permission(&p, "warehouse:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
     if sq.q.trim().is_empty() {
         return Ok(Json(vec![]));
     }
@@ -1501,7 +1504,7 @@ async fn list_tasks(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<TaskDto>>, CatalogHttpError> {
-    require_permission(&p, "warehouse:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "warehouse:read").await?;
     let (Some(lk), Some(b)) = (lk_id(&st, id).await?, st.browser.as_ref()) else {
         return Ok(Json(vec![]));
     };

@@ -1267,6 +1267,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         provisioner: catalog_provisioner,
         browser: catalog_browser,
         sessions: sessions.clone(),
+        pdp: pdp.clone(),
     });
 
     // Policy/Ranger seam admin router (E2d): the Policies console. Owns the
