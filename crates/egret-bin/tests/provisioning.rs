@@ -6,7 +6,6 @@ use egret_auth::password::hash_password;
 use egret_auth::users::UserRepo;
 use egret_core::UserId;
 use egret_metastore::Db;
-use egret_workspace::rbac::Authorizer;
 use egret_workspace::workspaces::WorkspaceRepo;
 
 async fn connect() -> Option<Db> {
@@ -53,17 +52,32 @@ async fn grant_group_binds_workspace_perms() {
         .await
         .unwrap();
 
-    let authz = Authorizer::new(db.clone());
-    let before = authz.workspace_permissions(member_id, ws.id).await.unwrap();
-    assert!(!before.contains("notebook:write"), "no perms before grant");
+    // Enforcement/permission-union now lives in the PDP; assert the durable effect of
+    // the grant directly — before it runs, the group is not yet a workspace member.
+    let members_before: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM workspace_members \
+         WHERE workspace_id = $1 AND principal_type = 'group' AND role = 'ws_editor'",
+    )
+    .bind(ws.id.0)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(members_before, 0, "no group member before grant");
 
     egret_bin::grant_group_to_workspace(&db, &slug, &group, "ws_editor", &admin_email)
         .await
         .unwrap();
 
-    let after = authz.workspace_permissions(member_id, ws.id).await.unwrap();
-    assert!(
-        after.contains("notebook:write"),
-        "group grant confers notebook:write"
+    let members_after: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM workspace_members \
+         WHERE workspace_id = $1 AND principal_type = 'group' AND role = 'ws_editor'",
+    )
+    .bind(ws.id.0)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        members_after, 1,
+        "grant binds the group as a ws_editor member"
     );
 }
