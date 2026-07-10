@@ -304,6 +304,24 @@ pub fn is_known(key: &str) -> bool {
     PERMISSIONS.iter().any(|p| p.key == key)
 }
 
+/// Actions that mutate the authorization graph itself (roles, role-permission
+/// sets, role/group assignments). Admin-only and NON-delegatable: the PDP
+/// `forbid`s them for everyone but `platform_admin`. Deliberately NOT in
+/// `PERMISSIONS` (not grantable). See the B1b-2 design.
+pub static ADMIN_GRAPH_ACTIONS: &[&str] = &[
+    "role:create",
+    "role:update",
+    "role:delete",
+    "role:assign_permission",
+    "user:assign_role",
+    "group:manage_members",
+];
+
+/// True if `key` is an admin-graph (non-delegatable) action.
+pub fn is_admin_graph(key: &str) -> bool {
+    ADMIN_GRAPH_ACTIONS.contains(&key)
+}
+
 /// Permissions at a given scope, catalog order preserved.
 pub fn at_scope(scope: Scope) -> Vec<&'static Permission> {
     PERMISSIONS.iter().filter(|p| p.scope == scope).collect()
@@ -336,6 +354,14 @@ mod tests {
         assert!(is_known("engine:create"));
         assert!(!is_known("engine:frobnicate"));
         assert!(groups().contains(&"Engines"));
+    }
+    #[test]
+    fn admin_graph_actions_are_non_grantable() {
+        assert!(is_admin_graph("role:create"));
+        assert!(!is_admin_graph("engine:read"));
+        for a in ADMIN_GRAPH_ACTIONS {
+            assert!(!is_known(a), "{a} must not be grantable");
+        }
     }
     #[test]
     fn workspace_actions_present_and_scoped() {

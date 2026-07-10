@@ -87,6 +87,27 @@ impl CedarPdp {
                 .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e:?}")))?;
             role_names.insert(id, name);
         }
+        // Non-delegatable admin-graph gate: a single static `forbid` covering the
+        // authz-graph-mutating actions, exempt only when the request context flags
+        // the subject as platform_admin. `forbid` overrides every `permit`, so even
+        // a role force-granted one of these actions cannot escalate — a non-admin
+        // is always denied. Fail-safe: a missing `is_platform_admin` flag ⇒ the
+        // `unless` is false ⇒ the forbid applies ⇒ deny.
+        let actions = egret_core::rbac::ADMIN_GRAPH_ACTIONS
+            .iter()
+            .map(|a| format!("Egret::Action::\"{a}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let forbid_src = format!(
+            "forbid(principal, action in [{actions}], resource) \
+             unless {{ context has is_platform_admin && context.is_platform_admin }};"
+        );
+        let forbid: cedar_policy::Policy = forbid_src
+            .parse()
+            .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("forbid policy: {e:?}")))?;
+        templates
+            .add(forbid)
+            .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("add forbid: {e:?}")))?;
         Ok(PdpInner {
             templates,
             role_names,
@@ -132,7 +153,17 @@ impl Pdp for CedarPdp {
             entities::link_grants(inner.templates.clone(), subject, &grants, &inner.role_names);
         let ents = entities::build_entities(subject, resource);
         let (p, a, r) = entities::request_uids(subject, action, resource);
-        let req = Request::new(p, a, r, Context::empty(), None)
+        // Feed the admin-graph `forbid` its exemption flag: true iff the subject
+        // holds a platform-scoped grant on the `platform_admin` role. Computed
+        // from the grants already loaded above — no extra query.
+        let is_admin = grants.iter().any(|g| {
+            g.scope_type == "platform"
+                && inner.role_names.get(&g.role_id).map(String::as_str) == Some("platform_admin")
+        });
+        let context =
+            Context::from_json_value(serde_json::json!({ "is_platform_admin": is_admin }), None)
+                .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("context: {e:?}")))?;
+        let req = Request::new(p, a, r, context, None)
             .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e:?}")))?;
         let resp = Authorizer::new().is_authorized(&req, &policies, &ents);
         Ok(Decision {
