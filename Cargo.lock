@@ -2522,6 +2522,7 @@ name = "egret-auth"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "argon2",
  "async-trait",
  "axum",

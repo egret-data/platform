@@ -83,7 +83,8 @@ async fn cedar_pdp_end_to_end() {
     .await
     .unwrap();
 
-    let pdp = CedarPdp::build(db.clone()).await.unwrap();
+    let bus = egret_events::EventBus::new();
+    let pdp = CedarPdp::build(db.clone(), &bus).await.unwrap();
     let u1_subject = Subject {
         user_id: u1,
         group_ids: vec![],
@@ -135,7 +136,8 @@ async fn cedar_pdp_end_to_end() {
     .await
     .unwrap();
 
-    let admin_pdp = CedarPdp::build(db.clone()).await.unwrap();
+    let bus = egret_events::EventBus::new();
+    let admin_pdp = CedarPdp::build(db.clone(), &bus).await.unwrap();
     let u2_subject = Subject {
         user_id: u2,
         group_ids: vec![],

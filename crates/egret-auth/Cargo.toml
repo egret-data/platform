@@ -32,9 +32,12 @@ time = "0.3"
 # handlers + the `AuthApi`/`OidcApi` doc structs merged in `openapi()`.
 utoipa.workspace = true
 cedar-policy.workspace = true
+arc-swap = { workspace = true }
+# Runtime for the PDP hot-reload task (`tokio::spawn`) and the `RolesChanged`
+# broadcast receiver it awaits.
+tokio.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
 tower.workspace = true
 http-body-util = "0.1"
 testcontainers.workspace = true

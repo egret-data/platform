@@ -3,27 +3,55 @@ pub mod entities;
 pub mod templates;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use cedar_policy::{
     Authorizer, Context, Decision as CedarDecision, PolicyId, PolicySet, Request, Template,
 };
 use egret_core::authz::{Decision, Pdp, Resource, Subject};
 use egret_core::Result;
+use egret_events::EventBus;
 use egret_metastore::Db;
+use tokio::sync::broadcast;
 
+use crate::events::RolesChanged;
 use crate::grants::AccessGrantStore;
 
-/// The Cedar-backed decision point. Templates are built from `role_permissions`
-/// once at construction (B1a); hot-reload on `role_permissions` changes is B2.
-#[derive(Clone)]
-pub struct CedarPdp {
-    grants: AccessGrantStore,
+/// The compiled policy state the PDP authorizes against. Held behind an
+/// `ArcSwap` so a background task can atomically swap in a freshly-loaded set
+/// when the role/permission catalog changes, without blocking readers.
+struct PdpInner {
     templates: PolicySet,
     role_names: HashMap<uuid::Uuid, String>,
 }
 
+/// The Cedar-backed decision point. Templates are built from `role_permissions`
+/// at construction (B1a) and hot-reloaded on every `RolesChanged` event (B1b).
+#[derive(Clone)]
+pub struct CedarPdp {
+    grants: AccessGrantStore,
+    db: Db,
+    inner: Arc<ArcSwap<PdpInner>>,
+}
+
 impl CedarPdp {
-    pub async fn build(db: Db) -> Result<Self> {
+    /// Build the initial template set and spawn a task that rebuilds it on every
+    /// `RolesChanged` event from `bus`.
+    pub async fn build(db: Db, bus: &EventBus) -> Result<Self> {
+        let inner = Arc::new(ArcSwap::from_pointee(Self::load_inner(&db).await?));
+        let pdp = Self {
+            grants: AccessGrantStore::new(db.clone()),
+            db,
+            inner,
+        };
+        pdp.spawn_reload(bus.subscribe::<RolesChanged>());
+        Ok(pdp)
+    }
+
+    /// The B1a `build` body: load roles + role_permissions, compile one template
+    /// per role keyed by `role:{id}`, gate the admin body on scope+name.
+    async fn load_inner(db: &Db) -> Result<PdpInner> {
         // Key templates by role_id (UUID), not name: `roles` is UNIQUE(scope,
         // name), so a workspace role can share a name with a platform role. Keying
         // by name collided across scopes → duplicate `add_template` id → `build()`
@@ -59,11 +87,30 @@ impl CedarPdp {
                 .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e:?}")))?;
             role_names.insert(id, name);
         }
-        Ok(Self {
-            grants: AccessGrantStore::new(db),
+        Ok(PdpInner {
             templates,
             role_names,
         })
+    }
+
+    fn spawn_reload(&self, mut rx: broadcast::Receiver<RolesChanged>) {
+        let db = self.db.clone();
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            // Loop until the last bus sender is dropped (`Closed`), which ends the
+            // `while let`. Both a normal event and a `Lagged` gap trigger a full
+            // reload — the reload reads the whole catalog, so a missed event is
+            // harmless as long as we rebuild afterward.
+            while let Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) = rx.recv().await {
+                match CedarPdp::load_inner(&db).await {
+                    Ok(next) => inner.store(Arc::new(next)),
+                    Err(e) => tracing::error!(
+                        error = ?e,
+                        "PDP reload failed; keeping previous policy set"
+                    ),
+                }
+            }
+        });
     }
 }
 
@@ -80,8 +127,9 @@ impl Pdp for CedarPdp {
             Resource::Platform => None,
         };
         let grants = self.grants.grants_for(subject.user_id, ws).await?;
+        let inner = self.inner.load();
         let policies =
-            entities::link_grants(self.templates.clone(), subject, &grants, &self.role_names);
+            entities::link_grants(inner.templates.clone(), subject, &grants, &inner.role_names);
         let ents = entities::build_entities(subject, resource);
         let (p, a, r) = entities::request_uids(subject, action, resource);
         let req = Request::new(p, a, r, Context::empty(), None)

@@ -90,6 +90,7 @@ testcontainers = "0.23"
 kube = { version = "0.99", features = ["client", "runtime", "derive", "ws"] }
 k8s-openapi = { version = "0.24", features = ["latest"] }
 cedar-policy = "4.11.2"
+arc-swap = "1"
 
 # Vendored mysql_async: patched to support StarRocks' JWT/OIDC auth-switch
 # (`authentication_openid_connect_client`). See third_party/mysql_async.
