@@ -391,11 +391,13 @@ async fn set_platform_roles(
     // `platform_admin` itself) mutates the authorization graph directly, so
     // this must not be delegatable — a holder of a granular permission like
     // the former `user:assign_role` could otherwise grant themselves any
-    // role. `platform_admin` only, same as the equivalent control-plane
+    // role. `user:assign_platform_role` is an admin-graph action: the PDP
+    // `forbid`s it for everyone but `platform_admin` (non-delegatable, not in
+    // the grantable catalog), same as the equivalent control-plane
     // role-assignment endpoints in `egret-controlplane/src/access/mod.rs`.
-    if !p.platform_roles.iter().any(|r| r == "platform_admin") {
-        return Err(AuthError(Error::Forbidden));
-    }
+    egret_core::authz::require(&*st.pdp, &p, "user:assign_platform_role")
+        .await
+        .map_err(AuthError)?;
     st.authz
         .replace_platform_roles(UserId(id), &body.roles)
         .await

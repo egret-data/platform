@@ -315,6 +315,7 @@ pub static ADMIN_GRAPH_ACTIONS: &[&str] = &[
     "role:assign_permission",
     "user:assign_role",
     "group:manage_members",
+    "user:assign_platform_role",
 ];
 
 /// True if `key` is an admin-graph (non-delegatable) action.

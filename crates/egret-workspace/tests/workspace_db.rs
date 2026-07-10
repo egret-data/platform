@@ -443,6 +443,76 @@ async fn set_platform_roles_rejects_delegated_permission_not_platform_admin() {
     );
 }
 
+/// B1b-final Task 1: the `set_platform_roles` gate now folds into the
+/// admin-graph `forbid` via `require(pdp, .., "user:assign_platform_role")`
+/// instead of an inline `platform_roles.contains("platform_admin")` check.
+/// This drives the migrated PDP path end-to-end through the real `CedarPdp`:
+/// a `platform_admin` is allowed (200) while a legitimate non-admin holding
+/// an unrelated platform role (`data_steward`) is denied (403), proving the
+/// forbid covers the new admin-graph action.
+#[tokio::test]
+async fn set_platform_roles_gate_is_admin_graph_forbid() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let admin = seed_user(&db).await;
+    let non_admin = seed_user(&db).await;
+    let target = seed_user(&db).await;
+    let st = ws_state(&db).await;
+    st.authz
+        .replace_platform_roles(admin, &["platform_admin".into()])
+        .await
+        .unwrap();
+    // A real, non-adversarial non-admin: holds `data_steward` (an unrelated
+    // platform role), not `platform_admin`.
+    st.authz
+        .replace_platform_roles(non_admin, &["data_steward".into()])
+        .await
+        .unwrap();
+    let app = axum::Router::new()
+        .nest("/api/admin", admin_user_router())
+        .with_state(st.clone());
+
+    let put = |actor: UserId, cookie: String| {
+        let app = app.clone();
+        async move {
+            let body =
+                serde_json::to_vec(&serde_json::json!({"roles": ["data_steward"]})).unwrap();
+            let _ = actor;
+            app.oneshot(
+                HttpRequest::builder()
+                    .method("PUT")
+                    .uri(format!("/api/admin/users/{}/platform-roles", target.0))
+                    .header("cookie", cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    // platform_admin → allowed by the `unless is_platform_admin` clause.
+    let admin_cookie = login_cookie(&db, admin, &st.sessions).await;
+    let admin_resp = put(admin, admin_cookie).await;
+    assert_eq!(
+        admin_resp.status(),
+        StatusCode::OK,
+        "platform_admin must pass the admin-graph gate"
+    );
+
+    // non-admin (data_steward, not platform_admin) → forbidden.
+    let non_admin_cookie = login_cookie(&db, non_admin, &st.sessions).await;
+    let non_admin_resp = put(non_admin, non_admin_cookie).await;
+    assert_eq!(
+        non_admin_resp.status(),
+        StatusCode::FORBIDDEN,
+        "a non-platform_admin must be denied `user:assign_platform_role` by the forbid"
+    );
+}
+
 // ── Task 9: Workspace member routes ──────────────────────────────────────────
 
 #[tokio::test]
