@@ -36,6 +36,7 @@ http-body-util = "0.1"
 url = { workspace = true }
 egret-secrets.workspace = true
 egret-auth.workspace = true
+egret-events.workspace = true
 egret-workspace.workspace = true
 async-trait.workspace = true
 chrono.workspace = true

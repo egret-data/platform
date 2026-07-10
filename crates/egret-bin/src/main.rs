@@ -983,6 +983,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         None
     };
 
+    // event bus — RoleRepo publishes RolesChanged; the Cedar PDP subscriber is wired in B1b-1
+    let bus = egret_events::EventBus::new();
+    // Cedar PDP — built from the SAME bus as RoleRepo so RolesChanged hot-reloads
+    // it (B1b-0 F1). A different EventBus would silently never reload. Defined
+    // above all seam-state constructions so `pdp.clone()` is in scope everywhere.
+    let pdp: std::sync::Arc<dyn egret_core::authz::Pdp> =
+        std::sync::Arc::new(egret_auth::pdp::CedarPdp::build(db.clone(), &bus).await?);
+
     // `secrets` (the SecretStore) is shared: the per-workspace storage layer and
     // the database block reuse the same instance for their secrets.
     let databases =
@@ -991,6 +999,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let database = Some(egret_query::DatabaseState {
         repo: databases.clone(),
         authz: Authorizer::new(db.clone()),
+        pdp: pdp.clone(),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
         workspace_secrets: workspace_secrets.clone(),
@@ -1034,16 +1043,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             sessions: sessions.clone(),
             workspaces: WorkspaceRepo::new(db.clone()),
             authz: Authorizer::new(db.clone()),
+            pdp: pdp.clone(),
             users: UserRepo::new(db.clone()),
         })
     };
-
-    // event bus — RoleRepo publishes RolesChanged; the Cedar PDP subscriber is wired in B1b-1
-    let bus = egret_events::EventBus::new();
-    // Cedar PDP — built from the SAME bus as RoleRepo so RolesChanged hot-reloads
-    // it (B1b-0 F1). A different EventBus would silently never reload.
-    let pdp: std::sync::Arc<dyn egret_core::authz::Pdp> =
-        std::sync::Arc::new(egret_auth::pdp::CedarPdp::build(db.clone(), &bus).await?);
 
     let bi = Some(egret_bi::BiState {
         saved: egret_bi::SavedQueryRepo::new(db.clone()),

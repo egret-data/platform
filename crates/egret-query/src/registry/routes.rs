@@ -29,6 +29,7 @@ use crate::registry::repo::DatabaseRepo;
 pub struct DatabaseState {
     pub repo: DatabaseRepo,
     pub authz: Authorizer,
+    pub pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
     pub sessions: SessionService,
     pub workspaces: WorkspaceRepo,
     /// Named per-workspace secret layer (Epic B). The create/update routes
@@ -84,7 +85,7 @@ async fn list(
     State(st): State<DatabaseState>,
     WsContext(ctx): WsContext,
 ) -> Result<Json<Vec<DatabaseDetailDto>>, DbApiError> {
-    st.authz.require_workspace(&ctx, PERM_MANAGE).await?;
+    egret_core::authz::require(&*st.pdp, &ctx, PERM_MANAGE).await?;
     let dbs = st.repo.list_for_workspace(ctx.workspace_id.0).await?;
     Ok(Json(dbs.into_iter().map(Into::into).collect()))
 }
@@ -140,7 +141,7 @@ async fn create(
     WsContext(ctx): WsContext,
     Json(body): Json<DatabaseInput>,
 ) -> Result<Json<DatabaseDetailDto>, DbApiError> {
-    st.authz.require_workspace(&ctx, PERM_MANAGE).await?;
+    egret_core::authz::require(&*st.pdp, &ctx, PERM_MANAGE).await?;
     let secret_id = resolve_secret_id(&st, ctx.workspace_id.0, &body, None).await?;
     let db = st
         .repo
@@ -175,7 +176,7 @@ async fn detail(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DatabaseDetailDto>, DbApiError> {
-    st.authz.require_workspace(&ctx, PERM_MANAGE).await?;
+    egret_core::authz::require(&*st.pdp, &ctx, PERM_MANAGE).await?;
     Ok(Json(
         st.repo
             .get_in_workspace(ctx.workspace_id.0, id)
@@ -208,7 +209,7 @@ async fn update(
     Path((_ws, id)): Path<(String, Uuid)>,
     Json(body): Json<DatabaseInput>,
 ) -> Result<Json<DatabaseDetailDto>, DbApiError> {
-    st.authz.require_workspace(&ctx, PERM_MANAGE).await?;
+    egret_core::authz::require(&*st.pdp, &ctx, PERM_MANAGE).await?;
     // Keep-current default: the row's existing secret id (404 if not owned).
     let existing = st.repo.current_secret_id(ctx.workspace_id.0, id).await?;
     let secret_id = resolve_secret_id(&st, ctx.workspace_id.0, &body, existing).await?;
@@ -247,7 +248,7 @@ async fn remove(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, DbApiError> {
-    st.authz.require_workspace(&ctx, PERM_MANAGE).await?;
+    egret_core::authz::require(&*st.pdp, &ctx, PERM_MANAGE).await?;
     st.repo.delete_in_workspace(ctx.workspace_id.0, id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -273,7 +274,7 @@ async fn test_saved(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> Result<Json<TestOutcome>, DbApiError> {
-    st.authz.require_workspace(&ctx, PERM_MANAGE).await?;
+    egret_core::authz::require(&*st.pdp, &ctx, PERM_MANAGE).await?;
     // Ownership check first: a foreign or absent row is 404 before any secret read.
     let db = st.repo.get_in_workspace(ctx.workspace_id.0, id).await?;
     let secret = st.repo.open_secret(id).await?;
@@ -315,7 +316,7 @@ async fn test_unsaved(
     WsContext(ctx): WsContext,
     Json(body): Json<TestInput>,
 ) -> Result<Json<TestOutcome>, DbApiError> {
-    st.authz.require_workspace(&ctx, PERM_MANAGE).await?;
+    egret_core::authz::require(&*st.pdp, &ctx, PERM_MANAGE).await?;
     let outcome = crate::registry::tester::test_connection(
         body.engine,
         &body.host,

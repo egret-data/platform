@@ -27,6 +27,7 @@ use egret_workspace::members::MemberRepo;
 use egret_workspace::rbac::Authorizer;
 use egret_workspace::workspaces::WorkspaceRepo;
 use http_body_util::BodyExt;
+use std::sync::Arc;
 use tower::ServiceExt; // oneshot
 use uuid::Uuid;
 
@@ -92,9 +93,18 @@ async fn setup() -> Option<Fixture> {
         .expect("seed ws B");
 
     let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
+    // Built-in roles (ws_admin/ws_viewer/…) + their permissions are seeded by
+    // migration 0003, so a real `CedarPdp` snapshots them as soon as it's
+    // built here — no per-test role seeding needed for this fixture.
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
     let app = workspace_database_router().with_state(DatabaseState {
         repo: DatabaseRepo::new(db.clone(), secrets, workspace_secrets.clone()),
         authz: Authorizer::new(db.clone()),
+        pdp,
         sessions: sessions.clone(),
         workspaces,
         workspace_secrets: workspace_secrets.clone(),
