@@ -2,7 +2,8 @@
 //!
 //! Global (control-plane) named secrets: every call scopes the
 //! `WorkspaceSecretStore` with `None` (rows with a NULL `workspace_id`), gated
-//! on `require_permission(&p, "secret:<action>")` (platform_admin bypasses).
+//! on `egret_core::authz::require(state.pdp, &p, "secret:<action>")` — the
+//! PDP-backed policy enforcement point (platform_admin bypasses).
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -17,7 +18,6 @@ use uuid::Uuid;
 use egret_core::http::ErrorBody;
 use egret_core::Ack;
 
-use crate::auth::require_permission;
 use crate::error::CpError;
 use crate::CpState;
 
@@ -86,7 +86,7 @@ async fn list(
     State(st): State<CpState>,
     Auth(principal): Auth,
 ) -> Result<Json<Vec<SecretDto>>, CpError> {
-    require_permission(&principal, "secret:read")?;
+    egret_core::authz::require(&*st.pdp, &principal, "secret:read").await?;
     let metas = st.secrets.list(None).await?;
     Ok(Json(metas.into_iter().map(Into::into).collect()))
 }
@@ -110,7 +110,7 @@ async fn create(
     Auth(principal): Auth,
     Json(body): Json<CreateSecretInput>,
 ) -> Result<(StatusCode, Json<SecretDto>), CpError> {
-    require_permission(&principal, "secret:create")?;
+    egret_core::authz::require(&*st.pdp, &principal, "secret:create").await?;
     let id = st
         .secrets
         .create(None, &body.name, body.description.as_deref(), &body.value)
@@ -141,7 +141,7 @@ async fn update(
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateSecretInput>,
 ) -> Result<Json<SecretDto>, CpError> {
-    require_permission(&principal, "secret:update")?;
+    egret_core::authz::require(&*st.pdp, &principal, "secret:update").await?;
     if let Some(name) = &body.name {
         st.secrets
             .rename(None, id, name, body.description.as_deref())
@@ -173,7 +173,7 @@ async fn remove(
     Auth(principal): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, CpError> {
-    require_permission(&principal, "secret:delete")?;
+    egret_core::authz::require(&*st.pdp, &principal, "secret:delete").await?;
     st.secrets.delete(None, id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

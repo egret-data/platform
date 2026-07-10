@@ -46,7 +46,10 @@ pub trait AuthTarget {
 
 impl AuthTarget for crate::Principal {
     fn subject(&self) -> Subject {
-        Subject { user_id: self.user_id, group_ids: self.group_ids.clone() }
+        Subject {
+            user_id: self.user_id,
+            group_ids: self.group_ids.clone(),
+        }
     }
     fn resource(&self) -> Resource {
         Resource::Platform
@@ -63,12 +66,12 @@ impl AuthTarget for crate::WorkspaceContext {
 }
 
 /// Enforce `action` for `target`: `Ok(())` if the PDP allows, `Error::Forbidden` otherwise.
-pub async fn require(
-    pdp: &dyn Pdp,
-    target: &impl AuthTarget,
-    action: &str,
-) -> crate::Result<()> {
-    if pdp.authorize(&target.subject(), action, &target.resource()).await?.allow {
+pub async fn require(pdp: &dyn Pdp, target: &impl AuthTarget, action: &str) -> crate::Result<()> {
+    if pdp
+        .authorize(&target.subject(), action, &target.resource())
+        .await?
+        .allow
+    {
         Ok(())
     } else {
         Err(crate::Error::Forbidden)
@@ -90,11 +93,21 @@ mod require_tests {
     use super::*;
     use crate::ids::{UserId, WorkspaceId};
 
-    struct StubPdp { allow: bool }
+    struct StubPdp {
+        allow: bool,
+    }
     #[async_trait::async_trait]
     impl Pdp for StubPdp {
-        async fn authorize(&self, _s: &Subject, _a: &str, _r: &Resource) -> crate::Result<Decision> {
-            Ok(Decision { allow: self.allow, reasons: vec![] })
+        async fn authorize(
+            &self,
+            _s: &Subject,
+            _a: &str,
+            _r: &Resource,
+        ) -> crate::Result<Decision> {
+            Ok(Decision {
+                allow: self.allow,
+                reasons: vec![],
+            })
         }
     }
 
@@ -118,7 +131,11 @@ mod require_tests {
     #[test]
     fn workspace_context_targets_its_workspace() {
         let ws = WorkspaceId::new();
-        let ctx = crate::WorkspaceContext { workspace_id: ws, principal: principal(), workspace_role: "ws_viewer".into() };
+        let ctx = crate::WorkspaceContext {
+            workspace_id: ws,
+            principal: principal(),
+            workspace_role: "ws_viewer".into(),
+        };
         match ctx.resource() {
             Resource::Workspace(w) => assert_eq!(w, ws),
             _ => panic!("expected workspace resource"),
