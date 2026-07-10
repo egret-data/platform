@@ -1238,12 +1238,14 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // credential-rotation push-down onto provisioned warehouses; the warehouse
     // admin router itself moved to egret-catalog-engine (E3d-3, see
     // `catalog_admin` below).
+    // event bus — RoleRepo publishes RolesChanged; the Cedar PDP subscriber is wired in B1b-1
+    let bus = egret_events::EventBus::new();
     let control_plane = Some(egret_controlplane::CpState {
         storage: egret_catalog_engine::CatalogStore::new(db.clone()),
         storage_registry: egret_storage::StorageRegistry::new(db.clone()),
         users: egret_auth::users::UserRepo::new(db.clone()),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
-        roles: egret_auth::roles::RoleRepo::new(db.clone()),
+        roles: egret_auth::roles::RoleRepo::new(db.clone(), bus.clone()),
         secrets: workspace_secrets.clone(),
         sessions: sessions.clone(),
         browser: catalog_browser.clone(),

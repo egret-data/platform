@@ -59,7 +59,7 @@ async fn setup() -> Option<Fixture> {
         storage_registry: egret_storage::StorageRegistry::new(db.clone()),
         users: users.clone(),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
-        roles: egret_auth::roles::RoleRepo::new(db.clone()),
+        roles: egret_auth::roles::RoleRepo::new(db.clone(), egret_events::EventBus::new()),
         secrets: workspace_secrets,
         sessions: sessions.clone(),
         browser: None,
@@ -491,7 +491,7 @@ async fn setup_isolated_schema() -> Option<Fixture> {
         storage_registry: egret_storage::StorageRegistry::new(db.clone()),
         users: users.clone(),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
-        roles: egret_auth::roles::RoleRepo::new(db.clone()),
+        roles: egret_auth::roles::RoleRepo::new(db.clone(), egret_events::EventBus::new()),
         secrets: workspace_secrets,
         sessions: sessions.clone(),
         browser: None,
@@ -1062,7 +1062,7 @@ async fn role_assignees_lists_users_and_groups() {
         return;
     };
     let admin = session_for(&f, "role_assignees_admin", true).await;
-    let roles = egret_auth::roles::RoleRepo::new(f.db.clone());
+    let roles = egret_auth::roles::RoleRepo::new(f.db.clone(), egret_events::EventBus::new());
     let groups = egret_auth::groups::GroupRepo::new(f.db.clone());
 
     // A fresh custom role, with no assignees yet.

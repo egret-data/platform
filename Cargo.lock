@@ -2522,6 +2522,7 @@ name = "egret-auth"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "argon2",
  "async-trait",
  "axum",
@@ -2531,6 +2532,7 @@ dependencies = [
  "chrono",
  "egret-config",
  "egret-core",
+ "egret-events",
  "egret-metastore",
  "egret-secrets",
  "hex",
@@ -2601,6 +2603,7 @@ dependencies = [
  "egret-core",
  "egret-engine-mgmt",
  "egret-engine-mgmt-api",
+ "egret-events",
  "egret-kernel",
  "egret-machine-idp",
  "egret-metastore",
@@ -2699,6 +2702,7 @@ dependencies = [
  "egret-auth",
  "egret-catalog-engine",
  "egret-core",
+ "egret-events",
  "egret-metastore",
  "egret-secrets",
  "egret-storage",
@@ -2777,6 +2781,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "serde_json",
+]
+
+[[package]]
+name = "egret-events"
+version = "0.1.0"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]

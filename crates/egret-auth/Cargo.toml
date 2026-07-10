@@ -9,6 +9,7 @@ egret-core = { workspace = true, features = ["http", "token"] }
 egret-metastore.workspace = true
 egret-config.workspace = true
 egret-secrets.workspace = true
+egret-events = { workspace = true }
 axum.workspace = true
 axum-extra = { version = "0.10", features = ["cookie", "cookie-private"] }
 sqlx.workspace = true
@@ -31,9 +32,12 @@ time = "0.3"
 # handlers + the `AuthApi`/`OidcApi` doc structs merged in `openapi()`.
 utoipa.workspace = true
 cedar-policy.workspace = true
+arc-swap = { workspace = true }
+# Runtime for the PDP hot-reload task (`tokio::spawn`) and the `RolesChanged`
+# broadcast receiver it awaits.
+tokio.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
 tower.workspace = true
 http-body-util = "0.1"
 testcontainers.workspace = true

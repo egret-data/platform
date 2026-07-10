@@ -245,7 +245,8 @@ async fn cedar_pdp_reproduces_legacy_decisions() {
     add_ws_member_group(&db, w1, group, "ws_editor").await;
 
     // Build the PDP ONCE, after all roles/permissions exist.
-    let pdp = CedarPdp::build(db.clone()).await.unwrap();
+    let bus = egret_events::EventBus::new();
+    let pdp = CedarPdp::build(db.clone(), &bus).await.unwrap();
 
     let actions = [
         "engine:create",

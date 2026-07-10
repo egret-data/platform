@@ -22,7 +22,7 @@ async fn full_role_lifecycle() {
         eprintln!("DATABASE_URL unset — skipping");
         return;
     };
-    let roles = RoleRepo::new(db.clone());
+    let roles = RoleRepo::new(db.clone(), egret_events::EventBus::new());
     let users = UserRepo::new(db.clone());
 
     // Create a workspace-scoped role with a description.
