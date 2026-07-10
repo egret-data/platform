@@ -1,4 +1,5 @@
-//! Router smoke test — unauthenticated requests rejected.
+//! Router smoke test — unauthenticated requests rejected — plus a PDP-backed
+//! workspace-authz gate (this seam migrated onto `egret_core::authz::require`).
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use egret_bi::{
@@ -6,9 +7,31 @@ use egret_bi::{
     DashboardRepo, DatasetRepo, SavedQueryRepo, SchemaService,
 };
 use egret_metastore::Db;
+use std::sync::Arc;
 use tower::ServiceExt;
+use uuid::Uuid;
 
-fn build_state(db: Db) -> BiState {
+/// Incidental PDP for the `requires_auth` smoke tests: those requests are
+/// rejected at the session layer (401) before any authz check runs, so an
+/// allow-all stub keeps them light. The `pdp_backed_*` test below builds a real
+/// `CedarPdp` instead — an allow-all stub would falsely 200 the denied case.
+struct AllowAllPdp;
+#[async_trait::async_trait]
+impl egret_core::authz::Pdp for AllowAllPdp {
+    async fn authorize(
+        &self,
+        _s: &egret_core::authz::Subject,
+        _a: &str,
+        _r: &egret_core::authz::Resource,
+    ) -> egret_core::Result<egret_core::authz::Decision> {
+        Ok(egret_core::authz::Decision {
+            allow: true,
+            reasons: vec![],
+        })
+    }
+}
+
+fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> BiState {
     BiState {
         saved: SavedQueryRepo::new(db.clone()),
         schema: SchemaService::new(),
@@ -27,6 +50,7 @@ fn build_state(db: Db) -> BiState {
         ),
         workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
         authz: egret_workspace::rbac::Authorizer::new(db.clone()),
+        pdp,
         charts: ChartRepo::new(db.clone()),
         datasets: DatasetRepo::new(db.clone()),
         dashboards: DashboardRepo::new(db.clone()),
@@ -38,7 +62,7 @@ async fn state() -> Option<BiState> {
     let url = std::env::var("DATABASE_URL").ok()?;
     let db = Db::connect(&url, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
-    Some(build_state(db))
+    Some(build_state(db, Arc::new(AllowAllPdp)))
 }
 
 #[tokio::test]
@@ -134,4 +158,146 @@ async fn dashboard_list_requires_auth() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Seed a workspace-scoped role holding `permission` and return its id + name.
+/// The PDP snapshots `roles`/`role_permissions` at build, so this must run
+/// BEFORE the `CedarPdp::build` below.
+async fn seed_workspace_role(db: &Db, permission: &str) -> (Uuid, String) {
+    let name = format!("bi_authz_{}", Uuid::new_v4().simple());
+    let role_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (scope, name, description) \
+         VALUES ('workspace', $1, 'bi authz test role') RETURNING id",
+    )
+    .bind(&name)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert role");
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
+        .bind(role_id)
+        .bind(permission)
+        .execute(&db.pool)
+        .await
+        .expect("grant permission");
+    (role_id, name)
+}
+
+/// Create a local user, add them to `ws` under workspace `role` (the
+/// `sync_workspace_grant` trigger mirrors this into `access_grants`, which the
+/// PDP reads), and return an authenticated session cookie token.
+async fn member_session(
+    db: &Db,
+    sessions: &egret_auth::session::SessionService,
+    ws: Uuid,
+    role: &str,
+) -> String {
+    let uid: Uuid =
+        sqlx::query_scalar("INSERT INTO users (provider, email) VALUES ('local', $1) RETURNING id")
+            .bind(format!("m_{}@egret.local", Uuid::new_v4().simple()))
+            .fetch_one(&db.pool)
+            .await
+            .expect("insert user");
+    sqlx::query(
+        "INSERT INTO workspace_members (workspace_id, principal_type, principal_id, role) \
+         VALUES ($1, 'user', $2, $3)",
+    )
+    .bind(ws)
+    .bind(uid)
+    .bind(role)
+    .execute(&db.pool)
+    .await
+    .expect("add workspace member");
+    sessions
+        .create(egret_core::ids::UserId(uid), "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token
+}
+
+/// PDP-backed workspace authz (this seam migrated onto
+/// `egret_core::authz::require`): a workspace member whose workspace role grants
+/// `dashboard:read` — resolved by a real `CedarPdp`, not the allow-all stub —
+/// can GET the dashboards list (200); a member whose role lacks it is denied
+/// (403). The 403 fires on the handler's first line, exercising the migrated
+/// decision point (an allow-all stub would falsely 200 it).
+#[tokio::test]
+async fn pdp_backed_dashboard_read_gate() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    // Workspace + owner.
+    let owner: Uuid =
+        sqlx::query_scalar("INSERT INTO users (provider, email) VALUES ('local', $1) RETURNING id")
+            .bind(format!("owner_{}@egret.local", Uuid::new_v4().simple()))
+            .fetch_one(&db.pool)
+            .await
+            .expect("insert owner");
+    let slug = format!("bi-authz-{}", Uuid::new_v4().simple());
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'BI Authz Test', $2, 'active') RETURNING id",
+    )
+    .bind(&slug)
+    .bind(owner)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert workspace");
+
+    // Two workspace roles: one grants dashboard:read, one only chart:read. Seed
+    // BEFORE building the PDP so it snapshots them.
+    let (_reader_role, reader_name) = seed_workspace_role(&db, "dashboard:read").await;
+    let (_other_role, other_name) = seed_workspace_role(&db, "chart:read").await;
+
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let st = build_state(db.clone(), pdp);
+    let sessions = st.sessions.clone();
+
+    // Members (workspace_members insert → trigger writes access_grants).
+    let reader = member_session(&db, &sessions, ws, &reader_name).await;
+    let non_reader = member_session(&db, &sessions, ws, &other_name).await;
+
+    let app = dashboard_router().with_state(st);
+
+    // Member with dashboard:read → 200.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/ws/{slug}/dashboards"))
+                .header("Cookie", format!("egret_session={reader}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "workspace member holding dashboard:read must list dashboards"
+    );
+
+    // Member without dashboard:read → 403 (denied by the PDP `require`).
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/ws/{slug}/dashboards"))
+                .header("Cookie", format!("egret_session={non_reader}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "workspace member lacking dashboard:read must be denied"
+    );
 }

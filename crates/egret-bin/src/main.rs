@@ -1038,6 +1038,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         })
     };
 
+    // event bus — RoleRepo publishes RolesChanged; the Cedar PDP subscriber is wired in B1b-1
+    let bus = egret_events::EventBus::new();
+    // Cedar PDP — built from the SAME bus as RoleRepo so RolesChanged hot-reloads
+    // it (B1b-0 F1). A different EventBus would silently never reload.
+    let pdp: std::sync::Arc<dyn egret_core::authz::Pdp> =
+        std::sync::Arc::new(egret_auth::pdp::CedarPdp::build(db.clone(), &bus).await?);
+
     let bi = Some(egret_bi::BiState {
         saved: egret_bi::SavedQueryRepo::new(db.clone()),
         schema: egret_bi::SchemaService::new(),
@@ -1045,6 +1052,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
+        pdp: pdp.clone(),
         charts: egret_bi::ChartRepo::new(db.clone()),
         datasets: egret_bi::DatasetRepo::new(db.clone()),
         dashboards: egret_bi::DashboardRepo::new(db.clone()),
@@ -1238,12 +1246,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // credential-rotation push-down onto provisioned warehouses; the warehouse
     // admin router itself moved to egret-catalog-engine (E3d-3, see
     // `catalog_admin` below).
-    // event bus — RoleRepo publishes RolesChanged; the Cedar PDP subscriber is wired in B1b-1
-    let bus = egret_events::EventBus::new();
-    // Cedar PDP — built from the SAME bus as RoleRepo so RolesChanged hot-reloads
-    // it (B1b-0 F1). A different EventBus would silently never reload.
-    let pdp: std::sync::Arc<dyn egret_core::authz::Pdp> =
-        std::sync::Arc::new(egret_auth::pdp::CedarPdp::build(db.clone(), &bus).await?);
     let control_plane = Some(egret_controlplane::CpState {
         storage: egret_catalog_engine::CatalogStore::new(db.clone()),
         storage_registry: egret_storage::StorageRegistry::new(db.clone()),

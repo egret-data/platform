@@ -37,5 +37,6 @@ egret-secrets.workspace = true
 url = { workspace = true }
 egret-query.workspace = true
 egret-auth.workspace = true
+egret-events.workspace = true
 egret-workspace.workspace = true
 chrono.workspace = true
