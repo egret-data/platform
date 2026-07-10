@@ -1,7 +1,9 @@
 //! Postgres-backed store for platform RBAC roles, their permissions, and
 //! principal (user/group) assignments.
 
+use crate::events::RolesChanged;
 use egret_core::Result;
+use egret_events::EventBus;
 use egret_metastore::Db;
 use uuid::Uuid;
 
@@ -17,6 +19,7 @@ pub struct RoleRow {
 #[derive(Clone)]
 pub struct RoleRepo {
     db: Db,
+    bus: EventBus,
 }
 
 /// Names of roles seeded by migration 0003 (non-deletable; name/scope immutable).
@@ -34,8 +37,8 @@ pub fn is_seeded(name: &str) -> bool {
 }
 
 impl RoleRepo {
-    pub fn new(db: Db) -> Self {
-        Self { db }
+    pub fn new(db: Db, bus: EventBus) -> Self {
+        Self { db, bus }
     }
 
     /// List all roles, ordered by scope then name.
@@ -153,7 +156,10 @@ impl RoleRepo {
         .fetch_one(&self.db.pool)
         .await;
         match res {
-            Ok(id) => Ok(id),
+            Ok(id) => {
+                self.bus.publish(RolesChanged);
+                Ok(id)
+            }
             Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Err(
                 egret_core::Error::Conflict(format!("role already exists: {scope}/{name}")),
             ),
@@ -180,6 +186,7 @@ impl RoleRepo {
             .execute(&self.db.pool)
             .await
             .map_err(db_err)?;
+        self.bus.publish(RolesChanged);
         Ok(())
     }
 
@@ -203,6 +210,7 @@ impl RoleRepo {
             .map_err(db_err)?;
         }
         tx.commit().await.map_err(db_err)?;
+        self.bus.publish(RolesChanged);
         Ok(())
     }
 
