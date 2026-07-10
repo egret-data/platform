@@ -34,6 +34,7 @@ use crate::typegen::generic_type;
 
 #[derive(Clone)]
 pub struct BiState {
+    pub db: egret_metastore::Db,
     pub saved: SavedQueryRepo,
     pub schema: SchemaService,
     pub databases: DatabaseRepo,

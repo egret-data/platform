@@ -44,7 +44,15 @@ where
             .filter(|w| w.status == "active")
             .ok_or_else(|| AuthError(Error::NotFound(format!("workspace: {slug}"))))?;
 
-        // 4. Membership: platform_admin bypass, else must hold ≥1 workspace role.
+        // 4. Membership: platform_admin bypass, else a workspace role, else an
+        //    object-guest. An object-guest is a NON-member who holds an
+        //    object-scoped grant on some object in this workspace (a share
+        //    recipient). We admit them with the display-only sentinel role
+        //    `object_guest`, which carries NO permissions: workspace-level
+        //    `require(&ctx, …)` still denies them (no workspace grant), so only
+        //    the specific objects they were granted are reachable — and only via
+        //    `require_object`, which asks the PDP. `workspace_role` is never used
+        //    for enforcement; it is display/precedence metadata only.
         let is_admin = principal
             .platform_roles
             .iter()
@@ -57,10 +65,17 @@ where
                 .workspace_roles_for(principal.user_id, ws.id)
                 .await
                 .map_err(AuthError)?;
-            roles
-                .into_iter()
-                .max_by_key(|r| workspace_role_rank(r))
-                .ok_or(AuthError(Error::Forbidden))?
+            match roles.into_iter().max_by_key(|r| workspace_role_rank(r)) {
+                Some(r) => r,
+                None if authz
+                    .has_object_grant_in_workspace(principal.user_id, ws.id)
+                    .await
+                    .map_err(AuthError)? =>
+                {
+                    "object_guest".to_string()
+                }
+                None => return Err(AuthError(Error::Forbidden)),
+            }
         };
 
         Ok(WsContext(WorkspaceContext {

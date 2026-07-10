@@ -1050,6 +1050,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     };
 
     let bi = Some(egret_bi::BiState {
+        db: db.clone(),
         saved: egret_bi::SavedQueryRepo::new(db.clone()),
         schema: egret_bi::SchemaService::new(),
         databases: databases.clone(),

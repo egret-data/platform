@@ -33,6 +33,7 @@ impl egret_core::authz::Pdp for AllowAllPdp {
 
 fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> BiState {
     BiState {
+        db: db.clone(),
         saved: SavedQueryRepo::new(db.clone()),
         schema: SchemaService::new(),
         databases: egret_query::DatabaseRepo::new(
