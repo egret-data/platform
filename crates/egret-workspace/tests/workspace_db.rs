@@ -445,8 +445,7 @@ async fn set_platform_roles_gate_is_admin_graph_forbid() {
     let put = |actor: UserId, cookie: String| {
         let app = app.clone();
         async move {
-            let body =
-                serde_json::to_vec(&serde_json::json!({"roles": ["data_steward"]})).unwrap();
+            let body = serde_json::to_vec(&serde_json::json!({"roles": ["data_steward"]})).unwrap();
             let _ = actor;
             app.oneshot(
                 HttpRequest::builder()
