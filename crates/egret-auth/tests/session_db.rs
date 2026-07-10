@@ -236,6 +236,31 @@ async fn platform_role_via_group_appears_in_principal() {
 }
 
 #[tokio::test]
+async fn validate_populates_principal_group_ids() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let uid = seed_user(&db).await;
+    let gid: uuid::Uuid = sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
+        .bind(format!("g-{}", uuid::Uuid::new_v4().simple()))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
+        .bind(uid.0)
+        .bind(gid)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let svc = SessionService::new(db.clone(), Duration::hours(24), Duration::minutes(60));
+    let issued = svc.create(uid, "a", "").await.unwrap();
+    let principal = svc.validate(&issued.token).await.unwrap().unwrap();
+    assert!(principal.group_ids.iter().any(|g| g.0 == gid));
+}
+
+#[tokio::test]
 async fn permissions_resolve_direct_group_and_empty() {
     let Some(db) = connect().await else {
         eprintln!("skip");
