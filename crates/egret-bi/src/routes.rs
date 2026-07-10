@@ -40,6 +40,7 @@ pub struct BiState {
     pub sessions: SessionService,
     pub workspaces: WorkspaceRepo,
     pub authz: Authorizer,
+    pub pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
     pub datasets: crate::dataset::DatasetRepo,
     pub charts: crate::chart::ChartRepo,
     pub dashboards: crate::dashboard::DashboardRepo,
@@ -128,8 +129,7 @@ async fn save(
     WsContext(ctx): WsContext,
     Json(b): Json<SaveQuery>,
 ) -> Result<Json<SavedQueryDto>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, PERM)
+    egret_core::authz::require(&*st.pdp, &ctx, PERM)
         .await
         .map_err(BiApiError::from)?;
     let q = st
@@ -162,8 +162,7 @@ async fn list(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
 ) -> Result<Json<Vec<SavedQueryDto>>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, PERM)
+    egret_core::authz::require(&*st.pdp, &ctx, PERM)
         .await
         .map_err(BiApiError::from)?;
     let qs = st
@@ -194,8 +193,7 @@ async fn load(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<SavedQueryDto>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, PERM)
+    egret_core::authz::require(&*st.pdp, &ctx, PERM)
         .await
         .map_err(BiApiError::from)?;
     let q = st
@@ -229,8 +227,7 @@ async fn update(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<SaveQuery>,
 ) -> Result<Json<SavedQueryDto>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, PERM)
+    egret_core::authz::require(&*st.pdp, &ctx, PERM)
         .await
         .map_err(BiApiError::from)?;
     require_owner(&st, &ctx, id).await?;
@@ -262,8 +259,7 @@ async fn remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, PERM)
+    egret_core::authz::require(&*st.pdp, &ctx, PERM)
         .await
         .map_err(BiApiError::from)?;
     require_owner(&st, &ctx, id).await?;
@@ -297,8 +293,7 @@ async fn conn_spec_perm(
     db: Uuid,
     perm: &str,
 ) -> Result<ConnSpec, BiApiError> {
-    st.authz
-        .require_workspace(ctx, perm)
+    egret_core::authz::require(&*st.pdp, ctx, perm)
         .await
         .map_err(BiApiError::from)?;
     let granted = st
@@ -541,8 +536,7 @@ async fn ds_set_folder(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<crate::model::SetFolder>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DS_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_dataset_in_ws(&st, &ctx, id).await?;
@@ -667,8 +661,7 @@ async fn ds_list(
     WsContext(ctx): WsContext,
     AxQuery(q): AxQuery<ListQuery>,
 ) -> Result<Json<Vec<DatasetSummaryDto>>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DS_READ)
+    egret_core::authz::require(&*st.pdp, &ctx, DS_READ)
         .await
         .map_err(BiApiError::from)?;
     let rows = st
@@ -704,8 +697,7 @@ async fn ds_trash(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DS_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_dataset_in_ws(&st, &ctx, id).await?;
@@ -737,8 +729,7 @@ async fn ds_restore(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DS_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_dataset_in_ws(&st, &ctx, id).await?;
@@ -770,8 +761,7 @@ async fn ds_bookmark_add(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DS_READ)
+    egret_core::authz::require(&*st.pdp, &ctx, DS_READ)
         .await
         .map_err(BiApiError::from)?;
     require_dataset_in_ws(&st, &ctx, id).await?;
@@ -803,8 +793,7 @@ async fn ds_bookmark_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DS_READ)
+    egret_core::authz::require(&*st.pdp, &ctx, DS_READ)
         .await
         .map_err(BiApiError::from)?;
     require_dataset_in_ws(&st, &ctx, id).await?;
@@ -836,8 +825,7 @@ async fn ds_get(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DS_READ)
+    egret_core::authz::require(&*st.pdp, &ctx, DS_READ)
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(load_detail(&st, id).await?))
@@ -866,8 +854,7 @@ async fn ds_update(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<UpdateDataset>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DS_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_dataset_owner(&st, &ctx, id).await?;
@@ -899,8 +886,7 @@ async fn ds_refresh(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DS_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_dataset_owner(&st, &ctx, id).await?;
@@ -941,8 +927,7 @@ async fn ds_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DS_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_dataset_owner(&st, &ctx, id).await?;
@@ -1128,8 +1113,7 @@ async fn ds_delete_metric(
     WsContext(ctx): WsContext,
     Path((_w, id, metric_id)): Path<(String, Uuid, Uuid)>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DS_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_dataset_owner(&st, &ctx, id).await?;
@@ -1217,8 +1201,7 @@ async fn ds_update_column(
     Path((_w, id, column_name)): Path<(String, Uuid, String)>,
     Json(b): Json<UpdateColumnBody>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DS_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_dataset_owner(&st, &ctx, id).await?;
@@ -1291,8 +1274,7 @@ async fn ds_delete_column(
     WsContext(ctx): WsContext,
     Path((_w, id, column_name)): Path<(String, Uuid, String)>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DS_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_dataset_owner(&st, &ctx, id).await?;
@@ -1346,8 +1328,7 @@ async fn ch_set_folder(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<crate::model::SetFolder>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, CH_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, CH_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_chart_in_ws(&st, &ctx, id).await?;
@@ -1382,8 +1363,7 @@ async fn ch_duplicate(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<crate::model::ChartDto>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, CH_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, CH_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_chart_in_ws(&st, &ctx, id).await?;
@@ -1445,8 +1425,7 @@ async fn ch_list(
     WsContext(ctx): WsContext,
     AxQuery(q): AxQuery<ListQuery>,
 ) -> Result<Json<Vec<crate::model::ChartDto>>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, CH_READ)
+    egret_core::authz::require(&*st.pdp, &ctx, CH_READ)
         .await
         .map_err(BiApiError::from)?;
     let rows = st
@@ -1480,8 +1459,7 @@ async fn ch_create(
     WsContext(ctx): WsContext,
     Json(b): Json<CreateChart>,
 ) -> Result<Json<crate::model::ChartDto>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, CH_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, CH_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     let ds = st
@@ -1530,8 +1508,7 @@ async fn ch_get(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<crate::model::ChartDto>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, CH_READ)
+    egret_core::authz::require(&*st.pdp, &ctx, CH_READ)
         .await
         .map_err(BiApiError::from)?;
     require_chart_in_ws(&st, &ctx, id).await?;
@@ -1567,8 +1544,7 @@ async fn ch_update(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<UpdateChart>,
 ) -> Result<Json<crate::model::ChartDto>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, CH_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, CH_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_chart_in_ws(&st, &ctx, id).await?;
@@ -1624,8 +1600,7 @@ async fn ch_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, CH_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, CH_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_chart_in_ws(&st, &ctx, id).await?;
@@ -1654,8 +1629,7 @@ async fn ch_data(
     WsContext(ctx): WsContext,
     Json(b): Json<ChartDataBody>,
 ) -> Result<Json<ChartDataResponse>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, CH_READ)
+    egret_core::authz::require(&*st.pdp, &ctx, CH_READ)
         .await
         .map_err(BiApiError::from)?;
     let ds = st
@@ -1712,8 +1686,7 @@ async fn ch_trash(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, CH_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, CH_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_chart_in_ws(&st, &ctx, id).await?;
@@ -1745,8 +1718,7 @@ async fn ch_restore(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, CH_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, CH_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_chart_in_ws(&st, &ctx, id).await?;
@@ -1778,8 +1750,7 @@ async fn ch_bookmark_add(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, CH_READ)
+    egret_core::authz::require(&*st.pdp, &ctx, CH_READ)
         .await
         .map_err(BiApiError::from)?;
     require_chart_in_ws(&st, &ctx, id).await?;
@@ -1811,8 +1782,7 @@ async fn ch_bookmark_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, CH_READ)
+    egret_core::authz::require(&*st.pdp, &ctx, CH_READ)
         .await
         .map_err(BiApiError::from)?;
     require_chart_in_ws(&st, &ctx, id).await?;
@@ -1871,8 +1841,7 @@ async fn db_set_folder(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<crate::model::SetFolder>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DB_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, DB_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_dashboard_in_ws(&st, &ctx, id).await?;
@@ -1964,8 +1933,7 @@ async fn db_list(
     WsContext(ctx): WsContext,
     AxQuery(q): AxQuery<ListQuery>,
 ) -> Result<Json<Vec<DashboardSummaryDto>>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DB_READ)
+    egret_core::authz::require(&*st.pdp, &ctx, DB_READ)
         .await
         .map_err(BiApiError::from)?;
     let rows = st
@@ -1998,8 +1966,7 @@ async fn db_create(
     WsContext(ctx): WsContext,
     Json(b): Json<CreateDashboard>,
 ) -> Result<Json<DashboardDetailDto>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DB_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, DB_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     let d = st
@@ -2038,8 +2005,7 @@ async fn db_get(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DashboardDetailDto>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DB_READ)
+    egret_core::authz::require(&*st.pdp, &ctx, DB_READ)
         .await
         .map_err(BiApiError::from)?;
     require_dashboard_in_ws(&st, &ctx, id).await?;
@@ -2072,8 +2038,7 @@ async fn db_update(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<UpdateDashboard>,
 ) -> Result<Json<DashboardDetailDto>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DB_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, DB_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_dashboard_in_ws(&st, &ctx, id).await?;
@@ -2121,8 +2086,7 @@ async fn db_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DB_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, DB_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_dashboard_in_ws(&st, &ctx, id).await?;
@@ -2152,8 +2116,7 @@ async fn db_trash(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DB_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, DB_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_dashboard_in_ws(&st, &ctx, id).await?;
@@ -2186,8 +2149,7 @@ async fn db_restore(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DB_MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, DB_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     require_dashboard_in_ws(&st, &ctx, id).await?;
@@ -2220,8 +2182,7 @@ async fn db_duplicate(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DashboardDetailDto>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DB_READ)
+    egret_core::authz::require(&*st.pdp, &ctx, DB_READ)
         .await
         .map_err(BiApiError::from)?;
     require_dashboard_in_ws(&st, &ctx, id).await?;
@@ -2257,8 +2218,7 @@ async fn db_bookmark_add(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DB_READ)
+    egret_core::authz::require(&*st.pdp, &ctx, DB_READ)
         .await
         .map_err(BiApiError::from)?;
     require_dashboard_in_ws(&st, &ctx, id).await?;
@@ -2290,8 +2250,7 @@ async fn db_bookmark_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    st.authz
-        .require_workspace(&ctx, DB_READ)
+    egret_core::authz::require(&*st.pdp, &ctx, DB_READ)
         .await
         .map_err(BiApiError::from)?;
     require_dashboard_in_ws(&st, &ctx, id).await?;
@@ -2375,8 +2334,7 @@ async fn folders_list(
     Path((_w, kind)): Path<(String, String)>,
 ) -> Result<Json<Vec<crate::model::FolderDto>>, BiApiError> {
     let (etype, read, _manage) = kind_perms(&kind).ok_or(Error::NotFound("kind".into()))?;
-    st.authz
-        .require_workspace(&ctx, read)
+    egret_core::authz::require(&*st.pdp, &ctx, read)
         .await
         .map_err(BiApiError::from)?;
     let rows = st
@@ -2413,8 +2371,7 @@ async fn folders_create(
     Json(b): Json<crate::model::CreateFolder>,
 ) -> Result<Json<crate::model::FolderDto>, BiApiError> {
     let (etype, _read, manage) = kind_perms(&kind).ok_or(Error::NotFound("kind".into()))?;
-    st.authz
-        .require_workspace(&ctx, manage)
+    egret_core::authz::require(&*st.pdp, &ctx, manage)
         .await
         .map_err(BiApiError::from)?;
     let f = st
@@ -2455,8 +2412,7 @@ async fn folders_rename(
     Json(b): Json<crate::model::RenameFolder>,
 ) -> Result<Json<crate::model::FolderDto>, BiApiError> {
     let (etype, _read, manage) = kind_perms(&kind).ok_or(Error::NotFound("kind".into()))?;
-    st.authz
-        .require_workspace(&ctx, manage)
+    egret_core::authz::require(&*st.pdp, &ctx, manage)
         .await
         .map_err(BiApiError::from)?;
     require_folder(&st, &ctx, id, etype).await?;
@@ -2492,8 +2448,7 @@ async fn folders_delete(
     Path((_w, kind, id)): Path<(String, String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
     let (etype, _read, manage) = kind_perms(&kind).ok_or(Error::NotFound("kind".into()))?;
-    st.authz
-        .require_workspace(&ctx, manage)
+    egret_core::authz::require(&*st.pdp, &ctx, manage)
         .await
         .map_err(BiApiError::from)?;
     require_folder(&st, &ctx, id, etype).await?;

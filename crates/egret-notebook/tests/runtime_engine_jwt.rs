@@ -29,6 +29,25 @@ impl egret_notebook::engine_token::EngineTokenMinter for StubMinter {
     }
 }
 
+/// Incidental PDP: these tests call `build_notebook_runtime` directly (not
+/// the `runtime` HTTP handler), so `st.pdp` is never consulted — the field
+/// only needs to exist to satisfy `NotebookState`'s constructor.
+struct AllowAllPdp;
+#[async_trait::async_trait]
+impl egret_core::authz::Pdp for AllowAllPdp {
+    async fn authorize(
+        &self,
+        _s: &egret_core::authz::Subject,
+        _a: &str,
+        _r: &egret_core::authz::Resource,
+    ) -> egret_core::Result<egret_core::authz::Decision> {
+        Ok(egret_core::authz::Decision {
+            allow: true,
+            reasons: vec![],
+        })
+    }
+}
+
 /// Minter for a user with no stored refresh token — always `NoRefreshToken`.
 struct NoRefreshMinter;
 
@@ -70,6 +89,7 @@ async fn runtime_manifest_carries_engine_jwt(pool: sqlx::PgPool) {
         ),
         workspaces,
         authz: Authorizer::new(db.clone()),
+        pdp: Arc::new(AllowAllPdp),
         users: UserRepo::new(db.clone()),
         catalog_base_url: "http://localhost:8181".into(),
         engine_minter: Arc::new(StubMinter),
@@ -113,6 +133,7 @@ async fn runtime_manifest_no_refresh_token_is_ok(pool: sqlx::PgPool) {
         ),
         workspaces,
         authz: Authorizer::new(db.clone()),
+        pdp: Arc::new(AllowAllPdp),
         users: UserRepo::new(db.clone()),
         catalog_base_url: "http://localhost:8181".into(),
         engine_minter: Arc::new(NoRefreshMinter),

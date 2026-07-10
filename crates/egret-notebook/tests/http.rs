@@ -76,6 +76,22 @@ async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
     (status, json)
 }
 
+/// Builds a real `CedarPdp` snapshotted against `db`'s already-migrated
+/// `role_permissions` (the `notebook:read`/`notebook:write` grants seeded by
+/// migration `0037_notebooks.sql` for `ws_admin`/`ws_editor`/`ws_viewer`).
+/// Almost every test below asserts a 403, and most of those are the
+/// *ownership* checks in `read_scoped`/`write_scoped` that run only after the
+/// PDP gate passes — an allow-all stub would let those still exercise
+/// correctly, but a real PDP is what the migrated `require()` call site now
+/// actually depends on, so we build it for real here.
+async fn build_pdp(db: &Db) -> std::sync::Arc<dyn egret_core::authz::Pdp> {
+    std::sync::Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    )
+}
+
 async fn setup(pool: sqlx::PgPool) -> Fixture {
     let db = Db { pool };
 
@@ -104,11 +120,14 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         .await
         .expect("seed ws B");
 
+    let pdp = build_pdp(&db).await;
+
     let app = notebook_router().with_state(NotebookState {
         store: NotebookStore::new(db.clone()),
         sessions: sessions.clone(),
         workspaces,
         authz: Authorizer::new(db.clone()),
+        pdp,
         users: UserRepo::new(db.clone()),
         catalog_base_url: "http://localhost:8181".into(),
         engine_minter: Arc::new(FakeEngineMinter),
@@ -596,6 +615,69 @@ async fn cell_crud_happy_path_and_nested_idor(pool: sqlx::PgPool) {
         .unwrap();
     let (_status, json) = into_json(resp).await;
     assert_eq!(json["cells"].as_array().unwrap().len(), 1);
+}
+
+/// PDP-backed workspace authz (this seam migrated onto
+/// `egret_core::authz::require`): a `ws_viewer` member — granted
+/// `notebook:read` but NOT `notebook:write` by migration `0037_notebooks.sql`
+/// — can GET a public notebook (200, resolved by the real `CedarPdp`), but is
+/// denied (403) on a PATCH before the ownership check (`write_scoped`) even
+/// runs. This exercises the migrated `require()` call site itself, not just
+/// the app-level ownership rules the other tests above cover.
+#[sqlx::test(migrations = "../../migrations")]
+async fn pdp_backed_read_write_gate(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
+    let (_viewer_uid, viewer_tok) = add_member(&f, f.ws_a, "viewer", "ws_viewer").await;
+
+    let id = create_nb(&f, &f.slug_a, &owner_tok).await;
+    let uri = format!("/ws/{}/notebooks/{id}", f.slug_a);
+
+    // Owner publishes it so the viewer's read passes the ownership check too.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &uri,
+            &owner_tok,
+            Some(serde_json::json!({ "is_public": true })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "owner can publish");
+
+    // ws_viewer has notebook:read → GET succeeds (200).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &uri, &viewer_tok, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "ws_viewer has notebook:read; GET a public notebook must succeed"
+    );
+
+    // ws_viewer lacks notebook:write → PATCH is denied at the PDP gate (403),
+    // before write_scoped's ownership check ever runs.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &uri,
+            &viewer_tok,
+            Some(serde_json::json!({ "name": "hijacked" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "ws_viewer lacks notebook:write; PATCH must be denied by the PDP gate"
+    );
 }
 
 #[sqlx::test(migrations = "../../migrations")]

@@ -40,6 +40,7 @@ pub struct NotebookState {
     pub sessions: SessionService,
     pub workspaces: WorkspaceRepo,
     pub authz: Authorizer,
+    pub pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
     /// UserRepo for `ensure_username`.
     pub users: UserRepo,
     /// Base URL of the Iceberg REST catalog (e.g. `http://localhost:8181`).
@@ -163,8 +164,7 @@ async fn list(
     WsContext(ctx): WsContext,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<NotebookSummary>>, NotebookApiError> {
-    st.authz
-        .require_workspace(&ctx, READ)
+    egret_core::authz::require(&*st.pdp, &ctx, READ)
         .await
         .map_err(NotebookApiError::from)?;
     let nbs = st
@@ -192,8 +192,7 @@ async fn create(
     WsContext(ctx): WsContext,
     Json(b): Json<CreateNotebook>,
 ) -> Result<(StatusCode, Json<NotebookDetail>), NotebookApiError> {
-    st.authz
-        .require_workspace(&ctx, WRITE)
+    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
         .await
         .map_err(NotebookApiError::from)?;
     let name = b.name.as_deref().unwrap_or("Untitled");
@@ -230,8 +229,7 @@ async fn get_one(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> Result<Json<NotebookDetail>, NotebookApiError> {
-    st.authz
-        .require_workspace(&ctx, READ)
+    egret_core::authz::require(&*st.pdp, &ctx, READ)
         .await
         .map_err(NotebookApiError::from)?;
     // Enforce ws-scope + (own OR public) before reading.
@@ -267,8 +265,7 @@ async fn update(
     Path((_ws, id)): Path<(String, Uuid)>,
     Json(b): Json<UpdateNotebook>,
 ) -> Result<Json<NotebookDetail>, NotebookApiError> {
-    st.authz
-        .require_workspace(&ctx, WRITE)
+    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
         .await
         .map_err(NotebookApiError::from)?;
     write_scoped(&st, &ctx, id).await?;
@@ -302,8 +299,7 @@ async fn remove(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> Result<StatusCode, NotebookApiError> {
-    st.authz
-        .require_workspace(&ctx, WRITE)
+    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
         .await
         .map_err(NotebookApiError::from)?;
     write_scoped(&st, &ctx, id).await?;
@@ -333,8 +329,7 @@ async fn trash(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> Result<StatusCode, NotebookApiError> {
-    st.authz
-        .require_workspace(&ctx, WRITE)
+    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
         .await
         .map_err(NotebookApiError::from)?;
     write_scoped(&st, &ctx, id).await?;
@@ -364,8 +359,7 @@ async fn restore(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> Result<StatusCode, NotebookApiError> {
-    st.authz
-        .require_workspace(&ctx, WRITE)
+    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
         .await
         .map_err(NotebookApiError::from)?;
     write_scoped(&st, &ctx, id).await?;
@@ -399,8 +393,7 @@ async fn set_folder(
     Path((_ws, id)): Path<(String, Uuid)>,
     Json(b): Json<SetFolder>,
 ) -> Result<StatusCode, NotebookApiError> {
-    st.authz
-        .require_workspace(&ctx, WRITE)
+    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
         .await
         .map_err(NotebookApiError::from)?;
     write_scoped(&st, &ctx, id).await?;
@@ -436,8 +429,7 @@ async fn bookmark_add(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> Result<StatusCode, NotebookApiError> {
-    st.authz
-        .require_workspace(&ctx, READ)
+    egret_core::authz::require(&*st.pdp, &ctx, READ)
         .await
         .map_err(NotebookApiError::from)?;
     read_scoped(&st, &ctx, id).await?;
@@ -467,8 +459,7 @@ async fn bookmark_remove(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> Result<StatusCode, NotebookApiError> {
-    st.authz
-        .require_workspace(&ctx, READ)
+    egret_core::authz::require(&*st.pdp, &ctx, READ)
         .await
         .map_err(NotebookApiError::from)?;
     read_scoped(&st, &ctx, id).await?;
@@ -502,8 +493,7 @@ async fn add_cell(
     Path((_ws, id)): Path<(String, Uuid)>,
     Json(b): Json<CreateCell>,
 ) -> Result<(StatusCode, Json<NotebookDetail>), NotebookApiError> {
-    st.authz
-        .require_workspace(&ctx, WRITE)
+    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
         .await
         .map_err(NotebookApiError::from)?;
     write_scoped(&st, &ctx, id).await?;
@@ -549,8 +539,7 @@ async fn update_cell(
     Path((_ws, id, cid)): Path<(String, Uuid, Uuid)>,
     Json(b): Json<UpdateCell>,
 ) -> Result<StatusCode, NotebookApiError> {
-    st.authz
-        .require_workspace(&ctx, WRITE)
+    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
         .await
         .map_err(NotebookApiError::from)?;
     write_scoped(&st, &ctx, id).await?;
@@ -583,8 +572,7 @@ async fn delete_cell(
     WsContext(ctx): WsContext,
     Path((_ws, id, cid)): Path<(String, Uuid, Uuid)>,
 ) -> Result<StatusCode, NotebookApiError> {
-    st.authz
-        .require_workspace(&ctx, WRITE)
+    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
         .await
         .map_err(NotebookApiError::from)?;
     write_scoped(&st, &ctx, id).await?;
@@ -615,8 +603,7 @@ async fn reorder(
     Path((_ws, id)): Path<(String, Uuid)>,
     Json(b): Json<ReorderCells>,
 ) -> Result<StatusCode, NotebookApiError> {
-    st.authz
-        .require_workspace(&ctx, WRITE)
+    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
         .await
         .map_err(NotebookApiError::from)?;
     write_scoped(&st, &ctx, id).await?;
@@ -640,8 +627,7 @@ async fn get_settings(
     State(st): State<NotebookState>,
     WsContext(ctx): WsContext,
 ) -> Result<Json<NotebookSettings>, NotebookApiError> {
-    st.authz
-        .require_workspace(&ctx, READ)
+    egret_core::authz::require(&*st.pdp, &ctx, READ)
         .await
         .map_err(NotebookApiError::from)?;
     let settings = st.store.get_settings(ctx.workspace_id.0).await?;
@@ -667,8 +653,7 @@ async fn update_settings(
     WsContext(ctx): WsContext,
     Json(body): Json<UpdateNotebookSettings>,
 ) -> Result<Json<NotebookSettings>, NotebookApiError> {
-    st.authz
-        .require_workspace(&ctx, MANAGE)
+    egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
         .await
         .map_err(NotebookApiError::from)?;
     // Atomic: the engine id set is validated up front, then replaced in one

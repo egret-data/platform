@@ -28,3 +28,6 @@ tokio.workspace = true
 tower.workspace = true
 http-body-util = "0.1"
 egret-config.workspace = true
+# Real `CedarPdp` in the authz-gate tests needs an `EventBus` to build against
+# (the migrated `require()` gates resolve through `WorkspaceState.pdp`).
+egret-events.workspace = true

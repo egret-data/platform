@@ -53,6 +53,26 @@ impl egret_notebook::engine_token::EngineTokenMinter for StubMinter {
     }
 }
 
+/// Incidental PDP: this test wires `NotebookState` only to satisfy
+/// `egret_kernel::routes::KernelState::notebook_docs` (an `Arc<dyn
+/// NotebookDocsPort>`), which never consults `pdp` — the field only needs to
+/// exist to compile.
+struct AllowAllPdp;
+#[async_trait::async_trait]
+impl egret_core::authz::Pdp for AllowAllPdp {
+    async fn authorize(
+        &self,
+        _s: &egret_core::authz::Subject,
+        _a: &str,
+        _r: &egret_core::authz::Resource,
+    ) -> egret_core::Result<egret_core::authz::Decision> {
+        Ok(egret_core::authz::Decision {
+            allow: true,
+            reasons: vec![],
+        })
+    }
+}
+
 // ── Fixture ──────────────────────────────────────────────────────────────────
 
 struct Fixture {
@@ -68,6 +88,39 @@ struct Fixture {
     owner: UserId,
     db: Db,
     launcher: Arc<FakeLauncher>,
+    /// Name of a workspace-scoped role seeded with NO permissions (in
+    /// particular, no `notebook:read`) — for `pdp_backed_notebook_read_gate`.
+    no_read_role: String,
+}
+
+/// Builds a real `CedarPdp` snapshotted against `db`'s already-migrated
+/// `role_permissions` (the `notebook:read`/`notebook:write` grants seeded by
+/// migration `0037_notebooks.sql` for `ws_admin`/`ws_editor`/`ws_viewer`).
+/// This is what `KernelState.pdp` now depends on for the migrated `require()`
+/// call sites, so tests that assert 403/200 on those gates need the real thing
+/// (an allow-all stub would falsely 200 the denied case).
+async fn build_pdp(db: &Db) -> Arc<dyn egret_core::authz::Pdp> {
+    Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    )
+}
+
+/// Seed a workspace-scoped role that grants NO permissions (in particular, no
+/// `notebook:read`). Must be seeded BEFORE `build_pdp` runs — the `CedarPdp`
+/// snapshots `roles`/`role_permissions` at build time.
+async fn seed_role_without_notebook_read(db: &Db) -> String {
+    let name = format!("kernel_no_read_{}", Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO roles (scope, name, description) \
+         VALUES ('workspace', $1, 'kernel authz test role: no notebook:read')",
+    )
+    .bind(&name)
+    .execute(&db.pool)
+    .await
+    .expect("insert role");
+    name
 }
 
 async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
@@ -120,10 +173,17 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         sessions: sessions.clone(),
         workspaces: workspaces.clone(),
         authz: Authorizer::new(db.clone()),
+        pdp: Arc::new(AllowAllPdp),
         users: UserRepo::new(db.clone()),
         catalog_base_url: "http://localhost:8181".into(),
         engine_minter: Arc::new(StubMinter),
     };
+
+    // Seed a permission-less workspace role BEFORE building the PDP so its
+    // snapshot includes it as a valid-but-empty role.
+    let no_read_role = seed_role_without_notebook_read(&db).await;
+
+    let pdp = build_pdp(&db).await;
 
     let state = KernelState {
         manager,
@@ -133,6 +193,7 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         sessions: sessions.clone(),
         workspaces: workspaces.clone(),
         authz: Authorizer::new(db.clone()),
+        pdp,
         api_url: "http://localhost:3000".into(),
         notebook_kernels: egret_kernel::NotebookKernelStore::new(db.clone()),
         proxy: Arc::new(egret_kernel::BackendWsProxy),
@@ -161,6 +222,7 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         owner,
         db,
         launcher,
+        no_read_role,
     }
 }
 
@@ -275,6 +337,42 @@ async fn add_member(
         .add(workspace, "user", uid.0, role, f.owner)
         .await
         .expect("seed member");
+    let token = f
+        .sessions
+        .create(uid, "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token;
+    (uid, token)
+}
+
+/// Like `add_member`, but inserts the `workspace_members` row directly via
+/// SQL, bypassing `MemberRepo::add`'s built-in-role allow-list — needed to
+/// seed a member under the custom PDP-test role (`f.no_read_role`), which
+/// isn't one of the three built-in workspace roles.
+async fn add_member_with_role(
+    f: &Fixture,
+    workspace: WorkspaceId,
+    tag: &str,
+    role: &str,
+) -> (UserId, String) {
+    let email = format!("{tag}_{}@egret.local", Uuid::new_v4().simple());
+    let uid = f
+        .users
+        .insert_local(&email, "Test", "x")
+        .await
+        .expect("insert user");
+    sqlx::query(
+        "INSERT INTO workspace_members (workspace_id, principal_type, principal_id, role, added_by) \
+         VALUES ($1, 'user', $2, $3, $4)",
+    )
+    .bind(workspace.0)
+    .bind(uid.0)
+    .bind(role)
+    .bind(f.owner.0)
+    .execute(&f.db.pool)
+    .await
+    .expect("seed member with custom role");
     let token = f
         .sessions
         .create(uid, "test", "127.0.0.1")
@@ -538,6 +636,48 @@ async fn non_member_post_is_rejected_before_provisioning(pool: sqlx::PgPool) {
         0,
         "launcher.ensure must NOT be called for an unauthorized request; ensured={:?}",
         inner.ensured.iter().map(|(k, _)| k).collect::<Vec<_>>()
+    );
+}
+
+/// PDP-backed workspace authz (this seam migrated onto
+/// `egret_core::authz::require`): a `ws_viewer` member — granted
+/// `notebook:read` by migration `0037_notebooks.sql` — reaches `GET
+/// /ws/{ws}/kernel` (200, resolved by the real `CedarPdp`), while a member
+/// whose workspace role grants NO permissions is denied (403) at the same
+/// gate. This exercises the migrated `require()` call site directly (as
+/// opposed to `non_member_post_is_rejected_before_provisioning` above, which
+/// covers the outsider/no-membership case).
+#[sqlx::test(migrations = "../../migrations")]
+async fn pdp_backed_notebook_read_gate(pool: sqlx::PgPool) {
+    let f = setup(pool).await;
+    let uri = format!("/ws/{}/kernel", f.slug);
+
+    // ws_viewer has notebook:read → GET succeeds (200).
+    let (_uid, viewer_tok) = add_member(&f, f.ws, "reader", "ws_viewer").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &uri, &viewer_tok))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "ws_viewer has notebook:read; GET must succeed"
+    );
+
+    // A member whose role grants no permissions → denied (403) at the PDP gate.
+    let (_uid2, no_perm_tok) = add_member_with_role(&f, f.ws, "norights", &f.no_read_role).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &uri, &no_perm_tok))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "member lacking notebook:read must be denied by the PDP gate"
     );
 }
 

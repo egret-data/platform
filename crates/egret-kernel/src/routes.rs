@@ -1,7 +1,7 @@
 //! Kernel lifecycle HTTP routes: `POST /ws/{workspace}/kernel` (start),
 //! `GET` (status), `DELETE` (stop).
 //!
-//! All handlers are gated by `authz.require_workspace(&ctx, "notebook:read")`
+//! All handlers are gated by `egret_core::authz::require(&*st.pdp, &ctx, "notebook:read")`
 //! BEFORE any provisioning work. The kernel key is always keyed to the
 //! caller's own `(user_id, workspace_id)` — never a path/body-supplied user.
 
@@ -51,6 +51,7 @@ pub struct KernelState {
     pub sessions: SessionService,
     pub workspaces: WorkspaceRepo,
     pub authz: Authorizer,
+    pub pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
     /// Base URL of the egret HTTP API forwarded to the kernel process as
     /// `EGRET_API_URL`.  Example: `"http://localhost:3000"`.
     pub api_url: String,
@@ -166,8 +167,7 @@ async fn start(
     State(st): State<KernelState>,
     WsContext(ctx): WsContext,
 ) -> Result<Json<crate::manager::KernelStatus>, KernelApiError> {
-    st.authz
-        .require_workspace(&ctx, "notebook:read")
+    egret_core::authz::require(&*st.pdp, &ctx, "notebook:read")
         .await
         .map_err(KernelApiError::from)?;
 
@@ -212,8 +212,7 @@ async fn status(
     State(st): State<KernelState>,
     WsContext(ctx): WsContext,
 ) -> Result<axum::response::Response, KernelApiError> {
-    st.authz
-        .require_workspace(&ctx, "notebook:read")
+    egret_core::authz::require(&*st.pdp, &ctx, "notebook:read")
         .await
         .map_err(KernelApiError::from)?;
 
@@ -247,8 +246,7 @@ async fn stop(
     State(st): State<KernelState>,
     WsContext(ctx): WsContext,
 ) -> Result<StatusCode, KernelApiError> {
-    st.authz
-        .require_workspace(&ctx, "notebook:read")
+    egret_core::authz::require(&*st.pdp, &ctx, "notebook:read")
         .await
         .map_err(KernelApiError::from)?;
 
@@ -288,8 +286,7 @@ async fn connect(
     WsContext(ctx): WsContext,
     Path((_ws, nb)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, KernelApiError> {
-    st.authz
-        .require_workspace(&ctx, "notebook:read")
+    egret_core::authz::require(&*st.pdp, &ctx, "notebook:read")
         .await
         .map_err(KernelApiError::from)?;
 
@@ -411,8 +408,7 @@ async fn channels(
     Path((_ws, nb)): Path<(String, Uuid)>,
     upgrade: WebSocketUpgrade,
 ) -> Result<axum::response::Response, KernelApiError> {
-    st.authz
-        .require_workspace(&ctx, "notebook:read")
+    egret_core::authz::require(&*st.pdp, &ctx, "notebook:read")
         .await
         .map_err(KernelApiError::from)?;
 
@@ -521,8 +517,7 @@ async fn authorize_notebook(
     ctx: &egret_core::WorkspaceContext,
     nb: Uuid,
 ) -> Result<(), KernelApiError> {
-    st.authz
-        .require_workspace(ctx, "notebook:read")
+    egret_core::authz::require(&*st.pdp, ctx, "notebook:read")
         .await
         .map_err(KernelApiError::from)?;
 

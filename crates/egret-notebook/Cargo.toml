@@ -28,3 +28,4 @@ tower.workspace = true
 http-body-util = "0.1"
 egret-auth.workspace = true
 egret-workspace.workspace = true
+egret-events.workspace = true

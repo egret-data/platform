@@ -43,3 +43,4 @@ futures-channel.workspace = true
 # depends only on the `egret-analytics-api` Port (E5c-1).
 egret-notebook.workspace = true
 egret-kernel = { path = ".", features = ["test-util"] }
+egret-events.workspace = true

@@ -935,14 +935,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| "http://localhost:8080".into());
 
-    let workspace = WorkspaceState {
-        workspaces: WorkspaceRepo::new(db.clone()),
-        members: MemberRepo::new(db.clone()),
-        authz: Authorizer::new(db.clone()),
-        users: users.clone(),
-        sessions: sessions.clone(),
-    };
-
     let oidc = if config.oidc.enabled {
         use axum_extra::extract::cookie::Key;
         use base64::Engine;
@@ -983,6 +975,23 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         None
     };
 
+    // event bus — RoleRepo publishes RolesChanged; the Cedar PDP subscriber is wired in B1b-1
+    let bus = egret_events::EventBus::new();
+    // Cedar PDP — built from the SAME bus as RoleRepo so RolesChanged hot-reloads
+    // it (B1b-0 F1). A different EventBus would silently never reload. Defined
+    // above all seam-state constructions so `pdp.clone()` is in scope everywhere.
+    let pdp: std::sync::Arc<dyn egret_core::authz::Pdp> =
+        std::sync::Arc::new(egret_auth::pdp::CedarPdp::build(db.clone(), &bus).await?);
+
+    let workspace = WorkspaceState {
+        workspaces: WorkspaceRepo::new(db.clone()),
+        members: MemberRepo::new(db.clone()),
+        authz: Authorizer::new(db.clone()),
+        pdp: pdp.clone(),
+        users: users.clone(),
+        sessions: sessions.clone(),
+    };
+
     // `secrets` (the SecretStore) is shared: the per-workspace storage layer and
     // the database block reuse the same instance for their secrets.
     let databases =
@@ -991,6 +1000,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let database = Some(egret_query::DatabaseState {
         repo: databases.clone(),
         authz: Authorizer::new(db.clone()),
+        pdp: pdp.clone(),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
         workspace_secrets: workspace_secrets.clone(),
@@ -1034,6 +1044,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             sessions: sessions.clone(),
             workspaces: WorkspaceRepo::new(db.clone()),
             authz: Authorizer::new(db.clone()),
+            pdp: pdp.clone(),
             users: UserRepo::new(db.clone()),
         })
     };
@@ -1045,6 +1056,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
+        pdp: pdp.clone(),
         charts: egret_bi::ChartRepo::new(db.clone()),
         datasets: egret_bi::DatasetRepo::new(db.clone()),
         dashboards: egret_bi::DashboardRepo::new(db.clone()),
@@ -1077,6 +1089,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
+        pdp: pdp.clone(),
         users: UserRepo::new(db.clone()),
         catalog_base_url: catalog_base_url.clone(),
         engine_minter: engine_minter.clone(),
@@ -1137,6 +1150,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
+        pdp: pdp.clone(),
         api_url,
         notebook_kernels: egret_kernel::NotebookKernelStore::new(db.clone()),
         proxy: std::sync::Arc::new(egret_kernel::BackendWsProxy),
@@ -1238,12 +1252,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // credential-rotation push-down onto provisioned warehouses; the warehouse
     // admin router itself moved to egret-catalog-engine (E3d-3, see
     // `catalog_admin` below).
-    // event bus — RoleRepo publishes RolesChanged; the Cedar PDP subscriber is wired in B1b-1
-    let bus = egret_events::EventBus::new();
-    // Cedar PDP — built from the SAME bus as RoleRepo so RolesChanged hot-reloads
-    // it (B1b-0 F1). A different EventBus would silently never reload.
-    let pdp: std::sync::Arc<dyn egret_core::authz::Pdp> =
-        std::sync::Arc::new(egret_auth::pdp::CedarPdp::build(db.clone(), &bus).await?);
     let control_plane = Some(egret_controlplane::CpState {
         storage: egret_catalog_engine::CatalogStore::new(db.clone()),
         storage_registry: egret_storage::StorageRegistry::new(db.clone()),

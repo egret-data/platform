@@ -38,6 +38,7 @@ pub struct EngineState {
     pub sessions: SessionService,
     pub workspaces: WorkspaceRepo,
     pub authz: Authorizer,
+    pub pdp: Arc<dyn egret_core::authz::Pdp>,
     pub users: UserRepo,
 }
 
@@ -73,8 +74,7 @@ async fn authorize(
     ctx: &egret_core::WorkspaceContext,
     database_id: Uuid,
 ) -> Result<(), EngineApiError> {
-    st.authz
-        .require_workspace(ctx, PERM)
+    egret_core::authz::require(&*st.pdp, ctx, PERM)
         .await
         .map_err(EngineApiError::from)?;
     let granted = st
@@ -182,8 +182,7 @@ async fn status(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> Result<Json<QueryStatusDto>, EngineApiError> {
-    st.authz
-        .require_workspace(&ctx, PERM)
+    egret_core::authz::require(&*st.pdp, &ctx, PERM)
         .await
         .map_err(EngineApiError::from)?;
     let q = owned(&st, &ctx, id).await?;
@@ -230,8 +229,7 @@ async fn results(
     Path((_ws, id)): Path<(String, Uuid)>,
     AxQuery(p): AxQuery<Page>,
 ) -> Result<Json<ResultsPage>, EngineApiError> {
-    st.authz
-        .require_workspace(&ctx, PERM)
+    egret_core::authz::require(&*st.pdp, &ctx, PERM)
         .await
         .map_err(EngineApiError::from)?;
     let q = owned(&st, &ctx, id).await?;
@@ -276,8 +274,7 @@ async fn results_csv(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, uuid::Uuid)>,
 ) -> Result<axum::response::Response, EngineApiError> {
-    st.authz
-        .require_workspace(&ctx, PERM)
+    egret_core::authz::require(&*st.pdp, &ctx, PERM)
         .await
         .map_err(EngineApiError::from)?;
     let q = owned(&st, &ctx, id).await?;
@@ -383,8 +380,7 @@ async fn cancel(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, EngineApiError> {
-    st.authz
-        .require_workspace(&ctx, PERM)
+    egret_core::authz::require(&*st.pdp, &ctx, PERM)
         .await
         .map_err(EngineApiError::from)?;
     let _q = owned(&st, &ctx, id).await?;
@@ -408,8 +404,7 @@ async fn history(
     State(st): State<EngineState>,
     WsContext(ctx): WsContext,
 ) -> Result<Json<Vec<QueryListItem>>, EngineApiError> {
-    st.authz
-        .require_workspace(&ctx, PERM)
+    egret_core::authz::require(&*st.pdp, &ctx, PERM)
         .await
         .map_err(EngineApiError::from)?;
     let qs = st

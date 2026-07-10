@@ -87,8 +87,7 @@ pub async fn runtime(
     WsContext(ctx): WsContext,
 ) -> Result<Json<NotebookRuntime>, NotebookApiError> {
     // 1. Authorization check.
-    st.authz
-        .require_workspace(&ctx, "notebook:read")
+    egret_core::authz::require(&*st.pdp, &ctx, "notebook:read")
         .await
         .map_err(NotebookApiError::from)?;
 
