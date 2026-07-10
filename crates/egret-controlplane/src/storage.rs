@@ -20,7 +20,6 @@ use uuid::Uuid;
 use egret_core::http::ErrorBody;
 use egret_core::Ack;
 
-use crate::auth::require_permission;
 use crate::error::CpError;
 use crate::CpState;
 
@@ -122,7 +121,7 @@ async fn download_object(
     Path(id): Path<Uuid>,
     axum::extract::Query(dq): axum::extract::Query<DownloadQuery>,
 ) -> Result<axum::response::Response, CpError> {
-    require_permission(&principal, "storage:read")?;
+    egret_core::authz::require(&*st.pdp, &principal, "storage:read").await?;
     let (store, bucket) = open_store(&st, id).await?;
     use egret_storage::ObjectStore as _;
     let uri = format!("s3://{bucket}/{}", dq.key);
@@ -220,7 +219,7 @@ async fn browse_objects(
     Path(id): Path<Uuid>,
     axum::extract::Query(bq): axum::extract::Query<BrowseQuery>,
 ) -> Result<Json<ListingDto>, CpError> {
-    require_permission(&principal, "storage:read")?;
+    egret_core::authz::require(&*st.pdp, &principal, "storage:read").await?;
     let (store, _bucket) = open_store(&st, id).await?;
     use egret_storage::ObjectStore as _;
     let listing = store
@@ -284,7 +283,7 @@ async fn list(
     State(st): State<CpState>,
     Auth(principal): Auth,
 ) -> Result<Json<Vec<StorageDto>>, CpError> {
-    require_permission(&principal, "storage:read")?;
+    egret_core::authz::require(&*st.pdp, &principal, "storage:read").await?;
     let conns = st.storage_registry.list_storage_conns().await?;
     Ok(Json(conns.into_iter().map(Into::into).collect()))
 }
@@ -308,7 +307,7 @@ async fn create(
     Auth(principal): Auth,
     Json(body): Json<StorageInput>,
 ) -> Result<(StatusCode, Json<StorageDto>), CpError> {
-    require_permission(&principal, "storage:create")?;
+    egret_core::authz::require(&*st.pdp, &principal, "storage:create").await?;
     let secret_ref = resolve_secret_ref(&st, &body).await?;
     let conn = st
         .storage_registry
@@ -335,7 +334,7 @@ async fn detail(
     Auth(principal): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<StorageDto>, CpError> {
-    require_permission(&principal, "storage:read")?;
+    egret_core::authz::require(&*st.pdp, &principal, "storage:read").await?;
     let conn = st
         .storage_registry
         .get_storage_conn(id)
@@ -366,7 +365,7 @@ async fn update(
     Path(id): Path<Uuid>,
     Json(body): Json<StorageInput>,
 ) -> Result<Json<StorageDto>, CpError> {
-    require_permission(&principal, "storage:update")?;
+    egret_core::authz::require(&*st.pdp, &principal, "storage:update").await?;
     let secret_ref = resolve_secret_ref(&st, &body).await?;
     let updated = st
         .storage_registry
@@ -424,7 +423,7 @@ async fn remove(
     Auth(principal): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, CpError> {
-    require_permission(&principal, "storage:delete")?;
+    egret_core::authz::require(&*st.pdp, &principal, "storage:delete").await?;
     if !st.storage_registry.delete_storage_conn(id).await? {
         return Err(CpError::NotFound);
     }
