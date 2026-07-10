@@ -15,7 +15,6 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use egret_auth::principal::Auth;
-use egret_auth::require_permission;
 use egret_auth::session::SessionService;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -47,6 +46,9 @@ pub struct PolicyAdminState {
     /// In-cluster URL Trino pods use to reach egret's REST catalog + token
     /// endpoint (e.g. `http://egret:8080`); rendered into the plugin config.
     pub engine_egret_url: String,
+    /// Policy decision point: every route gates on `egret_core::authz::require`
+    /// (B1b-2). `platform_admin` still bypasses inside the PDP.
+    pub pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
 }
 
 impl FromRef<PolicyAdminState> for SessionService {
@@ -320,7 +322,7 @@ async fn resource_lookup(
     Auth(p): Auth,
     Query(qp): Query<ResourceLookupQuery>,
 ) -> Result<Json<Vec<String>>, PolicyHttpError> {
-    require_permission(&p, "policy:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
     let svc = st.store.get_service(&qp.service).await?;
     let mut out: Vec<String> = Vec::new();
 
@@ -396,7 +398,7 @@ async fn list_policies(
     Auth(p): Auth,
     Query(qp): Query<ListQuery>,
 ) -> Result<Json<Vec<PolicySummary>>, PolicyHttpError> {
-    require_permission(&p, "policy:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
     let svc = st.store.get_service(&qp.service).await?;
     let mut out: Vec<PolicySummary> = st
         .store
@@ -439,7 +441,7 @@ async fn get_policy(
     Auth(p): Auth,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, PolicyHttpError> {
-    require_permission(&p, "policy:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
     let row = st.store.get_policy(id).await?;
     let mut body = row.policy_jsonb;
     if let Value::Object(m) = &mut body {
@@ -465,7 +467,7 @@ async fn list_profiles(
     State(st): State<PolicyAdminState>,
     Auth(p): Auth,
 ) -> Result<Json<Vec<ProfileDto>>, PolicyHttpError> {
-    require_permission(&p, "policy:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
     let engines = st.engines.list_engine_bindings().await?;
     let counts = st.store.policy_counts().await?;
     let profiles = st
@@ -519,7 +521,7 @@ async fn trino_config(
     Auth(p): Auth,
     Path(service): Path<String>,
 ) -> Result<Json<Vec<ConfigFile>>, PolicyHttpError> {
-    require_permission(&p, "policy:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
     let _ = st.store.get_service(&service).await?; // 404 if the profile doesn't exist
     let base = st.engine_egret_url.trim_end_matches('/');
 
@@ -580,7 +582,7 @@ async fn seed_defaults(
     Auth(p): Auth,
     Path(service): Path<String>,
 ) -> Result<Json<Value>, PolicyHttpError> {
-    require_permission(&p, "policy:seed")?;
+    egret_core::authz::require(&*st.pdp, &p, "policy:seed").await?;
     let svc = st.store.get_service(&service).await?;
     let created = st
         .store
@@ -611,7 +613,7 @@ async fn get_service_def(
     Auth(p): Auth,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, PolicyHttpError> {
-    require_permission(&p, "policy:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
     let def_name = match st.store.get_service(&name).await {
         Ok(svc) => svc.r#type,
         Err(_) => name,
@@ -663,7 +665,7 @@ async fn list_principals(
     Auth(p): Auth,
     Query(qp): Query<PrincipalQuery>,
 ) -> Result<Json<Vec<Principal>>, PolicyHttpError> {
-    require_permission(&p, "policy:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "policy:read").await?;
     let q = qp.q.unwrap_or_default().to_lowercase();
     let want_users = qp.kind.as_deref() != Some("group");
     let want_groups = qp.kind.as_deref() != Some("user");
@@ -754,7 +756,7 @@ async fn create_policy(
     Auth(p): Auth,
     Json(v): Json<Value>,
 ) -> Result<Json<Value>, PolicyHttpError> {
-    require_permission(&p, "policy:create")?;
+    egret_core::authz::require(&*st.pdp, &p, "policy:create").await?;
     let pol = editor_to_ranger_json(&v).map_err(PolicyHttpError::BadRequest)?;
     if pol.name.trim().is_empty() {
         return Err(PolicyHttpError::BadRequest(
@@ -794,7 +796,7 @@ async fn update_policy(
     Path(id): Path<i64>,
     Json(v): Json<Value>,
 ) -> Result<Json<Value>, PolicyHttpError> {
-    require_permission(&p, "policy:update")?;
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
     let pol = editor_to_ranger_json(&v).map_err(PolicyHttpError::BadRequest)?;
     if pol.name.trim().is_empty() {
         return Err(PolicyHttpError::BadRequest(
@@ -826,7 +828,7 @@ async fn delete_policy_handler(
     Auth(p): Auth,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, PolicyHttpError> {
-    require_permission(&p, "policy:delete")?;
+    egret_core::authz::require(&*st.pdp, &p, "policy:delete").await?;
     st.store.delete_policy(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -857,7 +859,7 @@ async fn set_policy_enabled(
     Path(id): Path<i64>,
     Json(b): Json<EnabledBody>,
 ) -> Result<StatusCode, PolicyHttpError> {
-    require_permission(&p, "policy:update")?;
+    egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
     st.store.set_policy_enabled(id, b.enabled).await?;
     Ok(StatusCode::NO_CONTENT)
 }

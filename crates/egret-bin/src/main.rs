@@ -1282,6 +1282,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
         sessions: sessions.clone(),
         engine_egret_url: engine_egret_url.clone(),
+        pdp: pdp.clone(),
     });
 
     // Engine-mgmt seam: owns the engine domain (HTTP router + provisioning).

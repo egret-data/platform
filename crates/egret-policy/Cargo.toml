@@ -11,8 +11,9 @@ license.workspace = true
 egret-core = { workspace = true, features = ["http"] }
 egret-metastore.workspace = true
 egret-policy-api.workspace = true
-# The admin Policies router (E2d) needs the Auth extractor + require_permission
-# gate + identity repos (principal picker) from the core hub.
+# The admin Policies router (E2d) needs the Auth extractor + identity repos
+# (principal picker) from the core hub; gates run through
+# `egret_core::authz::require` against the injected PDP (B1b-2).
 egret-auth.workspace = true
 async-trait.workspace = true
 sqlx.workspace = true
@@ -32,3 +33,5 @@ utoipa.workspace = true
 tokio.workspace = true
 tower.workspace = true
 http-body-util = "0.1"
+# Real CedarPdp in authz-asserting HTTP tests (B1b-2).
+egret-events.workspace = true

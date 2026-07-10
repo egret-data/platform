@@ -44,6 +44,29 @@ struct Fixture {
     groups: GroupRepo,
     sessions: SessionService,
     store: PolicyStore,
+    pdp: Arc<dyn egret_core::authz::Pdp>,
+}
+
+/// Incidental PDP for `PolicyAdminState`: every existing route test
+/// authenticates a `platform_admin` (whose bypass predates the PDP) and
+/// asserts non-authz behavior, so an allow-all stub keeps those fixtures
+/// light. Any test that asserts a 403 (`non_admin_cannot_list_policies`,
+/// `scoped_permission_policies_read_and_create`) must instead build a real
+/// `CedarPdp` via `attach_real_pdp` — an allow-all stub would falsely 200.
+struct AllowAllPdp;
+#[async_trait::async_trait]
+impl egret_core::authz::Pdp for AllowAllPdp {
+    async fn authorize(
+        &self,
+        _s: &egret_core::authz::Subject,
+        _a: &str,
+        _r: &egret_core::authz::Resource,
+    ) -> egret_core::Result<egret_core::authz::Decision> {
+        Ok(egret_core::authz::Decision {
+            allow: true,
+            reasons: vec![],
+        })
+    }
 }
 
 impl Fixture {
@@ -56,12 +79,25 @@ impl Fixture {
             groups: self.groups.clone(),
             sessions: self.sessions.clone(),
             engine_egret_url: "http://egret:8080".into(),
+            pdp: self.pdp.clone(),
         })
     }
     /// Router with no bound engines (the common case).
     fn app_empty(&self) -> axum::Router {
         self.app(Arc::new(MockEngineReader::default()))
     }
+}
+
+/// Rebuild `f.pdp` with a REAL `CedarPdp`. The PDP snapshots the
+/// `roles`/`role_permissions` catalog at build time and (in these tests) never
+/// reloads — raw-SQL seeding emits no `RolesChanged` event — so callers MUST
+/// seed any ad-hoc roles the PDP needs to know about BEFORE calling this.
+async fn attach_real_pdp(f: &mut Fixture) {
+    f.pdp = Arc::new(
+        egret_auth::pdp::CedarPdp::build(f.db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
 }
 
 async fn setup() -> Option<Fixture> {
@@ -78,6 +114,7 @@ async fn setup() -> Option<Fixture> {
         groups: GroupRepo::new(db.clone()),
         sessions,
         store: PolicyStore::new(db.clone()),
+        pdp: Arc::new(AllowAllPdp),
         db,
     })
 }
@@ -225,11 +262,15 @@ async fn platform_admin_can_list_policies_by_type() {
 
 #[tokio::test]
 async fn non_admin_cannot_list_policies() {
-    let Some(f) = setup().await else {
+    let Some(mut f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
     let token = session_for(&f, "policies_plain", false).await;
+    // A real Cedar PDP (not the allow-all stub) must back this 403 — the
+    // principal holds no platform role/permission, so the PDP denies
+    // `policy:read`.
+    attach_real_pdp(&mut f).await;
     let resp = f
         .app_empty()
         .oneshot(req("GET", "/policies?service=whatever", &token, None))
@@ -558,15 +599,30 @@ async fn list_profiles_shows_bound_engines_from_reader() {
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
 
+/// Policies: `policy:read` gates `GET /policies`, `policy:create` gates
+/// `POST /policies`. Proves the NEW `resource:action` gate: a scoped,
+/// non-admin principal holding the wrong (or no) permission is Forbidden, and
+/// one holding exactly the right permission succeeds — without the superuser
+/// bypass.
 #[tokio::test]
 async fn scoped_permission_policies_read_and_create() {
-    let Some(f) = setup().await else {
+    let Some(mut f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
     let (svc_name, svc_id) = seed_service(&f).await;
 
+    // Seed all three ad-hoc platform roles BEFORE the real Cedar PDP snapshots
+    // the roles catalog (raw-SQL seeding emits no RolesChanged event, so the
+    // PDP never reloads). This is the required real-PDP authz assertion: a
+    // non-platform_admin `policy:read` principal lists policies (200) but is
+    // denied create (403), resolved by a real `CedarPdp` — not the allow-all
+    // stub.
     let wrong = session_for_with_permission(&f, "policy_scoped_wrong", "engine:read").await;
+    let reader = session_for_with_permission(&f, "policy_scoped_reader", "policy:read").await;
+    let creator = session_for_with_permission(&f, "policy_scoped_creator", "policy:create").await;
+    attach_real_pdp(&mut f).await;
+
     let resp = f
         .app_empty()
         .oneshot(req(
@@ -583,7 +639,6 @@ async fn scoped_permission_policies_read_and_create() {
         "without policy:read must not list"
     );
 
-    let reader = session_for_with_permission(&f, "policy_scoped_reader", "policy:read").await;
     let (status, _) = into_json(
         f.app_empty()
             .oneshot(req(
@@ -614,7 +669,6 @@ async fn scoped_permission_policies_read_and_create() {
         "policy:read alone must not create"
     );
 
-    let creator = session_for_with_permission(&f, "policy_scoped_creator", "policy:create").await;
     let (status, body) = into_json(
         f.app_empty()
             .oneshot(req("POST", "/policies", &creator, Some(create_body)))
