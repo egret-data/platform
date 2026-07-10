@@ -21,6 +21,7 @@ pub struct WorkspaceState {
     pub workspaces: WorkspaceRepo,
     pub members: MemberRepo,
     pub authz: Authorizer,
+    pub pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
     pub users: UserRepo,
     pub sessions: SessionService,
 }
@@ -100,8 +101,7 @@ async fn create_ws(
     Auth(p): Auth,
     Json(body): Json<CreateWorkspace>,
 ) -> Result<Json<WorkspaceDto>, AuthError> {
-    st.authz
-        .require_platform(&p, "workspace:create")
+    egret_core::authz::require(&*st.pdp, &p, "workspace:create")
         .await
         .map_err(AuthError)?;
     // Warehouse provisioning is NO LONGER done at workspace-create time. A
@@ -137,8 +137,7 @@ async fn list_ws(
     Auth(p): Auth,
     Query(q): Query<PageQuery>,
 ) -> Result<Json<Vec<WorkspaceDto>>, AuthError> {
-    st.authz
-        .require_platform(&p, "workspace:read")
+    egret_core::authz::require(&*st.pdp, &p, "workspace:read")
         .await
         .map_err(AuthError)?;
     let page = Pagination {
@@ -167,8 +166,7 @@ async fn get_ws(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<WorkspaceDto>, AuthError> {
-    st.authz
-        .require_platform(&p, "workspace:read")
+    egret_core::authz::require(&*st.pdp, &p, "workspace:read")
         .await
         .map_err(AuthError)?;
     let ws = st
@@ -199,8 +197,7 @@ async fn update_ws(
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateWorkspace>,
 ) -> Result<Json<serde_json::Value>, AuthError> {
-    st.authz
-        .require_platform(&p, "workspace:update")
+    egret_core::authz::require(&*st.pdp, &p, "workspace:update")
         .await
         .map_err(AuthError)?;
     st.workspaces
@@ -227,8 +224,7 @@ async fn archive_ws(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AuthError> {
-    st.authz
-        .require_platform(&p, "workspace:archive")
+    egret_core::authz::require(&*st.pdp, &p, "workspace:archive")
         .await
         .map_err(AuthError)?;
     st.workspaces
@@ -310,8 +306,7 @@ async fn list_users(
     Auth(p): Auth,
     Query(q): Query<PageQuery>,
 ) -> Result<Json<Vec<UserDto>>, AuthError> {
-    st.authz
-        .require_platform(&p, "user:read")
+    egret_core::authz::require(&*st.pdp, &p, "user:read")
         .await
         .map_err(AuthError)?;
     let page = Pagination {
@@ -355,8 +350,7 @@ async fn get_user(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<UserDto>, AuthError> {
-    st.authz
-        .require_platform(&p, "user:read")
+    egret_core::authz::require(&*st.pdp, &p, "user:read")
         .await
         .map_err(AuthError)?;
     let u = st
@@ -447,8 +441,7 @@ async fn list_members(
     State(st): State<WorkspaceState>,
     WsContext(ctx): WsContext,
 ) -> Result<Json<Vec<MemberDto>>, AuthError> {
-    st.authz
-        .require_workspace(&ctx, "workspace:manage_members")
+    egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
         .await
         .map_err(AuthError)?;
     let members = st.members.list(ctx.workspace_id).await.map_err(AuthError)?;
@@ -482,8 +475,7 @@ async fn add_member(
     WsContext(ctx): WsContext,
     Json(body): Json<AddMember>,
 ) -> Result<Json<serde_json::Value>, AuthError> {
-    st.authz
-        .require_workspace(&ctx, "workspace:manage_members")
+    egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
         .await
         .map_err(AuthError)?;
     st.members
@@ -520,8 +512,7 @@ async fn remove_member(
     WsContext(ctx): WsContext,
     Path((_ws, ptype, pid)): Path<(String, String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, AuthError> {
-    st.authz
-        .require_workspace(&ctx, "workspace:manage_members")
+    egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
         .await
         .map_err(AuthError)?;
     st.members

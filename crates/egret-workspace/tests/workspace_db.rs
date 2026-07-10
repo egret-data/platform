@@ -234,11 +234,27 @@ async fn login_cookie(db: &Db, user: UserId, sessions: &SessionService) -> Strin
     format!("egret_session={}", issued.token)
 }
 
+/// Build a real `CedarPdp` snapshotted against `db`'s already-migrated
+/// `roles`/`role_permissions` (the platform + workspace role catalog seeded by
+/// migrations). The migrated `require()` gates in the workspace seam resolve
+/// through `WorkspaceState.pdp`, so the 403/200 authz tests need the real PDP —
+/// an allow-all stub would falsely 200 the denied cases. Role *assignments*
+/// (platform_role_assignments / workspace_members) are resolved live at
+/// authorize time, so seeding them after `build` is fine.
+async fn build_pdp(db: &Db) -> std::sync::Arc<dyn egret_core::authz::Pdp> {
+    std::sync::Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    )
+}
+
 async fn ws_state(db: &Db) -> WorkspaceState {
     WorkspaceState {
         workspaces: WorkspaceRepo::new(db.clone()),
         members: egret_workspace::members::MemberRepo::new(db.clone()),
         authz: egret_workspace::rbac::Authorizer::new(db.clone()),
+        pdp: build_pdp(db).await,
         users: UserRepo::new(db.clone()),
         sessions: SessionService::new(
             db.clone(),
@@ -463,9 +479,11 @@ async fn member_routes_enforce_membership() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // outsider gets 403
+    // outsider (no membership at all) gets 403 — rejected in the `WsContext`
+    // extractor before the gate is even reached.
     let cookie2 = login_cookie(&db, outsider, &st.sessions).await;
     let resp = app
+        .clone()
         .oneshot(
             HttpRequest::builder()
                 .uri(format!("/api/ws/{}/members", ws.slug))
@@ -476,6 +494,32 @@ async fn member_routes_enforce_membership() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // A ws_viewer member is a legitimate member (passes the extractor) but its
+    // role lacks `workspace:manage_members`, so the migrated PDP gate denies it
+    // (403). This exercises the denial path of the migrated `require()` call
+    // site itself, distinct from the outsider's extractor-level rejection above.
+    let viewer = seed_user(&db).await;
+    st.members
+        .add(ws.id, "user", viewer.0, "ws_viewer", owner)
+        .await
+        .unwrap();
+    let cookie3 = login_cookie(&db, viewer, &st.sessions).await;
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .uri(format!("/api/ws/{}/members", ws.slug))
+                .header("cookie", cookie3)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "ws_viewer lacks workspace:manage_members; PDP gate must deny"
+    );
 }
 
 #[tokio::test]

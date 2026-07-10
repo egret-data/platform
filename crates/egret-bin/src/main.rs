@@ -935,14 +935,6 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| "http://localhost:8080".into());
 
-    let workspace = WorkspaceState {
-        workspaces: WorkspaceRepo::new(db.clone()),
-        members: MemberRepo::new(db.clone()),
-        authz: Authorizer::new(db.clone()),
-        users: users.clone(),
-        sessions: sessions.clone(),
-    };
-
     let oidc = if config.oidc.enabled {
         use axum_extra::extract::cookie::Key;
         use base64::Engine;
@@ -990,6 +982,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // above all seam-state constructions so `pdp.clone()` is in scope everywhere.
     let pdp: std::sync::Arc<dyn egret_core::authz::Pdp> =
         std::sync::Arc::new(egret_auth::pdp::CedarPdp::build(db.clone(), &bus).await?);
+
+    let workspace = WorkspaceState {
+        workspaces: WorkspaceRepo::new(db.clone()),
+        members: MemberRepo::new(db.clone()),
+        authz: Authorizer::new(db.clone()),
+        pdp: pdp.clone(),
+        users: users.clone(),
+        sessions: sessions.clone(),
+    };
 
     // `secrets` (the SecretStore) is shared: the per-workspace storage layer and
     // the database block reuse the same instance for their secrets.
