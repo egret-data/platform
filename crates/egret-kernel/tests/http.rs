@@ -53,6 +53,26 @@ impl egret_notebook::engine_token::EngineTokenMinter for StubMinter {
     }
 }
 
+/// Incidental PDP: this test wires `NotebookState` only to satisfy
+/// `egret_kernel::routes::KernelState::notebook_docs` (an `Arc<dyn
+/// NotebookDocsPort>`), which never consults `pdp` — the field only needs to
+/// exist to compile.
+struct AllowAllPdp;
+#[async_trait::async_trait]
+impl egret_core::authz::Pdp for AllowAllPdp {
+    async fn authorize(
+        &self,
+        _s: &egret_core::authz::Subject,
+        _a: &str,
+        _r: &egret_core::authz::Resource,
+    ) -> egret_core::Result<egret_core::authz::Decision> {
+        Ok(egret_core::authz::Decision {
+            allow: true,
+            reasons: vec![],
+        })
+    }
+}
+
 // ── Fixture ──────────────────────────────────────────────────────────────────
 
 struct Fixture {
@@ -120,6 +140,7 @@ async fn setup(pool: sqlx::PgPool) -> Fixture {
         sessions: sessions.clone(),
         workspaces: workspaces.clone(),
         authz: Authorizer::new(db.clone()),
+        pdp: Arc::new(AllowAllPdp),
         users: UserRepo::new(db.clone()),
         catalog_base_url: "http://localhost:8181".into(),
         engine_minter: Arc::new(StubMinter),
