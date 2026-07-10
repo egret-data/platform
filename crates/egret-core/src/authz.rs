@@ -11,11 +11,22 @@ pub struct Subject {
     pub group_ids: Vec<crate::ids::GroupId>,
 }
 
-/// What the action is being taken on. Object variants arrive in B2.
+/// A specific BI content object being acted on, plus the ancestry (folder →
+/// workspace) needed to resolve folder- and workspace-scoped grants.
+#[derive(Debug, Clone)]
+pub struct ObjectRef {
+    pub kind: String, // "dashboard" | "chart" | "dataset" | "folder"
+    pub id: uuid::Uuid,
+    pub folder_id: Option<uuid::Uuid>, // None = Uncategorized
+    pub workspace_id: WorkspaceId,
+}
+
+/// What the action is being taken on.
 #[derive(Debug, Clone)]
 pub enum Resource {
     Platform,
     Workspace(WorkspaceId),
+    Object(ObjectRef),
 }
 
 /// The outcome of an authorization check.
@@ -62,6 +73,26 @@ impl AuthTarget for crate::WorkspaceContext {
     }
     fn resource(&self) -> Resource {
         Resource::Workspace(self.workspace_id)
+    }
+}
+
+/// Enforce `action` on a specific object. Subject from `ctx`; resource is the
+/// object + its ancestry (folder → workspace → platform).
+pub async fn require_object(
+    pdp: &dyn Pdp,
+    ctx: &crate::WorkspaceContext,
+    action: &str,
+    object: ObjectRef,
+) -> crate::Result<()> {
+    debug_assert_eq!(object.workspace_id, ctx.workspace_id);
+    if pdp
+        .authorize(&ctx.principal.subject(), action, &Resource::Object(object))
+        .await?
+        .allow
+    {
+        Ok(())
+    } else {
+        Err(crate::Error::Forbidden)
     }
 }
 
@@ -149,6 +180,43 @@ mod require_tests {
         assert!(require(&StubPdp { allow: true }, &p, "x:y").await.is_ok());
         assert!(matches!(
             require(&StubPdp { allow: false }, &p, "x:y").await,
+            Err(crate::Error::Forbidden)
+        ));
+    }
+
+    fn object_for(ws: WorkspaceId) -> ObjectRef {
+        ObjectRef {
+            kind: "dashboard".into(),
+            id: uuid::Uuid::new_v4(),
+            folder_id: None,
+            workspace_id: ws,
+        }
+    }
+
+    #[tokio::test]
+    async fn require_object_allows_and_forbids() {
+        let ws = WorkspaceId::new();
+        let ctx = crate::WorkspaceContext {
+            workspace_id: ws,
+            principal: principal(),
+            workspace_role: "ws_viewer".into(),
+        };
+        assert!(require_object(
+            &StubPdp { allow: true },
+            &ctx,
+            "dashboard:read",
+            object_for(ws),
+        )
+        .await
+        .is_ok());
+        assert!(matches!(
+            require_object(
+                &StubPdp { allow: false },
+                &ctx,
+                "dashboard:read",
+                object_for(ws),
+            )
+            .await,
             Err(crate::Error::Forbidden)
         ));
     }

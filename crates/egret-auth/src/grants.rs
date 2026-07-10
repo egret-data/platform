@@ -8,8 +8,12 @@ use egret_metastore::Db;
 #[derive(Debug, Clone)]
 pub struct Grant {
     pub role_id: uuid::Uuid,
-    pub scope_type: String, // 'platform' | 'workspace'
+    pub scope_type: String, // 'platform' | 'workspace' | 'object'
     pub scope_id: Option<uuid::Uuid>,
+    /// For object-scoped grants: the object kind ("dashboard" | "folder" | …)
+    /// that namespaces the Cedar `Object` entity id. `None` for platform/workspace
+    /// grants. Populated from SQL in Task 3.
+    pub object_type: Option<String>,
 }
 
 #[derive(Clone)]
@@ -45,6 +49,7 @@ impl AccessGrantStore {
                 role_id,
                 scope_type,
                 scope_id,
+                object_type: None,
             })
             .collect())
     }

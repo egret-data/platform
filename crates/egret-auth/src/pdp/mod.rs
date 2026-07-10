@@ -145,6 +145,10 @@ impl Pdp for CedarPdp {
     ) -> Result<Decision> {
         let ws = match resource {
             Resource::Workspace(w) => Some(*w),
+            // An object lives in a workspace; load that workspace's grants so
+            // workspace-scoped roles cascade to it. Object-scoped grant loading
+            // arrives in Task 3.
+            Resource::Object(o) => Some(o.workspace_id),
             Resource::Platform => None,
         };
         let grants = self.grants.grants_for(subject.user_id, ws).await?;
