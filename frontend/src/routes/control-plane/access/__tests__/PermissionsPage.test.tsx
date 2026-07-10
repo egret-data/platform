@@ -11,14 +11,24 @@ const GROUPS: api.PermissionCatalogGroup[] = [
   {
     group: "Users",
     permissions: [
-      { key: "users.read", description: "View users", roles: ["Admin"] },
-      { key: "users.write", description: "Create and edit users", roles: [] },
+      { key: "users.read", description: "View users", roles: ["Admin"], scope: "platform" },
+      {
+        key: "users.write",
+        description: "Create and edit users",
+        roles: [],
+        scope: "platform",
+      },
     ],
   },
   {
     group: "Policies",
     permissions: [
-      { key: "policies.read", description: "View policies", roles: ["Admin", "Analyst"] },
+      {
+        key: "policies.read",
+        description: "View policies",
+        roles: ["Admin", "Analyst"],
+        scope: "platform",
+      },
     ],
   },
 ];

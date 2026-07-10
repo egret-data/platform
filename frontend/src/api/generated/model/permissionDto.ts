@@ -9,5 +9,7 @@
 export interface PermissionDto {
   key: string;
   description: string;
+  /** Enforcement scope: `"platform"` or `"workspace"`. */
+  scope: string;
   roles: string[];
 }
