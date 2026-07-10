@@ -12,12 +12,10 @@
 //! same CSRF layer as the other mutating APIs.
 
 mod access;
-mod auth;
 mod error;
 mod secrets;
 mod storage;
 
-pub use auth::require_platform_admin;
 pub use error::CpError;
 
 use axum::extract::FromRef;

@@ -165,47 +165,6 @@ async fn rejects_unknown_role() {
     assert!(matches!(err, Err(egret_core::Error::InvalidInput(_))));
 }
 
-async fn make_group(db: &Db, name: &str) -> uuid::Uuid {
-    sqlx::query_scalar("INSERT INTO groups (name) VALUES ($1) RETURNING id")
-        .bind(name)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap()
-}
-
-#[tokio::test]
-async fn workspace_permission_via_group_is_unioned() {
-    let Some(db) = connect().await else {
-        eprintln!("skip");
-        return;
-    };
-    let owner = seed_user(&db).await;
-    let user = seed_user(&db).await;
-    let wrepo = WorkspaceRepo::new(db.clone());
-    let mrepo = MemberRepo::new(db.clone());
-    let authz = Authorizer::new(db.clone());
-    let ws = wrepo.create(&uniq("ws"), "W", owner).await.unwrap();
-
-    // user is NOT a direct member; their GROUP is ws_admin.
-    let gid = make_group(&db, &uniq("grp")).await;
-    sqlx::query("INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)")
-        .bind(user.0)
-        .bind(gid)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    mrepo
-        .add(ws.id, "group", gid, "ws_admin", owner)
-        .await
-        .unwrap();
-
-    let perms = authz.workspace_permissions(user, ws.id).await.unwrap();
-    assert!(
-        perms.contains("workspace:manage_members"),
-        "group role must grant the perm"
-    );
-}
-
 #[tokio::test]
 async fn replace_platform_roles_and_check() {
     let Some(db) = connect().await else {
@@ -218,10 +177,19 @@ async fn replace_platform_roles_and_check() {
         .replace_platform_roles(user, &["data_steward".into()])
         .await
         .unwrap();
-    let perms = authz.platform_permissions(user).await.unwrap();
-    assert!(perms.contains("user:read"));
-    assert!(!perms.contains("workspace:create")); // data_steward lacks it
-                                                  // bad role rejected
+    // Verify the assignment landed (enforcement/permission-union now lives in the PDP,
+    // so assert the durable `platform_role_assignments` effect directly).
+    let (assigned,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM platform_role_assignments pra \
+         JOIN roles r ON r.id = pra.role_id \
+         WHERE pra.principal_type = 'user' AND pra.principal_id = $1 AND r.name = 'data_steward'",
+    )
+    .bind(user.0)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(assigned, 1, "data_steward must be assigned");
+    // bad role rejected
     assert!(authz
         .replace_platform_roles(user, &["root".into()])
         .await
@@ -440,6 +408,75 @@ async fn set_platform_roles_rejects_delegated_permission_not_platform_admin() {
         resp.status(),
         StatusCode::FORBIDDEN,
         "a delegated user:assign_role permission must not grant platform roles"
+    );
+}
+
+/// B1b-final Task 1: the `set_platform_roles` gate now folds into the
+/// admin-graph `forbid` via `require(pdp, .., "user:assign_platform_role")`
+/// instead of an inline `platform_roles.contains("platform_admin")` check.
+/// This drives the migrated PDP path end-to-end through the real `CedarPdp`:
+/// a `platform_admin` is allowed (200) while a legitimate non-admin holding
+/// an unrelated platform role (`data_steward`) is denied (403), proving the
+/// forbid covers the new admin-graph action.
+#[tokio::test]
+async fn set_platform_roles_gate_is_admin_graph_forbid() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let admin = seed_user(&db).await;
+    let non_admin = seed_user(&db).await;
+    let target = seed_user(&db).await;
+    let st = ws_state(&db).await;
+    st.authz
+        .replace_platform_roles(admin, &["platform_admin".into()])
+        .await
+        .unwrap();
+    // A real, non-adversarial non-admin: holds `data_steward` (an unrelated
+    // platform role), not `platform_admin`.
+    st.authz
+        .replace_platform_roles(non_admin, &["data_steward".into()])
+        .await
+        .unwrap();
+    let app = axum::Router::new()
+        .nest("/api/admin", admin_user_router())
+        .with_state(st.clone());
+
+    let put = |actor: UserId, cookie: String| {
+        let app = app.clone();
+        async move {
+            let body = serde_json::to_vec(&serde_json::json!({"roles": ["data_steward"]})).unwrap();
+            let _ = actor;
+            app.oneshot(
+                HttpRequest::builder()
+                    .method("PUT")
+                    .uri(format!("/api/admin/users/{}/platform-roles", target.0))
+                    .header("cookie", cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    // platform_admin → allowed by the `unless is_platform_admin` clause.
+    let admin_cookie = login_cookie(&db, admin, &st.sessions).await;
+    let admin_resp = put(admin, admin_cookie).await;
+    assert_eq!(
+        admin_resp.status(),
+        StatusCode::OK,
+        "platform_admin must pass the admin-graph gate"
+    );
+
+    // non-admin (data_steward, not platform_admin) → forbidden.
+    let non_admin_cookie = login_cookie(&db, non_admin, &st.sessions).await;
+    let non_admin_resp = put(non_admin, non_admin_cookie).await;
+    assert_eq!(
+        non_admin_resp.status(),
+        StatusCode::FORBIDDEN,
+        "a non-platform_admin must be denied `user:assign_platform_role` by the forbid"
     );
 }
 
