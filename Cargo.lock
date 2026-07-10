@@ -2780,6 +2780,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "egret-events"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "egret-iceberg-ext"
 version = "0.1.0"
 dependencies = [
