@@ -297,6 +297,17 @@ async fn conn_spec_perm(
     egret_core::authz::require(&*st.pdp, ctx, perm)
         .await
         .map_err(BiApiError::from)?;
+    conn_spec_granted(st, ctx, db).await
+}
+
+/// Build a `ConnSpec` for a workspace-granted database WITHOUT an authz gate —
+/// the caller has already authorized (e.g. object-scope `require_object`). Still
+/// enforces that the database is granted to the workspace.
+async fn conn_spec_granted(
+    st: &BiState,
+    ctx: &egret_core::WorkspaceContext,
+    db: Uuid,
+) -> Result<ConnSpec, BiApiError> {
     let granted = st
         .databases
         .list_for_workspace(ctx.workspace_id.0)
@@ -495,25 +506,6 @@ pub fn dataset_router() -> Router<BiState> {
         )
 }
 
-/// Guard: dataset exists and lives in this workspace. Mirrors the inline
-/// `get` + workspace check the other dataset handlers use.
-async fn require_dataset_in_ws(
-    st: &BiState,
-    ctx: &egret_core::WorkspaceContext,
-    id: Uuid,
-) -> Result<(), BiApiError> {
-    let ds = st
-        .datasets
-        .get(id)
-        .await
-        .map_err(BiApiError::from)?
-        .ok_or(Error::NotFound("dataset".into()))?;
-    if ds.workspace_id != ctx.workspace_id.0 {
-        return Err(Error::NotFound("dataset".into()).into());
-    }
-    Ok(())
-}
-
 #[utoipa::path(
     patch,
     path = "/api/ws/{workspace}/datasets/{id}/folder",
@@ -537,10 +529,10 @@ async fn ds_set_folder(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<crate::model::SetFolder>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_in_ws(&st, &ctx, id).await?;
     if let Some(fid) = b.folder_id {
         require_folder(&st, &ctx, fid, "dataset").await?;
     }
@@ -698,10 +690,10 @@ async fn ds_trash(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_in_ws(&st, &ctx, id).await?;
     st.datasets
         .set_trashed(id, true)
         .await
@@ -730,10 +722,10 @@ async fn ds_restore(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_in_ws(&st, &ctx, id).await?;
     st.datasets
         .set_trashed(id, false)
         .await
@@ -762,10 +754,10 @@ async fn ds_bookmark_add(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_READ)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_READ, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_in_ws(&st, &ctx, id).await?;
     st.datasets
         .add_bookmark(ctx.principal.user_id.0, id)
         .await
@@ -794,10 +786,10 @@ async fn ds_bookmark_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_READ)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_READ, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_in_ws(&st, &ctx, id).await?;
     st.datasets
         .remove_bookmark(ctx.principal.user_id.0, id)
         .await
@@ -826,7 +818,8 @@ async fn ds_get(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_READ)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_READ, obj)
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(load_detail(&st, id).await?))
@@ -855,10 +848,10 @@ async fn ds_update(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<UpdateDataset>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_owner(&st, &ctx, id).await?;
     st.datasets
         .update(id, &b.name, &b.description, b.sql.as_deref())
         .await
@@ -887,17 +880,17 @@ async fn ds_refresh(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_owner(&st, &ctx, id).await?;
     let ds = st
         .datasets
         .get(id)
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("dataset".into()))?;
-    let spec = conn_spec_perm(&st, &ctx, ds.database_id, DS_MANAGE).await?;
+    let spec = conn_spec_granted(&st, &ctx, ds.database_id).await?;
     let source = source_of(&ds);
     let new_columns = introspect(&st, &spec, &source).await?;
     st.datasets
@@ -928,10 +921,10 @@ async fn ds_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_owner(&st, &ctx, id).await?;
     st.datasets.delete(id).await.map_err(BiApiError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -956,19 +949,6 @@ fn source_of(ds: &crate::dataset::Dataset) -> SourceSpec {
             schema: ds.schema_name.clone().unwrap_or_default(),
             table: ds.table_name.clone().unwrap_or_default(),
         },
-    }
-}
-
-async fn require_dataset_owner(
-    st: &BiState,
-    ctx: &egret_core::WorkspaceContext,
-    id: Uuid,
-) -> Result<(), BiApiError> {
-    let owner = st.datasets.owner(id).await.map_err(BiApiError::from)?;
-    if is_admin(ctx) || owner == Some(ctx.principal.user_id.0) {
-        Ok(())
-    } else {
-        Err(Error::Forbidden.into())
     }
 }
 
@@ -1014,14 +994,17 @@ async fn ds_add_metric(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<MetricBody>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    require_dataset_owner(&st, &ctx, id).await?;
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
+        .await
+        .map_err(BiApiError::from)?;
     let ds = st
         .datasets
         .get(id)
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("dataset".into()))?;
-    let spec = conn_spec_perm(&st, &ctx, ds.database_id, DS_MANAGE).await?;
+    let spec = conn_spec_granted(&st, &ctx, ds.database_id).await?;
     let d = validate_expression(&spec, &source_of(&ds), &b.expression)
         .await
         .map_err(BiApiError::from)?;
@@ -1065,7 +1048,10 @@ async fn ds_update_metric(
     Path((_w, id, metric_id)): Path<(String, Uuid, Uuid)>,
     Json(b): Json<MetricBody>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    require_dataset_owner(&st, &ctx, id).await?;
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
+        .await
+        .map_err(BiApiError::from)?;
     require_metric_in_dataset(&st, id, metric_id).await?;
     let ds = st
         .datasets
@@ -1073,7 +1059,7 @@ async fn ds_update_metric(
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("dataset".into()))?;
-    let spec = conn_spec_perm(&st, &ctx, ds.database_id, DS_MANAGE).await?;
+    let spec = conn_spec_granted(&st, &ctx, ds.database_id).await?;
     let d = validate_expression(&spec, &source_of(&ds), &b.expression)
         .await
         .map_err(BiApiError::from)?;
@@ -1114,10 +1100,10 @@ async fn ds_delete_metric(
     WsContext(ctx): WsContext,
     Path((_w, id, metric_id)): Path<(String, Uuid, Uuid)>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_owner(&st, &ctx, id).await?;
     require_metric_in_dataset(&st, id, metric_id).await?;
     st.datasets
         .delete_metric(metric_id)
@@ -1150,14 +1136,17 @@ async fn ds_add_column(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<AddColumnBody>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    require_dataset_owner(&st, &ctx, id).await?;
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
+        .await
+        .map_err(BiApiError::from)?;
     let ds = st
         .datasets
         .get(id)
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("dataset".into()))?;
-    let spec = conn_spec_perm(&st, &ctx, ds.database_id, DS_MANAGE).await?;
+    let spec = conn_spec_granted(&st, &ctx, ds.database_id).await?;
     let d = validate_expression(&spec, &source_of(&ds), &b.expression)
         .await
         .map_err(BiApiError::from)?;
@@ -1202,10 +1191,10 @@ async fn ds_update_column(
     Path((_w, id, column_name)): Path<(String, Uuid, String)>,
     Json(b): Json<UpdateColumnBody>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_owner(&st, &ctx, id).await?;
     let expr_update = if let Some(expr) = b.expression.as_deref() {
         match st
             .datasets
@@ -1220,7 +1209,7 @@ async fn ds_update_column(
                     .await
                     .map_err(BiApiError::from)?
                     .ok_or(Error::NotFound("dataset".into()))?;
-                let spec = conn_spec_perm(&st, &ctx, ds.database_id, DS_MANAGE).await?;
+                let spec = conn_spec_granted(&st, &ctx, ds.database_id).await?;
                 let d = validate_expression(&spec, &source_of(&ds), expr)
                     .await
                     .map_err(BiApiError::from)?;
@@ -1275,10 +1264,10 @@ async fn ds_delete_column(
     WsContext(ctx): WsContext,
     Path((_w, id, column_name)): Path<(String, Uuid, String)>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_owner(&st, &ctx, id).await?;
     st.datasets
         .delete_calc_column(id, &column_name)
         .await

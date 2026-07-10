@@ -104,7 +104,11 @@ fn valid_principal_type(pt: &str) -> Result<(), BiApiError> {
     }
 }
 
-async fn resolve(
+/// Resolve `(kind, id)` to its `ObjectRef` and assert it lives in the path
+/// workspace (else cross-tenant → `NotFound`). Shared by the share API and the
+/// per-object BI handlers so both apply the same object + workspace guard before
+/// `require_object`.
+pub(crate) async fn resolve(
     st: &BiState,
     ctx: &WorkspaceContext,
     kind: &str,
