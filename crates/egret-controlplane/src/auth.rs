@@ -15,12 +15,6 @@ pub fn require_platform_admin(principal: &Principal) -> Result<(), CpError> {
     egret_auth::require_platform_admin(principal).map_err(CpError::from)
 }
 
-/// Gate a control-plane action on a permission key. `platform_admin` always
-/// passes. Delegates to `egret-auth`.
-pub fn require_permission(principal: &Principal, permission: &str) -> Result<(), CpError> {
-    egret_auth::require_permission(principal, permission).map_err(CpError::from)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -36,15 +30,11 @@ mod tests {
         }
     }
 
-    // The delegators must preserve the 403 mapping: a denied gate → CpError::Forbidden.
+    // The delegator must preserve the 403 mapping: a denied gate → CpError::Forbidden.
     #[test]
     fn delegator_maps_denial_to_cp_forbidden() {
         assert!(matches!(
             require_platform_admin(&principal(&[], &[])),
-            Err(CpError::Forbidden)
-        ));
-        assert!(matches!(
-            require_permission(&principal(&[], &["engine:read"]), "engine:create"),
             Err(CpError::Forbidden)
         ));
     }
@@ -52,6 +42,5 @@ mod tests {
     #[test]
     fn delegator_allows_when_authorized() {
         assert!(require_platform_admin(&principal(&["platform_admin"], &[])).is_ok());
-        assert!(require_permission(&principal(&[], &["engine:create"]), "engine:create").is_ok());
     }
 }

@@ -28,7 +28,6 @@ use uuid::Uuid;
 
 use egret_core::http::ErrorBody;
 
-use crate::auth::{require_permission, require_platform_admin};
 use crate::error::CpError;
 use crate::CpState;
 
@@ -131,7 +130,7 @@ async fn list_users(
     State(st): State<CpState>,
     Auth(p): Auth,
 ) -> Result<Json<Vec<UserDto>>, CpError> {
-    require_permission(&p, "user:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "user:read").await?;
     let users = st.users.list(LIST_LIMIT, 0).await?;
     let mut out = Vec::with_capacity(users.len());
     for u in users {
@@ -175,7 +174,7 @@ async fn create_user(
     Auth(p): Auth,
     Json(body): Json<CreateUserInput>,
 ) -> Result<(StatusCode, Json<UserDto>), CpError> {
-    require_permission(&p, "user:create")?;
+    egret_core::authz::require(&*st.pdp, &p, "user:create").await?;
     let hash = egret_auth::password::hash_password(&body.password)?;
     let id = st
         .users
@@ -216,7 +215,7 @@ async fn update_user(
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateUserInput>,
 ) -> Result<Json<UserDto>, CpError> {
-    require_permission(&p, "user:update")?;
+    egret_core::authz::require(&*st.pdp, &p, "user:update").await?;
     let user_id = UserId(id);
     let existing = st
         .users
@@ -235,7 +234,7 @@ async fn update_user(
         }
         if status == "disabled" {
             // Disabling is a stronger action than a plain profile update.
-            require_permission(&p, "user:disable")?;
+            egret_core::authz::require(&*st.pdp, &p, "user:disable").await?;
         }
         st.users.set_status(user_id, status).await?;
     }
@@ -284,7 +283,7 @@ async fn assign_user_role(
     Path(id): Path<Uuid>,
     Json(body): Json<AssignRoleInput>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
     st.roles.assign("user", id, body.role_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -311,7 +310,7 @@ async fn unassign_user_role(
     Auth(p): Auth,
     Path((id, role_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
     guard_last_admin(&st, role_id).await?;
     st.roles.unassign("user", id, role_id).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -360,7 +359,7 @@ async fn list_groups(
     State(st): State<CpState>,
     Auth(p): Auth,
 ) -> Result<Json<Vec<GroupDto>>, CpError> {
-    require_permission(&p, "group:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "group:read").await?;
     let groups = st.groups.list_with_meta().await?;
     let mut out = Vec::with_capacity(groups.len());
     for (g, member_count) in groups {
@@ -401,7 +400,7 @@ async fn create_group(
     Auth(p): Auth,
     Json(body): Json<CreateGroupInput>,
 ) -> Result<(StatusCode, Json<GroupDto>), CpError> {
-    require_permission(&p, "group:create")?;
+    egret_core::authz::require(&*st.pdp, &p, "group:create").await?;
     let id = st.groups.create_local(&body.name).await?;
     Ok((
         StatusCode::CREATED,
@@ -435,7 +434,7 @@ async fn rename_group(
     Path(id): Path<Uuid>,
     Json(body): Json<RenameGroupInput>,
 ) -> Result<StatusCode, CpError> {
-    require_permission(&p, "group:update")?;
+    egret_core::authz::require(&*st.pdp, &p, "group:update").await?;
     let rows = st.groups.rename(id, &body.name).await?;
     if rows == 0 {
         return Err(CpError::Conflict(
@@ -463,7 +462,7 @@ async fn delete_group(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CpError> {
-    require_permission(&p, "group:delete")?;
+    egret_core::authz::require(&*st.pdp, &p, "group:delete").await?;
     let rows = st.groups.delete_local(id).await?;
     if rows == 0 {
         return Err(CpError::Conflict(
@@ -500,7 +499,7 @@ async fn list_group_members(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<GroupMemberDto>>, CpError> {
-    require_permission(&p, "group:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "group:read").await?;
     let members = st.groups.member_users(id).await?;
     Ok(Json(
         members
@@ -530,7 +529,7 @@ async fn add_group_member(
     Path(id): Path<Uuid>,
     Json(body): Json<AddMemberInput>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    egret_core::authz::require(&*st.pdp, &p, "group:manage_members").await?;
     st.groups.add_member(id, UserId(body.user_id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -555,7 +554,7 @@ async fn remove_group_member(
     Auth(p): Auth,
     Path((id, user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    egret_core::authz::require(&*st.pdp, &p, "group:manage_members").await?;
     st.groups.remove_member(id, UserId(user_id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -580,7 +579,7 @@ async fn assign_group_role(
     Path(id): Path<Uuid>,
     Json(body): Json<AssignRoleInput>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
     st.roles.assign("group", id, body.role_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -607,7 +606,7 @@ async fn unassign_group_role(
     Auth(p): Auth,
     Path((id, role_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
     guard_last_admin(&st, role_id).await?;
     st.roles.unassign("group", id, role_id).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -659,7 +658,7 @@ async fn list_roles(
     State(st): State<CpState>,
     Auth(p): Auth,
 ) -> Result<Json<Vec<RoleDto>>, CpError> {
-    require_permission(&p, "role:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "role:read").await?;
     let roles = st.roles.list().await?;
     let mut out = Vec::with_capacity(roles.len());
     for r in roles {
@@ -696,7 +695,7 @@ async fn create_role(
     Auth(p): Auth,
     Json(body): Json<CreateRoleInput>,
 ) -> Result<(StatusCode, Json<RoleDto>), CpError> {
-    require_platform_admin(&p)?;
+    egret_core::authz::require(&*st.pdp, &p, "role:create").await?;
     if body.scope != "platform" && body.scope != "workspace" {
         return Err(CpError::BadRequest(format!(
             "invalid scope: {}",
@@ -740,7 +739,7 @@ async fn update_role(
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateRoleInput>,
 ) -> Result<Json<RoleDto>, CpError> {
-    require_platform_admin(&p)?;
+    egret_core::authz::require(&*st.pdp, &p, "role:update").await?;
     st.roles.get(id).await?.ok_or(CpError::NotFound)?;
     st.roles.update_description(id, &body.description).await?;
     let role = st.roles.get(id).await?.ok_or(CpError::NotFound)?;
@@ -775,7 +774,7 @@ async fn delete_role(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    egret_core::authz::require(&*st.pdp, &p, "role:delete").await?;
     let role = st.roles.get(id).await?.ok_or(CpError::NotFound)?;
     if is_seeded(&role.name) {
         return Err(CpError::Conflict(
@@ -806,7 +805,7 @@ async fn set_role_permissions(
     Path(id): Path<Uuid>,
     Json(body): Json<SetPermissionsInput>,
 ) -> Result<StatusCode, CpError> {
-    require_platform_admin(&p)?;
+    egret_core::authz::require(&*st.pdp, &p, "role:assign_permission").await?;
     for key in &body.permissions {
         if !rbac::is_known(key) {
             return Err(CpError::BadRequest(format!("unknown permission: {key}")));
@@ -842,7 +841,7 @@ async fn list_role_assignees(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<RoleAssigneeDto>>, CpError> {
-    require_permission(&p, "role:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "role:read").await?;
     let assignees = st.roles.assignees_named(id).await?;
     Ok(Json(
         assignees
@@ -890,7 +889,7 @@ async fn list_permissions(
     State(st): State<CpState>,
     Auth(p): Auth,
 ) -> Result<Json<Vec<PermissionGroupDto>>, CpError> {
-    require_permission(&p, "role:read")?;
+    egret_core::authz::require(&*st.pdp, &p, "role:read").await?;
     let pairs = st.roles.permission_role_pairs().await?;
     let mut roles_by_perm: HashMap<String, Vec<String>> = HashMap::new();
     for (permission, role_name) in pairs {

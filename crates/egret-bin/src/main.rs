@@ -1267,6 +1267,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         provisioner: catalog_provisioner,
         browser: catalog_browser,
         sessions: sessions.clone(),
+        pdp: pdp.clone(),
     });
 
     // Policy/Ranger seam admin router (E2d): the Policies console. Owns the
@@ -1281,6 +1282,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
         sessions: sessions.clone(),
         engine_egret_url: engine_egret_url.clone(),
+        pdp: pdp.clone(),
     });
 
     // Engine-mgmt seam: owns the engine domain (HTTP router + provisioning).
@@ -1293,6 +1295,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
         secrets: workspace_secrets.clone(),
         sessions: sessions.clone(),
+        pdp: pdp.clone(),
         engine_provisioner,
         kube,
         engine_egret_url,

@@ -325,12 +325,20 @@ async fn platform_admin_can_manage_storage_and_secrets() {
 /// `POST /storage`. A principal with only one of the two must not get the other.
 #[tokio::test]
 async fn scoped_permission_storage_read_and_create() {
-    let Some(f) = setup().await else {
+    let Some(mut f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
 
+    // The `/storage` gate consults `state.pdp`; seed the ad-hoc roles BEFORE
+    // building the PDP (the Cedar PDP snapshots the roles catalog at build time)
+    // then swap in a real Cedar PDP so an allow-all stub can't mask the scoped
+    // grants.
     let wrong = session_for_with_permission(&f, "storage_scoped_wrong", "secret:read").await;
+    let reader = session_for_with_permission(&f, "storage_scoped_reader", "storage:read").await;
+    let creator = session_for_with_permission(&f, "storage_scoped_creator", "storage:create").await;
+    attach_real_pdp(&mut f).await;
+
     let resp = f
         .app
         .clone()
@@ -343,7 +351,6 @@ async fn scoped_permission_storage_read_and_create() {
         "a principal without storage:read must not list storage"
     );
 
-    let reader = session_for_with_permission(&f, "storage_scoped_reader", "storage:read").await;
     let resp = f
         .app
         .clone()
@@ -379,7 +386,6 @@ async fn scoped_permission_storage_read_and_create() {
         "storage:read alone must not create a storage connection"
     );
 
-    let creator = session_for_with_permission(&f, "storage_scoped_creator", "storage:create").await;
     let resp = f
         .app
         .clone()
@@ -927,11 +933,15 @@ async fn groups_local_and_oidc() {
 /// (`data_steward`) cannot be deleted (409) but the custom role can (204).
 #[tokio::test]
 async fn roles_seeded_and_permissions() {
-    let Some(f) = setup().await else {
+    let Some(mut f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
+    // These RBAC-graph routes (create/set-permissions/delete role) now consult
+    // `state.pdp`; use a real Cedar PDP so the platform_admin bypass over the
+    // admin-graph `forbid` is exercised for real (not the allow-all stub).
     let admin = session_for(&f, "roles_admin", true).await;
+    attach_real_pdp(&mut f).await;
     let role_name = format!("custom_role_{}", Uuid::new_v4().simple());
 
     // POST /access/roles → 201, a custom role.
@@ -1047,12 +1057,20 @@ async fn roles_seeded_and_permissions() {
 /// the path/body UUIDs below don't need to resolve to anything real.
 #[tokio::test]
 async fn permission_enforcement() {
-    let Some(f) = setup().await else {
+    let Some(mut f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
 
+    // The `/access/*` gates consult `state.pdp`; seed the ad-hoc roles BEFORE
+    // building the PDP (it snapshots the roles catalog at build), then swap in a
+    // real Cedar PDP. This is what makes the RBAC-graph 403s meaningful: the
+    // `role:read` reader's create/assign attempts are denied by the admin-graph
+    // `forbid`, not by an allow-all stub.
     let wrong = session_for_with_permission(&f, "access_scoped_wrong", "user:read").await;
+    let reader = session_for_with_permission(&f, "access_scoped_reader", "role:read").await;
+    attach_real_pdp(&mut f).await;
+
     let resp = f
         .app
         .clone()
@@ -1065,7 +1083,6 @@ async fn permission_enforcement() {
         "a principal without role:read must not list roles"
     );
 
-    let reader = session_for_with_permission(&f, "access_scoped_reader", "role:read").await;
     let resp = f
         .app
         .clone()
@@ -1164,16 +1181,74 @@ async fn permission_enforcement() {
     );
 }
 
+/// The admin-graph `forbid` proof, isolated: a non-`platform_admin` principal
+/// holding the grantable `role:read` permission can *see* roles
+/// (`GET /access/roles` → 200) but is denied by the `forbid` on the graph-
+/// mutating `POST /access/roles` (create_role) → 403 — even though `role:read`
+/// would, absent the forbid, be a delegatable permission. Runs under a real
+/// `CedarPdp` so the forbid actually decides.
+#[tokio::test]
+async fn role_read_holder_can_list_but_not_create_roles() {
+    let Some(mut f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    // Seed the reader's `role:read` grant BEFORE the PDP snapshots the catalog.
+    let reader = session_for_with_permission(&f, "forbid_role_reader", "role:read").await;
+    attach_real_pdp(&mut f).await;
+
+    // GET /access/roles → 200 (role:read is enough to see roles).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/access/roles", &reader, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a role:read principal must be able to list roles"
+    );
+
+    // POST /access/roles → 403 (create_role is admin-graph, denied by forbid).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/access/roles",
+            &reader,
+            Some(serde_json::json!({
+                "scope": "platform",
+                "name": format!("forbid_denied_{}", Uuid::new_v4().simple()),
+                "description": "should be denied by the admin-graph forbid",
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a role:read principal must be denied create_role by the admin-graph forbid"
+    );
+}
+
 /// `GET /access/roles/{id}/assignees` lists a role's assignees by display
 /// name (users by email, groups by name), for the admin console's
 /// drill-into-a-role view. A scoped principal without `role:read` is 403.
 #[tokio::test]
 async fn role_assignees_lists_users_and_groups() {
-    let Some(f) = setup().await else {
+    let Some(mut f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
+    // `GET /access/roles/{id}/assignees` gates on `role:read` via `state.pdp`;
+    // use a real Cedar PDP so the `role:read`-less principal is genuinely denied
+    // (the platform_admin bypass and the deny both hold regardless of the custom
+    // role being created after build).
     let admin = session_for(&f, "role_assignees_admin", true).await;
+    attach_real_pdp(&mut f).await;
     let roles = egret_auth::roles::RoleRepo::new(f.db.clone(), egret_events::EventBus::new());
     let groups = egret_auth::groups::GroupRepo::new(f.db.clone());
 

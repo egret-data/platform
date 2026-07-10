@@ -92,7 +92,8 @@ impl From<egret_secrets::SecretsError> for CatalogHttpError {
     }
 }
 
-/// `egret_core::Error` is what `require_permission` (egret-auth) returns.
+/// `egret_core::Error` is what `egret_core::authz::require` returns (Forbidden on
+/// a denied decision).
 impl From<egret_core::Error> for CatalogHttpError {
     fn from(e: egret_core::Error) -> Self {
         match e {

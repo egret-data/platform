@@ -147,5 +147,10 @@ serde_json.workspace = true
 egret-metastore = { workspace = true }
 # (`egret-auth` is now a regular dependency for the browse API; the browse_api
 # integration test reuses it for session minting.)
+# Real Cedar PDP for the warehouse-admin authz tests (B1b-2): the seam gates on
+# `egret_core::authz::require`, so any test asserting a 403/200 authz outcome
+# builds a `CedarPdp` (over an `egret_events::EventBus`) rather than an allow-all
+# stub, which would falsely pass.
+egret-events = { workspace = true }
 # (`chrono` — used by the browse tests' `SessionService::new` TTLs — is now a
 # regular dependency for the catalog-token DTO, so it's available to tests too.)

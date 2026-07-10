@@ -50,6 +50,10 @@ egret-policy.workspace = true
 # egret-catalog-engine (E3d-1); this dev-dep pulls the embedded lakekeeper engine
 # into the TEST build only (prod engine-mgmt stays on `CatalogPort`).
 egret-catalog-engine.workspace = true
+# Real `CedarPdp` construction in the authz route test (seams migrated onto
+# `egret_core::authz::require`): the PDP is built over the roles catalog and
+# needs an `EventBus` handle.
+egret-events.workspace = true
 tower.workspace = true
 http-body-util = "0.1"
 # `kube` (a normal dep, for `EngineProvisioningPort`'s WS-bridge use of

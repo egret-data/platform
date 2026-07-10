@@ -28,6 +28,10 @@ pub struct EngineMgmtState {
     pub secrets: egret_secrets::WorkspaceSecretStore,
     /// Session service backing the `Auth` extractor.
     pub sessions: SessionService,
+    /// PDP-backed policy decision point for the seam's authz gates
+    /// (`egret_core::authz::require`); platform_admin bypasses. Injected from
+    /// the shared PDP in the composition root.
+    pub pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
     /// Provisions/updates/deletes query engines on Kubernetes (kube-free
     /// Port); `None` in tests and when no cluster is configured (routes then
     /// report "kubernetes not configured").
