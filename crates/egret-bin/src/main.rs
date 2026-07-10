@@ -1149,6 +1149,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
+        pdp: pdp.clone(),
         api_url,
         notebook_kernels: egret_kernel::NotebookKernelStore::new(db.clone()),
         proxy: std::sync::Arc::new(egret_kernel::BackendWsProxy),
