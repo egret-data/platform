@@ -106,6 +106,7 @@ impl SessionService {
             email: row.email,
             platform_roles,
             permissions,
+            group_ids: vec![],
         }))
     }
 
