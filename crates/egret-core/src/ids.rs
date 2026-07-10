@@ -31,6 +31,7 @@ macro_rules! typed_id {
 
 typed_id!(WorkspaceId);
 typed_id!(UserId);
+typed_id!(GroupId);
 
 #[cfg(test)]
 mod tests {
