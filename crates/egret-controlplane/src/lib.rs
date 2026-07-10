@@ -50,6 +50,10 @@ pub struct CpState {
     /// `None` in tests. Used by the Storage router's credential-rotation push-down
     /// (the warehouse admin router itself moved to egret-catalog-engine in E3d-3).
     pub browser: Option<Arc<dyn WarehouseBrowser>>,
+    /// Cedar policy decision point (B1b). Built in `egret-bin` from the SAME
+    /// `EventBus` as `roles` so `RolesChanged` hot-reloads it; stored here as a
+    /// trait object so this crate stays independent of Cedar/egret-auth.
+    pub pdp: Arc<dyn egret_core::authz::Pdp>,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.

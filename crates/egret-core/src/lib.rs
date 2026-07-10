@@ -13,7 +13,7 @@ pub mod tabular;
 #[cfg(feature = "token")]
 pub mod token;
 
-pub use authz::{Decision, Pdp, Resource, Subject};
+pub use authz::{require, AuthTarget, Decision, Pdp, Resource, Subject};
 pub use context::{Principal, WorkspaceContext};
 pub use error::{Error, Result};
 #[cfg(feature = "http")]

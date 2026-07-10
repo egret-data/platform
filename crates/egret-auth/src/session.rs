@@ -101,11 +101,13 @@ impl SessionService {
 
         let platform_roles = self.platform_roles(UserId(row.user_id)).await?;
         let permissions = self.permissions(UserId(row.user_id)).await?;
+        let group_ids = self.group_ids(UserId(row.user_id)).await?;
         Ok(Some(Principal {
             user_id: UserId(row.user_id),
             email: row.email,
             platform_roles,
             permissions,
+            group_ids,
         }))
     }
 
@@ -160,6 +162,20 @@ impl SessionService {
         .await
         .map_err(db_err)?;
         Ok(rows.into_iter().map(|(p,)| p).collect())
+    }
+
+    /// Group ids the user is a direct member of.
+    async fn group_ids(&self, user_id: UserId) -> Result<Vec<egret_core::ids::GroupId>> {
+        let rows: Vec<(Uuid,)> =
+            sqlx::query_as("SELECT group_id FROM user_groups WHERE user_id = $1")
+                .bind(user_id.0)
+                .fetch_all(&self.db.pool)
+                .await
+                .map_err(db_err)?;
+        Ok(rows
+            .into_iter()
+            .map(|(g,)| egret_core::ids::GroupId(g))
+            .collect())
     }
 }
 

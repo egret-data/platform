@@ -28,6 +28,71 @@ struct Fixture {
     db: Db,
 }
 
+/// Incidental PDP for `CpState`: the storage + access route tests gate on
+/// `require_platform_admin` / `require_permission` (session-derived), NOT on
+/// `state.pdp` — those routes don't consult the PDP — so their 403 assertions
+/// are independent of it. An allow-all stub keeps those fixtures light.
+///
+/// The `secrets` routes DO consult `state.pdp` (B1b-1 Task 4), so their tests
+/// build a real `CedarPdp` via `attach_real_pdp` instead.
+struct AllowAllPdp;
+#[async_trait::async_trait]
+impl egret_core::authz::Pdp for AllowAllPdp {
+    async fn authorize(
+        &self,
+        _s: &egret_core::authz::Subject,
+        _a: &str,
+        _r: &egret_core::authz::Resource,
+    ) -> egret_core::Result<egret_core::authz::Decision> {
+        Ok(egret_core::authz::Decision {
+            allow: true,
+            reasons: vec![],
+        })
+    }
+}
+
+/// Build the control-plane `Router` for a given db + repos + PDP. Shared by
+/// `setup` (allow-all PDP) and `attach_real_pdp` (real Cedar PDP) so the two
+/// only differ in the injected decision point.
+fn build_app(
+    db: &Db,
+    users: &UserRepo,
+    sessions: &SessionService,
+    pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
+) -> axum::Router {
+    let crypto =
+        egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
+    let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
+    let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
+
+    control_plane_router().with_state(CpState {
+        storage: egret_catalog_engine::CatalogStore::new(db.clone()),
+        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
+        users: users.clone(),
+        groups: egret_auth::groups::GroupRepo::new(db.clone()),
+        roles: egret_auth::roles::RoleRepo::new(db.clone(), egret_events::EventBus::new()),
+        secrets: workspace_secrets,
+        sessions: sessions.clone(),
+        browser: None,
+        pdp,
+    })
+}
+
+/// Rebuild `f.app` with a REAL `CedarPdp`. The PDP snapshots the
+/// `roles`/`role_permissions` catalog at build time and (in these tests) never
+/// reloads — raw-SQL seeding emits no `RolesChanged` event — so callers MUST
+/// seed any ad-hoc roles the PDP needs to know about BEFORE calling this. The
+/// secrets routes consult `state.pdp`, so their tests use this in place of the
+/// allow-all stub, matching pre-migration `require_permission` outcomes.
+async fn attach_real_pdp(f: &mut Fixture) {
+    let pdp = std::sync::Arc::new(
+        egret_auth::pdp::CedarPdp::build(f.db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    f.app = build_app(&f.db, &f.users, &f.sessions, pdp);
+}
+
 async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -42,11 +107,6 @@ async fn setup() -> Option<Fixture> {
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
 
-    let crypto =
-        egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
-    let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
-    let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
-
     let users = UserRepo::new(db.clone());
     let sessions = SessionService::new(
         db.clone(),
@@ -54,16 +114,7 @@ async fn setup() -> Option<Fixture> {
         chrono::Duration::minutes(60),
     );
 
-    let app = control_plane_router().with_state(CpState {
-        storage: egret_catalog_engine::CatalogStore::new(db.clone()),
-        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
-        users: users.clone(),
-        groups: egret_auth::groups::GroupRepo::new(db.clone()),
-        roles: egret_auth::roles::RoleRepo::new(db.clone(), egret_events::EventBus::new()),
-        secrets: workspace_secrets,
-        sessions: sessions.clone(),
-        browser: None,
-    });
+    let app = build_app(&db, &users, &sessions, std::sync::Arc::new(AllowAllPdp));
 
     Some(Fixture {
         app,
@@ -162,10 +213,13 @@ fn req(method: &str, uri: &str, token: &str, body: Option<serde_json::Value>) ->
 
 #[tokio::test]
 async fn non_admin_is_forbidden() {
-    let Some(f) = setup().await else {
+    let Some(mut f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
+    // The `/secrets` gate consults `state.pdp`; use a real Cedar PDP so a
+    // grant-less principal is genuinely denied (an allow-all stub would 201).
+    attach_real_pdp(&mut f).await;
     let token = session_for(&f, "plain", false).await;
 
     // GET /storage → 403.
@@ -202,10 +256,13 @@ async fn non_admin_is_forbidden() {
 
 #[tokio::test]
 async fn platform_admin_can_manage_storage_and_secrets() {
-    let Some(f) = setup().await else {
+    let Some(mut f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
+    // The `/secrets` gate consults `state.pdp`; a real Cedar PDP proves the
+    // platform_admin bypass (not the allow-all stub) grants `secret:create`.
+    attach_real_pdp(&mut f).await;
     let token = session_for(&f, "admin", true).await;
     let suffix = Uuid::new_v4().simple().to_string();
 
@@ -341,12 +398,18 @@ async fn scoped_permission_storage_read_and_create() {
 /// `POST /secrets`.
 #[tokio::test]
 async fn scoped_permission_secrets_read_and_create() {
-    let Some(f) = setup().await else {
+    let Some(mut f) = setup().await else {
         eprintln!("skip: DATABASE_URL not set");
         return;
     };
 
+    // Seed the ad-hoc roles BEFORE building the PDP: the `/secrets` gate consults
+    // `state.pdp`, and the Cedar PDP snapshots the roles catalog at build time.
     let wrong = session_for_with_permission(&f, "secret_scoped_wrong", "storage:read").await;
+    let reader = session_for_with_permission(&f, "secret_scoped_reader", "secret:read").await;
+    let creator = session_for_with_permission(&f, "secret_scoped_creator", "secret:create").await;
+    attach_real_pdp(&mut f).await;
+
     let resp = f
         .app
         .clone()
@@ -359,7 +422,6 @@ async fn scoped_permission_secrets_read_and_create() {
         "a principal without secret:read must not list secrets"
     );
 
-    let reader = session_for_with_permission(&f, "secret_scoped_reader", "secret:read").await;
     let resp = f
         .app
         .clone()
@@ -391,7 +453,6 @@ async fn scoped_permission_secrets_read_and_create() {
         "secret:read alone must not create a secret"
     );
 
-    let creator = session_for_with_permission(&f, "secret_scoped_creator", "secret:create").await;
     let resp = f
         .app
         .clone()
@@ -403,6 +464,56 @@ async fn scoped_permission_secrets_read_and_create() {
         status,
         StatusCode::CREATED,
         "a scoped secret:create principal must create; body={body}"
+    );
+}
+
+/// Proves the `/secrets` gate now flows through `state.pdp` (B1b-1 Task 4): a
+/// non-`platform_admin` principal granted `secret:read` through a platform-scoped
+/// role — resolved by the real `CedarPdp`, not the allow-all stub — reads
+/// (200 on GET) but cannot create (403 on POST). If the handler still short-
+/// circuited on the session-derived `require_permission`, this would still pass;
+/// what makes it a PDP proof is that the decision comes from a `CedarPdp` built
+/// over `access_grants` (the grant mirrored from `platform_role_assignments`).
+#[tokio::test]
+async fn pdp_backed_secret_reader_reads_but_cannot_create() {
+    let Some(mut f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    // Seed the reader's platform role FIRST, then snapshot it into the PDP.
+    let reader = session_for_with_permission(&f, "pdp_secret_reader", "secret:read").await;
+    attach_real_pdp(&mut f).await;
+
+    // GET /secrets → 200 (the PDP allows `secret:read` at platform scope).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/secrets", &reader, None))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "PDP-backed secret:read must list secrets; body={body}"
+    );
+
+    // POST /secrets → 403 (the same principal lacks `secret:create`).
+    let create_body = serde_json::json!({
+        "name": format!("pdp-secret-{}", Uuid::new_v4().simple()),
+        "value": "s3cr3t",
+    });
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", "/secrets", &reader, Some(create_body)))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "PDP-backed secret:read alone must not create a secret"
     );
 }
 
@@ -495,6 +606,7 @@ async fn setup_isolated_schema() -> Option<Fixture> {
         secrets: workspace_secrets,
         sessions: sessions.clone(),
         browser: None,
+        pdp: std::sync::Arc::new(AllowAllPdp),
     });
 
     Some(Fixture {

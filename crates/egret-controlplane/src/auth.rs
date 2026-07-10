@@ -32,6 +32,7 @@ mod tests {
             email: "a@b.c".into(),
             platform_roles: roles.iter().map(|s| s.to_string()).collect(),
             permissions: perms.iter().map(|s| s.to_string()).collect(),
+            group_ids: vec![],
         }
     }
 

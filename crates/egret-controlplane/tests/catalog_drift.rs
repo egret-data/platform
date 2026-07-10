@@ -6,6 +6,8 @@
 //! `database:*` / dead `workspace:*` false alarm).
 //!
 //! Most control-plane routes gate on `egret_controlplane::auth::require_permission`.
+//! The `secret:*` keys are enforced by the PDP-backed
+//! `egret_core::authz::require(state.pdp, ..)` PEP in `secrets.rs` (B1b-1 Task 4).
 //! `workspace:*` keys are the one exception: they're enforced by the sibling
 //! `egret_workspace::rbac::Authorizer::require_platform` in
 //! `egret-workspace/src/routes.rs`, so that file is scanned too. `engine:*`
@@ -59,6 +61,9 @@ const GATE_CALLS: &[&str] = &[
     "require_permission(",
     "require_platform(",
     "require_workspace(",
+    // PDP-backed policy enforcement point (B1b-1): `secret:*` gates migrated
+    // from `require_permission` to `egret_core::authz::require(state.pdp, ..)`.
+    "authz::require(",
 ];
 
 /// Pull every `"resource:action"`-shaped quoted literal out of a line, but

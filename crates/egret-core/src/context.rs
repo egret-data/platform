@@ -14,6 +14,8 @@ pub struct Principal {
     pub platform_roles: Vec<String>,
     /// Effective permission keys resolved at session build.
     pub permissions: Vec<String>,
+    /// Group ids the user belongs to (direct memberships), for the PDP subject.
+    pub group_ids: Vec<crate::ids::GroupId>,
 }
 
 /// Identity + the workspace the current request operates within.
@@ -46,6 +48,7 @@ mod tests {
                 email: "a@b.c".into(),
                 platform_roles: roles.into_iter().map(String::from).collect(),
                 permissions: vec![],
+                group_ids: vec![],
             },
             workspace_role: "ws_editor".into(),
         }
