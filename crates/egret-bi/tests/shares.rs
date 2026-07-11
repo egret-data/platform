@@ -183,11 +183,12 @@ async fn object_share_grant_read_revoke() {
         body_string(resp).await
     );
 
-    // 2. The outside user is now an OBJECT-GUEST: WsContext admits them (they hold
-    //    an object grant on D in this ws), so the per-object `require_object` read
-    //    handler runs and ALLOWS (ws_viewer → dashboard:read from migration 0070).
-    //    GET D's grants → 200. This is the "reaches the handler + reads its
-    //    granted object" proof.
+    // 2. The outside user is now an OBJECT-GUEST holding only a ws_viewer grant on
+    //    D (dashboard:read, NOT dashboard:manage). Listing the ACL is manage-only
+    //    (security review F2 — the ACL exposes every other grantee), so the
+    //    read-only guest is DENIED: GET D's grants → 403. The object-guest
+    //    admission + "reads its granted object" proof is covered by step 3c below
+    //    (db_get on D → 200).
     let resp = app
         .clone()
         .oneshot(
@@ -202,8 +203,8 @@ async fn object_share_grant_read_revoke() {
     let st2 = resp.status();
     assert_eq!(
         st2,
-        StatusCode::OK,
-        "object-guest with a Viewer grant on D must READ D via require_object (200); got {st2}: {}",
+        StatusCode::FORBIDDEN,
+        "read-only object-guest must NOT list D's ACL (grant_list is manage-only, F2); got {st2}: {}",
         body_string(resp).await
     );
 

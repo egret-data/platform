@@ -143,6 +143,23 @@ async fn update_chart(
         .status()
 }
 
+/// POST a chart duplicate. Duplicating creates new workspace content, so it is
+/// gated on chart:manage (security review F1), matching ch_create.
+async fn duplicate_chart(app: &axum::Router, slug: &str, ch: Uuid, tok: &str) -> StatusCode {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/ws/{slug}/charts/{ch}/duplicate"))
+                .header("Cookie", format!("egret_session={tok}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
 #[tokio::test]
 async fn chart_per_object_handlers_are_object_scoped() {
     let Some(url) = std::env::var("DATABASE_URL").ok() else {
@@ -294,6 +311,13 @@ async fn chart_per_object_handlers_are_object_scoped() {
         StatusCode::FORBIDDEN,
         "outside ws_viewer must NOT update CH (viewer lacks manage → 403)"
     );
+    // Duplicating creates new content → chart:manage (F1). A read-only guest is denied.
+    let viewer_dup = duplicate_chart(&app, &slug, ch, &outside_viewer_tok).await;
+    assert_eq!(
+        viewer_dup,
+        StatusCode::FORBIDDEN,
+        "outside ws_viewer must NOT duplicate CH (duplicate needs manage → 403, F1)"
+    );
 
     // 2. Outside EDITOR: updates the granted CH (2xx) but not the sibling CH2 (403).
     let editor_update_ch = update_chart(&app, &slug, ch, &outside_editor_tok, ds, "e_rename").await;
@@ -307,6 +331,12 @@ async fn chart_per_object_handlers_are_object_scoped() {
         editor_update_sibling,
         StatusCode::FORBIDDEN,
         "outside ws_editor must NOT update ungranted sibling CH2 (403)"
+    );
+    // An Editor object-grant holds chart:manage on CH → may duplicate it (2xx, F1).
+    let editor_dup = duplicate_chart(&app, &slug, ch, &outside_editor_tok).await;
+    assert!(
+        editor_dup.is_success(),
+        "outside ws_editor object-grant must duplicate its granted CH (2xx, F1); got {editor_dup}"
     );
 
     // 3. Workspace ws_editor member reads + updates ANY chart. CH2 is owned by

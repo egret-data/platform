@@ -256,7 +256,7 @@ async fn grant_delete(
         (status = 200, description = "Direct object grants", body = Vec<ObjectGrantDto>),
         (status = 400, description = "Unknown kind", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
-        (status = 403, description = "Missing <kind>:read on the object", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing <kind>:manage on the object", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such object in this workspace", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
@@ -267,7 +267,10 @@ async fn grant_list(
     Path((_w, kind, id)): Path<(String, String, Uuid)>,
 ) -> Result<Json<Vec<ObjectGrantDto>>, BiApiError> {
     let obj = resolve(&st, &ctx, &kind, id).await?;
-    require_object(&*st.pdp, &ctx, &format!("{kind}:read"), obj)
+    // Listing the ACL exposes every grantee, so it is manage-only (matching
+    // grant_put/grant_delete) — a merely read-shared recipient must not be able
+    // to enumerate who else the object is shared with.
+    require_object(&*st.pdp, &ctx, &format!("{kind}:manage"), obj)
         .await
         .map_err(BiApiError::from)?;
     let rows: Vec<(Uuid, String, Uuid, String)> = sqlx::query_as(

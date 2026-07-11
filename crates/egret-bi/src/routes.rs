@@ -1353,10 +1353,11 @@ async fn ch_duplicate(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<crate::model::ChartDto>, BiApiError> {
-    // Reading the source is object-scoped (CH_READ); the copy itself is a
-    // workspace-level create, so a reader who can see the chart may duplicate it.
+    // Duplicating CREATES new workspace content, so it requires CH_MANAGE on the
+    // source (matching ch_create) — a read-only principal must not create rows.
+    // The source is still readable by any manager.
     let obj = crate::shares::resolve(&st, &ctx, "chart", id).await?;
-    egret_core::authz::require_object(&*st.pdp, &ctx, CH_READ, obj)
+    egret_core::authz::require_object(&*st.pdp, &ctx, CH_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
     let copy = st
@@ -2100,7 +2101,7 @@ async fn db_restore(
     responses(
         (status = 200, description = "Dashboard duplicated (layout copied)", body = DashboardDetailDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing dashboard:read permission", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission", body = ErrorBody),
         (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -2110,10 +2111,11 @@ async fn db_duplicate(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DashboardDetailDto>, BiApiError> {
-    // Reading the source is object-scoped (DB_READ); the copy itself is a
-    // workspace-level create, so a reader who can see the dashboard may duplicate it.
+    // Duplicating CREATES new workspace content, so it requires DB_MANAGE on the
+    // source (matching db_create) — a read-only principal must not create rows.
+    // The source is still readable by any manager.
     let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
-    egret_core::authz::require_object(&*st.pdp, &ctx, DB_READ, obj)
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
     let copy = st
