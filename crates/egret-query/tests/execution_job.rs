@@ -46,6 +46,8 @@ struct FakeFactory {
     sleep_ms: u64,
     /// Records the last `session_user` passed to `build` for test assertions.
     last_session_user: Arc<Mutex<Option<Option<String>>>>,
+    /// Records the last `bearer_token` passed to `build` for test assertions.
+    last_bearer_token: Arc<Mutex<Option<Option<String>>>>,
 }
 
 impl FakeFactory {
@@ -53,11 +55,16 @@ impl FakeFactory {
         FakeFactory {
             sleep_ms,
             last_session_user: Arc::new(Mutex::new(None)),
+            last_bearer_token: Arc::new(Mutex::new(None)),
         }
     }
 
     fn last_session_user(&self) -> Option<Option<String>> {
         self.last_session_user.lock().unwrap().clone()
+    }
+
+    fn last_bearer_token(&self) -> Option<Option<String>> {
+        self.last_bearer_token.lock().unwrap().clone()
     }
 }
 
@@ -68,9 +75,10 @@ impl ConnectorFactory for FakeFactory {
         _db: &Database,
         _secret: Option<String>,
         session_user: Option<String>,
-        _bearer_token: Option<String>,
+        bearer_token: Option<String>,
     ) -> Result<Box<dyn Connector>, egret_query::EngineError> {
         *self.last_session_user.lock().unwrap() = Some(session_user);
+        *self.last_bearer_token.lock().unwrap() = Some(bearer_token);
         Ok(Box::new(FakeConnector {
             sleep_ms: self.sleep_ms,
         }))
@@ -180,7 +188,7 @@ async fn submit_runs_to_finished() {
         return;
     };
     let id = jobs
-        .submit(wid, did, None, None, "SELECT 1", None)
+        .submit(wid, did, None, None, None, "SELECT 1", None)
         .await
         .unwrap();
     assert_eq!(
@@ -199,7 +207,7 @@ async fn cancel_sets_cancelled() {
         return;
     };
     let id = jobs
-        .submit(wid, did, None, None, "SELECT 1", None)
+        .submit(wid, did, None, None, None, "SELECT 1", None)
         .await
         .unwrap();
     wait_status(&store, id, QueryStatus::Running, 20).await;
@@ -257,6 +265,7 @@ async fn run_query_returns_tabular_result() {
         "SELECT 1",
         Some(50),
         Some("alice".to_string()),
+        None,
         &limits,
         CancellationToken::new(),
     )
@@ -273,6 +282,68 @@ async fn run_query_returns_tabular_result() {
     assert_eq!(factory.last_session_user(), Some(Some("alice".to_string())));
 }
 
+/// DB-gated: the `bearer_token` passed to `run_query` reaches `factory.build`
+/// unchanged (B3a plumbing). Non-delegated callers pass `None`; the delegation
+/// resolvers (Tasks 3/4) pass a real per-user JWT into this same slot.
+#[tokio::test]
+async fn bearer_token_reaches_factory() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("skip");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let wid: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug,name) VALUES ($1,'t') RETURNING id")
+            .bind(format!("w-{}", Uuid::new_v4().simple()))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let did: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases (name,engine,host,port,workspace_id) \
+         VALUES ($1,'trino','h',8080,$2) RETURNING id",
+    )
+    .bind(format!("db_{}", Uuid::new_v4().simple()))
+    .bind(wid)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let databases = egret_query::DatabaseRepo::new(
+        db.clone(),
+        egret_secrets::SecretStore::new(db.clone(), None),
+        egret_secrets::WorkspaceSecretStore::new(
+            db.clone(),
+            egret_secrets::SecretStore::new(db.clone(), None),
+        ),
+    );
+    let factory = FakeFactory::new(0);
+    let limits = Limits {
+        max_rows: 100,
+        timeout: Duration::from_secs(10),
+    };
+    egret_query::execution::run_query(
+        &databases,
+        &factory,
+        did,
+        "SELECT 1",
+        Some(50),
+        Some("alice".to_string()),
+        Some("tok".to_string()),
+        &limits,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("run_query ok");
+
+    // The bearer_token flowed through run_query into factory.build unchanged.
+    assert_eq!(
+        factory.last_bearer_token(),
+        Some(Some("tok".to_string())),
+        "factory.build must receive bearer_token=Some(\"tok\")"
+    );
+    assert_eq!(factory.last_session_user(), Some(Some("alice".to_string())));
+}
+
 #[tokio::test]
 async fn session_user_reaches_factory() {
     let Some((jobs, store, wid, did, factory)) = setup(0).await else {
@@ -280,7 +351,15 @@ async fn session_user_reaches_factory() {
         return;
     };
     let id = jobs
-        .submit(wid, did, None, Some("alice".to_string()), "SELECT 1", None)
+        .submit(
+            wid,
+            did,
+            None,
+            Some("alice".to_string()),
+            None,
+            "SELECT 1",
+            None,
+        )
         .await
         .unwrap();
     // Wait for the job to run (factory.build is called inside the spawned task).

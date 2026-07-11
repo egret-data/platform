@@ -25,4 +25,6 @@ export interface Database {
   options: ConnOptions;
   has_secret: boolean;
   status: string;
+  /** B3a: run BI queries as the caller's per-user engine JWT (delegation). */
+  delegated?: boolean;
 }

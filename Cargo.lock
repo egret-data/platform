@@ -2557,6 +2557,7 @@ dependencies = [
 name = "egret-bi"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "axum",
  "chrono",
@@ -2958,9 +2959,11 @@ dependencies = [
 name = "egret-query"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "axum",
  "chrono",
+ "egret-analytics-api",
  "egret-auth",
  "egret-core",
  "egret-events",

@@ -76,6 +76,7 @@ fn input(name: &str) -> DatabaseInput {
         options: ConnOptions::default(),
         secret_id: None,
         new_secret: None,
+        delegated: false,
     }
 }
 

@@ -25,6 +25,7 @@ pub(crate) struct Row {
     options: serde_json::Value,
     secret_id: Option<Uuid>,
     status: String,
+    delegated: bool,
 }
 
 impl Row {
@@ -41,6 +42,7 @@ impl Row {
             options,
             has_secret: self.secret_id.is_some(),
             status: self.status,
+            delegated: self.delegated,
         })
     }
 }
@@ -80,9 +82,9 @@ impl DatabaseRepo {
     ) -> Result<Database, DatabaseError> {
         let opts = serde_json::to_value(&input.options).unwrap_or(serde_json::json!({}));
         sqlx::query_as::<_, Row>(
-            "INSERT INTO query.databases (name, engine, host, port, options, secret_id, created_by, workspace_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
-             RETURNING id, name, engine, host, port, options, secret_id, status",
+            "INSERT INTO query.databases (name, engine, host, port, options, secret_id, created_by, workspace_id, delegated) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+             RETURNING id, name, engine, host, port, options, secret_id, status, delegated",
         )
         .bind(&input.name)
         .bind(input.engine.as_str())
@@ -92,6 +94,7 @@ impl DatabaseRepo {
         .bind(secret_id)
         .bind(created_by.map(|u| u.0))
         .bind(workspace_id)
+        .bind(input.delegated)
         .fetch_one(&self.db.pool)
         .await
         .map_err(|e| match &e {
@@ -105,7 +108,7 @@ impl DatabaseRepo {
 
     pub async fn get(&self, id: Uuid) -> Result<Database, DatabaseError> {
         sqlx::query_as::<_, Row>(
-            "SELECT id, name, engine, host, port, options, secret_id, status \
+            "SELECT id, name, engine, host, port, options, secret_id, status, delegated \
              FROM query.databases WHERE id = $1",
         )
         .bind(id)
@@ -125,7 +128,7 @@ impl DatabaseRepo {
         workspace_id: Uuid,
     ) -> Result<Vec<Database>, DatabaseError> {
         let rows = sqlx::query_as::<_, Row>(
-            "SELECT id, name, engine, host, port, options, secret_id, status \
+            "SELECT id, name, engine, host, port, options, secret_id, status, delegated \
              FROM query.databases WHERE workspace_id = $1 ORDER BY name",
         )
         .bind(workspace_id)
@@ -184,7 +187,7 @@ impl DatabaseRepo {
         id: Uuid,
     ) -> Result<Database, DatabaseError> {
         sqlx::query_as::<_, Row>(
-            "SELECT id, name, engine, host, port, options, secret_id, status \
+            "SELECT id, name, engine, host, port, options, secret_id, status, delegated \
              FROM query.databases WHERE id = $1 AND workspace_id = $2",
         )
         .bind(id)
@@ -216,7 +219,7 @@ impl DatabaseRepo {
 
         sqlx::query(
             "UPDATE query.databases SET name=$2, engine=$3, host=$4, port=$5, options=$6, \
-                 secret_id=$7, updated_at=now() WHERE id=$1 AND workspace_id=$8",
+                 secret_id=$7, delegated=$9, updated_at=now() WHERE id=$1 AND workspace_id=$8",
         )
         .bind(id)
         .bind(&input.name)
@@ -226,6 +229,7 @@ impl DatabaseRepo {
         .bind(opts)
         .bind(secret_id)
         .bind(workspace_id)
+        .bind(input.delegated)
         .execute(&self.db.pool)
         .await
         .map_err(|e| match &e {

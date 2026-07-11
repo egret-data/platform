@@ -74,7 +74,79 @@ impl egret_core::authz::Pdp for AllowAllPdp {
     }
 }
 
-fn build_state(db: egret_metastore::Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> EngineState {
+/// B3a: fake engine-token minter. `Some(token)` → mint ok (an OIDC user with a
+/// refresh token); `None` → `NoRefreshToken` (a non-OIDC user, must be denied).
+struct FakeMinter {
+    token: Option<String>,
+}
+#[async_trait]
+impl egret_analytics_api::engine_token::EngineTokenMinter for FakeMinter {
+    async fn mint(
+        &self,
+        _user: uuid::Uuid,
+    ) -> Result<
+        egret_analytics_api::engine_token::EngineToken,
+        egret_analytics_api::engine_token::BrokerError,
+    > {
+        match &self.token {
+            Some(t) => Ok(egret_analytics_api::engine_token::EngineToken {
+                access_token: t.clone(),
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            }),
+            None => Err(egret_analytics_api::engine_token::BrokerError::NoRefreshToken),
+        }
+    }
+}
+
+/// Stub minter for the non-delegation tests: never called on a non-delegated
+/// database (the submit handler only mints when `db.delegated`).
+struct NoMinter;
+#[async_trait]
+impl egret_analytics_api::engine_token::EngineTokenMinter for NoMinter {
+    async fn mint(
+        &self,
+        _user: uuid::Uuid,
+    ) -> Result<
+        egret_analytics_api::engine_token::EngineToken,
+        egret_analytics_api::engine_token::BrokerError,
+    > {
+        Err(egret_analytics_api::engine_token::BrokerError::NoRefreshToken)
+    }
+}
+
+/// Shared slot the capturing factory fills with the `(session_user, bearer_token)`
+/// the submit path resolved and threaded down to the async job.
+type CapturedArgs = Arc<std::sync::Mutex<Option<(Option<String>, Option<String>)>>>;
+
+/// Fake connector factory that records the `(session_user, bearer_token)` the
+/// submit path threaded down to the async job, then fails the connection (the
+/// query itself never runs — we only assert what delegation resolved). The
+/// captured tuple is filled once the spawned job reaches `run_query`.
+#[derive(Clone, Default)]
+struct CapturingFactory {
+    captured: CapturedArgs,
+}
+#[async_trait]
+impl egret_query::execution::connector::ConnectorFactory for CapturingFactory {
+    async fn build(
+        &self,
+        _db: &egret_query::Database,
+        _secret: Option<String>,
+        session_user: Option<String>,
+        bearer_token: Option<String>,
+    ) -> Result<Box<dyn egret_query::execution::connector::Connector>, egret_query::EngineError>
+    {
+        *self.captured.lock().unwrap() = Some((session_user, bearer_token));
+        Err(egret_query::EngineError::Connect("captured (test)".into()))
+    }
+}
+
+fn build_state(
+    db: egret_metastore::Db,
+    pdp: Arc<dyn egret_core::authz::Pdp>,
+    minter: Arc<dyn egret_analytics_api::engine_token::EngineTokenMinter>,
+    factory: Arc<dyn egret_query::execution::connector::ConnectorFactory>,
+) -> EngineState {
     let store = QueryStore::new(db.clone());
     let databases = DatabaseRepo::new(
         db.clone(),
@@ -97,7 +169,7 @@ fn build_state(db: egret_metastore::Db, pdp: Arc<dyn egret_core::authz::Pdp>) ->
     let jobs = JobManager::new(
         store.clone(),
         databases.clone(),
-        Arc::new(egret_query::execution::connector::DefaultConnectorFactory),
+        factory,
         storage.clone(),
         "s3://warehouse".into(),
         "query-results".into(),
@@ -117,6 +189,7 @@ fn build_state(db: egret_metastore::Db, pdp: Arc<dyn egret_core::authz::Pdp>) ->
         authz: egret_workspace::rbac::Authorizer::new(db.clone()),
         pdp,
         users: egret_auth::users::UserRepo::new(db),
+        engine_minter: minter,
     }
 }
 
@@ -126,7 +199,12 @@ async fn state() -> Option<EngineState> {
         .await
         .expect("connect");
     db.migrate().await.expect("migrate");
-    Some(build_state(db, Arc::new(AllowAllPdp)))
+    Some(build_state(
+        db,
+        Arc::new(AllowAllPdp),
+        Arc::new(NoMinter),
+        Arc::new(egret_query::execution::connector::DefaultConnectorFactory),
+    ))
 }
 
 #[tokio::test]
@@ -243,7 +321,12 @@ async fn pdp_backed_history_query_run_gate() {
             .await
             .expect("build CedarPdp"),
     );
-    let st = build_state(db.clone(), pdp);
+    let st = build_state(
+        db.clone(),
+        pdp,
+        Arc::new(NoMinter),
+        Arc::new(egret_query::execution::connector::DefaultConnectorFactory),
+    );
     let sessions = st.sessions.clone();
 
     // ws_editor holds query:run (migration 0009); ws_viewer does not.
@@ -284,4 +367,204 @@ async fn pdp_backed_history_query_run_gate() {
         StatusCode::FORBIDDEN,
         "ws_viewer (lacks query:run) must be denied"
     );
+}
+
+/// Poll the capturing factory until the spawned job reaches `run_query` and
+/// records the `(session_user, bearer_token)` it was built with (~2s budget).
+async fn wait_capture(m: &CapturedArgs) -> (Option<String>, Option<String>) {
+    for _ in 0..100 {
+        if let Some(v) = m.lock().unwrap().clone() {
+            return v;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("connector factory was never invoked (async job did not reach run_query)");
+}
+
+/// B3a Task 4: per-user delegation on the SQL Lab submit path, asserted through
+/// the real `POST /ws/{ws}/queries` HTTP handler with a fake minter and a
+/// capturing connector factory. Three branches:
+///  * DELEGATED db + an OIDC user (mint OK) → 202, and the async job is built
+///    with `session_user = the user's username` (NOT their email) plus the minted
+///    JWT as the bearer.
+///  * DELEGATED db + a non-OIDC user (mint → `NoRefreshToken`) → 403 (no silent
+///    service-cred fallback).
+///  * NON-DELEGATED db → 202, `session_user = caller email`, NO bearer — byte-
+///    identical to the prior shared-service behavior.
+#[tokio::test]
+async fn submit_delegation_branches() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = egret_metastore::Db::connect(&url, 5)
+        .await
+        .expect("connect");
+    db.migrate().await.expect("migrate");
+
+    // A workspace + a member holding query:run (ws_editor, migration 0009 grants it).
+    let email = format!("deleg_{}@egret.local", Uuid::new_v4().simple());
+    let uid: Uuid =
+        sqlx::query_scalar("INSERT INTO users (provider, email) VALUES ('local', $1) RETURNING id")
+            .bind(&email)
+            .fetch_one(&db.pool)
+            .await
+            .expect("insert user");
+    let slug = format!("deleg-{}", Uuid::new_v4().simple());
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'Delegation Test', $2, 'active') RETURNING id",
+    )
+    .bind(&slug)
+    .bind(uid)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert workspace");
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $2, r.id, 'workspace', $1 FROM roles r \
+         WHERE r.scope = 'workspace' AND r.name = 'ws_editor' ON CONFLICT DO NOTHING",
+    )
+    .bind(ws)
+    .bind(uid)
+    .execute(&db.pool)
+    .await
+    .expect("add workspace member");
+
+    let delegated_db: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id, delegated) \
+         VALUES ($1,'trino','localhost',8080,$2,true) RETURNING id",
+    )
+    .bind(format!("d-{}", Uuid::new_v4().simple()))
+    .bind(ws)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert delegated db");
+    let plain_db: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id, delegated) \
+         VALUES ($1,'trino','localhost',8080,$2,false) RETURNING id",
+    )
+    .bind(format!("p-{}", Uuid::new_v4().simple()))
+    .bind(ws)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert plain db");
+
+    // Real CedarPdp so query:run resolves for the ws_editor member; the 403 case
+    // below then fires from the delegation mint, not from an authz denial.
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+
+    let expected_username = egret_auth::users::UserRepo::new(db.clone())
+        .ensure_username(egret_core::ids::UserId(uid))
+        .await
+        .expect("ensure_username");
+    assert_ne!(
+        expected_username, email,
+        "sanity: username must differ from email so the assertions are meaningful"
+    );
+
+    let sessions = egret_auth::session::SessionService::new(
+        db.clone(),
+        chrono::Duration::hours(24),
+        chrono::Duration::minutes(60),
+    );
+    let token = sessions
+        .create(egret_core::ids::UserId(uid), "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token;
+
+    let post = |dbid: Uuid| {
+        Request::builder()
+            .method("POST")
+            .uri(format!("/ws/{slug}/queries"))
+            .header("content-type", "application/json")
+            .header("Cookie", format!("egret_session={token}"))
+            .body(Body::from(format!(
+                r#"{{"database_id":"{dbid}","sql":"SELECT 1"}}"#
+            )))
+            .unwrap()
+    };
+
+    // Branch 1: DELEGATED + mint OK → 202, and the job runs as the username + JWT.
+    let cap1 = Arc::new(CapturingFactory::default());
+    let st1 = build_state(
+        db.clone(),
+        pdp.clone(),
+        Arc::new(FakeMinter {
+            token: Some("fake-engine-jwt".into()),
+        }),
+        cap1.clone(),
+    );
+    let resp = engine_router()
+        .with_state(st1)
+        .oneshot(post(delegated_db))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::ACCEPTED,
+        "delegated + OIDC user (mint OK) must be accepted"
+    );
+    let (session_user, bearer) = wait_capture(&cap1.captured).await;
+    assert_eq!(
+        session_user,
+        Some(expected_username.clone()),
+        "delegated: session_user MUST be the username (preferred_username), not the email"
+    );
+    assert_eq!(
+        bearer,
+        Some("fake-engine-jwt".to_string()),
+        "delegated: the minted per-user JWT MUST be attached as the bearer"
+    );
+
+    // Branch 2: DELEGATED + a non-OIDC user (no refresh token) → 403, no fallback.
+    let st2 = build_state(
+        db.clone(),
+        pdp.clone(),
+        Arc::new(FakeMinter { token: None }),
+        Arc::new(CapturingFactory::default()),
+    );
+    let resp = engine_router()
+        .with_state(st2)
+        .oneshot(post(delegated_db))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "delegated + no refresh token → 403 (not a silent service-cred fallback)"
+    );
+
+    // Branch 3: NON-DELEGATED → byte-identical shared-service behavior: email, no bearer.
+    let cap3 = Arc::new(CapturingFactory::default());
+    let st3 = build_state(
+        db.clone(),
+        pdp.clone(),
+        Arc::new(FakeMinter {
+            token: Some("unused".into()),
+        }),
+        cap3.clone(),
+    );
+    let resp = engine_router()
+        .with_state(st3)
+        .oneshot(post(plain_db))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::ACCEPTED,
+        "non-delegated must be accepted"
+    );
+    let (session_user, bearer) = wait_capture(&cap3.captured).await;
+    assert_eq!(
+        session_user,
+        Some(email.clone()),
+        "non-delegated: session_user stays the caller email"
+    );
+    assert_eq!(bearer, None, "non-delegated: NO bearer is attached");
 }

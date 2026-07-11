@@ -38,6 +38,8 @@ pub struct BiState {
     pub saved: SavedQueryRepo,
     pub schema: SchemaService,
     pub databases: DatabaseRepo,
+    pub users: egret_auth::users::UserRepo,
+    pub engine_minter: std::sync::Arc<dyn egret_analytics_api::engine_token::EngineTokenMinter>,
     pub sessions: SessionService,
     pub workspaces: WorkspaceRepo,
     pub authz: Authorizer,
@@ -1036,13 +1038,15 @@ async fn ds_data(
     let from = crate::expr::source_ref_for(database.engine, &source_of(&ds));
     let sql = format!("SELECT *\nFROM {from}\nLIMIT {limit}");
 
+    let (session_user, bearer) = resolve_delegation(&st, &ctx, ds.database_id).await?;
     let result = egret_query::execution::run_query(
         &st.databases,
         &egret_query::execution::connector::DefaultConnectorFactory,
         ds.database_id,
         &sql,
         Some(limit as usize),
-        Some(ctx.principal.email.clone()),
+        session_user,
+        bearer,
         &chart_run_limits(),
         tokio_util::sync::CancellationToken::new(),
     )
@@ -1753,6 +1757,44 @@ fn chart_run_limits() -> egret_query::execution::model::Limits {
     }
 }
 
+/// For a target database, resolve the `(session_user, bearer_token)` to run a BI
+/// query with. Non-delegated connections keep the current behavior (caller email
+/// as session_user, no bearer). Delegated connections mint the caller's per-user
+/// engine JWT and use the caller's username (= the JWT `preferred_username`, which
+/// the engine matches against the bearer principal); a non-OIDC caller is denied.
+pub async fn resolve_delegation(
+    st: &BiState,
+    ctx: &egret_core::WorkspaceContext,
+    database_id: Uuid,
+) -> Result<(Option<String>, Option<String>), BiApiError> {
+    let db = st
+        .databases
+        .get(database_id)
+        .await
+        .map_err(|e| BiApiError::from(crate::BiError::from(e)))?;
+    if !db.delegated {
+        return Ok((Some(ctx.principal.email.clone()), None));
+    }
+    let token = st
+        .engine_minter
+        .mint(ctx.principal.user_id.0)
+        .await
+        .map_err(|e| match e {
+            egret_analytics_api::engine_token::BrokerError::NoRefreshToken => {
+                BiApiError::from(egret_core::Error::Forbidden)
+            }
+            other => BiApiError::from(egret_core::Error::Internal(anyhow::anyhow!(
+                other.to_string()
+            ))),
+        })?;
+    let username = st
+        .users
+        .ensure_username(ctx.principal.user_id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok((Some(username), Some(token.access_token)))
+}
+
 #[utoipa::path(
     post,
     path = "/api/ws/{workspace}/charts/{id}/data",
@@ -1805,13 +1847,15 @@ async fn ch_run(
     .map_err(|_| Error::InvalidInput("chart spec invalid".into()))?;
 
     let (sql, database_id) = compile_chart_sql(&st, &ctx, chart.dataset_id, &spec).await?;
+    let (session_user, bearer) = resolve_delegation(&st, &ctx, database_id).await?;
     let result = egret_query::execution::run_query(
         &st.databases,
         &egret_query::execution::connector::DefaultConnectorFactory,
         database_id,
         &sql,
         Some(spec.row_limit.max(0) as usize),
-        Some(ctx.principal.email.clone()),
+        session_user,
+        bearer,
         &chart_run_limits(),
         tokio_util::sync::CancellationToken::new(),
     )
@@ -2090,13 +2134,15 @@ async fn db_card_run(
     spec.filters.extend(body.filters);
 
     let (sql, database_id) = compile_chart_sql(&st, &ctx, chart.dataset_id, &spec).await?;
+    let (session_user, bearer) = resolve_delegation(&st, &ctx, database_id).await?;
     let result = egret_query::execution::run_query(
         &st.databases,
         &egret_query::execution::connector::DefaultConnectorFactory,
         database_id,
         &sql,
         Some(spec.row_limit.max(0) as usize),
-        Some(ctx.principal.email.clone()),
+        session_user,
+        bearer,
         &chart_run_limits(),
         tokio_util::sync::CancellationToken::new(),
     )

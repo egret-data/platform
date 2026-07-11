@@ -53,12 +53,14 @@ impl JobManager {
     }
 
     /// Insert a queued row, spawn the execution task, return the id.
+    #[allow(clippy::too_many_arguments)]
     pub async fn submit(
         &self,
         ws: Uuid,
         database_id: Uuid,
         user: Option<Uuid>,
         session_user: Option<String>,
+        bearer_token: Option<String>,
         sql: &str,
         limit: Option<usize>,
     ) -> Result<Uuid, EngineError> {
@@ -68,8 +70,16 @@ impl JobManager {
         let this = self.clone();
         let run_sql = sql.to_string();
         tokio::spawn(async move {
-            this.run(id, database_id, run_sql, limit, session_user, token)
-                .await;
+            this.run(
+                id,
+                database_id,
+                run_sql,
+                limit,
+                session_user,
+                bearer_token,
+                token,
+            )
+            .await;
             this.cancels.lock().unwrap().remove(&id);
         });
         Ok(id)
@@ -84,6 +94,7 @@ impl JobManager {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run(
         &self,
         id: Uuid,
@@ -91,6 +102,7 @@ impl JobManager {
         sql: String,
         limit: Option<usize>,
         session_user: Option<String>,
+        bearer_token: Option<String>,
         token: CancellationToken,
     ) {
         if let Err(e) = self.store.set_running(id).await {
@@ -98,7 +110,15 @@ impl JobManager {
             return;
         }
         match self
-            .execute(id, database_id, &sql, limit, session_user, &token)
+            .execute(
+                id,
+                database_id,
+                &sql,
+                limit,
+                session_user,
+                bearer_token,
+                &token,
+            )
             .await
         {
             Ok(()) => {} // finish() already persisted inside execute()
@@ -113,6 +133,7 @@ impl JobManager {
 
     /// Run the query to completion via the shared `run_query` path, write the
     /// result, persist finished.
+    #[allow(clippy::too_many_arguments)]
     async fn execute(
         &self,
         id: Uuid,
@@ -120,6 +141,7 @@ impl JobManager {
         sql: &str,
         limit: Option<usize>,
         session_user: Option<String>,
+        bearer_token: Option<String>,
         token: &CancellationToken,
     ) -> Result<(), EngineError> {
         let result = run_query(
@@ -129,6 +151,7 @@ impl JobManager {
             sql,
             limit,
             session_user,
+            bearer_token,
             &self.limits,
             token.clone(),
         )
@@ -176,6 +199,7 @@ pub async fn run_query(
     sql: &str,
     limit: Option<usize>,
     session_user: Option<String>,
+    bearer_token: Option<String>,
     limits: &Limits,
     cancel: CancellationToken,
 ) -> Result<TabularResult, EngineError> {
@@ -190,7 +214,9 @@ pub async fn run_query(
 
     let db = databases.get(database_id).await?;
     let secret = databases.open_secret(database_id).await?;
-    let connector = factory.build(&db, secret, session_user, None).await?;
+    let connector = factory
+        .build(&db, secret, session_user, bearer_token)
+        .await?;
 
     let fut = connector.execute(&effective_sql, &effective, cancel.clone());
     match tokio::time::timeout(effective.timeout, fut).await {

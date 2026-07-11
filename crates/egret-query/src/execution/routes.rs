@@ -40,6 +40,7 @@ pub struct EngineState {
     pub authz: Authorizer,
     pub pdp: Arc<dyn egret_core::authz::Pdp>,
     pub users: UserRepo,
+    pub engine_minter: Arc<dyn egret_analytics_api::engine_token::EngineTokenMinter>,
 }
 
 impl FromRef<EngineState> for SessionService {
@@ -109,12 +110,38 @@ async fn submit(
     Json(body): Json<SubmitQuery>,
 ) -> Result<(axum::http::StatusCode, Json<SubmitAck>), EngineApiError> {
     authorize(&st, &ctx, body.database_id).await?;
-    let session_user = Some(
-        st.users
+    // B3a: per-user delegation. For a delegated connection, mint the caller's
+    // short-lived engine JWT and run as their username (= JWT preferred_username);
+    // a non-OIDC caller is denied (403), never silently falls back to service
+    // creds. A non-delegated connection keeps the shared-service behavior:
+    // session_user = caller email, no bearer.
+    let db = st
+        .databases
+        .get(body.database_id)
+        .await
+        .map_err(|e| EngineApiError::from(crate::execution::EngineError::from(e)))?;
+    let (session_user, bearer) = if db.delegated {
+        let token = st
+            .engine_minter
+            .mint(ctx.principal.user_id.0)
+            .await
+            .map_err(|e| match e {
+                egret_analytics_api::engine_token::BrokerError::NoRefreshToken => {
+                    EngineApiError::from(egret_core::Error::Forbidden)
+                }
+                other => EngineApiError::from(egret_core::Error::Internal(anyhow::anyhow!(
+                    other.to_string()
+                ))),
+            })?;
+        let username = st
+            .users
             .ensure_username(ctx.principal.user_id)
             .await
-            .map_err(EngineApiError::from)?,
-    );
+            .map_err(EngineApiError::from)?;
+        (Some(username), Some(token.access_token))
+    } else {
+        (Some(ctx.principal.email.clone()), None)
+    };
     let id = st
         .jobs
         .submit(
@@ -122,6 +149,7 @@ async fn submit(
             body.database_id,
             Some(ctx.principal.user_id.0),
             session_user,
+            bearer,
             &body.sql,
             body.limit,
         )

@@ -17,7 +17,19 @@ pub struct StarRocksConnector {
 
 impl StarRocksConnector {
     pub fn new(spec: &ConnSpec) -> Self {
-        let user = spec.options.user.clone().unwrap_or_else(|| "root".into());
+        // Under delegation (a bearer is present), StarRocks `authentication_jwt`
+        // requires the MySQL login user to equal the JWT principal
+        // (`preferred_username`) — so use the resolved per-user `session_user`,
+        // mirroring Trino's `X-Trino-User = session_user`. Without a bearer the
+        // connection's configured service user is used (unchanged behavior).
+        let user = if spec.bearer_token.is_some() {
+            spec.session_user
+                .clone()
+                .or_else(|| spec.options.user.clone())
+                .unwrap_or_else(|| "root".into())
+        } else {
+            spec.options.user.clone().unwrap_or_else(|| "root".into())
+        };
         let mut b = mysql_async::OptsBuilder::default()
             .ip_or_hostname(spec.host.clone())
             .tcp_port(u16::try_from(spec.port).unwrap_or(9030))
@@ -259,5 +271,35 @@ mod tests {
         let c = StarRocksConnector::new(&spec(None, Some("native-pw".into())));
         assert!(!c.opts().enable_cleartext_plugin());
         assert_eq!(c.opts().pass(), Some("native-pw"));
+    }
+
+    /// Build a spec whose configured service user differs from the per-user
+    /// `session_user`, so the two login-user branches are distinguishable.
+    fn spec_distinct(bearer: Option<String>) -> ConnSpec {
+        ConnSpec {
+            engine: Engine::StarRocks,
+            host: "h".into(),
+            port: 9030,
+            options: ConnOptions {
+                user: Some("svc".into()),
+                ..Default::default()
+            },
+            secret: Some("native-pw".into()),
+            session_user: Some("alice".into()),
+            bearer_token: bearer,
+        }
+    }
+
+    #[test]
+    fn bearer_login_user_is_session_user() {
+        // Delegation: the MySQL login must be the JWT principal, not the service user.
+        let c = StarRocksConnector::new(&spec_distinct(Some("eyJ.jwt.sig".into())));
+        assert_eq!(c.opts().user(), Some("alice"));
+    }
+
+    #[test]
+    fn no_bearer_login_user_is_service_user() {
+        let c = StarRocksConnector::new(&spec_distinct(None));
+        assert_eq!(c.opts().user(), Some("svc"));
     }
 }

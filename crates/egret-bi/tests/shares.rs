@@ -18,9 +18,26 @@ use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+/// Test stub: object-scope tests use non-delegated DBs, so mint is never called.
+struct NoMinter;
+#[async_trait::async_trait]
+impl egret_analytics_api::engine_token::EngineTokenMinter for NoMinter {
+    async fn mint(
+        &self,
+        _user: uuid::Uuid,
+    ) -> Result<
+        egret_analytics_api::engine_token::EngineToken,
+        egret_analytics_api::engine_token::BrokerError,
+    > {
+        Err(egret_analytics_api::engine_token::BrokerError::NoRefreshToken)
+    }
+}
+
 fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> BiState {
     BiState {
         db: db.clone(),
+        users: egret_auth::users::UserRepo::new(db.clone()),
+        engine_minter: Arc::new(NoMinter),
         saved: SavedQueryRepo::new(db.clone()),
         schema: SchemaService::new(),
         databases: egret_query::DatabaseRepo::new(

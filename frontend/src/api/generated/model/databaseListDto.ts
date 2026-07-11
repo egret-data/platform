@@ -14,4 +14,5 @@ export interface DatabaseListDto {
   id: string;
   name: string;
   engine: Engine;
+  delegated: boolean;
 }
