@@ -18751,6 +18751,10 @@
           },
           "status": {
             "type": "string"
+          },
+          "delegated": {
+            "type": "boolean",
+            "description": "B3a: run BI queries as the caller's per-user engine JWT (delegation)."
           }
         }
       },
@@ -18764,7 +18768,8 @@
           "port",
           "options",
           "has_secret",
-          "status"
+          "status",
+          "delegated"
         ],
         "properties": {
           "id": {
@@ -18791,6 +18796,9 @@
           },
           "status": {
             "type": "string"
+          },
+          "delegated": {
+            "type": "boolean"
           }
         }
       },
@@ -18836,6 +18844,10 @@
                 "$ref": "#/components/schemas/NewSecret"
               }
             ]
+          },
+          "delegated": {
+            "type": "boolean",
+            "description": "B3a: run BI queries as the caller's per-user engine JWT (delegation)."
           }
         }
       },
@@ -18845,7 +18857,8 @@
         "required": [
           "id",
           "name",
-          "engine"
+          "engine",
+          "delegated"
         ],
         "properties": {
           "id": {
@@ -18856,6 +18869,9 @@
           },
           "engine": {
             "$ref": "#/components/schemas/Engine"
+          },
+          "delegated": {
+            "type": "boolean"
           }
         }
       },
