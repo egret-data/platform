@@ -26,6 +26,7 @@ fn input(name: &str) -> egret_query::registry::model::DatabaseInput {
         },
         secret_id: None,
         new_secret: None,
+        delegated: false,
     }
 }
 
@@ -106,6 +107,46 @@ async fn register_list_get_delete() {
         r.get_in_workspace(wid, db.id).await.unwrap_err(),
         egret_query::DatabaseError::NotFound(_)
     ));
+}
+
+#[tokio::test]
+async fn delegated_flag_roundtrips() {
+    let Some((r, _ws, wid)) = repo(true).await else {
+        eprintln!("skip");
+        return;
+    };
+    // Default (omitted in the helper) persists as false.
+    let default_db = r
+        .create_in_workspace(wid, &input(&uniq("db")), None, None)
+        .await
+        .unwrap();
+    assert!(
+        !r.get(default_db.id).await.unwrap().delegated,
+        "default delegated must be false"
+    );
+
+    // Explicit delegated=true round-trips through create → get.
+    let mut inp = input(&uniq("db"));
+    inp.delegated = true;
+    let del_db = r.create_in_workspace(wid, &inp, None, None).await.unwrap();
+    assert!(del_db.delegated, "create must return delegated=true");
+    assert!(
+        r.get(del_db.id).await.unwrap().delegated,
+        "get must read delegated=true"
+    );
+
+    // Update can flip it back to false.
+    let mut off = input("");
+    off.name = del_db.name.clone();
+    off.delegated = false;
+    let updated = r
+        .update_in_workspace(wid, del_db.id, &off, None, None)
+        .await
+        .unwrap();
+    assert!(!updated.delegated, "update must persist delegated=false");
+
+    r.delete_in_workspace(wid, default_db.id).await.unwrap();
+    r.delete_in_workspace(wid, del_db.id).await.unwrap();
 }
 
 #[tokio::test]

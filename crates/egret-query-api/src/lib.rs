@@ -79,4 +79,7 @@ pub struct Database {
     pub options: ConnOptions,
     pub has_secret: bool,
     pub status: String,
+    /// B3a: run BI queries as the caller's per-user engine JWT (delegation).
+    #[serde(default)]
+    pub delegated: bool,
 }

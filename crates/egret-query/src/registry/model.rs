@@ -30,6 +30,9 @@ pub struct DatabaseInput {
     pub secret_id: Option<Uuid>,
     #[serde(default)]
     pub new_secret: Option<egret_secrets::NewSecret>,
+    /// B3a: run BI queries as the caller's per-user engine JWT (delegation).
+    #[serde(default)]
+    pub delegated: bool,
 }
 
 /// Body for testing an unsaved connection (no `name`).
@@ -56,6 +59,7 @@ pub struct DatabaseDetailDto {
     pub options: ConnOptions,
     pub has_secret: bool,
     pub status: String,
+    pub delegated: bool,
 }
 
 impl From<Database> for DatabaseDetailDto {
@@ -69,6 +73,7 @@ impl From<Database> for DatabaseDetailDto {
             options: d.options,
             has_secret: d.has_secret,
             status: d.status,
+            delegated: d.delegated,
         }
     }
 }
@@ -79,6 +84,7 @@ pub struct DatabaseListDto {
     pub id: String,
     pub name: String,
     pub engine: Engine,
+    pub delegated: bool,
 }
 
 /// Result of a connection test.
