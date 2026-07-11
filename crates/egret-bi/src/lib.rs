@@ -11,6 +11,7 @@ pub mod model;
 mod routes;
 mod saved;
 mod schema;
+pub mod shares;
 mod typegen;
 
 pub use chart::{Chart, ChartRepo};
@@ -21,6 +22,7 @@ pub use expr::{validate_expression, DescribedExpr};
 pub use routes::{
     chart_router, dashboard_router, dataset_router, folder_router, sqllab_router, BiState,
 };
+pub use shares::shares_router;
 
 /// The BI seam's OpenAPI document (E0·P4b-6/-7): the dataset, chart, folder,
 /// sqllab, and dashboard routers merged into one `OpenApi`. `egret-server` calls
@@ -33,6 +35,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     doc.merge(routes::BiFolderApi::openapi());
     doc.merge(routes::BiSqlLabApi::openapi());
     doc.merge(routes::BiDashboardApi::openapi());
+    doc.merge(shares::BiSharesApi::openapi());
     doc
 }
 pub use saved::{SavedQuery, SavedQueryRepo};

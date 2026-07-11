@@ -24,12 +24,11 @@ pub fn template_for_role(role_name: &str, scope: &str, perms: &[String]) -> Stri
         .map(|p| format!("Egret::Action::\"{p}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    // Non-admin roles use `resource == ?resource` (exact match), NOT `in`, so a
-    // platform-scoped grant does NOT cascade into workspaces (Workspace in
-    // Platform). This preserves legacy semantics: only platform_admin bypasses
-    // across scopes; a non-admin platform permission stays platform-only and a
-    // workspace grant stays scoped to its own workspace. Do not change to `in`.
-    format!("permit(principal in ?principal, action in [{actions}], resource == ?resource);")
+    let op = if scope == "workspace" { "in" } else { "==" };
+    // workspace roles cascade to objects (folder→item, ws→object, object→itself via `in`);
+    // platform roles keep `==` so a platform grant never matches a workspace/object resource
+    // (anti-leak from B1b-2). Object grants use workspace roles, so they cascade correctly.
+    format!("permit(principal in ?principal, action in [{actions}], resource {op} ?resource);")
 }
 
 #[cfg(test)]
@@ -55,7 +54,34 @@ mod tests {
             &["dashboard:read".into(), "dashboard:manage".into()],
         );
         assert!(t.contains("Egret::Action::\"dashboard:read\""));
+        // Workspace roles cascade to objects (folder→item, ws→object): use `in`.
+        assert!(
+            t.contains("action in ["),
+            "workspace role must list its perms, got: {t}"
+        );
+        assert!(
+            t.contains("resource in ?resource"),
+            "workspace role must use cascading `in`, got: {t}"
+        );
         let tmpl: Template = t.parse().expect("role template parses");
+        let mut ps = PolicySet::new();
+        ps.add_template(tmpl).unwrap();
+    }
+
+    #[test]
+    fn platform_scope_non_admin_role_uses_exact_match() {
+        // A platform-scoped non-admin role keeps `==` so a platform grant never
+        // matches a workspace/object resource (anti-leak from B1b-2).
+        let t = template_for_role("platform_viewer", "platform", &["dashboard:read".into()]);
+        assert!(
+            t.contains("action in [") && t.contains("Egret::Action::\"dashboard:read\""),
+            "platform role must list its perms, got: {t}"
+        );
+        assert!(
+            t.contains("resource == ?resource"),
+            "platform non-admin role must use exact-match `==`, got: {t}"
+        );
+        let tmpl: Template = t.parse().expect("platform role template parses");
         let mut ps = PolicySet::new();
         ps.add_template(tmpl).unwrap();
     }
@@ -72,15 +98,16 @@ mod tests {
     fn workspace_role_named_platform_admin_is_not_unrestricted() {
         // Security review #2b: a workspace-scoped role that merely shares the name
         // `platform_admin` must NOT inherit the unrestricted admin body — it must
-        // list its own permissions and use exact-match `resource == ?resource`.
+        // list its own permissions. Being workspace-scoped it uses cascading `in`,
+        // but with its own `action in [...]` perm list, NOT the bare-`action` bypass.
         let t = template_for_role("platform_admin", "workspace", &["dashboard:read".into()]);
         assert!(
             t.contains("action in [") && t.contains("Egret::Action::\"dashboard:read\""),
             "workspace platform_admin must list its perms, got: {t}"
         );
         assert!(
-            t.contains("resource == ?resource"),
-            "workspace platform_admin must use exact-match scope, got: {t}"
+            t.contains("resource in ?resource"),
+            "workspace platform_admin (workspace scope) uses cascading `in`, got: {t}"
         );
         assert!(
             !t.contains("action, resource in ?resource"),

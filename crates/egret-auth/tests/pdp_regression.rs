@@ -195,6 +195,9 @@ async fn legacy_oracle(db: &Db, user: UserId, action: &str, resource: &Resource)
     match resource {
         Resource::Platform => platform_holds(db, user, action).await,
         Resource::Workspace(w) => workspace_holds(db, user, *w, action).await,
+        // This legacy oracle only compares platform/workspace decisions; object
+        // scope has its own tests in entities.rs and Task 3.
+        Resource::Object(_) => unreachable!("legacy oracle is not exercised with object resources"),
     }
 }
 

@@ -37,6 +37,36 @@ impl Authorizer {
         Ok(rows.into_iter().map(|(r,)| r).collect())
     }
 
+    /// True if `user_id` (directly or via a group) holds an object-scoped grant on
+    /// any object that lives in workspace `ws`. Used by `WsContext` to admit an
+    /// "object-guest" — a non-member share recipient — so per-object handlers can
+    /// run `require_object`. This carries NO workspace permissions; workspace-level
+    /// `require` still denies them.
+    pub async fn has_object_grant_in_workspace(
+        &self,
+        user_id: UserId,
+        ws: WorkspaceId,
+    ) -> Result<bool> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS( \
+               SELECT 1 FROM access_grants ag \
+               WHERE ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
+                    OR (ag.principal_type = 'group' AND ag.principal_id IN \
+                          (SELECT group_id FROM user_groups WHERE user_id = $1)) ) \
+                 AND ag.scope_type = 'object' \
+                 AND ( (ag.object_type = 'folder'    AND ag.scope_id IN (SELECT id FROM analytics.folders    WHERE workspace_id = $2)) \
+                    OR (ag.object_type = 'dashboard' AND ag.scope_id IN (SELECT id FROM analytics.dashboards WHERE workspace_id = $2)) \
+                    OR (ag.object_type = 'chart'     AND ag.scope_id IN (SELECT id FROM analytics.charts     WHERE workspace_id = $2)) \
+                    OR (ag.object_type = 'dataset'   AND ag.scope_id IN (SELECT id FROM analytics.datasets   WHERE workspace_id = $2)) ) )",
+        )
+        .bind(user_id.0)
+        .bind(ws.0)
+        .fetch_one(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(exists)
+    }
+
     /// Replace the user's platform role assignments with the supplied (validated) role names.
     pub async fn replace_platform_roles(&self, user_id: UserId, roles: &[String]) -> Result<()> {
         for r in roles {

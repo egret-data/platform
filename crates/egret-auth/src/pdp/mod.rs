@@ -143,11 +143,25 @@ impl Pdp for CedarPdp {
         action: &str,
         resource: &Resource,
     ) -> Result<Decision> {
-        let ws = match resource {
-            Resource::Workspace(w) => Some(*w),
-            Resource::Platform => None,
+        // Load the grants relevant to this resource: platform grants always,
+        // the resource's workspace grants (so ws roles cascade), and — for an
+        // object — object grants on the object itself or its containing folder
+        // (so a folder grant cascades to items inside it).
+        let (ws, object_ids) = match resource {
+            Resource::Platform => (None, Vec::new()),
+            Resource::Workspace(w) => (Some(*w), Vec::new()),
+            Resource::Object(o) => (
+                Some(o.workspace_id),
+                match o.folder_id {
+                    Some(f) => vec![o.id, f],
+                    None => vec![o.id],
+                },
+            ),
         };
-        let grants = self.grants.grants_for(subject.user_id, ws).await?;
+        let grants = self
+            .grants
+            .grants_for(subject.user_id, ws, &object_ids)
+            .await?;
         let inner = self.inner.load();
         let policies =
             entities::link_grants(inner.templates.clone(), subject, &grants, &inner.role_names);

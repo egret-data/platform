@@ -8334,7 +8334,7 @@
             }
           },
           "403": {
-            "description": "Missing chart:manage permission, or not the chart owner",
+            "description": "Missing chart:manage permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -8421,7 +8421,7 @@
             }
           },
           "403": {
-            "description": "Missing chart:manage permission, or not the chart owner",
+            "description": "Missing chart:manage permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -9301,7 +9301,7 @@
             }
           },
           "403": {
-            "description": "Missing dashboard:manage permission, or not the dashboard owner",
+            "description": "Missing dashboard:manage permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -9388,7 +9388,7 @@
             }
           },
           "403": {
-            "description": "Missing dashboard:manage permission, or not the dashboard owner",
+            "description": "Missing dashboard:manage permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -9841,7 +9841,7 @@
             }
           },
           "403": {
-            "description": "Missing dashboard:manage permission, or not the dashboard owner",
+            "description": "Missing dashboard:manage permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -9930,7 +9930,7 @@
             }
           },
           "403": {
-            "description": "Missing dashboard:manage permission, or not the dashboard owner",
+            "description": "Missing dashboard:manage permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -14920,6 +14920,351 @@
         }
       }
     },
+    "/api/ws/{workspace}/objects/{kind}/{id}/grants": {
+      "get": {
+        "tags": [
+          "shares"
+        ],
+        "operationId": "grant_list",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "Object kind: dashboard | chart | dataset | folder",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Object id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Direct object grants",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ObjectGrantDto"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown kind",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing <kind>:read on the object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such object in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "shares"
+        ],
+        "operationId": "grant_put",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "Object kind: dashboard | chart | dataset | folder",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Object id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ObjectGrantBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Grant created (or already existed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObjectGrantDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown kind, role, or principal_type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing <kind>:manage on the object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such object in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/objects/{kind}/{id}/grants/{grant_id}": {
+      "delete": {
+        "tags": [
+          "shares"
+        ],
+        "operationId": "grant_delete",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "description": "Object kind: dashboard | chart | dataset | folder",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Object id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "grant_id",
+            "in": "path",
+            "description": "Grant id to revoke",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Grant revoked (idempotent)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ack"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown kind",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing <kind>:manage on the object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such object in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/queries": {
       "get": {
         "tags": [
@@ -19276,6 +19621,56 @@
           }
         }
       },
+      "ObjectGrantBody": {
+        "type": "object",
+        "description": "Body of a share grant: give `principal` a workspace `role` on this object.",
+        "required": [
+          "principal_type",
+          "principal_id",
+          "role"
+        ],
+        "properties": {
+          "principal_type": {
+            "type": "string",
+            "description": "`user` | `group`."
+          },
+          "principal_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "role": {
+            "type": "string",
+            "description": "`ws_viewer` (Viewer, read) | `ws_editor` (Editor, manage)."
+          }
+        }
+      },
+      "ObjectGrantDto": {
+        "type": "object",
+        "description": "A single object-scoped grant on the object.",
+        "required": [
+          "id",
+          "principal_type",
+          "principal_id",
+          "role"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "principal_type": {
+            "type": "string"
+          },
+          "principal_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "role": {
+            "type": "string",
+            "description": "The workspace role name (`ws_viewer` | `ws_editor`)."
+          }
+        }
+      },
       "OrderBy": {
         "type": "object",
         "required": [
@@ -21227,6 +21622,10 @@
     {
       "name": "dashboards",
       "description": "BI dashboards: CRUD, layout (tabs + cards), folders, trash + bookmarks"
+    },
+    {
+      "name": "shares",
+      "description": "Per-object grants: share a dashboard / chart / dataset / folder with a user or group at a workspace role"
     },
     {
       "name": "auth",

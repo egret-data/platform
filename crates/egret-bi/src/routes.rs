@@ -34,6 +34,7 @@ use crate::typegen::generic_type;
 
 #[derive(Clone)]
 pub struct BiState {
+    pub db: egret_metastore::Db,
     pub saved: SavedQueryRepo,
     pub schema: SchemaService,
     pub databases: DatabaseRepo,
@@ -296,6 +297,17 @@ async fn conn_spec_perm(
     egret_core::authz::require(&*st.pdp, ctx, perm)
         .await
         .map_err(BiApiError::from)?;
+    conn_spec_granted(st, ctx, db).await
+}
+
+/// Build a `ConnSpec` for a workspace-granted database WITHOUT an authz gate —
+/// the caller has already authorized (e.g. object-scope `require_object`). Still
+/// enforces that the database is granted to the workspace.
+async fn conn_spec_granted(
+    st: &BiState,
+    ctx: &egret_core::WorkspaceContext,
+    db: Uuid,
+) -> Result<ConnSpec, BiApiError> {
     let granted = st
         .databases
         .list_for_workspace(ctx.workspace_id.0)
@@ -494,25 +506,6 @@ pub fn dataset_router() -> Router<BiState> {
         )
 }
 
-/// Guard: dataset exists and lives in this workspace. Mirrors the inline
-/// `get` + workspace check the other dataset handlers use.
-async fn require_dataset_in_ws(
-    st: &BiState,
-    ctx: &egret_core::WorkspaceContext,
-    id: Uuid,
-) -> Result<(), BiApiError> {
-    let ds = st
-        .datasets
-        .get(id)
-        .await
-        .map_err(BiApiError::from)?
-        .ok_or(Error::NotFound("dataset".into()))?;
-    if ds.workspace_id != ctx.workspace_id.0 {
-        return Err(Error::NotFound("dataset".into()).into());
-    }
-    Ok(())
-}
-
 #[utoipa::path(
     patch,
     path = "/api/ws/{workspace}/datasets/{id}/folder",
@@ -536,10 +529,10 @@ async fn ds_set_folder(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<crate::model::SetFolder>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_in_ws(&st, &ctx, id).await?;
     if let Some(fid) = b.folder_id {
         require_folder(&st, &ctx, fid, "dataset").await?;
     }
@@ -697,10 +690,10 @@ async fn ds_trash(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_in_ws(&st, &ctx, id).await?;
     st.datasets
         .set_trashed(id, true)
         .await
@@ -729,10 +722,10 @@ async fn ds_restore(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_in_ws(&st, &ctx, id).await?;
     st.datasets
         .set_trashed(id, false)
         .await
@@ -761,10 +754,10 @@ async fn ds_bookmark_add(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_READ)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_READ, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_in_ws(&st, &ctx, id).await?;
     st.datasets
         .add_bookmark(ctx.principal.user_id.0, id)
         .await
@@ -793,10 +786,10 @@ async fn ds_bookmark_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_READ)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_READ, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_in_ws(&st, &ctx, id).await?;
     st.datasets
         .remove_bookmark(ctx.principal.user_id.0, id)
         .await
@@ -825,7 +818,8 @@ async fn ds_get(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_READ)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_READ, obj)
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(load_detail(&st, id).await?))
@@ -854,10 +848,10 @@ async fn ds_update(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<UpdateDataset>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_owner(&st, &ctx, id).await?;
     st.datasets
         .update(id, &b.name, &b.description, b.sql.as_deref())
         .await
@@ -886,17 +880,17 @@ async fn ds_refresh(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_owner(&st, &ctx, id).await?;
     let ds = st
         .datasets
         .get(id)
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("dataset".into()))?;
-    let spec = conn_spec_perm(&st, &ctx, ds.database_id, DS_MANAGE).await?;
+    let spec = conn_spec_granted(&st, &ctx, ds.database_id).await?;
     let source = source_of(&ds);
     let new_columns = introspect(&st, &spec, &source).await?;
     st.datasets
@@ -927,10 +921,10 @@ async fn ds_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_owner(&st, &ctx, id).await?;
     st.datasets.delete(id).await.map_err(BiApiError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -955,19 +949,6 @@ fn source_of(ds: &crate::dataset::Dataset) -> SourceSpec {
             schema: ds.schema_name.clone().unwrap_or_default(),
             table: ds.table_name.clone().unwrap_or_default(),
         },
-    }
-}
-
-async fn require_dataset_owner(
-    st: &BiState,
-    ctx: &egret_core::WorkspaceContext,
-    id: Uuid,
-) -> Result<(), BiApiError> {
-    let owner = st.datasets.owner(id).await.map_err(BiApiError::from)?;
-    if is_admin(ctx) || owner == Some(ctx.principal.user_id.0) {
-        Ok(())
-    } else {
-        Err(Error::Forbidden.into())
     }
 }
 
@@ -1013,14 +994,17 @@ async fn ds_add_metric(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<MetricBody>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    require_dataset_owner(&st, &ctx, id).await?;
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
+        .await
+        .map_err(BiApiError::from)?;
     let ds = st
         .datasets
         .get(id)
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("dataset".into()))?;
-    let spec = conn_spec_perm(&st, &ctx, ds.database_id, DS_MANAGE).await?;
+    let spec = conn_spec_granted(&st, &ctx, ds.database_id).await?;
     let d = validate_expression(&spec, &source_of(&ds), &b.expression)
         .await
         .map_err(BiApiError::from)?;
@@ -1064,7 +1048,10 @@ async fn ds_update_metric(
     Path((_w, id, metric_id)): Path<(String, Uuid, Uuid)>,
     Json(b): Json<MetricBody>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    require_dataset_owner(&st, &ctx, id).await?;
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
+        .await
+        .map_err(BiApiError::from)?;
     require_metric_in_dataset(&st, id, metric_id).await?;
     let ds = st
         .datasets
@@ -1072,7 +1059,7 @@ async fn ds_update_metric(
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("dataset".into()))?;
-    let spec = conn_spec_perm(&st, &ctx, ds.database_id, DS_MANAGE).await?;
+    let spec = conn_spec_granted(&st, &ctx, ds.database_id).await?;
     let d = validate_expression(&spec, &source_of(&ds), &b.expression)
         .await
         .map_err(BiApiError::from)?;
@@ -1113,10 +1100,10 @@ async fn ds_delete_metric(
     WsContext(ctx): WsContext,
     Path((_w, id, metric_id)): Path<(String, Uuid, Uuid)>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_owner(&st, &ctx, id).await?;
     require_metric_in_dataset(&st, id, metric_id).await?;
     st.datasets
         .delete_metric(metric_id)
@@ -1149,14 +1136,17 @@ async fn ds_add_column(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<AddColumnBody>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    require_dataset_owner(&st, &ctx, id).await?;
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
+        .await
+        .map_err(BiApiError::from)?;
     let ds = st
         .datasets
         .get(id)
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("dataset".into()))?;
-    let spec = conn_spec_perm(&st, &ctx, ds.database_id, DS_MANAGE).await?;
+    let spec = conn_spec_granted(&st, &ctx, ds.database_id).await?;
     let d = validate_expression(&spec, &source_of(&ds), &b.expression)
         .await
         .map_err(BiApiError::from)?;
@@ -1201,10 +1191,10 @@ async fn ds_update_column(
     Path((_w, id, column_name)): Path<(String, Uuid, String)>,
     Json(b): Json<UpdateColumnBody>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_owner(&st, &ctx, id).await?;
     let expr_update = if let Some(expr) = b.expression.as_deref() {
         match st
             .datasets
@@ -1219,7 +1209,7 @@ async fn ds_update_column(
                     .await
                     .map_err(BiApiError::from)?
                     .ok_or(Error::NotFound("dataset".into()))?;
-                let spec = conn_spec_perm(&st, &ctx, ds.database_id, DS_MANAGE).await?;
+                let spec = conn_spec_granted(&st, &ctx, ds.database_id).await?;
                 let d = validate_expression(&spec, &source_of(&ds), expr)
                     .await
                     .map_err(BiApiError::from)?;
@@ -1274,10 +1264,10 @@ async fn ds_delete_column(
     WsContext(ctx): WsContext,
     Path((_w, id, column_name)): Path<(String, Uuid, String)>,
 ) -> Result<Json<DatasetDetailDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DS_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dataset_owner(&st, &ctx, id).await?;
     st.datasets
         .delete_calc_column(id, &column_name)
         .await
@@ -1328,10 +1318,10 @@ async fn ch_set_folder(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<crate::model::SetFolder>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, CH_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "chart", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, CH_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_chart_in_ws(&st, &ctx, id).await?;
     if let Some(fid) = b.folder_id {
         require_folder(&st, &ctx, fid, "chart").await?;
     }
@@ -1363,10 +1353,13 @@ async fn ch_duplicate(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<crate::model::ChartDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, CH_MANAGE)
+    // Duplicating CREATES new workspace content, so it requires CH_MANAGE on the
+    // source (matching ch_create) — a read-only principal must not create rows.
+    // The source is still readable by any manager.
+    let obj = crate::shares::resolve(&st, &ctx, "chart", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, CH_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_chart_in_ws(&st, &ctx, id).await?;
     let copy = st
         .charts
         .duplicate(id, Some(ctx.principal.user_id.0))
@@ -1374,35 +1367,6 @@ async fn ch_duplicate(
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("chart".into()))?;
     Ok(Json(crate::model::chart_dto(copy)))
-}
-
-async fn require_chart_in_ws(
-    st: &BiState,
-    ctx: &egret_core::WorkspaceContext,
-    id: Uuid,
-) -> Result<(), BiApiError> {
-    match st
-        .charts
-        .chart_workspace(id)
-        .await
-        .map_err(BiApiError::from)?
-    {
-        Some(w) if w == ctx.workspace_id.0 => Ok(()),
-        _ => Err(Error::NotFound("chart".into()).into()),
-    }
-}
-
-async fn require_chart_owner(
-    st: &BiState,
-    ctx: &egret_core::WorkspaceContext,
-    id: Uuid,
-) -> Result<(), BiApiError> {
-    let owner = st.charts.owner(id).await.map_err(BiApiError::from)?;
-    if is_admin(ctx) || owner == Some(ctx.principal.user_id.0) {
-        Ok(())
-    } else {
-        Err(Error::Forbidden.into())
-    }
 }
 
 #[utoipa::path(
@@ -1508,10 +1472,10 @@ async fn ch_get(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<crate::model::ChartDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, CH_READ)
+    let obj = crate::shares::resolve(&st, &ctx, "chart", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, CH_READ, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_chart_in_ws(&st, &ctx, id).await?;
     let c = st
         .charts
         .get(id)
@@ -1533,7 +1497,7 @@ async fn ch_get(
     responses(
         (status = 200, description = "Chart updated", body = ChartDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing chart:manage permission, or not the chart owner", body = ErrorBody),
+        (status = 403, description = "Missing chart:manage permission", body = ErrorBody),
         (status = 404, description = "No such chart, or referenced dataset not in this workspace", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -1544,11 +1508,10 @@ async fn ch_update(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<UpdateChart>,
 ) -> Result<Json<crate::model::ChartDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, CH_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "chart", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, CH_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_chart_in_ws(&st, &ctx, id).await?;
-    require_chart_owner(&st, &ctx, id).await?;
     // The (possibly changed) dataset must exist in this workspace — same cross-tenant guard as create.
     let ds = st
         .datasets
@@ -1590,7 +1553,7 @@ async fn ch_update(
     responses(
         (status = 200, description = "Chart deleted", body = Ack),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing chart:manage permission, or not the chart owner", body = ErrorBody),
+        (status = 403, description = "Missing chart:manage permission", body = ErrorBody),
         (status = 404, description = "No such chart in this workspace", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -1600,11 +1563,10 @@ async fn ch_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, CH_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "chart", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, CH_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_chart_in_ws(&st, &ctx, id).await?;
-    require_chart_owner(&st, &ctx, id).await?;
     st.charts.delete(id).await.map_err(BiApiError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -1686,10 +1648,10 @@ async fn ch_trash(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, CH_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "chart", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, CH_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_chart_in_ws(&st, &ctx, id).await?;
     st.charts
         .set_trashed(id, true)
         .await
@@ -1718,10 +1680,10 @@ async fn ch_restore(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, CH_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "chart", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, CH_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_chart_in_ws(&st, &ctx, id).await?;
     st.charts
         .set_trashed(id, false)
         .await
@@ -1750,10 +1712,10 @@ async fn ch_bookmark_add(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, CH_READ)
+    let obj = crate::shares::resolve(&st, &ctx, "chart", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, CH_READ, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_chart_in_ws(&st, &ctx, id).await?;
     st.charts
         .add_bookmark(ctx.principal.user_id.0, id)
         .await
@@ -1782,10 +1744,10 @@ async fn ch_bookmark_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, CH_READ)
+    let obj = crate::shares::resolve(&st, &ctx, "chart", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, CH_READ, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_chart_in_ws(&st, &ctx, id).await?;
     st.charts
         .remove_bookmark(ctx.principal.user_id.0, id)
         .await
@@ -1841,10 +1803,10 @@ async fn db_set_folder(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<crate::model::SetFolder>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DB_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dashboard_in_ws(&st, &ctx, id).await?;
     if let Some(fid) = b.folder_id {
         require_folder(&st, &ctx, fid, "dashboard").await?;
     }
@@ -1853,35 +1815,6 @@ async fn db_set_folder(
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-async fn require_dashboard_in_ws(
-    st: &BiState,
-    ctx: &egret_core::WorkspaceContext,
-    id: Uuid,
-) -> Result<(), BiApiError> {
-    match st
-        .dashboards
-        .dashboard_workspace(id)
-        .await
-        .map_err(BiApiError::from)?
-    {
-        Some(w) if w == ctx.workspace_id.0 => Ok(()),
-        _ => Err(Error::NotFound("dashboard".into()).into()),
-    }
-}
-
-async fn require_dashboard_owner(
-    st: &BiState,
-    ctx: &egret_core::WorkspaceContext,
-    id: Uuid,
-) -> Result<(), BiApiError> {
-    let owner = st.dashboards.owner(id).await.map_err(BiApiError::from)?;
-    if is_admin(ctx) || owner == Some(ctx.principal.user_id.0) {
-        Ok(())
-    } else {
-        Err(Error::Forbidden.into())
-    }
 }
 
 /// Every chart referenced by a card must live in the same workspace as the dashboard,
@@ -2005,10 +1938,10 @@ async fn db_get(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DashboardDetailDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DB_READ)
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_READ, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dashboard_in_ws(&st, &ctx, id).await?;
     Ok(Json(
         load_dashboard(&st, id, ctx.principal.user_id.0).await?,
     ))
@@ -2027,7 +1960,7 @@ async fn db_get(
         (status = 200, description = "Dashboard metadata + layout replaced", body = DashboardDetailDto),
         (status = 400, description = "Invalid layout (tab/card mismatch) or width not 'fixed'/'full'", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing dashboard:manage permission, or not the dashboard owner", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission", body = ErrorBody),
         (status = 404, description = "No such dashboard, or a referenced chart not in this workspace", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -2038,11 +1971,10 @@ async fn db_update(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<UpdateDashboard>,
 ) -> Result<Json<DashboardDetailDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DB_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dashboard_in_ws(&st, &ctx, id).await?;
-    require_dashboard_owner(&st, &ctx, id).await?;
     require_cards_in_ws(&st, &ctx, &b.cards).await?;
     crate::model::validate_layout(&b.tabs, &b.cards).map_err(BiApiError::from)?;
     if b.width != "fixed" && b.width != "full" {
@@ -2076,7 +2008,7 @@ async fn db_update(
     responses(
         (status = 200, description = "Dashboard deleted", body = Ack),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing dashboard:manage permission, or not the dashboard owner", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission", body = ErrorBody),
         (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -2086,11 +2018,10 @@ async fn db_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DB_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dashboard_in_ws(&st, &ctx, id).await?;
-    require_dashboard_owner(&st, &ctx, id).await?;
     st.dashboards.delete(id).await.map_err(BiApiError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -2106,7 +2037,7 @@ async fn db_remove(
     responses(
         (status = 200, description = "Dashboard moved to trash", body = Ack),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing dashboard:manage permission, or not the dashboard owner", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission", body = ErrorBody),
         (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -2116,11 +2047,10 @@ async fn db_trash(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DB_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dashboard_in_ws(&st, &ctx, id).await?;
-    require_dashboard_owner(&st, &ctx, id).await?;
     st.dashboards
         .set_trashed(id, true)
         .await
@@ -2139,7 +2069,7 @@ async fn db_trash(
     responses(
         (status = 200, description = "Dashboard restored from trash", body = Ack),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing dashboard:manage permission, or not the dashboard owner", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission", body = ErrorBody),
         (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -2149,11 +2079,10 @@ async fn db_restore(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DB_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dashboard_in_ws(&st, &ctx, id).await?;
-    require_dashboard_owner(&st, &ctx, id).await?;
     st.dashboards
         .set_trashed(id, false)
         .await
@@ -2172,7 +2101,7 @@ async fn db_restore(
     responses(
         (status = 200, description = "Dashboard duplicated (layout copied)", body = DashboardDetailDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing dashboard:read permission", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission", body = ErrorBody),
         (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -2182,10 +2111,13 @@ async fn db_duplicate(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DashboardDetailDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DB_READ)
+    // Duplicating CREATES new workspace content, so it requires DB_MANAGE on the
+    // source (matching db_create) — a read-only principal must not create rows.
+    // The source is still readable by any manager.
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dashboard_in_ws(&st, &ctx, id).await?;
     let copy = st
         .dashboards
         .duplicate(id, Some(ctx.principal.user_id.0))
@@ -2218,10 +2150,10 @@ async fn db_bookmark_add(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DB_READ)
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_READ, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dashboard_in_ws(&st, &ctx, id).await?;
     st.dashboards
         .add_bookmark(ctx.principal.user_id.0, "dashboard", id)
         .await
@@ -2250,10 +2182,10 @@ async fn db_bookmark_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DB_READ)
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_READ, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dashboard_in_ws(&st, &ctx, id).await?;
     st.dashboards
         .remove_bookmark(ctx.principal.user_id.0, "dashboard", id)
         .await
