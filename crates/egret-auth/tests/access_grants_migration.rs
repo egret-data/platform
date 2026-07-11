@@ -12,15 +12,17 @@ async fn db() -> Db {
 #[tokio::test]
 async fn legacy_grant_tables_are_dropped() {
     let db = db().await;
+    // Check the `public` schema specifically: some test harnesses create isolated
+    // `rbac_isolated_*` schemas that carry same-named tables, so an unqualified
+    // information_schema lookup would false-positive. `to_regclass('public.<t>')`
+    // resolves only the public table and returns NULL once it is dropped.
     for t in ["platform_role_assignments", "workspace_members"] {
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
-        )
-        .bind(t)
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
-        assert!(!exists, "{t} must be dropped after B2-flip");
+        let oid: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
+            .bind(format!("public.{t}"))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert!(oid.is_none(), "public.{t} must be dropped after B2-flip");
     }
 }
 

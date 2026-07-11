@@ -9,10 +9,20 @@
 -- for the re-backfill, and add a partial unique index that makes platform grants
 -- properly unique at the DB level (integrity guarantee for the last-admin count).
 
+-- Self-heal: collapse any pre-existing duplicate platform grants before adding the
+-- unique index. A platform grant is keyed by (principal, role) at platform scope;
+-- extra rows are exact duplicates (the grant is unchanged by removing them). None
+-- exist in production (the flip writers use NOT EXISTS, and the legacy PK gated the
+-- trigger), but a shared/long-lived dev DB may hold test-seed residue from before
+-- this index existed — this DELETE makes the migration robust on any database.
+DELETE FROM access_grants a USING access_grants b
+WHERE a.scope_type = 'platform' AND b.scope_type = 'platform'
+  AND a.principal_type = b.principal_type
+  AND a.principal_id = b.principal_id
+  AND a.role_id = b.role_id
+  AND a.ctid > b.ctid;
+
 -- Platform-grant integrity: one grant per (principal, role) at platform scope.
--- Creates cleanly — the flip writers (assign/replace_platform_roles/bootstrap) use
--- NOT EXISTS so no duplicates exist at migration time; the legacy PK previously
--- gated the trigger the same way.
 CREATE UNIQUE INDEX access_grants_platform_uniq
   ON access_grants (principal_type, principal_id, role_id)
   WHERE scope_type = 'platform';
