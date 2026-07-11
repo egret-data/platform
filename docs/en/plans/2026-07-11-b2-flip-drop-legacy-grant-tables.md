@@ -188,10 +188,12 @@ git commit -m "refactor(authz): platform grant writers write access_grants direc
 
 ## Task 2: Repoint platform-grant readers
 
+> **Scope note (Task 1 pulled work forward):** the four `roles.rs` readers (`assignees_of`, `assignees_named`, `roles_of`, `count_platform_admins`) were ALREADY repointed in Task 1 (they had to be — `roles_db.rs` round-trips writer→reader in one binary and the sync trigger is one-directional legacy→access_grants). So Task 2's remaining work is ONLY `session.rs` (`platform_roles`, `permissions`) and the `main.rs` idempotency check. Verify the 4 `roles.rs` readers already read `access_grants … scope_type='platform'` (Steps 3 below); if already done, skip them.
+
 **Files:**
 - Modify: `crates/egret-auth/src/session.rs` (`platform_roles`, `permissions`)
-- Modify: `crates/egret-auth/src/roles.rs` (`assignees_of`, `assignees_named`, `roles_of`, `count_platform_admins`)
-- Modify: `crates/egret-bin/src/main.rs` (idempotency check)
+- Modify: `crates/egret-bin/src/main.rs` (idempotency check) — if not already done in Task 1
+- Verify (likely already done in Task 1): `crates/egret-auth/src/roles.rs` (`assignees_of`, `assignees_named`, `roles_of`, `count_platform_admins`)
 - Test: existing `crates/egret-auth/tests/session_db.rs` + `roles_db.rs` cover this (they seed via legacy tables → trigger-mirrored → the repointed readers see the same rows).
 
 - [ ] **Step 1: Repoint `session.rs` `platform_roles`**
@@ -600,13 +602,37 @@ Create `migrations/0073_drop_legacy_grant_tables.sql`:
 -- B2-flip: access_grants is now the single grant store. Defensively re-backfill
 -- (self-heal any historical drift), then drop the sync triggers, their functions,
 -- and the two legacy grant tables.
+--
+-- IMPORTANT — NULL scope_id gap: the 0068/0072 UNIQUE includes scope_id, which is
+-- NULL for PLATFORM grants. Postgres treats NULLs as DISTINCT, so `ON CONFLICT DO
+-- NOTHING` never fires for platform rows and would DUPLICATE them (over-counting
+-- count_platform_admins → weakening the last-admin guard). Use NOT EXISTS guards
+-- for the re-backfill, and add a partial unique index that makes platform grants
+-- properly unique at the DB level (integrity guarantee for the last-admin count).
+
+-- Platform-grant integrity: one grant per (principal, role) at platform scope.
+-- Creates cleanly — the flip writers (assign/replace_platform_roles/bootstrap) use
+-- NOT EXISTS so no duplicates exist at migration time; the legacy PK previously
+-- gated the trigger the same way.
+CREATE UNIQUE INDEX access_grants_platform_uniq
+  ON access_grants (principal_type, principal_id, role_id)
+  WHERE scope_type = 'platform';
+
+-- Defensive re-backfill (dedup-safe via NOT EXISTS; the tables still exist here).
 INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id)
-  SELECT principal_type, principal_id, role_id, 'platform', NULL FROM platform_role_assignments
-  ON CONFLICT DO NOTHING;
+  SELECT pra.principal_type, pra.principal_id, pra.role_id, 'platform', NULL
+  FROM platform_role_assignments pra
+  WHERE NOT EXISTS (
+    SELECT 1 FROM access_grants ag
+    WHERE ag.principal_type = pra.principal_type AND ag.principal_id = pra.principal_id
+      AND ag.role_id = pra.role_id AND ag.scope_type = 'platform');
 INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id)
   SELECT wm.principal_type, wm.principal_id, r.id, 'workspace', wm.workspace_id
   FROM workspace_members wm JOIN roles r ON r.scope = 'workspace' AND r.name = wm.role
-  ON CONFLICT DO NOTHING;
+  WHERE NOT EXISTS (
+    SELECT 1 FROM access_grants ag
+    WHERE ag.principal_type = wm.principal_type AND ag.principal_id = wm.principal_id
+      AND ag.role_id = r.id AND ag.scope_type = 'workspace' AND ag.scope_id = wm.workspace_id);
 
 DROP TRIGGER IF EXISTS sync_platform_grant_trg ON platform_role_assignments;
 DROP TRIGGER IF EXISTS sync_workspace_grant_trg ON workspace_members;
@@ -615,6 +641,8 @@ DROP FUNCTION IF EXISTS sync_workspace_grant();
 DROP TABLE IF EXISTS platform_role_assignments;
 DROP TABLE IF EXISTS workspace_members;
 ```
+
+> **Writers note (from Task 1):** the platform writers (`assign`, `replace_platform_roles`, bootstrap) use `WHERE NOT EXISTS` for idempotency (because `ON CONFLICT` can't fire on the NULL `scope_id`). Once `access_grants_platform_uniq` exists, those writers MAY optionally be converted to `ON CONFLICT (principal_type, principal_id, role_id) WHERE scope_type = 'platform' DO NOTHING` for race-safety — NOT required for this task (NOT EXISTS + the unique index together already prevent duplicates; a rare concurrent double-assign errors out rather than duplicating, which is safe). If you convert them, do it in this task and re-run the writer tests.
 
 - [ ] **Step 2: Touch the metastore lib**
 
