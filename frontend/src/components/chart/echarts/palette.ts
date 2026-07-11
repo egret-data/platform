@@ -43,10 +43,14 @@ export const lineType = (i: number) => LINE_TYPES[i % LINE_TYPES.length];
 export const SYMBOLS = ["circle", "rect", "triangle", "diamond", "pin", "arrow"];
 export const symbolShape = (i: number) => SYMBOLS[i % SYMBOLS.length];
 
-/** ECharts accessibility: generate a screen-reader description of the chart's
- * data (the non-visual "data-table" fallback). No visual change — decal patterns
- * are intentionally left off to preserve the Metabase-clean look. */
-export const ARIA_A11Y = { enabled: true } as const;
+/** ECharts accessibility:
+ *  - `enabled` generates a screen-reader description of the chart's data (the
+ *    non-visual "data-table" fallback).
+ *  - `decal.show` overlays distinct patterns (dots/hatches) on filled series
+ *    (bars, pie slices, areas) so colour-blind users can tell them apart without
+ *    relying on the palette colour alone (WCAG "color-not-only"). Line charts add
+ *    dash/marker cycling on top of this (see `lineType`/`symbolShape`). */
+export const ARIA_A11Y = { enabled: true, decal: { show: true } } as const;
 
 // Metabase colours a single (un-broken-out) series with its "summarize" green
 // (palm/50 = hsl(89 48% 40%)) rather than the first accent.

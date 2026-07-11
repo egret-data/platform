@@ -1,5 +1,6 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { ResultColumn } from "@/components/chart/ChartTable";
+import { ARIA_A11Y } from "../palette";
 
 export interface MapBuildConfig {
   echartsName: string;
@@ -31,6 +32,7 @@ export function buildMapOption(columns: ResultColumn[], rows: unknown[][], cfg: 
   // label points land in the right place.
   const layout = { layoutCenter: ["50%", "50%"], layoutSize: "92%" };
   return {
+    aria: ARIA_A11Y, // screen-reader data description (non-visual fallback)
     tooltip: {
       trigger: "item",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
