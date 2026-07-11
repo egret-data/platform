@@ -120,7 +120,7 @@ export default function Datasets() {
       <td><span className="rounded bg-muted px-1.5 py-0.5 text-xs">{d.kind}</span></td>
       <td className="text-muted-foreground">{dbName(d.database_id)}</td>
       <td className="font-mono text-xs text-muted-foreground">{sourceOf(d)}</td>
-      <td>{d.column_count}</td>
+      <td className="tabular-nums">{d.column_count}</td>
       <td className="text-muted-foreground"><RelativeTime iso={d.updated_at} /></td>
       <td><DatasetActionsMenu ws={ws} ds={d} trashed={showTrash} folders={folders}
         onDuplicate={(x) => setDupId(x.id)}
@@ -213,6 +213,7 @@ export default function Datasets() {
           </div>
 
           {rows.length > 0 ? (
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
@@ -250,6 +251,7 @@ export default function Datasets() {
                 })
               )}
             </table>
+            </div>
           ) : (
             <p className="text-muted-foreground">{onlyBookmarked ? "No bookmarked datasets." : "No datasets match the current filters."}</p>
           )}

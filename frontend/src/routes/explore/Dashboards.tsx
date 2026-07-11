@@ -103,7 +103,7 @@ export default function Dashboards() {
           <Link className="font-medium hover:underline" to={`/explore/${ws}/dashboards/${d.id}`}>{d.name}</Link>
         </span>
       </td>
-      <td className="text-muted-foreground">{d.card_count}</td>
+      <td className="text-muted-foreground tabular-nums">{d.card_count}</td>
       <td className="text-muted-foreground"><RelativeTime iso={d.updated_at} /></td>
       <td>
         <DashboardActionsMenu
@@ -190,6 +190,7 @@ export default function Dashboards() {
           </div>
 
           {rows.length > 0 ? (
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
@@ -224,6 +225,7 @@ export default function Dashboards() {
                 })
               )}
             </table>
+            </div>
           ) : (
             <p className="text-muted-foreground">{onlyBookmarked ? "No bookmarked dashboards." : "No dashboards match the current filters."}</p>
           )}
