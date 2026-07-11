@@ -291,7 +291,135 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getControlPlaneAccessCreateRoleMutationOptions(options), queryClient);
     }
-    export type controlPlaneAccessDeleteRoleResponse204 = {
+    export type controlPlaneAccessGetRoleResponse200 = {
+  data: RoleDto
+  status: 200
+}
+
+export type controlPlaneAccessGetRoleResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessGetRoleResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessGetRoleResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessGetRoleResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessGetRoleResponseSuccess = (controlPlaneAccessGetRoleResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneAccessGetRoleResponseError = (controlPlaneAccessGetRoleResponse401 | controlPlaneAccessGetRoleResponse403 | controlPlaneAccessGetRoleResponse404 | controlPlaneAccessGetRoleResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessGetRoleResponse = (controlPlaneAccessGetRoleResponseSuccess | controlPlaneAccessGetRoleResponseError)
+
+export const getControlPlaneAccessGetRoleUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/access/roles/${encodeURIComponent(id)}`
+}
+
+export const controlPlaneAccessGetRole = async (id: string, options?: RequestInit): Promise<controlPlaneAccessGetRoleResponse> => {
+
+  return customInstance<controlPlaneAccessGetRoleResponse>(getControlPlaneAccessGetRoleUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessGetRoleQueryKey = (id: string,) => {
+    return [
+    `/api/control-plane/access/roles/${encodeURIComponent(id)}`
+    ] as const;
+    }
+
+
+export const getControlPlaneAccessGetRoleQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneAccessGetRole>>, TError = ErrorBody>(id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessGetRole>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneAccessGetRoleQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneAccessGetRole>>> = ({ signal }) => controlPlaneAccessGetRole(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessGetRole>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneAccessGetRoleQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessGetRole>>>
+export type ControlPlaneAccessGetRoleQueryError = ErrorBody
+
+
+export function useControlPlaneAccessGetRole<TData = Awaited<ReturnType<typeof controlPlaneAccessGetRole>>, TError = ErrorBody>(
+ id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessGetRole>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneAccessGetRole>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneAccessGetRole>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneAccessGetRole<TData = Awaited<ReturnType<typeof controlPlaneAccessGetRole>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessGetRole>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneAccessGetRole>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneAccessGetRole>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneAccessGetRole<TData = Awaited<ReturnType<typeof controlPlaneAccessGetRole>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessGetRole>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useControlPlaneAccessGetRole<TData = Awaited<ReturnType<typeof controlPlaneAccessGetRole>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessGetRole>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneAccessGetRoleQueryOptions(id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneAccessDeleteRoleResponse204 = {
   data: void
   status: 204
 }

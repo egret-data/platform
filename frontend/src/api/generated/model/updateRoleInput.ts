@@ -8,4 +8,6 @@
 
 export interface UpdateRoleInput {
   description: string;
+  /** @nullable */
+  parentRoleId?: string | null;
 }

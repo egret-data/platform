@@ -30,7 +30,10 @@ async fn role_mutations_publish_roles_changed() {
     let repo = RoleRepo::new(db.clone(), bus.clone());
 
     // create → exactly one event.
-    let id = repo.create("workspace", &uniq("evt"), "").await.unwrap();
+    let id = repo
+        .create("workspace", &uniq("evt"), "", None)
+        .await
+        .unwrap();
     assert!(rx.try_recv().is_ok(), "create should publish RolesChanged");
     assert!(rx.try_recv().is_err(), "create should publish exactly one");
 

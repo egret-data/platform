@@ -123,7 +123,13 @@ pub fn link_grants(
         }
         // Templates are keyed by role_id (UUID), matching `CedarPdp::build`, so a
         // workspace role sharing a platform role's name links its OWN template.
-        let template_id: PolicyId = format!("role:{}", g.role_id).parse().unwrap();
+        // A deny grant links the `forbid` counterpart (`role-deny:{id}`) so Cedar's
+        // forbid-beats-permit yields deny-wins.
+        let template_id: PolicyId = if g.effect == "deny" {
+            format!("role-deny:{}", g.role_id).parse().unwrap()
+        } else {
+            format!("role:{}", g.role_id).parse().unwrap()
+        };
         let link_id: PolicyId = format!("grant-{i}").parse().unwrap();
         let mut vals = HashMap::new();
         vals.insert(SlotId::principal(), user_uid(subject));
@@ -185,6 +191,7 @@ mod tests {
             scope_type: "workspace".into(),
             scope_id: Some(ws.0),
             object_type: None,
+            effect: "allow".into(),
         }];
         let ps = link_grants(ps, &subject, &grants, &names);
 
@@ -260,6 +267,7 @@ mod tests {
                 scope_type: "object".into(),
                 scope_id: Some(f1),
                 object_type: Some("folder".into()),
+                effect: "allow".into(),
             },
         );
 
@@ -296,6 +304,7 @@ mod tests {
                 scope_type: "object".into(),
                 scope_id: Some(d1),
                 object_type: Some("dashboard".into()),
+                effect: "allow".into(),
             },
         );
 

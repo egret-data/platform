@@ -86,7 +86,10 @@ async fn arc_dyn_pdp_hot_reloads_from_the_shared_bus() {
     let u = seed_user(&db).await;
     let w = seed_workspace(&db).await;
     let role_name = uniq("appwiring");
-    let r_id = repo.create("workspace", &role_name, "").await.unwrap();
+    let r_id = repo
+        .create("workspace", &role_name, "", None)
+        .await
+        .unwrap();
 
     sqlx::query(
         "INSERT INTO workspace_members (workspace_id, principal_type, principal_id, role) \

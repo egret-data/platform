@@ -13,4 +13,15 @@ export interface RoleDto {
   description: string;
   permissionCount: number;
   assigneeCount: number;
+  /**
+     * The role this one inherits permissions from (same scope). `None` at the
+     * top of a chain.
+     * @nullable
+     */
+  parentRoleId?: string | null;
+  /**
+     * Effective-minus-own permissions, for read-only display. Populated on the
+     * single-role GET; empty on the list endpoint.
+     */
+  inheritedPermissions: string[];
 }

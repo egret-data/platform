@@ -84,7 +84,10 @@ async fn pdp_hot_reloads_permission_grant_and_revoke() {
     let repo = RoleRepo::new(db.clone(), bus.clone());
 
     let role_name = uniq("hotreload");
-    let r_id = repo.create("workspace", &role_name, "").await.unwrap();
+    let r_id = repo
+        .create("workspace", &role_name, "", None)
+        .await
+        .unwrap();
 
     sqlx::query(
         "INSERT INTO workspace_members (workspace_id, principal_type, principal_id, role) \

@@ -14,6 +14,7 @@ pub struct RoleRow {
     pub scope: String,
     pub name: String,
     pub description: String,
+    pub parent_role_id: Option<Uuid>,
 }
 
 #[derive(Clone)]
@@ -44,7 +45,7 @@ impl RoleRepo {
     /// List all roles, ordered by scope then name.
     pub async fn list(&self) -> Result<Vec<RoleRow>> {
         sqlx::query_as::<_, RoleRow>(
-            "SELECT id, scope, name, description FROM roles ORDER BY scope, name",
+            "SELECT id, scope, name, description, parent_role_id FROM roles ORDER BY scope, name",
         )
         .fetch_all(&self.db.pool)
         .await
@@ -53,11 +54,13 @@ impl RoleRepo {
 
     /// Fetch a single role by id.
     pub async fn get(&self, id: Uuid) -> Result<Option<RoleRow>> {
-        sqlx::query_as::<_, RoleRow>("SELECT id, scope, name, description FROM roles WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&self.db.pool)
-            .await
-            .map_err(db_err)
+        sqlx::query_as::<_, RoleRow>(
+            "SELECT id, scope, name, description, parent_role_id FROM roles WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)
     }
 
     /// Permissions granted by a role, ordered by permission name.
@@ -106,7 +109,7 @@ impl RoleRepo {
     /// Roles directly assigned to a principal (does not expand group membership).
     pub async fn roles_of(&self, ptype: &str, pid: Uuid) -> Result<Vec<RoleRow>> {
         sqlx::query_as::<_, RoleRow>(
-            "SELECT r.id, r.scope, r.name, r.description FROM platform_role_assignments pra \
+            "SELECT r.id, r.scope, r.name, r.description, r.parent_role_id FROM platform_role_assignments pra \
              JOIN roles r ON r.id = pra.role_id \
              WHERE pra.principal_type = $1 AND pra.principal_id = $2 \
              ORDER BY r.name",
@@ -146,13 +149,21 @@ impl RoleRepo {
 
     /// Create a new role; returns its id.
     /// Errors with `Conflict` if a role with the same `(scope, name)` already exists.
-    pub async fn create(&self, scope: &str, name: &str, description: &str) -> Result<Uuid> {
+    pub async fn create(
+        &self,
+        scope: &str,
+        name: &str,
+        description: &str,
+        parent_role_id: Option<Uuid>,
+    ) -> Result<Uuid> {
         let res = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO roles (scope, name, description) VALUES ($1, $2, $3) RETURNING id",
+            "INSERT INTO roles (scope, name, description, parent_role_id) \
+             VALUES ($1, $2, $3, $4) RETURNING id",
         )
         .bind(scope)
         .bind(name)
         .bind(description)
+        .bind(parent_role_id)
         .fetch_one(&self.db.pool)
         .await;
         match res {
@@ -165,6 +176,49 @@ impl RoleRepo {
             ),
             Err(e) => Err(db_err(e)),
         }
+    }
+
+    /// Set (or clear) a role's parent. Validates same-scope and acyclic in the
+    /// app layer (the DB trigger re-checks). Publishes `RolesChanged` so the PDP
+    /// recomputes permission closures.
+    pub async fn set_parent(&self, id: Uuid, parent: Option<Uuid>) -> Result<()> {
+        if let Some(pid) = parent {
+            let child = self
+                .get(id)
+                .await?
+                .ok_or_else(|| egret_core::Error::NotFound(format!("role {id}")))?;
+            let parent_row = self.get(pid).await?.ok_or_else(|| {
+                egret_core::Error::InvalidInput(format!("parent role {pid} not found"))
+            })?;
+            if parent_row.scope != child.scope {
+                return Err(egret_core::Error::InvalidInput(
+                    "role parent must share scope".into(),
+                ));
+            }
+            // Walk up from parent; a hit on `id` is a cycle.
+            let mut cur = Some(pid);
+            let mut hops = 0;
+            while let Some(c) = cur {
+                if c == id {
+                    return Err(egret_core::Error::InvalidInput("role parent cycle".into()));
+                }
+                hops += 1;
+                if hops > 64 {
+                    return Err(egret_core::Error::InvalidInput(
+                        "role parent chain too deep".into(),
+                    ));
+                }
+                cur = self.get(c).await?.and_then(|r| r.parent_role_id);
+            }
+        }
+        sqlx::query("UPDATE roles SET parent_role_id = $1 WHERE id = $2")
+            .bind(parent)
+            .bind(id)
+            .execute(&self.db.pool)
+            .await
+            .map_err(db_err)?;
+        self.bus.publish(RolesChanged);
+        Ok(())
     }
 
     /// Update a role's description (name/scope are immutable after creation).

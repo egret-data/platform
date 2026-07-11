@@ -29,6 +29,7 @@ const ROLES: api.AccessRole[] = [
     description: "Manages data governance",
     permissionCount: 2,
     assigneeCount: 1,
+    inheritedPermissions: [],
   },
   {
     id: "r2",
@@ -37,6 +38,7 @@ const ROLES: api.AccessRole[] = [
     description: "A custom workspace role",
     permissionCount: 1,
     assigneeCount: 0,
+    inheritedPermissions: [],
   },
 ];
 
@@ -75,6 +77,11 @@ describe("RolesPage", () => {
   beforeEach(() => {
     vi.mocked(api.listRoles).mockResolvedValue(ROLES);
     vi.mocked(api.listPermissions).mockResolvedValue(PERMISSIONS);
+    // The edit dialog fetches the single role for its inherited permissions.
+    vi.mocked(api.getRole).mockImplementation(async (id) => {
+      const found = ROLES.find((r) => r.id === id) ?? ROLES[0];
+      return { ...found, inheritedPermissions: [] };
+    });
   });
 
   test("renders rows, marks the seeded role built-in, and disables its delete action", async () => {
@@ -107,6 +114,7 @@ describe("RolesPage", () => {
       description: "Read-only audit access",
       permissionCount: 0,
       assigneeCount: 0,
+      inheritedPermissions: [],
     });
 
     renderPage();
@@ -155,6 +163,56 @@ describe("RolesPage", () => {
     expect(new Set(keys)).toEqual(new Set(["catalog.read", "catalog.write"]));
   });
 
+  test("Edit dialog offers a same-scope Inherits from picker and shows inherited permissions read-only", async () => {
+    const user = userEvent.setup();
+    // Two workspace roles so the picker has a same-scope option other than self.
+    vi.mocked(api.listRoles).mockResolvedValue([
+      ...ROLES,
+      {
+        id: "r4",
+        scope: "workspace",
+        name: "ws_base",
+        description: "",
+        permissionCount: 1,
+        assigneeCount: 0,
+        inheritedPermissions: [],
+      },
+    ]);
+    // custom_role (r2) inherits catalog.write from its parent (read-only row).
+    vi.mocked(api.getRole).mockResolvedValue({
+      id: "r2",
+      scope: "workspace",
+      name: "custom_role",
+      description: "A custom workspace role",
+      permissionCount: 1,
+      assigneeCount: 0,
+      parentRoleId: null,
+      inheritedPermissions: ["catalog.write"],
+    });
+
+    renderPage();
+    await screen.findByText("custom_role");
+
+    await user.click(screen.getByRole("button", { name: /Actions for custom_role/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit permissions" }));
+    await screen.findByRole("heading", { name: /Edit role — custom_role/i });
+
+    // The picker offers the same-scope role ws_base, but not the role itself
+    // (data_steward is platform scope, so it must not appear either).
+    const picker = await screen.findByLabelText("Inherits from");
+    await user.click(picker);
+    expect(await screen.findByRole("option", { name: "ws_base" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "custom_role" })).toBeNull();
+    expect(screen.queryByRole("option", { name: "data_steward" })).toBeNull();
+    await user.keyboard("{Escape}");
+
+    // The inherited permission renders checked + disabled and badged "inherited".
+    const inheritedCb = await screen.findByRole("checkbox", { name: "catalog.write" });
+    expect(inheritedCb).toBeDisabled();
+    expect(inheritedCb).toHaveAttribute("data-state", "checked");
+    expect(screen.getByText("inherited")).toBeInTheDocument();
+  });
+
   test("clicking the assignee count opens the assignees dialog and lists them", async () => {
     const user = userEvent.setup();
     vi.mocked(api.getRoleAssignees).mockResolvedValue([
@@ -187,6 +245,7 @@ describe("RolesPage", () => {
         description: "Superuser",
         permissionCount: 0,
         assigneeCount: 1,
+        inheritedPermissions: [],
       },
       ...ROLES,
     ]);
