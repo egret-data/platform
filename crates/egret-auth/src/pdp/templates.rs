@@ -31,6 +31,23 @@ pub fn template_for_role(role_name: &str, scope: &str, perms: &[String]) -> Stri
     format!("permit(principal in ?principal, action in [{actions}], resource {op} ?resource);")
 }
 
+/// The `forbid` counterpart of `template_for_role`: same effective action list
+/// and same scope operator, but forbids. A deny grant links this so Cedar's
+/// forbid-beats-permit gives deny-wins. The platform-scoped `platform_admin`
+/// gets an unrestricted deny-all (mirroring its unrestricted permit).
+pub fn deny_template_for_role(role_name: &str, scope: &str, perms: &[String]) -> String {
+    if scope == "platform" && role_name == "platform_admin" {
+        return "forbid(principal in ?principal, action, resource in ?resource);".to_string();
+    }
+    let actions = perms
+        .iter()
+        .map(|p| format!("Egret::Action::\"{p}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let op = if scope == "workspace" { "in" } else { "==" };
+    format!("forbid(principal in ?principal, action in [{actions}], resource {op} ?resource);")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +109,16 @@ mod tests {
         let tmpl: Template = t.parse().expect("empty-actions template parses");
         let mut ps = PolicySet::new();
         ps.add_template(tmpl).expect("empty-actions template added");
+    }
+
+    #[test]
+    fn deny_template_forbids_and_parses() {
+        let t = deny_template_for_role("ws_editor", "workspace", &["dashboard:read".into()]);
+        assert!(t.starts_with("forbid("));
+        assert!(t.contains("resource in ?resource"));
+        let tmpl: Template = t.parse().expect("deny template parses");
+        let mut ps = PolicySet::new();
+        ps.add_template(tmpl).unwrap();
     }
 
     #[test]

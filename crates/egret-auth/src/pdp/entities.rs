@@ -123,7 +123,13 @@ pub fn link_grants(
         }
         // Templates are keyed by role_id (UUID), matching `CedarPdp::build`, so a
         // workspace role sharing a platform role's name links its OWN template.
-        let template_id: PolicyId = format!("role:{}", g.role_id).parse().unwrap();
+        // A deny grant links the `forbid` counterpart (`role-deny:{id}`) so Cedar's
+        // forbid-beats-permit yields deny-wins.
+        let template_id: PolicyId = if g.effect == "deny" {
+            format!("role-deny:{}", g.role_id).parse().unwrap()
+        } else {
+            format!("role:{}", g.role_id).parse().unwrap()
+        };
         let link_id: PolicyId = format!("grant-{i}").parse().unwrap();
         let mut vals = HashMap::new();
         vals.insert(SlotId::principal(), user_uid(subject));

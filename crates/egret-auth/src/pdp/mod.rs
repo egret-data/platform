@@ -117,6 +117,20 @@ impl CedarPdp {
             templates
                 .add_template(tmpl)
                 .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e:?}")))?;
+            // Forbid counterpart, keyed `role-deny:{id}`, using the SAME effective
+            // perms so a deny links a full block of the role's action set. Cedar's
+            // forbid-beats-permit makes a linked deny win over any permit.
+            let did: PolicyId = format!("role-deny:{id}")
+                .parse()
+                .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e:?}")))?;
+            let dtmpl = Template::parse(
+                Some(did),
+                templates::deny_template_for_role(name, scope, &perms),
+            )
+            .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e:?}")))?;
+            templates
+                .add_template(dtmpl)
+                .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e:?}")))?;
             role_names.insert(*id, name.clone());
         }
         // Non-delegatable admin-graph gate: a single static `forbid` covering the
