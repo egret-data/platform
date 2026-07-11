@@ -5,7 +5,7 @@ import { MoveToFolderItems } from "@/components/explore/MoveToFolderSub";
 import type { DashboardSummary } from "@/api/dashboards";
 import type { Folder } from "@/api/folders";
 
-export function DashboardActionsMenu({ ws, dash, trashed, folders, onDuplicate, onMove, onNewFolder, onTrash, onRestore, onDeletePermanent }: {
+export function DashboardActionsMenu({ ws, dash, trashed, folders, onDuplicate, onMove, onNewFolder, onTrash, onRestore, onDeletePermanent, onShare }: {
   ws: string;
   dash: DashboardSummary;
   trashed: boolean;
@@ -16,6 +16,7 @@ export function DashboardActionsMenu({ ws, dash, trashed, folders, onDuplicate, 
   onTrash: (d: DashboardSummary) => void;
   onRestore: (d: DashboardSummary) => void;
   onDeletePermanent: (d: DashboardSummary) => void;
+  onShare?: (d: DashboardSummary) => void;
 }) {
   const nav = useNavigate();
   if (trashed) {
@@ -37,6 +38,7 @@ export function DashboardActionsMenu({ ws, dash, trashed, folders, onDuplicate, 
         onMove={(fid) => onMove(dash, fid)}
         onNewFolder={() => onNewFolder(dash)}
       />
+      {onShare && <DropdownMenuItem onClick={() => onShare(dash)}>Share…</DropdownMenuItem>}
       <DropdownMenuSeparator />
       <DropdownMenuItem onClick={() => onTrash(dash)}>Move to Trash</DropdownMenuItem>
     </RowActionsMenu>

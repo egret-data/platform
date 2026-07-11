@@ -14,6 +14,7 @@ import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SortableHeader, type SortState } from "@/components/explore/SortableHeader";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { DashboardActionsMenu } from "@/components/chart/dashboard/DashboardActionsMenu";
+import { ShareDialog } from "@/components/sharing/ShareDialog";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
 import { groupByFolder, useCollapsed } from "@/components/explore/folders";
@@ -37,6 +38,7 @@ export default function Dashboards() {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
   const [pendingDelete, setPendingDelete] = useState<DashboardSummary | null>(null);
+  const [shareTarget, setShareTarget] = useState<DashboardSummary | null>(null);
   const [folderDialog, setFolderDialog] = useState<{ mode: "new" | "rename" | "move" | "bulkmove"; dash?: DashboardSummary; folder?: { id: string; name: string } } | null>(null);
 
   const rows = useMemo(() => {
@@ -112,6 +114,7 @@ export default function Dashboards() {
           onTrash={(x) => guard(trash.mutateAsync(x.id).then(() => toast.success("Moved to Trash")))}
           onRestore={(x) => guard(restore.mutateAsync(x.id))}
           onDeletePermanent={setPendingDelete}
+          onShare={setShareTarget}
         />
       </td>
     </tr>
@@ -251,6 +254,18 @@ export default function Dashboards() {
         description={`Permanently delete "${pendingDelete?.name ?? ""}"? This cannot be undone.`}
         onConfirm={async () => { if (!pendingDelete) return; await guard(remove.mutateAsync(pendingDelete.id)); setPendingDelete(null); }}
       />
+
+      {shareTarget && (
+        <ShareDialog
+          ws={ws}
+          kind="dashboard"
+          id={shareTarget.id}
+          name={shareTarget.name}
+          folderId={shareTarget.folder_id ?? null}
+          open={shareTarget !== null}
+          onOpenChange={(o) => { if (!o) setShareTarget(null); }}
+        />
+      )}
     </div>
   );
 }

@@ -5,7 +5,7 @@ import { MoveToFolderItems } from "@/components/explore/MoveToFolderSub";
 import type { Chart } from "@/api/charts";
 import type { Folder } from "@/api/folders";
 
-export function ChartActionsMenu({ ws, chart, trashed, folders, onDuplicate, onMove, onNewFolder, onTrash, onRestore, onDeletePermanent }: {
+export function ChartActionsMenu({ ws, chart, trashed, folders, onDuplicate, onMove, onNewFolder, onTrash, onRestore, onDeletePermanent, onShare }: {
   ws: string; chart: Chart; trashed: boolean; folders: Folder[];
   onDuplicate: (c: Chart) => void;
   onMove: (c: Chart, folderId: string | null) => void;
@@ -13,6 +13,7 @@ export function ChartActionsMenu({ ws, chart, trashed, folders, onDuplicate, onM
   onTrash: (c: Chart) => void;
   onRestore: (c: Chart) => void;
   onDeletePermanent: (c: Chart) => void;
+  onShare?: (c: Chart) => void;
 }) {
   const nav = useNavigate();
   if (trashed) {
@@ -34,6 +35,7 @@ export function ChartActionsMenu({ ws, chart, trashed, folders, onDuplicate, onM
         onMove={(fid) => onMove(chart, fid)}
         onNewFolder={() => onNewFolder(chart)}
       />
+      {onShare && <DropdownMenuItem onClick={() => onShare(chart)}>Share…</DropdownMenuItem>}
       <DropdownMenuSeparator />
       <DropdownMenuItem onClick={() => onTrash(chart)}>Move to Trash</DropdownMenuItem>
     </RowActionsMenu>

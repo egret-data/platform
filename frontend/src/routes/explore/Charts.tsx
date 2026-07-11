@@ -15,6 +15,7 @@ import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SortableHeader, type SortState } from "@/components/explore/SortableHeader";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { ChartActionsMenu } from "@/components/chart/ChartActionsMenu";
+import { ShareDialog } from "@/components/sharing/ShareDialog";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
 import { groupByFolder, useCollapsed } from "@/components/explore/folders";
@@ -39,6 +40,7 @@ export default function Charts() {
   const [typeFilter, setTypeFilter] = useState("all");
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
   const [pendingDelete, setPendingDelete] = useState<Chart | null>(null);
+  const [shareTarget, setShareTarget] = useState<Chart | null>(null);
   const [folderDialog, setFolderDialog] = useState<{ mode: "new" | "rename" | "move" | "bulkmove"; chart?: Chart; folder?: { id: string; name: string } } | null>(null);
 
   const rows = useMemo(() => {
@@ -114,7 +116,8 @@ export default function Charts() {
             onNewFolder={(c) => setFolderDialog({ mode: "move", chart: c })}
             onTrash={(x) => trash.mutateAsync(x.id).then(() => toast.success("Moved to Trash")).catch((e) => toast.error(String(e)))}
             onRestore={(x) => restore.mutateAsync(x.id).catch((e) => toast.error(String(e)))}
-            onDeletePermanent={(x) => setPendingDelete(x)} />
+            onDeletePermanent={(x) => setPendingDelete(x)}
+            onShare={(x) => setShareTarget(x)} />
         </td>
       </tr>
     );
@@ -251,6 +254,18 @@ export default function Charts() {
           else createFolder.mutateAsync(name).then(() => toast.success("Folder created")).catch((e) => toast.error(String(e)));
         }}
       />
+
+      {shareTarget && (
+        <ShareDialog
+          ws={ws}
+          kind="chart"
+          id={shareTarget.id}
+          name={shareTarget.name}
+          folderId={shareTarget.folder_id ?? null}
+          open={shareTarget !== null}
+          onOpenChange={(o) => { if (!o) setShareTarget(null); }}
+        />
+      )}
 
       <ConfirmDeleteDialog
         open={pendingDelete !== null}
