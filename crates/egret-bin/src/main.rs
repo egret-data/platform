@@ -1031,6 +1031,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         pdp: pdp.clone(),
         users: users.clone(),
         sessions: sessions.clone(),
+        audit: audit_sink.clone(),
     };
 
     // `secrets` (the SecretStore) is shared: the per-workspace storage layer and
@@ -1129,6 +1130,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         datasets: egret_bi::DatasetRepo::new(db.clone()),
         dashboards: egret_bi::DashboardRepo::new(db.clone()),
         folders: egret_bi::folder::FolderRepo::new(db.clone()),
+        audit: audit_sink.clone(),
     });
 
     let notebook_state = egret_notebook::NotebookState {
@@ -1309,6 +1311,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         sessions: sessions.clone(),
         browser: catalog_browser.clone(),
         pdp: pdp.clone(),
+        audit: audit_sink.clone(),
     });
 
     // Catalog seam admin router (E3d-3): warehouses / catalog-roles / grants /

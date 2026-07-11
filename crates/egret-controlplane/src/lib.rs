@@ -52,6 +52,9 @@ pub struct CpState {
     /// `EventBus` as `roles` so `RolesChanged` hot-reloads it; stored here as a
     /// trait object so this crate stays independent of Cedar/egret-auth.
     pub pdp: Arc<dyn egret_core::authz::Pdp>,
+    /// Append-only audit sink (B4). Mutation events are emitted at the
+    /// grant-change handlers; best-effort, never fails the request.
+    pub audit: egret_audit::AuditSink,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.

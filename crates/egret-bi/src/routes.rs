@@ -48,6 +48,9 @@ pub struct BiState {
     pub charts: crate::chart::ChartRepo,
     pub dashboards: crate::dashboard::DashboardRepo,
     pub folders: crate::folder::FolderRepo,
+    /// Append-only audit sink (B4). Emits Mutation events at object-grant
+    /// changes; best-effort, never fails the request.
+    pub audit: egret_audit::AuditSink,
 }
 impl FromRef<BiState> for SessionService {
     fn from_ref(s: &BiState) -> Self {

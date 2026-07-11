@@ -24,6 +24,9 @@ pub struct WorkspaceState {
     pub pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
     pub users: UserRepo,
     pub sessions: SessionService,
+    /// Append-only audit sink (B4). Emits Mutation events at platform-role and
+    /// membership changes; best-effort, never fails the request.
+    pub audit: egret_audit::AuditSink,
 }
 
 impl FromRef<WorkspaceState> for WorkspaceRepo {
@@ -402,6 +405,14 @@ async fn set_platform_roles(
         .replace_platform_roles(UserId(id), &body.roles)
         .await
         .map_err(AuthError)?;
+    st.audit.emit(egret_audit::AuditEvent::Mutation {
+        actor: Some(p.user_id.0),
+        workspace_id: None,
+        action: "platform_roles:set".into(),
+        resource_type: "grant".into(),
+        resource_id: Some(id.to_string()),
+        detail: serde_json::json!({ "user_id": id, "roles": body.roles }),
+    });
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -490,6 +501,18 @@ async fn add_member(
         )
         .await
         .map_err(AuthError)?;
+    st.audit.emit(egret_audit::AuditEvent::Mutation {
+        actor: Some(ctx.principal.user_id.0),
+        workspace_id: Some(ctx.workspace_id.0),
+        action: "member:add".into(),
+        resource_type: "grant".into(),
+        resource_id: None,
+        detail: serde_json::json!({
+            "principal_type": body.principal_type,
+            "principal_id": body.principal_id,
+            "role": body.role,
+        }),
+    });
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -521,6 +544,17 @@ async fn remove_member(
         .remove(ctx.workspace_id, &ptype, pid)
         .await
         .map_err(AuthError)?;
+    st.audit.emit(egret_audit::AuditEvent::Mutation {
+        actor: Some(ctx.principal.user_id.0),
+        workspace_id: Some(ctx.workspace_id.0),
+        action: "member:remove".into(),
+        resource_type: "grant".into(),
+        resource_id: None,
+        detail: serde_json::json!({
+            "principal_type": ptype,
+            "principal_id": pid,
+        }),
+    });
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

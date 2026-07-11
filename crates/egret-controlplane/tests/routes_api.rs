@@ -26,6 +26,9 @@ struct Fixture {
     users: UserRepo,
     sessions: SessionService,
     db: Db,
+    /// Receiver end of the audit sink wired into `CpState.audit`. Kept alive so
+    /// emitted `Mutation` events aren't dropped; the mutation-emit test drains it.
+    audit_rx: tokio::sync::mpsc::Receiver<egret_audit::AuditEvent>,
 }
 
 /// Incidental PDP for `CpState`: the storage + access route tests gate on
@@ -59,6 +62,7 @@ fn build_app(
     users: &UserRepo,
     sessions: &SessionService,
     pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
+    audit: egret_audit::AuditSink,
 ) -> axum::Router {
     let crypto =
         egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
@@ -75,6 +79,7 @@ fn build_app(
         sessions: sessions.clone(),
         browser: None,
         pdp,
+        audit,
     })
 }
 
@@ -90,7 +95,13 @@ async fn attach_real_pdp(f: &mut Fixture) {
             .await
             .expect("build CedarPdp"),
     );
-    f.app = build_app(&f.db, &f.users, &f.sessions, pdp);
+    f.app = build_app(
+        &f.db,
+        &f.users,
+        &f.sessions,
+        pdp,
+        egret_audit::AuditSink::new(16).0,
+    );
 }
 
 async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
@@ -114,13 +125,21 @@ async fn setup() -> Option<Fixture> {
         chrono::Duration::minutes(60),
     );
 
-    let app = build_app(&db, &users, &sessions, std::sync::Arc::new(AllowAllPdp));
+    let (audit, audit_rx) = egret_audit::AuditSink::new(16);
+    let app = build_app(
+        &db,
+        &users,
+        &sessions,
+        std::sync::Arc::new(AllowAllPdp),
+        audit,
+    );
 
     Some(Fixture {
         app,
         users,
         sessions,
         db,
+        audit_rx,
     })
 }
 
@@ -603,6 +622,7 @@ async fn setup_isolated_schema() -> Option<Fixture> {
         chrono::Duration::minutes(60),
     );
 
+    let (audit, audit_rx) = egret_audit::AuditSink::new(16);
     let app = control_plane_router().with_state(CpState {
         storage: egret_catalog_engine::CatalogStore::new(db.clone()),
         storage_registry: egret_storage::StorageRegistry::new(db.clone()),
@@ -613,6 +633,7 @@ async fn setup_isolated_schema() -> Option<Fixture> {
         sessions: sessions.clone(),
         browser: None,
         pdp: std::sync::Arc::new(AllowAllPdp),
+        audit,
     });
 
     Some(Fixture {
@@ -620,6 +641,7 @@ async fn setup_isolated_schema() -> Option<Fixture> {
         users,
         sessions,
         db,
+        audit_rx,
     })
 }
 
@@ -749,6 +771,111 @@ async fn users_crud_and_role_assign() {
         StatusCode::NO_CONTENT,
         "unassign a non-admin role"
     );
+}
+
+/// A successful user role `assign` emits an `AuditEvent::Mutation` on the sink
+/// wired into `CpState.audit` (B4): `action="role:assign"`, actor = the calling
+/// principal, and `detail` carries the user + role. We keep the sink's receiver
+/// alive on the fixture so the best-effort event isn't dropped.
+#[tokio::test]
+async fn role_assign_emits_audit_mutation() {
+    let Some(mut f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin = session_for(&f, "audit_admin", true).await;
+    let email = format!("audituser_{}@egret.local", Uuid::new_v4().simple());
+
+    // Create a user to assign the role to.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/users",
+            &admin,
+            Some(serde_json::json!({
+                "email": email,
+                "name": "Audit User",
+                "password": "S3curePassw0rd!",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create user; body={j}");
+    let user_id = j["id"].as_str().expect("user id in body").to_string();
+
+    // Create a custom platform role.
+    let role_name = format!("audit_role_{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/access/roles",
+            &admin,
+            Some(serde_json::json!({
+                "scope": "platform",
+                "name": role_name,
+                "description": "audit test role",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create role; body={j}");
+    let role_id = j["id"].as_str().expect("role id in body").to_string();
+
+    // Assign the role — this is the mutation that must emit an audit event.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/users/{user_id}/roles"),
+            &admin,
+            Some(serde_json::json!({ "roleId": role_id })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "assign role to user");
+
+    // The emit is best-effort try_send; with the receiver held it lands in the
+    // channel synchronously during the handler, so it's available immediately.
+    let ev = f
+        .audit_rx
+        .try_recv()
+        .expect("a Mutation event must be queued after a successful assign");
+    match ev {
+        egret_audit::AuditEvent::Mutation {
+            action,
+            resource_type,
+            resource_id,
+            detail,
+            ..
+        } => {
+            assert_eq!(action, "role:assign", "action");
+            assert_eq!(resource_type, "grant", "resource_type");
+            assert_eq!(
+                resource_id.as_deref(),
+                Some(role_id.as_str()),
+                "resource_id is the role id"
+            );
+            assert_eq!(detail["principal_type"], "user", "detail.principal_type");
+            assert_eq!(
+                detail["principal_id"],
+                serde_json::json!(user_id),
+                "detail.principal_id is the target user"
+            );
+            assert_eq!(
+                detail["role_id"],
+                serde_json::json!(role_id),
+                "detail.role_id"
+            );
+        }
+        other => panic!("expected a Mutation event, got {other:?}"),
+    }
 }
 
 /// `guard_last_admin` (shared by the user- and group-role unassign routes)
