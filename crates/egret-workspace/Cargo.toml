@@ -8,6 +8,7 @@ license.workspace = true
 # `http` feature: reference `egret_core::http::ErrorBody` in the OpenAPI
 # annotations (E0·P4b-2).
 egret-core = { workspace = true, features = ["http"] }
+egret-audit = { workspace = true }
 egret-metastore.workspace = true
 egret-auth.workspace = true
 axum.workspace = true

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 egret-core = { workspace = true, features = ["http"] }
+egret-audit = { workspace = true }
 egret-analytics-api.workspace = true
 egret-config.workspace = true
 egret-metastore.workspace = true

@@ -2518,6 +2518,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "egret-audit"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "egret-core",
+ "egret-metastore",
+ "serde",
+ "serde_json",
+ "sqlx 0.8.6",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "egret-auth"
 version = "0.1.0"
 dependencies = [
@@ -2530,6 +2545,7 @@ dependencies = [
  "base64 0.22.1",
  "cedar-policy",
  "chrono",
+ "egret-audit",
  "egret-config",
  "egret-core",
  "egret-events",
@@ -2562,6 +2578,7 @@ dependencies = [
  "axum",
  "chrono",
  "egret-analytics-api",
+ "egret-audit",
  "egret-auth",
  "egret-config",
  "egret-core",
@@ -2597,6 +2614,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "egret-audit",
  "egret-auth",
  "egret-bi",
  "egret-catalog-engine",
@@ -2702,6 +2720,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
+ "egret-audit",
  "egret-auth",
  "egret-catalog-engine",
  "egret-core",
@@ -3076,6 +3095,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "egret-audit",
  "egret-auth",
  "egret-config",
  "egret-core",

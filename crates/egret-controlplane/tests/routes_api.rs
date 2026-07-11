@@ -26,6 +26,9 @@ struct Fixture {
     users: UserRepo,
     sessions: SessionService,
     db: Db,
+    /// Receiver end of the audit sink wired into `CpState.audit`. Kept alive so
+    /// emitted `Mutation` events aren't dropped; the mutation-emit test drains it.
+    audit_rx: tokio::sync::mpsc::Receiver<egret_audit::AuditEvent>,
 }
 
 /// Incidental PDP for `CpState`: the storage + access route tests gate on
@@ -59,6 +62,7 @@ fn build_app(
     users: &UserRepo,
     sessions: &SessionService,
     pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
+    audit: egret_audit::AuditSink,
 ) -> axum::Router {
     let crypto =
         egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
@@ -75,6 +79,8 @@ fn build_app(
         sessions: sessions.clone(),
         browser: None,
         pdp,
+        audit,
+        audit_store: egret_audit::AuditStore::new(db.clone()),
     })
 }
 
@@ -90,7 +96,13 @@ async fn attach_real_pdp(f: &mut Fixture) {
             .await
             .expect("build CedarPdp"),
     );
-    f.app = build_app(&f.db, &f.users, &f.sessions, pdp);
+    f.app = build_app(
+        &f.db,
+        &f.users,
+        &f.sessions,
+        pdp,
+        egret_audit::AuditSink::new(16).0,
+    );
 }
 
 async fn into_json(resp: Response) -> (StatusCode, serde_json::Value) {
@@ -114,13 +126,21 @@ async fn setup() -> Option<Fixture> {
         chrono::Duration::minutes(60),
     );
 
-    let app = build_app(&db, &users, &sessions, std::sync::Arc::new(AllowAllPdp));
+    let (audit, audit_rx) = egret_audit::AuditSink::new(16);
+    let app = build_app(
+        &db,
+        &users,
+        &sessions,
+        std::sync::Arc::new(AllowAllPdp),
+        audit,
+    );
 
     Some(Fixture {
         app,
         users,
         sessions,
         db,
+        audit_rx,
     })
 }
 
@@ -603,6 +623,7 @@ async fn setup_isolated_schema() -> Option<Fixture> {
         chrono::Duration::minutes(60),
     );
 
+    let (audit, audit_rx) = egret_audit::AuditSink::new(16);
     let app = control_plane_router().with_state(CpState {
         storage: egret_catalog_engine::CatalogStore::new(db.clone()),
         storage_registry: egret_storage::StorageRegistry::new(db.clone()),
@@ -613,6 +634,8 @@ async fn setup_isolated_schema() -> Option<Fixture> {
         sessions: sessions.clone(),
         browser: None,
         pdp: std::sync::Arc::new(AllowAllPdp),
+        audit,
+        audit_store: egret_audit::AuditStore::new(db.clone()),
     });
 
     Some(Fixture {
@@ -620,6 +643,7 @@ async fn setup_isolated_schema() -> Option<Fixture> {
         users,
         sessions,
         db,
+        audit_rx,
     })
 }
 
@@ -749,6 +773,111 @@ async fn users_crud_and_role_assign() {
         StatusCode::NO_CONTENT,
         "unassign a non-admin role"
     );
+}
+
+/// A successful user role `assign` emits an `AuditEvent::Mutation` on the sink
+/// wired into `CpState.audit` (B4): `action="role:assign"`, actor = the calling
+/// principal, and `detail` carries the user + role. We keep the sink's receiver
+/// alive on the fixture so the best-effort event isn't dropped.
+#[tokio::test]
+async fn role_assign_emits_audit_mutation() {
+    let Some(mut f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let admin = session_for(&f, "audit_admin", true).await;
+    let email = format!("audituser_{}@egret.local", Uuid::new_v4().simple());
+
+    // Create a user to assign the role to.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/users",
+            &admin,
+            Some(serde_json::json!({
+                "email": email,
+                "name": "Audit User",
+                "password": "S3curePassw0rd!",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create user; body={j}");
+    let user_id = j["id"].as_str().expect("user id in body").to_string();
+
+    // Create a custom platform role.
+    let role_name = format!("audit_role_{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/access/roles",
+            &admin,
+            Some(serde_json::json!({
+                "scope": "platform",
+                "name": role_name,
+                "description": "audit test role",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create role; body={j}");
+    let role_id = j["id"].as_str().expect("role id in body").to_string();
+
+    // Assign the role — this is the mutation that must emit an audit event.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/users/{user_id}/roles"),
+            &admin,
+            Some(serde_json::json!({ "roleId": role_id })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "assign role to user");
+
+    // The emit is best-effort try_send; with the receiver held it lands in the
+    // channel synchronously during the handler, so it's available immediately.
+    let ev = f
+        .audit_rx
+        .try_recv()
+        .expect("a Mutation event must be queued after a successful assign");
+    match ev {
+        egret_audit::AuditEvent::Mutation {
+            action,
+            resource_type,
+            resource_id,
+            detail,
+            ..
+        } => {
+            assert_eq!(action, "role:assign", "action");
+            assert_eq!(resource_type, "grant", "resource_type");
+            assert_eq!(
+                resource_id.as_deref(),
+                Some(role_id.as_str()),
+                "resource_id is the role id"
+            );
+            assert_eq!(detail["principal_type"], "user", "detail.principal_type");
+            assert_eq!(
+                detail["principal_id"],
+                serde_json::json!(user_id),
+                "detail.principal_id is the target user"
+            );
+            assert_eq!(
+                detail["role_id"],
+                serde_json::json!(role_id),
+                "detail.role_id"
+            );
+        }
+        other => panic!("expected a Mutation event, got {other:?}"),
+    }
 }
 
 /// `guard_last_admin` (shared by the user- and group-role unassign routes)
@@ -1452,5 +1581,133 @@ async fn create_role_with_parent_exposes_inherited_permissions() {
     assert!(
         inherited.contains(&"dashboard:read".to_string()),
         "child inherits parent's dashboard:read; body={dto}"
+    );
+}
+
+/// `GET /control-plane/audit` is platform-admin-gated and keyset-paginates the
+/// append-only audit trail (B4). A platform_admin sees the seeded rows newest
+/// first with a `nextCursor` when the page is full, the cursor fetches the older
+/// row, and a non-admin is 403 (the gate is `require(role:read)` on `state.pdp`).
+#[tokio::test]
+async fn audit_query_paginates_and_gates() {
+    let Some(mut f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    // The audit route consults `state.pdp` (`require(role:read)`), so a real
+    // Cedar PDP is needed for the non-admin 403 to be genuine.
+    attach_real_pdp(&mut f).await;
+    let admin = session_for(&f, "audit_query_admin", true).await;
+
+    // Seed two decision rows for a unique actor, straight into the store the
+    // handler reads (same pool). The unique actor isolates the assertion from
+    // any other rows in the shared audit_log.
+    let actor = Uuid::new_v4();
+    let store = egret_audit::AuditStore::new(f.db.clone());
+    let mk = || egret_audit::AuditEvent::Decision {
+        actor: Some(actor),
+        workspace_id: None,
+        action: "dashboard:read".into(),
+        resource_type: "workspace".into(),
+        resource_id: Some("w".into()),
+        allow: false,
+        reasons: vec!["role:x".into()],
+    };
+    store.insert_batch(&[mk()]).await.expect("seed audit row 1");
+    store.insert_batch(&[mk()]).await.expect("seed audit row 2");
+
+    // Page 1: newest row + a nextCursor (the page is full at limit=1).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/control-plane/audit?actor={actor}&kind=decision&limit=1"),
+            &admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "admin audit query; body={j}");
+    assert_eq!(
+        j["entries"].as_array().expect("entries array").len(),
+        1,
+        "exactly one entry at limit=1; body={j}"
+    );
+    assert_eq!(
+        j["entries"][0]["action"], "dashboard:read",
+        "action; body={j}"
+    );
+    assert_eq!(j["entries"][0]["decision"], "deny", "deny row; body={j}");
+    let first_id = j["entries"][0]["id"].as_i64().expect("id");
+    let cursor = j["nextCursor"]
+        .as_str()
+        .expect("nextCursor present on a full page")
+        .to_string();
+    // A raw request string must percent-encode the `+` in the rfc3339 offset
+    // (the generated client does this); otherwise `+` decodes to a space.
+    let cursor_enc = cursor.replace('+', "%2B");
+
+    // Page 2 via the cursor: the older row (a strictly smaller id, no further cursor).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!(
+                "/control-plane/audit?actor={actor}&kind=decision&limit=1&cursor={cursor_enc}"
+            ),
+            &admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j2) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "admin audit query page 2; body={j2}"
+    );
+    assert_eq!(
+        j2["entries"].as_array().expect("entries array").len(),
+        1,
+        "the older row; body={j2}"
+    );
+    let second_id = j2["entries"][0]["id"].as_i64().expect("id");
+    assert!(
+        second_id < first_id,
+        "page 2 is strictly older (id {second_id} < {first_id})"
+    );
+
+    // A non-admin (no role:read) is 403.
+    let plain = session_for(&f, "audit_query_plain", false).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/control-plane/audit", &plain, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "non-admin is forbidden on the audit query"
+    );
+
+    // Security regression (B4 review finding A): the audit trail is admin-only.
+    // A non-admin governance role that holds `role:read` (e.g. `data_steward`)
+    // must STILL be forbidden — the gate is the admin-graph `audit:read`, not the
+    // grantable `role:read`.
+    let steward = session_for_with_permission(&f, "audit_query_steward", "role:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/control-plane/audit", &steward, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a role:read holder (non-admin) must not read the audit trail"
     );
 }

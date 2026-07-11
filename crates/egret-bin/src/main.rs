@@ -985,11 +985,44 @@ async fn serve(config: Config) -> anyhow::Result<()> {
 
     // event bus — RoleRepo publishes RolesChanged; the Cedar PDP subscriber is wired in B1b-1
     let bus = egret_events::EventBus::new();
+
+    // Build the audit sink + spawn the batch writer and retention prune (best-effort).
+    // `audit_sink` and `audit_store` are kept in scope after this block: Tasks 4/5
+    // clone them into the mutation-emitting states and the query API's CpState.
+    let audit_store = egret_audit::AuditStore::new(db.clone());
+    let (audit_sink, audit_rx) = egret_audit::AuditSink::new(config.audit.channel_capacity);
+    if config.audit.enabled {
+        let store = audit_store.clone();
+        tokio::spawn(egret_audit::AuditWriter::run(
+            audit_rx,
+            store,
+            config.audit.batch_size,
+            std::time::Duration::from_millis(config.audit.flush_interval_ms),
+        ));
+        let prune_store = audit_store.clone();
+        let retention = config.audit.retention_days;
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                if let Err(e) = prune_store.prune(retention).await {
+                    tracing::warn!(error=%e, "audit prune failed");
+                }
+            }
+        });
+    }
+
     // Cedar PDP — built from the SAME bus as RoleRepo so RolesChanged hot-reloads
     // it (B1b-0 F1). A different EventBus would silently never reload. Defined
     // above all seam-state constructions so `pdp.clone()` is in scope everywhere.
-    let pdp: std::sync::Arc<dyn egret_core::authz::Pdp> =
-        std::sync::Arc::new(egret_auth::pdp::CedarPdp::build(db.clone(), &bus).await?);
+    // When auditing is enabled, wrap it so every authorize also emits a Decision
+    // event (observation only — parity unchanged).
+    let cedar = std::sync::Arc::new(egret_auth::pdp::CedarPdp::build(db.clone(), &bus).await?);
+    let pdp: std::sync::Arc<dyn egret_core::authz::Pdp> = if config.audit.enabled {
+        std::sync::Arc::new(egret_auth::pdp::AuditingPdp::new(cedar, audit_sink.clone()))
+    } else {
+        cedar
+    };
 
     let workspace = WorkspaceState {
         workspaces: WorkspaceRepo::new(db.clone()),
@@ -998,6 +1031,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         pdp: pdp.clone(),
         users: users.clone(),
         sessions: sessions.clone(),
+        audit: audit_sink.clone(),
     };
 
     // `secrets` (the SecretStore) is shared: the per-workspace storage layer and
@@ -1096,6 +1130,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         datasets: egret_bi::DatasetRepo::new(db.clone()),
         dashboards: egret_bi::DashboardRepo::new(db.clone()),
         folders: egret_bi::folder::FolderRepo::new(db.clone()),
+        audit: audit_sink.clone(),
     });
 
     let notebook_state = egret_notebook::NotebookState {
@@ -1276,6 +1311,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         sessions: sessions.clone(),
         browser: catalog_browser.clone(),
         pdp: pdp.clone(),
+        audit: audit_sink.clone(),
+        audit_store: audit_store.clone(),
     });
 
     // Catalog seam admin router (E3d-3): warehouses / catalog-roles / grants /

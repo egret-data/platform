@@ -90,6 +90,7 @@ fn build_state(
         datasets: DatasetRepo::new(db.clone()),
         dashboards: DashboardRepo::new(db.clone()),
         folders: egret_bi::folder::FolderRepo::new(db),
+        audit: egret_audit::AuditSink::new(16).0,
     }
 }
 

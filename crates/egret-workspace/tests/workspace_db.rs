@@ -352,6 +352,7 @@ async fn ws_state(db: &Db) -> WorkspaceState {
             chrono::Duration::hours(24),
             chrono::Duration::minutes(60),
         ),
+        audit: egret_audit::AuditSink::new(16).0,
     }
 }
 

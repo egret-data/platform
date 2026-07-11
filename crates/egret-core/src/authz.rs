@@ -37,6 +37,33 @@ pub struct Decision {
     pub reasons: Vec<String>,
 }
 
+impl Resource {
+    /// Audit resource-type discriminant.
+    pub fn type_str(&self) -> &'static str {
+        match self {
+            Resource::Platform => "platform",
+            Resource::Workspace(_) => "workspace",
+            Resource::Object(_) => "object",
+        }
+    }
+    /// The workspace this resource lives in, if any (Platform → None).
+    pub fn workspace_id(&self) -> Option<crate::ids::WorkspaceId> {
+        match self {
+            Resource::Platform => None,
+            Resource::Workspace(w) => Some(*w),
+            Resource::Object(o) => Some(o.workspace_id),
+        }
+    }
+    /// A stable string id for audit (ws uuid / "kind:uuid" / None for platform).
+    pub fn id_str(&self) -> Option<String> {
+        match self {
+            Resource::Platform => None,
+            Resource::Workspace(w) => Some(w.0.to_string()),
+            Resource::Object(o) => Some(format!("{}:{}", o.kind, o.id)),
+        }
+    }
+}
+
 /// The single decision point. One implementation (Cedar) lives in `egret-auth`.
 #[async_trait::async_trait]
 pub trait Pdp: Send + Sync {
@@ -106,6 +133,32 @@ pub async fn require(pdp: &dyn Pdp, target: &impl AuthTarget, action: &str) -> c
         Ok(())
     } else {
         Err(crate::Error::Forbidden)
+    }
+}
+
+#[cfg(test)]
+mod audit_helpers_tests {
+    use super::*;
+    use crate::ids::WorkspaceId;
+    #[test]
+    fn resource_helpers() {
+        let ws = WorkspaceId::new();
+        assert_eq!(Resource::Platform.type_str(), "platform");
+        assert_eq!(Resource::Platform.workspace_id(), None);
+        assert_eq!(Resource::Platform.id_str(), None);
+        assert_eq!(Resource::Workspace(ws).type_str(), "workspace");
+        assert_eq!(Resource::Workspace(ws).workspace_id(), Some(ws));
+        assert_eq!(Resource::Workspace(ws).id_str(), Some(ws.0.to_string()));
+        let o = ObjectRef {
+            kind: "dashboard".into(),
+            id: uuid::Uuid::nil(),
+            folder_id: None,
+            workspace_id: ws,
+        };
+        let r = Resource::Object(o);
+        assert_eq!(r.type_str(), "object");
+        assert_eq!(r.workspace_id(), Some(ws));
+        assert_eq!(r.id_str(), Some(format!("dashboard:{}", uuid::Uuid::nil())));
     }
 }
 

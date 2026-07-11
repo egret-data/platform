@@ -288,6 +288,18 @@ async fn assign_user_role(
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
     st.roles.assign("user", id, body.role_id).await?;
+    st.audit.emit(egret_audit::AuditEvent::Mutation {
+        actor: Some(p.user_id.0),
+        workspace_id: None,
+        action: "role:assign".into(),
+        resource_type: "grant".into(),
+        resource_id: Some(body.role_id.to_string()),
+        detail: serde_json::json!({
+            "principal_type": "user",
+            "principal_id": id,
+            "role_id": body.role_id,
+        }),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -316,6 +328,18 @@ async fn unassign_user_role(
     egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
     guard_last_admin(&st, role_id).await?;
     st.roles.unassign("user", id, role_id).await?;
+    st.audit.emit(egret_audit::AuditEvent::Mutation {
+        actor: Some(p.user_id.0),
+        workspace_id: None,
+        action: "role:unassign".into(),
+        resource_type: "grant".into(),
+        resource_id: Some(role_id.to_string()),
+        detail: serde_json::json!({
+            "principal_type": "user",
+            "principal_id": id,
+            "role_id": role_id,
+        }),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -584,6 +608,18 @@ async fn assign_group_role(
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
     st.roles.assign("group", id, body.role_id).await?;
+    st.audit.emit(egret_audit::AuditEvent::Mutation {
+        actor: Some(p.user_id.0),
+        workspace_id: None,
+        action: "role:assign".into(),
+        resource_type: "grant".into(),
+        resource_id: Some(body.role_id.to_string()),
+        detail: serde_json::json!({
+            "principal_type": "group",
+            "principal_id": id,
+            "role_id": body.role_id,
+        }),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -612,6 +648,18 @@ async fn unassign_group_role(
     egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
     guard_last_admin(&st, role_id).await?;
     st.roles.unassign("group", id, role_id).await?;
+    st.audit.emit(egret_audit::AuditEvent::Mutation {
+        actor: Some(p.user_id.0),
+        workspace_id: None,
+        action: "role:unassign".into(),
+        resource_type: "grant".into(),
+        resource_id: Some(role_id.to_string()),
+        detail: serde_json::json!({
+            "principal_type": "group",
+            "principal_id": id,
+            "role_id": role_id,
+        }),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 

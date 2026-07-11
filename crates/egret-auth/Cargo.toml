@@ -10,6 +10,7 @@ egret-metastore.workspace = true
 egret-config.workspace = true
 egret-secrets.workspace = true
 egret-events = { workspace = true }
+egret-audit = { workspace = true }
 axum.workspace = true
 axum-extra = { version = "0.10", features = ["cookie", "cookie-private"] }
 sqlx.workspace = true

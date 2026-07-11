@@ -1,0 +1,18 @@
+[package]
+name = "egret-audit"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+egret-core = { workspace = true }
+egret-metastore = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+sqlx = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

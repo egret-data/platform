@@ -18,6 +18,7 @@ egret-config.workspace = true
 egret-metastore.workspace = true
 egret-server.workspace = true
 egret-auth.workspace = true
+egret-audit = { workspace = true }
 egret-events = { workspace = true }
 egret-workspace.workspace = true
 egret-catalog-engine.workspace = true
