@@ -15,11 +15,12 @@ use crate::dashboard::{Dashboard, DashboardCard, NewCard};
 use crate::dataset::{Dataset, DatasetColumn, Metric};
 
 pub use egret_analytics_api::bi::{
-    AddColumnBody, CardInput, ChartDataResponse, ChartDto, CreateChart, CreateDashboard,
-    CreateDataset, CreateFolder, CreateSource, DashboardCardDto, DashboardDetailDto,
-    DashboardSummaryDto, DashboardTabDto, DatasetColumnDto, DatasetDetailDto, DatasetSummaryDto,
-    FolderDto, MetricBody, MetricDto, NewTabInput, RenameFolder, SaveQuery, SavedQueryDto,
-    SchemaColumn, SetFolder, UpdateChart, UpdateColumnBody, UpdateDashboard, UpdateDataset,
+    AddColumnBody, CardInput, ChartDataResponse, ChartDto, ChartRunResponse, CreateChart,
+    CreateDashboard, CreateDataset, CreateFolder, CreateSource, DashboardCardDto,
+    DashboardDetailDto, DashboardSummaryDto, DashboardTabDto, DatasetColumnDto, DatasetDetailDto,
+    DatasetSummaryDto, FolderDto, MetricBody, MetricDto, NewTabInput, RenameFolder, SaveQuery,
+    SavedQueryDto, SchemaColumn, SetFolder, UpdateChart, UpdateColumnBody, UpdateDashboard,
+    UpdateDataset,
 };
 
 pub fn folder_dto(f: crate::folder::Folder) -> FolderDto {

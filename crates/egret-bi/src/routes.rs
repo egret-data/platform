@@ -21,8 +21,8 @@ use crate::dataset::{NewColumn, SourceSpec};
 use crate::error::BiApiError;
 use crate::expr::validate_expression;
 use crate::model::{
-    AddColumnBody, CardInput, ChartDataBody, ChartDataResponse, ChartDto, CreateChart,
-    CreateDashboard, CreateDataset, CreateFolder, CreateSource, DashboardCardDto,
+    AddColumnBody, CardInput, ChartDataBody, ChartDataResponse, ChartDto, ChartRunResponse,
+    CreateChart, CreateDashboard, CreateDataset, CreateFolder, CreateSource, DashboardCardDto,
     DashboardDetailDto, DashboardSummaryDto, DashboardTabDto, DatasetColumnDto, DatasetDetailDto,
     DatasetSummaryDto, FolderDto, MetricBody, MetricDto, NewTabInput, RenameFolder, SaveQuery,
     SavedQueryDto, SchemaColumn, SetFolder, UpdateChart, UpdateColumnBody, UpdateDashboard,
@@ -1281,6 +1281,7 @@ pub fn chart_router() -> Router<BiState> {
     Router::new()
         .route("/ws/{workspace}/charts", post(ch_create).get(ch_list))
         .route("/ws/{workspace}/charts/data", post(ch_data))
+        .route("/ws/{workspace}/charts/{id}/data", post(ch_run))
         .route(
             "/ws/{workspace}/charts/{id}",
             get(ch_get).put(ch_update).delete(ch_remove),
@@ -1594,9 +1595,25 @@ async fn ch_data(
     egret_core::authz::require(&*st.pdp, &ctx, CH_READ)
         .await
         .map_err(BiApiError::from)?;
+    let (sql, database_id) = compile_chart_sql(&st, &ctx, b.dataset_id, &b.query_spec).await?;
+    Ok(Json(ChartDataResponse {
+        sql,
+        database_id: database_id.to_string(),
+    }))
+}
+
+/// Compile a dataset's `QuerySpec` to `(sql, database_id)`. The dataset must live
+/// in the caller's workspace (cross-tenant guard → `NotFound`). Shared by
+/// `ch_data` (client-supplied spec) and `ch_run` (the chart's SAVED spec).
+async fn compile_chart_sql(
+    st: &BiState,
+    ctx: &egret_core::WorkspaceContext,
+    dataset_id: Uuid,
+    spec: &chartquery::QuerySpec,
+) -> Result<(String, Uuid), BiApiError> {
     let ds = st
         .datasets
-        .get(b.dataset_id)
+        .get(dataset_id)
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("dataset".into()))?;
@@ -1610,20 +1627,97 @@ async fn ch_data(
         .map_err(|e| BiApiError::from(crate::BiError::from(e)))?;
     let cols = st
         .datasets
-        .columns(b.dataset_id)
+        .columns(dataset_id)
         .await
         .map_err(BiApiError::from)?;
     let metrics = st
         .datasets
-        .metrics(b.dataset_id)
+        .metrics(dataset_id)
         .await
         .map_err(BiApiError::from)?;
     let source = source_of(&ds);
-    let sql = chartquery::build(database.engine, &source, &cols, &metrics, &b.query_spec)
+    let sql = chartquery::build(database.engine, &source, &cols, &metrics, spec)
         .map_err(BiApiError::from)?;
-    Ok(Json(ChartDataResponse {
-        sql,
-        database_id: ds.database_id.to_string(),
+    Ok((sql, ds.database_id))
+}
+
+/// Execution guards for a chart-data run: cap at the chart row ceiling with a
+/// modest timeout. (`Limits` has no `Default`; mirror `SchemaService::limits`.)
+fn chart_run_limits() -> egret_query::execution::model::Limits {
+    egret_query::execution::model::Limits {
+        max_rows: crate::chartquery::MAX_CHART_ROWS as usize,
+        timeout: Duration::from_secs(30),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/charts/{id}/data",
+    tag = "charts",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Chart id"),
+    ),
+    responses(
+        (status = 200, description = "The chart's SAVED query, executed: columns + rows", body = ChartRunResponse),
+        (status = 400, description = "Chart has no runnable query, or its saved spec is invalid", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "No chart:read grant on this chart", body = ErrorBody),
+        (status = 404, description = "No such chart in this workspace, or its dataset is gone", body = ErrorBody),
+        (status = 502, description = "Query engine error", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+/// Object-scoped: runs ONLY the chart's persisted query (no client-supplied
+/// spec — the handler takes only the path id), so an object guest with a
+/// `chart:read` grant can view the shared chart's data without any query:run
+/// workspace permission.
+async fn ch_run(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+) -> Result<Json<ChartRunResponse>, BiApiError> {
+    // Object-scoped read gate: object guests reach execution; a non-granted
+    // chart is denied here (403) BEFORE anything is loaded or run.
+    let obj = crate::shares::resolve(&st, &ctx, "chart", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, CH_READ, obj)
+        .await
+        .map_err(BiApiError::from)?;
+
+    let chart = st
+        .charts
+        .get(id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("chart".into()))?;
+    // Extract ONLY the chart's saved query spec (params.spec). The endpoint
+    // accepts no request body, so a guest can run nothing but this.
+    let spec: chartquery::QuerySpec = serde_json::from_value(
+        chart
+            .params
+            .get("spec")
+            .cloned()
+            .ok_or_else(|| Error::InvalidInput("chart has no runnable query".into()))?,
+    )
+    .map_err(|_| Error::InvalidInput("chart spec invalid".into()))?;
+
+    let (sql, database_id) = compile_chart_sql(&st, &ctx, chart.dataset_id, &spec).await?;
+    let result = egret_query::execution::run_query(
+        &st.databases,
+        &egret_query::execution::connector::DefaultConnectorFactory,
+        database_id,
+        &sql,
+        Some(spec.row_limit.max(0) as usize),
+        Some(ctx.principal.email.clone()),
+        &chart_run_limits(),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .map_err(|e| BiApiError::from(crate::BiError::from(e)))?;
+
+    Ok(Json(ChartRunResponse {
+        columns: result.columns,
+        rows: result.rows,
     }))
 }
 
@@ -2460,6 +2554,7 @@ pub struct BiDatasetApi;
         ch_update,
         ch_remove,
         ch_data,
+        ch_run,
         ch_set_folder,
         ch_duplicate,
         ch_trash,
@@ -2473,6 +2568,8 @@ pub struct BiDatasetApi;
         ChartDto,
         ChartDataBody,
         ChartDataResponse,
+        ChartRunResponse,
+        egret_core::ColumnMeta,
         crate::chartquery::QuerySpec,
         crate::chartquery::Filter,
         crate::chartquery::OrderBy,
