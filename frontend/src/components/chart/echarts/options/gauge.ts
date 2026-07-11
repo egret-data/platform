@@ -1,7 +1,7 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
-import { SERIES_PALETTE, COLOR_FALLBACK, resolveColor } from "../palette";
+import { ARIA_A11Y, SERIES_PALETTE, COLOR_FALLBACK, resolveColor } from "../palette";
 
 export interface ResultColumn { name: string; type: string }
 export interface GaugeBuildConfig {
@@ -30,6 +30,7 @@ export function buildGaugeOption(columns: ResultColumn[], rows: unknown[][], cfg
   const textColor = resolveColor("var(--foreground)", COLOR_FALLBACK.text);
 
   return {
+    aria: ARIA_A11Y, // screen-reader data description (non-visual fallback)
     series: [{
       type: "gauge",
       min, max,

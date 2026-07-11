@@ -32,6 +32,26 @@ export const CHART_THEME = {
 
 export const seriesColor = (i: number) => SERIES_PALETTE[i % SERIES_PALETTE.length];
 
+/** Line dash styles cycled per series so line charts stay distinguishable without
+ * relying on colour alone (WCAG "color-not-only"; colour-blind users). ECharts
+ * `lineStyle.type` accepts "solid" | "dashed" | "dotted" or a dash-array. */
+export const LINE_TYPES: (string | number[])[] = ["solid", "dashed", "dotted", [9, 3, 2, 3]];
+export const lineType = (i: number) => LINE_TYPES[i % LINE_TYPES.length];
+
+/** Marker shapes cycled per series (line points + scatter) — shape distinguishes
+ * a series without relying on colour. */
+export const SYMBOLS = ["circle", "rect", "triangle", "diamond", "pin", "arrow"];
+export const symbolShape = (i: number) => SYMBOLS[i % SYMBOLS.length];
+
+/** ECharts accessibility:
+ *  - `enabled` generates a screen-reader description of the chart's data (the
+ *    non-visual "data-table" fallback).
+ *  - `decal.show` overlays distinct patterns (dots/hatches) on filled series
+ *    (bars, pie slices, areas) so colour-blind users can tell them apart without
+ *    relying on the palette colour alone (WCAG "color-not-only"). Line charts add
+ *    dash/marker cycling on top of this (see `lineType`/`symbolShape`). */
+export const ARIA_A11Y = { enabled: true, decal: { show: true } } as const;
+
 // Metabase colours a single (un-broken-out) series with its "summarize" green
 // (palm/50 = hsl(89 48% 40%)) rather than the first accent.
 export const SUMMARIZE_COLOR = "#689735";

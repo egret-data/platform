@@ -2,7 +2,7 @@ import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
 import { formatValue } from "../../format";
-import { CHART_THEME, SERIES_PALETTE, COLOR_FALLBACK, resolveColor } from "../palette";
+import { ARIA_A11Y, CHART_THEME, SERIES_PALETTE, COLOR_FALLBACK, resolveColor } from "../palette";
 
 export interface ResultColumn { name: string; type: string }
 export interface WaterfallBuildConfig {
@@ -62,6 +62,7 @@ export function buildWaterfallOption(columns: ResultColumn[], rows: unknown[][],
   }
 
   return {
+    aria: ARIA_A11Y, // screen-reader data description (non-visual fallback)
     grid: CHART_THEME.grid,
     tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
     xAxis: {

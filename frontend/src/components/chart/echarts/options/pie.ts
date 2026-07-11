@@ -1,7 +1,7 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
-import { SERIES_PALETTE, OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor } from "../palette";
+import { ARIA_A11Y, SERIES_PALETTE, OTHER_SLICE_COLOR, COLOR_FALLBACK, resolveColor } from "../palette";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
 
 export interface ResultColumn { name: string; type: string }
@@ -103,6 +103,7 @@ export function buildPieOption(columns: ResultColumn[], rows: unknown[][], cfg: 
     : undefined;
 
   return {
+    aria: ARIA_A11Y, // screen-reader data description (non-visual fallback)
     color: SERIES_PALETTE,
     tooltip: { trigger: "item", formatter: (p: { name: string; value: unknown; percent: number }) => `${p.name}: ${fmt(p.value)} (${p.percent}%)` },
     legend: cfg.showLegend ? { bottom: 0, type: "scroll" } : undefined,

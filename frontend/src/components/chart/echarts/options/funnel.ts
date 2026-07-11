@@ -1,7 +1,7 @@
 import type { EChartsCoreOption } from "echarts/core";
 import type { ColumnFormat } from "../../format-types";
 import { formatValue } from "../../format";
-import { SERIES_PALETTE } from "../palette";
+import { ARIA_A11Y, SERIES_PALETTE } from "../palette";
 
 export interface ResultColumn { name: string; type: string }
 export interface FunnelBuildConfig {
@@ -29,6 +29,7 @@ export function buildFunnelOption(columns: ResultColumn[], rows: unknown[][], cf
     cfg.metric ? formatValue(v, cfg.metricTypes?.[cfg.metric] ?? "double", cfg.columnSettings?.[cfg.metric]) : String(v);
 
   return {
+    aria: ARIA_A11Y, // screen-reader data description (non-visual fallback)
     color: SERIES_PALETTE,
     tooltip: { trigger: "item", formatter: (p: { name: string; value: unknown; percent: number }) => `${p.name}: ${fmt(p.value)} (${p.percent}%)` },
     series: [{
