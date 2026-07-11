@@ -58,7 +58,7 @@ pub async fn object_ref(db: &Db, kind: &str, id: Uuid) -> Result<ObjectRef, Erro
 
 /// Body of a share grant: give `principal` a workspace `role` on this object.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct GrantBody {
+pub struct ObjectGrantBody {
     /// `user` | `group`.
     pub principal_type: String,
     pub principal_id: Uuid,
@@ -68,7 +68,7 @@ pub struct GrantBody {
 
 /// A single object-scoped grant on the object.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct GrantDto {
+pub struct ObjectGrantDto {
     pub id: Uuid,
     pub principal_type: String,
     pub principal_id: Uuid,
@@ -133,9 +133,9 @@ pub(crate) async fn resolve(
         ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder"),
         ("id" = Uuid, Path, description = "Object id"),
     ),
-    request_body = GrantBody,
+    request_body = ObjectGrantBody,
     responses(
-        (status = 200, description = "Grant created (or already existed)", body = GrantDto),
+        (status = 200, description = "Grant created (or already existed)", body = ObjectGrantDto),
         (status = 400, description = "Unknown kind, role, or principal_type", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing <kind>:manage on the object", body = egret_core::http::ErrorBody),
@@ -147,8 +147,8 @@ async fn grant_put(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
     Path((_w, kind, id)): Path<(String, String, Uuid)>,
-    Json(b): Json<GrantBody>,
-) -> Result<Json<GrantDto>, BiApiError> {
+    Json(b): Json<ObjectGrantBody>,
+) -> Result<Json<ObjectGrantDto>, BiApiError> {
     let obj = resolve(&st, &ctx, &kind, id).await?;
     require_object(&*st.pdp, &ctx, &format!("{kind}:manage"), obj)
         .await
@@ -194,7 +194,7 @@ async fn grant_put(
     .await
     .map_err(|e| BiApiError::from(crate::BiError::Db(e)))?;
 
-    Ok(Json(GrantDto {
+    Ok(Json(ObjectGrantDto {
         id: grant_id,
         principal_type: b.principal_type,
         principal_id: b.principal_id,
@@ -253,7 +253,7 @@ async fn grant_delete(
         ("id" = Uuid, Path, description = "Object id"),
     ),
     responses(
-        (status = 200, description = "Direct object grants", body = Vec<GrantDto>),
+        (status = 200, description = "Direct object grants", body = Vec<ObjectGrantDto>),
         (status = 400, description = "Unknown kind", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing <kind>:read on the object", body = egret_core::http::ErrorBody),
@@ -265,7 +265,7 @@ async fn grant_list(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
     Path((_w, kind, id)): Path<(String, String, Uuid)>,
-) -> Result<Json<Vec<GrantDto>>, BiApiError> {
+) -> Result<Json<Vec<ObjectGrantDto>>, BiApiError> {
     let obj = resolve(&st, &ctx, &kind, id).await?;
     require_object(&*st.pdp, &ctx, &format!("{kind}:read"), obj)
         .await
@@ -282,7 +282,7 @@ async fn grant_list(
     .map_err(|e| BiApiError::from(crate::BiError::Db(e)))?;
     Ok(Json(
         rows.into_iter()
-            .map(|(gid, pt, pid, role)| GrantDto {
+            .map(|(gid, pt, pid, role)| ObjectGrantDto {
                 id: gid,
                 principal_type: pt,
                 principal_id: pid,
@@ -296,7 +296,7 @@ async fn grant_list(
 #[derive(utoipa::OpenApi)]
 #[openapi(
     paths(grant_put, grant_delete, grant_list),
-    components(schemas(GrantBody, GrantDto)),
+    components(schemas(ObjectGrantBody, ObjectGrantDto)),
     tags((name = "shares", description = "Per-object grants: share a dashboard / chart / dataset / folder with a user or group at a workspace role")),
 )]
 pub struct BiSharesApi;

@@ -96,12 +96,11 @@ async fn object_scope_end_to_end() {
     // ── Role setup ─────────────────────────────────────────────────────────
     // `ws_editor` genuinely holds dashboard:read + dashboard:manage (migration
     // 0015); confirm before relying on it (ws_viewer does NOT — see module doc).
-    let ws_editor_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM roles WHERE scope = 'workspace' AND name = 'ws_editor'",
-    )
-    .fetch_one(&db.pool)
-    .await
-    .expect("seeded ws role `ws_editor` must exist");
+    let ws_editor_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM roles WHERE scope = 'workspace' AND name = 'ws_editor'")
+            .fetch_one(&db.pool)
+            .await
+            .expect("seeded ws role `ws_editor` must exist");
     let editor_perms: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM role_permissions \
          WHERE role_id = $1 AND permission IN ('dashboard:read', 'dashboard:manage')",

@@ -126,6 +126,8 @@ export * from './notebookSettings';
 export * from './notebooksListParams';
 export * from './notebookSummary';
 export * from './objectDto';
+export * from './objectGrantBody';
+export * from './objectGrantDto';
 export * from './oidcOidcCallbackParams';
 export * from './orderBy';
 export * from './partitionDto';

@@ -55,7 +55,10 @@ mod tests {
         );
         assert!(t.contains("Egret::Action::\"dashboard:read\""));
         // Workspace roles cascade to objects (folder→item, ws→object): use `in`.
-        assert!(t.contains("action in ["), "workspace role must list its perms, got: {t}");
+        assert!(
+            t.contains("action in ["),
+            "workspace role must list its perms, got: {t}"
+        );
         assert!(
             t.contains("resource in ?resource"),
             "workspace role must use cascading `in`, got: {t}"

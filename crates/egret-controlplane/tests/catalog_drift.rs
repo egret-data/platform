@@ -64,6 +64,10 @@ const GATE_CALLS: &[&str] = &[
     // PDP-backed policy enforcement point (B1b-1): `secret:*` gates migrated
     // from `require_permission` to `egret_core::authz::require(state.pdp, ..)`.
     "authz::require(",
+    // Object-scope PEP (B2-1a): per-object BI handlers gate on
+    // `egret_core::authz::require_object(state.pdp, ctx, PERM, obj)` — e.g.
+    // `dataset:manage` on the dataset `{id}` handlers moved off `authz::require`.
+    "require_object(",
 ];
 
 /// Pull every `"resource:action"`-shaped quoted literal out of a line, but

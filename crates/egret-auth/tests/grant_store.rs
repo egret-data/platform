@@ -87,7 +87,10 @@ async fn grants_for_returns_platform_and_scoped_workspace_grants() {
         .any(|x| x.scope_type == "workspace" && x.scope_id == Some(ws_id.0)));
 
     // A workspace the user is not in returns no workspace grants.
-    let g2 = store.grants_for(user_id, Some(other_ws), &[]).await.unwrap();
+    let g2 = store
+        .grants_for(user_id, Some(other_ws), &[])
+        .await
+        .unwrap();
     assert!(g2.iter().all(|x| x.scope_type != "workspace"));
     // Platform grants still show up regardless of workspace.
     assert!(g2.iter().any(|x| x.scope_type == "platform"));
