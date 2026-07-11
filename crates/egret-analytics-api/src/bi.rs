@@ -217,6 +217,18 @@ pub struct ChartDataResponse {
     pub database_id: String,
 }
 
+/// A saved chart's query, executed: columns + row-major rows. Mirrors the first
+/// two fields of `TabularResult` so the frontend consumes it like a query
+/// result. Returned by the object-scoped `POST /charts/{id}/data` endpoint,
+/// which runs ONLY the chart's persisted query (no client-supplied spec).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ChartRunResponse {
+    pub columns: Vec<egret_core::ColumnMeta>,
+    /// Row-major cell values; each inner vec is one row aligned to `columns`.
+    #[schema(value_type = Vec<Vec<Object>>)]
+    pub rows: Vec<Vec<serde_json::Value>>,
+}
+
 // ── Dashboard DTOs ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]

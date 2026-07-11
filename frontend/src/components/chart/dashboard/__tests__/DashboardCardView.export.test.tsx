@@ -10,8 +10,11 @@ vi.mock("@/components/chart/ChartRenderer", () => ({
   ChartRenderer: ({ vizType }: { vizType: string }) =>
     vizType === "table" ? <table data-testid="cr-table" /> : <svg data-testid="chart-svg" />,
 }));
+// One mock fn drives both the edit-mode (useChartData) and view-mode (useDashboardCardData) paths,
+// so each test's mockReturnValue applies whichever mode it renders.
 const useChartData = vi.fn();
 vi.mock("@/api/useChartData", () => ({ useChartData: (...a: unknown[]) => useChartData(...a) }));
+vi.mock("@/api/useSavedChartData", () => ({ useDashboardCardData: (...a: unknown[]) => useChartData(...a) }));
 
 import { DashboardCardView } from "../DashboardCardView";
 
@@ -22,24 +25,24 @@ const card = { id: "k", card_type: "chart", chart_id: "c", options: {} } as neve
 describe("DashboardCardView export affordance", () => {
   it("shows the export button for a loaded chart card in view mode", () => {
     useChartData.mockReturnValue({ columns: [{ name: "a", type: "x" }], rows: [["1"]], isLoading: false, error: null });
-    render(<DashboardCardView ws="eng" card={card} chart={chart} parameters={[]} paramValues={{}} />);
+    render(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} parameters={[]} paramValues={{}} />);
     expect(screen.getByRole("button", { name: /export chart/i })).toBeTruthy();
   });
   it("hides the export button while loading", () => {
     useChartData.mockReturnValue({ columns: [], rows: [], isLoading: true, error: null });
-    render(<DashboardCardView ws="eng" card={card} chart={chart} parameters={[]} paramValues={{}} />);
+    render(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} parameters={[]} paramValues={{}} />);
     expect(screen.queryByRole("button", { name: /export chart/i })).toBeNull();
   });
   it("hides the export button in edit mode", () => {
     useChartData.mockReturnValue({ columns: [{ name: "a", type: "x" }], rows: [["1"]], isLoading: false, error: null });
-    render(<DashboardCardView ws="eng" card={card} chart={chart} parameters={[]} paramValues={{}} editing />);
+    render(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} parameters={[]} paramValues={{}} editing />);
     expect(screen.queryByRole("button", { name: /export chart/i })).toBeNull();
   });
 
   it("offers Download PNG for a chart card (chart svg present in the render container)", async () => {
     const user = userEvent.setup();
     useChartData.mockReturnValue({ columns: [{ name: "a", type: "x" }], rows: [["1"]], isLoading: false, error: null });
-    render(<DashboardCardView ws="eng" card={card} chart={chart} parameters={[]} paramValues={{}} />);
+    render(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} parameters={[]} paramValues={{}} />);
     await user.click(screen.getByRole("button", { name: /export chart/i }));
     expect(await screen.findByText("Download CSV")).toBeTruthy();
     expect(screen.getByText("Download PNG")).toBeTruthy();
@@ -51,7 +54,7 @@ describe("DashboardCardView export affordance", () => {
   it("does NOT offer Download PNG for a table card (no chart svg)", async () => {
     const user = userEvent.setup();
     useChartData.mockReturnValue({ columns: [{ name: "a", type: "x" }], rows: [["1"]], isLoading: false, error: null });
-    render(<DashboardCardView ws="eng" card={card} chart={tableChart} parameters={[]} paramValues={{}} />);
+    render(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={tableChart} parameters={[]} paramValues={{}} />);
     await user.click(screen.getByRole("button", { name: /export chart/i }));
     expect(await screen.findByText("Download CSV")).toBeTruthy();
     expect(screen.queryByText("Download PNG")).toBeNull();

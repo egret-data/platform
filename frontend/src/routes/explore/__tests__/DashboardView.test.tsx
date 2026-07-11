@@ -36,6 +36,9 @@ vi.mock("@/api/charts", async (orig) => ({
 vi.mock("@/api/useChartData", () => ({
   useChartData: () => ({ columns: [{ name: "rev", type: "double" }], rows: [[5]], isLoading: false, error: null }),
 }));
+vi.mock("@/api/useSavedChartData", () => ({
+  useDashboardCardData: () => ({ columns: [{ name: "rev", type: "double" }], rows: [[5]], isLoading: false, error: null }),
+}));
 vi.mock("@/api/useColumnValues", () => ({
   // fresh array each call — would loop without the idempotent guard
   useColumnValues: () => ({ values: ["new", "paid"].slice(), isLoading: false, error: null }),

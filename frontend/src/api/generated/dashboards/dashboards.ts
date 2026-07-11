@@ -26,6 +26,8 @@ import type {
 
 import type {
   Ack,
+  CardRunBody,
+  ChartRunResponse,
   CreateDashboard,
   DashboardDetailDto,
   DashboardSummaryDto,
@@ -830,6 +832,141 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getDashboardsDbBookmarkRemoveMutationOptions(options), queryClient);
+    }
+    export type dashboardsDbCardRunResponse200 = {
+  data: ChartRunResponse
+  status: 200
+}
+
+export type dashboardsDbCardRunResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type dashboardsDbCardRunResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type dashboardsDbCardRunResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type dashboardsDbCardRunResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type dashboardsDbCardRunResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type dashboardsDbCardRunResponse502 = {
+  data: ErrorBody
+  status: 502
+}
+
+export type dashboardsDbCardRunResponseSuccess = (dashboardsDbCardRunResponse200) & {
+  headers: Headers;
+};
+export type dashboardsDbCardRunResponseError = (dashboardsDbCardRunResponse400 | dashboardsDbCardRunResponse401 | dashboardsDbCardRunResponse403 | dashboardsDbCardRunResponse404 | dashboardsDbCardRunResponse500 | dashboardsDbCardRunResponse502) & {
+  headers: Headers;
+};
+
+export type dashboardsDbCardRunResponse = (dashboardsDbCardRunResponseSuccess | dashboardsDbCardRunResponseError)
+
+export const getDashboardsDbCardRunUrl = (workspace: string,
+    id: string,
+    cardId: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/dashboards/${encodeURIComponent(id)}/cards/${encodeURIComponent(cardId)}/data`
+}
+
+/**
+ * The body is OPTIONAL (a body-less call runs the saved query unfiltered).
+ * Incoming filters are appended to the persisted `spec.filters` and validated by
+ * `compile_chart_sql` → `chartquery::build`, which resolves every filter `col`
+ * against the dataset's real columns (an unknown column → 400) and renders the
+ * values/operators through the injection-safe `sql_literal`/`FilterOp` path. The
+ * client cannot inject a predicate on an arbitrary column.
+ * @summary Object-scoped on the DASHBOARD: a `dashboard:read` object grant TRANSITIVELY
+authorizes running the data of any card on that dashboard — NO per-chart
+grant is needed. The card must belong to the path dashboard (else 404). Runs
+the card chart's persisted query, optionally merged with resolved
+dashboard-parameter filters from the request body, so a shared viewer can
+view the card's (filtered) data without any `query:run` permission.
+ */
+export const dashboardsDbCardRun = async (workspace: string,
+    id: string,
+    cardId: string,
+    cardRunBody: CardRunBody, options?: RequestInit): Promise<dashboardsDbCardRunResponse> => {
+
+  return customInstance<dashboardsDbCardRunResponse>(getDashboardsDbCardRunUrl(workspace,id,cardId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(cardRunBody)
+  }
+);}
+
+
+
+
+
+export const getDashboardsDbCardRunMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dashboardsDbCardRun>>, TError,{workspace: string;id: string;cardId: string;data: CardRunBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof dashboardsDbCardRun>>, TError,{workspace: string;id: string;cardId: string;data: CardRunBody}, TContext> => {
+
+const mutationKey = ['dashboardsDbCardRun'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof dashboardsDbCardRun>>, {workspace: string;id: string;cardId: string;data: CardRunBody}> = (props) => {
+          const {workspace,id,cardId,data} = props ?? {};
+
+          return  dashboardsDbCardRun(workspace,id,cardId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DashboardsDbCardRunMutationResult = NonNullable<Awaited<ReturnType<typeof dashboardsDbCardRun>>>
+    export type DashboardsDbCardRunMutationBody = CardRunBody
+    export type DashboardsDbCardRunMutationError = ErrorBody
+
+    /**
+ * @summary Object-scoped on the DASHBOARD: a `dashboard:read` object grant TRANSITIVELY
+authorizes running the data of any card on that dashboard — NO per-chart
+grant is needed. The card must belong to the path dashboard (else 404). Runs
+the card chart's persisted query, optionally merged with resolved
+dashboard-parameter filters from the request body, so a shared viewer can
+view the card's (filtered) data without any `query:run` permission.
+ */
+export const useDashboardsDbCardRun = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dashboardsDbCardRun>>, TError,{workspace: string;id: string;cardId: string;data: CardRunBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof dashboardsDbCardRun>>,
+        TError,
+        {workspace: string;id: string;cardId: string;data: CardRunBody},
+        TContext
+      > => {
+      return useMutation(getDashboardsDbCardRunMutationOptions(options), queryClient);
     }
     export type dashboardsDbDuplicateResponse200 = {
   data: DashboardDetailDto

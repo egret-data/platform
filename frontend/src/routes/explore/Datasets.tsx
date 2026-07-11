@@ -13,6 +13,7 @@ import { useDatabases } from "@/api/sqllab";
 import { useDatasets, useDataset, useDatasetListMutations, useDeleteDataset, type DatasetSummary } from "@/api/datasets";
 import { CreateDatasetDialog } from "@/components/dataset/CreateDatasetDialog";
 import { DatasetActionsMenu } from "@/components/dataset/DatasetActionsMenu";
+import { ShareDialog } from "@/components/sharing/ShareDialog";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SortableHeader } from "@/components/explore/SortableHeader";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -46,6 +47,7 @@ export default function Datasets() {
   const [dbFilter, setDbFilter] = useState("all");
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" }>({ key: "updated_at", dir: "desc" });
   const [pendingDelete, setPendingDelete] = useState<DatasetSummary | null>(null);
+  const [shareTarget, setShareTarget] = useState<DatasetSummary | null>(null);
   const [folderDialog, setFolderDialog] = useState<{ mode: "new" | "rename" | "move" | "bulkmove"; ds?: DatasetSummary; folder?: { id: string; name: string } } | null>(null);
   const [dupId, setDupId] = useState<string | null>(null);
   const dup = useDataset(ws, dupId);
@@ -126,7 +128,8 @@ export default function Datasets() {
         onNewFolder={(x) => setFolderDialog({ mode: "move", ds: x })}
         onTrash={(x) => trash.mutateAsync(x.id).then(() => toast.success("Moved to Trash")).catch((e) => toast.error(String(e)))}
         onRestore={(x) => restore.mutateAsync(x.id).catch((e) => toast.error(String(e)))}
-        onDeletePermanent={(x) => setPendingDelete(x)} /></td>
+        onDeletePermanent={(x) => setPendingDelete(x)}
+        onShare={(x) => setShareTarget(x)} /></td>
     </tr>
   );
 
@@ -297,6 +300,18 @@ export default function Datasets() {
         description={`Permanently delete "${pendingDelete?.name ?? ""}"? This cannot be undone.`}
         onConfirm={async () => { if (!pendingDelete) return; await guard(del.mutateAsync(pendingDelete.id)); setPendingDelete(null); }}
       />
+
+      {shareTarget && (
+        <ShareDialog
+          ws={ws}
+          kind="dataset"
+          id={shareTarget.id}
+          name={shareTarget.name}
+          folderId={shareTarget.folder_id ?? null}
+          open={shareTarget !== null}
+          onOpenChange={(o) => { if (!o) setShareTarget(null); }}
+        />
+      )}
     </div>
   );
 }

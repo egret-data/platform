@@ -12,6 +12,7 @@ use crate::execution::connector::ConnectorFactory;
 use crate::execution::error::EngineError;
 use crate::execution::model::Limits;
 use crate::execution::store::QueryStore;
+use egret_core::TabularResult;
 
 #[derive(Clone)]
 pub struct JobManager {
@@ -62,20 +63,12 @@ impl JobManager {
         limit: Option<usize>,
     ) -> Result<Uuid, EngineError> {
         let id = self.store.insert(ws, database_id, user, sql).await?; // original sql stored
-        let max_rows = limit
-            .map(|l| l.clamp(1, self.limits.max_rows))
-            .unwrap_or(self.limits.max_rows);
-        let limits = Limits {
-            max_rows,
-            timeout: self.limits.timeout,
-        };
-        let effective_sql = apply_sql_limit(sql, limit, max_rows); // wrapped for SELECT
         let token = CancellationToken::new();
         self.cancels.lock().unwrap().insert(id, token.clone());
         let this = self.clone();
-        let run_sql = effective_sql;
+        let run_sql = sql.to_string();
         tokio::spawn(async move {
-            this.run(id, database_id, run_sql, limits, session_user, token)
+            this.run(id, database_id, run_sql, limit, session_user, token)
                 .await;
             this.cancels.lock().unwrap().remove(&id);
         });
@@ -96,7 +89,7 @@ impl JobManager {
         id: Uuid,
         database_id: Uuid,
         sql: String,
-        limits: Limits,
+        limit: Option<usize>,
         session_user: Option<String>,
         token: CancellationToken,
     ) {
@@ -105,7 +98,7 @@ impl JobManager {
             return;
         }
         match self
-            .execute(id, database_id, &sql, &limits, session_user, &token)
+            .execute(id, database_id, &sql, limit, session_user, &token)
             .await
         {
             Ok(()) => {} // finish() already persisted inside execute()
@@ -118,28 +111,28 @@ impl JobManager {
         }
     }
 
-    /// Resolve the connection, run with the outer timeout, write the result, persist finished.
+    /// Run the query to completion via the shared `run_query` path, write the
+    /// result, persist finished.
     async fn execute(
         &self,
         id: Uuid,
         database_id: Uuid,
         sql: &str,
-        limits: &Limits,
+        limit: Option<usize>,
         session_user: Option<String>,
         token: &CancellationToken,
     ) -> Result<(), EngineError> {
-        let db = self.databases.get(database_id).await?;
-        let secret = self.databases.open_secret(database_id).await?;
-        let connector = self.factory.build(&db, secret, session_user, None).await?;
-
-        let fut = connector.execute(sql, limits, token.clone());
-        let result = match tokio::time::timeout(limits.timeout, fut).await {
-            Ok(r) => r?,
-            Err(_) => {
-                token.cancel();
-                return Err(EngineError::Timeout);
-            }
-        };
+        let result = run_query(
+            &self.databases,
+            &*self.factory,
+            database_id,
+            sql,
+            limit,
+            session_user,
+            &self.limits,
+            token.clone(),
+        )
+        .await?;
 
         let uri = format!(
             "{}/{}/{}.jsonl",
@@ -154,6 +147,58 @@ impl JobManager {
             .finish(id, &result, &uri, self.preview_rows)
             .await?;
         Ok(())
+    }
+}
+
+/// Run `sql` on `database_id` to completion and return the full result.
+///
+/// This is the single shared execution path. It resolves the connection for
+/// `database_id`, applies the row `limit` (Superset-style SQL wrap + fetch cap,
+/// clamped to `limits.max_rows`), builds the connector via `factory`, and runs
+/// the query to completion under the outer `limits.timeout`, returning the
+/// coerced [`TabularResult`] (columns + row-major rows, values already typed by
+/// the connector). Async engines (Trino) are polled to completion inside their
+/// connector, so the caller gets finished rows from a single `await` — no
+/// client-side polling handle.
+///
+/// Both the `submit`/[`JobManager`] path (which then persists the result) and
+/// the BI data endpoints (which return the rows directly) call this, so there
+/// is exactly one place that turns `(database_id, sql, limit)` into rows.
+///
+/// `cancel` is honored cooperatively by the connector; on the outer timeout it
+/// is triggered so the engine query is aborted best-effort. Callers with no
+/// cancellation concern can pass `CancellationToken::new()`.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_query(
+    databases: &DatabaseRepo,
+    factory: &dyn ConnectorFactory,
+    database_id: Uuid,
+    sql: &str,
+    limit: Option<usize>,
+    session_user: Option<String>,
+    limits: &Limits,
+    cancel: CancellationToken,
+) -> Result<TabularResult, EngineError> {
+    let max_rows = limit
+        .map(|l| l.clamp(1, limits.max_rows))
+        .unwrap_or(limits.max_rows);
+    let effective = Limits {
+        max_rows,
+        timeout: limits.timeout,
+    };
+    let effective_sql = apply_sql_limit(sql, limit, max_rows); // wrapped for SELECT
+
+    let db = databases.get(database_id).await?;
+    let secret = databases.open_secret(database_id).await?;
+    let connector = factory.build(&db, secret, session_user, None).await?;
+
+    let fut = connector.execute(&effective_sql, &effective, cancel.clone());
+    match tokio::time::timeout(effective.timeout, fut).await {
+        Ok(r) => r,
+        Err(_) => {
+            cancel.cancel();
+            Err(EngineError::Timeout)
+        }
     }
 }
 

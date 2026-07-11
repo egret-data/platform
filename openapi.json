@@ -8629,6 +8629,116 @@
         }
       }
     },
+    "/api/ws/{workspace}/charts/{id}/data": {
+      "post": {
+        "tags": [
+          "charts"
+        ],
+        "summary": "Object-scoped: runs ONLY the chart's persisted query (no client-supplied\nspec — the handler takes only the path id), so an object guest with a\n`chart:read` grant can view the shared chart's data without any query:run\nworkspace permission.",
+        "operationId": "ch_run",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Chart id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The chart's SAVED query, executed: columns + rows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChartRunResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Chart has no runnable query, or its saved spec is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "No chart:read grant on this chart",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such chart in this workspace, or its dataset is gone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Query engine error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/charts/{id}/duplicate": {
       "post": {
         "tags": [
@@ -9596,6 +9706,137 @@
         }
       }
     },
+    "/api/ws/{workspace}/dashboards/{id}/cards/{card_id}/data": {
+      "post": {
+        "tags": [
+          "dashboards"
+        ],
+        "summary": "Object-scoped on the DASHBOARD: a `dashboard:read` object grant TRANSITIVELY\nauthorizes running the data of any card on that dashboard — NO per-chart\ngrant is needed. The card must belong to the path dashboard (else 404). Runs\nthe card chart's persisted query, optionally merged with resolved\ndashboard-parameter filters from the request body, so a shared viewer can\nview the card's (filtered) data without any `query:run` permission.",
+        "description": "The body is OPTIONAL (a body-less call runs the saved query unfiltered).\nIncoming filters are appended to the persisted `spec.filters` and validated by\n`compile_chart_sql` → `chartquery::build`, which resolves every filter `col`\nagainst the dataset's real columns (an unknown column → 400) and renders the\nvalues/operators through the injection-safe `sql_literal`/`FilterOp` path. The\nclient cannot inject a predicate on an arbitrary column.",
+        "operationId": "db_card_run",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Dashboard id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "card_id",
+            "in": "path",
+            "description": "Card id (must belong to the dashboard)",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CardRunBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The card's chart SAVED query (with dashboard filters), executed: columns + rows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChartRunResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Card has no chart, its saved spec is invalid, or a filter references an unknown column",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "No dashboard:read grant on this dashboard",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such dashboard, or the card is not on this dashboard",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Query engine error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/dashboards/{id}/duplicate": {
       "post": {
         "tags": [
@@ -9653,7 +9894,7 @@
             }
           },
           "403": {
-            "description": "Missing dashboard:read permission",
+            "description": "Missing dashboard:manage permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -14999,7 +15240,7 @@
             }
           },
           "403": {
-            "description": "Missing <kind>:read on the object",
+            "description": "Missing <kind>:manage on the object",
             "content": {
               "application/json": {
                 "schema": {
@@ -17293,6 +17534,19 @@
           }
         }
       },
+      "CardRunBody": {
+        "type": "object",
+        "description": "Optional body for the card-data endpoint: resolved dashboard-parameter filters\nto merge into the card chart's persisted query. Reuses `chartquery::Filter`\n(the same `{ col, op, value }` shape the chart spec uses), so the frontend\nsends exactly what `applyParamsToChart` produces. Each filter's `col` is\nvalidated against the dataset's real columns before it is applied (an unknown\ncolumn → 400), and the values/operators are rendered through the same\ninjection-safe `sql_literal`/`FilterOp` path as the persisted filters.",
+        "properties": {
+          "filters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Filter"
+            },
+            "description": "Resolved, dashboard-param-derived filters to AND onto the card's saved query."
+          }
+        }
+      },
       "CatalogRoleDto": {
         "type": "object",
         "required": [
@@ -17461,6 +17715,32 @@
           },
           "bookmarked": {
             "type": "boolean"
+          }
+        }
+      },
+      "ChartRunResponse": {
+        "type": "object",
+        "description": "A saved chart's query, executed: columns + row-major rows. Mirrors the first\ntwo fields of `TabularResult` so the frontend consumes it like a query\nresult. Returned by the object-scoped `POST /charts/{id}/data` endpoint,\nwhich runs ONLY the chart's persisted query (no client-supplied spec).",
+        "required": [
+          "columns",
+          "rows"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ColumnMeta"
+            }
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "description": "Row-major cell values; each inner vec is one row aligned to `columns`."
           }
         }
       },

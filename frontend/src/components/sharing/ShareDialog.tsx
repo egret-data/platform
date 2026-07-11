@@ -1,0 +1,375 @@
+import { useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Loader2, Trash2, X } from "lucide-react";
+import { toast } from "sonner";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { listPrincipals } from "@/api/policies";
+import {
+  getSharesGrantListQueryKey,
+  useSharesGrantDelete,
+  useSharesGrantList,
+  useSharesGrantPut,
+} from "@/api/generated/shares/shares";
+import type { ObjectGrantDto } from "@/api/generated/model";
+
+/** Object kinds that support object-scoped sharing. */
+export type ShareKind = "dashboard" | "chart" | "dataset" | "folder";
+
+/** Workspace roles offered when sharing. */
+const ROLE_OPTIONS = [
+  { value: "ws_viewer", label: "Viewer" },
+  { value: "ws_editor", label: "Editor" },
+] as const;
+
+const roleLabel = (role: string) =>
+  ROLE_OPTIONS.find((r) => r.value === role)?.label ?? role;
+
+/** Narrow the react-query error into an HTTP status if we have one. */
+function errorStatus(err: unknown): number | undefined {
+  if (err && typeof err === "object" && "status" in err) {
+    const s = (err as { status?: unknown }).status;
+    if (typeof s === "number") return s;
+  }
+  return undefined;
+}
+
+interface Props {
+  ws: string;
+  kind: ShareKind;
+  id: string;
+  /** When set, inherited grants from this folder are shown read-only. */
+  folderId?: string | null;
+  /** Human name of the object, shown in the header. */
+  name?: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+
+/**
+ * Metabase-style sharing modal for an object (dashboard / chart / dataset /
+ * folder). Lists direct grants (editable), inherited-from-folder grants
+ * (read-only), and lets a manager add or remove direct grants.
+ *
+ * The grants list endpoint is manage-gated: a non-manager receives a 403,
+ * which we surface as a friendly message rather than crashing or leaking the
+ * ACL.
+ */
+export function ShareDialog({ ws, kind, id, folderId, name, open, onOpenChange }: Props) {
+  const qc = useQueryClient();
+
+  const directKey = getSharesGrantListQueryKey(ws, kind, id);
+  const directQ = useSharesGrantList(ws, kind, id, {
+    query: { enabled: open, retry: false },
+  });
+
+  const inheritedQ = useSharesGrantList(ws, "folder", folderId ?? "", {
+    query: { enabled: open && !!folderId, retry: false },
+  });
+
+  const put = useSharesGrantPut();
+  const del = useSharesGrantDelete();
+
+  const direct = (directQ.data?.data ?? []) as ObjectGrantDto[];
+  const inherited = (inheritedQ.data?.data ?? []) as ObjectGrantDto[];
+  const forbidden = errorStatus(directQ.error) === 403;
+
+  const invalidate = () => qc.invalidateQueries({ queryKey: directKey });
+
+  const upsertRole = (grant: ObjectGrantDto, role: string) => {
+    put.mutate(
+      {
+        workspace: ws,
+        kind,
+        id,
+        data: { principal_type: grant.principal_type, principal_id: grant.principal_id, role },
+      },
+      {
+        onSuccess: invalidate,
+        onError: (e) => toast.error(String(e)),
+      },
+    );
+  };
+
+  const removeGrant = (grant: ObjectGrantDto) => {
+    del.mutate(
+      { workspace: ws, kind, id, grantId: grant.id },
+      {
+        onSuccess: () => {
+          toast.success("Access removed");
+          invalidate();
+        },
+        onError: (e) => toast.error(String(e)),
+      },
+    );
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Share{name ? ` "${name}"` : ""}</DialogTitle>
+          <DialogDescription>
+            Grant people and groups access to this {kind}.
+          </DialogDescription>
+        </DialogHeader>
+
+        {directQ.isLoading ? (
+          <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading access…
+          </div>
+        ) : forbidden ? (
+          <p className="py-6 text-sm text-muted-foreground" role="alert">
+            You don&apos;t have permission to manage sharing for this {kind}.
+          </p>
+        ) : directQ.isError ? (
+          <p className="py-6 text-sm text-destructive" role="alert">
+            Couldn&apos;t load sharing settings. {String(directQ.error)}
+          </p>
+        ) : (
+          <div className="space-y-5">
+            <AddGrantRow
+              onAdd={(body) =>
+                put.mutate(
+                  { workspace: ws, kind, id, data: body },
+                  {
+                    onSuccess: () => {
+                      toast.success("Access granted");
+                      invalidate();
+                    },
+                    onError: (e) => toast.error(String(e)),
+                  },
+                )
+              }
+              pending={put.isPending}
+            />
+
+            <section aria-label="Direct access" className="space-y-2">
+              <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                People &amp; groups with access
+              </h3>
+              {direct.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No direct access yet.</p>
+              ) : (
+                <ul className="divide-y rounded-md border">
+                  {direct.map((g) => (
+                    <li key={g.id} className="flex items-center gap-2 px-3 py-2">
+                      <PrincipalLabel grant={g} />
+                      <div className="ml-auto flex items-center gap-1">
+                        <Select value={g.role} onValueChange={(v) => upsertRole(g, v)}>
+                          <SelectTrigger
+                            className="h-8 w-28"
+                            aria-label={`Role for ${g.principal_id}`}
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {ROLE_OPTIONS.map((r) => (
+                              <SelectItem key={r.value} value={r.value}>
+                                {r.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-8 w-8 text-muted-foreground"
+                          aria-label={`Remove ${g.principal_id}`}
+                          onClick={() => removeGrant(g)}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            {folderId && (
+              <section aria-label="Inherited access" className="space-y-2">
+                <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Inherited from folder
+                </h3>
+                {inheritedQ.isLoading ? (
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+                  </div>
+                ) : inherited.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    No access inherited from the folder.
+                  </p>
+                ) : (
+                  <ul className="divide-y rounded-md border bg-muted/40">
+                    {inherited.map((g) => (
+                      <li key={g.id} className="flex items-center gap-2 px-3 py-2">
+                        <PrincipalLabel grant={g} />
+                        <span className="ml-auto text-xs text-muted-foreground">
+                          {roleLabel(g.role)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  Inherited access is managed on the folder and can&apos;t be changed here.
+                </p>
+              </section>
+            )}
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Grantee cell: principal id/name plus a User/Group badge. */
+function PrincipalLabel({ grant }: { grant: ObjectGrantDto }) {
+  const isGroup = grant.principal_type === "group";
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      <span className="truncate text-sm">{grant.principal_id}</span>
+      <Badge variant="outline" className="shrink-0">
+        {isGroup ? "Group" : "User"}
+      </Badge>
+    </span>
+  );
+}
+
+/**
+ * Add-a-grant row: a principal-type toggle, a search/select for the principal
+ * (suggestions from the policy principal picker), and a role select.
+ */
+function AddGrantRow({
+  onAdd,
+  pending,
+}: {
+  onAdd: (body: { principal_type: string; principal_id: string; role: string }) => void;
+  pending: boolean;
+}) {
+  const [type, setType] = useState<"user" | "group">("user");
+  const [value, setValue] = useState("");
+  const [role, setRole] = useState<string>("ws_viewer");
+  const [showSuggest, setShowSuggest] = useState(false);
+
+  const suggestQ = useQuery({
+    queryKey: ["share-principals", type, value],
+    queryFn: () => listPrincipals(value, type),
+    enabled: showSuggest && value.trim().length > 0,
+  });
+
+  const suggestions = useMemo(() => suggestQ.data ?? [], [suggestQ.data]);
+  const canAdd = value.trim().length > 0 && !pending;
+
+  const submit = () => {
+    if (!canAdd) return;
+    onAdd({ principal_type: type, principal_id: value.trim(), role });
+    setValue("");
+    setShowSuggest(false);
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <Select
+          value={type}
+          onValueChange={(v) => {
+            setType(v as "user" | "group");
+            setValue("");
+          }}
+        >
+          <SelectTrigger className="h-9 w-24" aria-label="Principal type">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="user">User</SelectItem>
+            <SelectItem value="group">Group</SelectItem>
+          </SelectContent>
+        </Select>
+
+        <div className="relative flex-1">
+          <Input
+            className="h-9"
+            aria-label={type === "group" ? "Group name" : "User email"}
+            placeholder={type === "group" ? "Group name…" : "User email…"}
+            value={value}
+            onChange={(e) => {
+              setValue(e.target.value);
+              setShowSuggest(true);
+            }}
+            onFocus={() => setShowSuggest(true)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                submit();
+              }
+            }}
+          />
+          {showSuggest && value.trim().length > 0 && suggestions.length > 0 && (
+            <ul className="absolute z-10 mt-1 max-h-48 w-full overflow-auto rounded-md border bg-popover p-1 shadow-md">
+              {suggestions.map((p) => (
+                <li key={p.name}>
+                  <button
+                    type="button"
+                    className="w-full rounded px-2 py-1.5 text-left text-sm hover:bg-accent"
+                    onClick={() => {
+                      setValue(p.name);
+                      setShowSuggest(false);
+                    }}
+                  >
+                    <span className="font-medium">{p.label}</span>
+                    {p.label !== p.name && (
+                      <span className="ml-1 text-xs text-muted-foreground">{p.name}</span>
+                    )}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <Select value={role} onValueChange={setRole}>
+          <SelectTrigger className="h-9 w-28" aria-label="Role">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {ROLE_OPTIONS.map((r) => (
+              <SelectItem key={r.value} value={r.value}>
+                {r.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        <Button onClick={submit} disabled={!canAdd}>
+          {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Add"}
+        </Button>
+      </div>
+      {value.trim().length > 0 && showSuggest && (
+        <button
+          type="button"
+          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          onClick={() => setShowSuggest(false)}
+        >
+          <X className="h-3 w-3" /> hide suggestions
+        </button>
+      )}
+    </div>
+  );
+}
