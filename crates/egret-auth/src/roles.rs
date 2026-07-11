@@ -77,8 +77,8 @@ impl RoleRepo {
     /// Principals (type, id) a role is directly assigned to.
     pub async fn assignees_of(&self, id: Uuid) -> Result<Vec<(String, Uuid)>> {
         sqlx::query_as(
-            "SELECT principal_type, principal_id FROM platform_role_assignments \
-             WHERE role_id = $1",
+            "SELECT principal_type, principal_id FROM access_grants \
+             WHERE role_id = $1 AND scope_type = 'platform'",
         )
         .bind(id)
         .fetch_all(&self.db.pool)
@@ -91,12 +91,12 @@ impl RoleRepo {
         // returns (kind, name) where kind is "user" | "group"
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT 'user' AS kind, u.email::text AS name \
-               FROM platform_role_assignments pra JOIN users u ON u.id = pra.principal_id \
-              WHERE pra.role_id = $1 AND pra.principal_type = 'user' \
+               FROM access_grants pra JOIN users u ON u.id = pra.principal_id \
+              WHERE pra.role_id = $1 AND pra.principal_type = 'user' AND pra.scope_type = 'platform' \
              UNION ALL \
              SELECT 'group' AS kind, g.name \
-               FROM platform_role_assignments pra JOIN groups g ON g.id = pra.principal_id \
-              WHERE pra.role_id = $1 AND pra.principal_type = 'group' \
+               FROM access_grants pra JOIN groups g ON g.id = pra.principal_id \
+              WHERE pra.role_id = $1 AND pra.principal_type = 'group' AND pra.scope_type = 'platform' \
              ORDER BY name",
         )
         .bind(role_id)
@@ -109,9 +109,9 @@ impl RoleRepo {
     /// Roles directly assigned to a principal (does not expand group membership).
     pub async fn roles_of(&self, ptype: &str, pid: Uuid) -> Result<Vec<RoleRow>> {
         sqlx::query_as::<_, RoleRow>(
-            "SELECT r.id, r.scope, r.name, r.description, r.parent_role_id FROM platform_role_assignments pra \
+            "SELECT r.id, r.scope, r.name, r.description, r.parent_role_id FROM access_grants pra \
              JOIN roles r ON r.id = pra.role_id \
-             WHERE pra.principal_type = $1 AND pra.principal_id = $2 \
+             WHERE pra.principal_type = $1 AND pra.principal_id = $2 AND pra.scope_type = 'platform' \
              ORDER BY r.name",
         )
         .bind(ptype)
@@ -138,9 +138,9 @@ impl RoleRepo {
     /// guard against removing the last platform admin.
     pub async fn count_platform_admins(&self) -> Result<i64> {
         sqlx::query_scalar(
-            "SELECT count(*) FROM platform_role_assignments pra \
+            "SELECT count(*) FROM access_grants pra \
              JOIN roles r ON r.id = pra.role_id \
-             WHERE r.name = 'platform_admin'",
+             WHERE r.name = 'platform_admin' AND pra.scope_type = 'platform'",
         )
         .fetch_one(&self.db.pool)
         .await
@@ -232,8 +232,7 @@ impl RoleRepo {
         Ok(())
     }
 
-    /// Delete a role (cascades to `role_permissions` and
-    /// `platform_role_assignments`).
+    /// Delete a role (cascades to `role_permissions` and `access_grants`).
     pub async fn delete(&self, id: Uuid) -> Result<()> {
         sqlx::query("DELETE FROM roles WHERE id = $1")
             .bind(id)
@@ -268,11 +267,18 @@ impl RoleRepo {
         Ok(())
     }
 
-    /// Assign a role to a principal (idempotent).
+    /// Assign a role to a principal (idempotent). Writes the unified access_grants
+    /// store directly (platform scope). Idempotency is guarded with NOT EXISTS
+    /// rather than ON CONFLICT: the UNIQUE index includes `scope_id`, which is NULL
+    /// for platform grants, and Postgres treats NULLs as distinct — so ON CONFLICT
+    /// would never fire and re-assign would duplicate the row.
     pub async fn assign(&self, ptype: &str, pid: Uuid, role_id: Uuid) -> Result<()> {
         sqlx::query(
-            "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
-             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             SELECT $1, $2, $3, 'platform', NULL \
+             WHERE NOT EXISTS ( \
+               SELECT 1 FROM access_grants \
+               WHERE principal_type = $1 AND principal_id = $2 AND role_id = $3 AND scope_type = 'platform')",
         )
         .bind(ptype)
         .bind(pid)
@@ -283,11 +289,11 @@ impl RoleRepo {
         Ok(())
     }
 
-    /// Remove a role assignment from a principal.
+    /// Remove a platform role assignment from a principal.
     pub async fn unassign(&self, ptype: &str, pid: Uuid, role_id: Uuid) -> Result<()> {
         sqlx::query(
-            "DELETE FROM platform_role_assignments \
-             WHERE principal_type = $1 AND principal_id = $2 AND role_id = $3",
+            "DELETE FROM access_grants \
+             WHERE principal_type = $1 AND principal_id = $2 AND role_id = $3 AND scope_type = 'platform'",
         )
         .bind(ptype)
         .bind(pid)

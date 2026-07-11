@@ -23,10 +23,11 @@ impl Authorizer {
         ws: WorkspaceId,
     ) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT DISTINCT wm.role FROM workspace_members wm \
-             WHERE wm.workspace_id = $1 \
-               AND ( (wm.principal_type = 'user'  AND wm.principal_id = $2) \
-                  OR (wm.principal_type = 'group' AND wm.principal_id IN \
+            "SELECT DISTINCT r.name FROM access_grants ag \
+             JOIN roles r ON r.id = ag.role_id \
+             WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1 \
+               AND ( (ag.principal_type = 'user'  AND ag.principal_id = $2) \
+                  OR (ag.principal_type = 'group' AND ag.principal_id IN \
                          (SELECT group_id FROM user_groups WHERE user_id = $2)) )",
         )
         .bind(ws.0)
@@ -78,16 +79,25 @@ impl Authorizer {
         }
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
         sqlx::query(
-            "DELETE FROM platform_role_assignments WHERE principal_type = 'user' AND principal_id = $1",
+            "DELETE FROM access_grants \
+             WHERE principal_type = 'user' AND principal_id = $1 AND scope_type = 'platform'",
         )
         .bind(user_id.0)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
         for r in roles {
+            // NOT EXISTS rather than ON CONFLICT: platform grants have a NULL
+            // scope_id, which the UNIQUE index treats as distinct, so ON CONFLICT
+            // would never dedupe a repeated role name in `roles`.
             sqlx::query(
-                "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
-                 SELECT 'user', $1, id FROM roles WHERE scope = 'platform' AND name = $2",
+                "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+                 SELECT 'user', $1, ro.id, 'platform', NULL FROM roles ro \
+                 WHERE ro.scope = 'platform' AND ro.name = $2 \
+                   AND NOT EXISTS ( \
+                     SELECT 1 FROM access_grants ag \
+                     WHERE ag.principal_type = 'user' AND ag.principal_id = $1 \
+                       AND ag.role_id = ro.id AND ag.scope_type = 'platform')",
             )
             .bind(user_id.0)
             .bind(r)

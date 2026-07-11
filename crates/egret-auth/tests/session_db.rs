@@ -218,8 +218,9 @@ async fn platform_role_via_group_appears_in_principal() {
         .await
         .unwrap();
     sqlx::query(
-        "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
-         SELECT 'group', $1, id FROM roles WHERE scope='platform' AND name='platform_admin'",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'group', $1, id, 'platform', NULL FROM roles WHERE scope='platform' AND name='platform_admin' \
+         ON CONFLICT DO NOTHING",
     )
     .bind(gid)
     .execute(&db.pool)
@@ -285,8 +286,8 @@ async fn permissions_resolve_direct_group_and_empty() {
     // U1: role assigned directly.
     let u1 = seed_user(&db).await;
     sqlx::query(
-        "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
-         VALUES ('user', $1, $2)",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, 'platform', NULL) ON CONFLICT DO NOTHING",
     )
     .bind(u1.0)
     .bind(role_id)
@@ -311,8 +312,8 @@ async fn permissions_resolve_direct_group_and_empty() {
         .await
         .unwrap();
     sqlx::query(
-        "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
-         VALUES ('group', $1, $2)",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('group', $1, $2, 'platform', NULL) ON CONFLICT DO NOTHING",
     )
     .bind(gid)
     .bind(role_id)

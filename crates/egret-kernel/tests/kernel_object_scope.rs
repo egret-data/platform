@@ -205,8 +205,9 @@ async fn seed_user_with_session(f: &Fixture, tag: &str) -> (UserId, String) {
 /// Add `uid` as a member of the workspace with `role`.
 async fn add_member(f: &Fixture, uid: UserId, role: &str) {
     sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, principal_type, principal_id, role, added_by) \
-         VALUES ($1, 'user', $2, $3, $4)",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id, granted_by) \
+         SELECT 'user', $2, r.id, 'workspace', $1, $4 FROM roles r \
+         WHERE r.scope = 'workspace' AND r.name = $3 ON CONFLICT DO NOTHING",
     )
     .bind(f.ws.0)
     .bind(uid.0)

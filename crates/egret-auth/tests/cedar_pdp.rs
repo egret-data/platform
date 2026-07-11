@@ -70,11 +70,12 @@ async fn cedar_pdp_end_to_end() {
     let u1 = seed_user(&db).await;
     let w = seed_workspace(&db).await;
     let w2 = seed_workspace(&db).await; // a workspace U1 is NOT a member of
-                                        // Legacy write path; the `sync_workspace_grant` trigger mirrors it into
-                                        // access_grants, resolving the role NAME to the ws-scoped role id.
+                                        // Direct access_grants seed, resolving the role NAME to the ws-scoped role id.
     sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, principal_type, principal_id, role) \
-         VALUES ($1, 'user', $2, $3)",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $2, r.id, 'workspace', $1 FROM roles r \
+         WHERE r.scope = 'workspace' AND r.name = $3 \
+         ON CONFLICT DO NOTHING",
     )
     .bind(w.0)
     .bind(u1.0)
@@ -125,10 +126,10 @@ async fn cedar_pdp_end_to_end() {
     .fetch_one(&db.pool)
     .await
     .expect("seeded platform role `platform_admin` must exist");
-    // Legacy write path; `sync_platform_grant` mirrors it into access_grants.
+    // Direct access_grants seed (platform scope).
     sqlx::query(
-        "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
-         VALUES ('user', $1, $2)",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, 'platform', NULL) ON CONFLICT DO NOTHING",
     )
     .bind(u2.0)
     .bind(platform_admin_role_id)

@@ -199,8 +199,9 @@ async fn member_session(
             .await
             .expect("insert user");
     sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, principal_type, principal_id, role) \
-         VALUES ($1, 'user', $2, $3)",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $2, r.id, 'workspace', $1 FROM roles r \
+         WHERE r.scope = 'workspace' AND r.name = $3 ON CONFLICT DO NOTHING",
     )
     .bind(ws)
     .bind(uid)
@@ -261,7 +262,7 @@ async fn pdp_backed_dashboard_read_gate() {
     let st = build_state(db.clone(), pdp);
     let sessions = st.sessions.clone();
 
-    // Members (workspace_members insert → trigger writes access_grants).
+    // Members (workspace-scope access_grants inserted directly).
     let reader = member_session(&db, &sessions, ws, &reader_name).await;
     let non_reader = member_session(&db, &sessions, ws, &other_name).await;
 

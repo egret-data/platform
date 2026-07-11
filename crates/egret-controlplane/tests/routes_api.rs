@@ -134,8 +134,8 @@ async fn session_for(f: &Fixture, tag: &str, platform_admin: bool) -> String {
         .expect("insert user");
     if platform_admin {
         sqlx::query(
-            "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
-             SELECT 'user', $1, id FROM roles WHERE scope='platform' AND name='platform_admin'",
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             SELECT 'user', $1, id, 'platform', NULL FROM roles WHERE scope='platform' AND name='platform_admin'",
         )
         .bind(uid.0)
         .execute(&f.db.pool)
@@ -180,8 +180,8 @@ async fn session_for_with_permission(f: &Fixture, tag: &str, permission: &str) -
         .expect("grant permission");
 
     sqlx::query(
-        "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
-         VALUES ('user', $1, $2)",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, 'platform', NULL)",
     )
     .bind(uid.0)
     .bind(role_id)
@@ -479,7 +479,7 @@ async fn scoped_permission_secrets_read_and_create() {
 /// (200 on GET) but cannot create (403 on POST). If the handler still short-
 /// circuited on the session-derived `require_permission`, this would still pass;
 /// what makes it a PDP proof is that the decision comes from a `CedarPdp` built
-/// over `access_grants` (the grant mirrored from `platform_role_assignments`).
+/// over `access_grants` (the platform-scope grant seeded directly).
 #[tokio::test]
 async fn pdp_backed_secret_reader_reads_but_cannot_create() {
     let Some(mut f) = setup().await else {
@@ -765,8 +765,9 @@ async fn last_admin_guard() {
     // The lone platform_admin in this isolated schema.
     let token = session_for(&f, "solo_admin", true).await;
     let (admin_id, role_id): (Uuid, Uuid) = sqlx::query_as(
-        "SELECT pra.principal_id, pra.role_id FROM platform_role_assignments pra \
-         JOIN roles r ON r.id = pra.role_id WHERE r.name = 'platform_admin'",
+        "SELECT pra.principal_id, pra.role_id FROM access_grants pra \
+         JOIN roles r ON r.id = pra.role_id \
+         WHERE r.name = 'platform_admin' AND pra.scope_type = 'platform'",
     )
     .fetch_one(&f.db.pool)
     .await

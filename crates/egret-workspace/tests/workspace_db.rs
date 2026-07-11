@@ -178,11 +178,12 @@ async fn replace_platform_roles_and_check() {
         .await
         .unwrap();
     // Verify the assignment landed (enforcement/permission-union now lives in the PDP,
-    // so assert the durable `platform_role_assignments` effect directly).
+    // so assert the durable `access_grants` platform-scope effect directly).
     let (assigned,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM platform_role_assignments pra \
-         JOIN roles r ON r.id = pra.role_id \
-         WHERE pra.principal_type = 'user' AND pra.principal_id = $1 AND r.name = 'data_steward'",
+        "SELECT COUNT(*) FROM access_grants ag \
+         JOIN roles r ON r.id = ag.role_id \
+         WHERE ag.principal_type = 'user' AND ag.principal_id = $1 \
+           AND ag.scope_type = 'platform' AND r.name = 'data_steward'",
     )
     .bind(user.0)
     .fetch_one(&db.pool)
@@ -259,6 +260,65 @@ async fn notebook_object_grant_admits_guest() {
     );
 }
 
+/// B2-flip Task 3: `MemberRepo::add` is one-role-per-member — adding a second
+/// role for the same principal in the same workspace REPLACES the first, leaving
+/// exactly one workspace grant (the delete-then-insert-in-a-tx invariant).
+#[tokio::test]
+async fn member_add_replaces_role_one_row() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let members = egret_workspace::members::MemberRepo::new(db.clone());
+    let authz = egret_workspace::rbac::Authorizer::new(db.clone());
+    // seed a workspace + a user + an adder
+    let ws = egret_core::WorkspaceId::new();
+    sqlx::query("INSERT INTO workspaces (id, slug, name) VALUES ($1,$2,'W')")
+        .bind(ws.0)
+        .bind(format!("flip-ws-{}", ws.0))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let uid = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, provider, email, name, status) VALUES ($1,'local',$2,'M','active')",
+    )
+    .bind(uid)
+    .bind(format!("flipm-{uid}@t.local"))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let by = egret_core::UserId(uid);
+    // add ws_viewer, then re-add as ws_editor → exactly one workspace grant remains, = ws_editor
+    members.add(ws, "user", uid, "ws_viewer", by).await.unwrap();
+    members.add(ws, "user", uid, "ws_editor", by).await.unwrap();
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM access_grants WHERE principal_type='user' AND principal_id=$1 AND scope_type='workspace' AND scope_id=$2")
+        .bind(uid).bind(ws.0).fetch_one(&db.pool).await.unwrap();
+    assert_eq!(n, 1, "one workspace role per member");
+    let roles = authz
+        .workspace_roles_for(egret_core::UserId(uid), ws)
+        .await
+        .unwrap();
+    assert_eq!(roles, vec!["ws_editor".to_string()]);
+    // cleanup
+    sqlx::query("DELETE FROM access_grants WHERE principal_id=$1")
+        .bind(uid)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM users WHERE id=$1")
+        .bind(uid)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM workspaces WHERE id=$1")
+        .bind(ws.0)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+}
+
 async fn login_cookie(db: &Db, user: UserId, sessions: &SessionService) -> String {
     let issued = sessions.create(user, "a", "").await.unwrap();
     let _ = db;
@@ -270,8 +330,8 @@ async fn login_cookie(db: &Db, user: UserId, sessions: &SessionService) -> Strin
 /// migrations). The migrated `require()` gates in the workspace seam resolve
 /// through `WorkspaceState.pdp`, so the 403/200 authz tests need the real PDP —
 /// an allow-all stub would falsely 200 the denied cases. Role *assignments*
-/// (platform_role_assignments / workspace_members) are resolved live at
-/// authorize time, so seeding them after `build` is fine.
+/// (access_grants) are resolved live at authorize time, so seeding them after
+/// `build` is fine.
 async fn build_pdp(db: &Db) -> std::sync::Arc<dyn egret_core::authz::Pdp> {
     std::sync::Arc::new(
         egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
@@ -439,8 +499,8 @@ async fn set_platform_roles_rejects_delegated_permission_not_platform_admin() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
-         VALUES ('user', $1, $2)",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, 'platform', NULL) ON CONFLICT DO NOTHING",
     )
     .bind(attacker.0)
     .bind(role_id)

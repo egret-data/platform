@@ -55,8 +55,9 @@ async fn grant_group_binds_workspace_perms() {
     // Enforcement/permission-union now lives in the PDP; assert the durable effect of
     // the grant directly — before it runs, the group is not yet a workspace member.
     let members_before: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM workspace_members \
-         WHERE workspace_id = $1 AND principal_type = 'group' AND role = 'ws_editor'",
+        "SELECT COUNT(*) FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
+         WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1 \
+           AND ag.principal_type = 'group' AND r.name = 'ws_editor'",
     )
     .bind(ws.id.0)
     .fetch_one(&db.pool)
@@ -69,8 +70,9 @@ async fn grant_group_binds_workspace_perms() {
         .unwrap();
 
     let members_after: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM workspace_members \
-         WHERE workspace_id = $1 AND principal_type = 'group' AND role = 'ws_editor'",
+        "SELECT COUNT(*) FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
+         WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1 \
+           AND ag.principal_type = 'group' AND r.name = 'ws_editor'",
     )
     .bind(ws.id.0)
     .fetch_one(&db.pool)
