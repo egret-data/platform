@@ -28,7 +28,7 @@ async fn full_role_lifecycle() {
     // Create a workspace-scoped role with a description.
     let name = uniq("t_role");
     let role_id = roles
-        .create("workspace", &name, "temp test role")
+        .create("workspace", &name, "temp test role", None)
         .await
         .unwrap();
 

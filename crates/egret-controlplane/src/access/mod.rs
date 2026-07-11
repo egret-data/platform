@@ -704,7 +704,7 @@ async fn create_role(
     }
     let id = st
         .roles
-        .create(&body.scope, &body.name, &body.description)
+        .create(&body.scope, &body.name, &body.description, None)
         .await?;
     Ok((
         StatusCode::CREATED,
