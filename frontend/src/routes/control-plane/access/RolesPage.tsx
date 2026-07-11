@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import { Building2, Layers, MoreHorizontal, Pencil, Plus, Shield, Trash2 } from "lucide-react";
 
 import {
   type AccessRole,
@@ -17,6 +17,7 @@ import {
 } from "@/api/access";
 import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
+import { StatCard, StatCardRow } from "@/components/control-plane/StatCard";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -173,7 +174,20 @@ export default function RolesPage() {
             )}
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-4">
+          {(() => {
+            const all = rows;
+            const total = all.length;
+            const platform = all.filter((r) => r.scope === "platform").length;
+            const workspace = all.filter((r) => r.scope === "workspace").length;
+            return (
+              <StatCardRow>
+                <StatCard label="Total" value={total} icon={Shield} hint="Defined roles" />
+                <StatCard label="Platform" value={platform} icon={Building2} />
+                <StatCard label="Workspace" value={workspace} icon={Layers} />
+              </StatCardRow>
+            );
+          })()}
           {deleteError && (
             <Alert variant="destructive" className="mb-4">
               <AlertDescription>{deleteError}</AlertDescription>
