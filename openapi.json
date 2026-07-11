@@ -11723,6 +11723,126 @@
         }
       }
     },
+    "/api/ws/{workspace}/datasets/{id}/data": {
+      "post": {
+        "tags": [
+          "datasets"
+        ],
+        "summary": "Object-scoped dataset data-preview: runs ONLY a bounded\n`SELECT * FROM <the dataset's own source> LIMIT n` (n from the optional body,\nclamped to [100, 1000]). Accepts NO client SQL, so an object guest with a\n`dataset:read` grant can preview only the shared dataset — no `query:run`\nworkspace permission required.",
+        "operationId": "ds_data",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Dataset id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DatasetDataBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A bounded preview of the dataset's OWN source (SELECT * … LIMIT n): columns + rows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChartRunResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "No dataset:read grant on this dataset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such dataset in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Query engine error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/datasets/{id}/folder": {
       "patch": {
         "tags": [
@@ -13487,7 +13607,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Notebooks visible to the caller (own + public)",
+            "description": "All notebooks in the workspace (role-based)",
             "content": {
               "application/json": {
                 "schema": {
@@ -14752,7 +14872,7 @@
             }
           },
           "403": {
-            "description": "Notebook is private and not owned by the caller",
+            "description": "Missing notebook:read for this notebook",
             "content": {
               "application/json": {
                 "schema": {
@@ -14835,7 +14955,7 @@
             }
           },
           "403": {
-            "description": "Notebook is private and not owned by the caller",
+            "description": "Missing notebook:read for this notebook",
             "content": {
               "application/json": {
                 "schema": {
@@ -14883,7 +15003,7 @@
           "kernel"
         ],
         "summary": "`POST /ws/{workspace}/notebooks/{notebook}/kernel/connect` — ensure the gateway\nand resolve/create the per-notebook kernel id.",
-        "description": "Gate: `notebook:read`; the notebook must belong to this workspace and be\nreadable by the caller (owner or public). The kernel is always the caller's own.",
+        "description": "Gate: `notebook:read` at OBJECT scope; the notebook must belong to this\nworkspace and be readable by the caller (workspace role OR an object grant on\nthis notebook). The kernel is always the caller's own.",
         "operationId": "connect",
         "parameters": [
           {
@@ -14936,7 +15056,7 @@
             }
           },
           "403": {
-            "description": "Notebook is private and not owned by the caller",
+            "description": "Missing notebook:read for this notebook",
             "content": {
               "application/json": {
                 "schema": {
@@ -15019,7 +15139,7 @@
             }
           },
           "403": {
-            "description": "Notebook is private and not owned by the caller",
+            "description": "Missing notebook:read for this notebook",
             "content": {
               "application/json": {
                 "schema": {
@@ -15119,7 +15239,7 @@
             }
           },
           "403": {
-            "description": "Notebook is private and not owned by the caller",
+            "description": "Missing notebook:read for this notebook",
             "content": {
               "application/json": {
                 "schema": {
@@ -18705,6 +18825,20 @@
           },
           "is_calculated": {
             "type": "boolean"
+          }
+        }
+      },
+      "DatasetDataBody": {
+        "type": "object",
+        "description": "Body of the object-scoped dataset data-preview: an OPTIONAL row cap only.\nThere is deliberately NO client SQL field — the endpoint always runs\n`SELECT * FROM <the dataset's own source>`, so a shared reader can preview\nonly the dataset its grant covers. Unknown fields are ignored.",
+        "properties": {
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Rows to preview. Clamped to [100, 1000]; defaults to 200 when absent."
           }
         }
       },

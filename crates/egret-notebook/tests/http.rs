@@ -1,15 +1,18 @@
-//! Notebook HTTP route tests — ownership + IDOR enforcement.
+//! Notebook HTTP route tests — role-based authorization + IDOR enforcement.
 //!
-//! These prove the `/ws/{workspace}/notebooks` router (`notebook_router`):
+//! Notebooks are ROLE-BASED (like BI content): the per-`{id}` handlers are
+//! object-scoped via `require_object`, so a workspace role's `notebook:read`/
+//! `notebook:write` cascades to every notebook in the workspace (owner/public no
+//! longer gate access). These prove the `/ws/{workspace}/notebooks` router:
 //!   - create → 201 with exactly one seeded `code` cell; GET → 200, `is_owner`
 //!     true for the owner,
-//!   - a non-owner member is Forbidden (403) on a *private* notebook, then 200
-//!     (with `is_owner=false`) once the owner makes it public,
-//!   - a **platform_admin** gets 403 on another user's PRIVATE notebook (read)
-//!     and 403 on PATCH/DELETE — there is deliberately NO admin override,
+//!   - a non-owner workspace member READS any notebook (200, `is_owner=false`),
+//!   - a **platform_admin** now HAS an override (object → Platform ancestry):
+//!     reads + writes another user's notebook,
 //!   - a notebook created under workspace A is 404 through workspace B's path
 //!     (cross-tenant IDOR closed),
-//!   - PATCH/DELETE by a non-owner member → 403,
+//!   - a non-owner `ws_editor` member PATCH/DELETE/trash a notebook they don't
+//!     own → 2xx (role-based edit); a `ws_viewer` is denied writes (403),
 //!   - cell add/update/delete/reorder happy path for the owner; a cell of
 //!     notebook X addressed under notebook Y → 404 (nested IDOR closed),
 //!   - unknown `cell_type` on add → 400.
@@ -272,41 +275,15 @@ async fn create_and_get_owner_sees_seeded_cell(pool: sqlx::PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn non_owner_private_403_then_public_200(pool: sqlx::PgPool) {
+async fn non_owner_member_reads_any_notebook(pool: sqlx::PgPool) {
     let f = setup(pool).await;
     let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
     let (_other_uid, other_tok) = add_member(&f, f.ws_a, "other", "ws_editor").await;
     let id = create_nb(&f, &f.slug_a, &owner_tok).await;
     let uri = format!("/ws/{}/notebooks/{id}", f.slug_a);
 
-    // Non-owner GET on a PRIVATE notebook → 403.
-    let resp = f
-        .app
-        .clone()
-        .oneshot(req("GET", &uri, &other_tok, None))
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::FORBIDDEN,
-        "non-owner must not view a private notebook"
-    );
-
-    // Owner makes it public.
-    let resp = f
-        .app
-        .clone()
-        .oneshot(req(
-            "PATCH",
-            &uri,
-            &owner_tok,
-            Some(serde_json::json!({ "is_public": true })),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "owner can publish");
-
-    // Now non-owner GET → 200 with is_owner=false.
+    // Role-based: a non-owner member GETs a notebook they don't own (never made
+    // public) → 200 with is_owner=false. Private-by-default is gone.
     let resp = f
         .app
         .clone()
@@ -314,7 +291,11 @@ async fn non_owner_private_403_then_public_200(pool: sqlx::PgPool) {
         .await
         .unwrap();
     let (status, json) = into_json(resp).await;
-    assert_eq!(status, StatusCode::OK, "non-owner can view a public nb");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "non-owner member reads any workspace notebook (role-based)"
+    );
     assert_eq!(
         json["is_owner"],
         serde_json::json!(false),
@@ -323,14 +304,16 @@ async fn non_owner_private_403_then_public_200(pool: sqlx::PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn platform_admin_has_no_override(pool: sqlx::PgPool) {
+async fn platform_admin_has_override(pool: sqlx::PgPool) {
     let f = setup(pool).await;
     let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
     let (_admin_uid, admin_tok) = add_platform_admin(&f, "admin").await;
     let id = create_nb(&f, &f.slug_a, &owner_tok).await;
     let uri = format!("/ws/{}/notebooks/{id}", f.slug_a);
 
-    // GET another user's PRIVATE notebook → still 403 (no override).
+    // Object-scoped now: the platform_admin's unrestricted platform grant
+    // cascades to objects (Object → Folder → Workspace → Platform), so it reads
+    // and writes any notebook — consistent with BI content.
     let resp = f
         .app
         .clone()
@@ -339,11 +322,10 @@ async fn platform_admin_has_no_override(pool: sqlx::PgPool) {
         .unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::FORBIDDEN,
-        "platform_admin must NOT read another user's private notebook"
+        StatusCode::OK,
+        "platform_admin reads another user's notebook (override applies)"
     );
 
-    // PATCH → 403 (no override).
     let resp = f
         .app
         .clone()
@@ -351,17 +333,16 @@ async fn platform_admin_has_no_override(pool: sqlx::PgPool) {
             "PATCH",
             &uri,
             &admin_tok,
-            Some(serde_json::json!({ "name": "hijacked" })),
+            Some(serde_json::json!({ "name": "renamed-by-admin" })),
         ))
         .await
         .unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::FORBIDDEN,
-        "platform_admin must NOT patch another user's notebook"
+        StatusCode::OK,
+        "platform_admin patches another user's notebook (override applies)"
     );
 
-    // DELETE → 403 (no override).
     let resp = f
         .app
         .clone()
@@ -370,8 +351,8 @@ async fn platform_admin_has_no_override(pool: sqlx::PgPool) {
         .unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::FORBIDDEN,
-        "platform_admin must NOT delete another user's notebook"
+        StatusCode::NO_CONTENT,
+        "platform_admin deletes another user's notebook (override applies)"
     );
 }
 
@@ -406,20 +387,23 @@ async fn cross_workspace_get_is_404(pool: sqlx::PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn non_owner_patch_and_delete_are_403(pool: sqlx::PgPool) {
+async fn non_owner_editor_writes_but_viewer_denied(pool: sqlx::PgPool) {
     let f = setup(pool).await;
     let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
-    let (_other_uid, other_tok) = add_member(&f, f.ws_a, "other", "ws_editor").await;
+    // A non-owner ws_editor member and a non-owner ws_viewer member.
+    let (_editor_uid, editor_tok) = add_member(&f, f.ws_a, "editor", "ws_editor").await;
+    let (_viewer_uid, viewer_tok) = add_member(&f, f.ws_a, "viewer", "ws_viewer").await;
     let id = create_nb(&f, &f.slug_a, &owner_tok).await;
     let uri = format!("/ws/{}/notebooks/{id}", f.slug_a);
 
+    // ws_viewer lacks notebook:write → PATCH forbidden (403), even though it can read.
     let resp = f
         .app
         .clone()
         .oneshot(req(
             "PATCH",
             &uri,
-            &other_tok,
+            &viewer_tok,
             Some(serde_json::json!({ "name": "nope" })),
         ))
         .await
@@ -427,19 +411,39 @@ async fn non_owner_patch_and_delete_are_403(pool: sqlx::PgPool) {
     assert_eq!(
         resp.status(),
         StatusCode::FORBIDDEN,
-        "non-owner PATCH must be forbidden"
+        "ws_viewer must NOT patch (lacks notebook:write)"
     );
 
+    // A non-owner ws_editor member PATCHes a notebook they don't own → 200
+    // (role-based edit, owner gate removed).
     let resp = f
         .app
         .clone()
-        .oneshot(req("DELETE", &uri, &other_tok, None))
+        .oneshot(req(
+            "PATCH",
+            &uri,
+            &editor_tok,
+            Some(serde_json::json!({ "name": "renamed-by-editor" })),
+        ))
         .await
         .unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::FORBIDDEN,
-        "non-owner DELETE must be forbidden"
+        StatusCode::OK,
+        "non-owner ws_editor member patches any notebook (role-based)"
+    );
+
+    // …and DELETEs it → 204.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &uri, &editor_tok, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "non-owner ws_editor member deletes any notebook (role-based)"
     );
 }
 
@@ -781,27 +785,38 @@ async fn trash_hides_and_restore_reappears(pool: sqlx::PgPool) {
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn non_owner_trash_is_403(pool: sqlx::PgPool) {
+async fn non_owner_editor_can_trash_but_viewer_cannot(pool: sqlx::PgPool) {
     let f = setup(pool).await;
     let (_owner_uid, owner_tok) = add_member(&f, f.ws_a, "owner", "ws_editor").await;
-    let (_other_uid, other_tok) = add_member(&f, f.ws_a, "other", "ws_editor").await;
+    let (_editor_uid, editor_tok) = add_member(&f, f.ws_a, "editor", "ws_editor").await;
+    let (_viewer_uid, viewer_tok) = add_member(&f, f.ws_a, "viewer", "ws_viewer").await;
     let id = create_nb(&f, &f.slug_a, &owner_tok).await;
+    let trash_uri = format!("/ws/{}/notebooks/{id}/trash", f.slug_a);
 
+    // ws_viewer lacks notebook:write → trash forbidden (403).
     let resp = f
         .app
         .clone()
-        .oneshot(req(
-            "POST",
-            &format!("/ws/{}/notebooks/{id}/trash", f.slug_a),
-            &other_tok,
-            None,
-        ))
+        .oneshot(req("POST", &trash_uri, &viewer_tok, None))
         .await
         .unwrap();
     assert_eq!(
         resp.status(),
         StatusCode::FORBIDDEN,
-        "non-owner trash must be forbidden"
+        "ws_viewer must NOT trash (lacks notebook:write)"
+    );
+
+    // A non-owner ws_editor member trashes a notebook they don't own → 204.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &trash_uri, &editor_tok, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "non-owner ws_editor member trashes any notebook (role-based)"
     );
 }
 

@@ -22,6 +22,7 @@ import { RowActionsMenu } from "@/components/explore/RowActionsMenu";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SortableHeader, type SortState } from "@/components/explore/SortableHeader";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { ShareDialog } from "@/components/sharing/ShareDialog";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -198,6 +199,7 @@ function NotebookActionsMenu({
   onTrash,
   onRestore,
   onDeletePermanent,
+  onShare,
 }: {
   ws: string;
   nb: NotebookSummary;
@@ -209,6 +211,7 @@ function NotebookActionsMenu({
   onTrash: (nb: NotebookSummary) => void;
   onRestore: (nb: NotebookSummary) => void;
   onDeletePermanent: (nb: NotebookSummary) => void;
+  onShare?: (nb: NotebookSummary) => void;
 }) {
   const nav = useNavigate();
   if (trashed) {
@@ -237,6 +240,7 @@ function NotebookActionsMenu({
         onMove={(fid) => onMove(nb, fid)}
         onNewFolder={() => onNewFolder(nb)}
       />
+      {onShare && <DropdownMenuItem onClick={() => onShare(nb)}>Share…</DropdownMenuItem>}
       <DropdownMenuSeparator />
       <DropdownMenuItem onClick={() => onTrash(nb)}>Move to Trash</DropdownMenuItem>
     </RowActionsMenu>
@@ -269,6 +273,7 @@ export default function Notebooks() {
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
   const [renameTarget, setRenameTarget] = useState<NotebookSummary | null>(null);
   const [pendingDelete, setPendingDelete] = useState<NotebookSummary | null>(null);
+  const [shareTarget, setShareTarget] = useState<NotebookSummary | null>(null);
   const [folderDialog, setFolderDialog] = useState<{
     mode: "new" | "rename" | "move" | "bulkmove";
     nb?: NotebookSummary;
@@ -387,6 +392,7 @@ export default function Notebooks() {
           onTrash={(x) => guard(trashNotebook.mutateAsync(x.id).then(() => toast.success("Moved to Trash")))}
           onRestore={(x) => guard(restoreNotebook.mutateAsync(x.id))}
           onDeletePermanent={setPendingDelete}
+          onShare={setShareTarget}
         />
       </td>
     </tr>
@@ -650,6 +656,20 @@ export default function Notebooks() {
           setPendingDelete(null);
         }}
       />
+
+      {shareTarget && (
+        <ShareDialog
+          ws={ws}
+          kind="notebook"
+          id={shareTarget.id}
+          name={shareTarget.name}
+          folderId={shareTarget.folder_id ?? null}
+          open={shareTarget !== null}
+          onOpenChange={(o) => {
+            if (!o) setShareTarget(null);
+          }}
+        />
+      )}
     </div>
   );
 }

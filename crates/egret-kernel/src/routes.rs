@@ -1,9 +1,18 @@
 //! Kernel lifecycle HTTP routes: `POST /ws/{workspace}/kernel` (start),
 //! `GET` (status), `DELETE` (stop).
 //!
-//! All handlers are gated by `egret_core::authz::require(&*st.pdp, &ctx, "notebook:read")`
-//! BEFORE any provisioning work. The kernel key is always keyed to the
-//! caller's own `(user_id, workspace_id)` — never a path/body-supplied user.
+//! The workspace-scoped lifecycle handlers (`start`/`status`/`stop`) have no
+//! notebook in scope — they act on the caller's own per-`(user_id, workspace_id)`
+//! kernel — so they gate at WORKSPACE scope via
+//! `egret_core::authz::require(&*st.pdp, &ctx, "notebook:read")`.
+//!
+//! The per-notebook handlers (`connect`/`channels`/`interrupt`/`restart`/
+//! `active-executions`) are OBJECT-scoped: they gate via
+//! `egret_core::authz::require_object(&*st.pdp, &ctx, "notebook:read", <notebook ObjectRef>)`
+//! so a shared notebook's kernel is reachable by any principal (workspace role
+//! member OR an object-guest holding a grant on that notebook). All gates fire
+//! BEFORE any provisioning work; the kernel key is always keyed to the caller's
+//! own `(user_id, workspace_id)` — never a path/body-supplied user.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -263,8 +272,9 @@ async fn stop(
 /// `POST /ws/{workspace}/notebooks/{notebook}/kernel/connect` — ensure the gateway
 /// and resolve/create the per-notebook kernel id.
 ///
-/// Gate: `notebook:read`; the notebook must belong to this workspace and be
-/// readable by the caller (owner or public). The kernel is always the caller's own.
+/// Gate: `notebook:read` at OBJECT scope; the notebook must belong to this
+/// workspace and be readable by the caller (workspace role OR an object grant on
+/// this notebook). The kernel is always the caller's own.
 #[utoipa::path(
     post,
     path = "/api/ws/{workspace}/notebooks/{notebook}/kernel/connect",
@@ -276,7 +286,7 @@ async fn stop(
     responses(
         (status = 200, description = "Gateway ensured; body is `{ phase, kernel_id }` when ready, else `{ phase }`", body = Object),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Notebook is private and not owned by the caller", body = ErrorBody),
+        (status = 403, description = "Missing notebook:read for this notebook", body = ErrorBody),
         (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -286,25 +296,9 @@ async fn connect(
     WsContext(ctx): WsContext,
     Path((_ws, nb)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, KernelApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, "notebook:read")
-        .await
-        .map_err(KernelApiError::from)?;
-
-    // Notebook must belong to this workspace AND be readable by the caller.
-    let (summary, nb_ws) = st
-        .notebook_docs
-        .get_summary(nb)
-        .await
-        .map_err(KernelApiError)?
-        .ok_or_else(|| KernelApiError(egret_core::Error::NotFound("notebook not found".into())))?;
-    if nb_ws != ctx.workspace_id.0 {
-        return Err(KernelApiError(egret_core::Error::NotFound(
-            "notebook not found".into(),
-        )));
-    }
-    if !(summary.is_public || summary.owner_user_id == ctx.principal.user_id.0) {
-        return Err(KernelApiError(egret_core::Error::Forbidden));
-    }
+    // Object-scoped gate: notebook must belong to this workspace AND be readable
+    // by the caller (workspace role OR an object grant on this notebook).
+    authorize_notebook(&st, &ctx, nb).await?;
 
     let key = KernelKey {
         user_id: ctx.principal.user_id.0,
@@ -396,7 +390,7 @@ impl crate::recorder::ChannelTap for ChannelsTap {
         // response body. The error statuses below are returned before the upgrade.
         (status = 101, description = "WebSocket upgrade for the Jupyter channels stream"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Notebook is private and not owned by the caller", body = ErrorBody),
+        (status = 403, description = "Missing notebook:read for this notebook", body = ErrorBody),
         (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
         (status = 409, description = "Kernel not started; call connect first", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -408,25 +402,9 @@ async fn channels(
     Path((_ws, nb)): Path<(String, Uuid)>,
     upgrade: WebSocketUpgrade,
 ) -> Result<axum::response::Response, KernelApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, "notebook:read")
-        .await
-        .map_err(KernelApiError::from)?;
-
-    // Notebook must belong to this workspace AND be readable by the caller.
-    let (summary, nb_ws) = st
-        .notebook_docs
-        .get_summary(nb)
-        .await
-        .map_err(KernelApiError)?
-        .ok_or_else(|| KernelApiError(egret_core::Error::NotFound("notebook not found".into())))?;
-    if nb_ws != ctx.workspace_id.0 {
-        return Err(KernelApiError(egret_core::Error::NotFound(
-            "notebook not found".into(),
-        )));
-    }
-    if !(summary.is_public || summary.owner_user_id == ctx.principal.user_id.0) {
-        return Err(KernelApiError(egret_core::Error::Forbidden));
-    }
+    // Object-scoped gate: notebook must belong to this workspace AND be readable
+    // by the caller (workspace role OR an object grant on this notebook).
+    authorize_notebook(&st, &ctx, nb).await?;
 
     let user = ctx.principal.user_id.0;
     let key = KernelKey {
@@ -507,21 +485,19 @@ async fn channels(
     }))
 }
 
-/// Shared auth + IDOR gate for any notebook-scoped endpoint: requires
-/// `notebook:read`, the notebook to belong to this workspace, and the caller to
-/// be the owner or the notebook to be public.  Used by `resolve_running_notebook_kernel`,
-/// `active_executions`, and any future endpoint that needs the same check but
-/// does NOT need a Ready kernel.
-async fn authorize_notebook(
+/// Resolve a notebook to the folder + workspace ancestry
+/// [`ObjectRef`](egret_core::authz::ObjectRef) the PDP needs for object-scoped
+/// authz, asserting it lives in the path workspace. `NotFound` if the notebook is
+/// absent OR belongs to another workspace (cross-tenant → don't leak existence).
+/// The caller passes the result to
+/// [`require_object`](egret_core::authz::require_object), which does the
+/// role/share authorization; this resolver no longer inspects owner/public
+/// (notebooks are ROLE-BASED, mirroring `egret-notebook`).
+async fn notebook_object_ref(
     st: &KernelState,
     ctx: &egret_core::WorkspaceContext,
     nb: Uuid,
-) -> Result<(), KernelApiError> {
-    egret_core::authz::require(&*st.pdp, ctx, "notebook:read")
-        .await
-        .map_err(KernelApiError::from)?;
-
-    // Notebook must belong to this workspace AND be readable by the caller.
+) -> Result<egret_core::authz::ObjectRef, KernelApiError> {
     let (summary, nb_ws) = st
         .notebook_docs
         .get_summary(nb)
@@ -533,15 +509,37 @@ async fn authorize_notebook(
             "notebook not found".into(),
         )));
     }
-    if !(summary.is_public || summary.owner_user_id == ctx.principal.user_id.0) {
-        return Err(KernelApiError(egret_core::Error::Forbidden));
-    }
+    Ok(egret_core::authz::ObjectRef {
+        kind: "notebook".into(),
+        id: nb,
+        folder_id: summary.folder_id,
+        workspace_id: ctx.workspace_id,
+    })
+}
+
+/// Shared OBJECT-scoped auth gate for any notebook-scoped endpoint: resolves the
+/// notebook's `ObjectRef` (asserting it lives in this workspace) and requires
+/// `notebook:read` on it — passing for a workspace role member OR an object-guest
+/// holding a grant on this notebook. Used by `connect`, `channels`,
+/// `resolve_running_notebook_kernel` (interrupt/restart), `active_executions`,
+/// and any future endpoint that needs the same check but does NOT need a Ready
+/// kernel.
+async fn authorize_notebook(
+    st: &KernelState,
+    ctx: &egret_core::WorkspaceContext,
+    nb: Uuid,
+) -> Result<(), KernelApiError> {
+    let obj = notebook_object_ref(st, ctx, nb).await?;
+    egret_core::authz::require_object(&*st.pdp, ctx, "notebook:read", obj)
+        .await
+        .map_err(KernelApiError::from)?;
     Ok(())
 }
 
-/// Shared auth + IDOR + resolution for `interrupt`/`restart`. Requires
-/// `notebook:read`, the notebook to belong to this workspace and be readable,
-/// and a Ready kernel with a resolved per-notebook kernel id. Returns
+/// Shared auth + resolution for `interrupt`/`restart`. Object-scoped: requires
+/// `notebook:read` on the notebook (workspace role OR object grant), the notebook
+/// to belong to this workspace, and a Ready kernel with a resolved per-notebook
+/// kernel id. Returns
 /// `(gateway_url, kernel_id)`. 409 Conflict if no Ready kernel / no kernel id yet.
 async fn resolve_running_notebook_kernel(
     st: &KernelState,
@@ -597,7 +595,7 @@ async fn resolve_running_notebook_kernel(
     responses(
         (status = 204, description = "Interrupt sent to the per-notebook kernel"),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Notebook is private and not owned by the caller", body = ErrorBody),
+        (status = 403, description = "Missing notebook:read for this notebook", body = ErrorBody),
         (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
         (status = 409, description = "No running kernel for this notebook; call connect first", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -628,7 +626,7 @@ async fn kernel_interrupt(
     responses(
         (status = 200, description = "Kernel restarted; body is `{ kernel_id }`", body = Object),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Notebook is private and not owned by the caller", body = ErrorBody),
+        (status = 403, description = "Missing notebook:read for this notebook", body = ErrorBody),
         (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
         (status = 409, description = "No running kernel for this notebook; call connect first", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -666,7 +664,7 @@ async fn kernel_restart(
     responses(
         (status = 200, description = "Cell ids currently executing for the caller's notebook: `{ running: [uuid] }`", body = Object),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Notebook is private and not owned by the caller", body = ErrorBody),
+        (status = 403, description = "Missing notebook:read for this notebook", body = ErrorBody),
         (status = 404, description = "No such notebook in this workspace", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),

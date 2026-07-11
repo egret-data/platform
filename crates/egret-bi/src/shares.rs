@@ -26,7 +26,19 @@ fn object_table(kind: &str) -> Option<&'static str> {
         "chart" => Some("charts"),
         "dataset" => Some("datasets"),
         "folder" => Some("folders"),
+        "notebook" => Some("notebooks"),
         _ => None,
+    }
+}
+
+/// The action a caller must hold on the object to manage its shares. Notebooks
+/// have no `notebook:manage` action, so notebook sharing requires `notebook:write`
+/// (Editor); every BI kind uses `<kind>:manage`.
+fn manage_action(kind: &str) -> String {
+    if kind == "notebook" {
+        "notebook:write".to_string()
+    } else {
+        format!("{kind}:manage")
     }
 }
 
@@ -150,7 +162,7 @@ async fn grant_put(
     Json(b): Json<ObjectGrantBody>,
 ) -> Result<Json<ObjectGrantDto>, BiApiError> {
     let obj = resolve(&st, &ctx, &kind, id).await?;
-    require_object(&*st.pdp, &ctx, &format!("{kind}:manage"), obj)
+    require_object(&*st.pdp, &ctx, &manage_action(&kind), obj)
         .await
         .map_err(BiApiError::from)?;
     valid_principal_type(&b.principal_type)?;
@@ -227,7 +239,7 @@ async fn grant_delete(
     Path((_w, kind, id, grant_id)): Path<(String, String, Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
     let obj = resolve(&st, &ctx, &kind, id).await?;
-    require_object(&*st.pdp, &ctx, &format!("{kind}:manage"), obj)
+    require_object(&*st.pdp, &ctx, &manage_action(&kind), obj)
         .await
         .map_err(BiApiError::from)?;
     // Scope the delete by the object so a manage holder can't revoke an unrelated grant.
@@ -270,7 +282,7 @@ async fn grant_list(
     // Listing the ACL exposes every grantee, so it is manage-only (matching
     // grant_put/grant_delete) — a merely read-shared recipient must not be able
     // to enumerate who else the object is shared with.
-    require_object(&*st.pdp, &ctx, &format!("{kind}:manage"), obj)
+    require_object(&*st.pdp, &ctx, &manage_action(&kind), obj)
         .await
         .map_err(BiApiError::from)?;
     let rows: Vec<(Uuid, String, Uuid, String)> = sqlx::query_as(

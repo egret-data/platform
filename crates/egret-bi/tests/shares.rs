@@ -350,3 +350,101 @@ async fn object_share_grant_read_revoke() {
         "after revoke, the outside user must lose read on D"
     );
 }
+
+/// B2-2 Task 1: notebook sharing is gated by `notebook:write` (Editor), not a
+/// non-existent `notebook:manage`. A `ws_editor` (holds notebook:write) can grant
+/// on a notebook; a `ws_viewer` (holds notebook:read but NOT notebook:write) cannot.
+#[tokio::test]
+async fn notebook_share_requires_editor() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    let owner = seed_user(&db).await;
+    let slug = format!("nbshare-{}", Uuid::new_v4().simple());
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'NB Share', $2, 'active') RETURNING id",
+    )
+    .bind(&slug)
+    .bind(owner)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert workspace");
+
+    let editor = seed_user(&db).await;
+    add_member(&db, ws, editor, "ws_editor").await; // holds notebook:write
+    let viewer = seed_user(&db).await;
+    add_member(&db, ws, viewer, "ws_viewer").await; // notebook:read only
+    let outsider = seed_user(&db).await;
+
+    // A notebook in the workspace.
+    let nb: Uuid = sqlx::query_scalar(
+        "INSERT INTO analytics.notebooks (workspace_id, owner_user_id, name) VALUES ($1, $2, 'NB') RETURNING id",
+    )
+    .bind(ws)
+    .bind(owner)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert notebook");
+
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let st = build_state(db.clone(), pdp);
+    let sessions = st.sessions.clone();
+    let editor_tok = session_for(&db, &sessions, editor).await;
+    let viewer_tok = session_for(&db, &sessions, viewer).await;
+
+    let app = shares_router().with_state(st);
+
+    // Editor (notebook:write) grants ws_viewer on the notebook → 2xx.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/ws/{slug}/objects/notebook/{nb}/grants"))
+                .header("Cookie", format!("egret_session={editor_tok}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"principal_type":"user","principal_id":"{outsider}","role":"ws_viewer"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let s = resp.status();
+    assert!(
+        s.is_success(),
+        "editor (notebook:write) must grant on a notebook; got {s}: {}",
+        body_string(resp).await
+    );
+
+    // Viewer (notebook:read, NOT notebook:write) cannot grant → 403.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/ws/{slug}/objects/notebook/{nb}/grants"))
+                .header("Cookie", format!("egret_session={viewer_tok}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"principal_type":"user","principal_id":"{outsider}","role":"ws_viewer"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a ws_viewer (no notebook:write) must NOT be able to share a notebook"
+    );
+}

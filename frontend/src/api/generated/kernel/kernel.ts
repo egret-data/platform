@@ -734,8 +734,9 @@ export const getKernelConnectUrl = (workspace: string,
 }
 
 /**
- * Gate: `notebook:read`; the notebook must belong to this workspace and be
- * readable by the caller (owner or public). The kernel is always the caller's own.
+ * Gate: `notebook:read` at OBJECT scope; the notebook must belong to this
+ * workspace and be readable by the caller (workspace role OR an object grant on
+ * this notebook). The kernel is always the caller's own.
  * @summary `POST /ws/{workspace}/notebooks/{notebook}/kernel/connect` — ensure the gateway
 and resolve/create the per-notebook kernel id.
  */

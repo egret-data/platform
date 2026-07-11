@@ -29,7 +29,7 @@ import {
 import type { ObjectGrantDto } from "@/api/generated/model";
 
 /** Object kinds that support object-scoped sharing. */
-export type ShareKind = "dashboard" | "chart" | "dataset" | "folder";
+export type ShareKind = "dashboard" | "chart" | "dataset" | "folder" | "notebook";
 
 /** Workspace roles offered when sharing. */
 const ROLE_OPTIONS = [

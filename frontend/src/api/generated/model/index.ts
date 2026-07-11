@@ -73,6 +73,7 @@ export * from './databaseDetailDto';
 export * from './databaseInput';
 export * from './databaseListDto';
 export * from './datasetColumnDto';
+export * from './datasetDataBody';
 export * from './datasetDetailDto';
 export * from './datasetsDsListParams';
 export * from './datasetSummaryDto';
