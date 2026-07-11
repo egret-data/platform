@@ -9711,8 +9711,8 @@
         "tags": [
           "dashboards"
         ],
-        "summary": "Object-scoped on the DASHBOARD: a `dashboard:read` object grant TRANSITIVELY\nauthorizes running the data of any card on that dashboard — NO per-chart\ngrant is needed. The card must belong to the path dashboard (else 404). Runs\nONLY the card chart's persisted query (the handler takes no request body), so\na shared viewer can view the card's data without any `query:run` permission.",
-        "description": "Dashboard-parameter filters are NOT applied here: the card runs UNFILTERED.\nMerging validated dashboard-param values into the spec is a follow-up (Task 3\nnote) — unfiltered-but-safe is preferred over filtered-but-unvalidated.",
+        "summary": "Object-scoped on the DASHBOARD: a `dashboard:read` object grant TRANSITIVELY\nauthorizes running the data of any card on that dashboard — NO per-chart\ngrant is needed. The card must belong to the path dashboard (else 404). Runs\nthe card chart's persisted query, optionally merged with resolved\ndashboard-parameter filters from the request body, so a shared viewer can\nview the card's (filtered) data without any `query:run` permission.",
+        "description": "The body is OPTIONAL (a body-less call runs the saved query unfiltered).\nIncoming filters are appended to the persisted `spec.filters` and validated by\n`compile_chart_sql` → `chartquery::build`, which resolves every filter `col`\nagainst the dataset's real columns (an unknown column → 400) and renders the\nvalues/operators through the injection-safe `sql_literal`/`FilterOp` path. The\nclient cannot inject a predicate on an arbitrary column.",
         "operationId": "db_card_run",
         "parameters": [
           {
@@ -9753,9 +9753,19 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CardRunBody"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
-            "description": "The card's chart SAVED query, executed: columns + rows",
+            "description": "The card's chart SAVED query (with dashboard filters), executed: columns + rows",
             "content": {
               "application/json": {
                 "schema": {
@@ -9765,7 +9775,7 @@
             }
           },
           "400": {
-            "description": "Card has no chart, or its chart's saved spec is invalid",
+            "description": "Card has no chart, its saved spec is invalid, or a filter references an unknown column",
             "content": {
               "application/json": {
                 "schema": {
@@ -17521,6 +17531,19 @@
               "null"
             ],
             "minimum": 0
+          }
+        }
+      },
+      "CardRunBody": {
+        "type": "object",
+        "description": "Optional body for the card-data endpoint: resolved dashboard-parameter filters\nto merge into the card chart's persisted query. Reuses `chartquery::Filter`\n(the same `{ col, op, value }` shape the chart spec uses), so the frontend\nsends exactly what `applyParamsToChart` produces. Each filter's `col` is\nvalidated against the dataset's real columns before it is applied (an unknown\ncolumn → 400), and the values/operators are rendered through the same\ninjection-safe `sql_literal`/`FilterOp` path as the persisted filters.",
+        "properties": {
+          "filters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Filter"
+            },
+            "description": "Resolved, dashboard-param-derived filters to AND onto the card's saved query."
           }
         }
       },

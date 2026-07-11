@@ -1878,6 +1878,20 @@ pub fn dashboard_router() -> Router<BiState> {
         )
 }
 
+/// Optional body for the card-data endpoint: resolved dashboard-parameter filters
+/// to merge into the card chart's persisted query. Reuses `chartquery::Filter`
+/// (the same `{ col, op, value }` shape the chart spec uses), so the frontend
+/// sends exactly what `applyParamsToChart` produces. Each filter's `col` is
+/// validated against the dataset's real columns before it is applied (an unknown
+/// column → 400), and the values/operators are rendered through the same
+/// injection-safe `sql_literal`/`FilterOp` path as the persisted filters.
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+pub struct CardRunBody {
+    /// Resolved, dashboard-param-derived filters to AND onto the card's saved query.
+    #[serde(default)]
+    pub filters: Vec<chartquery::Filter>,
+}
+
 #[utoipa::path(
     post,
     path = "/api/ws/{workspace}/dashboards/{id}/cards/{card_id}/data",
@@ -1887,9 +1901,10 @@ pub fn dashboard_router() -> Router<BiState> {
         ("id" = Uuid, Path, description = "Dashboard id"),
         ("card_id" = Uuid, Path, description = "Card id (must belong to the dashboard)"),
     ),
+    request_body = CardRunBody,
     responses(
-        (status = 200, description = "The card's chart SAVED query, executed: columns + rows", body = ChartRunResponse),
-        (status = 400, description = "Card has no chart, or its chart's saved spec is invalid", body = ErrorBody),
+        (status = 200, description = "The card's chart SAVED query (with dashboard filters), executed: columns + rows", body = ChartRunResponse),
+        (status = 400, description = "Card has no chart, its saved spec is invalid, or a filter references an unknown column", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "No dashboard:read grant on this dashboard", body = ErrorBody),
         (status = 404, description = "No such dashboard, or the card is not on this dashboard", body = ErrorBody),
@@ -1900,17 +1915,31 @@ pub fn dashboard_router() -> Router<BiState> {
 /// Object-scoped on the DASHBOARD: a `dashboard:read` object grant TRANSITIVELY
 /// authorizes running the data of any card on that dashboard — NO per-chart
 /// grant is needed. The card must belong to the path dashboard (else 404). Runs
-/// ONLY the card chart's persisted query (the handler takes no request body), so
-/// a shared viewer can view the card's data without any `query:run` permission.
+/// the card chart's persisted query, optionally merged with resolved
+/// dashboard-parameter filters from the request body, so a shared viewer can
+/// view the card's (filtered) data without any `query:run` permission.
 ///
-/// Dashboard-parameter filters are NOT applied here: the card runs UNFILTERED.
-/// Merging validated dashboard-param values into the spec is a follow-up (Task 3
-/// note) — unfiltered-but-safe is preferred over filtered-but-unvalidated.
+/// The body is OPTIONAL (a body-less call runs the saved query unfiltered).
+/// Incoming filters are appended to the persisted `spec.filters` and validated by
+/// `compile_chart_sql` → `chartquery::build`, which resolves every filter `col`
+/// against the dataset's real columns (an unknown column → 400) and renders the
+/// values/operators through the injection-safe `sql_literal`/`FilterOp` path. The
+/// client cannot inject a predicate on an arbitrary column.
 async fn db_card_run(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
     Path((_w, id, card_id)): Path<(String, Uuid, Uuid)>,
+    // OPTIONAL body, read as raw bytes so an empty POST (with or without a JSON
+    // content-type) is treated as "no filters" rather than a parse error. A
+    // present-but-malformed body → 400.
+    raw_body: axum::body::Bytes,
 ) -> Result<Json<ChartRunResponse>, BiApiError> {
+    let body: CardRunBody = if raw_body.is_empty() {
+        CardRunBody::default()
+    } else {
+        serde_json::from_slice(&raw_body)
+            .map_err(|_| Error::InvalidInput("invalid request body".into()))?
+    };
     // Object-scoped read gate on the DASHBOARD. A non-granted dashboard is denied
     // here (403) BEFORE any card lookup or execution.
     let dobj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
@@ -1940,7 +1969,7 @@ async fn db_card_run(
         .await
         .map_err(BiApiError::from)?
         .ok_or(Error::NotFound("chart".into()))?;
-    let spec: chartquery::QuerySpec = serde_json::from_value(
+    let mut spec: chartquery::QuerySpec = serde_json::from_value(
         chart
             .params
             .get("spec")
@@ -1948,6 +1977,14 @@ async fn db_card_run(
             .ok_or_else(|| Error::InvalidInput("chart has no runnable query".into()))?,
     )
     .map_err(|_| Error::InvalidInput("chart spec invalid".into()))?;
+
+    // Merge resolved dashboard-parameter filters onto the persisted query. Each
+    // filter's `col` is validated against the dataset's real columns by
+    // `compile_chart_sql` → `chartquery::build` (`find_column`); an unknown column
+    // is rejected (BadRequest → 400) BEFORE any query runs, so a client cannot
+    // inject a predicate on an arbitrary column. Values/operators are
+    // injection-safe via `sql_literal`/`FilterOp`.
+    spec.filters.extend(body.filters);
 
     let (sql, database_id) = compile_chart_sql(&st, &ctx, chart.dataset_id, &spec).await?;
     let result = egret_query::execution::run_query(
@@ -2739,6 +2776,9 @@ pub struct BiSqlLabApi;
         NewTabInput,
         SetFolder,
         ChartRunResponse,
+        CardRunBody,
+        crate::chartquery::Filter,
+        crate::chartquery::FilterOp,
         Ack,
         ErrorBody,
     )),

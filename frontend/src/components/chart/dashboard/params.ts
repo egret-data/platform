@@ -251,6 +251,30 @@ export function paramToFilters(
   }
 }
 
+/**
+ * The dashboard-parameter-derived filters for one card: the delta a card's mapped
+ * parameters add on top of its saved chart spec (what `applyParamsToChart` appends
+ * to `spec.filters`). Temporal-unit params re-grid a column rather than filter, so
+ * they contribute NO filters here. This is the exact list the view-mode data path
+ * sends to the object-scoped card-data endpoint, which validates each `col` against
+ * the dataset's real columns and merges them into the persisted query server-side.
+ */
+export function paramFiltersForCard(
+  parameters: DashboardParameter[],
+  values: Record<string, unknown>,
+  mappings: Record<string, string>,
+  now: Date = new Date(),
+): ChartFilter[] {
+  const extra: ChartFilter[] = [];
+  for (const param of parameters) {
+    const column = mappings[param.id];
+    if (!column) continue;
+    if (param.type === "temporal_unit") continue; // re-grids, not a filter
+    extra.push(...paramToFilters(param, values[param.slug], column, now));
+  }
+  return extra;
+}
+
 export function applyParamsToChart(
   chart: Chart,
   parameters: DashboardParameter[],
@@ -258,21 +282,18 @@ export function applyParamsToChart(
   mappings: Record<string, string>,
   now: Date = new Date(),
 ): Chart {
-  const extra: ChartFilter[] = [];
+  const extra = paramFiltersForCard(parameters, values, mappings, now);
   const temporalOverrides: Record<string, string> = {};
   for (const param of parameters) {
+    if (param.type !== "temporal_unit") continue;
     const column = mappings[param.id];
     if (!column) continue;
-    if (param.type === "temporal_unit") {
-      const raw = values[param.slug];
-      const unit = typeof raw === "string" && raw ? raw : param.default;
-      const current = chart.params.spec.temporal_units ?? {};
-      if (typeof unit === "string" && unit && column in current) {
-        temporalOverrides[column] = unit; // re-grid an already-grouped column
-      }
-      continue;
+    const raw = values[param.slug];
+    const unit = typeof raw === "string" && raw ? raw : param.default;
+    const current = chart.params.spec.temporal_units ?? {};
+    if (typeof unit === "string" && unit && column in current) {
+      temporalOverrides[column] = unit; // re-grid an already-grouped column
     }
-    extra.push(...paramToFilters(param, values[param.slug], column, now));
   }
   if (extra.length === 0 && Object.keys(temporalOverrides).length === 0) return chart;
   const spec = { ...chart.params.spec, filters: [...chart.params.spec.filters, ...extra] };

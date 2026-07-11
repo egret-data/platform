@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { chartsChRun } from "@/api/generated/charts/charts";
 import { dashboardsDbCardRun } from "@/api/generated/dashboards/dashboards";
-import type { ChartRunResponse } from "@/api/generated/model";
+import type { ChartRunResponse, CardRunBody } from "@/api/generated/model";
+import type { ChartFilter } from "@/api/charts";
 import type { ChartData } from "@/api/useChartData";
 
 /**
@@ -38,12 +39,17 @@ export function useSavedChartData(ws: string, chartId: string | null, nonce?: nu
  * Run a dashboard card's persisted chart query via
  * `POST /dashboards/{id}/cards/{card_id}/data`. Only call this for chart-backed
  * cards — a virtual card (text/heading/link, NULL chart_id) returns 400.
+ *
+ * `filters` carries the resolved dashboard-parameter filters for this card (from
+ * `paramFiltersForCard`); the backend validates each `col` against the dataset's
+ * real columns and merges them into the persisted query. They are part of the
+ * query key, so changing a dashboard parameter refetches the card.
  */
-export function useDashboardCardData(ws: string, dashboardId: string | null, cardId: string | null, nonce?: number, enabled = true): ChartData {
+export function useDashboardCardData(ws: string, dashboardId: string | null, cardId: string | null, nonce?: number, enabled = true, filters: ChartFilter[] = []): ChartData {
   const q = useQuery({
-    queryKey: ["dashboardsDbCardRun", ws, dashboardId, cardId, nonce],
+    queryKey: ["dashboardsDbCardRun", ws, dashboardId, cardId, nonce, filters],
     // apiFetch throws on non-2xx, so a resolved envelope is always the success body.
-    queryFn: () => dashboardsDbCardRun(ws, dashboardId ?? "", cardId ?? "").then((r) => r.data as ChartRunResponse),
+    queryFn: () => dashboardsDbCardRun(ws, dashboardId ?? "", cardId ?? "", { filters: filters as CardRunBody["filters"] }).then((r) => r.data as ChartRunResponse),
     enabled: enabled && !!dashboardId && !!cardId,
   });
   return {

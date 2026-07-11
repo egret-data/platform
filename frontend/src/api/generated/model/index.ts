@@ -22,6 +22,7 @@ export * from './adminWorkspacesListWsParams';
 export * from './assignRoleInput';
 export * from './authConfig';
 export * from './cardInput';
+export * from './cardRunBody';
 export * from './catalogRoleDto';
 export * from './catalogTestDto';
 export * from './cell';

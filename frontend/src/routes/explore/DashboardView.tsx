@@ -27,7 +27,7 @@ import { DashboardEditToolbar } from "@/components/chart/dashboard/DashboardEdit
 import type { SectionLayout } from "@/components/chart/dashboard/dashboard-sections";
 import { dropPlaceholders } from "@/components/chart/dashboard/dashboard-sections";
 import { PlaceholderCard } from "@/components/chart/dashboard/PlaceholderCard";
-import { slugify, applyParamsToChart, computeLinkedFilters, isBlank } from "@/components/chart/dashboard/params";
+import { slugify, applyParamsToChart, paramFiltersForCard, computeLinkedFilters, isBlank } from "@/components/chart/dashboard/params";
 import { useColumnValues } from "@/api/useColumnValues";
 import { useDashboardTabs } from "@/api/useDashboardTabs";
 import { DashboardTabBar } from "@/components/chart/dashboard/DashboardTabBar";
@@ -460,6 +460,9 @@ export default function DashboardView() {
             const baseChart = chartById.get(c.chart_id ?? "");
             const mappings = (c.options.paramMappings as Record<string, string>) ?? {};
             const injected = baseChart ? applyParamsToChart(baseChart, parameters, paramsState.values, mappings) : undefined;
+            // Resolved dashboard-param filters for this card — sent to the view-mode
+            // card-data endpoint so filtering is applied server-side (validated).
+            const paramFilters = baseChart ? paramFiltersForCard(parameters, paramsState.values, mappings) : [];
             return (
             <div key={c.id} className="group relative h-full">
               {editing && (
@@ -486,7 +489,7 @@ export default function DashboardView() {
                 {c.card_type === "placeholder" ? (
                   <PlaceholderCard onPick={() => setFillingPlaceholderId(c.id)} />
                 ) : (
-                  <DashboardCardView ws={ws} dashboardId={dashboard.id} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values}
+                  <DashboardCardView ws={ws} dashboardId={dashboard.id} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values} paramFilters={paramFilters}
                     blocked={!editing && requiredUnset} editing={editing}
                     autoHeight={!!c.options.autoHeight}
                     rowHeight={rowHeight}

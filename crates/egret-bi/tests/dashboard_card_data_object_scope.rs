@@ -131,6 +131,37 @@ async fn post_card_data(
     (status, bytes)
 }
 
+/// POST the card-data endpoint with a JSON `{ "filters": [...] }` body.
+async fn post_card_data_with_filters(
+    app: &axum::Router,
+    slug: &str,
+    dash: Uuid,
+    card: Uuid,
+    tok: &str,
+    filters: serde_json::Value,
+) -> (StatusCode, Vec<u8>) {
+    let body = serde_json::json!({ "filters": filters }).to_string();
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/ws/{slug}/dashboards/{dash}/cards/{card}/data"))
+                .header("Cookie", format!("egret_session={tok}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, bytes)
+}
+
 #[tokio::test]
 async fn dashboard_card_data_is_transitively_object_scoped() {
     let Some(url) = std::env::var("DATABASE_URL").ok() else {
@@ -292,5 +323,149 @@ async fn dashboard_card_data_is_transitively_object_scoped() {
         denied_status,
         StatusCode::FORBIDDEN,
         "a user with no grant on the dashboard is denied (403)"
+    );
+}
+
+/// Dashboard-parameter filters posted in the body are MERGED + VALIDATED before the
+/// card's saved query runs:
+///  * a filter on a REAL dataset column is accepted and REACHES execution
+///    (200 with a live engine, else 502) — the merged predicate is compiled to SQL;
+///  * a filter on an UNKNOWN column is REJECTED with 400 (unknown filter column),
+///    BEFORE the query engine is touched — no predicate injection on arbitrary columns.
+#[tokio::test]
+async fn dashboard_card_data_merges_and_validates_filters() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    let owner = seed_user(&db).await;
+    let slug = format!("dbcardf-{}", Uuid::new_v4().simple());
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'DB Card Filter Test', $2, 'active') RETURNING id",
+    )
+    .bind(&slug)
+    .bind(owner)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert workspace");
+
+    let db_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id) \
+         VALUES ($1,'trino','localhost',8080,$2) RETURNING id",
+    )
+    .bind(format!("db-{}", Uuid::new_v4().simple()))
+    .bind(ws)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    let outside_viewer = seed_user(&db).await;
+
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let st = build_state(db.clone(), pdp);
+    let sessions = st.sessions.clone();
+    let outside_viewer_tok = session_for(&sessions, outside_viewer).await;
+
+    // Dataset with a single real column "one".
+    let ds = st
+        .datasets
+        .create(
+            ws,
+            db_id,
+            "DS",
+            "",
+            &SourceSpec::Virtual {
+                sql: "SELECT 1 AS one".into(),
+            },
+            &[NewColumn {
+                column_name: "one".into(),
+                data_type: "integer".into(),
+                type_generic: "numeric".into(),
+                is_temporal: false,
+            }],
+            Some(egret_core::UserId(owner)),
+        )
+        .await
+        .unwrap()
+        .id;
+    let spec = serde_json::json!({
+        "metrics": [],
+        "dimensions": [],
+        "columns": ["one"],
+        "filters": [],
+        "orderby": [],
+        "row_limit": 10,
+        "rollup_groups": []
+    });
+    let params = serde_json::json!({ "spec": spec });
+    let chart = st
+        .charts
+        .create(ws, ds, "CH", "", "table", &params, Some(owner))
+        .await
+        .unwrap()
+        .id;
+
+    let dash = st
+        .dashboards
+        .create(ws, "D", "", Some(owner))
+        .await
+        .unwrap()
+        .id;
+    let card = seed_card(&db, dash, chart).await;
+    grant_object(&db, outside_viewer, "dashboard", dash, "ws_viewer", owner).await;
+
+    let app = dashboard_router().with_state(st);
+
+    // 1. A filter on the REAL column "one" is accepted + compiled → reaches execution
+    //    (200 with a live engine, else 502). Never 400/403.
+    let (ok_status, ok_body) = post_card_data_with_filters(
+        &app,
+        &slug,
+        dash,
+        card,
+        &outside_viewer_tok,
+        serde_json::json!([{ "col": "one", "op": "eq", "value": 1 }]),
+    )
+    .await;
+    assert!(
+        ok_status == StatusCode::OK || ok_status == StatusCode::BAD_GATEWAY,
+        "a valid filter on a real column must be accepted + reach execution \
+         (200 with a live engine, else 502); got {ok_status}, body={}",
+        String::from_utf8_lossy(&ok_body)
+    );
+
+    // 2. A filter on an UNKNOWN column is rejected with 400 BEFORE execution — the
+    //    column is not on the dataset, so no predicate can be injected on it.
+    let (bad_status, bad_body) = post_card_data_with_filters(
+        &app,
+        &slug,
+        dash,
+        card,
+        &outside_viewer_tok,
+        serde_json::json!([{ "col": "nonexistent_col", "op": "eq", "value": 1 }]),
+    )
+    .await;
+    assert_eq!(
+        bad_status,
+        StatusCode::BAD_REQUEST,
+        "a filter on an unknown column must be rejected (400), not executed; body={}",
+        String::from_utf8_lossy(&bad_body)
+    );
+
+    // 3. A body-less call still runs the saved query unfiltered (backward compatible).
+    let (none_status, none_body) =
+        post_card_data(&app, &slug, dash, card, &outside_viewer_tok).await;
+    assert!(
+        none_status == StatusCode::OK || none_status == StatusCode::BAD_GATEWAY,
+        "a body-less call runs the saved query unfiltered; got {none_status}, body={}",
+        String::from_utf8_lossy(&none_body)
     );
 }
