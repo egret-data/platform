@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ExternalLink, Loader2, Plus, Server } from "lucide-react";
+import { Activity, ExternalLink, Loader2, Plus, PowerOff, Server } from "lucide-react";
 
 import {
   type CreateEngineInput,
@@ -13,6 +13,7 @@ import {
   listWarehouses,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
+import { StatCard, StatCardRow } from "@/components/control-plane/StatCard";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -117,7 +118,20 @@ export default function ControlPlaneEngines() {
           </Button>
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-4">
+        {(() => {
+          const all = engines.data ?? [];
+          const total = all.length;
+          const running = all.filter((e) => (e.status ?? "").toLowerCase() === "running").length;
+          const down = total - running;
+          return (
+            <StatCardRow>
+              <StatCard label="Total" value={total} icon={Server} hint="Registered clusters" />
+              <StatCard label="Running" value={running} tone="success" icon={Activity} />
+              <StatCard label="Not running" value={down} tone={down > 0 ? "warning" : "default"} icon={PowerOff} />
+            </StatCardRow>
+          );
+        })()}
         {engines.isError ? (
           <Alert variant="destructive">
             <AlertDescription>
