@@ -83,8 +83,9 @@ async fn init(config: Config, force: bool) -> anyhow::Result<()> {
 
     if !force {
         let existing: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM platform_role_assignments pra \
-             JOIN roles r ON r.id = pra.role_id WHERE r.scope='platform' AND r.name='platform_admin'",
+            "SELECT count(*) FROM access_grants ag \
+             JOIN roles r ON r.id = ag.role_id \
+             WHERE r.scope='platform' AND r.name='platform_admin' AND ag.scope_type='platform'",
         )
         .fetch_one(&db.pool)
         .await?;

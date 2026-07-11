@@ -133,11 +133,12 @@ impl SessionService {
     /// Platform roles for the user (direct + via group membership).
     async fn platform_roles(&self, user_id: UserId) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT DISTINCT r.name FROM platform_role_assignments pra \
-             JOIN roles r ON r.id = pra.role_id \
-             WHERE (pra.principal_type = 'user'  AND pra.principal_id = $1) \
-                OR (pra.principal_type = 'group' AND pra.principal_id IN \
-                       (SELECT group_id FROM user_groups WHERE user_id = $1))",
+            "SELECT DISTINCT r.name FROM access_grants ag \
+             JOIN roles r ON r.id = ag.role_id \
+             WHERE ag.scope_type = 'platform' \
+               AND ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
+                  OR (ag.principal_type = 'group' AND ag.principal_id IN \
+                         (SELECT group_id FROM user_groups WHERE user_id = $1)) )",
         )
         .bind(user_id.0)
         .fetch_all(&self.db.pool)
@@ -151,11 +152,12 @@ impl SessionService {
     async fn permissions(&self, user_id: UserId) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT DISTINCT rp.permission \
-             FROM platform_role_assignments pra \
-             JOIN role_permissions rp ON rp.role_id = pra.role_id \
-             WHERE (pra.principal_type = 'user'  AND pra.principal_id = $1) \
-                OR (pra.principal_type = 'group' AND pra.principal_id IN \
-                       (SELECT group_id FROM user_groups WHERE user_id = $1))",
+             FROM access_grants ag \
+             JOIN role_permissions rp ON rp.role_id = ag.role_id \
+             WHERE ag.scope_type = 'platform' \
+               AND ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
+                  OR (ag.principal_type = 'group' AND ag.principal_id IN \
+                         (SELECT group_id FROM user_groups WHERE user_id = $1)) )",
         )
         .bind(user_id.0)
         .fetch_all(&self.db.pool)

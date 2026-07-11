@@ -232,8 +232,7 @@ impl RoleRepo {
         Ok(())
     }
 
-    /// Delete a role (cascades to `role_permissions` and
-    /// `platform_role_assignments`).
+    /// Delete a role (cascades to `role_permissions` and `access_grants`).
     pub async fn delete(&self, id: Uuid) -> Result<()> {
         sqlx::query("DELETE FROM roles WHERE id = $1")
             .bind(id)
