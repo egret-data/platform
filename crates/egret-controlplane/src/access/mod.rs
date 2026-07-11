@@ -56,7 +56,10 @@ pub fn router() -> Router<CpState> {
         .route("/groups/{id}/roles", post(assign_group_role))
         .route("/groups/{id}/roles/{role_id}", delete(unassign_group_role))
         .route("/access/roles", get(list_roles).post(create_role))
-        .route("/access/roles/{id}", patch(update_role).delete(delete_role))
+        .route(
+            "/access/roles/{id}",
+            get(get_role).patch(update_role).delete(delete_role),
+        )
         .route("/access/roles/{id}/permissions", put(set_role_permissions))
         .route("/access/roles/{id}/assignees", get(list_role_assignees))
         .route("/permissions", get(list_permissions))
@@ -623,24 +626,66 @@ pub struct RoleDto {
     pub description: String,
     pub permission_count: i64,
     pub assignee_count: i64,
+    /// The role this one inherits permissions from (same scope). `None` at the
+    /// top of a chain.
+    pub parent_role_id: Option<Uuid>,
+    /// Effective-minus-own permissions, for read-only display. Populated on the
+    /// single-role GET; empty on the list endpoint.
+    pub inherited_permissions: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 struct CreateRoleInput {
     scope: String,
     name: String,
     #[serde(default)]
     description: String,
+    #[serde(default)]
+    parent_role_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 struct UpdateRoleInput {
     description: String,
+    #[serde(default)]
+    parent_role_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 struct SetPermissionsInput {
     permissions: Vec<String>,
+}
+
+/// Effective-minus-own permissions for a role: the union of every ancestor's
+/// own permissions (walking `parent_role_id`), minus what the role grants
+/// itself. The chain is acyclic (enforced in `RoleRepo::set_parent` + a DB
+/// trigger), but cap defensively so a corrupt graph can't loop forever.
+async fn inherited_perms(
+    st: &CpState,
+    role: &egret_auth::roles::RoleRow,
+) -> Result<Vec<String>, CpError> {
+    let own: std::collections::BTreeSet<String> = st
+        .roles
+        .permissions_of(role.id)
+        .await?
+        .into_iter()
+        .collect();
+    let mut acc: std::collections::BTreeSet<String> = Default::default();
+    let mut cur = role.parent_role_id;
+    let mut hops = 0;
+    while let Some(c) = cur {
+        for perm in st.roles.permissions_of(c).await? {
+            acc.insert(perm);
+        }
+        hops += 1;
+        if hops > 64 {
+            break;
+        }
+        cur = st.roles.get(c).await?.and_then(|r| r.parent_role_id);
+    }
+    Ok(acc.difference(&own).cloned().collect())
 }
 
 #[utoipa::path(
@@ -671,9 +716,48 @@ async fn list_roles(
             description: r.description,
             permission_count,
             assignee_count,
+            parent_role_id: r.parent_role_id,
+            // The list view stays cheap: inherited perms are only computed on
+            // the single-role GET.
+            inherited_permissions: vec![],
         });
     }
     Ok(Json(out))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/access/roles/{id}",
+    tag = "control-plane-access",
+    params(("id" = Uuid, Path, description = "Role id")),
+    responses(
+        (status = 200, description = "A single role with its parent and inherited permissions", body = RoleDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing role:read permission", body = ErrorBody),
+        (status = 404, description = "No such role", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn get_role(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<RoleDto>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "role:read").await?;
+    let role = st.roles.get(id).await?.ok_or(CpError::NotFound)?;
+    let permission_count = st.roles.permissions_of(id).await?.len() as i64;
+    let assignee_count = st.roles.assignees_of(id).await?.len() as i64;
+    let inherited_permissions = inherited_perms(&st, &role).await?;
+    Ok(Json(RoleDto {
+        id: role.id,
+        scope: role.scope,
+        name: role.name,
+        description: role.description,
+        permission_count,
+        assignee_count,
+        parent_role_id: role.parent_role_id,
+        inherited_permissions,
+    }))
 }
 
 #[utoipa::path(
@@ -704,8 +788,24 @@ async fn create_role(
     }
     let id = st
         .roles
-        .create(&body.scope, &body.name, &body.description, None)
-        .await?;
+        .create(
+            &body.scope,
+            &body.name,
+            &body.description,
+            body.parent_role_id,
+        )
+        .await
+        .map_err(|e| match e {
+            // A bad parent (cross-scope or cycle) trips the `roles_parent_guard`
+            // DB trigger, which surfaces as an internal DB error. When the caller
+            // supplied a parent, report it as a client error rather than a 500.
+            egret_core::Error::Internal(_) if body.parent_role_id.is_some() => CpError::BadRequest(
+                "invalid parent role (must share scope and be acyclic)".to_string(),
+            ),
+            other => other.into(),
+        })?;
+    let role = st.roles.get(id).await?.ok_or(CpError::NotFound)?;
+    let inherited_permissions = inherited_perms(&st, &role).await?;
     Ok((
         StatusCode::CREATED,
         Json(RoleDto {
@@ -715,6 +815,8 @@ async fn create_role(
             description: body.description,
             permission_count: 0,
             assignee_count: 0,
+            parent_role_id: role.parent_role_id,
+            inherited_permissions,
         }),
     ))
 }
@@ -742,9 +844,13 @@ async fn update_role(
     egret_core::authz::require(&*st.pdp, &p, "role:update").await?;
     st.roles.get(id).await?.ok_or(CpError::NotFound)?;
     st.roles.update_description(id, &body.description).await?;
+    // `set_parent` validates same-scope + acyclic in the app layer, returning
+    // `InvalidInput` (→ `CpError::BadRequest`) for a bad parent.
+    st.roles.set_parent(id, body.parent_role_id).await?;
     let role = st.roles.get(id).await?.ok_or(CpError::NotFound)?;
     let permission_count = st.roles.permissions_of(id).await?.len() as i64;
     let assignee_count = st.roles.assignees_of(id).await?.len() as i64;
+    let inherited_permissions = inherited_perms(&st, &role).await?;
     Ok(Json(RoleDto {
         id: role.id,
         scope: role.scope,
@@ -752,6 +858,8 @@ async fn update_role(
         description: role.description,
         permission_count,
         assignee_count,
+        parent_role_id: role.parent_role_id,
+        inherited_permissions,
     }))
 }
 
@@ -941,6 +1049,7 @@ async fn list_permissions(
         assign_group_role,
         unassign_group_role,
         list_roles,
+        get_role,
         create_role,
         update_role,
         delete_role,

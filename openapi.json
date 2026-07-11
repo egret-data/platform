@@ -968,6 +968,76 @@
       }
     },
     "/api/control-plane/access/roles/{id}": {
+      "get": {
+        "tags": [
+          "control-plane-access"
+        ],
+        "operationId": "get_role",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Role id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A single role with its parent and inherited permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoleDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing role:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such role",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "tags": [
           "control-plane-access"
@@ -18295,6 +18365,13 @@
           },
           "description": {
             "type": "string"
+          },
+          "parentRoleId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           }
         }
       },
@@ -20844,7 +20921,8 @@
           "name",
           "description",
           "permissionCount",
-          "assigneeCount"
+          "assigneeCount",
+          "inheritedPermissions"
         ],
         "properties": {
           "id": {
@@ -20867,6 +20945,21 @@
           "assigneeCount": {
             "type": "integer",
             "format": "int64"
+          },
+          "parentRoleId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The role this one inherits permissions from (same scope). `None` at the\ntop of a chain."
+          },
+          "inheritedPermissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Effective-minus-own permissions, for read-only display. Populated on the\nsingle-role GET; empty on the list endpoint."
           }
         }
       },
@@ -21836,6 +21929,13 @@
         "properties": {
           "description": {
             "type": "string"
+          },
+          "parentRoleId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           }
         }
       },

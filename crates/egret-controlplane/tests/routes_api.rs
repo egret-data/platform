@@ -1345,3 +1345,111 @@ async fn role_assignees_lists_users_and_groups() {
         "group assignee named by group name; body={j}"
     );
 }
+
+/// A workspace role that inherits a parent (`parentRoleId` on create) exposes
+/// the parent's permissions via the single-role `GET /access/roles/{id}` as
+/// `inheritedPermissions`. Proves the role-hierarchy control-plane surface:
+/// create parent → give it `dashboard:read` → create child inheriting it →
+/// GET child shows `parentRoleId` + inherited `dashboard:read`.
+#[tokio::test]
+async fn create_role_with_parent_exposes_inherited_permissions() {
+    let Some(mut f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    // The RBAC-graph routes consult `state.pdp`; the platform_admin bypass makes
+    // create/set-permissions/GET all pass. A real Cedar PDP mirrors production.
+    let admin = session_for(&f, "role_parent_admin", true).await;
+    attach_real_pdp(&mut f).await;
+
+    // Create the parent (workspace scope) and grant it dashboard:read.
+    let parent_name = format!("b2_3_api_parent_{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/access/roles",
+            &admin,
+            Some(serde_json::json!({
+                "scope": "workspace",
+                "name": parent_name,
+                "description": "",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create parent role; body={j}");
+    let parent_id = j["id"].as_str().expect("parent id in body").to_string();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/access/roles/{parent_id}/permissions"),
+            &admin,
+            Some(serde_json::json!({ "permissions": ["dashboard:read"] })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "set parent permissions"
+    );
+
+    // Create the child, inheriting the parent.
+    let child_name = format!("b2_3_api_child_{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/access/roles",
+            &admin,
+            Some(serde_json::json!({
+                "scope": "workspace",
+                "name": child_name,
+                "description": "",
+                "parentRoleId": parent_id,
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create child role; body={j}");
+    let child_id = j["id"].as_str().expect("child id in body").to_string();
+    assert_eq!(
+        j["parentRoleId"].as_str(),
+        Some(parent_id.as_str()),
+        "child create echoes parentRoleId; body={j}"
+    );
+
+    // GET the child role → parentRoleId + inheritedPermissions populated.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/access/roles/{child_id}"),
+            &admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, dto) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "get child role; body={dto}");
+    assert_eq!(
+        dto["parentRoleId"].as_str(),
+        Some(parent_id.as_str()),
+        "child GET carries parentRoleId; body={dto}"
+    );
+    let inherited: Vec<String> =
+        serde_json::from_value(dto["inheritedPermissions"].clone()).expect("inheritedPermissions");
+    assert!(
+        inherited.contains(&"dashboard:read".to_string()),
+        "child inherits parent's dashboard:read; body={dto}"
+    );
+}
