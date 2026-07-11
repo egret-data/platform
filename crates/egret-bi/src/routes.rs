@@ -1872,6 +1872,101 @@ pub fn dashboard_router() -> Router<BiState> {
             "/ws/{workspace}/dashboards/{id}/folder",
             patch(db_set_folder),
         )
+        .route(
+            "/ws/{workspace}/dashboards/{id}/cards/{card_id}/data",
+            post(db_card_run),
+        )
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/dashboards/{id}/cards/{card_id}/data",
+    tag = "dashboards",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dashboard id"),
+        ("card_id" = Uuid, Path, description = "Card id (must belong to the dashboard)"),
+    ),
+    responses(
+        (status = 200, description = "The card's chart SAVED query, executed: columns + rows", body = ChartRunResponse),
+        (status = 400, description = "Card has no chart, or its chart's saved spec is invalid", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "No dashboard:read grant on this dashboard", body = ErrorBody),
+        (status = 404, description = "No such dashboard, or the card is not on this dashboard", body = ErrorBody),
+        (status = 502, description = "Query engine error", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+/// Object-scoped on the DASHBOARD: a `dashboard:read` object grant TRANSITIVELY
+/// authorizes running the data of any card on that dashboard — NO per-chart
+/// grant is needed. The card must belong to the path dashboard (else 404). Runs
+/// ONLY the card chart's persisted query (the handler takes no request body), so
+/// a shared viewer can view the card's data without any `query:run` permission.
+///
+/// Dashboard-parameter filters are NOT applied here: the card runs UNFILTERED.
+/// Merging validated dashboard-param values into the spec is a follow-up (Task 3
+/// note) — unfiltered-but-safe is preferred over filtered-but-unvalidated.
+async fn db_card_run(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id, card_id)): Path<(String, Uuid, Uuid)>,
+) -> Result<Json<ChartRunResponse>, BiApiError> {
+    // Object-scoped read gate on the DASHBOARD. A non-granted dashboard is denied
+    // here (403) BEFORE any card lookup or execution.
+    let dobj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_READ, dobj)
+        .await
+        .map_err(BiApiError::from)?;
+
+    // The card must belong to THIS dashboard (a foreign / random card_id → 404).
+    // The row's chart_id may be NULL for a virtual card (heading/text/link).
+    let chart_id: Option<Uuid> = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT chart_id FROM analytics.dashboard_cards WHERE id = $1 AND dashboard_id = $2",
+    )
+    .bind(card_id)
+    .bind(id)
+    .fetch_optional(&st.db.pool)
+    .await
+    .map_err(|e| BiApiError::from(crate::BiError::from(e)))?
+    .ok_or(Error::NotFound("card".into()))?;
+    let chart_id = chart_id.ok_or_else(|| Error::InvalidInput("card has no chart".into()))?;
+
+    // Load the card's chart and run ONLY its saved query. NOTE: there is
+    // deliberately NO per-chart `require_object` — the dashboard grant above is
+    // the authority (transitive auth: dashboard grant → card data).
+    let chart = st
+        .charts
+        .get(chart_id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("chart".into()))?;
+    let spec: chartquery::QuerySpec = serde_json::from_value(
+        chart
+            .params
+            .get("spec")
+            .cloned()
+            .ok_or_else(|| Error::InvalidInput("chart has no runnable query".into()))?,
+    )
+    .map_err(|_| Error::InvalidInput("chart spec invalid".into()))?;
+
+    let (sql, database_id) = compile_chart_sql(&st, &ctx, chart.dataset_id, &spec).await?;
+    let result = egret_query::execution::run_query(
+        &st.databases,
+        &egret_query::execution::connector::DefaultConnectorFactory,
+        database_id,
+        &sql,
+        Some(spec.row_limit.max(0) as usize),
+        Some(ctx.principal.email.clone()),
+        &chart_run_limits(),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .map_err(|e| BiApiError::from(crate::BiError::from(e)))?;
+
+    Ok(Json(ChartRunResponse {
+        columns: result.columns,
+        rows: result.rows,
+    }))
 }
 
 #[utoipa::path(
@@ -2631,6 +2726,7 @@ pub struct BiSqlLabApi;
         db_bookmark_add,
         db_bookmark_remove,
         db_set_folder,
+        db_card_run,
     ),
     components(schemas(
         CreateDashboard,
@@ -2642,6 +2738,7 @@ pub struct BiSqlLabApi;
         CardInput,
         NewTabInput,
         SetFolder,
+        ChartRunResponse,
         Ack,
         ErrorBody,
     )),
