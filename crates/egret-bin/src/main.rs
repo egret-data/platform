@@ -1014,6 +1014,29 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         workspace_secrets: workspace_secrets.clone(),
     });
 
+    // F2-P1 T6: one shared engine-token broker (Keycloak refresh-grant) mints the
+    // short-lived per-user engine JWT carried in the notebook-runtime manifest.
+    // When OIDC is disabled the deps are empty strings, so this still constructs
+    // and only fails at mint-time. Reused by EngineState (B3a SQL Lab delegation),
+    // BiState (B3a per-user delegation), NotebookState, and KernelState — one
+    // shared Arc.
+    let engine_minter: std::sync::Arc<dyn egret_notebook::engine_token::EngineTokenMinter> = {
+        use egret_bin::engine_broker::{EngineTokenBroker, KeycloakRefresher};
+        std::sync::Arc::new(EngineTokenBroker::new(
+            secrets.clone(),
+            egret_auth::oidc_refresh::OidcRefreshRepo::new(db.clone()),
+            KeycloakRefresher {
+                http: reqwest::Client::new(),
+                token_url: format!(
+                    "{}/protocol/openid-connect/token",
+                    config.oidc.issuer_url.trim_end_matches('/')
+                ),
+                client_id: config.oidc.client_id.clone(),
+                client_secret: config.oidc.client_secret.clone(),
+            },
+        ))
+    };
+
     let engine = {
         let storage_cfg = egret_storage::StorageConfig {
             endpoint: config.storage.endpoint.clone(),
@@ -1054,29 +1077,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             authz: Authorizer::new(db.clone()),
             pdp: pdp.clone(),
             users: UserRepo::new(db.clone()),
+            engine_minter: engine_minter.clone(),
         })
-    };
-
-    // F2-P1 T6: one shared engine-token broker (Keycloak refresh-grant) mints the
-    // short-lived per-user engine JWT carried in the notebook-runtime manifest.
-    // When OIDC is disabled the deps are empty strings, so this still constructs
-    // and only fails at mint-time. Reused by BiState (B3a per-user delegation),
-    // NotebookState, and KernelState — one shared Arc.
-    let engine_minter: std::sync::Arc<dyn egret_notebook::engine_token::EngineTokenMinter> = {
-        use egret_bin::engine_broker::{EngineTokenBroker, KeycloakRefresher};
-        std::sync::Arc::new(EngineTokenBroker::new(
-            secrets.clone(),
-            egret_auth::oidc_refresh::OidcRefreshRepo::new(db.clone()),
-            KeycloakRefresher {
-                http: reqwest::Client::new(),
-                token_url: format!(
-                    "{}/protocol/openid-connect/token",
-                    config.oidc.issuer_url.trim_end_matches('/')
-                ),
-                client_id: config.oidc.client_id.clone(),
-                client_secret: config.oidc.client_secret.clone(),
-            },
-        ))
     };
 
     let bi = Some(egret_bi::BiState {

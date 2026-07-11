@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 egret-core = { workspace = true, features = ["http"] }
 egret-query-api.workspace = true
+egret-analytics-api.workspace = true
 egret-metastore.workspace = true
 egret-auth.workspace = true
 egret-workspace.workspace = true
@@ -19,6 +20,7 @@ serde_json.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
+anyhow.workspace = true
 tracing.workspace = true
 reqwest.workspace = true
 mysql_async.workspace = true
