@@ -94,6 +94,20 @@ pub struct StorageSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditConfig {
+    /// When false, the PDP is not wrapped and no events are emitted.
+    pub enabled: bool,
+    /// Rows older than this are pruned. Default 90.
+    pub retention_days: i64,
+    /// Bounded channel capacity; on overflow events are dropped (best-effort).
+    pub channel_capacity: usize,
+    /// Max events per INSERT batch.
+    pub batch_size: usize,
+    /// Flush the batch at least this often.
+    pub flush_interval_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
@@ -108,6 +122,7 @@ pub struct Config {
     pub ranger: RangerSettings,
     pub secrets: SecretsConfig,
     pub engine: EngineConfig,
+    pub audit: AuditConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +240,13 @@ impl Default for Config {
                 query_timeout_secs: 60,
                 preview_rows: 100,
                 results_prefix: "query-results".into(),
+            },
+            audit: AuditConfig {
+                enabled: true,
+                retention_days: 90,
+                channel_capacity: 8192,
+                batch_size: 256,
+                flush_interval_ms: 1000,
             },
         }
     }
@@ -443,6 +465,19 @@ mod tests {
         assert_eq!(cfg.engine.query_timeout_secs, 60);
         assert_eq!(cfg.engine.preview_rows, 100);
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn audit_defaults_present() {
+        figment::Jail::expect_with(|_j| {
+            let cfg: Config = Config::figment().extract()?;
+            assert!(cfg.audit.enabled);
+            assert_eq!(cfg.audit.retention_days, 90);
+            assert_eq!(cfg.audit.channel_capacity, 8192);
+            assert_eq!(cfg.audit.batch_size, 256);
+            assert_eq!(cfg.audit.flush_interval_ms, 1000);
+            Ok(())
+        });
     }
 
     #[test]
