@@ -44,6 +44,19 @@ vi.mock("@/api/folders", () => ({
   }),
 }));
 
+// ShareDialog talks to the generated shares hooks + the principal picker; stub
+// them so opening the dialog from the notebook row renders without a network.
+vi.mock("@/api/generated/shares/shares", () => ({
+  getSharesGrantListQueryKey: () => ["grants"],
+  useSharesGrantList: () => ({ data: { data: [] }, isLoading: false, isError: false, error: null }),
+  useSharesGrantPut: () => ({ mutate: vi.fn(), isPending: false }),
+  useSharesGrantDelete: () => ({ mutate: vi.fn(), isPending: false }),
+}));
+
+vi.mock("@/api/policies", () => ({
+  listPrincipals: vi.fn(() => Promise.resolve([])),
+}));
+
 import Notebooks from "@/routes/explore/Notebooks";
 
 // ── Render helper ─────────────────────────────────────────────────────────────
@@ -376,6 +389,23 @@ describe("Notebooks list", () => {
     await waitFor(() => {
       expect(deleteMutateAsync).toHaveBeenCalledWith("nb-1");
     });
+  });
+
+  // ── Row actions menu → Share ────────────────────────────────────────────────
+
+  it("row menu → Share… opens the ShareDialog scoped to the notebook", async () => {
+    const user = userEvent.setup();
+    renderAt();
+
+    // Default sort is updated_at desc; nb-2 "Shared Report" is the first row.
+    await user.click(screen.getAllByRole("button", { name: "Actions" })[0]);
+    await user.click(await screen.findByText("Share…"));
+
+    // Dialog opens with the notebook name and notebook-scoped copy.
+    expect(await screen.findByText('Share "Shared Report"')).toBeInTheDocument();
+    expect(
+      screen.getByText("Grant people and groups access to this notebook."),
+    ).toBeInTheDocument();
   });
 
   // ── Header button cluster ───────────────────────────────────────────────────

@@ -27,7 +27,9 @@ import type {
 import type {
   Ack,
   AddColumnBody,
+  ChartRunResponse,
   CreateDataset,
+  DatasetDataBody,
   DatasetDetailDto,
   DatasetSummaryDto,
   DatasetsDsListParams,
@@ -1149,6 +1151,131 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getDatasetsDsDeleteColumnMutationOptions(options), queryClient);
+    }
+    export type datasetsDsDataResponse200 = {
+  data: ChartRunResponse
+  status: 200
+}
+
+export type datasetsDsDataResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type datasetsDsDataResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type datasetsDsDataResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type datasetsDsDataResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type datasetsDsDataResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type datasetsDsDataResponse502 = {
+  data: ErrorBody
+  status: 502
+}
+
+export type datasetsDsDataResponseSuccess = (datasetsDsDataResponse200) & {
+  headers: Headers;
+};
+export type datasetsDsDataResponseError = (datasetsDsDataResponse400 | datasetsDsDataResponse401 | datasetsDsDataResponse403 | datasetsDsDataResponse404 | datasetsDsDataResponse500 | datasetsDsDataResponse502) & {
+  headers: Headers;
+};
+
+export type datasetsDsDataResponse = (datasetsDsDataResponseSuccess | datasetsDsDataResponseError)
+
+export const getDatasetsDsDataUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/data`
+}
+
+/**
+ * @summary Object-scoped dataset data-preview: runs ONLY a bounded
+`SELECT * FROM <the dataset's own source> LIMIT n` (n from the optional body,
+clamped to [100, 1000]). Accepts NO client SQL, so an object guest with a
+`dataset:read` grant can preview only the shared dataset — no `query:run`
+workspace permission required.
+ */
+export const datasetsDsData = async (workspace: string,
+    id: string,
+    datasetDataBody: DatasetDataBody, options?: RequestInit): Promise<datasetsDsDataResponse> => {
+
+  return customInstance<datasetsDsDataResponse>(getDatasetsDsDataUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(datasetDataBody)
+  }
+);}
+
+
+
+
+
+export const getDatasetsDsDataMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof datasetsDsData>>, TError,{workspace: string;id: string;data: DatasetDataBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof datasetsDsData>>, TError,{workspace: string;id: string;data: DatasetDataBody}, TContext> => {
+
+const mutationKey = ['datasetsDsData'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof datasetsDsData>>, {workspace: string;id: string;data: DatasetDataBody}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  datasetsDsData(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DatasetsDsDataMutationResult = NonNullable<Awaited<ReturnType<typeof datasetsDsData>>>
+    export type DatasetsDsDataMutationBody = DatasetDataBody
+    export type DatasetsDsDataMutationError = ErrorBody
+
+    /**
+ * @summary Object-scoped dataset data-preview: runs ONLY a bounded
+`SELECT * FROM <the dataset's own source> LIMIT n` (n from the optional body,
+clamped to [100, 1000]). Accepts NO client SQL, so an object guest with a
+`dataset:read` grant can preview only the shared dataset — no `query:run`
+workspace permission required.
+ */
+export const useDatasetsDsData = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof datasetsDsData>>, TError,{workspace: string;id: string;data: DatasetDataBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof datasetsDsData>>,
+        TError,
+        {workspace: string;id: string;data: DatasetDataBody},
+        TContext
+      > => {
+      return useMutation(getDatasetsDsDataMutationOptions(options), queryClient);
     }
     export type datasetsDsSetFolderResponse200 = {
   data: Ack
