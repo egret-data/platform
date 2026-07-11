@@ -32,6 +32,7 @@ egret-orchestrator = { path = "crates/egret-orchestrator" }
 egret-engine-mgmt-api = { path = "crates/egret-engine-mgmt-api" }
 egret-engine-mgmt = { path = "crates/egret-engine-mgmt" }
 egret-events = { path = "crates/egret-events" }
+egret-audit = { path = "crates/egret-audit" }
 
 # Iceberg model — pin the lakekeeper fork/rev so the TableMetadataBuilder /
 # TableUpdate::apply / TableRequirement::check API matches the reference exactly.
