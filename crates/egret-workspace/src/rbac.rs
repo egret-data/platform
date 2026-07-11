@@ -57,7 +57,8 @@ impl Authorizer {
                  AND ( (ag.object_type = 'folder'    AND ag.scope_id IN (SELECT id FROM analytics.folders    WHERE workspace_id = $2)) \
                     OR (ag.object_type = 'dashboard' AND ag.scope_id IN (SELECT id FROM analytics.dashboards WHERE workspace_id = $2)) \
                     OR (ag.object_type = 'chart'     AND ag.scope_id IN (SELECT id FROM analytics.charts     WHERE workspace_id = $2)) \
-                    OR (ag.object_type = 'dataset'   AND ag.scope_id IN (SELECT id FROM analytics.datasets   WHERE workspace_id = $2)) ) )",
+                    OR (ag.object_type = 'dataset'   AND ag.scope_id IN (SELECT id FROM analytics.datasets   WHERE workspace_id = $2)) \
+                    OR (ag.object_type = 'notebook'  AND ag.scope_id IN (SELECT id FROM analytics.notebooks  WHERE workspace_id = $2)) ) )",
         )
         .bind(user_id.0)
         .bind(ws.0)
