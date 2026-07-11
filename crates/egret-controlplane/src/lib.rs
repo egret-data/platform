@@ -12,6 +12,7 @@
 //! same CSRF layer as the other mutating APIs.
 
 mod access;
+pub mod audit;
 mod error;
 mod secrets;
 mod storage;
@@ -55,6 +56,8 @@ pub struct CpState {
     /// Append-only audit sink (B4). Mutation events are emitted at the
     /// grant-change handlers; best-effort, never fails the request.
     pub audit: egret_audit::AuditSink,
+    /// Read side of the audit trail (B4), backing `GET /control-plane/audit`.
+    pub audit_store: egret_audit::AuditStore,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.
@@ -71,6 +74,7 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(storage::router())
         .merge(secrets::router())
         .merge(access::router())
+        .merge(audit::audit_router())
 }
 
 /// The control-plane seam's OpenAPI document (E0·P4b-3): the access, storage,
@@ -82,5 +86,6 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     let mut doc = access::ControlPlaneAccessApi::openapi();
     doc.merge(storage::ControlPlaneStorageApi::openapi());
     doc.merge(secrets::ControlPlaneSecretsApi::openapi());
+    doc.merge(audit::ControlPlaneAuditApi::openapi());
     doc
 }

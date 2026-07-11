@@ -80,6 +80,7 @@ fn build_app(
         browser: None,
         pdp,
         audit,
+        audit_store: egret_audit::AuditStore::new(db.clone()),
     })
 }
 
@@ -634,6 +635,7 @@ async fn setup_isolated_schema() -> Option<Fixture> {
         browser: None,
         pdp: std::sync::Arc::new(AllowAllPdp),
         audit,
+        audit_store: egret_audit::AuditStore::new(db.clone()),
     });
 
     Some(Fixture {
@@ -1579,5 +1581,116 @@ async fn create_role_with_parent_exposes_inherited_permissions() {
     assert!(
         inherited.contains(&"dashboard:read".to_string()),
         "child inherits parent's dashboard:read; body={dto}"
+    );
+}
+
+/// `GET /control-plane/audit` is platform-admin-gated and keyset-paginates the
+/// append-only audit trail (B4). A platform_admin sees the seeded rows newest
+/// first with a `nextCursor` when the page is full, the cursor fetches the older
+/// row, and a non-admin is 403 (the gate is `require(role:read)` on `state.pdp`).
+#[tokio::test]
+async fn audit_query_paginates_and_gates() {
+    let Some(mut f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    // The audit route consults `state.pdp` (`require(role:read)`), so a real
+    // Cedar PDP is needed for the non-admin 403 to be genuine.
+    attach_real_pdp(&mut f).await;
+    let admin = session_for(&f, "audit_query_admin", true).await;
+
+    // Seed two decision rows for a unique actor, straight into the store the
+    // handler reads (same pool). The unique actor isolates the assertion from
+    // any other rows in the shared audit_log.
+    let actor = Uuid::new_v4();
+    let store = egret_audit::AuditStore::new(f.db.clone());
+    let mk = || egret_audit::AuditEvent::Decision {
+        actor: Some(actor),
+        workspace_id: None,
+        action: "dashboard:read".into(),
+        resource_type: "workspace".into(),
+        resource_id: Some("w".into()),
+        allow: false,
+        reasons: vec!["role:x".into()],
+    };
+    store.insert_batch(&[mk()]).await.expect("seed audit row 1");
+    store.insert_batch(&[mk()]).await.expect("seed audit row 2");
+
+    // Page 1: newest row + a nextCursor (the page is full at limit=1).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/control-plane/audit?actor={actor}&kind=decision&limit=1"),
+            &admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "admin audit query; body={j}");
+    assert_eq!(
+        j["entries"].as_array().expect("entries array").len(),
+        1,
+        "exactly one entry at limit=1; body={j}"
+    );
+    assert_eq!(
+        j["entries"][0]["action"], "dashboard:read",
+        "action; body={j}"
+    );
+    assert_eq!(j["entries"][0]["decision"], "deny", "deny row; body={j}");
+    let first_id = j["entries"][0]["id"].as_i64().expect("id");
+    let cursor = j["nextCursor"]
+        .as_str()
+        .expect("nextCursor present on a full page")
+        .to_string();
+    // A raw request string must percent-encode the `+` in the rfc3339 offset
+    // (the generated client does this); otherwise `+` decodes to a space.
+    let cursor_enc = cursor.replace('+', "%2B");
+
+    // Page 2 via the cursor: the older row (a strictly smaller id, no further cursor).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!(
+                "/control-plane/audit?actor={actor}&kind=decision&limit=1&cursor={cursor_enc}"
+            ),
+            &admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j2) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "admin audit query page 2; body={j2}"
+    );
+    assert_eq!(
+        j2["entries"].as_array().expect("entries array").len(),
+        1,
+        "the older row; body={j2}"
+    );
+    let second_id = j2["entries"][0]["id"].as_i64().expect("id");
+    assert!(
+        second_id < first_id,
+        "page 2 is strictly older (id {second_id} < {first_id})"
+    );
+
+    // A non-admin (no role:read) is 403.
+    let plain = session_for(&f, "audit_query_plain", false).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/control-plane/audit", &plain, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "non-admin is forbidden on the audit query"
     );
 }

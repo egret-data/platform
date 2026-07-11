@@ -1312,6 +1312,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         browser: catalog_browser.clone(),
         pdp: pdp.clone(),
         audit: audit_sink.clone(),
+        audit_store: audit_store.clone(),
     });
 
     // Catalog seam admin router (E3d-3): warehouses / catalog-roles / grants /
