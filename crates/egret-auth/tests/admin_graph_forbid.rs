@@ -39,11 +39,11 @@ async fn platform_role_id(db: &Db, name: &str) -> Uuid {
         .unwrap_or_else(|_| panic!("seeded platform role `{name}` must exist"))
 }
 
-/// Assign a platform role to a user (mirrored into `access_grants` by trigger).
+/// Assign a platform role to a user (direct access_grants seed).
 async fn assign_platform_role(db: &Db, user: UserId, role_id: Uuid) {
     sqlx::query(
-        "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
-         VALUES ('user', $1, $2)",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, 'platform', NULL) ON CONFLICT DO NOTHING",
     )
     .bind(user.0)
     .bind(role_id)

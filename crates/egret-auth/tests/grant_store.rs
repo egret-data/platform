@@ -48,8 +48,7 @@ async fn grants_for_returns_platform_and_scoped_workspace_grants() {
     let ws_id = seed_workspace(&db).await;
     let other_ws = seed_workspace(&db).await;
 
-    // Platform grant via the legacy write path (mirrored into access_grants by
-    // the `sync_platform_grant` trigger from migration 0068).
+    // Platform grant written directly to the unified access_grants store.
     let platform_role_id: Uuid = sqlx::query_scalar(
         "SELECT id FROM roles WHERE scope = 'platform' AND name = 'data_steward'",
     )
@@ -57,8 +56,8 @@ async fn grants_for_returns_platform_and_scoped_workspace_grants() {
     .await
     .expect("seeded platform role `data_steward` must exist");
     sqlx::query(
-        "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
-         VALUES ('user', $1, $2)",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, 'platform', NULL) ON CONFLICT DO NOTHING",
     )
     .bind(user_id.0)
     .bind(platform_role_id)
@@ -66,12 +65,13 @@ async fn grants_for_returns_platform_and_scoped_workspace_grants() {
     .await
     .unwrap();
 
-    // Workspace grant via the legacy write path (role NAME -> role id),
-    // mirrored by `sync_workspace_grant`. `ws_admin` is a seeded
-    // workspace-scoped role (migration 0003).
+    // Workspace grant written directly (role NAME -> role id). `ws_admin` is a
+    // seeded workspace-scoped role (migration 0003).
     sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, principal_type, principal_id, role) \
-         VALUES ($1, 'user', $2, 'ws_admin')",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $2, r.id, 'workspace', $1 FROM roles r \
+         WHERE r.scope = 'workspace' AND r.name = 'ws_admin' \
+         ON CONFLICT DO NOTHING",
     )
     .bind(ws_id.0)
     .bind(user_id.0)

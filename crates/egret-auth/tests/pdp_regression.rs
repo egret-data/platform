@@ -2,12 +2,11 @@
 //! reproduces the legacy authorization decisions EXACTLY.
 //!
 //! The `legacy_oracle` below is the source of truth for the expected decision.
-//! It queries the SAME tables the two legacy authorizers used
-//! (`egret_auth::require_permission` / `egret_workspace::rbac::Authorizer`),
+//! It reads the unified `access_grants` store (with the appropriate scope filter),
 //! implementing the documented semantics:
 //!
-//! * platform_admin  = the user holds a `platform_role_assignments` (direct or
-//!   via a group) to the role named `platform_admin`.
+//! * platform_admin  = the user holds a platform-scope `access_grants` row (direct
+//!   or via a group) to the role named `platform_admin`.
 //! * platform decision(action) = is_platform_admin OR the user holds `action`
 //!   via a platform role (direct or via group).
 //! * workspace decision(W, action) = is_platform_admin OR the user holds
@@ -82,8 +81,8 @@ async fn platform_role_id(db: &Db, name: &str) -> Uuid {
 
 async fn assign_platform_role_user(db: &Db, user: UserId, role_id: Uuid) {
     sqlx::query(
-        "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
-         VALUES ('user', $1, $2)",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, 'platform', NULL) ON CONFLICT DO NOTHING",
     )
     .bind(user.0)
     .bind(role_id)
@@ -94,8 +93,10 @@ async fn assign_platform_role_user(db: &Db, user: UserId, role_id: Uuid) {
 
 async fn add_ws_member_user(db: &Db, ws: WorkspaceId, user: UserId, role: &str) {
     sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, principal_type, principal_id, role) \
-         VALUES ($1, 'user', $2, $3)",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $2, r.id, 'workspace', $1 FROM roles r \
+         WHERE r.scope = 'workspace' AND r.name = $3 \
+         ON CONFLICT DO NOTHING",
     )
     .bind(ws.0)
     .bind(user.0)
@@ -107,8 +108,10 @@ async fn add_ws_member_user(db: &Db, ws: WorkspaceId, user: UserId, role: &str) 
 
 async fn add_ws_member_group(db: &Db, ws: WorkspaceId, group: GroupId, role: &str) {
     sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, principal_type, principal_id, role) \
-         VALUES ($1, 'group', $2, $3)",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'group', $2, r.id, 'workspace', $1 FROM roles r \
+         WHERE r.scope = 'workspace' AND r.name = $3 \
+         ON CONFLICT DO NOTHING",
     )
     .bind(ws.0)
     .bind(group.0)
@@ -130,14 +133,14 @@ async fn groups_of(db: &Db, user: UserId) -> Vec<GroupId> {
 
 // ── Oracle ─────────────────────────────────────────────────────────────────
 
-/// platform_admin = holds a platform_role_assignment (direct or via group) to
+/// platform_admin = holds a platform-scope access_grant (direct or via group) to
 /// the role named `platform_admin`.
 async fn is_platform_admin(db: &Db, user: UserId) -> bool {
     sqlx::query_scalar(
         "SELECT EXISTS ( \
-           SELECT 1 FROM platform_role_assignments pra \
+           SELECT 1 FROM access_grants pra \
            JOIN roles r ON r.id = pra.role_id \
-           WHERE r.scope = 'platform' AND r.name = 'platform_admin' \
+           WHERE r.scope = 'platform' AND r.name = 'platform_admin' AND pra.scope_type = 'platform' \
              AND ( (pra.principal_type = 'user'  AND pra.principal_id = $1) \
                 OR (pra.principal_type = 'group' AND pra.principal_id IN \
                       (SELECT group_id FROM user_groups WHERE user_id = $1)) ) )",
@@ -152,10 +155,10 @@ async fn is_platform_admin(db: &Db, user: UserId) -> bool {
 async fn platform_holds(db: &Db, user: UserId, action: &str) -> bool {
     sqlx::query_scalar(
         "SELECT EXISTS ( \
-           SELECT 1 FROM platform_role_assignments pra \
+           SELECT 1 FROM access_grants pra \
            JOIN roles r ON r.id = pra.role_id AND r.scope = 'platform' \
            JOIN role_permissions rp ON rp.role_id = r.id \
-           WHERE rp.permission = $2 \
+           WHERE rp.permission = $2 AND pra.scope_type = 'platform' \
              AND ( (pra.principal_type = 'user'  AND pra.principal_id = $1) \
                 OR (pra.principal_type = 'group' AND pra.principal_id IN \
                       (SELECT group_id FROM user_groups WHERE user_id = $1)) ) )",
@@ -171,10 +174,10 @@ async fn platform_holds(db: &Db, user: UserId, action: &str) -> bool {
 async fn workspace_holds(db: &Db, user: UserId, ws: WorkspaceId, action: &str) -> bool {
     sqlx::query_scalar(
         "SELECT EXISTS ( \
-           SELECT 1 FROM workspace_members wm \
-           JOIN roles r ON r.scope = 'workspace' AND r.name = wm.role \
+           SELECT 1 FROM access_grants wm \
+           JOIN roles r ON r.id = wm.role_id AND r.scope = 'workspace' \
            JOIN role_permissions rp ON rp.role_id = r.id \
-           WHERE wm.workspace_id = $2 AND rp.permission = $3 \
+           WHERE wm.scope_type = 'workspace' AND wm.scope_id = $2 AND rp.permission = $3 \
              AND ( (wm.principal_type = 'user'  AND wm.principal_id = $1) \
                 OR (wm.principal_type = 'group' AND wm.principal_id IN \
                       (SELECT group_id FROM user_groups WHERE user_id = $1)) ) )",

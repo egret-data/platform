@@ -82,7 +82,7 @@ async fn arc_dyn_pdp_hot_reloads_from_the_shared_bus() {
     let repo = RoleRepo::new(db.clone(), bus.clone()); // SAME bus
 
     // Seed user U, workspace W, a fresh zero-perm workspace role R (via the repo),
-    // and membership U→R@W (0068/0069 triggers mirror it into access_grants).
+    // and membership U→R@W (direct access_grants seed).
     let u = seed_user(&db).await;
     let w = seed_workspace(&db).await;
     let role_name = uniq("appwiring");
@@ -92,8 +92,10 @@ async fn arc_dyn_pdp_hot_reloads_from_the_shared_bus() {
         .unwrap();
 
     sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, principal_type, principal_id, role) \
-         VALUES ($1, 'user', $2, $3)",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $2, r.id, 'workspace', $1 FROM roles r \
+         WHERE r.scope = 'workspace' AND r.name = $3 \
+         ON CONFLICT DO NOTHING",
     )
     .bind(w.0)
     .bind(u.0)

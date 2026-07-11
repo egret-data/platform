@@ -1,8 +1,9 @@
 //! DB-gated regression for security review #1/#4 (migration 0069): a
-//! `workspace_members` UPSERT that changes a member's role fires an UPDATE, which
-//! 0068's INSERT/DELETE-only triggers left unmirrored — the demoted member kept
-//! their old-role grant in `access_grants`. 0069 adds an UPDATE branch (delete
-//! OLD-role grant + insert NEW-role grant) and NULL guards.
+//! a member role change must leave exactly one workspace grant in `access_grants`
+//! (the NEW role), never keeping the STALE old-role grant behind. Originally a
+//! regression for the 0069 trigger UPDATE branch; now that `access_grants` is the
+//! single store, `MemberRepo::add` writes it directly (delete + insert),
+//! and this test guards the same one-role-per-member invariant.
 //!
 //! Self-skips without DATABASE_URL. Model: `access_grants_migration.rs`.
 
@@ -48,19 +49,34 @@ async fn grant_role_ids(db: &Db, user: Uuid, ws: Uuid) -> Vec<Uuid> {
     rows.into_iter().map(|(r,)| r).collect()
 }
 
-/// The exact UPSERT `MemberRepo::add` issues (`ON CONFLICT ... DO UPDATE SET role`).
+/// The one-role-per-member replace `MemberRepo::add` issues against the unified
+/// store: delete any existing workspace grant for this member, then insert the new
+/// role (role NAME -> ws-scoped role id).
 async fn upsert_member(db: &Db, ws: Uuid, user: Uuid, role: &str) {
+    let mut tx = db.pool.begin().await.unwrap();
     sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, principal_type, principal_id, role) \
-         VALUES ($1, 'user', $2, $3) \
-         ON CONFLICT (workspace_id, principal_type, principal_id) DO UPDATE SET role = EXCLUDED.role",
+        "DELETE FROM access_grants \
+         WHERE principal_type = 'user' AND principal_id = $1 \
+           AND scope_type = 'workspace' AND scope_id = $2",
     )
-    .bind(ws)
     .bind(user)
-    .bind(role)
-    .execute(&db.pool)
+    .bind(ws)
+    .execute(&mut *tx)
     .await
     .unwrap();
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $1, r.id, 'workspace', $2 FROM roles r \
+         WHERE r.scope = 'workspace' AND r.name = $3 \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(user)
+    .bind(ws)
+    .bind(role)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
 }
 
 #[tokio::test]
