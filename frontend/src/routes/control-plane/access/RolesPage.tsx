@@ -8,6 +8,7 @@ import {
   type RoleAssignee,
   createRole,
   deleteRole,
+  getRole,
   getRoleAssignees,
   listPermissions,
   listRoles,
@@ -77,6 +78,32 @@ const SEEDED_ROLE_NAMES = new Set([
 ]);
 
 const BUILTIN_DELETE_TOOLTIP = "Built-in role";
+
+/** Sentinel Select value for "no parent" (a role at the top of a chain). */
+const NO_PARENT = "__none__";
+
+/**
+ * Role ids that must not be offered as `role`'s parent: `role` itself and any
+ * role whose parent chain already reaches `role` (choosing one would form an
+ * obvious cycle). Computed from the flat roles list.
+ */
+function cyclicParentIds(roleId: string, roles: AccessRole[]): Set<string> {
+  const parentOf = new Map(roles.map((r) => [r.id, r.parentRoleId ?? null]));
+  const banned = new Set<string>([roleId]);
+  for (const r of roles) {
+    let cur: string | null | undefined = r.id;
+    let hops = 0;
+    while (cur && hops < 64) {
+      if (cur === roleId) {
+        banned.add(r.id);
+        break;
+      }
+      cur = parentOf.get(cur) ?? null;
+      hops += 1;
+    }
+  }
+  return banned;
+}
 
 function isSeeded(role: AccessRole): boolean {
   return SEEDED_ROLE_NAMES.has(role.name);
@@ -269,6 +296,7 @@ export default function RolesPage() {
       <CreateRoleDialog open={createOpen} onOpenChange={setCreateOpen} />
       <EditRoleDialog
         role={editTarget}
+        roles={rows}
         onOpenChange={(o) => {
           if (!o) setEditTarget(null);
         }}
@@ -425,9 +453,11 @@ function CreateRoleDialog({
  */
 function EditRoleDialog({
   role,
+  roles,
   onOpenChange,
 }: {
   role: AccessRole | null;
+  roles: AccessRole[];
   onOpenChange: (open: boolean) => void;
 }) {
   const queryClient = useQueryClient();
@@ -437,13 +467,36 @@ function EditRoleDialog({
     retry: false,
   });
 
+  // The list endpoint returns an empty `inheritedPermissions`; the single-role
+  // GET populates it (and the current parent), so fetch it while open.
+  const detail = useQuery<AccessRole, ApiError>({
+    queryKey: ["control-plane", "access", "role", role?.id ?? ""],
+    queryFn: () => getRole(role!.id),
+    enabled: role !== null,
+    retry: false,
+  });
+
   const [description, setDescription] = useState("");
+  const [parent, setParent] = useState<string>(NO_PARENT);
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const isSuperuser = role?.name === "platform_admin";
   const groups = permissions.data ?? [];
+
+  // Roles offered as a parent: same scope, excluding self and any role whose
+  // chain already reaches this one (obvious cycle).
+  const parentOptions = useMemo(() => {
+    if (!role) return [] as AccessRole[];
+    const banned = cyclicParentIds(role.id, roles);
+    return roles.filter((r) => r.scope === role.scope && !banned.has(r.id));
+  }, [role, roles]);
+
+  const inherited = useMemo(
+    () => new Set(detail.data?.inheritedPermissions ?? []),
+    [detail.data],
+  );
 
   const initialChecked = useMemo(() => {
     if (!role) return new Set<string>();
@@ -459,6 +512,7 @@ function EditRoleDialog({
   useEffect(() => {
     if (role) {
       setDescription(role.description);
+      setParent(role.parentRoleId ?? NO_PARENT);
       setChecked(initialChecked);
       setError(null);
     }
@@ -483,8 +537,10 @@ function EditRoleDialog({
     setError(null);
     setSaving(true);
     try {
-      if (description !== role.description) {
-        await updateRole(role.id, description.trim());
+      const nextParent = parent === NO_PARENT ? null : parent;
+      const parentChanged = nextParent !== (role.parentRoleId ?? null);
+      if (description !== role.description || parentChanged) {
+        await updateRole(role.id, description.trim(), nextParent);
       }
       if (!isSuperuser) {
         await setRolePermissions(role.id, Array.from(checked));
@@ -526,6 +582,26 @@ function EditRoleDialog({
             />
           </div>
 
+          <div className="space-y-1.5">
+            <Label htmlFor="edit-role-parent">Inherits from</Label>
+            <Select value={parent} onValueChange={setParent} disabled={isSuperuser}>
+              <SelectTrigger id="edit-role-parent" aria-label="Inherits from" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_PARENT}>No parent</SelectItem>
+                {parentOptions.map((r) => (
+                  <SelectItem key={r.id} value={r.id}>
+                    {r.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              This role also grants everything its parent grants.
+            </p>
+          </div>
+
           {isSuperuser && (
             <Alert>
               <AlertDescription className="text-muted-foreground">
@@ -550,12 +626,13 @@ function EditRoleDialog({
                   <div className="grid grid-cols-1 gap-x-6 gap-y-1.5 rounded-md border p-3 sm:grid-cols-2">
                     {group.permissions.map((p) => {
                       const id = `perm-${p.key}`;
+                      const isInherited = inherited.has(p.key);
                       return (
                         <div key={p.key} className="flex items-center gap-2">
                           <Checkbox
                             id={id}
-                            checked={checked.has(p.key)}
-                            disabled={isSuperuser}
+                            checked={isInherited || checked.has(p.key)}
+                            disabled={isSuperuser || isInherited}
                             onCheckedChange={(c) => toggle(p.key, c === true)}
                           />
                           <Label
@@ -565,6 +642,11 @@ function EditRoleDialog({
                           >
                             {p.key}
                           </Label>
+                          {isInherited && (
+                            <Badge variant="secondary" className="font-normal">
+                              inherited
+                            </Badge>
+                          )}
                         </div>
                       );
                     })}

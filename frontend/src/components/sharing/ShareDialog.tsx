@@ -37,8 +37,51 @@ const ROLE_OPTIONS = [
   { value: "ws_editor", label: "Editor" },
 ] as const;
 
+/** Sentinel role value for an explicit "deny" (Blocked) grant. */
+const BLOCKED_VALUE = "__blocked__";
+
+/**
+ * Options for the add-grant role select: the two allow roles plus a "Blocked"
+ * choice that maps to a `ws_editor` deny grant (deny-wins over any allow).
+ */
+const ADD_ROLE_OPTIONS = [
+  ...ROLE_OPTIONS,
+  { value: BLOCKED_VALUE, label: "Blocked (No access)" },
+] as const;
+
 const roleLabel = (role: string) =>
   ROLE_OPTIONS.find((r) => r.value === role)?.label ?? role;
+
+/** Body of a share grant PUT. */
+interface GrantBody {
+  principal_type: string;
+  principal_id: string;
+  role: string;
+  effect: string;
+}
+
+/**
+ * Map a selected role option to a grant body. The "Blocked" sentinel becomes a
+ * `ws_editor` deny grant; a real role is an allow grant.
+ */
+function grantBody(principal_type: string, principal_id: string, role: string): GrantBody {
+  if (role === BLOCKED_VALUE) {
+    return { principal_type, principal_id, role: "ws_editor", effect: "deny" };
+  }
+  return { principal_type, principal_id, role, effect: "allow" };
+}
+
+/** Red "No access" badge shown for a deny grant, using the destructive token. */
+function NoAccessBadge() {
+  return (
+    <Badge
+      className="border-transparent text-white"
+      style={{ backgroundColor: "var(--destructive)" }}
+    >
+      No access
+    </Badge>
+  );
+}
 
 /** Narrow the react-query error into an HTTP status if we have one. */
 function errorStatus(err: unknown): number | undefined {
@@ -97,7 +140,7 @@ export function ShareDialog({ ws, kind, id, folderId, name, open, onOpenChange }
         workspace: ws,
         kind,
         id,
-        data: { principal_type: grant.principal_type, principal_id: grant.principal_id, role },
+        data: grantBody(grant.principal_type, grant.principal_id, role),
       },
       {
         onSuccess: invalidate,
@@ -171,21 +214,25 @@ export function ShareDialog({ ws, kind, id, folderId, name, open, onOpenChange }
                     <li key={g.id} className="flex items-center gap-2 px-3 py-2">
                       <PrincipalLabel grant={g} />
                       <div className="ml-auto flex items-center gap-1">
-                        <Select value={g.role} onValueChange={(v) => upsertRole(g, v)}>
-                          <SelectTrigger
-                            className="h-8 w-28"
-                            aria-label={`Role for ${g.principal_id}`}
-                          >
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {ROLE_OPTIONS.map((r) => (
-                              <SelectItem key={r.value} value={r.value}>
-                                {r.label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                        {g.effect === "deny" ? (
+                          <NoAccessBadge />
+                        ) : (
+                          <Select value={g.role} onValueChange={(v) => upsertRole(g, v)}>
+                            <SelectTrigger
+                              className="h-8 w-28"
+                              aria-label={`Role for ${g.principal_id}`}
+                            >
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {ROLE_OPTIONS.map((r) => (
+                                <SelectItem key={r.value} value={r.value}>
+                                  {r.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        )}
                         <Button
                           size="icon"
                           variant="ghost"
@@ -220,9 +267,15 @@ export function ShareDialog({ ws, kind, id, folderId, name, open, onOpenChange }
                     {inherited.map((g) => (
                       <li key={g.id} className="flex items-center gap-2 px-3 py-2">
                         <PrincipalLabel grant={g} />
-                        <span className="ml-auto text-xs text-muted-foreground">
-                          {roleLabel(g.role)}
-                        </span>
+                        {g.effect === "deny" ? (
+                          <span className="ml-auto">
+                            <NoAccessBadge />
+                          </span>
+                        ) : (
+                          <span className="ml-auto text-xs text-muted-foreground">
+                            {roleLabel(g.role)}
+                          </span>
+                        )}
                       </li>
                     ))}
                   </ul>
@@ -260,7 +313,7 @@ function AddGrantRow({
   onAdd,
   pending,
 }: {
-  onAdd: (body: { principal_type: string; principal_id: string; role: string }) => void;
+  onAdd: (body: GrantBody) => void;
   pending: boolean;
 }) {
   const [type, setType] = useState<"user" | "group">("user");
@@ -279,7 +332,7 @@ function AddGrantRow({
 
   const submit = () => {
     if (!canAdd) return;
-    onAdd({ principal_type: type, principal_id: value.trim(), role });
+    onAdd(grantBody(type, value.trim(), role));
     setValue("");
     setShowSuggest(false);
   };
@@ -345,11 +398,11 @@ function AddGrantRow({
         </div>
 
         <Select value={role} onValueChange={setRole}>
-          <SelectTrigger className="h-9 w-28" aria-label="Role">
+          <SelectTrigger className="h-9 w-40" aria-label="Role">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {ROLE_OPTIONS.map((r) => (
+            {ADD_ROLE_OPTIONS.map((r) => (
               <SelectItem key={r.value} value={r.value}>
                 {r.label}
               </SelectItem>

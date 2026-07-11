@@ -24,6 +24,7 @@ import {
   controlPlaneAccessCreateUser,
   controlPlaneAccessDeleteGroup,
   controlPlaneAccessDeleteRole,
+  controlPlaneAccessGetRole,
   controlPlaneAccessListGroupMembers,
   controlPlaneAccessListGroups,
   controlPlaneAccessListPermissions,
@@ -130,12 +131,25 @@ export async function listRoles(): Promise<AccessRole[]> {
   return (await controlPlaneAccessListRoles()).data as AccessRole[];
 }
 
-export async function createRole(input: { scope: string; name: string; description: string }): Promise<AccessRole> {
+export async function getRole(id: string): Promise<AccessRole> {
+  return (await controlPlaneAccessGetRole(id)).data as AccessRole;
+}
+
+export async function createRole(input: {
+  scope: string;
+  name: string;
+  description: string;
+  parentRoleId?: string | null;
+}): Promise<AccessRole> {
   return (await controlPlaneAccessCreateRole(input)).data as AccessRole;
 }
 
-export async function updateRole(id: string, description: string): Promise<AccessRole> {
-  return (await controlPlaneAccessUpdateRole(id, { description })).data as AccessRole;
+export async function updateRole(
+  id: string,
+  description: string,
+  parentRoleId?: string | null,
+): Promise<AccessRole> {
+  return (await controlPlaneAccessUpdateRole(id, { description, parentRoleId })).data as AccessRole;
 }
 
 export async function deleteRole(id: string): Promise<void> {

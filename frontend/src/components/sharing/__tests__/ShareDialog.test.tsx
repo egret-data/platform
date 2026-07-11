@@ -102,8 +102,53 @@ test("calls the PUT hook when adding a grant", async () => {
     workspace: "eng",
     kind: "chart",
     id: "c1",
-    data: { principal_type: "user", principal_id: "bob@egret.local", role: "ws_viewer" },
+    data: {
+      principal_type: "user",
+      principal_id: "bob@egret.local",
+      role: "ws_viewer",
+      effect: "allow",
+    },
   });
+});
+
+test("adds a Blocked grant as a ws_editor deny", async () => {
+  renderDialog();
+  await userEvent.type(screen.getByLabelText("User email"), "carol@egret.local");
+  // Open the add-row role select and choose the Blocked option.
+  await userEvent.click(screen.getByLabelText("Role"));
+  await userEvent.click(await screen.findByRole("option", { name: "Blocked (No access)" }));
+  await userEvent.click(screen.getByRole("button", { name: "Add" }));
+
+  expect(putMutate).toHaveBeenCalledTimes(1);
+  expect(putMutate.mock.calls[0][0]).toEqual({
+    workspace: "eng",
+    kind: "chart",
+    id: "c1",
+    data: {
+      principal_type: "user",
+      principal_id: "carol@egret.local",
+      role: "ws_editor",
+      effect: "deny",
+    },
+  });
+});
+
+test("renders a No access badge for a deny grant instead of a role control", () => {
+  directResult = ok([
+    {
+      id: "d1",
+      principal_type: "user",
+      principal_id: "mallory@egret.local",
+      role: "ws_editor",
+      effect: "deny",
+    },
+  ]);
+  renderDialog();
+  expect(screen.getByText("No access")).toBeInTheDocument();
+  // A deny grant has no editable role select…
+  expect(screen.queryByLabelText("Role for mallory@egret.local")).toBeNull();
+  // …but removal still works.
+  expect(screen.getByLabelText("Remove mallory@egret.local")).toBeInTheDocument();
 });
 
 test("calls the DELETE hook when removing a direct grant", async () => {

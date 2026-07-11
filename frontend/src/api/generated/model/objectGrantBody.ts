@@ -13,6 +13,11 @@ export interface ObjectGrantBody {
   /** `user` | `group`. */
   principal_type: string;
   principal_id: string;
-  /** `ws_viewer` (Viewer, read) | `ws_editor` (Editor, manage). */
+  /**
+     * `ws_viewer` (Viewer, read) | `ws_editor` (Editor, manage). For a "Blocked"
+     * grant, send `ws_editor` with `effect="deny"`.
+     */
   role: string;
+  /** `allow` (default) | `deny`. A deny blocks the principal on this object. */
+  effect?: string;
 }

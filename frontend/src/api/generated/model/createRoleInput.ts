@@ -10,4 +10,6 @@ export interface CreateRoleInput {
   scope: string;
   name: string;
   description?: string;
+  /** @nullable */
+  parentRoleId?: string | null;
 }

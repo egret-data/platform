@@ -15,4 +15,6 @@ export interface ObjectGrantDto {
   principal_id: string;
   /** The workspace role name (`ws_viewer` | `ws_editor`). */
   role: string;
+  /** `allow` | `deny`. */
+  effect: string;
 }

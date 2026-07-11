@@ -42,8 +42,8 @@ const USERS: api.AccessUser[] = [
 ];
 
 const ROLES: api.AccessRole[] = [
-  { id: "r1", scope: "platform", name: "Admin", description: "", permissionCount: 0, assigneeCount: 1 },
-  { id: "r2", scope: "platform", name: "Analyst", description: "", permissionCount: 0, assigneeCount: 0 },
+  { id: "r1", scope: "platform", name: "Admin", description: "", permissionCount: 0, assigneeCount: 1, inheritedPermissions: [] },
+  { id: "r2", scope: "platform", name: "Analyst", description: "", permissionCount: 0, assigneeCount: 0, inheritedPermissions: [] },
 ];
 
 function renderPage(me: Me | null = ADMIN_ME) {
