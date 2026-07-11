@@ -210,6 +210,69 @@ async fn cancel_sets_cancelled() {
     );
 }
 
+/// DB-gated (needs `DATABASE_URL`), engine-free: exercises the shared
+/// `run_query` path end to end with the fake connector — resolve the database,
+/// build the connector via the factory, run to completion, return the coerced
+/// `TabularResult`. Skips (does not fail) when `DATABASE_URL` is unset.
+#[tokio::test]
+async fn run_query_returns_tabular_result() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("skip");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let wid: Uuid =
+        sqlx::query_scalar("INSERT INTO workspaces (slug,name) VALUES ($1,'t') RETURNING id")
+            .bind(format!("w-{}", Uuid::new_v4().simple()))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let did: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases (name,engine,host,port,workspace_id) \
+         VALUES ($1,'trino','h',8080,$2) RETURNING id",
+    )
+    .bind(format!("db_{}", Uuid::new_v4().simple()))
+    .bind(wid)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let databases = egret_query::DatabaseRepo::new(
+        db.clone(),
+        egret_secrets::SecretStore::new(db.clone(), None),
+        egret_secrets::WorkspaceSecretStore::new(
+            db.clone(),
+            egret_secrets::SecretStore::new(db.clone(), None),
+        ),
+    );
+    let factory = FakeFactory::new(0);
+    let limits = Limits {
+        max_rows: 100,
+        timeout: Duration::from_secs(10),
+    };
+    let result = egret_query::execution::run_query(
+        &databases,
+        &factory,
+        did,
+        "SELECT 1",
+        Some(50),
+        Some("alice".to_string()),
+        &limits,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("run_query ok");
+
+    // The fake connector returns one bigint column `n` with a single row [1].
+    assert_eq!(result.columns.len(), 1);
+    assert_eq!(result.columns[0].name, "n");
+    assert_eq!(result.row_count, 1);
+    assert_eq!(result.rows, vec![vec![serde_json::json!(1)]]);
+    assert!(!result.truncated);
+    // The resolved connection carried the session_user through the factory.
+    assert_eq!(factory.last_session_user(), Some(Some("alice".to_string())));
+}
+
 #[tokio::test]
 async fn session_user_reaches_factory() {
     let Some((jobs, store, wid, did, factory)) = setup(0).await else {
