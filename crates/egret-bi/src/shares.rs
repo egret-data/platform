@@ -74,8 +74,16 @@ pub struct ObjectGrantBody {
     /// `user` | `group`.
     pub principal_type: String,
     pub principal_id: Uuid,
-    /// `ws_viewer` (Viewer, read) | `ws_editor` (Editor, manage).
+    /// `ws_viewer` (Viewer, read) | `ws_editor` (Editor, manage). For a "Blocked"
+    /// grant, send `ws_editor` with `effect="deny"`.
     pub role: String,
+    /// `allow` (default) | `deny`. A deny blocks the principal on this object.
+    #[serde(default = "default_effect")]
+    pub effect: String,
+}
+
+fn default_effect() -> String {
+    "allow".to_string()
 }
 
 /// A single object-scoped grant on the object.
@@ -86,6 +94,8 @@ pub struct ObjectGrantDto {
     pub principal_id: Uuid,
     /// The workspace role name (`ws_viewer` | `ws_editor`).
     pub role: String,
+    /// `allow` | `deny`.
+    pub effect: String,
 }
 
 pub fn shares_router() -> Router<BiState> {
@@ -113,6 +123,14 @@ fn valid_principal_type(pt: &str) -> Result<(), BiApiError> {
     match pt {
         "user" | "group" => Ok(()),
         _ => Err(Error::InvalidInput(format!("principal_type: {pt}")).into()),
+    }
+}
+
+/// Validate the grant effect.
+fn valid_effect(e: &str) -> Result<(), BiApiError> {
+    match e {
+        "allow" | "deny" => Ok(()),
+        _ => Err(Error::InvalidInput(format!("effect: {e}")).into()),
     }
 }
 
@@ -167,6 +185,7 @@ async fn grant_put(
         .map_err(BiApiError::from)?;
     valid_principal_type(&b.principal_type)?;
     valid_role(&b.role)?;
+    valid_effect(&b.effect)?;
 
     let role_id: Uuid =
         sqlx::query_scalar("SELECT id FROM roles WHERE scope = 'workspace' AND name = $1")
@@ -180,14 +199,15 @@ async fn grant_put(
     // return the canonical row whether we inserted or it already existed.
     sqlx::query(
         "INSERT INTO access_grants \
-           (principal_type, principal_id, role_id, scope_type, object_type, scope_id, granted_by) \
-         VALUES ($1, $2, $3, 'object', $4, $5, $6) ON CONFLICT DO NOTHING",
+           (principal_type, principal_id, role_id, scope_type, object_type, scope_id, effect, granted_by) \
+         VALUES ($1, $2, $3, 'object', $4, $5, $6, $7) ON CONFLICT DO NOTHING",
     )
     .bind(&b.principal_type)
     .bind(b.principal_id)
     .bind(role_id)
     .bind(&kind)
     .bind(id)
+    .bind(&b.effect)
     .bind(ctx.principal.user_id.0)
     .execute(&st.db.pool)
     .await
@@ -196,12 +216,13 @@ async fn grant_put(
     let grant_id: Uuid = sqlx::query_scalar(
         "SELECT id FROM access_grants \
          WHERE principal_type = $1 AND principal_id = $2 AND role_id = $3 \
-           AND scope_type = 'object' AND scope_id = $4",
+           AND scope_type = 'object' AND scope_id = $4 AND effect = $5",
     )
     .bind(&b.principal_type)
     .bind(b.principal_id)
     .bind(role_id)
     .bind(id)
+    .bind(&b.effect)
     .fetch_one(&st.db.pool)
     .await
     .map_err(|e| BiApiError::from(crate::BiError::Db(e)))?;
@@ -211,6 +232,7 @@ async fn grant_put(
         principal_type: b.principal_type,
         principal_id: b.principal_id,
         role: b.role,
+        effect: b.effect,
     }))
 }
 
@@ -285,8 +307,8 @@ async fn grant_list(
     require_object(&*st.pdp, &ctx, &manage_action(&kind), obj)
         .await
         .map_err(BiApiError::from)?;
-    let rows: Vec<(Uuid, String, Uuid, String)> = sqlx::query_as(
-        "SELECT ag.id, ag.principal_type, ag.principal_id, r.name AS role \
+    let rows: Vec<(Uuid, String, Uuid, String, String)> = sqlx::query_as(
+        "SELECT ag.id, ag.principal_type, ag.principal_id, r.name AS role, ag.effect \
          FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
          WHERE ag.scope_type = 'object' AND ag.scope_id = $1 \
          ORDER BY ag.created_at",
@@ -297,11 +319,12 @@ async fn grant_list(
     .map_err(|e| BiApiError::from(crate::BiError::Db(e)))?;
     Ok(Json(
         rows.into_iter()
-            .map(|(gid, pt, pid, role)| ObjectGrantDto {
+            .map(|(gid, pt, pid, role, effect)| ObjectGrantDto {
                 id: gid,
                 principal_type: pt,
                 principal_id: pid,
                 role,
+                effect,
             })
             .collect(),
     ))

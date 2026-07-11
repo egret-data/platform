@@ -54,6 +54,7 @@ impl Authorizer {
                     OR (ag.principal_type = 'group' AND ag.principal_id IN \
                           (SELECT group_id FROM user_groups WHERE user_id = $1)) ) \
                  AND ag.scope_type = 'object' \
+                 AND ag.effect = 'allow' \
                  AND ( (ag.object_type = 'folder'    AND ag.scope_id IN (SELECT id FROM analytics.folders    WHERE workspace_id = $2)) \
                     OR (ag.object_type = 'dashboard' AND ag.scope_id IN (SELECT id FROM analytics.dashboards WHERE workspace_id = $2)) \
                     OR (ag.object_type = 'chart'     AND ag.scope_id IN (SELECT id FROM analytics.charts     WHERE workspace_id = $2)) \

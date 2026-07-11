@@ -20131,7 +20131,11 @@
           },
           "role": {
             "type": "string",
-            "description": "`ws_viewer` (Viewer, read) | `ws_editor` (Editor, manage)."
+            "description": "`ws_viewer` (Viewer, read) | `ws_editor` (Editor, manage). For a \"Blocked\"\ngrant, send `ws_editor` with `effect=\"deny\"`."
+          },
+          "effect": {
+            "type": "string",
+            "description": "`allow` (default) | `deny`. A deny blocks the principal on this object."
           }
         }
       },
@@ -20142,7 +20146,8 @@
           "id",
           "principal_type",
           "principal_id",
-          "role"
+          "role",
+          "effect"
         ],
         "properties": {
           "id": {
@@ -20159,6 +20164,10 @@
           "role": {
             "type": "string",
             "description": "The workspace role name (`ws_viewer` | `ws_editor`)."
+          },
+          "effect": {
+            "type": "string",
+            "description": "`allow` | `deny`."
           }
         }
       },
