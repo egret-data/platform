@@ -1,6 +1,9 @@
 //! Cedar-based policy decision point.
+pub mod audit;
 pub mod entities;
 pub mod templates;
+
+pub use audit::AuditingPdp;
 
 use std::collections::HashMap;
 use std::sync::Arc;
