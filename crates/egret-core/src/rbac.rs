@@ -304,10 +304,11 @@ pub fn is_known(key: &str) -> bool {
     PERMISSIONS.iter().any(|p| p.key == key)
 }
 
-/// Actions that mutate the authorization graph itself (roles, role-permission
-/// sets, role/group assignments). Admin-only and NON-delegatable: the PDP
-/// `forbid`s them for everyone but `platform_admin`. Deliberately NOT in
-/// `PERMISSIONS` (not grantable). See the B1b-2 design.
+/// Admin-only, NON-delegatable actions: the PDP `forbid`s them for everyone but
+/// `platform_admin`. Mostly authorization-graph mutations (roles, role-permission
+/// sets, role/group assignments); also `audit:read` (the security audit trail is
+/// admin-only — B4). Deliberately NOT in `PERMISSIONS` (not grantable to any role).
+/// See the B1b-2 design.
 pub static ADMIN_GRAPH_ACTIONS: &[&str] = &[
     "role:create",
     "role:update",
@@ -316,6 +317,7 @@ pub static ADMIN_GRAPH_ACTIONS: &[&str] = &[
     "user:assign_role",
     "group:manage_members",
     "user:assign_platform_role",
+    "audit:read",
 ];
 
 /// True if `key` is an admin-graph (non-delegatable) action.

@@ -69,7 +69,10 @@ async fn list_audit(
     Auth(p): Auth,
     Query(q): Query<AuditQueryParams>,
 ) -> Result<Json<AuditPage>, CpError> {
-    egret_core::authz::require(&*st.pdp, &p, "role:read").await?;
+    // The audit trail is platform-admin-only. `audit:read` is an ADMIN_GRAPH action
+    // (not in the grantable catalog), so only platform_admin passes — a non-admin
+    // governance role like `data_steward` (which holds `role:read`) is denied.
+    egret_core::authz::require(&*st.pdp, &p, "audit:read").await?;
     let limit = q.limit.unwrap_or(100).clamp(1, 500);
     let query = egret_audit::AuditQuery {
         actor: q.actor,

@@ -1693,4 +1693,21 @@ async fn audit_query_paginates_and_gates() {
         StatusCode::FORBIDDEN,
         "non-admin is forbidden on the audit query"
     );
+
+    // Security regression (B4 review finding A): the audit trail is admin-only.
+    // A non-admin governance role that holds `role:read` (e.g. `data_steward`)
+    // must STILL be forbidden — the gate is the admin-graph `audit:read`, not the
+    // grantable `role:read`.
+    let steward = session_for_with_permission(&f, "audit_query_steward", "role:read").await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/control-plane/audit", &steward, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a role:read holder (non-admin) must not read the audit trail"
+    );
 }
