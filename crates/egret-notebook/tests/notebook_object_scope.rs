@@ -79,8 +79,9 @@ async fn session_for(sessions: &egret_auth::session::SessionService, uid: Uuid) 
 
 async fn add_member(db: &Db, ws: Uuid, uid: Uuid, role: &str) {
     sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, principal_type, principal_id, role) \
-         VALUES ($1, 'user', $2, $3)",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $2, r.id, 'workspace', $1 FROM roles r \
+         WHERE r.scope = 'workspace' AND r.name = $3 ON CONFLICT DO NOTHING",
     )
     .bind(ws)
     .bind(uid)

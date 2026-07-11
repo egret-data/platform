@@ -346,8 +346,8 @@ async fn add_member(
     (uid, token)
 }
 
-/// Like `add_member`, but inserts the `workspace_members` row directly via
-/// SQL, bypassing `MemberRepo::add`'s built-in-role allow-list — needed to
+/// Like `add_member`, but inserts the workspace-scope `access_grants` row
+/// directly via SQL, bypassing `MemberRepo::add`'s built-in-role allow-list — needed to
 /// seed a member under the custom PDP-test role (`f.no_read_role`), which
 /// isn't one of the three built-in workspace roles.
 async fn add_member_with_role(
@@ -363,8 +363,9 @@ async fn add_member_with_role(
         .await
         .expect("insert user");
     sqlx::query(
-        "INSERT INTO workspace_members (workspace_id, principal_type, principal_id, role, added_by) \
-         VALUES ($1, 'user', $2, $3, $4)",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id, granted_by) \
+         SELECT 'user', $2, r.id, 'workspace', $1, $4 FROM roles r \
+         WHERE r.scope = 'workspace' AND r.name = $3 ON CONFLICT DO NOTHING",
     )
     .bind(workspace.0)
     .bind(uid.0)

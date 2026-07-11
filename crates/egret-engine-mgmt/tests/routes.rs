@@ -154,8 +154,8 @@ async fn session_for(f: &Fixture, tag: &str, platform_admin: bool) -> String {
         .expect("insert user");
     if platform_admin {
         sqlx::query(
-            "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
-             SELECT 'user', $1, id FROM roles WHERE scope='platform' AND name='platform_admin'",
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             SELECT 'user', $1, id, 'platform', NULL FROM roles WHERE scope='platform' AND name='platform_admin'",
         )
         .bind(uid.0)
         .execute(&f.db.pool)
@@ -200,8 +200,8 @@ async fn session_for_with_permission(f: &Fixture, tag: &str, permission: &str) -
         .expect("grant permission");
 
     sqlx::query(
-        "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
-         VALUES ('user', $1, $2)",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, 'platform', NULL)",
     )
     .bind(uid.0)
     .bind(role_id)
