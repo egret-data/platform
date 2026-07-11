@@ -122,6 +122,7 @@ async fn submit(
             body.database_id,
             Some(ctx.principal.user_id.0),
             session_user,
+            None,
             &body.sql,
             body.limit,
         )

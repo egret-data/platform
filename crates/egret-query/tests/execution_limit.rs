@@ -137,6 +137,7 @@ async fn per_query_limit_caps_rows() {
             did,
             None,
             None,
+            None,
             "SELECT * FROM UNNEST(SEQUENCE(1,100)) AS t(n)",
             Some(5),
         )

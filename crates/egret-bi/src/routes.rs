@@ -1043,6 +1043,7 @@ async fn ds_data(
         &sql,
         Some(limit as usize),
         Some(ctx.principal.email.clone()),
+        None,
         &chart_run_limits(),
         tokio_util::sync::CancellationToken::new(),
     )
@@ -1812,6 +1813,7 @@ async fn ch_run(
         &sql,
         Some(spec.row_limit.max(0) as usize),
         Some(ctx.principal.email.clone()),
+        None,
         &chart_run_limits(),
         tokio_util::sync::CancellationToken::new(),
     )
@@ -2097,6 +2099,7 @@ async fn db_card_run(
         &sql,
         Some(spec.row_limit.max(0) as usize),
         Some(ctx.principal.email.clone()),
+        None,
         &chart_run_limits(),
         tokio_util::sync::CancellationToken::new(),
     )
