@@ -18,6 +18,16 @@ describe("buildCartesianOption — base", () => {
     const opt = buildCartesianOption(columns, rows, { kind: "line", xAxis: "region", yMetrics: ["rev"] }) as any;
     expect(opt.series[0].type).toBe("line");
   });
+  it("a11y: line series cycle dash style + marker shape (not colour alone), and aria is enabled", () => {
+    const opt = buildCartesianOption(columns, rows, { kind: "line", xAxis: "region", yMetrics: ["rev", "cnt"] }) as any;
+    // Screen-reader data description (non-visual fallback).
+    expect(opt.aria).toMatchObject({ enabled: true });
+    // First two series get DISTINCT dash types + marker shapes so colour-blind
+    // users can tell them apart without relying on the palette colour.
+    expect(opt.series[0].lineStyle.type).toBe("solid");
+    expect(opt.series[1].lineStyle.type).toBe("dashed");
+    expect(opt.series[0].symbol).not.toBe(opt.series[1].symbol);
+  });
   it("returns empty series when x or metrics missing", () => {
     const opt = buildCartesianOption(columns, rows, { kind: "bar", yMetrics: [] }) as any;
     expect(opt.series).toEqual([]);

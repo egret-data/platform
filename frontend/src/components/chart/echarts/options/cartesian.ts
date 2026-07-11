@@ -3,7 +3,7 @@ import type { CartesianViz } from "@/api/charts";
 import type { ColumnFormat } from "../../format-types";
 import { isNumericType, isTemporalType } from "../../format-types";
 import { formatValue } from "../../format";
-import { CHART_THEME, COLOR_FALLBACK, resolveColor, seriesColor, SUMMARIZE_COLOR } from "../palette";
+import { ARIA_A11Y, CHART_THEME, COLOR_FALLBACK, lineType, resolveColor, seriesColor, SUMMARIZE_COLOR, symbolShape } from "../palette";
 import { isExtractUnit, temporalLabel } from "@/components/chart/temporal-units";
 
 export interface ResultColumn { name: string; type: string }
@@ -316,13 +316,17 @@ function decorateSeries(
   if (cfg.kind === "area") out.areaStyle = { opacity: CHART_THEME.areaOpacity };
   if (type === "line") {
     out.smooth = !!cfg.smooth;
-    out.lineStyle = { width: CHART_THEME.lineWidth };
+    // Cycle the dash style + marker shape per series so lines are distinguishable
+    // without relying on colour alone (a11y: colour-blind users).
+    out.lineStyle = { width: CHART_THEME.lineWidth, type: lineType(colorIdx) };
+    out.symbol = symbolShape(colorIdx);
     out.symbolSize = CHART_THEME.symbolSize;
     out.showSymbol = cfg.showMarkers !== false;  // markers shown unless explicitly turned off
     out.connectNulls = cfg.connectNulls ?? true; // Metabase connects across nulls by default
     if (cfg.step) out.step = "middle";
   }
-  if (type === "scatter") { out.symbolSize = CHART_THEME.symbolSize; out.itemStyle = { color, opacity: CHART_THEME.scatterOpacity }; }
+  // Scatter series get a distinct marker shape per series (shape, not colour).
+  if (type === "scatter") { out.symbol = symbolShape(colorIdx); out.symbolSize = CHART_THEME.symbolSize; out.itemStyle = { color, opacity: CHART_THEME.scatterOpacity }; }
   if (isDualAxis(cfg) && rightMetrics(cfg).includes(metric)) out.yAxisIndex = 1;
   if (cfg.showLabels) {
     out.label = {
@@ -438,6 +442,7 @@ function baseOption(cfg: CartesianBuildConfig, categories: (string | number)[], 
   };
 
   return {
+    aria: ARIA_A11Y, // screen-reader data description (non-visual fallback)
     color: undefined,
     grid,
     tooltip: { trigger: cfg.kind === "scatter" ? "item" : "axis", formatter: tooltipFormatter },
