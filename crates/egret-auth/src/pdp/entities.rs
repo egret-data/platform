@@ -185,6 +185,7 @@ mod tests {
             scope_type: "workspace".into(),
             scope_id: Some(ws.0),
             object_type: None,
+            effect: "allow".into(),
         }];
         let ps = link_grants(ps, &subject, &grants, &names);
 
@@ -260,6 +261,7 @@ mod tests {
                 scope_type: "object".into(),
                 scope_id: Some(f1),
                 object_type: Some("folder".into()),
+                effect: "allow".into(),
             },
         );
 
@@ -296,6 +298,7 @@ mod tests {
                 scope_type: "object".into(),
                 scope_id: Some(d1),
                 object_type: Some("dashboard".into()),
+                effect: "allow".into(),
             },
         );
 

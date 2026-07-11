@@ -14,7 +14,18 @@ pub struct Grant {
     /// that namespaces the Cedar `Object` entity id. `None` for platform/workspace
     /// grants. Populated from SQL in Task 3.
     pub object_type: Option<String>,
+    /// 'allow' | 'deny'. Deny links the `role-deny:{id}` forbid template.
+    pub effect: String,
 }
+
+/// (role_id, scope_type, scope_id, object_type, effect) as read from SQL.
+type GrantRow = (
+    uuid::Uuid,
+    String,
+    Option<uuid::Uuid>,
+    Option<String>,
+    String,
+);
 
 #[derive(Clone)]
 pub struct AccessGrantStore {
@@ -39,8 +50,8 @@ impl AccessGrantStore {
         ws: Option<WorkspaceId>,
         object_scope_ids: &[uuid::Uuid],
     ) -> Result<Vec<Grant>> {
-        let rows: Vec<(uuid::Uuid, String, Option<uuid::Uuid>, Option<String>)> = sqlx::query_as(
-            "SELECT ag.role_id, ag.scope_type, ag.scope_id, ag.object_type \
+        let rows: Vec<GrantRow> = sqlx::query_as(
+            "SELECT ag.role_id, ag.scope_type, ag.scope_id, ag.object_type, ag.effect \
              FROM access_grants ag \
              WHERE ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
                   OR (ag.principal_type = 'group' AND ag.principal_id IN \
@@ -57,12 +68,15 @@ impl AccessGrantStore {
         .map_err(db_err)?;
         Ok(rows
             .into_iter()
-            .map(|(role_id, scope_type, scope_id, object_type)| Grant {
-                role_id,
-                scope_type,
-                scope_id,
-                object_type,
-            })
+            .map(
+                |(role_id, scope_type, scope_id, object_type, effect)| Grant {
+                    role_id,
+                    scope_type,
+                    scope_id,
+                    object_type,
+                    effect,
+                },
+            )
             .collect())
     }
 }
