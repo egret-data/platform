@@ -112,6 +112,14 @@
   --input: oklch(0.92 0 286.61);
   --ring: oklch(0.71 0.01 286.09);
 
+  /* Functional highlight (amber) — a warm accent for a page's single primary
+     emphasis: "recommended" badges, featured/active markers, upsell CTAs. The
+     teal `--primary` stays the default action color; `--highlight` is the rarer,
+     attention-grabbing accent (data-dashboard "blue data + amber highlight"
+     pattern). NOT `--accent`, which shadcn uses for hover/focus backgrounds. */
+  --highlight: oklch(0.72 0.15 65);
+  --highlight-foreground: oklch(0.28 0.06 65);
+
   /* Font families */
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
@@ -152,6 +160,10 @@
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.55 0.02 285.93);
 
+  /* Dark mode: a brighter amber so it reads on the dark surfaces, dark text on it. */
+  --highlight: oklch(0.78 0.15 70);
+  --highlight-foreground: oklch(0.22 0.05 70);
+
   /* Shadows - Dark mode */
   --shadow-xs: 0 1px 3px 0px oklch(0 0 0 / 0.05);
   --shadow-sm: 0 1px 3px 0px oklch(0 0 0 / 0.1), 0 1px 2px -1px oklch(0 0 0 / 0.1);
@@ -180,6 +192,8 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
+  --color-highlight: var(--highlight);
+  --color-highlight-foreground: var(--highlight-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
@@ -231,4 +245,25 @@ code {
 /* Font smoothing */
 * {
   -webkit-font-smoothing: antialiased;
+}
+
+/* Accessibility: honor the OS "reduce motion" setting — neutralize transitions,
+   animations, and smooth-scroll so the UI stays fully functional without motion
+   (WCAG 2.3.3 / prefers-reduced-motion). Data still renders immediately. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Tabular figures for numeric/data contexts (right-aligned counts, ids, metrics,
+   timers) so digits don't shift width and columns stay aligned. Apply `tabular`
+   (or Tailwind's `tabular-nums`) on the number cell/value. */
+.tabular {
+  font-variant-numeric: tabular-nums;
 }
