@@ -122,10 +122,10 @@ impl WorkspaceRepo {
         } else {
             sqlx::query_as::<_, WorkspaceRow>(
                 "SELECT DISTINCT w.id, w.slug, w.name, w.status FROM workspaces w \
-                 JOIN workspace_members wm ON wm.workspace_id = w.id \
+                 JOIN access_grants ag ON ag.scope_id = w.id AND ag.scope_type = 'workspace' \
                  WHERE w.status = 'active' \
-                   AND ( (wm.principal_type = 'user'  AND wm.principal_id = $1) \
-                      OR (wm.principal_type = 'group' AND wm.principal_id IN \
+                   AND ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
+                      OR (ag.principal_type = 'group' AND ag.principal_id IN \
                              (SELECT group_id FROM user_groups WHERE user_id = $1)) ) \
                  ORDER BY w.name",
             )

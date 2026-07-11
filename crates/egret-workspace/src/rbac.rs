@@ -23,10 +23,11 @@ impl Authorizer {
         ws: WorkspaceId,
     ) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT DISTINCT wm.role FROM workspace_members wm \
-             WHERE wm.workspace_id = $1 \
-               AND ( (wm.principal_type = 'user'  AND wm.principal_id = $2) \
-                  OR (wm.principal_type = 'group' AND wm.principal_id IN \
+            "SELECT DISTINCT r.name FROM access_grants ag \
+             JOIN roles r ON r.id = ag.role_id \
+             WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1 \
+               AND ( (ag.principal_type = 'user'  AND ag.principal_id = $2) \
+                  OR (ag.principal_type = 'group' AND ag.principal_id IN \
                          (SELECT group_id FROM user_groups WHERE user_id = $2)) )",
         )
         .bind(ws.0)
