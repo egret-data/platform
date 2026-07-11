@@ -193,6 +193,7 @@ export default function Charts() {
           </div>
 
           {rows.length > 0 ? (
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
@@ -227,6 +228,7 @@ export default function Charts() {
                 })
               )}
             </table>
+            </div>
           ) : (
             <p className="text-muted-foreground">{onlyBookmarked ? "No bookmarked charts." : "No charts match the current filters."}</p>
           )}

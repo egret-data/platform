@@ -516,6 +516,7 @@ export default function Notebooks() {
           </div>
 
           {rows.length > 0 ? (
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
@@ -574,6 +575,7 @@ export default function Notebooks() {
                 })
               )}
             </table>
+            </div>
           ) : (
             <p className="text-muted-foreground">
               {onlyBookmarked
