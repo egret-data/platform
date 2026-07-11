@@ -143,10 +143,12 @@ impl NotebookStore {
         Ok(id)
     }
 
-    /// List notebooks the viewer can see: owned or public, in this workspace.
-    /// `trashed` selects the trash bin (soft-deleted) instead of the live list.
-    /// Each row carries a per-viewer `bookmarked` flag.
-    pub async fn list_visible(
+    /// List ALL notebooks in the workspace. Notebooks are role-based (any
+    /// `notebook:read` holder — every workspace member — sees them all), so the
+    /// old owner/public visibility filter is gone; `owner_user_id`/`is_public`
+    /// remain only as metadata. `trashed` selects the trash bin (soft-deleted)
+    /// instead of the live list. Each row carries a per-`viewer` `bookmarked` flag.
+    pub async fn list_in_workspace(
         &self,
         ws: Uuid,
         viewer: Uuid,
@@ -162,7 +164,7 @@ impl NotebookStore {
              EXISTS (SELECT 1 FROM analytics.bookmarks b WHERE b.user_id=$2 \
                  AND b.entity_type='notebook' AND b.entity_id=notebooks.id) AS bookmarked \
              FROM analytics.notebooks \
-             WHERE workspace_id=$1 AND (owner_user_id=$2 OR is_public) AND {pred} \
+             WHERE workspace_id=$1 AND {pred} \
              ORDER BY updated_at DESC"
         ))
         .bind(ws)
@@ -646,7 +648,7 @@ mod tests {
         assert_eq!(detail.cells[0].source, "");
         assert!(detail.summary.is_owner, "owner viewer => is_owner true");
 
-        let list = store.list_visible(ws, user, false).await.unwrap();
+        let list = store.list_in_workspace(ws, user, false).await.unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, id);
         assert!(list[0].is_owner);
@@ -656,7 +658,7 @@ mod tests {
         store.delete(id).await.unwrap();
         assert!(store.get_with_cells(id, user).await.unwrap().is_none());
         assert!(store
-            .list_visible(ws, user, false)
+            .list_in_workspace(ws, user, false)
             .await
             .unwrap()
             .is_empty());
@@ -675,19 +677,19 @@ mod tests {
         store.trash(id).await.unwrap();
         assert!(
             store
-                .list_visible(ws, alice, false)
+                .list_in_workspace(ws, alice, false)
                 .await
                 .unwrap()
                 .is_empty(),
             "trashed notebook hidden from live list"
         );
-        let trash = store.list_visible(ws, alice, true).await.unwrap();
+        let trash = store.list_in_workspace(ws, alice, true).await.unwrap();
         assert_eq!(trash.len(), 1, "trashed notebook shows in trash bin");
         assert!(trash[0].deleted_at.is_some(), "deleted_at populated");
 
         // Restore → reappears in the live list.
         store.restore(id).await.unwrap();
-        let live = store.list_visible(ws, alice, false).await.unwrap();
+        let live = store.list_in_workspace(ws, alice, false).await.unwrap();
         assert_eq!(live.len(), 1, "restored notebook back in live list");
         assert!(live[0].deleted_at.is_none());
 
@@ -706,12 +708,12 @@ mod tests {
             .await
             .unwrap();
 
-        let alice_list = store.list_visible(ws, alice, false).await.unwrap();
+        let alice_list = store.list_in_workspace(ws, alice, false).await.unwrap();
         assert!(
             alice_list.iter().any(|n| n.id == id && n.bookmarked),
             "alice sees her own bookmark"
         );
-        let bob_list = store.list_visible(ws, bob, false).await.unwrap();
+        let bob_list = store.list_in_workspace(ws, bob, false).await.unwrap();
         assert!(
             bob_list.iter().any(|n| n.id == id && !n.bookmarked),
             "bob does not see alice's bookmark"
@@ -720,7 +722,7 @@ mod tests {
         // remove_bookmark is idempotent and clears the flag.
         store.remove_bookmark(alice, id).await.unwrap();
         store.remove_bookmark(alice, id).await.unwrap();
-        let alice_list = store.list_visible(ws, alice, false).await.unwrap();
+        let alice_list = store.list_in_workspace(ws, alice, false).await.unwrap();
         assert!(alice_list.iter().all(|n| !n.bookmarked));
     }
 
@@ -759,15 +761,15 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "../../migrations")]
-    async fn list_visibility_owner_and_public(pool: sqlx::PgPool) {
+    async fn list_returns_all_workspace_notebooks(pool: sqlx::PgPool) {
         let db = Db { pool };
         let store = NotebookStore::new(db.clone());
         let (ws, alice) = seed(&db).await;
         let bob = seed_second_user(&db).await;
 
+        // Two notebooks owned by alice; one left private, one flagged public.
         let priv_nb = store.create(ws, alice, "priv").await.unwrap();
         let pub_nb = store.create(ws, alice, "pub").await.unwrap();
-        // Make pub_nb public.
         store
             .update(
                 pub_nb,
@@ -780,17 +782,22 @@ mod tests {
             .await
             .unwrap();
 
-        // Bob sees only the public notebook.
-        let bob_list = store.list_visible(ws, bob, false).await.unwrap();
-        assert_eq!(bob_list.len(), 1, "bob should see 1 notebook (public only)");
-        assert_eq!(bob_list[0].id, pub_nb);
-        assert!(!bob_list[0].is_owner, "bob is not the owner");
+        // Role-based: Bob (a non-owner) sees BOTH notebooks — the private one too,
+        // since is_public/owner no longer gate visibility.
+        let bob_list = store.list_in_workspace(ws, bob, false).await.unwrap();
+        assert_eq!(
+            bob_list.len(),
+            2,
+            "bob sees ALL workspace notebooks (role-based, not just public)"
+        );
+        assert!(bob_list.iter().all(|n| !n.is_owner), "bob owns neither");
+        assert!(bob_list.iter().any(|n| n.id == priv_nb));
+        assert!(bob_list.iter().any(|n| n.id == pub_nb));
 
-        // Alice sees both.
-        let alice_list = store.list_visible(ws, alice, false).await.unwrap();
+        // Alice sees both too, marked as owner.
+        let alice_list = store.list_in_workspace(ws, alice, false).await.unwrap();
         assert_eq!(alice_list.len(), 2, "alice should see both");
-
-        let _ = priv_nb;
+        assert!(alice_list.iter().all(|n| n.is_owner));
     }
 
     #[sqlx::test(migrations = "../../migrations")]

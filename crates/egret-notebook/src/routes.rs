@@ -1,13 +1,15 @@
-//! Workspace-scoped notebook REST routes + ownership enforcement.
+//! Workspace-scoped notebook REST routes + object-scope authorization.
 //!
-//! Ownership rules (defense-in-depth on top of the store's SQL guards):
-//!   - **read** (GET one): allowed iff the notebook is in the caller's workspace
-//!     AND (the caller owns it OR it is public). Cross-workspace → 404,
-//!     not-own-not-public → 403.
-//!   - **write** (PATCH / DELETE / all cell mutations): owner ONLY — there is
-//!     deliberately **no** `platform_admin` override (unlike the query seam).
-//!   - every cell route resolves its parent notebook and runs `write_scoped`
-//!     before mutating, and the store additionally scopes by `notebook_id`.
+//! Notebooks are ROLE-BASED, like BI content (dashboards/charts/datasets): a
+//! workspace `ws_viewer` may read every notebook in the workspace and a
+//! `ws_editor` may edit every notebook, and per-object shares additionally grant
+//! outside users access to a single notebook. Each per-notebook `{id}` handler
+//! resolves the notebook to an [`ObjectRef`] (`notebook_object_ref`) and gates on
+//! [`require_object`] (READ or WRITE); a folder/workspace/object grant cascades
+//! to it exactly as for the BI kinds. `owner_user_id`/`is_public` remain as
+//! metadata (creator + a now-cosmetic flag) but no longer gate access.
+//! Cross-workspace ids → 404 (don't leak existence); every cell route
+//! additionally scopes its write by `notebook_id` (nested-IDOR defense).
 
 use axum::extract::{FromRef, Path, Query, State};
 use axum::http::StatusCode;
@@ -15,6 +17,7 @@ use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
+use egret_core::authz::{require_object, ObjectRef};
 use egret_core::http::ErrorBody;
 use egret_core::{Error, WorkspaceContext, WorkspacePath};
 use egret_workspace::context::WsContext;
@@ -100,36 +103,16 @@ pub struct ListQuery {
     pub trashed: bool,
 }
 
-/// Read scope: resolve a notebook and assert the caller may *view* it.
-/// Cross-workspace → 404 (don't leak existence); not-own-not-public → 403.
-async fn read_scoped(
+/// Resolve a notebook to the [`ObjectRef`] (folder + workspace ancestry) the PDP
+/// needs, asserting it lives in the path workspace. `NotFound` if the notebook is
+/// absent OR belongs to another workspace (cross-tenant → don't leak existence).
+/// Callers pass the result to [`require_object`], which does the actual
+/// role/share authorization — this function no longer inspects owner/public.
+async fn notebook_object_ref(
     st: &NotebookState,
     ctx: &WorkspaceContext,
     id: Uuid,
-) -> Result<NotebookSummary, NotebookApiError> {
-    let (mut summary, ws) = st
-        .store
-        .get_summary(id)
-        .await?
-        .ok_or_else(|| Error::NotFound("notebook".into()))?;
-    if ws != ctx.workspace_id.0 {
-        return Err(Error::NotFound("notebook".into()).into());
-    }
-    let me = ctx.principal.user_id.0;
-    if summary.owner_user_id != me && !summary.is_public {
-        return Err(Error::Forbidden.into());
-    }
-    summary.is_owner = summary.owner_user_id == me;
-    Ok(summary)
-}
-
-/// Write scope: owner ONLY. No `platform_admin` override by design.
-/// Cross-workspace → 404; non-owner (incl. platform_admin) → 403.
-async fn write_scoped(
-    st: &NotebookState,
-    ctx: &WorkspaceContext,
-    id: Uuid,
-) -> Result<(), NotebookApiError> {
+) -> Result<ObjectRef, NotebookApiError> {
     let (summary, ws) = st
         .store
         .get_summary(id)
@@ -138,10 +121,12 @@ async fn write_scoped(
     if ws != ctx.workspace_id.0 {
         return Err(Error::NotFound("notebook".into()).into());
     }
-    if summary.owner_user_id != ctx.principal.user_id.0 {
-        return Err(Error::Forbidden.into());
-    }
-    Ok(())
+    Ok(ObjectRef {
+        kind: "notebook".into(),
+        id,
+        folder_id: summary.folder_id,
+        workspace_id: ctx.workspace_id,
+    })
 }
 
 #[utoipa::path(
@@ -153,7 +138,7 @@ async fn write_scoped(
         ("trashed" = Option<bool>, Query, description = "List the trash bin instead of live notebooks when true"),
     ),
     responses(
-        (status = 200, description = "Notebooks visible to the caller (own + public)", body = Vec<NotebookSummary>),
+        (status = 200, description = "All notebooks in the workspace (role-based)", body = Vec<NotebookSummary>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing notebook:read permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -169,7 +154,7 @@ async fn list(
         .map_err(NotebookApiError::from)?;
     let nbs = st
         .store
-        .list_visible(ctx.workspace_id.0, ctx.principal.user_id.0, q.trashed)
+        .list_in_workspace(ctx.workspace_id.0, ctx.principal.user_id.0, q.trashed)
         .await?;
     Ok(Json(nbs))
 }
@@ -229,11 +214,10 @@ async fn get_one(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> Result<Json<NotebookDetail>, NotebookApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, READ)
+    let obj = notebook_object_ref(&st, &ctx, id).await?;
+    require_object(&*st.pdp, &ctx, READ, obj)
         .await
         .map_err(NotebookApiError::from)?;
-    // Enforce ws-scope + (own OR public) before reading.
-    read_scoped(&st, &ctx, id).await?;
     let detail = st
         .store
         .get_with_cells(id, ctx.principal.user_id.0)
@@ -265,10 +249,10 @@ async fn update(
     Path((_ws, id)): Path<(String, Uuid)>,
     Json(b): Json<UpdateNotebook>,
 ) -> Result<Json<NotebookDetail>, NotebookApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
+    let obj = notebook_object_ref(&st, &ctx, id).await?;
+    require_object(&*st.pdp, &ctx, WRITE, obj)
         .await
         .map_err(NotebookApiError::from)?;
-    write_scoped(&st, &ctx, id).await?;
     st.store.update(id, &b).await?;
     let detail = st
         .store
@@ -299,10 +283,10 @@ async fn remove(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> Result<StatusCode, NotebookApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
+    let obj = notebook_object_ref(&st, &ctx, id).await?;
+    require_object(&*st.pdp, &ctx, WRITE, obj)
         .await
         .map_err(NotebookApiError::from)?;
-    write_scoped(&st, &ctx, id).await?;
     st.store.delete(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -329,10 +313,10 @@ async fn trash(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> Result<StatusCode, NotebookApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
+    let obj = notebook_object_ref(&st, &ctx, id).await?;
+    require_object(&*st.pdp, &ctx, WRITE, obj)
         .await
         .map_err(NotebookApiError::from)?;
-    write_scoped(&st, &ctx, id).await?;
     st.store.trash(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -359,10 +343,10 @@ async fn restore(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> Result<StatusCode, NotebookApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
+    let obj = notebook_object_ref(&st, &ctx, id).await?;
+    require_object(&*st.pdp, &ctx, WRITE, obj)
         .await
         .map_err(NotebookApiError::from)?;
-    write_scoped(&st, &ctx, id).await?;
     st.store.restore(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -393,10 +377,10 @@ async fn set_folder(
     Path((_ws, id)): Path<(String, Uuid)>,
     Json(b): Json<SetFolder>,
 ) -> Result<StatusCode, NotebookApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
+    let obj = notebook_object_ref(&st, &ctx, id).await?;
+    require_object(&*st.pdp, &ctx, WRITE, obj)
         .await
         .map_err(NotebookApiError::from)?;
-    write_scoped(&st, &ctx, id).await?;
     if let Some(fid) = b.folder_id {
         match st.store.folder_kind(fid).await? {
             Some((w, t)) if w == ctx.workspace_id.0 && t == "notebook" => {}
@@ -429,10 +413,10 @@ async fn bookmark_add(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> Result<StatusCode, NotebookApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, READ)
+    let obj = notebook_object_ref(&st, &ctx, id).await?;
+    require_object(&*st.pdp, &ctx, READ, obj)
         .await
         .map_err(NotebookApiError::from)?;
-    read_scoped(&st, &ctx, id).await?;
     st.store.add_bookmark(ctx.principal.user_id.0, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -459,10 +443,10 @@ async fn bookmark_remove(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> Result<StatusCode, NotebookApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, READ)
+    let obj = notebook_object_ref(&st, &ctx, id).await?;
+    require_object(&*st.pdp, &ctx, READ, obj)
         .await
         .map_err(NotebookApiError::from)?;
-    read_scoped(&st, &ctx, id).await?;
     st.store
         .remove_bookmark(ctx.principal.user_id.0, id)
         .await?;
@@ -493,10 +477,10 @@ async fn add_cell(
     Path((_ws, id)): Path<(String, Uuid)>,
     Json(b): Json<CreateCell>,
 ) -> Result<(StatusCode, Json<NotebookDetail>), NotebookApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
+    let obj = notebook_object_ref(&st, &ctx, id).await?;
+    require_object(&*st.pdp, &ctx, WRITE, obj)
         .await
         .map_err(NotebookApiError::from)?;
-    write_scoped(&st, &ctx, id).await?;
     CellType::parse(&b.cell_type).ok_or_else(|| Error::InvalidInput("invalid cell_type".into()))?;
     st.store
         .add_cell(
@@ -539,10 +523,10 @@ async fn update_cell(
     Path((_ws, id, cid)): Path<(String, Uuid, Uuid)>,
     Json(b): Json<UpdateCell>,
 ) -> Result<StatusCode, NotebookApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
+    let obj = notebook_object_ref(&st, &ctx, id).await?;
+    require_object(&*st.pdp, &ctx, WRITE, obj)
         .await
         .map_err(NotebookApiError::from)?;
-    write_scoped(&st, &ctx, id).await?;
     if let Some(t) = &b.cell_type {
         CellType::parse(t).ok_or_else(|| Error::InvalidInput("invalid cell_type".into()))?;
     }
@@ -572,10 +556,10 @@ async fn delete_cell(
     WsContext(ctx): WsContext,
     Path((_ws, id, cid)): Path<(String, Uuid, Uuid)>,
 ) -> Result<StatusCode, NotebookApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
+    let obj = notebook_object_ref(&st, &ctx, id).await?;
+    require_object(&*st.pdp, &ctx, WRITE, obj)
         .await
         .map_err(NotebookApiError::from)?;
-    write_scoped(&st, &ctx, id).await?;
     st.store.delete_cell(id, cid).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -603,10 +587,10 @@ async fn reorder(
     Path((_ws, id)): Path<(String, Uuid)>,
     Json(b): Json<ReorderCells>,
 ) -> Result<StatusCode, NotebookApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WRITE)
+    let obj = notebook_object_ref(&st, &ctx, id).await?;
+    require_object(&*st.pdp, &ctx, WRITE, obj)
         .await
         .map_err(NotebookApiError::from)?;
-    write_scoped(&st, &ctx, id).await?;
     st.store.reorder(id, &b.order).await?;
     Ok(StatusCode::NO_CONTENT)
 }
