@@ -8,8 +8,16 @@ use std::sync::Arc;
 struct FixedPdp(bool);
 #[async_trait::async_trait]
 impl Pdp for FixedPdp {
-    async fn authorize(&self, _s: &Subject, _a: &str, _r: &Resource) -> egret_core::Result<Decision> {
-        Ok(Decision { allow: self.0, reasons: vec!["p1".into()] })
+    async fn authorize(
+        &self,
+        _s: &Subject,
+        _a: &str,
+        _r: &Resource,
+    ) -> egret_core::Result<Decision> {
+        Ok(Decision {
+            allow: self.0,
+            reasons: vec!["p1".into()],
+        })
     }
 }
 
@@ -17,13 +25,24 @@ impl Pdp for FixedPdp {
 async fn emits_a_decision_event() {
     let (sink, mut rx) = AuditSink::new(16);
     let pdp = AuditingPdp::new(Arc::new(FixedPdp(false)), sink);
-    let subject = Subject { user_id: UserId::new(), group_ids: vec![] };
+    let subject = Subject {
+        user_id: UserId::new(),
+        group_ids: vec![],
+    };
     let ws = WorkspaceId::new();
-    let d = pdp.authorize(&subject, "dashboard:read", &Resource::Workspace(ws)).await.unwrap();
+    let d = pdp
+        .authorize(&subject, "dashboard:read", &Resource::Workspace(ws))
+        .await
+        .unwrap();
     assert!(!d.allow);
     let ev = rx.try_recv().expect("one event emitted");
     match ev {
-        AuditEvent::Decision { action, allow, resource_type, .. } => {
+        AuditEvent::Decision {
+            action,
+            allow,
+            resource_type,
+            ..
+        } => {
             assert_eq!(action, "dashboard:read");
             assert!(!allow);
             assert_eq!(resource_type, "workspace");
