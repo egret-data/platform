@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Boxes, Loader2, Plus, Trash2 } from "lucide-react";
+import { Boxes, CheckCircle2, HardDrive, Loader2, Plus, Trash2, Warehouse as WarehouseIcon } from "lucide-react";
 
 import {
   type Warehouse,
@@ -13,6 +13,7 @@ import {
 } from "@/api/controlPlane";
 import { useMyWorkspaces } from "@/api/hooks";
 import { ApiError } from "@/api/client";
+import { StatCard, StatCardRow } from "@/components/control-plane/StatCard";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -103,7 +104,20 @@ export default function Warehouses() {
           </Button>
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-4">
+        {(() => {
+          const all = rows;
+          const total = all.length;
+          const provisioned = all.filter((w) => w.lakekeeperWarehouseId).length;
+          const storageCount = storage.data?.length ?? 0;
+          return (
+            <StatCardRow>
+              <StatCard label="Total" value={total} icon={WarehouseIcon} hint="Catalog warehouses" />
+              <StatCard label="Provisioned" value={provisioned} tone="success" icon={CheckCircle2} />
+              <StatCard label="Storage connections" value={storageCount} icon={HardDrive} />
+            </StatCardRow>
+          );
+        })()}
         {warehouses.isError ? (
           <Alert variant="destructive">
             <AlertDescription>Failed to load warehouses. Please try again.</AlertDescription>

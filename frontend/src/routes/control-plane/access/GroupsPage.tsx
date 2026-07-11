@@ -21,6 +21,7 @@ import {
 } from "@/api/access";
 import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
+import { StatCard, StatCardRow } from "@/components/control-plane/StatCard";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -135,7 +136,18 @@ export default function GroupsPage() {
             </Button>
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-4">
+          {(() => {
+            const all = rows;
+            const total = all.length;
+            const withRoles = all.filter((g) => g.roles.length > 0).length;
+            return (
+              <StatCardRow>
+                <StatCard label="Total" value={total} icon={UsersRound} hint="User groups" />
+                <StatCard label="With roles" value={withRoles} tone="success" icon={ShieldCheck} />
+              </StatCardRow>
+            );
+          })()}
           {deleteError && (
             <Alert variant="destructive" className="mb-4">
               <AlertDescription>{deleteError}</AlertDescription>

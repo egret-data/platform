@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { MoreHorizontal, Pencil, Plus, ShieldCheck } from "lucide-react";
+import { MoreHorizontal, Pencil, Plus, ShieldCheck, UserCheck, Users, UserX } from "lucide-react";
 
 import {
   type AccessRole,
@@ -14,6 +14,7 @@ import {
 } from "@/api/access";
 import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
+import { StatCard, StatCardRow } from "@/components/control-plane/StatCard";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -103,7 +104,20 @@ export default function UsersPage() {
             </Button>
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-4">
+          {(() => {
+            const all = rows;
+            const total = all.length;
+            const active = all.filter((u) => u.status === "active").length;
+            const disabled = total - active;
+            return (
+              <StatCardRow>
+                <StatCard label="Total" value={total} icon={Users} hint="Platform accounts" />
+                <StatCard label="Active" value={active} tone="success" icon={UserCheck} />
+                <StatCard label="Disabled" value={disabled} tone={disabled > 0 ? "warning" : "default"} icon={UserX} />
+              </StatCardRow>
+            );
+          })()}
           <Table>
             <TableHeader>
               <TableRow>
