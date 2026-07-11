@@ -497,6 +497,7 @@ pub fn dataset_router() -> Router<BiState> {
             "/ws/{workspace}/datasets/{id}/columns/{column_name}",
             put(ds_update_column).delete(ds_delete_column),
         )
+        .route("/ws/{workspace}/datasets/{id}/data", post(ds_data))
         .route("/ws/{workspace}/datasets/{id}/folder", patch(ds_set_folder))
         .route("/ws/{workspace}/datasets/{id}/trash", post(ds_trash))
         .route("/ws/{workspace}/datasets/{id}/restore", post(ds_restore))
@@ -950,6 +951,108 @@ fn source_of(ds: &crate::dataset::Dataset) -> SourceSpec {
             table: ds.table_name.clone().unwrap_or_default(),
         },
     }
+}
+
+/// Preview row-cap bounds for the object-scoped dataset data endpoint.
+const PREVIEW_DEFAULT_LIMIT: i64 = 200;
+const PREVIEW_MIN_LIMIT: i64 = 100;
+const PREVIEW_MAX_LIMIT: i64 = 1000;
+
+/// Body of the object-scoped dataset data-preview: an OPTIONAL row cap only.
+/// There is deliberately NO client SQL field — the endpoint always runs
+/// `SELECT * FROM <the dataset's own source>`, so a shared reader can preview
+/// only the dataset its grant covers. Unknown fields are ignored.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct DatasetDataBody {
+    /// Rows to preview. Clamped to [100, 1000]; defaults to 200 when absent.
+    pub limit: Option<i64>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/datasets/{id}/data",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+    ),
+    request_body = DatasetDataBody,
+    responses(
+        (status = 200, description = "A bounded preview of the dataset's OWN source (SELECT * … LIMIT n): columns + rows", body = ChartRunResponse),
+        (status = 400, description = "Malformed request body", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "No dataset:read grant on this dataset", body = ErrorBody),
+        (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
+        (status = 502, description = "Query engine error", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+/// Object-scoped dataset data-preview: runs ONLY a bounded
+/// `SELECT * FROM <the dataset's own source> LIMIT n` (n from the optional body,
+/// clamped to [100, 1000]). Accepts NO client SQL, so an object guest with a
+/// `dataset:read` grant can preview only the shared dataset — no `query:run`
+/// workspace permission required.
+async fn ds_data(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+    // OPTIONAL body, read as raw bytes so an empty POST is "use the default limit"
+    // rather than a parse error. A present-but-malformed body → 400.
+    raw_body: axum::body::Bytes,
+) -> Result<Json<ChartRunResponse>, BiApiError> {
+    // Object-scoped read gate: a non-granted dataset is denied here (403) BEFORE
+    // anything is loaded or run.
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_READ, obj)
+        .await
+        .map_err(BiApiError::from)?;
+
+    let body: DatasetDataBody = if raw_body.is_empty() {
+        DatasetDataBody { limit: None }
+    } else {
+        serde_json::from_slice(&raw_body)
+            .map_err(|_| Error::InvalidInput("invalid request body".into()))?
+    };
+    let limit = body
+        .limit
+        .unwrap_or(PREVIEW_DEFAULT_LIMIT)
+        .clamp(PREVIEW_MIN_LIMIT, PREVIEW_MAX_LIMIT);
+
+    let ds = st
+        .datasets
+        .get(id)
+        .await
+        .map_err(BiApiError::from)?
+        .ok_or(Error::NotFound("dataset".into()))?;
+    let database = st
+        .databases
+        .get(ds.database_id)
+        .await
+        .map_err(|e| BiApiError::from(crate::BiError::from(e)))?;
+
+    // Build the FROM with the SAME helper the chart-data path uses
+    // (`chartquery::build` → `source_ref_for`): physical sources are engine-quoted;
+    // a virtual dataset's saved SQL is wrapped as a subquery. NEVER hand-built.
+    let from = crate::expr::source_ref_for(database.engine, &source_of(&ds));
+    let sql = format!("SELECT *\nFROM {from}\nLIMIT {limit}");
+
+    let result = egret_query::execution::run_query(
+        &st.databases,
+        &egret_query::execution::connector::DefaultConnectorFactory,
+        ds.database_id,
+        &sql,
+        Some(limit as usize),
+        Some(ctx.principal.email.clone()),
+        &chart_run_limits(),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .map_err(|e| BiApiError::from(crate::BiError::from(e)))?;
+
+    Ok(Json(ChartRunResponse {
+        columns: result.columns,
+        rows: result.rows,
+    }))
 }
 
 /// Guard against cross-dataset/cross-workspace metric access: the metric must belong to
@@ -2645,6 +2748,7 @@ async fn require_folder(
         ds_update,
         ds_remove,
         ds_refresh,
+        ds_data,
         ds_add_metric,
         ds_update_metric,
         ds_delete_metric,
@@ -2668,6 +2772,9 @@ async fn require_folder(
         MetricBody,
         AddColumnBody,
         UpdateColumnBody,
+        DatasetDataBody,
+        ChartRunResponse,
+        egret_core::ColumnMeta,
         SetFolder,
         Ack,
         ErrorBody,
