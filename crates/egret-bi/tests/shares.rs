@@ -249,10 +249,10 @@ async fn object_share_grant_read_revoke() {
         "SECURITY: object-guest must NOT reach workspace-level list-all (over-admission)"
     );
 
-    // 3c. The per-ITEM dashboard read handler (`db_get`) is still workspace-scoped
-    //     (`require`, not `require_object` — that migration is Tasks 5-7), so it
-    //     also denies the guest on its OWN granted D. Safe/under-permissive: the
-    //     guest can read D only through the migrated (require_object) handlers.
+    // 3c. The per-ITEM dashboard read handler (`db_get`) is now object-scoped
+    //     (`require_object`, Task 7), so the object-guest CAN read its OWN granted
+    //     dashboard D (200) even though the workspace-level list-all above denies
+    //     them. Object grant admits exactly the granted item, nothing wider.
     let resp = app
         .clone()
         .oneshot(
@@ -266,8 +266,8 @@ async fn object_share_grant_read_revoke() {
         .unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::FORBIDDEN,
-        "db_get is workspace-scoped (require, not require_object) until Task 7; denies the guest"
+        StatusCode::OK,
+        "db_get is object-scoped (require_object, Task 7); admits the object-guest on its granted D"
     );
 
     // 4. A ws_viewer caller cannot grant (needs dashboard:manage) → 403.

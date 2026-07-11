@@ -1802,10 +1802,10 @@ async fn db_set_folder(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<crate::model::SetFolder>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DB_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dashboard_in_ws(&st, &ctx, id).await?;
     if let Some(fid) = b.folder_id {
         require_folder(&st, &ctx, fid, "dashboard").await?;
     }
@@ -1814,35 +1814,6 @@ async fn db_set_folder(
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-async fn require_dashboard_in_ws(
-    st: &BiState,
-    ctx: &egret_core::WorkspaceContext,
-    id: Uuid,
-) -> Result<(), BiApiError> {
-    match st
-        .dashboards
-        .dashboard_workspace(id)
-        .await
-        .map_err(BiApiError::from)?
-    {
-        Some(w) if w == ctx.workspace_id.0 => Ok(()),
-        _ => Err(Error::NotFound("dashboard".into()).into()),
-    }
-}
-
-async fn require_dashboard_owner(
-    st: &BiState,
-    ctx: &egret_core::WorkspaceContext,
-    id: Uuid,
-) -> Result<(), BiApiError> {
-    let owner = st.dashboards.owner(id).await.map_err(BiApiError::from)?;
-    if is_admin(ctx) || owner == Some(ctx.principal.user_id.0) {
-        Ok(())
-    } else {
-        Err(Error::Forbidden.into())
-    }
 }
 
 /// Every chart referenced by a card must live in the same workspace as the dashboard,
@@ -1966,10 +1937,10 @@ async fn db_get(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DashboardDetailDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DB_READ)
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_READ, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dashboard_in_ws(&st, &ctx, id).await?;
     Ok(Json(
         load_dashboard(&st, id, ctx.principal.user_id.0).await?,
     ))
@@ -1988,7 +1959,7 @@ async fn db_get(
         (status = 200, description = "Dashboard metadata + layout replaced", body = DashboardDetailDto),
         (status = 400, description = "Invalid layout (tab/card mismatch) or width not 'fixed'/'full'", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing dashboard:manage permission, or not the dashboard owner", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission", body = ErrorBody),
         (status = 404, description = "No such dashboard, or a referenced chart not in this workspace", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -1999,11 +1970,10 @@ async fn db_update(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<UpdateDashboard>,
 ) -> Result<Json<DashboardDetailDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DB_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dashboard_in_ws(&st, &ctx, id).await?;
-    require_dashboard_owner(&st, &ctx, id).await?;
     require_cards_in_ws(&st, &ctx, &b.cards).await?;
     crate::model::validate_layout(&b.tabs, &b.cards).map_err(BiApiError::from)?;
     if b.width != "fixed" && b.width != "full" {
@@ -2037,7 +2007,7 @@ async fn db_update(
     responses(
         (status = 200, description = "Dashboard deleted", body = Ack),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing dashboard:manage permission, or not the dashboard owner", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission", body = ErrorBody),
         (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -2047,11 +2017,10 @@ async fn db_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DB_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dashboard_in_ws(&st, &ctx, id).await?;
-    require_dashboard_owner(&st, &ctx, id).await?;
     st.dashboards.delete(id).await.map_err(BiApiError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -2067,7 +2036,7 @@ async fn db_remove(
     responses(
         (status = 200, description = "Dashboard moved to trash", body = Ack),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing dashboard:manage permission, or not the dashboard owner", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission", body = ErrorBody),
         (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -2077,11 +2046,10 @@ async fn db_trash(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DB_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dashboard_in_ws(&st, &ctx, id).await?;
-    require_dashboard_owner(&st, &ctx, id).await?;
     st.dashboards
         .set_trashed(id, true)
         .await
@@ -2100,7 +2068,7 @@ async fn db_trash(
     responses(
         (status = 200, description = "Dashboard restored from trash", body = Ack),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing dashboard:manage permission, or not the dashboard owner", body = ErrorBody),
+        (status = 403, description = "Missing dashboard:manage permission", body = ErrorBody),
         (status = 404, description = "No such dashboard in this workspace", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -2110,11 +2078,10 @@ async fn db_restore(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DB_MANAGE)
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dashboard_in_ws(&st, &ctx, id).await?;
-    require_dashboard_owner(&st, &ctx, id).await?;
     st.dashboards
         .set_trashed(id, false)
         .await
@@ -2143,10 +2110,12 @@ async fn db_duplicate(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<DashboardDetailDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DB_READ)
+    // Reading the source is object-scoped (DB_READ); the copy itself is a
+    // workspace-level create, so a reader who can see the dashboard may duplicate it.
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_READ, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dashboard_in_ws(&st, &ctx, id).await?;
     let copy = st
         .dashboards
         .duplicate(id, Some(ctx.principal.user_id.0))
@@ -2179,10 +2148,10 @@ async fn db_bookmark_add(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DB_READ)
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_READ, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dashboard_in_ws(&st, &ctx, id).await?;
     st.dashboards
         .add_bookmark(ctx.principal.user_id.0, "dashboard", id)
         .await
@@ -2211,10 +2180,10 @@ async fn db_bookmark_remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, DB_READ)
+    let obj = crate::shares::resolve(&st, &ctx, "dashboard", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DB_READ, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_dashboard_in_ws(&st, &ctx, id).await?;
     st.dashboards
         .remove_bookmark(ctx.principal.user_id.0, "dashboard", id)
         .await
