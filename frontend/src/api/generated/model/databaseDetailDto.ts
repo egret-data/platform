@@ -17,4 +17,5 @@ export interface DatabaseDetailDto {
   options: ConnOptions;
   has_secret: boolean;
   status: string;
+  delegated: boolean;
 }

@@ -298,6 +298,7 @@ function DatabaseConnDialog({
   const [schema, setSchema] = useState(editConn?.options.database ?? "");
   const [httpScheme, setHttpScheme] = useState(editConn?.options.http_scheme ?? "");
   const [impersonate, setImpersonate] = useState(editConn?.options.impersonate ?? false);
+  const [delegated, setDelegated] = useState(editConn?.delegated ?? false);
   const [secretSel, setSecretSel] = useState<SecretSelection>({});
   const [error, setError] = useState<string | null>(null);
 
@@ -311,6 +312,7 @@ function DatabaseConnDialog({
     setSchema(conn?.options.database ?? "");
     setHttpScheme(conn?.options.http_scheme ?? "");
     setImpersonate(conn?.options.impersonate ?? false);
+    setDelegated(conn?.delegated ?? false);
     setSecretSel({});
     setError(null);
     createMutation.reset();
@@ -342,6 +344,8 @@ function DatabaseConnDialog({
       host: host.trim(),
       port: Number(port),
       options,
+      // B3a: run BI queries as the caller's per-user engine JWT (delegation).
+      delegated,
       // Reference an existing named secret or create a new one. On edit with no
       // change, secretSel is `{}` so the backend keeps the current secret.
       ...secretSel,
@@ -487,6 +491,23 @@ function DatabaseConnDialog({
                 </p>
               </div>
             )}
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <Label htmlFor="db-delegated" className="font-normal">
+                  Per-user delegation
+                </Label>
+                <Switch
+                  id="db-delegated"
+                  checked={delegated}
+                  onCheckedChange={setDelegated}
+                  aria-label="Per-user delegation"
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Run queries as the signed-in user (requires SSO)
+              </p>
+            </div>
 
             <SecretPicker
               ws={ws}

@@ -415,4 +415,78 @@ describe("DatabasesPage", () => {
       );
     });
   });
+
+  // ── Per-user delegation toggle ────────────────────────────────────────────
+
+  it("renders the Per-user delegation switch in the Add dialog", async () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
+
+    await waitFor(() => screen.getByText("Add engine connection"));
+
+    expect(
+      screen.getByRole("switch", { name: /per-user delegation/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("toggling Per-user delegation and submitting includes delegated: true in the create payload", async () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
+
+    await waitFor(() => screen.getByText("Add engine connection"));
+
+    fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "trino-deleg" } });
+    fireEvent.change(screen.getByLabelText(/^host$/i), { target: { value: "trino.example.com" } });
+    fireEvent.change(screen.getByLabelText(/^port$/i), { target: { value: "8080" } });
+
+    fireEvent.click(screen.getByRole("switch", { name: /per-user delegation/i }));
+
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i, hidden: false }));
+
+    await waitFor(() => {
+      expect(createMutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "trino-deleg",
+          delegated: true,
+        }),
+      );
+    });
+  });
+
+  it("toggling Per-user delegation and submitting includes delegated: true in the update payload", async () => {
+    renderAt();
+
+    const editButtons = screen.getAllByRole("button", { name: /^edit/i });
+    fireEvent.click(editButtons[0]);
+
+    await waitFor(() => screen.getByText("Edit engine connection"));
+
+    fireEvent.click(screen.getByRole("switch", { name: /per-user delegation/i }));
+
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => {
+      const call = updateMutateAsync.mock.calls[0][0];
+      expect(call.input.delegated).toBe(true);
+    });
+  });
+
+  it("defaults delegated to false when the switch is untouched on create", async () => {
+    renderAt();
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
+
+    await waitFor(() => screen.getByText("Add engine connection"));
+
+    fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "no-deleg" } });
+    fireEvent.change(screen.getByLabelText(/^host$/i), { target: { value: "db.example.com" } });
+    fireEvent.change(screen.getByLabelText(/^port$/i), { target: { value: "8080" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /add connection/i, hidden: false }));
+
+    await waitFor(() => {
+      expect(createMutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({ delegated: false }),
+      );
+    });
+  });
 });

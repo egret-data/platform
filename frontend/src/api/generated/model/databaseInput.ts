@@ -24,4 +24,6 @@ export interface DatabaseInput {
   /** @nullable */
   secret_id?: string | null;
   new_secret?: null | NewSecret;
+  /** B3a: run BI queries as the caller's per-user engine JWT (delegation). */
+  delegated?: boolean;
 }
