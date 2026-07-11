@@ -29,6 +29,7 @@ import type {
   ChartDataBody,
   ChartDataResponse,
   ChartDto,
+  ChartRunResponse,
   ChartsChListParams,
   CreateChart,
   ErrorBody,
@@ -935,6 +936,128 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getChartsChBookmarkRemoveMutationOptions(options), queryClient);
+    }
+    export type chartsChRunResponse200 = {
+  data: ChartRunResponse
+  status: 200
+}
+
+export type chartsChRunResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type chartsChRunResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type chartsChRunResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type chartsChRunResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type chartsChRunResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type chartsChRunResponse502 = {
+  data: ErrorBody
+  status: 502
+}
+
+export type chartsChRunResponseSuccess = (chartsChRunResponse200) & {
+  headers: Headers;
+};
+export type chartsChRunResponseError = (chartsChRunResponse400 | chartsChRunResponse401 | chartsChRunResponse403 | chartsChRunResponse404 | chartsChRunResponse500 | chartsChRunResponse502) & {
+  headers: Headers;
+};
+
+export type chartsChRunResponse = (chartsChRunResponseSuccess | chartsChRunResponseError)
+
+export const getChartsChRunUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/charts/${encodeURIComponent(id)}/data`
+}
+
+/**
+ * @summary Object-scoped: runs ONLY the chart's persisted query (no client-supplied
+spec — the handler takes only the path id), so an object guest with a
+`chart:read` grant can view the shared chart's data without any query:run
+workspace permission.
+ */
+export const chartsChRun = async (workspace: string,
+    id: string, options?: RequestInit): Promise<chartsChRunResponse> => {
+
+  return customInstance<chartsChRunResponse>(getChartsChRunUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getChartsChRunMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof chartsChRun>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof chartsChRun>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['chartsChRun'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof chartsChRun>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  chartsChRun(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ChartsChRunMutationResult = NonNullable<Awaited<ReturnType<typeof chartsChRun>>>
+
+    export type ChartsChRunMutationError = ErrorBody
+
+    /**
+ * @summary Object-scoped: runs ONLY the chart's persisted query (no client-supplied
+spec — the handler takes only the path id), so an object guest with a
+`chart:read` grant can view the shared chart's data without any query:run
+workspace permission.
+ */
+export const useChartsChRun = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof chartsChRun>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof chartsChRun>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getChartsChRunMutationOptions(options), queryClient);
     }
     export type chartsChDuplicateResponse200 = {
   data: ChartDto

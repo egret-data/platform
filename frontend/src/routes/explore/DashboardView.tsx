@@ -486,7 +486,7 @@ export default function DashboardView() {
                 {c.card_type === "placeholder" ? (
                   <PlaceholderCard onPick={() => setFillingPlaceholderId(c.id)} />
                 ) : (
-                  <DashboardCardView ws={ws} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values}
+                  <DashboardCardView ws={ws} dashboardId={dashboard.id} card={c} chart={injected} refreshNonce={view.refreshNonce} parameters={parameters} paramValues={paramsState.values}
                     blocked={!editing && requiredUnset} editing={editing}
                     autoHeight={!!c.options.autoHeight}
                     rowHeight={rowHeight}

@@ -12,6 +12,10 @@ vi.mock("@/components/chart/ChartRenderer", () => ({
 vi.mock("@/api/useChartData", () => ({
   useChartData: () => ({ columns: [{ name: "rev", type: "number" }], rows: [[1]], isLoading: false, error: null }),
 }));
+// View-mode chart cards read through the object-scoped card-data hook.
+vi.mock("@/api/useSavedChartData", () => ({
+  useDashboardCardData: () => ({ columns: [{ name: "rev", type: "number" }], rows: [[1]], isLoading: false, error: null }),
+}));
 
 import { DashboardCardView } from "../DashboardCardView";
 
@@ -26,7 +30,7 @@ const card = {
 
 describe("DashboardCardView vizOverride", () => {
   it("renders ChartRenderer with the overridden viz_type + merged display, spec intact", () => {
-    render(<DashboardCardView ws="eng" card={card} chart={chart} refreshNonce={0} parameters={[]} paramValues={{}} />);
+    render(<DashboardCardView ws="eng" dashboardId="d1" card={card} chart={chart} refreshNonce={0} parameters={[]} paramValues={{}} />);
     expect(seen.vizType).toBe("line");
     expect((seen.params as { cartesian: { stacked: boolean } }).cartesian.stacked).toBe(true);
     expect((seen.params as { spec: unknown }).spec).toEqual((chart as { params: { spec: unknown } }).params.spec);

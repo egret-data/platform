@@ -1,9 +1,15 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { DashboardCardView } from "../DashboardCardView";
 import type { DashboardCard } from "@/api/dashboards";
 import type { Chart } from "@/api/charts";
 
+// View-mode chart cards read through the object-scoped card-data hook.
+const useDashboardCardData = vi.fn(() => ({ columns: [{ name: "rev", type: "double" }], rows: [[5]], isLoading: false, error: null }));
+vi.mock("@/api/useSavedChartData", () => ({
+  useDashboardCardData: (...a: unknown[]) => useDashboardCardData(...(a as [])),
+}));
+// Edit-mode path (unused by these view-mode tests) — mocked so the real hook's react-query deps never load.
 vi.mock("@/api/useChartData", () => ({
   useChartData: () => ({ columns: [{ name: "rev", type: "double" }], rows: [[5]], isLoading: false, error: null }),
 }));
@@ -22,36 +28,43 @@ const card = (over: Partial<DashboardCard>): DashboardCard => ({
 });
 
 describe("DashboardCardView", () => {
-  it("renders a chart card with the chart name as header by default", () => {
-    render(<DashboardCardView ws="eng" card={card({ chart_id: "c1" })} chart={chart} />);
+  beforeEach(() => useDashboardCardData.mockClear());
+
+  it("renders a chart card with rows from the card-data hook and the chart name as header", () => {
+    render(<DashboardCardView ws="eng" dashboardId="d1" card={card({ chart_id: "c1" })} chart={chart} />);
     expect(screen.getByText("Sales")).toBeInTheDocument();
     expect(screen.getByTestId("chart")).toBeInTheDocument();
+    // The chart-backed card fetches via the object-scoped card-data endpoint (ws, dashboardId, cardId).
+    expect(useDashboardCardData).toHaveBeenCalledWith("eng", "d1", "k", undefined, true);
   });
   it("uses options.title to override the header", () => {
-    render(<DashboardCardView ws="eng" card={card({ chart_id: "c1", options: { title: "Revenue" } })} chart={chart} />);
+    render(<DashboardCardView ws="eng" dashboardId="d1" card={card({ chart_id: "c1", options: { title: "Revenue" } })} chart={chart} />);
     expect(screen.getByText("Revenue")).toBeInTheDocument();
     expect(screen.queryByText("Sales")).not.toBeInTheDocument();
   });
   it("hides the header when options.title is empty string", () => {
-    render(<DashboardCardView ws="eng" card={card({ chart_id: "c1", options: { title: "" } })} chart={chart} />);
+    render(<DashboardCardView ws="eng" dashboardId="d1" card={card({ chart_id: "c1", options: { title: "" } })} chart={chart} />);
     expect(screen.queryByText("Sales")).not.toBeInTheDocument();
     expect(screen.getByTestId("chart")).toBeInTheDocument();
   });
-  it("routes a text card to markdown", () => {
-    render(<DashboardCardView ws="eng" card={card({ card_type: "text", options: { text: "# Hi" } })} chart={undefined} />);
+  it("routes a text card to markdown and does NOT fetch data", () => {
+    render(<DashboardCardView ws="eng" dashboardId="d1" card={card({ card_type: "text", options: { text: "# Hi" } })} chart={undefined} />);
     expect(screen.getByRole("heading", { name: "Hi" })).toBeInTheDocument();
+    expect(useDashboardCardData).not.toHaveBeenCalled();
   });
-  it("routes a heading card", () => {
-    render(<DashboardCardView ws="eng" card={card({ card_type: "heading", options: { text: "Section" } })} chart={undefined} />);
+  it("routes a heading card and does NOT fetch data", () => {
+    render(<DashboardCardView ws="eng" dashboardId="d1" card={card({ card_type: "heading", options: { text: "Section" } })} chart={undefined} />);
     expect(screen.getByText("Section")).toBeInTheDocument();
+    expect(useDashboardCardData).not.toHaveBeenCalled();
   });
-  it("routes a link card", () => {
-    render(<DashboardCardView ws="eng" card={card({ card_type: "link", options: { url: "https://x.com", label: "X" } })} chart={undefined} />);
+  it("routes a link card and does NOT fetch data", () => {
+    render(<DashboardCardView ws="eng" dashboardId="d1" card={card({ card_type: "link", options: { url: "https://x.com", label: "X" } })} chart={undefined} />);
     expect(screen.getByRole("link", { name: "X" })).toHaveAttribute("href", "https://x.com");
+    expect(useDashboardCardData).not.toHaveBeenCalled();
   });
   it("threads onValueClick to a chart card", () => {
     const onValueClick = vi.fn();
-    render(<DashboardCardView ws="eng" card={card({ chart_id: "c1" })} chart={chart} onValueClick={onValueClick} />);
+    render(<DashboardCardView ws="eng" dashboardId="d1" card={card({ chart_id: "c1" })} chart={chart} onValueClick={onValueClick} />);
     fireEvent.click(screen.getByTestId("chart"));
     expect(onValueClick).toHaveBeenCalledWith({ dims: [{ col: "region", value: "EU" }] }, 1, 2);
   });

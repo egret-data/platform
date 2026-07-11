@@ -28,6 +28,8 @@ export * from './cell';
 export * from './chartDataBody';
 export * from './chartDataResponse';
 export * from './chartDto';
+export * from './chartRunResponse';
+export * from './chartRunResponseRowsItemItem';
 export * from './chartsChListParams';
 export * from './clientDto';
 export * from './clusterDto';
