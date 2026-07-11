@@ -131,6 +131,45 @@ async fn full_role_lifecycle() {
     assert!(roles.get(role_id).await.unwrap().is_none());
 }
 
+#[tokio::test]
+async fn assign_writes_platform_access_grant() {
+    let Some(db) = connect().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    let repo = RoleRepo::new(db.clone(), egret_events::EventBus::new());
+    let uid = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, provider, email, name, status) VALUES ($1,'local',$2,'T','active')",
+    )
+    .bind(uid)
+    .bind(format!("flip-{uid}@t.local"))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let role: uuid::Uuid =
+        sqlx::query_scalar("SELECT id FROM roles WHERE scope='platform' AND name='data_steward'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    repo.assign("user", uid, role).await.unwrap();
+    // A platform-scope access_grant now exists (not via a legacy trigger — direct).
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM access_grants WHERE principal_type='user' AND principal_id=$1 AND role_id=$2 AND scope_type='platform'")
+        .bind(uid).bind(role).fetch_one(&db.pool).await.unwrap();
+    assert_eq!(n, 1, "assign must write a platform access_grant");
+    repo.unassign("user", uid, role).await.unwrap();
+    let n2: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM access_grants WHERE principal_type='user' AND principal_id=$1 AND role_id=$2 AND scope_type='platform'")
+        .bind(uid).bind(role).fetch_one(&db.pool).await.unwrap();
+    assert_eq!(n2, 0, "unassign must remove the platform access_grant");
+    sqlx::query("DELETE FROM users WHERE id=$1")
+        .bind(uid)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+}
+
 #[test]
 fn seeded_role_names_are_recognized() {
     assert!(egret_auth::roles::is_seeded("platform_admin"));

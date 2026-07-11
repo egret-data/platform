@@ -102,9 +102,16 @@ async fn init(config: Config, force: bool) -> anyhow::Result<()> {
     let users = UserRepo::new(db.clone());
     let user_id = users.insert_local(&email, "Administrator", &hash).await?;
 
+    // NOT EXISTS rather than ON CONFLICT: platform grants have a NULL scope_id,
+    // which the UNIQUE index treats as distinct, so ON CONFLICT would not dedupe.
     sqlx::query(
-        "INSERT INTO platform_role_assignments (principal_type, principal_id, role_id) \
-         SELECT 'user', $1, id FROM roles WHERE scope='platform' AND name='platform_admin'",
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $1, ro.id, 'platform', NULL FROM roles ro \
+         WHERE ro.scope='platform' AND ro.name='platform_admin' \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM access_grants ag \
+             WHERE ag.principal_type='user' AND ag.principal_id=$1 \
+               AND ag.role_id=ro.id AND ag.scope_type='platform')",
     )
     .bind(user_id.0)
     .execute(&db.pool)
