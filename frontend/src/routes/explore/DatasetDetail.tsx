@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useDataset, useRefreshDataset, useDeleteDataset, useUpdateDataset } from "@/api/datasets";
 import { ColumnsTab } from "@/components/dataset/ColumnsTab";
 import { MetricsTab } from "@/components/dataset/MetricsTab";
+import { PreviewTab } from "@/components/dataset/PreviewTab";
 
 export default function DatasetDetail() {
   const { workspace: ws = "", id = "" } = useParams();
@@ -113,12 +114,16 @@ export default function DatasetDetail() {
         <TabsList>
           <TabsTrigger value="columns">Columns ({ds.columns.length})</TabsTrigger>
           <TabsTrigger value="metrics">Metrics ({ds.metrics.length})</TabsTrigger>
+          <TabsTrigger value="preview">Preview</TabsTrigger>
         </TabsList>
         <TabsContent value="columns">
           <ColumnsTab ws={ws} datasetId={id} columns={ds.columns} />
         </TabsContent>
         <TabsContent value="metrics">
           <MetricsTab ws={ws} datasetId={id} metrics={ds.metrics} />
+        </TabsContent>
+        <TabsContent value="preview">
+          <PreviewTab ws={ws} datasetId={id} />
         </TabsContent>
       </Tabs>
 
