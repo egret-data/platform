@@ -19,10 +19,11 @@ pub struct SavedQuery {
     pub sql: String,
     pub description: String,
     pub created_by: Option<Uuid>,
+    pub folder_id: Option<Uuid>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-const COLS: &str = "id, database_id, name, sql, description, created_by, updated_at";
+const COLS: &str = "id, database_id, name, sql, description, created_by, folder_id, updated_at";
 
 impl SavedQueryRepo {
     pub fn new(db: Db) -> Self {
@@ -106,5 +107,15 @@ impl SavedQueryRepo {
                 .await?
                 .flatten(),
         )
+    }
+
+    /// Move the saved query into (`Some`) or out of (`None`) a folder.
+    pub async fn set_folder(&self, id: Uuid, folder_id: Option<Uuid>) -> Result<(), BiError> {
+        sqlx::query("UPDATE analytics.saved_queries SET folder_id = $2 WHERE id = $1")
+            .bind(id)
+            .bind(folder_id)
+            .execute(&self.db.pool)
+            .await?;
+        Ok(())
     }
 }
