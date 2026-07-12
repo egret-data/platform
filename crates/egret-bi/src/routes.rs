@@ -69,6 +69,8 @@ impl FromRef<BiState> for Authorizer {
 }
 
 const PERM: &str = "query:run";
+const SQ_READ: &str = "saved_query:read";
+const SQ_MANAGE: &str = "saved_query:manage";
 const DS_READ: &str = "dataset:read";
 const DS_MANAGE: &str = "dataset:manage";
 const CH_READ: &str = "chart:read";
@@ -82,6 +84,10 @@ pub fn sqllab_router() -> Router<BiState> {
         .route(
             "/ws/{workspace}/sqllab/queries/{id}",
             get(load).put(update).delete(remove),
+        )
+        .route(
+            "/ws/{workspace}/sqllab/queries/{id}/folder",
+            patch(sq_set_folder),
         )
         .route(
             "/ws/{workspace}/sqllab/databases/{db}/catalogs",
@@ -106,15 +112,9 @@ fn dto(q: crate::saved::SavedQuery) -> SavedQueryDto {
         sql: q.sql,
         description: q.description,
         created_by: q.created_by.map(|u| u.to_string()),
+        folder_id: q.folder_id.map(|f| f.to_string()),
         updated_at: q.updated_at,
     }
-}
-
-fn is_admin(ctx: &egret_core::WorkspaceContext) -> bool {
-    ctx.principal
-        .platform_roles
-        .iter()
-        .any(|r| r == "platform_admin")
 }
 
 #[utoipa::path(
@@ -126,7 +126,7 @@ fn is_admin(ctx: &egret_core::WorkspaceContext) -> bool {
     responses(
         (status = 200, description = "Saved query created", body = SavedQueryDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 403, description = "Missing saved_query:manage permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -135,7 +135,7 @@ async fn save(
     WsContext(ctx): WsContext,
     Json(b): Json<SaveQuery>,
 ) -> Result<Json<SavedQueryDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, PERM)
+    egret_core::authz::require(&*st.pdp, &ctx, SQ_MANAGE)
         .await
         .map_err(BiApiError::from)?;
     let q = st
@@ -160,7 +160,7 @@ async fn save(
     responses(
         (status = 200, description = "Saved queries in the workspace", body = Vec<SavedQueryDto>),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 403, description = "Missing saved_query:read permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]
@@ -168,7 +168,7 @@ async fn list(
     State(st): State<BiState>,
     WsContext(ctx): WsContext,
 ) -> Result<Json<Vec<SavedQueryDto>>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, PERM)
+    egret_core::authz::require(&*st.pdp, &ctx, SQ_READ)
         .await
         .map_err(BiApiError::from)?;
     let qs = st
@@ -189,7 +189,7 @@ async fn list(
     responses(
         (status = 200, description = "Saved query detail", body = SavedQueryDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing query:run permission", body = ErrorBody),
+        (status = 403, description = "Missing saved_query:read permission", body = ErrorBody),
         (status = 404, description = "No such saved query", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -199,7 +199,8 @@ async fn load(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<SavedQueryDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, PERM)
+    let obj = crate::shares::resolve(&st, &ctx, "saved_query", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, SQ_READ, obj)
         .await
         .map_err(BiApiError::from)?;
     let q = st
@@ -222,7 +223,7 @@ async fn load(
     responses(
         (status = 200, description = "Saved query updated", body = SavedQueryDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing query:run permission, or not the query owner", body = ErrorBody),
+        (status = 403, description = "Missing saved_query:manage permission", body = ErrorBody),
         (status = 404, description = "No such saved query", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -233,10 +234,10 @@ async fn update(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(b): Json<SaveQuery>,
 ) -> Result<Json<SavedQueryDto>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, PERM)
+    let obj = crate::shares::resolve(&st, &ctx, "saved_query", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, SQ_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_owner(&st, &ctx, id).await?;
     let q = st
         .saved
         .update(id, &b.name, &b.sql, &b.description, b.database_id)
@@ -255,7 +256,7 @@ async fn update(
     responses(
         (status = 200, description = "Saved query deleted", body = Ack),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing query:run permission, or not the query owner", body = ErrorBody),
+        (status = 403, description = "Missing saved_query:manage permission", body = ErrorBody),
         (status = 404, description = "No such saved query", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -265,24 +266,49 @@ async fn remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, BiApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, PERM)
+    let obj = crate::shares::resolve(&st, &ctx, "saved_query", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, SQ_MANAGE, obj)
         .await
         .map_err(BiApiError::from)?;
-    require_owner(&st, &ctx, id).await?;
     st.saved.delete(id).await.map_err(BiApiError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
-async fn require_owner(
-    st: &BiState,
-    ctx: &egret_core::WorkspaceContext,
-    id: Uuid,
-) -> Result<(), BiApiError> {
-    let owner = st.saved.owner(id).await.map_err(BiApiError::from)?;
-    if is_admin(ctx) || owner == Some(ctx.principal.user_id.0) {
-        Ok(())
-    } else {
-        Err(Error::Forbidden.into())
+
+#[utoipa::path(
+    patch,
+    path = "/api/ws/{workspace}/sqllab/queries/{id}/folder",
+    tag = "sqllab",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Saved query id"),
+    ),
+    request_body = SetFolder,
+    responses(
+        (status = 200, description = "Saved query moved to folder", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing saved_query:manage permission", body = ErrorBody),
+        (status = 404, description = "No such saved query or target folder in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn sq_set_folder(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+    Json(b): Json<crate::model::SetFolder>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    let obj = crate::shares::resolve(&st, &ctx, "saved_query", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, SQ_MANAGE, obj)
+        .await
+        .map_err(BiApiError::from)?;
+    if let Some(fid) = b.folder_id {
+        require_folder(&st, &ctx, fid, "saved_query").await?;
     }
+    st.saved
+        .set_folder(id, b.folder_id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn conn_spec(
@@ -2620,6 +2646,7 @@ fn kind_perms(kind: &str) -> Option<(&'static str, &'static str, &'static str)> 
         // the perms already exist in the DB (migration 0037). Literal strings so
         // we don't take a cross-crate dependency.
         "notebooks" => Some(("notebook", "notebook:read", "notebook:write")),
+        "saved_queries" => Some(("saved_query", SQ_READ, SQ_MANAGE)),
         _ => None,
     }
 }
@@ -2902,6 +2929,7 @@ pub struct BiFolderApi;
         load,
         update,
         remove,
+        sq_set_folder,
         catalogs,
         schemas,
         tables,
@@ -2911,6 +2939,7 @@ pub struct BiFolderApi;
         SaveQuery,
         SavedQueryDto,
         SchemaColumn,
+        SetFolder,
         Ack,
         ErrorBody,
     )),

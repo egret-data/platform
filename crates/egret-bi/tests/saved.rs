@@ -53,7 +53,7 @@ async fn crud_roundtrip() {
 }
 
 #[tokio::test]
-async fn owner_returns_creator() {
+async fn created_by_roundtrips() {
     let Some((r, wid, uid)) = setup().await else {
         eprintln!("skip");
         return;
@@ -69,7 +69,8 @@ async fn owner_returns_creator() {
         )
         .await
         .unwrap();
-    assert_eq!(r.owner(q.id).await.unwrap(), Some(uid));
+    let got = r.get(q.id).await.unwrap().unwrap();
+    assert_eq!(got.created_by, Some(uid));
     r.delete(q.id).await.unwrap();
 }
 

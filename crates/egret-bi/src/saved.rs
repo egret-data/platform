@@ -98,17 +98,6 @@ impl SavedQueryRepo {
         Ok(())
     }
 
-    /// The owner's id (for the owner-or-admin edit/delete gate).
-    pub async fn owner(&self, id: Uuid) -> Result<Option<Uuid>, BiError> {
-        Ok(
-            sqlx::query_scalar("SELECT created_by FROM analytics.saved_queries WHERE id=$1")
-                .bind(id)
-                .fetch_optional(&self.db.pool)
-                .await?
-                .flatten(),
-        )
-    }
-
     /// Move the saved query into (`Some`) or out of (`None`) a folder.
     pub async fn set_folder(&self, id: Uuid, folder_id: Option<Uuid>) -> Result<(), BiError> {
         sqlx::query("UPDATE analytics.saved_queries SET folder_id = $2 WHERE id = $1")
