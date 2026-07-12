@@ -181,6 +181,11 @@ describe("Sidebar – Control Plane Data Governance group", () => {
       "href",
       "/control-plane/policies",
     );
+    // Audit log has no `perm` → platform_admin-only, slugified to `audit-log`.
+    expect(screen.getByRole("link", { name: "Audit log" })).toHaveAttribute(
+      "href",
+      "/control-plane/audit-log",
+    );
   });
 });
 
@@ -226,6 +231,7 @@ describe("Sidebar – permission-based filtering", () => {
       "Roles",
       "Permissions",
       "Policies",
+      "Audit log",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }

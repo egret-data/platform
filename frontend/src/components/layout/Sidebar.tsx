@@ -3,7 +3,7 @@ import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
   BarChart3, Bell, Boxes, ChevronDown, ChevronRight, Database,
   FolderKanban, HardDrive, KeyRound, LayoutDashboard, ListChecks, type LucideIcon,
-  NotebookText, PanelLeftClose, PanelLeftOpen, Plug, Server, Share2, ShieldCheck,
+  NotebookText, PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Server, Share2, ShieldCheck,
   SquareTerminal, Table2, UserCog, Users, UsersRound, Waypoints, Workflow,
 } from "lucide-react";
 import {
@@ -83,6 +83,7 @@ const CONTROL_PLANE_GROUPS: NavGroup[] = [
     heading: "Data Governance",
     items: [
       { label: "Policies", icon: ShieldCheck, perm: "policy:read" },
+      { label: "Audit log", icon: ScrollText },
     ],
   },
 ];
