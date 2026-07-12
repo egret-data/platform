@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Info, Pencil, Star } from "lucide-react";
+import { Info, LayoutDashboard, Pencil, Star } from "lucide-react";
 import { useParams } from "react-router-dom";
 import { type Layout } from "react-grid-layout";
 import { useDashboard, useDashboardMutations, type DashboardCard as Card, type DashboardParameter } from "@/api/dashboards";
@@ -443,9 +443,17 @@ export default function DashboardView() {
           <button type="button" className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90" onClick={() => openPanel({ kind: "add" })}>Add a chart</button>
         </div>
       ) : cards.length === 0 ? (
-        <p className="text-muted-foreground">No cards yet. Click Edit to add charts.</p>
+        <div className="flex flex-col items-center gap-2 py-20 text-center text-muted-foreground">
+          <LayoutDashboard className="h-8 w-8 text-muted-foreground/40" aria-hidden />
+          <p className="text-sm">
+            No cards yet. Click <span className="font-medium text-foreground">Edit</span> to add charts.
+          </p>
+        </div>
       ) : tabs.length > 0 && visibleCards.length === 0 ? (
-        <p className="py-12 text-center text-muted-foreground">No cards on this tab.</p>
+        <div className="flex flex-col items-center gap-2 py-20 text-center text-muted-foreground">
+          <LayoutDashboard className="h-8 w-8 text-muted-foreground/40" aria-hidden />
+          <p className="text-sm">No cards on this tab.</p>
+        </div>
       ) : (
         <DashboardGridLayout
           editing={editing}

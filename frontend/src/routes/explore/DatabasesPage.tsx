@@ -146,7 +146,17 @@ export default function DatabasesPage() {
                   <tr key={conn.id} className="border-b border-border last:border-b-0">
                     <td className="py-2 pr-4 font-medium">{conn.name}</td>
                     <td className="py-2 pr-4">
-                      <Badge variant="secondary">{conn.engine}</Badge>
+                      <span className="flex items-center gap-1.5">
+                        <Badge variant="secondary">{conn.engine}</Badge>
+                        {conn.delegated ? (
+                          <Badge
+                            className="border-transparent bg-highlight text-highlight-foreground"
+                            title="Queries run as the signed-in user (per-user delegation)"
+                          >
+                            Per-user
+                          </Badge>
+                        ) : null}
+                      </span>
                     </td>
                     <td className="py-2 pr-4 font-mono text-muted-foreground">
                       {conn.host}:{conn.port}
