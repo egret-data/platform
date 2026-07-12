@@ -421,7 +421,7 @@ async fn set_platform_roles(
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct AddMember {
     pub principal_type: String,
-    pub principal_id: Uuid,
+    pub principal_id: String,
     pub role: String,
 }
 
@@ -430,6 +430,10 @@ pub struct MemberDto {
     pub principal_type: String,
     pub principal_id: String,
     pub role: String,
+    pub principal_name: Option<String>,
+    pub granted_by_name: Option<String>,
+    pub added_at: chrono::DateTime<chrono::Utc>,
+    pub is_platform_admin: bool,
 }
 
 pub fn ws_member_router() -> Router<WorkspaceState> {
@@ -465,6 +469,10 @@ async fn list_members(
                 principal_type: m.principal_type,
                 principal_id: m.principal_id.to_string(),
                 role: m.role,
+                principal_name: m.principal_name,
+                granted_by_name: m.granted_by_name,
+                added_at: m.added_at,
+                is_platform_admin: m.is_platform_admin,
             })
             .collect(),
     ))
@@ -491,11 +499,47 @@ async fn add_member(
     egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
         .await
         .map_err(AuthError)?;
+    // The picker supplies an email / group name; a role change supplies the existing
+    // member's UUID. Accept a real UUID directly, else resolve email/name -> id.
+    let pid: uuid::Uuid = match uuid::Uuid::parse_str(&body.principal_id) {
+        Ok(u) => u,
+        Err(_) => st
+            .members
+            .resolve_principal(&body.principal_type, &body.principal_id)
+            .await
+            .map_err(AuthError)?
+            .ok_or_else(|| {
+                AuthError(egret_core::Error::InvalidInput(format!(
+                    "unknown {}: {}",
+                    body.principal_type, body.principal_id
+                )))
+            })?,
+    };
+    // A role change is a replace; demoting the last ws_admin is a last-admin removal.
+    if body.role != "ws_admin"
+        && st
+            .members
+            .role_of(ctx.workspace_id, &body.principal_type, pid)
+            .await
+            .map_err(AuthError)?
+            .as_deref()
+            == Some("ws_admin")
+        && st
+            .members
+            .count_ws_admins(ctx.workspace_id)
+            .await
+            .map_err(AuthError)?
+            <= 1
+    {
+        return Err(AuthError(egret_core::Error::Conflict(
+            "the workspace must keep at least one admin".into(),
+        )));
+    }
     st.members
         .add(
             ctx.workspace_id,
             &body.principal_type,
-            body.principal_id,
+            pid,
             &body.role,
             ctx.principal.user_id,
         )
@@ -509,7 +553,7 @@ async fn add_member(
         resource_id: None,
         detail: serde_json::json!({
             "principal_type": body.principal_type,
-            "principal_id": body.principal_id,
+            "principal_id": pid,
             "role": body.role,
         }),
     });
@@ -540,6 +584,26 @@ async fn remove_member(
     egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
         .await
         .map_err(AuthError)?;
+    // Don't let a workspace lose its last admin (it would become unmanageable
+    // without platform intervention).
+    if st
+        .members
+        .role_of(ctx.workspace_id, &ptype, pid)
+        .await
+        .map_err(AuthError)?
+        .as_deref()
+        == Some("ws_admin")
+        && st
+            .members
+            .count_ws_admins(ctx.workspace_id)
+            .await
+            .map_err(AuthError)?
+            <= 1
+    {
+        return Err(AuthError(egret_core::Error::Conflict(
+            "the workspace must keep at least one admin".into(),
+        )));
+    }
     st.members
         .remove(ctx.workspace_id, &ptype, pid)
         .await
