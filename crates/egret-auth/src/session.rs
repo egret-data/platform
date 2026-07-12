@@ -147,17 +147,29 @@ impl SessionService {
         Ok(rows.into_iter().map(|(n,)| n).collect())
     }
 
-    /// Effective permission keys for the user: role_permissions over every role
-    /// assigned directly or via the user's group memberships.
+    /// Effective permission keys for the user: role_permissions over every platform
+    /// role assigned directly or via a group, **expanded up the role-hierarchy parent
+    /// chain** so an inherited permission (from a parent role) is surfaced to the
+    /// frontend's permission-aware UI gating — matching what the PDP enforces via its
+    /// closure. (FE gating only; enforcement is always the PDP.)
     async fn permissions(&self, user_id: UserId) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT DISTINCT rp.permission \
-             FROM access_grants ag \
-             JOIN role_permissions rp ON rp.role_id = ag.role_id \
-             WHERE ag.scope_type = 'platform' \
-               AND ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
-                  OR (ag.principal_type = 'group' AND ag.principal_id IN \
-                         (SELECT group_id FROM user_groups WHERE user_id = $1)) )",
+            "WITH RECURSIVE granted AS ( \
+               SELECT ag.role_id FROM access_grants ag \
+               WHERE ag.scope_type = 'platform' \
+                 AND ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
+                    OR (ag.principal_type = 'group' AND ag.principal_id IN \
+                           (SELECT group_id FROM user_groups WHERE user_id = $1)) ) \
+             ), \
+             closure AS ( \
+               SELECT role_id FROM granted \
+               UNION \
+               SELECT r.parent_role_id FROM roles r \
+                 JOIN closure c ON r.id = c.role_id \
+                WHERE r.parent_role_id IS NOT NULL \
+             ) \
+             SELECT DISTINCT rp.permission \
+               FROM closure c JOIN role_permissions rp ON rp.role_id = c.role_id",
         )
         .bind(user_id.0)
         .fetch_all(&self.db.pool)

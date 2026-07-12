@@ -23,6 +23,10 @@ pub struct RoleRepo {
     bus: EventBus,
 }
 
+/// Fixed advisory-lock key serializing role-graph parent mutations (`set_parent`),
+/// so concurrent parent changes can't write-skew into a cycle. Arbitrary constant.
+const ROLE_GRAPH_LOCK_KEY: i64 = 0x_E6E7_C0DE_6A11;
+
 /// Names of roles seeded by migration 0003 (non-deletable; name/scope immutable).
 pub const SEEDED_ROLES: &[&str] = &[
     "platform_admin",
@@ -182,6 +186,16 @@ impl RoleRepo {
     /// app layer (the DB trigger re-checks). Publishes `RolesChanged` so the PDP
     /// recomputes permission closures.
     pub async fn set_parent(&self, id: Uuid, parent: Option<Uuid>) -> Result<()> {
+        // Serialize ALL role-graph parent mutations on a transaction-scoped advisory
+        // lock so two concurrent `set_parent` calls can't form a cycle via write-skew
+        // under READ COMMITTED (the cycle-check + the UPDATE become atomic w.r.t. any
+        // other set_parent). Only this method takes the lock, so contention is nil.
+        let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(ROLE_GRAPH_LOCK_KEY)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
         if let Some(pid) = parent {
             let child = self
                 .get(id)
@@ -214,9 +228,10 @@ impl RoleRepo {
         sqlx::query("UPDATE roles SET parent_role_id = $1 WHERE id = $2")
             .bind(parent)
             .bind(id)
-            .execute(&self.db.pool)
+            .execute(&mut *tx)
             .await
             .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
         self.bus.publish(RolesChanged);
         Ok(())
     }
