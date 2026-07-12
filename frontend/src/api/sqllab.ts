@@ -34,7 +34,7 @@ import {
 
 // ── types ──
 export interface DatabaseListItem { id: string; name: string; engine: string }
-export interface SavedQuery { id: string; database_id: string | null; name: string; sql: string; description: string; created_by: string | null; updated_at: string }
+export interface SavedQuery { id: string; database_id: string | null; name: string; sql: string; description: string; created_by: string | null; folder_id: string | null; updated_at: string }
 export interface SchemaColumn { name: string; type: string }
 export type QueryStatus = "queued" | "running" | "finished" | "failed" | "cancelled";
 export interface QueryView {
