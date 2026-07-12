@@ -119,6 +119,8 @@
      pattern). NOT `--accent`, which shadcn uses for hover/focus backgrounds. */
   --highlight: oklch(0.72 0.15 65);
   --highlight-foreground: oklch(0.28 0.06 65);
+  --success: oklch(0.55 0.14 155);
+  --success-foreground: oklch(0.99 0 0);
 
   /* Font families */
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -163,6 +165,8 @@
   /* Dark mode: a brighter amber so it reads on the dark surfaces, dark text on it. */
   --highlight: oklch(0.78 0.15 70);
   --highlight-foreground: oklch(0.22 0.05 70);
+  --success: oklch(0.72 0.14 155);
+  --success-foreground: oklch(0.18 0.04 155);
 
   /* Shadows - Dark mode */
   --shadow-xs: 0 1px 3px 0px oklch(0 0 0 / 0.05);
@@ -194,6 +198,8 @@
   --color-destructive: var(--destructive);
   --color-highlight: var(--highlight);
   --color-highlight-foreground: var(--highlight-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
