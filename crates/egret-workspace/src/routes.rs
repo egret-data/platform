@@ -499,6 +499,21 @@ async fn add_member(
     egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
         .await
         .map_err(AuthError)?;
+    // A role change is a replace; demoting the last ws_admin is a last-admin removal.
+    if body.role != "ws_admin"
+        && st
+            .members
+            .role_of(ctx.workspace_id, &body.principal_type, body.principal_id)
+            .await
+            .map_err(AuthError)?
+            .as_deref()
+            == Some("ws_admin")
+        && st.members.count_ws_admins(ctx.workspace_id).await.map_err(AuthError)? <= 1
+    {
+        return Err(AuthError(egret_core::Error::Conflict(
+            "the workspace must keep at least one admin".into(),
+        )));
+    }
     st.members
         .add(
             ctx.workspace_id,
@@ -548,6 +563,21 @@ async fn remove_member(
     egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
         .await
         .map_err(AuthError)?;
+    // Don't let a workspace lose its last admin (it would become unmanageable
+    // without platform intervention).
+    if st
+        .members
+        .role_of(ctx.workspace_id, &ptype, pid)
+        .await
+        .map_err(AuthError)?
+        .as_deref()
+        == Some("ws_admin")
+        && st.members.count_ws_admins(ctx.workspace_id).await.map_err(AuthError)? <= 1
+    {
+        return Err(AuthError(egret_core::Error::Conflict(
+            "the workspace must keep at least one admin".into(),
+        )));
+    }
     st.members
         .remove(ctx.workspace_id, &ptype, pid)
         .await

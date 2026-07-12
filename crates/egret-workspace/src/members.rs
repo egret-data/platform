@@ -111,6 +111,33 @@ impl MemberRepo {
         .map_err(db_err)?;
         Ok(rows.into_iter().map(Into::into).collect())
     }
+
+    /// Number of members holding `ws_admin` in the workspace.
+    pub async fn count_ws_admins(&self, ws: WorkspaceId) -> Result<i64> {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
+             WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1 AND r.name = 'ws_admin'",
+        )
+        .bind(ws.0)
+        .fetch_one(&self.db.pool)
+        .await
+        .map_err(db_err)
+    }
+
+    /// The workspace role a principal currently holds here, if any.
+    pub async fn role_of(&self, ws: WorkspaceId, ptype: &str, pid: Uuid) -> Result<Option<String>> {
+        sqlx::query_scalar(
+            "SELECT r.name FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
+             WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1 \
+               AND ag.principal_type = $2 AND ag.principal_id = $3",
+        )
+        .bind(ws.0)
+        .bind(ptype)
+        .bind(pid)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)
+    }
 }
 
 #[derive(sqlx::FromRow)]
