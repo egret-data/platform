@@ -4,7 +4,7 @@ use egret_core::{Error, Result, UserId, WorkspaceId};
 use egret_metastore::Db;
 use uuid::Uuid;
 
-use crate::model::{WorkspaceMember, WORKSPACE_ROLES};
+use crate::model::WorkspaceMember;
 use crate::workspaces::db_err;
 
 #[derive(Clone)]
@@ -28,7 +28,14 @@ impl MemberRepo {
         if ptype != "user" && ptype != "group" {
             return Err(Error::InvalidInput(format!("bad principal_type: {ptype}")));
         }
-        if !WORKSPACE_ROLES.contains(&role) {
+        let role_ok: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM roles WHERE scope = 'workspace' AND name = $1)",
+        )
+        .bind(role)
+        .fetch_one(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        if !role_ok {
             return Err(Error::InvalidInput(format!(
                 "unknown workspace role: {role}"
             )));
