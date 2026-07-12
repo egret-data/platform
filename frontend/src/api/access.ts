@@ -24,6 +24,7 @@ import {
   controlPlaneAccessCreateUser,
   controlPlaneAccessDeleteGroup,
   controlPlaneAccessDeleteRole,
+  controlPlaneAccessGetEffectiveAccess,
   controlPlaneAccessGetRole,
   controlPlaneAccessListGroupMembers,
   controlPlaneAccessListGroups,
@@ -41,6 +42,7 @@ import {
 } from "./generated/control-plane-access/control-plane-access";
 import type {
   ControlPlaneUserDto,
+  EffectiveAccess,
   GroupDto,
   GroupMemberDto,
   PermissionGroupDto,
@@ -55,6 +57,9 @@ export type AccessGroup = GroupDto;
 export type GroupMember = GroupMemberDto;
 export type AccessRole = RoleDto;
 export type PermissionCatalogGroup = PermissionGroupDto;
+
+// Effective-access report (roles/permissions/workspaces/objects/denies for a principal).
+export type { EffectiveAccess };
 
 // FE-local: the spec types `kind` as a bare `string`; keep the narrow union.
 export interface RoleAssignee {
@@ -168,4 +173,18 @@ export async function getRoleAssignees(roleId: string): Promise<RoleAssignee[]> 
 
 export async function listPermissions(): Promise<PermissionCatalogGroup[]> {
   return (await controlPlaneAccessListPermissions()).data as PermissionCatalogGroup[];
+}
+
+// ── Effective access ──────────────────────────────────────────────────────────
+
+export async function getEffectiveAccess(
+  principalType: "user" | "group",
+  principalId: string,
+): Promise<EffectiveAccess> {
+  return (
+    await controlPlaneAccessGetEffectiveAccess({
+      principal_type: principalType,
+      principal_id: principalId,
+    })
+  ).data as EffectiveAccess;
 }
