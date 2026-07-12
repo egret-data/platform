@@ -10,4 +10,10 @@ export interface MemberDto {
   principal_type: string;
   principal_id: string;
   role: string;
+  /** @nullable */
+  principal_name?: string | null;
+  /** @nullable */
+  granted_by_name?: string | null;
+  added_at: string;
+  is_platform_admin: boolean;
 }

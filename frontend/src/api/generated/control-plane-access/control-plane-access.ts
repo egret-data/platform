@@ -27,10 +27,12 @@ import type {
 import type {
   AddMemberInput,
   AssignRoleInput,
+  ControlPlaneAccessGetEffectiveAccessParams,
   ControlPlaneUserDto,
   CreateGroupInput,
   CreateRoleInput,
   CreateUserInput,
+  EffectiveAccess,
   ErrorBody,
   GroupDto,
   GroupMemberDto,
@@ -64,6 +66,160 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   }
   return result;
 };
+
+export type controlPlaneAccessGetEffectiveAccessResponse200 = {
+  data: EffectiveAccess
+  status: 200
+}
+
+export type controlPlaneAccessGetEffectiveAccessResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneAccessGetEffectiveAccessResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessGetEffectiveAccessResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessGetEffectiveAccessResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessGetEffectiveAccessResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessGetEffectiveAccessResponseSuccess = (controlPlaneAccessGetEffectiveAccessResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneAccessGetEffectiveAccessResponseError = (controlPlaneAccessGetEffectiveAccessResponse400 | controlPlaneAccessGetEffectiveAccessResponse401 | controlPlaneAccessGetEffectiveAccessResponse403 | controlPlaneAccessGetEffectiveAccessResponse404 | controlPlaneAccessGetEffectiveAccessResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessGetEffectiveAccessResponse = (controlPlaneAccessGetEffectiveAccessResponseSuccess | controlPlaneAccessGetEffectiveAccessResponseError)
+
+export const getControlPlaneAccessGetEffectiveAccessUrl = (params: ControlPlaneAccessGetEffectiveAccessParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/control-plane/access/effective?${stringifiedParams}` : `/api/control-plane/access/effective`
+}
+
+/**
+ * @summary `GET /access/effective` — the effective-access resolver (AX-3): for a
+principal, enumerate the platform roles, permissions (with provenance),
+workspace memberships, object grants, and denies that feed them. Read-only,
+so it gates on `role:read`. `principal_id` accepts a raw UUID or a
+user email / group name (resolved to a UUID; 404 if unknown).
+ */
+export const controlPlaneAccessGetEffectiveAccess = async (params: ControlPlaneAccessGetEffectiveAccessParams, options?: RequestInit): Promise<controlPlaneAccessGetEffectiveAccessResponse> => {
+
+  return customInstance<controlPlaneAccessGetEffectiveAccessResponse>(getControlPlaneAccessGetEffectiveAccessUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessGetEffectiveAccessQueryKey = (params?: ControlPlaneAccessGetEffectiveAccessParams,) => {
+    return [
+    `/api/control-plane/access/effective`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getControlPlaneAccessGetEffectiveAccessQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneAccessGetEffectiveAccess>>, TError = ErrorBody>(params: ControlPlaneAccessGetEffectiveAccessParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessGetEffectiveAccess>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneAccessGetEffectiveAccessQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneAccessGetEffectiveAccess>>> = ({ signal }) => controlPlaneAccessGetEffectiveAccess(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessGetEffectiveAccess>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneAccessGetEffectiveAccessQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessGetEffectiveAccess>>>
+export type ControlPlaneAccessGetEffectiveAccessQueryError = ErrorBody
+
+
+export function useControlPlaneAccessGetEffectiveAccess<TData = Awaited<ReturnType<typeof controlPlaneAccessGetEffectiveAccess>>, TError = ErrorBody>(
+ params: ControlPlaneAccessGetEffectiveAccessParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessGetEffectiveAccess>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneAccessGetEffectiveAccess>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneAccessGetEffectiveAccess>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneAccessGetEffectiveAccess<TData = Awaited<ReturnType<typeof controlPlaneAccessGetEffectiveAccess>>, TError = ErrorBody>(
+ params: ControlPlaneAccessGetEffectiveAccessParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessGetEffectiveAccess>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneAccessGetEffectiveAccess>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneAccessGetEffectiveAccess>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneAccessGetEffectiveAccess<TData = Awaited<ReturnType<typeof controlPlaneAccessGetEffectiveAccess>>, TError = ErrorBody>(
+ params: ControlPlaneAccessGetEffectiveAccessParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessGetEffectiveAccess>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary `GET /access/effective` — the effective-access resolver (AX-3): for a
+principal, enumerate the platform roles, permissions (with provenance),
+workspace memberships, object grants, and denies that feed them. Read-only,
+so it gates on `role:read`. `principal_id` accepts a raw UUID or a
+user email / group name (resolved to a UUID; 404 if unknown).
+ */
+
+export function useControlPlaneAccessGetEffectiveAccess<TData = Awaited<ReturnType<typeof controlPlaneAccessGetEffectiveAccess>>, TError = ErrorBody>(
+ params: ControlPlaneAccessGetEffectiveAccessParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessGetEffectiveAccess>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneAccessGetEffectiveAccessQueryOptions(params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
 
 export type controlPlaneAccessListRolesResponse200 = {
   data: RoleDto[]

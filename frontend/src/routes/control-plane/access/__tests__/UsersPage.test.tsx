@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import UsersPage from "@/routes/control-plane/access/UsersPage";
@@ -51,7 +52,9 @@ function renderPage(me: Me | null = ADMIN_ME) {
   return render(
     <AuthContext.Provider value={{ me, isLoading: false }}>
       <QueryClientProvider client={qc}>
-        <UsersPage />
+        <MemoryRouter>
+          <UsersPage />
+        </MemoryRouter>
       </QueryClientProvider>
     </AuthContext.Provider>,
   );

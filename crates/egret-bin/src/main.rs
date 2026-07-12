@@ -1307,6 +1307,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         users: egret_auth::users::UserRepo::new(db.clone()),
         groups: egret_auth::groups::GroupRepo::new(db.clone()),
         roles: egret_auth::roles::RoleRepo::new(db.clone(), bus.clone()),
+        access_resolver: egret_auth::effective::AccessResolver::new(db.clone()),
         secrets: workspace_secrets.clone(),
         sessions: sessions.clone(),
         browser: catalog_browser.clone(),

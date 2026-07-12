@@ -63,6 +63,7 @@ pub fn router() -> Router<CpState> {
         .route("/access/roles/{id}/permissions", put(set_role_permissions))
         .route("/access/roles/{id}/assignees", get(list_role_assignees))
         .route("/permissions", get(list_permissions))
+        .route("/access/effective", get(get_effective_access))
 }
 
 /// Reject removing a role assignment that holds the last `platform_admin`
@@ -1075,6 +1076,51 @@ async fn list_permissions(
     Ok(Json(out))
 }
 
+// ---------- Effective access (AX-3) ----------
+
+#[derive(Debug, Deserialize)]
+struct EffectiveQuery {
+    principal_type: String,
+    principal_id: String,
+}
+
+/// `GET /access/effective` — the effective-access resolver (AX-3): for a
+/// principal, enumerate the platform roles, permissions (with provenance),
+/// workspace memberships, object grants, and denies that feed them. Read-only,
+/// so it gates on `role:read`. `principal_id` accepts a raw UUID or a
+/// user email / group name (resolved to a UUID; 404 if unknown).
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/access/effective",
+    tag = "control-plane-access",
+    params(
+        ("principal_type" = String, Query, description = "user | group"),
+        ("principal_id" = String, Query, description = "UUID, or a user email / group name"),
+    ),
+    responses(
+        (status = 200, description = "Effective access for the principal", body = egret_auth::effective::EffectiveAccess),
+        (status = 400, description = "Invalid principal_type", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing role:read permission", body = ErrorBody),
+        (status = 404, description = "No such principal", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn get_effective_access(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    axum::extract::Query(q): axum::extract::Query<EffectiveQuery>,
+) -> Result<Json<egret_auth::effective::EffectiveAccess>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "role:read").await?;
+    let pid = st
+        .access_resolver
+        .resolve_ident(&q.principal_type, &q.principal_id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    let ea = st.access_resolver.resolve(&q.principal_type, pid).await?;
+    Ok(Json(ea))
+}
+
 /// OpenAPI fragment for the control-plane Access router (users/groups/roles/
 /// permissions). Merged into `egret_controlplane::openapi()`. `UserDto` is
 /// emitted as `ControlPlaneUserDto` (see its `#[schema(as = …)]`) to avoid
@@ -1104,6 +1150,7 @@ async fn list_permissions(
         set_role_permissions,
         list_role_assignees,
         list_permissions,
+        get_effective_access,
     ),
     components(schemas(
         UserDto,
@@ -1122,6 +1169,14 @@ async fn list_permissions(
         RoleAssigneeDto,
         PermissionDto,
         PermissionGroupDto,
+        egret_auth::effective::EffectiveAccess,
+        egret_auth::effective::PrincipalInfo,
+        egret_auth::effective::RoleSource,
+        egret_auth::effective::PermVia,
+        egret_auth::effective::EffectivePermission,
+        egret_auth::effective::WorkspaceMembership,
+        egret_auth::effective::ObjectGrant,
+        egret_auth::effective::DenyEntry,
         ErrorBody,
     )),
     tags((name = "control-plane-access", description = "Platform access control: users, groups, roles, and the permission catalog")),

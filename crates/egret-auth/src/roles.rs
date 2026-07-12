@@ -320,6 +320,6 @@ impl RoleRepo {
     }
 }
 
-fn db_err(e: sqlx::Error) -> egret_core::Error {
+pub(crate) fn db_err(e: sqlx::Error) -> egret_core::Error {
     egret_core::Error::Internal(anyhow::anyhow!(e))
 }

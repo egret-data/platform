@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { MoreHorizontal, Pencil, Plus, ShieldCheck, UserCheck, Users, UserX } from "lucide-react";
+import { Compass, MoreHorizontal, Pencil, Plus, ShieldCheck, UserCheck, Users, UserX } from "lucide-react";
 
 import {
   type AccessRole,
@@ -64,6 +65,7 @@ const COLUMNS = ["Email", "Name", "Provider", "Status", "Roles", "Groups", ""];
  * (name + enable-disable) / role-assignment actions.
  */
 export default function UsersPage() {
+  const navigate = useNavigate();
   const { me } = useAuth();
   // Role assignment is platform_admin-only on the backend; user create/edit
   // (name + enable/disable) stays delegatable via user:create/user:update.
@@ -182,6 +184,12 @@ export default function UsersPage() {
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          onClick={() => navigate(`/control-plane/access-explorer?user=${u.id}`)}
+                        >
+                          <Compass className="mr-2 h-4 w-4" />
+                          View access
+                        </DropdownMenuItem>
                         {isAdmin && (
                           <DropdownMenuItem onClick={() => setRolesTarget(u)}>
                             <ShieldCheck className="mr-2 h-4 w-4" />
