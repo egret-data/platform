@@ -1,4 +1,4 @@
-import type { ChartFilter, ValueFilterOp, Chart, ChartParams, VizType } from "@/api/charts";
+import type { ChartFilter, ValueFilterOp, Chart, ChartParams, VizType, QuerySpec } from "@/api/charts";
 import type { DashboardParameter } from "@/api/dashboards";
 import { TEMPORAL_UNITS } from "@/components/chart/temporal-units";
 
@@ -275,6 +275,36 @@ export function paramFiltersForCard(
   return extra;
 }
 
+/**
+ * The dashboard-parameter-derived temporal-unit overrides for one card: for each
+ * `temporal_unit` param mapped to a column that the card's saved spec ALREADY groups
+ * temporally (`spec.temporal_units[column]` is set), the resolved unit token that
+ * re-grids that column. This is the exact map the view-mode data path sends to the
+ * object-scoped card-data endpoint, which validates each token against the
+ * `TemporalUnit` enum and merges it into the persisted query server-side (an override
+ * replaces the saved unit for that column). Non-temporal params contribute nothing.
+ */
+export function temporalOverridesForCard(
+  parameters: DashboardParameter[],
+  values: Record<string, unknown>,
+  mappings: Record<string, string>,
+  spec: QuerySpec,
+): Record<string, string> {
+  const temporalOverrides: Record<string, string> = {};
+  for (const param of parameters) {
+    if (param.type !== "temporal_unit") continue;
+    const column = mappings[param.id];
+    if (!column) continue;
+    const raw = values[param.slug];
+    const unit = typeof raw === "string" && raw ? raw : param.default;
+    const current = spec.temporal_units ?? {};
+    if (typeof unit === "string" && unit && column in current) {
+      temporalOverrides[column] = unit; // re-grid an already-grouped column
+    }
+  }
+  return temporalOverrides;
+}
+
 export function applyParamsToChart(
   chart: Chart,
   parameters: DashboardParameter[],
@@ -283,18 +313,7 @@ export function applyParamsToChart(
   now: Date = new Date(),
 ): Chart {
   const extra = paramFiltersForCard(parameters, values, mappings, now);
-  const temporalOverrides: Record<string, string> = {};
-  for (const param of parameters) {
-    if (param.type !== "temporal_unit") continue;
-    const column = mappings[param.id];
-    if (!column) continue;
-    const raw = values[param.slug];
-    const unit = typeof raw === "string" && raw ? raw : param.default;
-    const current = chart.params.spec.temporal_units ?? {};
-    if (typeof unit === "string" && unit && column in current) {
-      temporalOverrides[column] = unit; // re-grid an already-grouped column
-    }
-  }
+  const temporalOverrides = temporalOverridesForCard(parameters, values, mappings, chart.params.spec);
   if (extra.length === 0 && Object.keys(temporalOverrides).length === 0) return chart;
   const spec = { ...chart.params.spec, filters: [...chart.params.spec.filters, ...extra] };
   if (Object.keys(temporalOverrides).length > 0) {

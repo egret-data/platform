@@ -158,7 +158,26 @@ async fn post_card_data_with_filters(
     tok: &str,
     filters: serde_json::Value,
 ) -> (StatusCode, Vec<u8>) {
-    let body = serde_json::json!({ "filters": filters }).to_string();
+    post_card_data_with_body(
+        app,
+        slug,
+        dash,
+        card,
+        tok,
+        serde_json::json!({ "filters": filters }),
+    )
+    .await
+}
+
+/// POST the card-data endpoint with an arbitrary JSON body (e.g. a `temporal_units` map).
+async fn post_card_data_with_body(
+    app: &axum::Router,
+    slug: &str,
+    dash: Uuid,
+    card: Uuid,
+    tok: &str,
+    body: serde_json::Value,
+) -> (StatusCode, Vec<u8>) {
     let resp = app
         .clone()
         .oneshot(
@@ -167,7 +186,7 @@ async fn post_card_data_with_filters(
                 .uri(format!("/ws/{slug}/dashboards/{dash}/cards/{card}/data"))
                 .header("Cookie", format!("egret_session={tok}"))
                 .header("Content-Type", "application/json")
-                .body(Body::from(body))
+                .body(Body::from(body.to_string()))
                 .unwrap(),
         )
         .await
@@ -485,5 +504,158 @@ async fn dashboard_card_data_merges_and_validates_filters() {
         none_status == StatusCode::OK || none_status == StatusCode::BAD_GATEWAY,
         "a body-less call runs the saved query unfiltered; got {none_status}, body={}",
         String::from_utf8_lossy(&none_body)
+    );
+}
+
+/// `temporal_unit` dashboard-param overrides posted in the body are MERGED + VALIDATED
+/// (re-grid path) before the card's saved query runs:
+///  * a KNOWN unit token ("month") on a temporal, SELECTED dimension is accepted and
+///    REACHES execution (200 with a live engine, else 502) — the override reaches
+///    `chartquery::build` and compiles to an enum-driven bucket expression;
+///  * an UNKNOWN unit token is REJECTED with 400 BEFORE the engine is touched — the
+///    token is validated against the `TemporalUnit` enum, so no raw string is spliced
+///    into SQL.
+#[tokio::test]
+async fn dashboard_card_data_merges_and_validates_temporal_units() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    let owner = seed_user(&db).await;
+    let slug = format!("dbcardt-{}", Uuid::new_v4().simple());
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'DB Card Temporal Test', $2, 'active') RETURNING id",
+    )
+    .bind(&slug)
+    .bind(owner)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert workspace");
+
+    let db_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id) \
+         VALUES ($1,'trino','localhost',8080,$2) RETURNING id",
+    )
+    .bind(format!("db-{}", Uuid::new_v4().simple()))
+    .bind(ws)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    let outside_viewer = seed_user(&db).await;
+
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let st = build_state(db.clone(), pdp);
+    let sessions = st.sessions.clone();
+    let outside_viewer_tok = session_for(&sessions, outside_viewer).await;
+
+    // Dataset with a temporal column "d" (grouped) and a numeric metric column "n".
+    let ds = st
+        .datasets
+        .create(
+            ws,
+            db_id,
+            "DS",
+            "",
+            &SourceSpec::Virtual {
+                sql: "SELECT CAST('2020-01-01' AS DATE) AS d, 1 AS n".into(),
+            },
+            &[
+                NewColumn {
+                    column_name: "d".into(),
+                    data_type: "date".into(),
+                    type_generic: "temporal".into(),
+                    is_temporal: true,
+                },
+                NewColumn {
+                    column_name: "n".into(),
+                    data_type: "integer".into(),
+                    type_generic: "numeric".into(),
+                    is_temporal: false,
+                },
+            ],
+            Some(egret_core::UserId(owner)),
+        )
+        .await
+        .unwrap()
+        .id;
+    // A dataset-defined metric so the aggregate query (which applies the temporal grid
+    // to its dimension) has a valid measure.
+    st.datasets
+        .add_metric(ds, "cnt", "COUNT(*)", "integer", "numeric", "Count", "")
+        .await
+        .unwrap();
+    // Saved spec: group by temporal dimension "d" (pre-gridded to "day"), count metric.
+    let spec = serde_json::json!({
+        "metrics": ["cnt"],
+        "dimensions": ["d"],
+        "columns": [],
+        "filters": [],
+        "orderby": [],
+        "row_limit": 10,
+        "rollup_groups": [],
+        "temporal_units": { "d": "day" }
+    });
+    let params = serde_json::json!({ "spec": spec });
+    let chart = st
+        .charts
+        .create(ws, ds, "CH", "", "bar", &params, Some(owner))
+        .await
+        .unwrap()
+        .id;
+
+    let dash = st
+        .dashboards
+        .create(ws, "D", "", Some(owner))
+        .await
+        .unwrap()
+        .id;
+    let card = seed_card(&db, dash, chart).await;
+    grant_object(&db, outside_viewer, "dashboard", dash, "ws_viewer", owner).await;
+
+    let app = dashboard_router().with_state(st);
+
+    // 1. A KNOWN unit "month" re-grids the temporal dimension → accepted + compiled →
+    //    reaches execution (200 with a live engine, else 502). Never 400/403.
+    let (ok_status, ok_body) = post_card_data_with_body(
+        &app,
+        &slug,
+        dash,
+        card,
+        &outside_viewer_tok,
+        serde_json::json!({ "temporal_units": { "d": "month" } }),
+    )
+    .await;
+    assert!(
+        ok_status == StatusCode::OK || ok_status == StatusCode::BAD_GATEWAY,
+        "a known temporal unit on a selected temporal column must be accepted + reach \
+         execution (200 with a live engine, else 502); got {ok_status}, body={}",
+        String::from_utf8_lossy(&ok_body)
+    );
+
+    // 2. An UNKNOWN unit token is rejected with 400 BEFORE execution — the token is
+    //    validated against the `TemporalUnit` enum, so no raw string reaches SQL.
+    let (bad_status, bad_body) = post_card_data_with_body(
+        &app,
+        &slug,
+        dash,
+        card,
+        &outside_viewer_tok,
+        serde_json::json!({ "temporal_units": { "d": "'; DROP TABLE t; --" } }),
+    )
+    .await;
+    assert_eq!(
+        bad_status,
+        StatusCode::BAD_REQUEST,
+        "an unknown temporal unit token must be rejected (400), not executed; body={}",
+        String::from_utf8_lossy(&bad_body)
     );
 }

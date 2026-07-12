@@ -18030,6 +18030,16 @@
               "$ref": "#/components/schemas/Filter"
             },
             "description": "Resolved, dashboard-param-derived filters to AND onto the card's saved query."
+          },
+          "temporal_units": {
+            "type": "object",
+            "description": "Resolved `temporal_unit` dashboard-param overrides: dimension column name ->\ntemporal unit token (e.g. \"month\"). Each token is validated against the\n`TemporalUnit` enum by `chartquery::build` (an unknown token → 400) and rendered\nas an enum-driven bucket expression — never spliced into SQL as a raw string.\nA client override replaces the saved unit for that already-gridded column.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           }
         }
       },

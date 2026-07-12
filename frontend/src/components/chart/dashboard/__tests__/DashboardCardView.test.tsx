@@ -35,21 +35,28 @@ describe("DashboardCardView", () => {
     expect(screen.getByText("Sales")).toBeInTheDocument();
     expect(screen.getByTestId("chart")).toBeInTheDocument();
     // The chart-backed card fetches via the object-scoped card-data endpoint
-    // (ws, dashboardId, cardId, nonce, enabled, paramFilters). No params → empty filters.
-    expect(useDashboardCardData).toHaveBeenCalledWith("eng", "d1", "k", undefined, true, []);
+    // (ws, dashboardId, cardId, nonce, enabled, paramFilters, paramTemporal). No params
+    // → empty filters + empty temporal overrides.
+    expect(useDashboardCardData).toHaveBeenCalledWith("eng", "d1", "k", undefined, true, [], {});
   });
   it("forwards resolved dashboard-param filters to the card-data hook", () => {
     const paramFilters = [{ col: "region", op: "eq" as const, value: "EU" }];
     render(<DashboardCardView ws="eng" dashboardId="d1" card={card({ chart_id: "c1" })} chart={chart} paramFilters={paramFilters} />);
     // The filter body reaches the hook, so the endpoint applies it server-side.
-    expect(useDashboardCardData).toHaveBeenCalledWith("eng", "d1", "k", undefined, true, paramFilters);
+    expect(useDashboardCardData).toHaveBeenCalledWith("eng", "d1", "k", undefined, true, paramFilters, {});
+  });
+  it("forwards resolved temporal-unit overrides to the card-data hook", () => {
+    const paramTemporal = { created_at: "month" };
+    render(<DashboardCardView ws="eng" dashboardId="d1" card={card({ chart_id: "c1" })} chart={chart} paramTemporal={paramTemporal} />);
+    // The temporal overrides reach the hook, so the endpoint re-grids server-side.
+    expect(useDashboardCardData).toHaveBeenCalledWith("eng", "d1", "k", undefined, true, [], paramTemporal);
   });
   it("a param-filter change re-invokes the hook with the new filters (drives a refetch)", () => {
     const { rerender } = render(<DashboardCardView ws="eng" dashboardId="d1" card={card({ chart_id: "c1" })} chart={chart} paramFilters={[{ col: "region", op: "eq" as const, value: "EU" }]} />);
-    expect(useDashboardCardData).toHaveBeenLastCalledWith("eng", "d1", "k", undefined, true, [{ col: "region", op: "eq", value: "EU" }]);
+    expect(useDashboardCardData).toHaveBeenLastCalledWith("eng", "d1", "k", undefined, true, [{ col: "region", op: "eq", value: "EU" }], {});
     rerender(<DashboardCardView ws="eng" dashboardId="d1" card={card({ chart_id: "c1" })} chart={chart} paramFilters={[{ col: "region", op: "eq" as const, value: "US" }]} />);
     // A changed filter value → a new filters array → the hook (and its query key) sees it.
-    expect(useDashboardCardData).toHaveBeenLastCalledWith("eng", "d1", "k", undefined, true, [{ col: "region", op: "eq", value: "US" }]);
+    expect(useDashboardCardData).toHaveBeenLastCalledWith("eng", "d1", "k", undefined, true, [{ col: "region", op: "eq", value: "US" }], {});
   });
   it("uses options.title to override the header", () => {
     render(<DashboardCardView ws="eng" dashboardId="d1" card={card({ chart_id: "c1", options: { title: "Revenue" } })} chart={chart} />);

@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { CardRunBodyTemporalUnits } from './cardRunBodyTemporalUnits';
 import type { Filter } from './filter';
 
 /**
@@ -19,4 +20,12 @@ import type { Filter } from './filter';
 export interface CardRunBody {
   /** Resolved, dashboard-param-derived filters to AND onto the card's saved query. */
   filters?: Filter[];
+  /**
+     * Resolved `temporal_unit` dashboard-param overrides: dimension column name ->
+     * temporal unit token (e.g. "month"). Each token is validated against the
+     * `TemporalUnit` enum by `chartquery::build` (an unknown token → 400) and rendered
+     * as an enum-driven bucket expression — never spliced into SQL as a raw string.
+     * A client override replaces the saved unit for that already-gridded column.
+     */
+  temporal_units?: CardRunBodyTemporalUnits;
 }

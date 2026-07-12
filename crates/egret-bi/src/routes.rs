@@ -2040,6 +2040,13 @@ pub struct CardRunBody {
     /// Resolved, dashboard-param-derived filters to AND onto the card's saved query.
     #[serde(default)]
     pub filters: Vec<chartquery::Filter>,
+    /// Resolved `temporal_unit` dashboard-param overrides: dimension column name ->
+    /// temporal unit token (e.g. "month"). Each token is validated against the
+    /// `TemporalUnit` enum by `chartquery::build` (an unknown token → 400) and rendered
+    /// as an enum-driven bucket expression — never spliced into SQL as a raw string.
+    /// A client override replaces the saved unit for that already-gridded column.
+    #[serde(default)]
+    pub temporal_units: std::collections::HashMap<String, String>,
 }
 
 #[utoipa::path(
@@ -2135,6 +2142,13 @@ async fn db_card_run(
     // inject a predicate on an arbitrary column. Values/operators are
     // injection-safe via `sql_literal`/`FilterOp`.
     spec.filters.extend(body.filters);
+
+    // Merge resolved `temporal_unit` dashboard-param overrides onto the persisted
+    // query: a client override REPLACES the saved unit for that column (re-grid). The
+    // unit token is validated against the `TemporalUnit` enum by `chartquery::build`
+    // (an unknown token → 400) and a unit on a non-temporal / non-selected column is
+    // also rejected there, so a client cannot smuggle raw SQL through the unit value.
+    spec.temporal_units.extend(body.temporal_units);
 
     let (sql, database_id) = compile_chart_sql(&st, &ctx, chart.dataset_id, &spec).await?;
     let (session_user, bearer) = resolve_delegation(&st, &ctx, database_id).await?;

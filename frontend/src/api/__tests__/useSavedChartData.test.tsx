@@ -46,7 +46,15 @@ describe("useDashboardCardData", () => {
     const call = cardDataCalls().at(-1)!;
     const opts = call[1] as { method?: string; body?: string };
     expect(opts.method).toBe("POST");
-    expect(JSON.parse(opts.body ?? "{}")).toEqual({ filters });
+    expect(JSON.parse(opts.body ?? "{}")).toEqual({ filters, temporal_units: {} });
+  });
+
+  it("POSTs resolved temporal-unit overrides in the request body", async () => {
+    const temporalUnits = { created_at: "month" };
+    const { result } = renderHook(() => useDashboardCardData("eng", "d1", "k", undefined, true, [], temporalUnits), { wrapper });
+    await waitFor(() => expect(result.current.rows).toEqual([[5]]));
+    const opts = cardDataCalls().at(-1)![1] as { body?: string };
+    expect(JSON.parse(opts.body ?? "{}")).toEqual({ filters: [], temporal_units: temporalUnits });
   });
 
   it("refetches when the filters change (new query key)", async () => {
@@ -58,7 +66,7 @@ describe("useDashboardCardData", () => {
     rerender();
     await waitFor(() => expect(cardDataCalls().length).toBe(before + 1));
     // The new fetch carries the changed filter value.
-    expect(JSON.parse((cardDataCalls().at(-1)![1] as { body?: string }).body ?? "{}")).toEqual({ filters });
+    expect(JSON.parse((cardDataCalls().at(-1)![1] as { body?: string }).body ?? "{}")).toEqual({ filters, temporal_units: {} });
   });
 
   it("does not fetch until a chart-backed card id is present", () => {

@@ -17,7 +17,7 @@ function asString(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 
-type ChartCardTileProps = { ws: string; dashboardId: string; card: DashboardCard; chart: Chart | undefined; refreshNonce?: number; paramFilters?: ChartFilter[]; onValueClick?: (ctx: DrillContext, x: number, y: number) => void; blocked?: boolean; editing?: boolean; autoHeight?: boolean; onAutoHeight?: (rows: number) => void; rowHeight?: number };
+type ChartCardTileProps = { ws: string; dashboardId: string; card: DashboardCard; chart: Chart | undefined; refreshNonce?: number; paramFilters?: ChartFilter[]; paramTemporal?: Record<string, string>; onValueClick?: (ctx: DrillContext, x: number, y: number) => void; blocked?: boolean; editing?: boolean; autoHeight?: boolean; onAutoHeight?: (rows: number) => void; rowHeight?: number };
 
 /**
  * View-mode chart tile: fetches via the object-scoped card-data endpoint
@@ -26,10 +26,11 @@ type ChartCardTileProps = { ws: string; dashboardId: string; card: DashboardCard
  * only the dashboard grant, no `query:run` workspace permission.
  */
 function ChartCardTileView(props: ChartCardTileProps) {
-  const { ws, dashboardId, card, chart, refreshNonce, paramFilters, blocked } = props;
-  // Pass the resolved dashboard-parameter filters so the card-data endpoint applies
-  // them server-side (view-mode filtering). A changed filter mints a fresh query key.
-  const data = useDashboardCardData(ws, dashboardId, card.id, refreshNonce, !blocked && !!chart, paramFilters ?? []);
+  const { ws, dashboardId, card, chart, refreshNonce, paramFilters, paramTemporal, blocked } = props;
+  // Pass the resolved dashboard-parameter filters + temporal-unit overrides so the
+  // card-data endpoint applies them server-side (view-mode filtering + re-grid). A
+  // changed filter or unit mints a fresh query key.
+  const data = useDashboardCardData(ws, dashboardId, card.id, refreshNonce, !blocked && !!chart, paramFilters ?? [], paramTemporal ?? {});
   return <ChartCardTileBody {...props} data={data} />;
 }
 
@@ -84,7 +85,7 @@ function ChartCardTileBody({ card, chart, onValueClick, blocked, editing, autoHe
 }
 
 /** Render one dashboard card by its card_type. */
-export function DashboardCardView({ ws, dashboardId, card, chart, refreshNonce, parameters, paramValues, paramFilters, onValueClick, blocked, editing, autoHeight, onAutoHeight, rowHeight, onEditText, autoFocusText }: { ws: string; dashboardId: string; card: DashboardCard; chart: Chart | undefined; refreshNonce?: number; parameters?: DashboardParameter[]; paramValues?: Record<string, unknown>; paramFilters?: ChartFilter[]; onValueClick?: (ctx: DrillContext, x: number, y: number) => void; blocked?: boolean; editing?: boolean; autoHeight?: boolean; onAutoHeight?: (rows: number) => void; rowHeight?: number; onEditText?: (text: string) => void; autoFocusText?: boolean }) {
+export function DashboardCardView({ ws, dashboardId, card, chart, refreshNonce, parameters, paramValues, paramFilters, paramTemporal, onValueClick, blocked, editing, autoHeight, onAutoHeight, rowHeight, onEditText, autoFocusText }: { ws: string; dashboardId: string; card: DashboardCard; chart: Chart | undefined; refreshNonce?: number; parameters?: DashboardParameter[]; paramValues?: Record<string, unknown>; paramFilters?: ChartFilter[]; paramTemporal?: Record<string, string>; onValueClick?: (ctx: DrillContext, x: number, y: number) => void; blocked?: boolean; editing?: boolean; autoHeight?: boolean; onAutoHeight?: (rows: number) => void; rowHeight?: number; onEditText?: (text: string) => void; autoFocusText?: boolean }) {
   const wrap = (body: React.ReactNode) => (autoHeight && onAutoHeight ? <AutoHeightMeasure rowHeight={rowHeight ?? 0} onRows={onAutoHeight}>{body}</AutoHeightMeasure> : body);
   if (card.card_type === "text") {
     const raw = asString(card.options.text) ?? "";
@@ -97,7 +98,7 @@ export function DashboardCardView({ ws, dashboardId, card, chart, refreshNonce, 
     return wrap(<HeadingCard text={display} editing={editing} autoFocus={autoFocusText} onChange={onEditText} />);
   }
   if (card.card_type === "link") return wrap(<LinkCard url={asString(card.options.url)} label={asString(card.options.label)} editing={editing} />);
-  const tileProps = { ws, dashboardId, card, chart, refreshNonce, paramFilters, onValueClick, blocked, editing, autoHeight, onAutoHeight, rowHeight };
+  const tileProps = { ws, dashboardId, card, chart, refreshNonce, paramFilters, paramTemporal, onValueClick, blocked, editing, autoHeight, onAutoHeight, rowHeight };
   // View mode reads through the object-scoped card-data endpoint; edit mode keeps the
   // build->submit editor pipeline so unsaved draft cards + param injection still render.
   return editing ? <ChartCardTileEdit {...tileProps} /> : <ChartCardTileView {...tileProps} />;

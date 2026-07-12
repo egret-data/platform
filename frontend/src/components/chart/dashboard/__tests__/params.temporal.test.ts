@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { applyParamsToChart, summarize } from "../params";
+import { applyParamsToChart, summarize, temporalOverridesForCard } from "../params";
 import type { DashboardParameter } from "@/api/dashboards";
 import type { Chart } from "@/api/charts";
 
@@ -47,6 +47,28 @@ describe("applyParamsToChart — temporal_unit", () => {
     );
     expect(out.params.spec.temporal_units).toEqual({ created_at: "quarter" });
     expect(out.params.spec.filters).toEqual([{ col: "region", op: "eq", value: "EU" }]);
+  });
+});
+
+describe("temporalOverridesForCard", () => {
+  it("returns the override for a temporal_unit param mapped to an already-gridded column", () => {
+    const out = temporalOverridesForCard([tuParam()], { date_grouping: "quarter" }, { p1: "created_at" }, chart({ created_at: "month" }).params.spec);
+    expect(out).toEqual({ created_at: "quarter" });
+  });
+
+  it("is empty when the mapped column is not already gridded (view-mode only re-grids)", () => {
+    const out = temporalOverridesForCard([tuParam()], { date_grouping: "quarter" }, { p1: "created_at" }, chart({}).params.spec);
+    expect(out).toEqual({});
+  });
+
+  it("falls back to the param default when the value is blank", () => {
+    const out = temporalOverridesForCard([tuParam({ default: "year" })], { date_grouping: "" }, { p1: "created_at" }, chart({ created_at: "month" }).params.spec);
+    expect(out).toEqual({ created_at: "year" });
+  });
+
+  it("is empty when the param is not mapped", () => {
+    const out = temporalOverridesForCard([tuParam()], { date_grouping: "quarter" }, {}, chart({ created_at: "month" }).params.spec);
+    expect(out).toEqual({});
   });
 });
 

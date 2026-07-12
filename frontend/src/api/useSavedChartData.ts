@@ -42,14 +42,17 @@ export function useSavedChartData(ws: string, chartId: string | null, nonce?: nu
  *
  * `filters` carries the resolved dashboard-parameter filters for this card (from
  * `paramFiltersForCard`); the backend validates each `col` against the dataset's
- * real columns and merges them into the persisted query. They are part of the
- * query key, so changing a dashboard parameter refetches the card.
+ * real columns and merges them into the persisted query. `temporalUnits` carries the
+ * resolved `temporal_unit` param overrides (from `temporalOverridesForCard`) — a
+ * `column -> unit token` map the backend validates against the `TemporalUnit` enum and
+ * merges to re-grid the persisted query. Both are part of the query key, so changing a
+ * dashboard parameter refetches the card.
  */
-export function useDashboardCardData(ws: string, dashboardId: string | null, cardId: string | null, nonce?: number, enabled = true, filters: ChartFilter[] = []): ChartData {
+export function useDashboardCardData(ws: string, dashboardId: string | null, cardId: string | null, nonce?: number, enabled = true, filters: ChartFilter[] = [], temporalUnits: Record<string, string> = {}): ChartData {
   const q = useQuery({
-    queryKey: ["dashboardsDbCardRun", ws, dashboardId, cardId, nonce, filters],
+    queryKey: ["dashboardsDbCardRun", ws, dashboardId, cardId, nonce, filters, temporalUnits],
     // apiFetch throws on non-2xx, so a resolved envelope is always the success body.
-    queryFn: () => dashboardsDbCardRun(ws, dashboardId ?? "", cardId ?? "", { filters: filters as CardRunBody["filters"] }).then((r) => r.data as ChartRunResponse),
+    queryFn: () => dashboardsDbCardRun(ws, dashboardId ?? "", cardId ?? "", { filters: filters as CardRunBody["filters"], temporal_units: temporalUnits }).then((r) => r.data as ChartRunResponse),
     enabled: enabled && !!dashboardId && !!cardId,
   });
   return {
