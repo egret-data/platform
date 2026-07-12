@@ -136,9 +136,16 @@ async fn add_accepts_custom_ws_role_rejects_bad_role() {
         eprintln!("skip");
         return;
     };
-    let by = seed_user_email(&db, &format!("by-{}@t.local", uuid::Uuid::new_v4().simple())).await;
-    let member =
-        seed_user_email(&db, &format!("cm-{}@t.local", uuid::Uuid::new_v4().simple())).await;
+    let by = seed_user_email(
+        &db,
+        &format!("by-{}@t.local", uuid::Uuid::new_v4().simple()),
+    )
+    .await;
+    let member = seed_user_email(
+        &db,
+        &format!("cm-{}@t.local", uuid::Uuid::new_v4().simple()),
+    )
+    .await;
     let wrepo = WorkspaceRepo::new(db.clone());
     let mrepo = MemberRepo::new(db.clone());
     let ws = wrepo.create(&uniq("ws"), "W", by).await.unwrap();
@@ -161,7 +168,9 @@ async fn add_accepts_custom_ws_role_rejects_bad_role() {
     assert_eq!(members[0].role, custom);
 
     // A platform-scoped role name → InvalidInput (not a workspace role).
-    let plat = mrepo.add(ws.id, "user", member.0, "platform_admin", by).await;
+    let plat = mrepo
+        .add(ws.id, "user", member.0, "platform_admin", by)
+        .await;
     assert!(
         matches!(plat, Err(egret_core::Error::InvalidInput(_))),
         "platform_admin must be rejected as a workspace role, got {plat:?}"
@@ -185,7 +194,11 @@ async fn re_add_replaces_role() {
         eprintln!("skip");
         return;
     };
-    let by = seed_user_email(&db, &format!("by-{}@t.local", uuid::Uuid::new_v4().simple())).await;
+    let by = seed_user_email(
+        &db,
+        &format!("by-{}@t.local", uuid::Uuid::new_v4().simple()),
+    )
+    .await;
     let u = seed_user_email(&db, &format!("u-{}@t.local", uuid::Uuid::new_v4().simple())).await;
     let wrepo = WorkspaceRepo::new(db.clone());
     let mrepo = MemberRepo::new(db.clone());
@@ -251,8 +264,11 @@ async fn last_admin_guard() {
         return;
     };
     let st = ws_state(&db).await;
-    let admin =
-        seed_user_email(&db, &format!("a1-{}@t.local", uuid::Uuid::new_v4().simple())).await;
+    let admin = seed_user_email(
+        &db,
+        &format!("a1-{}@t.local", uuid::Uuid::new_v4().simple()),
+    )
+    .await;
     let ws = st.workspaces.create(&uniq("ws"), "W", admin).await.unwrap();
 
     // Sole ws_admin.
@@ -322,13 +338,20 @@ async fn last_admin_guard() {
 
     // Still the sole admin — the guard blocked both mutations.
     assert_eq!(
-        st.members.role_of(ws.id, "user", admin.0).await.unwrap().as_deref(),
+        st.members
+            .role_of(ws.id, "user", admin.0)
+            .await
+            .unwrap()
+            .as_deref(),
         Some("ws_admin"),
     );
 
     // Add a SECOND ws_admin: the guard no longer trips.
-    let admin2 =
-        seed_user_email(&db, &format!("a2-{}@t.local", uuid::Uuid::new_v4().simple())).await;
+    let admin2 = seed_user_email(
+        &db,
+        &format!("a2-{}@t.local", uuid::Uuid::new_v4().simple()),
+    )
+    .await;
     st.members
         .add(ws.id, "user", admin2.0, "ws_admin", admin)
         .await
@@ -377,8 +400,11 @@ async fn add_member_resolves_email_to_id() {
     };
     let st = ws_state(&db).await;
     // Caller is a ws_admin so `workspace:manage_members` passes.
-    let admin =
-        seed_user_email(&db, &format!("adm-{}@t.local", uuid::Uuid::new_v4().simple())).await;
+    let admin = seed_user_email(
+        &db,
+        &format!("adm-{}@t.local", uuid::Uuid::new_v4().simple()),
+    )
+    .await;
     let ws = st.workspaces.create(&uniq("ws"), "W", admin).await.unwrap();
     st.members
         .add(ws.id, "user", admin.0, "ws_admin", admin)

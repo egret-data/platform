@@ -524,7 +524,12 @@ async fn add_member(
             .map_err(AuthError)?
             .as_deref()
             == Some("ws_admin")
-        && st.members.count_ws_admins(ctx.workspace_id).await.map_err(AuthError)? <= 1
+        && st
+            .members
+            .count_ws_admins(ctx.workspace_id)
+            .await
+            .map_err(AuthError)?
+            <= 1
     {
         return Err(AuthError(egret_core::Error::Conflict(
             "the workspace must keep at least one admin".into(),
@@ -588,7 +593,12 @@ async fn remove_member(
         .map_err(AuthError)?
         .as_deref()
         == Some("ws_admin")
-        && st.members.count_ws_admins(ctx.workspace_id).await.map_err(AuthError)? <= 1
+        && st
+            .members
+            .count_ws_admins(ctx.workspace_id)
+            .await
+            .map_err(AuthError)?
+            <= 1
     {
         return Err(AuthError(egret_core::Error::Conflict(
             "the workspace must keep at least one admin".into(),
