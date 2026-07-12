@@ -41,6 +41,10 @@ pub struct CpState {
     pub groups: egret_auth::groups::GroupRepo,
     /// Platform RBAC roles, permissions, and principal assignments.
     pub roles: egret_auth::roles::RoleRepo,
+    /// Effective-access resolver (AX-3): enumerates a principal's roles,
+    /// permissions, workspace memberships, and object grants for the
+    /// `GET /access/effective` console endpoint.
+    pub access_resolver: egret_auth::effective::AccessResolver,
     /// Named secret layer, used in GLOBAL scope (`None` workspace) here.
     pub secrets: WorkspaceSecretStore,
     /// Session service backing the `Auth` extractor.

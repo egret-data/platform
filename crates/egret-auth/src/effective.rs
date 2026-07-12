@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::roles::db_err; // reuse the existing error mapper
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct EffectiveAccess {
     pub principal: PrincipalInfo,
     pub platform_roles: Vec<RoleSource>,
@@ -17,7 +17,7 @@ pub struct EffectiveAccess {
     pub denies: Vec<DenyEntry>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct PrincipalInfo {
     pub r#type: String,
     pub id: String,
@@ -25,25 +25,25 @@ pub struct PrincipalInfo {
     pub is_platform_admin: bool,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, utoipa::ToSchema)]
 pub struct RoleSource {
     pub name: String,
     pub source: String, // "direct" | "group:{groupName}"
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct PermVia {
     pub role: String,
     pub inherited_from: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct EffectivePermission {
     pub key: String,
     pub via: Vec<PermVia>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct WorkspaceMembership {
     pub workspace_id: String,
     pub workspace_slug: String,
@@ -52,7 +52,7 @@ pub struct WorkspaceMembership {
     pub source: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ObjectGrant {
     pub kind: String,
     pub id: String,
@@ -63,7 +63,7 @@ pub struct ObjectGrant {
     pub source: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DenyEntry {
     pub scope: String,
     pub target: String,
@@ -282,7 +282,11 @@ impl AccessResolver {
             .filter(|o| o.effect == "deny")
             .map(|o| DenyEntry {
                 scope: "object".into(),
-                target: format!("{}:{}", o.kind, o.name.clone().unwrap_or_else(|| o.id.clone())),
+                target: format!(
+                    "{}:{}",
+                    o.kind,
+                    o.name.clone().unwrap_or_else(|| o.id.clone())
+                ),
                 role: o.role.clone(),
                 source: o.source.clone(),
             })
@@ -299,6 +303,33 @@ impl AccessResolver {
             });
         }
         out
+    }
+
+    /// Resolve a principal identifier to a UUID: accept a real UUID directly,
+    /// else look up a user by email / a group by name. `Ok(None)` if unknown.
+    /// Returns `InvalidInput` for an unrecognized `ptype`.
+    pub async fn resolve_ident(
+        &self,
+        ptype: &str,
+        ident: &str,
+    ) -> Result<Option<Uuid>, egret_core::Error> {
+        if let Ok(u) = Uuid::parse_str(ident) {
+            return Ok(Some(u));
+        }
+        let sql = match ptype {
+            "user" => "SELECT id FROM users WHERE email = $1",
+            "group" => "SELECT id FROM groups WHERE name = $1",
+            _ => {
+                return Err(egret_core::Error::InvalidInput(format!(
+                    "bad principal_type: {ptype}"
+                )))
+            }
+        };
+        sqlx::query_scalar(sql)
+            .bind(ident)
+            .fetch_optional(&self.db.pool)
+            .await
+            .map_err(db_err)
     }
 
     /// Resolve a principal's full effective access.
