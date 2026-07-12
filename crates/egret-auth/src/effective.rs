@@ -152,6 +152,58 @@ impl AccessResolver {
             })
             .collect()
     }
+
+    /// Effective permissions for the granted platform roles, with provenance.
+    /// For each granted role, walks its parent chain (role hierarchy) and records,
+    /// per permission, which granted role conferred it and (if it came from a
+    /// parent) which parent. Skipped for platform_admin (superuser).
+    #[allow(dead_code)] // removed in Task 3
+    async fn permissions(
+        &self,
+        platform_roles: &[RoleSource],
+    ) -> Result<Vec<EffectivePermission>, egret_core::Error> {
+        use std::collections::BTreeMap;
+        let mut acc: BTreeMap<String, Vec<PermVia>> = BTreeMap::new();
+        for rs in platform_roles {
+            if rs.name == "platform_admin" {
+                continue; // superuser — enumerated permissions are meaningless
+            }
+            // (permission, owning_role_name) for this granted role's whole closure.
+            let rows: Vec<(String, String)> = sqlx::query_as(
+                "WITH RECURSIVE closure AS ( \
+                   SELECT id, name, parent_role_id FROM roles WHERE name = $1 AND scope = 'platform' \
+                   UNION \
+                   SELECT r.id, r.name, r.parent_role_id FROM roles r \
+                     JOIN closure c ON r.id = c.parent_role_id \
+                 ) \
+                 SELECT rp.permission, c.name AS owner FROM closure c \
+                   JOIN role_permissions rp ON rp.role_id = c.id",
+            )
+            .bind(&rs.name)
+            .fetch_all(&self.db.pool)
+            .await
+            .map_err(db_err)?;
+            for (perm, owner) in rows {
+                let inherited_from = if owner == rs.name { None } else { Some(owner) };
+                let via = PermVia {
+                    role: rs.name.clone(),
+                    inherited_from,
+                };
+                let entry = acc.entry(perm).or_default();
+                // Dedupe: a role reachable by two paths shouldn't duplicate a (role, inherited_from) pair.
+                if !entry
+                    .iter()
+                    .any(|v| v.role == via.role && v.inherited_from == via.inherited_from)
+                {
+                    entry.push(via);
+                }
+            }
+        }
+        Ok(acc
+            .into_iter()
+            .map(|(key, via)| EffectivePermission { key, via })
+            .collect())
+    }
 }
 
 #[derive(sqlx::FromRow, Clone)]
