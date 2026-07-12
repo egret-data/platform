@@ -89,7 +89,7 @@ These are **not** added to `ADMIN_GRAPH_ACTIONS` — they behave like `chart:*`
 | Handler  | From                              | To                                                        |
 |----------|-----------------------------------|-----------------------------------------------------------|
 | `save`   | `require(query:run)`              | `require(saved_query:manage)` (ws-level create)           |
-| `list`   | `require(query:run)`              | `require(saved_query:read)`, then filter to grant-visible rows (owned ∪ folder-granted ∪ object-granted), mirroring chart `list` |
+| `list`   | `require(query:run)`              | `require(saved_query:read)` + return all workspace rows (mirrors `ch_list` exactly — no per-object filter) |
 | `load`   | `require(query:run)`              | `require_object(saved_query:read, resolve("saved_query", id))` |
 | `update` | `require(query:run)` + `require_owner` | `require_object(saved_query:manage, resolve(...))` — **owner-gate dropped**, role/grant-based edit (matches B2-1a) |
 | `delete` | `require(query:run)` + `require_owner` | `require_object(saved_query:manage, resolve(...))`        |
@@ -106,9 +106,12 @@ Plus:
 - Drop the now-unused `require_owner` helper for saved queries (keep it if other
   callers remain; otherwise remove).
 
-The `list` filter follows the chart-list precedent exactly: a caller with a
-workspace role that grants `saved_query:read` sees all workspace saved queries; an
-object-guest sees only the saved queries granted to them.
+`list` follows the chart-list precedent exactly (`ch_list`): it requires
+workspace-scope `saved_query:read` and returns **all** workspace saved queries with
+no per-object filtering. An object-guest (who lacks the workspace read perm) gets a
+403 on `list` but can still `load` an individually-granted saved query by id via
+`require_object`. A dedicated "shared with me" saved-query discovery view is **out of
+scope** (see below) — the same limitation charts have.
 
 ### 5. Share API + folders — already generic (no new routes)
 
@@ -162,6 +165,10 @@ object-guest sees only the saved queries granted to them.
 - Saved-query versioning / history.
 - Cross-workspace saved-query sharing (object grants stay within one workspace, like
   every other BI object).
+- A "shared with me" discovery view for object-guests. The backend `load`-by-id path
+  works via `require_object`, but there is no per-saved-query route/page today
+  (unlike charts). Discovery UI is a follow-up; this epic delivers folders + share +
+  role-based edit for workspace members.
 
 ## Migration / rollout notes
 

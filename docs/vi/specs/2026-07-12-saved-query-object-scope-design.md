@@ -86,7 +86,7 @@ object-scope được), không phải hành động admin-only.
 | Handler  | Từ                                | Sang                                                      |
 |----------|-----------------------------------|-----------------------------------------------------------|
 | `save`   | `require(query:run)`              | `require(saved_query:manage)` (tạo ở mức ws)              |
-| `list`   | `require(query:run)`              | `require(saved_query:read)`, rồi lọc theo hàng nhìn-thấy-được (owned ∪ folder-granted ∪ object-granted), mirror chart `list` |
+| `list`   | `require(query:run)`              | `require(saved_query:read)` + trả tất cả hàng của ws (mirror `ch_list` — không lọc per-object) |
 | `load`   | `require(query:run)`              | `require_object(saved_query:read, resolve("saved_query", id))` |
 | `update` | `require(query:run)` + `require_owner` | `require_object(saved_query:manage, resolve(...))` — **bỏ owner-gate**, sửa theo role/grant (như B2-1a) |
 | `delete` | như trên                          | `require_object(saved_query:manage, resolve(...))`        |
@@ -101,8 +101,11 @@ Thêm:
   (repo `COLS`, `create`, `update`, `list`, `get`, và mapper `dto()`).
 - Bỏ helper `require_owner` cho saved query nếu không còn caller nào khác dùng.
 
-`list` lọc theo đúng tiền lệ chart-list: caller có role workspace cấp `saved_query:read`
-thấy toàn bộ saved query của ws; object-guest chỉ thấy các saved query được cấp cho họ.
+`list` theo đúng tiền lệ chart-list (`ch_list`): yêu cầu `saved_query:read` ở ws-scope và
+trả **tất cả** saved query của ws, không lọc per-object. Object-guest (thiếu quyền read
+ws) bị 403 ở `list` nhưng vẫn `load` được từng saved query được cấp riêng qua id (bằng
+`require_object`). Màn hình "shared with me" cho saved query nằm **ngoài phạm vi** — cùng
+giới hạn như chart.
 
 ### 5. Share API + folder — đã generic (không route mới)
 
@@ -153,6 +156,9 @@ thấy toàn bộ saved query của ws; object-guest chỉ thấy các saved que
 - Versioning / lịch sử saved query.
 - Chia sẻ saved query chéo-workspace (object grant nằm trong 1 workspace, như mọi object
   BI khác).
+- Màn hình "shared with me" cho object-guest. Path `load`-by-id ở backend chạy qua
+  `require_object`, nhưng chưa có route/page riêng cho từng saved query (khác chart). UI
+  discovery là follow-up; epic này giao folders + share + edit theo role cho thành viên ws.
 
 ## Ghi chú migration / rollout
 
