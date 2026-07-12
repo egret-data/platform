@@ -17,6 +17,10 @@ pub struct WorkspaceMember {
     pub principal_type: String, // user | group
     pub principal_id: Uuid,
     pub role: String,
+    pub principal_name: Option<String>,
+    pub granted_by_name: Option<String>,
+    pub added_at: chrono::DateTime<chrono::Utc>,
+    pub is_platform_admin: bool,
 }
 
 pub const WORKSPACE_ROLES: &[&str] = &["ws_admin", "ws_editor", "ws_viewer"];

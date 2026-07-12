@@ -81,9 +81,22 @@ impl MemberRepo {
 
     pub async fn list(&self, ws: WorkspaceId) -> Result<Vec<WorkspaceMember>> {
         let rows = sqlx::query_as::<_, MemberRow>(
-            "SELECT ag.principal_type, ag.principal_id, r.name AS role \
-             FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
-             WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1",
+            "SELECT ag.principal_type, ag.principal_id, r.name AS role, \
+                    COALESCE(u.email::text, g.name) AS principal_name, \
+                    gb.email::text AS granted_by_name, \
+                    ag.created_at AS added_at, \
+                    EXISTS ( \
+                      SELECT 1 FROM access_grants pa JOIN roles pr ON pr.id = pa.role_id \
+                      WHERE pa.principal_type = ag.principal_type AND pa.principal_id = ag.principal_id \
+                        AND pa.scope_type = 'platform' AND pr.name = 'platform_admin' \
+                    ) AS is_platform_admin \
+             FROM access_grants ag \
+             JOIN roles r ON r.id = ag.role_id \
+             LEFT JOIN users  u  ON ag.principal_type = 'user'  AND u.id = ag.principal_id \
+             LEFT JOIN groups g  ON ag.principal_type = 'group' AND g.id = ag.principal_id \
+             LEFT JOIN users  gb ON gb.id = ag.granted_by \
+             WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1 \
+             ORDER BY ag.created_at",
         )
         .bind(ws.0)
         .fetch_all(&self.db.pool)
@@ -98,6 +111,10 @@ struct MemberRow {
     principal_type: String,
     principal_id: Uuid,
     role: String,
+    principal_name: Option<String>,
+    granted_by_name: Option<String>,
+    added_at: chrono::DateTime<chrono::Utc>,
+    is_platform_admin: bool,
 }
 
 impl From<MemberRow> for WorkspaceMember {
@@ -106,6 +123,10 @@ impl From<MemberRow> for WorkspaceMember {
             principal_type: r.principal_type,
             principal_id: r.principal_id,
             role: r.role,
+            principal_name: r.principal_name,
+            granted_by_name: r.granted_by_name,
+            added_at: r.added_at,
+            is_platform_admin: r.is_platform_admin,
         }
     }
 }

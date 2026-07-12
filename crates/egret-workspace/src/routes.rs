@@ -430,6 +430,10 @@ pub struct MemberDto {
     pub principal_type: String,
     pub principal_id: String,
     pub role: String,
+    pub principal_name: Option<String>,
+    pub granted_by_name: Option<String>,
+    pub added_at: chrono::DateTime<chrono::Utc>,
+    pub is_platform_admin: bool,
 }
 
 pub fn ws_member_router() -> Router<WorkspaceState> {
@@ -465,6 +469,10 @@ async fn list_members(
                 principal_type: m.principal_type,
                 principal_id: m.principal_id.to_string(),
                 role: m.role,
+                principal_name: m.principal_name,
+                granted_by_name: m.granted_by_name,
+                added_at: m.added_at,
+                is_platform_admin: m.is_platform_admin,
             })
             .collect(),
     ))
