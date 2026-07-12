@@ -265,7 +265,60 @@ describe("RolesPage", () => {
   test("renders an empty state when there are no roles", async () => {
     vi.mocked(api.listRoles).mockResolvedValue([]);
     renderPage();
-    expect(await screen.findByText("No roles yet.")).toBeInTheDocument();
+    expect(await screen.findByText("No roles.")).toBeInTheDocument();
+  });
+
+  test("the Scope facet filters to platform-only rows", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("data_steward");
+    expect(screen.getByText("custom_role")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox", { name: "Scope" }));
+    await user.click(await screen.findByRole("option", { name: "Platform" }));
+
+    // data_steward is platform scope; custom_role (workspace) is filtered out.
+    expect(screen.getByText("data_steward")).toBeInTheDocument();
+    expect(screen.queryByText("custom_role")).not.toBeInTheDocument();
+  });
+
+  test("typing in the search box narrows rows by name", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("data_steward");
+
+    await user.type(screen.getByPlaceholderText("Search roles…"), "custom");
+    expect(screen.getByText("custom_role")).toBeInTheDocument();
+    expect(screen.queryByText("data_steward")).not.toBeInTheDocument();
+  });
+
+  test("the summary strip shows total, platform, and workspace counts", async () => {
+    renderPage();
+    await screen.findByText("data_steward");
+
+    // ROLES has 2 roles: 1 platform (data_steward), 1 workspace (custom_role).
+    // "platform"/"workspace" also appear as scope badges, so assert against the
+    // strip container (anchored on the unique "roles" label) with its counts.
+    const strip = screen.getByText("roles").closest("div")!;
+    expect(strip).toHaveTextContent("2roles");
+    expect(strip).toHaveTextContent("1platform");
+    expect(strip).toHaveTextContent("1workspace");
+  });
+
+  test("the built-in badge and assignee drill-in still render", async () => {
+    renderPage();
+    await screen.findByText("data_steward");
+
+    // Seeded role keeps its built-in badge.
+    expect(screen.getByText("built-in")).toBeInTheDocument();
+    // data_steward (assigneeCount 1) exposes the drill-in control; custom_role
+    // (0) stays a plain badge.
+    expect(
+      screen.getByRole("button", { name: "View assignees of data_steward" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "View assignees of custom_role" }),
+    ).not.toBeInTheDocument();
   });
 
   test("a non-admin role:read viewer sees a read-only table: no New role button and no Actions menu", async () => {

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Building2, Layers, MoreHorizontal, Pencil, Plus, Shield, Trash2 } from "lucide-react";
+import { MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 
 import {
   type AccessRole,
@@ -17,7 +17,9 @@ import {
 } from "@/api/access";
 import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
-import { StatCard, StatCardRow } from "@/components/control-plane/StatCard";
+import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
+import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
+import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -54,20 +56,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 
 export const rolesQueryKey = ["control-plane", "access", "roles"] as const;
 export const permissionsQueryKey = ["control-plane", "access", "permissions"] as const;
-
-const COLUMNS = ["Scope", "Name", "Description", "Permissions", "Assignees", ""];
 
 /** Built-in role names, seeded on install — these cannot be deleted. */
 const SEEDED_ROLE_NAMES = new Set([
@@ -137,6 +129,7 @@ export default function RolesPage() {
   const [deleteTarget, setDeleteTarget] = useState<AccessRole | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [assigneesTarget, setAssigneesTarget] = useState<AccessRole | null>(null);
+  const [scopeFacet, setScopeFacet] = useState(FACET_ALL);
 
   const deleteMutation = useMutation<void, ApiError, string>({
     mutationFn: (id) => deleteRole(id),
@@ -146,6 +139,109 @@ export default function RolesPage() {
     },
     onError: (err) => setDeleteError(err.message ?? "Failed to delete role."),
   });
+
+  const columns: Column<AccessRole>[] = [
+    {
+      key: "scope",
+      label: "Scope",
+      cell: (r) => (
+        <Badge variant={r.scope === "platform" ? "default" : "outline"}>{r.scope}</Badge>
+      ),
+    },
+    {
+      key: "name",
+      label: "Name",
+      sortable: true,
+      className: "font-medium",
+      value: (r) => r.name,
+      cell: (r) => (
+        <>
+          {r.name}
+          {isSeeded(r) && (
+            <Badge variant="secondary" className="ml-2 font-normal">
+              built-in
+            </Badge>
+          )}
+        </>
+      ),
+    },
+    {
+      key: "description",
+      label: "Description",
+      value: (r) => r.description,
+      cell: (r) => (
+        <span className="text-muted-foreground">{r.description || "—"}</span>
+      ),
+    },
+    {
+      key: "permissions",
+      label: "Permissions",
+      cell: (r) => <Badge variant="secondary">{r.permissionCount}</Badge>,
+    },
+    {
+      key: "assignees",
+      label: "Assignees",
+      cell: (r) =>
+        r.assigneeCount > 0 ? (
+          <Button
+            type="button"
+            variant="link"
+            className="h-auto p-0"
+            aria-label={`View assignees of ${r.name}`}
+            onClick={() => setAssigneesTarget(r)}
+          >
+            <Badge variant="secondary" className="cursor-pointer">
+              {r.assigneeCount}
+            </Badge>
+          </Button>
+        ) : (
+          <Badge variant="secondary">{r.assigneeCount}</Badge>
+        ),
+    },
+    {
+      key: "actions",
+      label: "",
+      className: "text-right",
+      cell: (r) => {
+        const seeded = isSeeded(r);
+        return (
+          isAdmin && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" aria-label={`Actions for ${r.name}`}>
+                  <MoreHorizontal className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => setEditTarget(r)}>
+                  <Pencil className="mr-2 h-4 w-4" />
+                  Edit permissions
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  disabled={seeded}
+                  title={seeded ? BUILTIN_DELETE_TOOLTIP : undefined}
+                  className="text-destructive focus:text-destructive"
+                  onClick={() => {
+                    setDeleteError(null);
+                    setDeleteTarget(r);
+                  }}
+                >
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  Delete
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )
+        );
+      },
+    },
+  ];
+
+  const filtered = rows.filter(
+    (r) => scopeFacet === FACET_ALL || r.scope === scopeFacet,
+  );
+  const platform = rows.filter((r) => r.scope === "platform").length;
 
   return (
     <div className="space-y-5">
@@ -175,135 +271,43 @@ export default function RolesPage() {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          {(() => {
-            const all = rows;
-            const total = all.length;
-            const platform = all.filter((r) => r.scope === "platform").length;
-            const workspace = all.filter((r) => r.scope === "workspace").length;
-            return (
-              <StatCardRow>
-                <StatCard label="Total" value={total} icon={Shield} hint="Defined roles" />
-                <StatCard label="Platform" value={platform} icon={Building2} />
-                <StatCard label="Workspace" value={workspace} icon={Layers} />
-              </StatCardRow>
-            );
-          })()}
           {deleteError && (
             <Alert variant="destructive" className="mb-4">
               <AlertDescription>{deleteError}</AlertDescription>
             </Alert>
           )}
-          <Table>
-            <TableHeader>
-              <TableRow>
-                {COLUMNS.map((col) => (
-                  <TableHead
-                    key={col || "actions"}
-                    className={col === "" ? "text-right" : undefined}
-                  >
-                    {col || <span className="sr-only">Actions</span>}
-                  </TableHead>
-                ))}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.map((r) => {
-                const seeded = isSeeded(r);
-                return (
-                  <TableRow key={r.id}>
-                    <TableCell>
-                      <Badge variant={r.scope === "platform" ? "default" : "outline"}>
-                        {r.scope}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="font-medium">
-                      {r.name}
-                      {seeded && (
-                        <Badge variant="secondary" className="ml-2 font-normal">
-                          built-in
-                        </Badge>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {r.description || "—"}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="secondary">{r.permissionCount}</Badge>
-                    </TableCell>
-                    <TableCell>
-                      {r.assigneeCount > 0 ? (
-                        <Button
-                          type="button"
-                          variant="link"
-                          className="h-auto p-0"
-                          aria-label={`View assignees of ${r.name}`}
-                          onClick={() => setAssigneesTarget(r)}
-                        >
-                          <Badge variant="secondary" className="cursor-pointer">
-                            {r.assigneeCount}
-                          </Badge>
-                        </Button>
-                      ) : (
-                        <Badge variant="secondary">{r.assigneeCount}</Badge>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {isAdmin && (
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              aria-label={`Actions for ${r.name}`}
-                            >
-                              <MoreHorizontal className="h-4 w-4" />
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end">
-                            <DropdownMenuItem onClick={() => setEditTarget(r)}>
-                              <Pencil className="mr-2 h-4 w-4" />
-                              Edit permissions
-                            </DropdownMenuItem>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuItem
-                              disabled={seeded}
-                              title={seeded ? BUILTIN_DELETE_TOOLTIP : undefined}
-                              className="text-destructive focus:text-destructive"
-                              onClick={() => {
-                                setDeleteError(null);
-                                setDeleteTarget(r);
-                              }}
-                            >
-                              <Trash2 className="mr-2 h-4 w-4" />
-                              Delete
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
-              {rows.length === 0 && (
-                <TableRow className="hover:bg-transparent">
-                  <TableCell
-                    colSpan={COLUMNS.length}
-                    className="text-center text-muted-foreground"
-                  >
-                    {roles.isError ? (
-                      <span className="text-destructive">
-                        {roles.error?.message ?? "Failed to load roles."}
-                      </span>
-                    ) : roles.isLoading ? (
-                      "Loading…"
-                    ) : (
-                      "No roles yet."
-                    )}
-                  </TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
+          <SummaryStrip
+            items={[
+              { label: "roles", value: rows.length },
+              { label: "platform", value: platform },
+              { label: "workspace", value: rows.length - platform },
+            ]}
+          />
+          <FilterableTable
+            rows={filtered}
+            columns={columns}
+            getId={(r) => r.id}
+            searchPlaceholder="Search roles…"
+            initialSort={{ key: "name", dir: "asc" }}
+            emptyText={
+              roles.isLoading
+                ? "Loading…"
+                : roles.isError
+                  ? (roles.error?.message ?? "Failed to load roles.")
+                  : "No roles."
+            }
+            filters={
+              <FacetSelect
+                label="Scope"
+                value={scopeFacet}
+                onChange={setScopeFacet}
+                options={[
+                  { value: "platform", label: "Platform" },
+                  { value: "workspace", label: "Workspace" },
+                ]}
+              />
+            }
+          />
         </CardContent>
       </Card>
 

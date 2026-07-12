@@ -72,8 +72,12 @@ describe("UsersPage", () => {
     expect(screen.getByText("bob@example.com")).toBeInTheDocument();
     expect(screen.getByText("Alice")).toBeInTheDocument();
     expect(screen.getByText("Admin")).toBeInTheDocument();
-    expect(screen.getByText("active")).toBeInTheDocument();
-    expect(screen.getByText("disabled")).toBeInTheDocument();
+    // "active"/"disabled" also appear as SummaryStrip labels, so scope the
+    // status-badge assertions to each user's row.
+    const aliceRow = screen.getByText("alice@example.com").closest("tr") as HTMLElement;
+    expect(within(aliceRow).getByText("active")).toBeInTheDocument();
+    const bobRow = screen.getByText("bob@example.com").closest("tr") as HTMLElement;
+    expect(within(bobRow).getByText("disabled")).toBeInTheDocument();
   });
 
   test("renders a user's groups as chips in their own Groups column", async () => {
@@ -94,7 +98,39 @@ describe("UsersPage", () => {
   test("renders an empty state when there are no users", async () => {
     vi.mocked(api.listUsers).mockResolvedValue([]);
     renderPage();
-    expect(await screen.findByText("No users yet.")).toBeInTheDocument();
+    expect(await screen.findByText("No users.")).toBeInTheDocument();
+  });
+
+  test("the summary strip shows the total user count", async () => {
+    renderPage();
+    await screen.findByText("alice@example.com");
+    const strip = screen.getByText("users").closest("span")?.parentElement as HTMLElement;
+    expect(within(strip).getByText("2")).toBeInTheDocument();
+    expect(within(strip).getByText("users")).toBeInTheDocument();
+  });
+
+  test("typing in the search box narrows the visible rows", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("alice@example.com");
+
+    await user.type(screen.getByPlaceholderText("Search users…"), "bob");
+
+    expect(screen.getByText("bob@example.com")).toBeInTheDocument();
+    expect(screen.queryByText("alice@example.com")).not.toBeInTheDocument();
+  });
+
+  test("the Status facet filters rows to the chosen status", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("alice@example.com");
+
+    // Alice is active, Bob is disabled. Pick "Active" → only Alice remains.
+    await user.click(screen.getByRole("combobox", { name: "Status" }));
+    await user.click(await screen.findByRole("option", { name: "Active" }));
+
+    expect(screen.getByText("alice@example.com")).toBeInTheDocument();
+    expect(screen.queryByText("bob@example.com")).not.toBeInTheDocument();
   });
 
   test("New user dialog calls createUser with the entered fields", async () => {

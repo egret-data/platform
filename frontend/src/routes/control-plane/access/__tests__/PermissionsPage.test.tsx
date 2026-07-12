@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, test, vi } from "vitest";
 
@@ -64,5 +65,61 @@ describe("PermissionsPage", () => {
     const row = screen.getByText("users.write").closest("tr");
     expect(row).not.toBeNull();
     expect(row!.textContent).toContain("—");
+  });
+});
+
+const SEARCH_GROUPS: api.PermissionCatalogGroup[] = [
+  {
+    group: "Charts",
+    permissions: [
+      { key: "chart:read", description: "View charts", roles: ["Admin"], scope: "platform" },
+      {
+        key: "chart:manage",
+        description: "Create and edit charts",
+        roles: [],
+        scope: "platform",
+      },
+    ],
+  },
+  {
+    group: "Engines",
+    permissions: [
+      { key: "engine:read", description: "View engines", roles: ["Admin"], scope: "platform" },
+    ],
+  },
+];
+
+describe("PermissionsPage search", () => {
+  test("filters permissions across grouped cards and restores when cleared", async () => {
+    vi.mocked(api.listPermissions).mockResolvedValue(SEARCH_GROUPS);
+    const user = userEvent.setup();
+    renderPage();
+
+    // Initially every permission renders across both groups.
+    expect(await screen.findByText("chart:read")).toBeInTheDocument();
+    expect(screen.getByText("chart:manage")).toBeInTheDocument();
+    expect(screen.getByText("engine:read")).toBeInTheDocument();
+    expect(screen.getByText("Engines")).toBeInTheDocument();
+
+    const box = screen.getByPlaceholderText("Search permissions…");
+
+    // Typing "chart" keeps the chart permissions and hides the Engines group.
+    await user.type(box, "chart");
+    expect(screen.getByText("chart:read")).toBeInTheDocument();
+    expect(screen.getByText("chart:manage")).toBeInTheDocument();
+    expect(screen.queryByText("engine:read")).not.toBeInTheDocument();
+    expect(screen.queryByText("Engines")).not.toBeInTheDocument();
+
+    // A nonsense query matches nothing → the no-matches message shows.
+    await user.clear(box);
+    await user.type(box, "zzzznope");
+    expect(screen.queryByText("chart:read")).not.toBeInTheDocument();
+    expect(screen.getByText(/No permissions match/)).toBeInTheDocument();
+
+    // Clearing the search restores every permission.
+    await user.clear(box);
+    expect(screen.getByText("chart:read")).toBeInTheDocument();
+    expect(screen.getByText("engine:read")).toBeInTheDocument();
+    expect(screen.getByText("Engines")).toBeInTheDocument();
   });
 });

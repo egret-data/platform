@@ -1,9 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
+import { Search } from "lucide-react";
+import { useState } from "react";
 
 import { type PermissionCatalogGroup, listPermissions } from "@/api/access";
 import { ApiError } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -32,6 +35,21 @@ export default function PermissionsPage() {
 
   const groups = permissions.data ?? [];
 
+  const [q, setQ] = useState("");
+  const needle = q.trim().toLowerCase();
+  const filteredGroups = groups
+    .map((g) => ({
+      ...g,
+      permissions: needle
+        ? g.permissions.filter(
+            (p) =>
+              p.key.toLowerCase().includes(needle) ||
+              p.description.toLowerCase().includes(needle),
+          )
+        : g.permissions,
+    }))
+    .filter((g) => g.permissions.length > 0);
+
   return (
     <div className="space-y-5">
       <div>
@@ -41,6 +59,18 @@ export default function PermissionsPage() {
           roles each one is currently granted to.
         </p>
       </div>
+
+      {!permissions.isLoading && !permissions.isError && groups.length > 0 && (
+        <div className="relative max-w-xs">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            className="pl-8"
+            placeholder="Search permissions…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
+        </div>
+      )}
 
       {permissions.isError ? (
         <Alert variant="destructive">
@@ -52,9 +82,13 @@ export default function PermissionsPage() {
         <p className="text-sm text-muted-foreground">Loading…</p>
       ) : groups.length === 0 ? (
         <p className="text-sm text-muted-foreground">No permissions defined.</p>
+      ) : filteredGroups.length === 0 ? (
+        <p className="text-sm text-muted-foreground">
+          No permissions match &ldquo;{q}&rdquo;.
+        </p>
       ) : (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          {groups.map((g) => (
+          {filteredGroups.map((g) => (
             <ConfigSection key={g.group} title={g.group}>
               <div className="overflow-x-auto">
                 <Table>
