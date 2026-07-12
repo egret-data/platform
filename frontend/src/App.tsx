@@ -44,6 +44,7 @@ import UsersPage from "@/routes/control-plane/access/UsersPage";
 import GroupsPage from "@/routes/control-plane/access/GroupsPage";
 import RolesPage from "@/routes/control-plane/access/RolesPage";
 import PermissionsPage from "@/routes/control-plane/access/PermissionsPage";
+import AccessExplorer from "@/routes/control-plane/access/AccessExplorer";
 
 const qc = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1, staleTime: 30000 } } });
 
@@ -135,6 +136,7 @@ function ControlPlaneRoutes() {
           <Route path="groups" element={<RequirePermission perm="group:read"><GroupsPage /></RequirePermission>} />
           <Route path="roles" element={<RequirePermission perm="role:read"><RolesPage /></RequirePermission>} />
           <Route path="permissions" element={<RequirePermission perm="role:read"><PermissionsPage /></RequirePermission>} />
+          <Route path="access-explorer" element={<RequirePermission perm="role:read"><AccessExplorer /></RequirePermission>} />
           <Route path="audit-log" element={<RequireGlobalAdmin><AuditLog /></RequireGlobalAdmin>} />
           <Route path="*" element={<ControlPlaneIndex />} />
         </Routes>

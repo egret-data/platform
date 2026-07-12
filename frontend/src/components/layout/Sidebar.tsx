@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
-  BarChart3, Bell, Boxes, ChevronDown, ChevronRight, Database,
+  BarChart3, Bell, Boxes, ChevronDown, ChevronRight, Compass, Database,
   FolderKanban, HardDrive, KeyRound, LayoutDashboard, ListChecks, type LucideIcon,
   NotebookText, PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Server, Settings, Share2, ShieldCheck,
   SquareTerminal, Table2, UserCog, Users, UsersRound, Waypoints, Workflow,
@@ -78,6 +78,7 @@ const CONTROL_PLANE_GROUPS: NavGroup[] = [
       { label: "Groups", icon: UsersRound, perm: "group:read" },
       { label: "Roles", icon: UserCog, perm: "role:read" },
       { label: "Permissions", icon: ListChecks, perm: "role:read" },
+      { label: "Access explorer", icon: Compass, perm: "role:read", to: "access-explorer" },
     ],
   },
   {

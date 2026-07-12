@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { MoreHorizontal, Pencil, Plus, ShieldCheck, Trash2, UsersRound } from "lucide-react";
+import { Compass, MoreHorizontal, Pencil, Plus, ShieldCheck, Trash2, UsersRound } from "lucide-react";
 
 import {
   type AccessGroup,
@@ -80,6 +81,7 @@ const OIDC_TOOLTIP = "Synced from your identity provider — read-only here.";
  * role assignment (their membership is owned by the identity provider).
  */
 export default function GroupsPage() {
+  const navigate = useNavigate();
   const { me } = useAuth();
   // Assigning roles to a group and managing its membership are
   // platform_admin-only on the backend; group lifecycle (create/rename/
@@ -222,6 +224,12 @@ export default function GroupsPage() {
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
+                          <DropdownMenuItem
+                            onClick={() => navigate(`/control-plane/access-explorer?group=${g.id}`)}
+                          >
+                            <Compass className="mr-2 h-4 w-4" />
+                            View access
+                          </DropdownMenuItem>
                           {isAdmin && (
                             <DropdownMenuItem onClick={() => setRolesTarget(g)}>
                               <ShieldCheck className="mr-2 h-4 w-4" />
