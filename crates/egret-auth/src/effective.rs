@@ -84,17 +84,16 @@ impl AccessResolver {
     /// Every grant feeding this principal, with a `source` label. For a user, this
     /// is their own grants plus grants held by any group they belong to; for a
     /// group, only its own grants (egret groups don't nest).
-    #[allow(dead_code)] // removed in Task 3
     async fn grant_rows(&self, ptype: &str, pid: Uuid) -> Result<Vec<GrantRow>, egret_core::Error> {
         let sql = "
             SELECT ag.scope_type, ag.scope_id, ag.object_type, ag.effect,
-                   r.name AS role, r.id AS role_id, r.scope AS role_scope,
+                   r.name AS role,
                    'direct' AS source
               FROM access_grants ag JOIN roles r ON r.id = ag.role_id
              WHERE ag.principal_type = $1 AND ag.principal_id = $2
             UNION ALL
             SELECT ag.scope_type, ag.scope_id, ag.object_type, ag.effect,
-                   r.name AS role, r.id AS role_id, r.scope AS role_scope,
+                   r.name AS role,
                    'group:' || g.name AS source
               FROM access_grants ag
               JOIN roles r  ON r.id = ag.role_id
@@ -109,8 +108,6 @@ impl AccessResolver {
             .await
             .map_err(db_err)
     }
-
-    #[allow(dead_code)] // removed in Task 3
     async fn principal_info(
         &self,
         ptype: &str,
@@ -140,8 +137,6 @@ impl AccessResolver {
             is_platform_admin,
         })
     }
-
-    #[allow(dead_code)] // removed in Task 3
     fn platform_roles(grants: &[GrantRow]) -> Vec<RoleSource> {
         grants
             .iter()
@@ -157,7 +152,6 @@ impl AccessResolver {
     /// For each granted role, walks its parent chain (role hierarchy) and records,
     /// per permission, which granted role conferred it and (if it came from a
     /// parent) which parent. Skipped for platform_admin (superuser).
-    #[allow(dead_code)] // removed in Task 3
     async fn permissions(
         &self,
         platform_roles: &[RoleSource],
@@ -204,17 +198,143 @@ impl AccessResolver {
             .map(|(key, via)| EffectivePermission { key, via })
             .collect())
     }
+
+    async fn workspaces(
+        &self,
+        grants: &[GrantRow],
+    ) -> Result<Vec<WorkspaceMembership>, egret_core::Error> {
+        let mut out = Vec::new();
+        for g in grants
+            .iter()
+            .filter(|g| g.scope_type == "workspace" && g.effect == "allow")
+        {
+            let Some(ws_id) = g.scope_id else { continue };
+            let row: Option<(Uuid, String, String)> =
+                sqlx::query_as("SELECT id, slug, name FROM workspaces WHERE id = $1")
+                    .bind(ws_id)
+                    .fetch_optional(&self.db.pool)
+                    .await
+                    .map_err(db_err)?;
+            if let Some((id, slug, name)) = row {
+                out.push(WorkspaceMembership {
+                    workspace_id: id.to_string(),
+                    workspace_slug: slug,
+                    workspace_name: name,
+                    role: g.role.clone(),
+                    source: g.source.clone(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Map an object `kind` to its `analytics` table name. Returns a `'static`
+    /// literal only — never the caller's raw string — so the value spliced into
+    /// SQL below can't carry an injection.
+    fn object_table(kind: &str) -> Option<&'static str> {
+        match kind {
+            "dashboard" => Some("dashboards"),
+            "chart" => Some("charts"),
+            "dataset" => Some("datasets"),
+            "notebook" => Some("notebooks"),
+            "saved_query" => Some("saved_queries"),
+            "folder" => Some("folders"),
+            _ => None,
+        }
+    }
+
+    async fn objects(&self, grants: &[GrantRow]) -> Result<Vec<ObjectGrant>, egret_core::Error> {
+        let mut out = Vec::new();
+        for g in grants.iter().filter(|g| g.scope_type == "object") {
+            let (Some(kind), Some(id)) = (g.object_type.as_deref(), g.scope_id) else {
+                continue;
+            };
+            let (name, ws_slug) = if let Some(table) = Self::object_table(kind) {
+                let sql = format!(
+                    "SELECT o.name::text, w.slug FROM analytics.{table} o \
+                     JOIN workspaces w ON w.id = o.workspace_id WHERE o.id = $1"
+                );
+                sqlx::query_as::<_, (Option<String>, Option<String>)>(&sql)
+                    .bind(id)
+                    .fetch_optional(&self.db.pool)
+                    .await
+                    .map_err(db_err)?
+                    .unwrap_or((None, None))
+            } else {
+                (None, None)
+            };
+            out.push(ObjectGrant {
+                kind: kind.to_string(),
+                id: id.to_string(),
+                name,
+                workspace_slug: ws_slug,
+                role: g.role.clone(),
+                effect: g.effect.clone(),
+                source: g.source.clone(),
+            });
+        }
+        Ok(out)
+    }
+
+    fn denies(objects: &[ObjectGrant], grants: &[GrantRow]) -> Vec<DenyEntry> {
+        let mut out: Vec<DenyEntry> = objects
+            .iter()
+            .filter(|o| o.effect == "deny")
+            .map(|o| DenyEntry {
+                scope: "object".into(),
+                target: format!("{}:{}", o.kind, o.name.clone().unwrap_or_else(|| o.id.clone())),
+                role: o.role.clone(),
+                source: o.source.clone(),
+            })
+            .collect();
+        for g in grants
+            .iter()
+            .filter(|g| g.effect == "deny" && g.scope_type != "object")
+        {
+            out.push(DenyEntry {
+                scope: "role".into(),
+                target: g.role.clone(),
+                role: g.role.clone(),
+                source: g.source.clone(),
+            });
+        }
+        out
+    }
+
+    /// Resolve a principal's full effective access.
+    pub async fn resolve(
+        &self,
+        ptype: &str,
+        pid: Uuid,
+    ) -> Result<EffectiveAccess, egret_core::Error> {
+        let grants = self.grant_rows(ptype, pid).await?;
+        let principal = self.principal_info(ptype, pid, &grants).await?;
+        let platform_roles = Self::platform_roles(&grants);
+        let permissions = if principal.is_platform_admin {
+            Vec::new()
+        } else {
+            self.permissions(&platform_roles).await?
+        };
+        let workspaces = self.workspaces(&grants).await?;
+        let objects = self.objects(&grants).await?;
+        let denies = Self::denies(&objects, &grants);
+        Ok(EffectiveAccess {
+            principal,
+            platform_roles,
+            permissions,
+            workspaces,
+            objects,
+            denies,
+        })
+    }
 }
 
 #[derive(sqlx::FromRow, Clone)]
-#[allow(dead_code)]
 struct GrantRow {
     scope_type: String,
     scope_id: Option<Uuid>,
     object_type: Option<String>,
     effect: String,
     role: String,
-    role_id: Uuid,
-    role_scope: String,
     source: String,
 }
