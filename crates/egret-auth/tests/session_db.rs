@@ -332,6 +332,64 @@ async fn permissions_resolve_direct_group_and_empty() {
 }
 
 #[tokio::test]
+async fn permissions_include_inherited_parent_role_perms() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let svc = SessionService::new(db.clone(), Duration::hours(24), Duration::minutes(60));
+
+    // A parent platform role holding storage:read, and a child role that inherits it
+    // (its own perm is engine:read). A user granted ONLY the child role must see BOTH
+    // permissions — the FE-gating closure now matches the PDP's.
+    let parent: uuid::Uuid =
+        sqlx::query_scalar("INSERT INTO roles (scope, name) VALUES ('platform', $1) RETURNING id")
+            .bind(format!("t_parent-{}", uuid::Uuid::new_v4().simple()))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'storage:read')")
+        .bind(parent)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let child: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO roles (scope, name, parent_role_id) VALUES ('platform', $1, $2) RETURNING id",
+    )
+    .bind(format!("t_child-{}", uuid::Uuid::new_v4().simple()))
+    .bind(parent)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'engine:read')")
+        .bind(child)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let u = seed_user(&db).await;
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, 'platform', NULL) ON CONFLICT DO NOTHING",
+    )
+    .bind(u.0)
+    .bind(child)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let issued = svc.create(u, "a", "").await.unwrap();
+    let principal = svc.validate(&issued.token).await.unwrap().unwrap();
+    assert!(
+        principal.permissions.iter().any(|p| p == "engine:read"),
+        "own perm"
+    );
+    assert!(
+        principal.permissions.iter().any(|p| p == "storage:read"),
+        "inherited parent perm surfaced via the hierarchy closure"
+    );
+}
+
+#[tokio::test]
 async fn login_is_rate_limited() {
     let Some(db) = connect().await else {
         eprintln!("skip");

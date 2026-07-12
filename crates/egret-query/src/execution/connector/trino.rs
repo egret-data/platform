@@ -209,7 +209,15 @@ async fn send(req: reqwest::RequestBuilder) -> Result<TrinoResp, EngineError> {
         .await
         .map_err(|e| EngineError::Connect(e.to_string()))?;
     if !resp.status().is_success() {
-        return Err(EngineError::Engine(format!("http {}", resp.status())));
+        let status = resp.status();
+        // Per-user delegation: a 401/403 means the engine rejected THIS user's
+        // identity or denied the tables (bad/expired JWT, or a Ranger/file-ACL deny).
+        // Surface a clean Forbidden (→ HTTP 403 with a data-access message) instead of
+        // an opaque engine error, so the BI client can explain it.
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(EngineError::Forbidden);
+        }
+        return Err(EngineError::Engine(format!("http {status}")));
     }
     resp.json::<TrinoResp>()
         .await
