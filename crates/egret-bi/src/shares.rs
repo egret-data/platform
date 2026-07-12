@@ -27,6 +27,7 @@ fn object_table(kind: &str) -> Option<&'static str> {
         "dataset" => Some("datasets"),
         "folder" => Some("folders"),
         "notebook" => Some("notebooks"),
+        "saved_query" => Some("saved_queries"),
         _ => None,
     }
 }
