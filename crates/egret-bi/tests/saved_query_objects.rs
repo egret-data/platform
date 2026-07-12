@@ -158,8 +158,7 @@ async fn update_query(
     name: &str,
     sql: &str,
 ) -> StatusCode {
-    let body =
-        format!(r#"{{"database_id":null,"name":"{name}","sql":"{sql}","description":""}}"#);
+    let body = format!(r#"{{"database_id":null,"name":"{name}","sql":"{sql}","description":""}}"#);
     app.clone()
         .oneshot(
             Request::builder()
@@ -284,13 +283,27 @@ async fn object_guest_can_load_granted_saved_query_only() {
 
     let q1 = st
         .saved
-        .create(ws, None, "q1", "SELECT 1", "", Some(egret_core::UserId(owner)))
+        .create(
+            ws,
+            None,
+            "q1",
+            "SELECT 1",
+            "",
+            Some(egret_core::UserId(owner)),
+        )
         .await
         .unwrap()
         .id;
     let q2 = st
         .saved
-        .create(ws, None, "q2", "SELECT 2", "", Some(egret_core::UserId(owner)))
+        .create(
+            ws,
+            None,
+            "q2",
+            "SELECT 2",
+            "",
+            Some(egret_core::UserId(owner)),
+        )
         .await
         .unwrap()
         .id;
@@ -366,12 +379,19 @@ async fn ws_editor_can_edit_others_saved_query() {
     );
 
     // The change actually persisted.
-    let got = saved.get(q).await.unwrap().expect("saved query still exists");
+    let got = saved
+        .get(q)
+        .await
+        .unwrap()
+        .expect("saved query still exists");
     assert_eq!(
         got.name, "renamed-by-b",
         "the non-owner editor's rename must persist"
     );
-    assert_eq!(got.sql, "SELECT 2", "the non-owner editor's sql edit must persist");
+    assert_eq!(
+        got.sql, "SELECT 2",
+        "the non-owner editor's sql edit must persist"
+    );
 }
 
 /// 4. `require_folder` guard: q lives in ws_a; a folder is created in ws_b with
@@ -402,7 +422,14 @@ async fn set_folder_rejects_foreign_folder() {
     // q in ws_a.
     let q = st
         .saved
-        .create(ws_a, None, "q", "SELECT 1", "", Some(egret_core::UserId(owner)))
+        .create(
+            ws_a,
+            None,
+            "q",
+            "SELECT 1",
+            "",
+            Some(egret_core::UserId(owner)),
+        )
         .await
         .unwrap()
         .id;
