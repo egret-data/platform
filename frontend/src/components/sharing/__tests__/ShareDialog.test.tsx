@@ -69,6 +69,25 @@ test("lists direct grants with principal and role", () => {
   expect(screen.getByLabelText("Role for alice@egret.local")).toBeInTheDocument();
 });
 
+test("prefers the resolved principal_name over the raw principal_id", () => {
+  directResult = ok([
+    {
+      id: "g1",
+      principal_type: "user",
+      principal_id: "11111111-1111-1111-1111-111111111111",
+      principal_name: "alice@egret.local",
+      role: "ws_viewer",
+    },
+  ]);
+  renderDialog();
+  // The human name shows, not the UUID.
+  expect(screen.getByText("alice@egret.local")).toBeInTheDocument();
+  expect(screen.queryByText("11111111-1111-1111-1111-111111111111")).toBeNull();
+  // Controls key off the resolved name too.
+  expect(screen.getByLabelText("Role for alice@egret.local")).toBeInTheDocument();
+  expect(screen.getByLabelText("Remove alice@egret.local")).toBeInTheDocument();
+});
+
 test("renders read-only inherited section when folderId is set", () => {
   directResult = ok([
     { id: "g1", principal_type: "user", principal_id: "alice@egret.local", role: "ws_viewer" },

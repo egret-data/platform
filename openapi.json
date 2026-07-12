@@ -20473,6 +20473,13 @@
             "type": "string",
             "format": "uuid"
           },
+          "principal_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable grantee name: a user's email or a group's name. `None` if\nthe principal row could not be resolved (e.g. deleted)."
+          },
           "role": {
             "type": "string",
             "description": "The workspace role name (`ws_viewer` | `ws_editor`)."
