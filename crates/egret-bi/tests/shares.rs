@@ -330,10 +330,16 @@ async fn object_share_grant_read_revoke() {
         listed.contains(&outsider.to_string()) && listed.contains("ws_viewer"),
         "GET grants must list the outsider's ws_viewer grant; got {listed}"
     );
-    let grant_id = serde_json::from_str::<serde_json::Value>(&listed).unwrap()[0]["id"]
+    let listed_json = serde_json::from_str::<serde_json::Value>(&listed).unwrap();
+    // The list resolves each grantee's display name (a user's email here).
+    let name = listed_json[0]["principal_name"]
         .as_str()
-        .unwrap()
-        .to_string();
+        .unwrap_or_default();
+    assert!(
+        name.ends_with("@egret.local"),
+        "GET grants must resolve principal_name to the outsider's email; got {listed}"
+    );
+    let grant_id = listed_json[0]["id"].as_str().unwrap().to_string();
 
     // 6. Editor deletes the grant → outsider loses read (403).
     let resp = app

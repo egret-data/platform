@@ -220,7 +220,7 @@ export function ShareDialog({ ws, kind, id, folderId, name, open, onOpenChange }
                           <Select value={g.role} onValueChange={(v) => upsertRole(g, v)}>
                             <SelectTrigger
                               className="h-8 w-28"
-                              aria-label={`Role for ${g.principal_id}`}
+                              aria-label={`Role for ${principalLabel(g)}`}
                             >
                               <SelectValue />
                             </SelectTrigger>
@@ -237,7 +237,7 @@ export function ShareDialog({ ws, kind, id, folderId, name, open, onOpenChange }
                           size="icon"
                           variant="ghost"
                           className="h-8 w-8 text-muted-foreground"
-                          aria-label={`Remove ${g.principal_id}`}
+                          aria-label={`Remove ${principalLabel(g)}`}
                           onClick={() => removeGrant(g)}
                         >
                           <Trash2 className="h-4 w-4" />
@@ -292,12 +292,17 @@ export function ShareDialog({ ws, kind, id, folderId, name, open, onOpenChange }
   );
 }
 
-/** Grantee cell: principal id/name plus a User/Group badge. */
+/** Resolved grantee display name (email / group name), falling back to the raw id. */
+const principalLabel = (grant: ObjectGrantDto) => grant.principal_name ?? grant.principal_id;
+
+/** Grantee cell: resolved principal name plus a User/Group badge. */
 function PrincipalLabel({ grant }: { grant: ObjectGrantDto }) {
   const isGroup = grant.principal_type === "group";
   return (
     <span className="flex min-w-0 items-center gap-2">
-      <span className="truncate text-sm">{grant.principal_id}</span>
+      <span className="truncate text-sm" title={grant.principal_id}>
+        {principalLabel(grant)}
+      </span>
       <Badge variant="outline" className="shrink-0">
         {isGroup ? "Group" : "User"}
       </Badge>

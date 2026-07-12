@@ -13,6 +13,12 @@ export interface ObjectGrantDto {
   id: string;
   principal_type: string;
   principal_id: string;
+  /**
+     * Human-readable grantee name: a user's email or a group's name. `None` if
+     * the principal row could not be resolved (e.g. deleted).
+     * @nullable
+     */
+  principal_name?: string | null;
   /** The workspace role name (`ws_viewer` | `ws_editor`). */
   role: string;
   /** `allow` | `deny`. */

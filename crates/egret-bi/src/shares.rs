@@ -92,6 +92,9 @@ pub struct ObjectGrantDto {
     pub id: Uuid,
     pub principal_type: String,
     pub principal_id: Uuid,
+    /// Human-readable grantee name: a user's email or a group's name. `None` if
+    /// the principal row could not be resolved (e.g. deleted).
+    pub principal_name: Option<String>,
     /// The workspace role name (`ws_viewer` | `ws_editor`).
     pub role: String,
     /// `allow` | `deny`.
@@ -245,6 +248,9 @@ async fn grant_put(
         id: grant_id,
         principal_type: b.principal_type,
         principal_id: b.principal_id,
+        // The FE re-fetches the list (which resolves names) after a PUT, so we
+        // don't resolve here.
+        principal_name: None,
         role: b.role,
         effect: b.effect,
     }))
@@ -329,9 +335,16 @@ async fn grant_list(
     require_object(&*st.pdp, &ctx, &manage_action(&kind), obj)
         .await
         .map_err(BiApiError::from)?;
-    let rows: Vec<(Uuid, String, Uuid, String, String)> = sqlx::query_as(
-        "SELECT ag.id, ag.principal_type, ag.principal_id, r.name AS role, ag.effect \
+    // LEFT JOIN resolves the grantee's display name: a user's email or a group's
+    // name (following egret-auth `assignees_named`). `email` is `citext`, so cast
+    // to `text` for a uniform `Option<String>` column.
+    let rows: Vec<(Uuid, String, Uuid, Option<String>, String, String)> = sqlx::query_as(
+        "SELECT ag.id, ag.principal_type, ag.principal_id, \
+                COALESCE(u.email::text, g.name) AS principal_name, \
+                r.name AS role, ag.effect \
          FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
+         LEFT JOIN users u ON ag.principal_type = 'user' AND u.id = ag.principal_id \
+         LEFT JOIN groups g ON ag.principal_type = 'group' AND g.id = ag.principal_id \
          WHERE ag.scope_type = 'object' AND ag.scope_id = $1 \
          ORDER BY ag.created_at",
     )
@@ -341,10 +354,11 @@ async fn grant_list(
     .map_err(|e| BiApiError::from(crate::BiError::Db(e)))?;
     Ok(Json(
         rows.into_iter()
-            .map(|(gid, pt, pid, role, effect)| ObjectGrantDto {
+            .map(|(gid, pt, pid, name, role, effect)| ObjectGrantDto {
                 id: gid,
                 principal_type: pt,
                 principal_id: pid,
+                principal_name: name,
                 role,
                 effect,
             })
