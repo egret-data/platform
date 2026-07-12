@@ -26,6 +26,8 @@ import Notebooks from "@/routes/explore/Notebooks";
 import NotebookPage from "@/routes/explore/NotebookPage";
 import NotebookSettings from "@/routes/explore/NotebookSettings";
 import DatabasesPage from "@/routes/explore/DatabasesPage";
+import WorkspaceSettings from "@/routes/explore/settings/WorkspaceSettings";
+import Members from "@/routes/explore/settings/Members";
 import { Placeholder } from "@/routes/Placeholder";
 import ControlPlaneEngines from "@/routes/control-plane/ControlPlaneEngines";
 import EngineDetail from "@/routes/control-plane/EngineDetail";
@@ -76,6 +78,10 @@ function ExploreRoutes() {
           <Route path="workflows" element={<Placeholder title="Workflows" />} />
           <Route path="alerts" element={<Placeholder title="Alerts" />} />
           <Route path="data-lineage" element={<Placeholder title="Data Lineage" />} />
+          <Route path="settings" element={<WorkspaceSettings />}>
+            <Route index element={<Navigate to="members" replace />} />
+            <Route path="members" element={<Members />} />
+          </Route>
           <Route path="*" element={<Navigate to="sql-lab" replace />} />
         </Routes>
       </AppShell>

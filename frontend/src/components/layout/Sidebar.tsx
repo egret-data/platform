@@ -3,7 +3,7 @@ import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
   BarChart3, Bell, Boxes, ChevronDown, ChevronRight, Database,
   FolderKanban, HardDrive, KeyRound, LayoutDashboard, ListChecks, type LucideIcon,
-  NotebookText, PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Server, Share2, ShieldCheck,
+  NotebookText, PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Server, Settings, Share2, ShieldCheck,
   SquareTerminal, Table2, UserCog, Users, UsersRound, Waypoints, Workflow,
 } from "lucide-react";
 import {
@@ -15,7 +15,7 @@ import { useAuth } from "@/auth/useAuth";
 
 /** `perm` is the fine-grained read permission that unlocks this item in the
  * Control Plane; items with no `perm` (e.g. Workspaces) are platform_admin-only. */
-type NavItem = { label: string; icon: LucideIcon; perm?: string };
+type NavItem = { label: string; icon: LucideIcon; perm?: string; to?: string };
 type NavGroup = { heading: string; items: NavItem[] };
 
 const EXPLORE_GROUPS: NavGroup[] = [
@@ -53,6 +53,7 @@ const EXPLORE_GROUPS: NavGroup[] = [
     heading: "Manage",
     items: [
       { label: "Engines", icon: Database },
+      { label: "Workspace settings", icon: Settings, to: "settings/members" },
     ],
   },
 ];
@@ -154,12 +155,13 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
         : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
     }`;
 
-  const renderItem = ({ label, icon: Icon }: NavItem) => {
+  const renderItem = ({ label, icon: Icon, to }: NavItem) => {
+    const path = `${base}/${to ?? slug(label)}`;
     if (collapsed) {
       return (
         <Tooltip key={label}>
           <TooltipTrigger asChild>
-            <NavLink to={`${base}/${slug(label)}`} className={linkClass}>
+            <NavLink to={path} className={linkClass}>
               <Icon className="h-4 w-4 shrink-0" />
             </NavLink>
           </TooltipTrigger>
@@ -171,7 +173,7 @@ export function Sidebar({ collapsed, onToggle }: SidebarProps) {
     return (
       <NavLink
         key={label}
-        to={`${base}/${slug(label)}`}
+        to={path}
         className={linkClass}
       >
         <Icon className="h-4 w-4 shrink-0" />
