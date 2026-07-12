@@ -34,8 +34,10 @@ vi.mock("@/api/notebooks", () => ({
   useRemoveNotebookBookmark: () => removeBookmarkMutation(),
 }));
 
+const foldersMock = vi.fn(() => ({ data: [] as { id: string; name: string }[] }));
+
 vi.mock("@/api/folders", () => ({
-  useFolders: () => ({ data: [] }),
+  useFolders: () => foldersMock(),
   useSetFolder: () => ({ mutateAsync: vi.fn().mockResolvedValue({}) }),
   useFolderMutations: () => ({
     create: { mutateAsync: vi.fn().mockResolvedValue({ id: "f1", name: "F1" }) },
@@ -134,6 +136,8 @@ beforeEach(() => {
   createMutateAsync.mockReset();
   updateMutateAsync.mockReset();
   deleteMutateAsync.mockReset();
+  foldersMock.mockReset();
+  foldersMock.mockReturnValue({ data: [] });
 
   notebooksMock.mockReturnValue({
     data: [mockNb1, mockNb2],
@@ -405,6 +409,23 @@ describe("Notebooks list", () => {
     expect(await screen.findByText('Share "Shared Report"')).toBeInTheDocument();
     expect(
       screen.getByText("Grant people and groups access to this notebook."),
+    ).toBeInTheDocument();
+  });
+
+  // ── Folder header menu → Share ──────────────────────────────────────────────
+
+  it("folder header menu → Share… opens the ShareDialog scoped to the folder", async () => {
+    foldersMock.mockReturnValue({ data: [{ id: "fold-1", name: "Quarterly" }] });
+    const user = userEvent.setup();
+    renderAt();
+
+    await user.click(await screen.findByRole("button", { name: "Folder Quarterly actions" }));
+    await user.click(await screen.findByText("Share…"));
+
+    // Dialog opens scoped to the folder (kind="folder").
+    expect(await screen.findByText('Share "Quarterly"')).toBeInTheDocument();
+    expect(
+      screen.getByText("Grant people and groups access to this folder."),
     ).toBeInTheDocument();
   });
 

@@ -41,6 +41,7 @@ export default function Charts() {
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
   const [pendingDelete, setPendingDelete] = useState<Chart | null>(null);
   const [shareTarget, setShareTarget] = useState<Chart | null>(null);
+  const [folderShare, setFolderShare] = useState<{ id: string; name: string } | null>(null);
   const [folderDialog, setFolderDialog] = useState<{ mode: "new" | "rename" | "move" | "bulkmove"; chart?: Chart; folder?: { id: string; name: string } } | null>(null);
 
   const rows = useMemo(() => {
@@ -218,6 +219,7 @@ export default function Charts() {
                         colSpan={bulk.bulkMode ? 5 : 4}
                         collapsed={isCollapsed}
                         onToggle={() => collapse.toggle(key)}
+                        onShare={group.folder ? () => setFolderShare({ id: group.folder!.id, name: group.folder!.name }) : undefined}
                         onRename={group.folder ? () => setFolderDialog({ mode: "rename", folder: group.folder! }) : undefined}
                         onDelete={group.folder ? () => removeFolder.mutateAsync(group.folder!.id).then(() => toast.success("Folder deleted")).catch((e) => toast.error(String(e))) : undefined}
                         onDropItem={(id) => setFolder.mutateAsync({ id, folder_id: group.folder?.id ?? null }).catch((e) => toast.error(String(e)))}
@@ -266,6 +268,17 @@ export default function Charts() {
           folderId={shareTarget.folder_id ?? null}
           open={shareTarget !== null}
           onOpenChange={(o) => { if (!o) setShareTarget(null); }}
+        />
+      )}
+
+      {folderShare && (
+        <ShareDialog
+          ws={ws}
+          kind="folder"
+          id={folderShare.id}
+          name={folderShare.name}
+          open={folderShare !== null}
+          onOpenChange={(o) => { if (!o) setFolderShare(null); }}
         />
       )}
 
