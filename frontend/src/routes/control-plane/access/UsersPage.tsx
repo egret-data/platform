@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Compass, MoreHorizontal, Pencil, Plus, ShieldCheck, UserCheck, Users, UserX } from "lucide-react";
+import { Compass, MoreHorizontal, Pencil, Plus, ShieldCheck } from "lucide-react";
 
 import {
   type AccessRole,
@@ -15,7 +15,9 @@ import {
 } from "@/api/access";
 import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
-import { StatCard, StatCardRow } from "@/components/control-plane/StatCard";
+import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
+import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
+import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -43,20 +45,15 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { TagCombobox } from "@/components/ui/tag-combobox";
 
 export const usersQueryKey = ["control-plane", "access", "users"] as const;
 const rolesQueryKey = ["control-plane", "access", "roles"] as const;
 
-const COLUMNS = ["Email", "Name", "Provider", "Status", "Roles", "Groups", ""];
+const PROVIDER_OPTIONS = [
+  { value: "local", label: "Local" },
+  { value: "oidc", label: "OIDC" },
+];
 
 /**
  * Control Plane → Access control → Users.
@@ -81,6 +78,93 @@ export default function UsersPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<AccessUser | null>(null);
   const [rolesTarget, setRolesTarget] = useState<AccessUser | null>(null);
+  const [statusFacet, setStatusFacet] = useState(FACET_ALL);
+  const [providerFacet, setProviderFacet] = useState(FACET_ALL);
+
+  const columns: Column<AccessUser>[] = [
+    { key: "email", label: "Email", sortable: true, className: "font-medium", value: (u) => u.email, cell: (u) => u.email },
+    { key: "name", label: "Name", sortable: true, value: (u) => u.name, cell: (u) => u.name },
+    { key: "provider", label: "Provider", cell: (u) => <Badge variant="outline">{u.provider}</Badge> },
+    {
+      key: "status",
+      label: "Status",
+      cell: (u) => (
+        <Badge variant={u.status === "active" ? "default" : "secondary"}>{u.status}</Badge>
+      ),
+    },
+    {
+      key: "roles",
+      label: "Roles",
+      cell: (u) =>
+        u.roles.length === 0 ? (
+          <span className="text-muted-foreground">—</span>
+        ) : (
+          <div className="flex flex-wrap gap-1">
+            {u.roles.map((r) => (
+              <Badge key={r} variant="secondary">
+                {r}
+              </Badge>
+            ))}
+          </div>
+        ),
+    },
+    {
+      key: "groups",
+      label: "Groups",
+      cell: (u) =>
+        u.groups.length === 0 ? (
+          <span className="text-muted-foreground">—</span>
+        ) : (
+          <div className="flex flex-wrap gap-1">
+            {u.groups.map((g) => (
+              <Badge key={g} variant="outline">
+                {g}
+              </Badge>
+            ))}
+          </div>
+        ),
+    },
+    {
+      key: "actions",
+      label: "",
+      className: "text-right",
+      cell: (u) => (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon" aria-label={`Actions for ${u.email}`}>
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              onClick={() => navigate(`/control-plane/access-explorer?user=${u.id}`)}
+            >
+              <Compass className="mr-2 h-4 w-4" />
+              View access
+            </DropdownMenuItem>
+            {isAdmin && (
+              <DropdownMenuItem onClick={() => setRolesTarget(u)}>
+                <ShieldCheck className="mr-2 h-4 w-4" />
+                Assign roles
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuItem onClick={() => setEditTarget(u)}>
+              <Pencil className="mr-2 h-4 w-4" />
+              Edit
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ),
+    },
+  ];
+
+  const filtered = rows.filter(
+    (u) =>
+      (statusFacet === FACET_ALL || u.status === statusFacet) &&
+      (providerFacet === FACET_ALL || u.provider === providerFacet),
+  );
+  const total = rows.length;
+  const active = rows.filter((u) => u.status === "active").length;
 
   return (
     <div className="space-y-5">
@@ -107,124 +191,46 @@ export default function UsersPage() {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          {(() => {
-            const all = rows;
-            const total = all.length;
-            const active = all.filter((u) => u.status === "active").length;
-            const disabled = total - active;
-            return (
-              <StatCardRow>
-                <StatCard label="Total" value={total} icon={Users} hint="Platform accounts" />
-                <StatCard label="Active" value={active} tone="success" icon={UserCheck} />
-                <StatCard label="Disabled" value={disabled} tone={disabled > 0 ? "warning" : "default"} icon={UserX} />
-              </StatCardRow>
-            );
-          })()}
-          <Table>
-            <TableHeader>
-              <TableRow>
-                {COLUMNS.map((col) => (
-                  <TableHead
-                    key={col || "actions"}
-                    className={col === "" ? "text-right" : undefined}
-                  >
-                    {col || <span className="sr-only">Actions</span>}
-                  </TableHead>
-                ))}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.map((u) => (
-                <TableRow key={u.id}>
-                  <TableCell className="font-medium">{u.email}</TableCell>
-                  <TableCell>{u.name}</TableCell>
-                  <TableCell>
-                    <Badge variant="outline">{u.provider}</Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant={u.status === "active" ? "default" : "secondary"}>
-                      {u.status}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    {u.roles.length === 0 ? (
-                      <span className="text-muted-foreground">—</span>
-                    ) : (
-                      <div className="flex flex-wrap gap-1">
-                        {u.roles.map((r) => (
-                          <Badge key={r} variant="secondary">
-                            {r}
-                          </Badge>
-                        ))}
-                      </div>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    {u.groups.length === 0 ? (
-                      <span className="text-muted-foreground">—</span>
-                    ) : (
-                      <div className="flex flex-wrap gap-1">
-                        {u.groups.map((g) => (
-                          <Badge key={g} variant="outline">
-                            {g}
-                          </Badge>
-                        ))}
-                      </div>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          aria-label={`Actions for ${u.email}`}
-                        >
-                          <MoreHorizontal className="h-4 w-4" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem
-                          onClick={() => navigate(`/control-plane/access-explorer?user=${u.id}`)}
-                        >
-                          <Compass className="mr-2 h-4 w-4" />
-                          View access
-                        </DropdownMenuItem>
-                        {isAdmin && (
-                          <DropdownMenuItem onClick={() => setRolesTarget(u)}>
-                            <ShieldCheck className="mr-2 h-4 w-4" />
-                            Assign roles
-                          </DropdownMenuItem>
-                        )}
-                        <DropdownMenuItem onClick={() => setEditTarget(u)}>
-                          <Pencil className="mr-2 h-4 w-4" />
-                          Edit
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </TableCell>
-                </TableRow>
-              ))}
-              {rows.length === 0 && (
-                <TableRow className="hover:bg-transparent">
-                  <TableCell
-                    colSpan={COLUMNS.length}
-                    className="text-center text-muted-foreground"
-                  >
-                    {users.isError ? (
-                      <span className="text-destructive">
-                        {users.error?.message ?? "Failed to load users."}
-                      </span>
-                    ) : users.isLoading ? (
-                      "Loading…"
-                    ) : (
-                      "No users yet."
-                    )}
-                  </TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
+          <SummaryStrip
+            items={[
+              { label: "users", value: total },
+              { label: "active", value: active },
+              { label: "disabled", value: total - active },
+            ]}
+          />
+          <FilterableTable
+            rows={filtered}
+            columns={columns}
+            getId={(u) => u.id}
+            searchPlaceholder="Search users…"
+            initialSort={{ key: "email", dir: "asc" }}
+            emptyText={
+              users.isLoading
+                ? "Loading…"
+                : users.isError
+                  ? (users.error?.message ?? "Failed to load users.")
+                  : "No users."
+            }
+            filters={
+              <>
+                <FacetSelect
+                  label="Status"
+                  value={statusFacet}
+                  onChange={setStatusFacet}
+                  options={[
+                    { value: "active", label: "Active" },
+                    { value: "disabled", label: "Disabled" },
+                  ]}
+                />
+                <FacetSelect
+                  label="Provider"
+                  value={providerFacet}
+                  onChange={setProviderFacet}
+                  options={PROVIDER_OPTIONS}
+                />
+              </>
+            }
+          />
         </CardContent>
       </Card>
 
