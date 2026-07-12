@@ -63,3 +63,4 @@ mod tests {
 // migration registry: 0039_notebook_resource_access
 // migration registry: 0040_user_username
 // migration registry: 0062_engine_mgmt_schema (moves engines/engine_catalogs to engine_mgmt schema)
+// migration registry: 0077_saved_query_objects (saved_queries.folder_id + saved_query:{read,manage} grants)
