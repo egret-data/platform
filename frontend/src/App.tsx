@@ -37,6 +37,7 @@ import ProfileDetailPage from "@/routes/control-plane/ProfileDetailPage";
 import PolicyEditorPage from "@/routes/control-plane/PolicyEditorPage";
 import Warehouses from "@/routes/control-plane/Warehouses";
 import WarehouseDetail from "@/routes/control-plane/WarehouseDetail";
+import AuditLog from "@/routes/control-plane/AuditLog";
 import UsersPage from "@/routes/control-plane/access/UsersPage";
 import GroupsPage from "@/routes/control-plane/access/GroupsPage";
 import RolesPage from "@/routes/control-plane/access/RolesPage";
@@ -128,6 +129,7 @@ function ControlPlaneRoutes() {
           <Route path="groups" element={<RequirePermission perm="group:read"><GroupsPage /></RequirePermission>} />
           <Route path="roles" element={<RequirePermission perm="role:read"><RolesPage /></RequirePermission>} />
           <Route path="permissions" element={<RequirePermission perm="role:read"><PermissionsPage /></RequirePermission>} />
+          <Route path="audit-log" element={<RequireGlobalAdmin><AuditLog /></RequireGlobalAdmin>} />
           <Route path="*" element={<ControlPlaneIndex />} />
         </Routes>
       </AppShell>
