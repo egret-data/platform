@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
@@ -165,7 +165,39 @@ describe("GroupsPage", () => {
   test("renders an empty state when there are no groups", async () => {
     vi.mocked(api.listGroups).mockResolvedValue([]);
     renderPage();
-    expect(await screen.findByText("No groups yet.")).toBeInTheDocument();
+    expect(await screen.findByText("No groups.")).toBeInTheDocument();
+  });
+
+  test("typing in the search box narrows the rows by name", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("Engineering");
+    expect(screen.getByText("SSO-Everyone")).toBeInTheDocument();
+
+    await user.type(screen.getByPlaceholderText("Search groups…"), "Engineer");
+
+    expect(screen.getByText("Engineering")).toBeInTheDocument();
+    expect(screen.queryByText("SSO-Everyone")).not.toBeInTheDocument();
+  });
+
+  test("the summary strip shows the group count", async () => {
+    renderPage();
+    await screen.findByText("Engineering");
+    const strip = screen.getByText("groups").closest("span")?.parentElement as HTMLElement;
+    expect(within(strip).getByText("2")).toBeInTheDocument();
+    expect(within(strip).getByText("groups")).toBeInTheDocument();
+  });
+
+  test("the Source facet filters to local or oidc groups", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("Engineering");
+
+    await user.click(screen.getByRole("combobox", { name: /Source/i }));
+    await user.click(await screen.findByRole("option", { name: "OIDC" }));
+
+    expect(screen.getByText("SSO-Everyone")).toBeInTheDocument();
+    expect(screen.queryByText("Engineering")).not.toBeInTheDocument();
   });
 
   test("an oidc group has rename, delete, and manage-members disabled but roles enabled", async () => {

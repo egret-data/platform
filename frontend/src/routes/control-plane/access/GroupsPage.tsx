@@ -22,7 +22,9 @@ import {
 } from "@/api/access";
 import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
-import { StatCard, StatCardRow } from "@/components/control-plane/StatCard";
+import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
+import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
+import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -51,14 +53,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { TagCombobox } from "@/components/ui/tag-combobox";
 import { usersQueryKey } from "@/routes/control-plane/access/UsersPage";
 
@@ -68,8 +62,6 @@ const rolesQueryKey = ["control-plane", "access", "roles"] as const;
 function groupMembersQueryKey(groupId: string) {
   return ["control-plane", "access", "group-members", groupId] as const;
 }
-
-const COLUMNS = ["Name", "Source", "Members", "Roles", ""];
 
 const OIDC_TOOLTIP = "Synced from your identity provider — read-only here.";
 
@@ -103,6 +95,7 @@ export default function GroupsPage() {
   const [deleteTarget, setDeleteTarget] = useState<AccessGroup | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [viewMembersTarget, setViewMembersTarget] = useState<AccessGroup | null>(null);
+  const [sourceFacet, setSourceFacet] = useState(FACET_ALL);
 
   const deleteMutation = useMutation<void, ApiError, string>({
     mutationFn: (id) => deleteGroup(id),
@@ -112,6 +105,133 @@ export default function GroupsPage() {
     },
     onError: (err) => setDeleteError(err.message ?? "Failed to delete group."),
   });
+
+  const columns: Column<AccessGroup>[] = [
+    {
+      key: "name",
+      label: "Name",
+      sortable: true,
+      className: "font-medium",
+      value: (g) => g.name,
+      cell: (g) => g.name,
+    },
+    {
+      key: "source",
+      label: "Source",
+      cell: (g) => {
+        const isOidc = g.source === "oidc";
+        return (
+          <>
+            <Badge variant={isOidc ? "secondary" : "outline"}>{g.source}</Badge>
+            {isOidc && (
+              <div className="text-xs font-normal text-muted-foreground">synced</div>
+            )}
+          </>
+        );
+      },
+    },
+    {
+      key: "members",
+      label: "Members",
+      cell: (g) =>
+        g.memberCount > 0 ? (
+          <Button
+            type="button"
+            variant="link"
+            className="h-auto p-0"
+            aria-label={`View members of ${g.name}`}
+            onClick={() => setViewMembersTarget(g)}
+          >
+            {g.memberCount}
+          </Button>
+        ) : (
+          g.memberCount
+        ),
+    },
+    {
+      key: "roles",
+      label: "Roles",
+      cell: (g) =>
+        g.roles.length === 0 ? (
+          <span className="text-muted-foreground">—</span>
+        ) : (
+          <div className="flex flex-wrap gap-1">
+            {g.roles.map((r) => (
+              <Badge key={r} variant="secondary">
+                {r}
+              </Badge>
+            ))}
+          </div>
+        ),
+    },
+    {
+      key: "actions",
+      label: "",
+      className: "text-right",
+      cell: (g) => {
+        const isOidc = g.source === "oidc";
+        return (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" aria-label={`Actions for ${g.name}`}>
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                onClick={() => navigate(`/control-plane/access-explorer?group=${g.id}`)}
+              >
+                <Compass className="mr-2 h-4 w-4" />
+                View access
+              </DropdownMenuItem>
+              {isAdmin && (
+                <DropdownMenuItem onClick={() => setRolesTarget(g)}>
+                  <ShieldCheck className="mr-2 h-4 w-4" />
+                  Assign roles
+                </DropdownMenuItem>
+              )}
+              {isAdmin && (
+                <DropdownMenuItem
+                  disabled={isOidc}
+                  title={isOidc ? OIDC_TOOLTIP : undefined}
+                  onClick={() => setMembersTarget(g)}
+                >
+                  <UsersRound className="mr-2 h-4 w-4" />
+                  Manage members
+                </DropdownMenuItem>
+              )}
+              <DropdownMenuItem
+                disabled={isOidc}
+                title={isOidc ? OIDC_TOOLTIP : undefined}
+                onClick={() => setRenameTarget(g)}
+              >
+                <Pencil className="mr-2 h-4 w-4" />
+                Rename
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                disabled={isOidc}
+                title={isOidc ? OIDC_TOOLTIP : undefined}
+                className="text-destructive focus:text-destructive"
+                onClick={() => {
+                  setDeleteError(null);
+                  setDeleteTarget(g);
+                }}
+              >
+                <Trash2 className="mr-2 h-4 w-4" />
+                Delete
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        );
+      },
+    },
+  ];
+
+  const filtered = rows.filter(
+    (g) => sourceFacet === FACET_ALL || g.source === sourceFacet,
+  );
+  const totalMembers = rows.reduce((sum, g) => sum + g.memberCount, 0);
 
   return (
     <div className="space-y-5">
@@ -139,160 +259,42 @@ export default function GroupsPage() {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          {(() => {
-            const all = rows;
-            const total = all.length;
-            const withRoles = all.filter((g) => g.roles.length > 0).length;
-            return (
-              <StatCardRow>
-                <StatCard label="Total" value={total} icon={UsersRound} hint="User groups" />
-                <StatCard label="With roles" value={withRoles} tone="success" icon={ShieldCheck} />
-              </StatCardRow>
-            );
-          })()}
           {deleteError && (
             <Alert variant="destructive" className="mb-4">
               <AlertDescription>{deleteError}</AlertDescription>
             </Alert>
           )}
-          <Table>
-            <TableHeader>
-              <TableRow>
-                {COLUMNS.map((col) => (
-                  <TableHead
-                    key={col || "actions"}
-                    className={col === "" ? "text-right" : undefined}
-                  >
-                    {col || <span className="sr-only">Actions</span>}
-                  </TableHead>
-                ))}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.map((g) => {
-                const isOidc = g.source === "oidc";
-                return (
-                  <TableRow key={g.id}>
-                    <TableCell className="font-medium">{g.name}</TableCell>
-                    <TableCell>
-                      <Badge variant={isOidc ? "secondary" : "outline"}>
-                        {g.source}
-                      </Badge>
-                      {isOidc && (
-                        <div className="text-xs font-normal text-muted-foreground">
-                          synced
-                        </div>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      {g.memberCount > 0 ? (
-                        <Button
-                          type="button"
-                          variant="link"
-                          className="h-auto p-0"
-                          aria-label={`View members of ${g.name}`}
-                          onClick={() => setViewMembersTarget(g)}
-                        >
-                          {g.memberCount}
-                        </Button>
-                      ) : (
-                        g.memberCount
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      {g.roles.length === 0 ? (
-                        <span className="text-muted-foreground">—</span>
-                      ) : (
-                        <div className="flex flex-wrap gap-1">
-                          {g.roles.map((r) => (
-                            <Badge key={r} variant="secondary">
-                              {r}
-                            </Badge>
-                          ))}
-                        </div>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            aria-label={`Actions for ${g.name}`}
-                          >
-                            <MoreHorizontal className="h-4 w-4" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem
-                            onClick={() => navigate(`/control-plane/access-explorer?group=${g.id}`)}
-                          >
-                            <Compass className="mr-2 h-4 w-4" />
-                            View access
-                          </DropdownMenuItem>
-                          {isAdmin && (
-                            <DropdownMenuItem onClick={() => setRolesTarget(g)}>
-                              <ShieldCheck className="mr-2 h-4 w-4" />
-                              Assign roles
-                            </DropdownMenuItem>
-                          )}
-                          {isAdmin && (
-                            <DropdownMenuItem
-                              disabled={isOidc}
-                              title={isOidc ? OIDC_TOOLTIP : undefined}
-                              onClick={() => setMembersTarget(g)}
-                            >
-                              <UsersRound className="mr-2 h-4 w-4" />
-                              Manage members
-                            </DropdownMenuItem>
-                          )}
-                          <DropdownMenuItem
-                            disabled={isOidc}
-                            title={isOidc ? OIDC_TOOLTIP : undefined}
-                            onClick={() => setRenameTarget(g)}
-                          >
-                            <Pencil className="mr-2 h-4 w-4" />
-                            Rename
-                          </DropdownMenuItem>
-                          <DropdownMenuSeparator />
-                          <DropdownMenuItem
-                            disabled={isOidc}
-                            title={isOidc ? OIDC_TOOLTIP : undefined}
-                            className="text-destructive focus:text-destructive"
-                            onClick={() => {
-                              setDeleteError(null);
-                              setDeleteTarget(g);
-                            }}
-                          >
-                            <Trash2 className="mr-2 h-4 w-4" />
-                            Delete
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
-              {rows.length === 0 && (
-                <TableRow className="hover:bg-transparent">
-                  <TableCell
-                    colSpan={COLUMNS.length}
-                    className="text-center text-muted-foreground"
-                  >
-                    {groups.isError ? (
-                      <span className="text-destructive">
-                        {groups.error?.message ?? "Failed to load groups."}
-                      </span>
-                    ) : groups.isLoading ? (
-                      "Loading…"
-                    ) : (
-                      "No groups yet."
-                    )}
-                  </TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
+          <SummaryStrip
+            items={[
+              { label: "groups", value: rows.length },
+              { label: "members", value: totalMembers },
+            ]}
+          />
+          <FilterableTable
+            rows={filtered}
+            columns={columns}
+            getId={(g) => g.id}
+            searchPlaceholder="Search groups…"
+            initialSort={{ key: "name", dir: "asc" }}
+            emptyText={
+              groups.isLoading
+                ? "Loading…"
+                : groups.isError
+                  ? (groups.error?.message ?? "Failed to load groups.")
+                  : "No groups."
+            }
+            filters={
+              <FacetSelect
+                label="Source"
+                value={sourceFacet}
+                onChange={setSourceFacet}
+                options={[
+                  { value: "local", label: "Local" },
+                  { value: "oidc", label: "OIDC" },
+                ]}
+              />
+            }
+          />
         </CardContent>
       </Card>
 
