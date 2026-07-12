@@ -274,6 +274,7 @@ export default function Notebooks() {
   const [renameTarget, setRenameTarget] = useState<NotebookSummary | null>(null);
   const [pendingDelete, setPendingDelete] = useState<NotebookSummary | null>(null);
   const [shareTarget, setShareTarget] = useState<NotebookSummary | null>(null);
+  const [folderShare, setFolderShare] = useState<{ id: string; name: string } | null>(null);
   const [folderDialog, setFolderDialog] = useState<{
     mode: "new" | "rename" | "move" | "bulkmove";
     nb?: NotebookSummary;
@@ -549,6 +550,11 @@ export default function Notebooks() {
                         colSpan={bulk.bulkMode ? 5 : 4}
                         collapsed={isCollapsed}
                         onToggle={() => collapse.toggle(key)}
+                        onShare={
+                          group.folder
+                            ? () => setFolderShare({ id: group.folder!.id, name: group.folder!.name })
+                            : undefined
+                        }
                         onRename={
                           group.folder
                             ? () => setFolderDialog({ mode: "rename", folder: group.folder! })
@@ -669,6 +675,19 @@ export default function Notebooks() {
           open={shareTarget !== null}
           onOpenChange={(o) => {
             if (!o) setShareTarget(null);
+          }}
+        />
+      )}
+
+      {folderShare && (
+        <ShareDialog
+          ws={ws}
+          kind="folder"
+          id={folderShare.id}
+          name={folderShare.name}
+          open={folderShare !== null}
+          onOpenChange={(o) => {
+            if (!o) setFolderShare(null);
           }}
         />
       )}

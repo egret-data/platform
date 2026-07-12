@@ -13,3 +13,21 @@ test("renders name + count and toggles", async () => {
   await userEvent.click(screen.getByLabelText("Toggle Revenue"));
   expect(onToggle).toHaveBeenCalledTimes(1);
 });
+
+test("actions menu shows Share…, Rename, Delete and fires onShare", async () => {
+  const onShare = vi.fn();
+  const onRename = vi.fn();
+  const onDelete = vi.fn();
+  render(<table><tbody>
+    <FolderHeaderRow
+      name="Revenue" count={3} colSpan={4} collapsed={false} onToggle={vi.fn()}
+      onShare={onShare} onRename={onRename} onDelete={onDelete}
+    />
+  </tbody></table>);
+  await userEvent.click(screen.getByLabelText("Folder Revenue actions"));
+  expect(screen.getByText("Share…")).toBeInTheDocument();
+  expect(screen.getByText("Rename")).toBeInTheDocument();
+  expect(screen.getByText("Delete")).toBeInTheDocument();
+  await userEvent.click(screen.getByText("Share…"));
+  expect(onShare).toHaveBeenCalledTimes(1);
+});

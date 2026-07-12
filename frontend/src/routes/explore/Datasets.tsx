@@ -48,6 +48,7 @@ export default function Datasets() {
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" }>({ key: "updated_at", dir: "desc" });
   const [pendingDelete, setPendingDelete] = useState<DatasetSummary | null>(null);
   const [shareTarget, setShareTarget] = useState<DatasetSummary | null>(null);
+  const [folderShare, setFolderShare] = useState<{ id: string; name: string } | null>(null);
   const [folderDialog, setFolderDialog] = useState<{ mode: "new" | "rename" | "move" | "bulkmove"; ds?: DatasetSummary; folder?: { id: string; name: string } } | null>(null);
   const [dupId, setDupId] = useState<string | null>(null);
   const dup = useDataset(ws, dupId);
@@ -241,6 +242,7 @@ export default function Datasets() {
                         colSpan={bulk.bulkMode ? 8 : 7}
                         collapsed={isCollapsed}
                         onToggle={() => collapse.toggle(key)}
+                        onShare={group.folder ? () => setFolderShare({ id: group.folder!.id, name: group.folder!.name }) : undefined}
                         onRename={group.folder ? () => setFolderDialog({ mode: "rename", folder: group.folder! }) : undefined}
                         onDelete={group.folder ? () => removeFolder.mutateAsync(group.folder!.id).then(() => toast.success("Folder deleted")).catch((e) => toast.error(String(e))) : undefined}
                         onDropItem={(id) => setFolder.mutateAsync({ id, folder_id: group.folder?.id ?? null }).catch((e) => toast.error(String(e)))}
@@ -312,6 +314,17 @@ export default function Datasets() {
           folderId={shareTarget.folder_id ?? null}
           open={shareTarget !== null}
           onOpenChange={(o) => { if (!o) setShareTarget(null); }}
+        />
+      )}
+
+      {folderShare && (
+        <ShareDialog
+          ws={ws}
+          kind="folder"
+          id={folderShare.id}
+          name={folderShare.name}
+          open={folderShare !== null}
+          onOpenChange={(o) => { if (!o) setFolderShare(null); }}
         />
       )}
     </div>
