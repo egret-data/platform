@@ -129,7 +129,7 @@ function ControlPlaneRoutes() {
           <Route path="groups" element={<RequirePermission perm="group:read"><GroupsPage /></RequirePermission>} />
           <Route path="roles" element={<RequirePermission perm="role:read"><RolesPage /></RequirePermission>} />
           <Route path="permissions" element={<RequirePermission perm="role:read"><PermissionsPage /></RequirePermission>} />
-          <Route path="audit-log" element={<AuditLog />} />
+          <Route path="audit-log" element={<RequireGlobalAdmin><AuditLog /></RequireGlobalAdmin>} />
           <Route path="*" element={<ControlPlaneIndex />} />
         </Routes>
       </AppShell>
