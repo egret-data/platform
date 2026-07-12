@@ -421,7 +421,7 @@ async fn set_platform_roles(
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct AddMember {
     pub principal_type: String,
-    pub principal_id: Uuid,
+    pub principal_id: String,
     pub role: String,
 }
 
@@ -499,11 +499,27 @@ async fn add_member(
     egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
         .await
         .map_err(AuthError)?;
+    // The picker supplies an email / group name; a role change supplies the existing
+    // member's UUID. Accept a real UUID directly, else resolve email/name -> id.
+    let pid: uuid::Uuid = match uuid::Uuid::parse_str(&body.principal_id) {
+        Ok(u) => u,
+        Err(_) => st
+            .members
+            .resolve_principal(&body.principal_type, &body.principal_id)
+            .await
+            .map_err(AuthError)?
+            .ok_or_else(|| {
+                AuthError(egret_core::Error::InvalidInput(format!(
+                    "unknown {}: {}",
+                    body.principal_type, body.principal_id
+                )))
+            })?,
+    };
     // A role change is a replace; demoting the last ws_admin is a last-admin removal.
     if body.role != "ws_admin"
         && st
             .members
-            .role_of(ctx.workspace_id, &body.principal_type, body.principal_id)
+            .role_of(ctx.workspace_id, &body.principal_type, pid)
             .await
             .map_err(AuthError)?
             .as_deref()
@@ -518,7 +534,7 @@ async fn add_member(
         .add(
             ctx.workspace_id,
             &body.principal_type,
-            body.principal_id,
+            pid,
             &body.role,
             ctx.principal.user_id,
         )
@@ -532,7 +548,7 @@ async fn add_member(
         resource_id: None,
         detail: serde_json::json!({
             "principal_type": body.principal_type,
-            "principal_id": body.principal_id,
+            "principal_id": pid,
             "role": body.role,
         }),
     });

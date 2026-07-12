@@ -363,3 +363,91 @@ async fn last_admin_guard() {
     );
     assert_eq!(st.members.count_ws_admins(ws.id).await.unwrap(), 1);
 }
+
+// ── Test 5: add-member resolves email → id (picker regression) ─────────────────
+
+/// Adding a member by EMAIL (as the picker sends) resolves to the user's id; an
+/// unknown email is rejected with 4xx. This is the bug that made the "Add member"
+/// flow always 422 (an email was deserialized into a `Uuid` field).
+#[tokio::test]
+async fn add_member_resolves_email_to_id() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let st = ws_state(&db).await;
+    // Caller is a ws_admin so `workspace:manage_members` passes.
+    let admin =
+        seed_user_email(&db, &format!("adm-{}@t.local", uuid::Uuid::new_v4().simple())).await;
+    let ws = st.workspaces.create(&uniq("ws"), "W", admin).await.unwrap();
+    st.members
+        .add(ws.id, "user", admin.0, "ws_admin", admin)
+        .await
+        .unwrap();
+
+    // A target user we'll add by email (as the picker sends: name == email).
+    let target_email = format!("tgt-{}@t.local", uuid::Uuid::new_v4().simple());
+    let target = seed_user_email(&db, &target_email).await;
+
+    let app = axum::Router::new()
+        .nest("/api/ws", ws_member_router())
+        .with_state(st.clone());
+    let cookie = login_cookie(admin, &st.sessions).await;
+
+    // Act: POST with the EMAIL as principal_id → 200, and the member is stored
+    // under the user's real UUID (not the email string).
+    let body = serde_json::to_vec(&serde_json::json!({
+        "principal_type": "user", "principal_id": target_email, "role": "ws_viewer"
+    }))
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri(format!("/api/ws/{}/members", ws.slug))
+                .header("cookie", cookie.clone())
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "adding a member by email must resolve and 200"
+    );
+    assert_eq!(
+        st.members
+            .role_of(ws.id, "user", target.0)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("ws_viewer"),
+        "member must be stored under the resolved user id",
+    );
+
+    // Act 2: POST with an unknown email → 4xx (InvalidInput / 400).
+    let body = serde_json::to_vec(&serde_json::json!({
+        "principal_type": "user", "principal_id": "nobody@nowhere.test", "role": "ws_viewer"
+    }))
+    .unwrap();
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri(format!("/api/ws/{}/members", ws.slug))
+                .header("cookie", cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_client_error(),
+        "an unknown email must be rejected with 4xx, got {}",
+        resp.status()
+    );
+}

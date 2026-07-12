@@ -124,6 +124,21 @@ impl MemberRepo {
         .map_err(db_err)
     }
 
+    /// Resolve a principal identifier to its id: a user by email, a group by name.
+    /// `users.email` is citext so the match is case-insensitive.
+    pub async fn resolve_principal(&self, ptype: &str, ident: &str) -> Result<Option<Uuid>> {
+        let sql = match ptype {
+            "user" => "SELECT id FROM users WHERE email = $1",
+            "group" => "SELECT id FROM groups WHERE name = $1",
+            _ => return Err(Error::InvalidInput(format!("bad principal_type: {ptype}"))),
+        };
+        sqlx::query_scalar(sql)
+            .bind(ident)
+            .fetch_optional(&self.db.pool)
+            .await
+            .map_err(db_err)
+    }
+
     /// The workspace role a principal currently holds here, if any.
     pub async fn role_of(&self, ws: WorkspaceId, ptype: &str, pid: Uuid) -> Result<Option<String>> {
         sqlx::query_scalar(
