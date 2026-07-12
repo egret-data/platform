@@ -292,6 +292,18 @@ pub static PERMISSIONS: &[Permission] = &[
         Scope::Workspace
     ),
     perm!(
+        "saved_query:read",
+        "SQL Lab",
+        "View saved queries",
+        Scope::Workspace
+    ),
+    perm!(
+        "saved_query:manage",
+        "SQL Lab",
+        "Create, edit, and delete saved queries",
+        Scope::Workspace
+    ),
+    perm!(
         "workspace:manage_members",
         "Workspaces",
         "Manage workspace members and workspace-scoped resources",
@@ -365,6 +377,11 @@ mod tests {
         for a in ADMIN_GRAPH_ACTIONS {
             assert!(!is_known(a), "{a} must not be grantable");
         }
+    }
+    #[test]
+    fn saved_query_perms_are_known() {
+        assert!(is_known("saved_query:read"));
+        assert!(is_known("saved_query:manage"));
     }
     #[test]
     fn workspace_actions_present_and_scoped() {

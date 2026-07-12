@@ -26,6 +26,8 @@ pub struct SavedQueryDto {
     pub sql: String,
     pub description: String,
     pub created_by: Option<String>,
+    /// Folder this saved query lives in (`None` = root). Serialized as a string.
+    pub folder_id: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 

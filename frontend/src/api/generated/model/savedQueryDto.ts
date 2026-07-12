@@ -15,5 +15,10 @@ export interface SavedQueryDto {
   description: string;
   /** @nullable */
   created_by?: string | null;
+  /**
+     * Folder this saved query lives in (`None` = root). Serialized as a string.
+     * @nullable
+     */
+  folder_id?: string | null;
   updated_at: string;
 }

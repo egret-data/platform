@@ -30,6 +30,7 @@ import type {
   SaveQuery,
   SavedQueryDto,
   SchemaColumn,
+  SetFolder,
   SqllabColumnsParams,
   SqllabSchemasParams,
   SqllabTablesParams
@@ -1199,4 +1200,105 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getSqllabRemoveMutationOptions(options), queryClient);
+    }
+    export type sqllabSqSetFolderResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type sqllabSqSetFolderResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type sqllabSqSetFolderResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type sqllabSqSetFolderResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type sqllabSqSetFolderResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type sqllabSqSetFolderResponseSuccess = (sqllabSqSetFolderResponse200) & {
+  headers: Headers;
+};
+export type sqllabSqSetFolderResponseError = (sqllabSqSetFolderResponse401 | sqllabSqSetFolderResponse403 | sqllabSqSetFolderResponse404 | sqllabSqSetFolderResponse500) & {
+  headers: Headers;
+};
+
+export type sqllabSqSetFolderResponse = (sqllabSqSetFolderResponseSuccess | sqllabSqSetFolderResponseError)
+
+export const getSqllabSqSetFolderUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/sqllab/queries/${encodeURIComponent(id)}/folder`
+}
+
+export const sqllabSqSetFolder = async (workspace: string,
+    id: string,
+    setFolder: SetFolder, options?: RequestInit): Promise<sqllabSqSetFolderResponse> => {
+
+  return customInstance<sqllabSqSetFolderResponse>(getSqllabSqSetFolderUrl(workspace,id),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setFolder)
+  }
+);}
+
+
+
+
+
+export const getSqllabSqSetFolderMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sqllabSqSetFolder>>, TError,{workspace: string;id: string;data: SetFolder}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof sqllabSqSetFolder>>, TError,{workspace: string;id: string;data: SetFolder}, TContext> => {
+
+const mutationKey = ['sqllabSqSetFolder'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof sqllabSqSetFolder>>, {workspace: string;id: string;data: SetFolder}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  sqllabSqSetFolder(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SqllabSqSetFolderMutationResult = NonNullable<Awaited<ReturnType<typeof sqllabSqSetFolder>>>
+    export type SqllabSqSetFolderMutationBody = SetFolder
+    export type SqllabSqSetFolderMutationError = ErrorBody
+
+    export const useSqllabSqSetFolder = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sqllabSqSetFolder>>, TError,{workspace: string;id: string;data: SetFolder}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof sqllabSqSetFolder>>,
+        TError,
+        {workspace: string;id: string;data: SetFolder},
+        TContext
+      > => {
+      return useMutation(getSqllabSqSetFolderMutationOptions(options), queryClient);
     }

@@ -16836,7 +16836,7 @@
             }
           },
           "403": {
-            "description": "Missing query:run permission",
+            "description": "Missing saved_query:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -16905,7 +16905,7 @@
             }
           },
           "403": {
-            "description": "Missing query:run permission",
+            "description": "Missing saved_query:manage permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -16984,7 +16984,7 @@
             }
           },
           "403": {
-            "description": "Missing query:run permission",
+            "description": "Missing saved_query:read permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -17081,7 +17081,7 @@
             }
           },
           "403": {
-            "description": "Missing query:run permission, or not the query owner",
+            "description": "Missing saved_query:manage permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -17168,7 +17168,7 @@
             }
           },
           "403": {
-            "description": "Missing query:run permission, or not the query owner",
+            "description": "Missing saved_query:manage permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -17179,6 +17179,105 @@
           },
           "404": {
             "description": "No such saved query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/sqllab/queries/{id}/folder": {
+      "patch": {
+        "tags": [
+          "sqllab"
+        ],
+        "operationId": "sq_set_folder",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Saved query id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetFolder"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved query moved to folder",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ack"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing saved_query:manage permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such saved query or target folder in this workspace",
             "content": {
               "application/json": {
                 "schema": {
@@ -21442,6 +21541,13 @@
               "string",
               "null"
             ]
+          },
+          "folder_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Folder this saved query lives in (`None` = root). Serialized as a string."
           },
           "updated_at": {
             "type": "string",

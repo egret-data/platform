@@ -23,8 +23,9 @@ import {
 } from "./generated/folders/folders";
 import type { FolderDto } from "./generated/model";
 import { notebooksSetFolder } from "./generated/notebooks/notebooks";
+import { sqllabSqSetFolder } from "./generated/sqllab/sqllab";
 
-export type EntityKind = "charts" | "dashboards" | "datasets" | "notebooks";
+export type EntityKind = "charts" | "dashboards" | "datasets" | "notebooks" | "saved_queries";
 export type Folder = FolderDto;
 
 /** Invalidation key for each entity's list; generated for migrated domains,
@@ -34,6 +35,7 @@ const listKeyOf: Record<EntityKind, (ws: string) => readonly unknown[]> = {
   dashboards: (ws) => getDashboardsDbListQueryKey(ws),
   datasets: (ws) => getDatasetsDsListQueryKey(ws),
   notebooks: (ws) => ["notebooks", ws],
+  saved_queries: (ws) => ["sqllab", ws, "saved"],
 };
 
 /** `PATCH /ws/{ws}/{kind}/{id}/folder` via each domain's generated fetch fn. */
@@ -42,6 +44,7 @@ const setFolderOf: Record<EntityKind, (ws: string, id: string, folderId: string 
   dashboards: (ws, id, folder_id) => dashboardsDbSetFolder(ws, id, { folder_id }),
   datasets: (ws, id, folder_id) => datasetsDsSetFolder(ws, id, { folder_id }),
   notebooks: (ws, id, folder_id) => notebooksSetFolder(ws, id, { folder_id }),
+  saved_queries: (ws, id, folder_id) => sqllabSqSetFolder(ws, id, { folder_id }),
 };
 
 export const folderKeys = { list: (ws: string, kind: EntityKind) => getFoldersFoldersListQueryKey(ws, kind) };
