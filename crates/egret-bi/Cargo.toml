@@ -11,6 +11,7 @@ egret-analytics-api.workspace = true
 egret-config.workspace = true
 egret-metastore.workspace = true
 egret-auth.workspace = true
+egret-events.workspace = true
 egret-workspace.workspace = true
 egret-query.workspace = true
 egret-query-api.workspace = true

@@ -1326,6 +1326,9 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         audit: audit_sink.clone(),
         audit_store: audit_store.clone(),
         tags: egret_bi::TagRepo::new(db.clone()),
+        // SAME `bus` as `roles` so a classification-policy change publishes the
+        // RolesChanged reload the Cedar PDP subscribes to (Access P3.3).
+        classification_policies: egret_bi::ClassificationPolicyRepo::new(db.clone(), bus.clone()),
     });
 
     // Catalog seam admin router (E3d-3): warehouses / catalog-roles / grants /

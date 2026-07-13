@@ -45,5 +45,5 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
 }
 pub use saved::{SavedQuery, SavedQueryRepo};
 pub use schema::SchemaService;
-pub use tags::{Tag, TagRepo};
+pub use tags::{ClassificationPolicyRepo, Tag, TagRepo};
 pub use typegen::{generic_type, GenericType};

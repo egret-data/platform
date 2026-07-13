@@ -24,6 +24,12 @@ export interface Tag {
   color: string;
   assignment_count: number;
   created_at: string;
+  /**
+   * Clearance role names required to open objects carrying this tag,
+   * enforced in the Cedar PDP. Empty = not gated (no restriction beyond the
+   * object's own access grants).
+   */
+  required_roles: string[];
 }
 
 export const tagsQueryKey = ["tags"] as const;
@@ -77,6 +83,37 @@ export function useDeleteTag() {
   return useMutation<void, Error, string>({
     mutationFn: async (id) => {
       await apiJson<void>(`/control-plane/tags/${id}`, { method: "DELETE" });
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: tagsQueryKey }),
+  });
+}
+
+/**
+ * Sets the clearance policy for a tag: objects carrying it become openable
+ * only by principals holding one of `required_roles` (Cedar PDP-enforced).
+ * Passing an empty array clears the gate — same effect as
+ * `useClearTagAccessPolicy`, kept separate for callers that always PUT.
+ */
+export function useSetTagAccessPolicy() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, { id: string; required_roles: string[] }>({
+    mutationFn: async ({ id, required_roles }) => {
+      await apiJson<void>(`/control-plane/tags/${id}/access-policy`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ required_roles }),
+      });
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: tagsQueryKey }),
+  });
+}
+
+/** Clears a tag's clearance policy — objects carrying it are no longer gated. */
+export function useClearTagAccessPolicy() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, string>({
+    mutationFn: async (id) => {
+      await apiJson<void>(`/control-plane/tags/${id}/access-policy`, { method: "DELETE" });
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: tagsQueryKey }),
   });

@@ -66,6 +66,11 @@ pub struct CpState {
     /// Platform classification-tag catalog (Access P3.1, metadata only — see
     /// `egret_bi::tags`).
     pub tags: egret_bi::TagRepo,
+    /// Classification access policies (Access P3.3): which clearance roles a tag
+    /// requires. Mutations publish `RolesChanged` on the SAME bus as `roles` so
+    /// the Cedar PDP reloads. Model + CRUD only in this task; PDP enforcement is
+    /// a later task.
+    pub classification_policies: egret_bi::ClassificationPolicyRepo,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.
