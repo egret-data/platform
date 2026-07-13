@@ -1924,8 +1924,8 @@ async fn tag_catalog_crud_and_permissions() {
     assert_eq!(j["key"], key, "created tag key; body={j}");
     assert_eq!(j["name"], "PII", "created tag name; body={j}");
     assert_eq!(
-        j["assignmentCount"], 0,
-        "fresh tag has 0 assignments; body={j}"
+        j["assignment_count"], 0,
+        "fresh tag has 0 assignments (snake_case, matches FE); body={j}"
     );
     let id = j["id"].as_str().expect("tag id").to_string();
 

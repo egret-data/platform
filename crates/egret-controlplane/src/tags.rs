@@ -31,8 +31,9 @@ pub fn router() -> Router<CpState> {
         .route("/tags/{id}", patch(update_tag).delete(delete_tag))
 }
 
+// snake_case (house convention here): matches the FE `Tag` type and the sibling
+// object-tag `TagDto` in egret-bi, which the FE consumes with a single interface.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
-#[serde(rename_all = "camelCase")]
 pub struct TagDto {
     pub id: String,
     pub key: String,
