@@ -656,6 +656,18 @@ pub fn ws_member_router() -> Router<WorkspaceState> {
         .route("/{workspace}/members/{ptype}/{pid}", delete(remove_member))
         .route("/{workspace}/roles", get(list_workspace_roles))
         .route("/{workspace}/shares", get(list_workspace_shares))
+        .route(
+            "/{workspace}/access-requests",
+            get(list_workspace_access_requests),
+        )
+        .route(
+            "/{workspace}/access-requests/{id}/approve",
+            post(approve_access_request),
+        )
+        .route(
+            "/{workspace}/access-requests/{id}/deny",
+            post(deny_access_request),
+        )
 }
 
 #[utoipa::path(
@@ -973,6 +985,172 @@ async fn list_workspace_shares(
     Ok(Json(grants.into_iter().map(Into::into).collect()))
 }
 
+// ── Workspace access-request approver routes (P2b) ───────────────────────────
+//
+// The APPROVER side of the join-request workflow: a workspace admin reviews the
+// pending queue and approves (→ member added with role + optional expiry via the
+// repo's single grant path) or denies. Workspace-scoped and gated on
+// `workspace:manage_members` (same as the member routes). The cross-workspace +
+// pending guards live in `AccessRequestRepo::{approve,deny}` — surfaced here as
+// 404 (`NotFound`) / 409 (`Conflict`) via `AuthError`.
+
+#[derive(Deserialize)]
+pub struct AccessRequestStatusQuery {
+    /// Filter by request status; defaults to `pending`.
+    pub status: Option<String>,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct ApproveAccessRequest {
+    /// Role to grant the requester; defaults to the originally requested role.
+    pub role: Option<String>,
+    /// Optional time-boxed expiry for the membership grant.
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct DenyAccessRequest {
+    /// Optional note recorded on the denied request.
+    pub note: Option<String>,
+}
+
+/// `GET /ws/{workspace}/access-requests?status=` — the workspace's join requests
+/// filtered by `status` (default `pending`). Gated on `workspace:manage_members`.
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/access-requests",
+    tag = "workspace-members",
+    params(
+        WorkspacePath,
+        ("status" = Option<String>, Query, description = "Filter by status (default: pending)"),
+    ),
+    responses(
+        (status = 200, description = "The workspace's join requests, newest first", body = Vec<AccessRequestDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_workspace_access_requests(
+    State(st): State<WorkspaceState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<AccessRequestStatusQuery>,
+) -> Result<Json<Vec<AccessRequestDto>>, AuthError> {
+    egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
+        .await
+        .map_err(AuthError)?;
+    let status = q.status.as_deref().unwrap_or("pending");
+    let rows = st
+        .access_requests
+        .list_for_workspace(ctx.workspace_id, status)
+        .await
+        .map_err(AuthError)?;
+    Ok(Json(rows.into_iter().map(Into::into).collect()))
+}
+
+/// `POST /ws/{workspace}/access-requests/{id}/approve` — approve a pending request:
+/// add the requester as a member with the chosen role + optional expiry via the
+/// repo's single grant path, then mark it approved. The repo enforces the
+/// cross-workspace guard (`NotFound` → 404) and pending guard (`Conflict` → 409).
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/access-requests/{id}/approve",
+    tag = "workspace-members",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Access-request id"),
+    ),
+    request_body = ApproveAccessRequest,
+    responses(
+        (status = 200, description = "Request approved and member added", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 404, description = "No such request in this workspace", body = ErrorBody),
+        (status = 409, description = "Request already decided", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn approve_access_request(
+    State(st): State<WorkspaceState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    Json(body): Json<ApproveAccessRequest>,
+) -> Result<Json<serde_json::Value>, AuthError> {
+    egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
+        .await
+        .map_err(AuthError)?;
+    st.access_requests
+        .approve(
+            id,
+            ctx.workspace_id,
+            body.role.as_deref(),
+            body.expires_at,
+            ctx.principal.user_id,
+        )
+        .await
+        .map_err(AuthError)?;
+    st.audit.emit(egret_audit::AuditEvent::Mutation {
+        actor: Some(ctx.principal.user_id.0),
+        workspace_id: Some(ctx.workspace_id.0),
+        action: "access_request:approve".into(),
+        resource_type: "access_request".into(),
+        resource_id: Some(id.to_string()),
+        detail: serde_json::json!({
+            "role": body.role,
+            "expires_at": body.expires_at.map(|t| t.to_rfc3339()),
+        }),
+    });
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// `POST /ws/{workspace}/access-requests/{id}/deny` — deny a pending request with
+/// an optional note. The repo enforces the cross-workspace + pending guards.
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/access-requests/{id}/deny",
+    tag = "workspace-members",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Access-request id"),
+    ),
+    request_body = DenyAccessRequest,
+    responses(
+        (status = 200, description = "Request denied", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 409, description = "Request not pending or not in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn deny_access_request(
+    State(st): State<WorkspaceState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    Json(body): Json<DenyAccessRequest>,
+) -> Result<Json<serde_json::Value>, AuthError> {
+    egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
+        .await
+        .map_err(AuthError)?;
+    st.access_requests
+        .deny(
+            id,
+            ctx.workspace_id,
+            body.note.as_deref(),
+            ctx.principal.user_id,
+        )
+        .await
+        .map_err(AuthError)?;
+    st.audit.emit(egret_audit::AuditEvent::Mutation {
+        actor: Some(ctx.principal.user_id.0),
+        workspace_id: Some(ctx.workspace_id.0),
+        action: "access_request:deny".into(),
+        resource_type: "access_request".into(),
+        resource_id: Some(id.to_string()),
+        detail: serde_json::json!({ "note": body.note }),
+    });
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 // ── OpenAPI fragments (E0·P4b-2) ─────────────────────────────────────────────
 //
 // One doc struct per router, merged in `egret_workspace::openapi()`. Full mounted
@@ -1019,8 +1197,28 @@ pub struct AdminUserApi;
 /// OpenAPI fragment for the workspace-membership router (`/api/ws/{workspace}/members`).
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(list_members, add_member, remove_member, list_workspace_roles, list_workspace_shares),
-    components(schemas(MemberDto, AddMember, WsRoleDto, WsPermDto, ObjectGrantRollupDto, Ack, ErrorBody)),
+    paths(
+        list_members,
+        add_member,
+        remove_member,
+        list_workspace_roles,
+        list_workspace_shares,
+        list_workspace_access_requests,
+        approve_access_request,
+        deny_access_request,
+    ),
+    components(schemas(
+        MemberDto,
+        AddMember,
+        WsRoleDto,
+        WsPermDto,
+        ObjectGrantRollupDto,
+        AccessRequestDto,
+        ApproveAccessRequest,
+        DenyAccessRequest,
+        Ack,
+        ErrorBody,
+    )),
     tags((name = "workspace-members", description = "Workspace membership (add/remove principals)")),
 )]
 pub struct WsMemberApi;

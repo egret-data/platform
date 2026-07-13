@@ -13,7 +13,7 @@ use egret_core::UserId;
 use egret_metastore::Db;
 use egret_workspace::members::MemberRepo;
 use egret_workspace::rbac::Authorizer;
-use egret_workspace::routes::{access_request_router, WorkspaceState};
+use egret_workspace::routes::{access_request_router, ws_member_router, WorkspaceState};
 use egret_workspace::workspaces::WorkspaceRepo;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -256,4 +256,221 @@ async fn requester_endpoints_flow() {
     assert_eq!(resp.status(), StatusCode::OK, "cancel own pending must 200");
     let ok = body_json(resp).await;
     assert_eq!(ok["ok"], serde_json::Value::Bool(true));
+}
+
+/// The approver flow through the workspace-scoped `ws_member_router`:
+/// a ws_admin lists the pending inbox (a ws_viewer is 403), approves one request
+/// (→ member with the chosen role + expiry, request `approved`), is blocked from
+/// approving a request that belongs to a DIFFERENT workspace (404), and denies
+/// another with a note.
+#[tokio::test]
+async fn approver_endpoints_flow() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let st = ws_state(&db).await;
+    let app = axum::Router::new()
+        .nest("/api/ws", ws_member_router())
+        .with_state(st.clone());
+
+    // A ws_admin, a plain ws_viewer member, and two outside requesters.
+    let admin = seed_user_email(&db, &format!("adm-{}@t.local", Uuid::new_v4().simple())).await;
+    let viewer = seed_user_email(&db, &format!("viw-{}@t.local", Uuid::new_v4().simple())).await;
+    let req_email = format!("rqr-{}@t.local", Uuid::new_v4().simple());
+    let requester = seed_user_email(&db, &req_email).await;
+    let requester2 =
+        seed_user_email(&db, &format!("rq2-{}@t.local", Uuid::new_v4().simple())).await;
+
+    let ws = st
+        .workspaces
+        .create(&uniq("ws"), "Approver WS", admin)
+        .await
+        .unwrap();
+    st.members
+        .add(ws.id, "user", admin.0, "ws_admin", admin)
+        .await
+        .unwrap();
+    st.members
+        .add(ws.id, "user", viewer.0, "ws_viewer", admin)
+        .await
+        .unwrap();
+
+    // Seed two pending requests in THIS workspace.
+    let pending = st
+        .access_requests
+        .create(requester, ws.id, "ws_viewer", "let me in")
+        .await
+        .unwrap();
+    let pending2 = st
+        .access_requests
+        .create(requester2, ws.id, "ws_viewer", "me too")
+        .await
+        .unwrap();
+
+    let admin_cookie = login_cookie(admin, &st.sessions).await;
+    let viewer_cookie = login_cookie(viewer, &st.sessions).await;
+
+    // 1) ws_admin GET inbox (default status=pending) → 200 with the request + requester_name.
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .uri(format!("/api/ws/{}/access-requests", ws.slug))
+                .header("cookie", admin_cookie.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "admin inbox must 200");
+    let inbox = body_json(resp).await;
+    let row = inbox
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == serde_json::Value::String(pending.id.to_string()))
+        .expect("inbox must contain the pending request");
+    assert_eq!(
+        row["requester_name"],
+        serde_json::Value::String(req_email.clone()),
+        "inbox row carries the requester's display name"
+    );
+
+    // 2) ws_viewer GET inbox → 403 (not manage_members).
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .uri(format!("/api/ws/{}/access-requests", ws.slug))
+                .header("cookie", viewer_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "non-admin inbox must 403"
+    );
+
+    // 3) approve with role=ws_editor + 7d expiry → 200; member added with that role+expiry; status approved.
+    let expires = chrono::Utc::now() + chrono::Duration::days(7);
+    let approve_body = serde_json::to_vec(&serde_json::json!({
+        "role": "ws_editor", "expires_at": expires.to_rfc3339()
+    }))
+    .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/ws/{}/access-requests/{}/approve",
+                    ws.slug, pending.id
+                ))
+                .header("cookie", admin_cookie.clone())
+                .header("content-type", "application/json")
+                .body(Body::from(approve_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "approve must 200");
+    assert_eq!(body_json(resp).await["ok"], serde_json::Value::Bool(true));
+
+    assert_eq!(
+        st.members
+            .role_of(ws.id, "user", requester.0)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("ws_editor"),
+        "approve must add the requester as ws_editor"
+    );
+    let (grant_role, grant_expiry): (String, Option<chrono::DateTime<chrono::Utc>>) =
+        sqlx::query_as(
+            "SELECT r.name, ag.expires_at FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
+             WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1 \
+               AND ag.principal_type = 'user' AND ag.principal_id = $2",
+        )
+        .bind(ws.id.0)
+        .bind(requester.0)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(grant_role, "ws_editor");
+    let ge = grant_expiry.expect("grant must carry the 7d expiry");
+    assert!(
+        (ge - expires).num_seconds().abs() < 5,
+        "grant expiry must match the requested 7d expiry"
+    );
+    assert_eq!(
+        st.access_requests
+            .get(pending.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "approved",
+        "request status must be approved"
+    );
+
+    // 4) approve a request that belongs to a DIFFERENT workspace, via THIS ws's path → 404.
+    let ws_other = st
+        .workspaces
+        .create(&uniq("ws"), "Other WS", admin)
+        .await
+        .unwrap();
+    let foreign = st
+        .access_requests
+        .create(requester2, ws_other.id, "ws_viewer", "elsewhere")
+        .await
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/ws/{}/access-requests/{}/approve",
+                    ws.slug, foreign.id
+                ))
+                .header("cookie", admin_cookie.clone())
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "approving a cross-workspace request must 404"
+    );
+
+    // 5) deny another pending request with a note → 200, status denied, note stored.
+    let deny_body = serde_json::to_vec(&serde_json::json!({ "note": "nope" })).unwrap();
+    let resp = app
+        .clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/ws/{}/access-requests/{}/deny",
+                    ws.slug, pending2.id
+                ))
+                .header("cookie", admin_cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(deny_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "deny must 200");
+    assert_eq!(body_json(resp).await["ok"], serde_json::Value::Bool(true));
+    let denied = st.access_requests.get(pending2.id).await.unwrap().unwrap();
+    assert_eq!(denied.status, "denied", "request must be denied");
+    assert_eq!(denied.decision_note.as_deref(), Some("nope"), "note stored");
 }
