@@ -139,6 +139,27 @@ describe("RolesPage", () => {
   test("Edit dialog prefills checked permissions from listPermissions and Save persists the toggled set", async () => {
     const user = userEvent.setup();
     vi.mocked(api.setRolePermissions).mockResolvedValue(undefined);
+    // custom_role is a workspace role; the matrix only shows workspace-scoped
+    // permissions, so this fixture matches the role's scope.
+    vi.mocked(api.listPermissions).mockResolvedValue([
+      {
+        group: "Catalog",
+        permissions: [
+          {
+            key: "catalog.read",
+            description: "Read catalog metadata",
+            roles: ["data_steward", "custom_role"],
+            scope: "workspace",
+          },
+          {
+            key: "catalog.write",
+            description: "Write catalog metadata",
+            roles: ["data_steward"],
+            scope: "workspace",
+          },
+        ],
+      },
+    ]);
 
     renderPage();
     await screen.findByText("custom_role");
@@ -153,6 +174,13 @@ describe("RolesPage", () => {
     const writeCheckbox = screen.getByRole("checkbox", { name: "catalog.write" });
     expect(readCheckbox).toHaveAttribute("data-state", "checked");
     expect(writeCheckbox).toHaveAttribute("data-state", "unchecked");
+
+    // With one-of-two editable perms checked, the group's select-all is tri-state
+    // indeterminate (Radix exposes this as aria-checked="mixed").
+    expect(screen.getByRole("checkbox", { name: "Select all Catalog" })).toHaveAttribute(
+      "aria-checked",
+      "mixed",
+    );
 
     await user.click(writeCheckbox);
     await user.click(screen.getByRole("button", { name: /^Save$/i }));
@@ -176,6 +204,27 @@ describe("RolesPage", () => {
         permissionCount: 1,
         assigneeCount: 0,
         inheritedPermissions: [],
+      },
+    ]);
+    // custom_role is a workspace role; scope its catalog perms to workspace so
+    // the (scope-filtered) matrix shows them.
+    vi.mocked(api.listPermissions).mockResolvedValue([
+      {
+        group: "Catalog",
+        permissions: [
+          {
+            key: "catalog.read",
+            description: "Read catalog metadata",
+            roles: ["data_steward", "custom_role"],
+            scope: "workspace",
+          },
+          {
+            key: "catalog.write",
+            description: "Write catalog metadata",
+            roles: ["data_steward"],
+            scope: "workspace",
+          },
+        ],
       },
     ]);
     // custom_role (r2) inherits catalog.write from its parent (read-only row).
@@ -211,6 +260,69 @@ describe("RolesPage", () => {
     expect(inheritedCb).toBeDisabled();
     expect(inheritedCb).toHaveAttribute("data-state", "checked");
     expect(screen.getByText("inherited")).toBeInTheDocument();
+  });
+
+  test("Edit dialog for a workspace role hides platform-scoped permissions, filters by search, and select-all-per-group toggles", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.setRolePermissions).mockResolvedValue(undefined);
+    // A workspace group and a platform group; only the workspace one is holdable
+    // by custom_role (a workspace role).
+    vi.mocked(api.listPermissions).mockResolvedValue([
+      {
+        group: "Charts",
+        permissions: [
+          {
+            key: "chart:read",
+            description: "Read charts",
+            roles: [],
+            scope: "workspace",
+          },
+        ],
+      },
+      {
+        group: "Engines",
+        permissions: [
+          {
+            key: "engine:read",
+            description: "Read engines",
+            roles: [],
+            scope: "platform",
+          },
+        ],
+      },
+    ]);
+    vi.mocked(api.getRole).mockResolvedValue({
+      id: "r2",
+      scope: "workspace",
+      name: "custom_role",
+      description: "A custom workspace role",
+      permissionCount: 1,
+      assigneeCount: 0,
+      parentRoleId: null,
+      inheritedPermissions: [],
+    });
+
+    renderPage();
+    await screen.findByText("custom_role");
+
+    await user.click(screen.getByRole("button", { name: /Actions for custom_role/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit permissions" }));
+    await screen.findByRole("heading", { name: /Edit role — custom_role/i });
+
+    // The workspace permission renders; the platform group/permission does not.
+    expect(await screen.findByRole("checkbox", { name: "chart:read" })).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "engine:read" })).toBeNull();
+    expect(screen.queryByText("Engines")).toBeNull();
+
+    // Searching for "chart" keeps chart:read visible.
+    await user.type(screen.getByPlaceholderText("Search permissions…"), "chart");
+    expect(screen.getByRole("checkbox", { name: "chart:read" })).toBeInTheDocument();
+
+    // Clicking the group's select-all toggles chart:read's checkbox on.
+    const chartCb = screen.getByRole("checkbox", { name: "chart:read" });
+    expect(chartCb).toHaveAttribute("data-state", "unchecked");
+    await user.click(screen.getByRole("checkbox", { name: "Select all Charts" }));
+    expect(chartCb).toHaveAttribute("data-state", "checked");
   });
 
   test("clicking the assignee count opens the assignees dialog and lists them", async () => {
@@ -292,6 +404,55 @@ describe("RolesPage", () => {
     expect(screen.queryByText("data_steward")).not.toBeInTheDocument();
   });
 
+  test("the Tree view toggle renders the hierarchy and hides the search box; List view restores it", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.listRoles).mockResolvedValue([
+      {
+        id: "p1",
+        scope: "platform",
+        name: "base_role",
+        description: "Parent role",
+        permissionCount: 1,
+        assigneeCount: 0,
+        inheritedPermissions: [],
+      },
+      {
+        id: "c1",
+        scope: "platform",
+        name: "child_role",
+        description: "Inherits from base_role",
+        permissionCount: 2,
+        assigneeCount: 0,
+        parentRoleId: "p1",
+        inheritedPermissions: [],
+      },
+      {
+        id: "w1",
+        scope: "workspace",
+        name: "ws_role",
+        description: "A workspace role",
+        permissionCount: 1,
+        assigneeCount: 0,
+        inheritedPermissions: [],
+      },
+    ]);
+
+    renderPage();
+    await screen.findByText("ws_role");
+    expect(screen.getByPlaceholderText("Search roles…")).toBeInTheDocument();
+
+    // Switch to Tree view: the (nested) child role renders and the search box
+    // disappears (search/filter live in the table, which is unmounted).
+    await user.click(screen.getByRole("button", { name: "Tree view" }));
+    expect(screen.getByText("child_role")).toBeInTheDocument();
+    expect(screen.getByText("ws_role")).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Search roles…")).toBeNull();
+
+    // Switch back to List view: the search box returns.
+    await user.click(screen.getByRole("button", { name: "List view" }));
+    expect(screen.getByPlaceholderText("Search roles…")).toBeInTheDocument();
+  });
+
   test("the summary strip shows total, platform, and workspace counts", async () => {
     renderPage();
     await screen.findByText("data_steward");
@@ -319,6 +480,42 @@ describe("RolesPage", () => {
     expect(
       screen.queryByRole("button", { name: "View assignees of custom_role" }),
     ).not.toBeInTheDocument();
+  });
+
+  test("the Inherits from column shows the parent role's name as a chip, and — for a root role", async () => {
+    // A parent role and a child whose parentRoleId points at it.
+    vi.mocked(api.listRoles).mockResolvedValue([
+      {
+        id: "p1",
+        scope: "workspace",
+        name: "base_role",
+        description: "Parent role",
+        permissionCount: 1,
+        assigneeCount: 0,
+        inheritedPermissions: [],
+      },
+      {
+        id: "c1",
+        scope: "workspace",
+        name: "child_role",
+        description: "Inherits from base_role",
+        permissionCount: 2,
+        assigneeCount: 0,
+        parentRoleId: "p1",
+        inheritedPermissions: [],
+      },
+    ]);
+
+    renderPage();
+    await screen.findByText("child_role");
+
+    // The child's row renders the parent's name (base_role) in the Inherits
+    // from column. base_role also appears as its own row's Name cell, so assert
+    // that the parent name is present at least twice (own row + child's chip).
+    expect(screen.getAllByText("base_role").length).toBeGreaterThanOrEqual(2);
+
+    // The root role (base_role, no parentRoleId) renders an em dash placeholder.
+    expect(screen.getByText("—")).toBeInTheDocument();
   });
 
   test("a non-admin role:read viewer sees a read-only table: no New role button and no Actions menu", async () => {

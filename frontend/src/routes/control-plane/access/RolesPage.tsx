@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import { MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
 
 import {
   type AccessRole,
@@ -102,6 +102,72 @@ function isSeeded(role: AccessRole): boolean {
   return SEEDED_ROLE_NAMES.has(role.name);
 }
 
+/** Read-only indented tree of the role hierarchy, grouped by scope. */
+function RolesTree({
+  roles,
+  isAdmin,
+  onEdit,
+}: {
+  roles: AccessRole[];
+  isAdmin: boolean;
+  onEdit: (role: AccessRole) => void;
+}) {
+  const childrenOf = useMemo(() => {
+    const ids = new Set(roles.map((r) => r.id));
+    const m = new Map<string | null, AccessRole[]>();
+    for (const r of roles) {
+      const parent = r.parentRoleId && ids.has(r.parentRoleId) ? r.parentRoleId : null;
+      const arr = m.get(parent) ?? [];
+      arr.push(r);
+      m.set(parent, arr);
+    }
+    return m;
+  }, [roles]);
+
+  const renderNode = (r: AccessRole, depth: number): ReactNode => {
+    if (depth > 64) return null; // cycle guard (DB prevents cycles)
+    const kids = childrenOf.get(r.id) ?? [];
+    return (
+      <div key={r.id}>
+        <button
+          type="button"
+          disabled={!isAdmin}
+          onClick={() => isAdmin && onEdit(r)}
+          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent disabled:cursor-default disabled:hover:bg-transparent"
+          style={{ paddingLeft: `${8 + depth * 20}px` }}
+        >
+          <span className="font-medium">{r.name}</span>
+          {isSeeded(r) && (
+            <Badge variant="secondary" className="font-normal">
+              built-in
+            </Badge>
+          )}
+        </button>
+        {kids.map((k) => renderNode(k, depth + 1))}
+      </div>
+    );
+  };
+
+  const scopes: ("platform" | "workspace")[] = ["platform", "workspace"];
+  const roots = childrenOf.get(null) ?? [];
+  return (
+    <div className="space-y-4">
+      {scopes.map((scope) => {
+        const scopeRoots = roots.filter((r) => r.scope === scope);
+        if (scopeRoots.length === 0) return null;
+        return (
+          <div key={scope} className="space-y-1">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              {scope}
+            </h3>
+            {scopeRoots.map((r) => renderNode(r, 0))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /**
  * Control Plane → Access control → Roles.
  *
@@ -130,6 +196,7 @@ export default function RolesPage() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [assigneesTarget, setAssigneesTarget] = useState<AccessRole | null>(null);
   const [scopeFacet, setScopeFacet] = useState(FACET_ALL);
+  const [treeView, setTreeView] = useState(false);
 
   const deleteMutation = useMutation<void, ApiError, string>({
     mutationFn: (id) => deleteRole(id),
@@ -139,6 +206,8 @@ export default function RolesPage() {
     },
     onError: (err) => setDeleteError(err.message ?? "Failed to delete role."),
   });
+
+  const nameById = useMemo(() => new Map(rows.map((r) => [r.id, r.name])), [rows]);
 
   const columns: Column<AccessRole>[] = [
     {
@@ -164,6 +233,20 @@ export default function RolesPage() {
           )}
         </>
       ),
+    },
+    {
+      key: "parent",
+      label: "Inherits from",
+      sortable: true,
+      value: (r) => (r.parentRoleId ? (nameById.get(r.parentRoleId) ?? "") : ""),
+      cell: (r) =>
+        r.parentRoleId && nameById.get(r.parentRoleId) ? (
+          <Badge variant="outline" className="font-normal">
+            {nameById.get(r.parentRoleId)}
+          </Badge>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        ),
     },
     {
       key: "description",
@@ -248,8 +331,8 @@ export default function RolesPage() {
       <div>
         <h1 className="text-2xl font-semibold leading-tight">Roles</h1>
         <p className="text-sm text-muted-foreground">
-          Platform and workspace roles, their permission grants, and how many
-          users/groups are assigned.
+          Platform roles apply across all of egret; workspace roles apply inside a single
+          workspace and are assigned per-workspace on that workspace's Members page.
         </p>
       </div>
 
@@ -262,12 +345,22 @@ export default function RolesPage() {
                 Edit a role's permissions to change what it grants.
               </CardDescription>
             </div>
-            {isAdmin && (
-              <Button size="sm" onClick={() => setCreateOpen(true)}>
-                <Plus className="mr-1 h-4 w-4" />
-                New role
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant={treeView ? "secondary" : "outline"}
+                onClick={() => setTreeView((v) => !v)}
+                aria-pressed={treeView}
+              >
+                {treeView ? "List view" : "Tree view"}
               </Button>
-            )}
+              {isAdmin && (
+                <Button size="sm" onClick={() => setCreateOpen(true)}>
+                  <Plus className="mr-1 h-4 w-4" />
+                  New role
+                </Button>
+              )}
+            </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -283,31 +376,40 @@ export default function RolesPage() {
               { label: "workspace", value: rows.length - platform },
             ]}
           />
-          <FilterableTable
-            rows={filtered}
-            columns={columns}
-            getId={(r) => r.id}
-            searchPlaceholder="Search roles…"
-            initialSort={{ key: "name", dir: "asc" }}
-            emptyText={
-              roles.isLoading
-                ? "Loading…"
-                : roles.isError
-                  ? (roles.error?.message ?? "Failed to load roles.")
-                  : "No roles."
-            }
-            filters={
-              <FacetSelect
-                label="Scope"
-                value={scopeFacet}
-                onChange={setScopeFacet}
-                options={[
-                  { value: "platform", label: "Platform" },
-                  { value: "workspace", label: "Workspace" },
-                ]}
-              />
-            }
-          />
+          {treeView ? (
+            <>
+              <p className="text-xs text-muted-foreground">
+                Tree view shows the full hierarchy — switch to list to search or filter.
+              </p>
+              <RolesTree roles={rows} isAdmin={isAdmin} onEdit={setEditTarget} />
+            </>
+          ) : (
+            <FilterableTable
+              rows={filtered}
+              columns={columns}
+              getId={(r) => r.id}
+              searchPlaceholder="Search roles…"
+              initialSort={{ key: "name", dir: "asc" }}
+              emptyText={
+                roles.isLoading
+                  ? "Loading…"
+                  : roles.isError
+                    ? (roles.error?.message ?? "Failed to load roles.")
+                    : "No roles."
+              }
+              filters={
+                <FacetSelect
+                  label="Scope"
+                  value={scopeFacet}
+                  onChange={setScopeFacet}
+                  options={[
+                    { value: "platform", label: "Platform" },
+                    { value: "workspace", label: "Workspace" },
+                  ]}
+                />
+              }
+            />
+          )}
         </CardContent>
       </Card>
 
@@ -503,6 +605,25 @@ function EditRoleDialog({
   const isSuperuser = role?.name === "platform_admin";
   const groups = permissions.data ?? [];
 
+  const [permQuery, setPermQuery] = useState("");
+
+  // Only permissions this role's scope can hold; then apply the in-dialog search.
+  const shownGroups = useMemo(() => {
+    const needle = permQuery.trim().toLowerCase();
+    return groups
+      .map((g) => ({
+        ...g,
+        permissions: g.permissions.filter(
+          (p) =>
+            (!role || p.scope === role.scope) &&
+            (needle === "" ||
+              p.key.toLowerCase().includes(needle) ||
+              p.description.toLowerCase().includes(needle)),
+        ),
+      }))
+      .filter((g) => g.permissions.length > 0);
+  }, [groups, role, permQuery]);
+
   // Roles offered as a parent: same scope, excluding self and any role whose
   // chain already reaches this one (obvious cycle).
   const parentOptions = useMemo(() => {
@@ -546,6 +667,19 @@ function EditRoleDialog({
       const next = new Set(prev);
       if (isChecked) next.add(key);
       else next.delete(key);
+      return next;
+    });
+  }
+
+  /** Toggle every non-inherited permission of a group on/off at once. */
+  function toggleGroup(perms: { key: string }[], on: boolean) {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      for (const p of perms) {
+        if (inherited.has(p.key)) continue; // inherited perms are fixed
+        if (on) next.add(p.key);
+        else next.delete(p.key);
+      }
       return next;
     });
   }
@@ -628,6 +762,25 @@ function EditRoleDialog({
             </Alert>
           )}
 
+          {!isSuperuser && role && (
+            <p className="text-xs text-muted-foreground">
+              This is a <span className="font-medium text-foreground">{role.scope}</span> role
+              — it can hold {role.scope}-scoped permissions.
+            </p>
+          )}
+
+          {!isSuperuser && !permissions.isLoading && !permissions.isError && groups.length > 0 && (
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                className="pl-8"
+                placeholder="Search permissions…"
+                value={permQuery}
+                onChange={(e) => setPermQuery(e.target.value)}
+              />
+            </div>
+          )}
+
           <div className="space-y-4">
             {permissions.isLoading ? (
               <p className="text-sm text-muted-foreground">Loading…</p>
@@ -635,42 +788,54 @@ function EditRoleDialog({
               <p className="text-sm text-destructive">
                 {permissions.error?.message ?? "Failed to load permissions."}
               </p>
+            ) : shownGroups.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No permissions match your search.</p>
             ) : (
-              groups.map((group) => (
-                <div key={group.group} className="space-y-1.5">
-                  <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                    {group.group}
-                  </h3>
-                  <div className="grid grid-cols-1 gap-x-6 gap-y-1.5 rounded-md border p-3 sm:grid-cols-2">
-                    {group.permissions.map((p) => {
-                      const id = `perm-${p.key}`;
-                      const isInherited = inherited.has(p.key);
-                      return (
-                        <div key={p.key} className="flex items-center gap-2">
-                          <Checkbox
-                            id={id}
-                            checked={isInherited || checked.has(p.key)}
-                            disabled={isSuperuser || isInherited}
-                            onCheckedChange={(c) => toggle(p.key, c === true)}
-                          />
-                          <Label
-                            htmlFor={id}
-                            className="cursor-pointer font-normal"
-                            title={p.description}
-                          >
-                            {p.key}
-                          </Label>
-                          {isInherited && (
-                            <Badge variant="secondary" className="font-normal">
-                              inherited
-                            </Badge>
-                          )}
-                        </div>
-                      );
-                    })}
+              shownGroups.map((group) => {
+                const editable = group.permissions.filter((p) => !inherited.has(p.key));
+                const allOn = editable.length > 0 && editable.every((p) => checked.has(p.key));
+                const someOn = editable.some((p) => checked.has(p.key));
+                return (
+                  <div key={group.group} className="space-y-1.5">
+                    <div className="flex items-center gap-2">
+                      {!isSuperuser && editable.length > 0 && (
+                        <Checkbox
+                          aria-label={`Select all ${group.group}`}
+                          checked={allOn ? true : someOn ? "indeterminate" : false}
+                          onCheckedChange={(c) => toggleGroup(editable, c === true)}
+                        />
+                      )}
+                      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        {group.group}
+                      </h3>
+                    </div>
+                    <div className="grid grid-cols-1 gap-x-6 gap-y-1.5 rounded-md border p-3 sm:grid-cols-2">
+                      {group.permissions.map((p) => {
+                        const id = `perm-${p.key}`;
+                        const isInherited = inherited.has(p.key);
+                        return (
+                          <div key={p.key} className="flex items-center gap-2">
+                            <Checkbox
+                              id={id}
+                              checked={isInherited || checked.has(p.key)}
+                              disabled={isSuperuser || isInherited}
+                              onCheckedChange={(c) => toggle(p.key, c === true)}
+                            />
+                            <Label htmlFor={id} className="cursor-pointer font-normal" title={p.description}>
+                              {p.key}
+                            </Label>
+                            {isInherited && (
+                              <Badge variant="secondary" className="font-normal">
+                                inherited
+                              </Badge>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>
