@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import { MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
 
 import {
   type AccessRole,
@@ -503,6 +503,25 @@ function EditRoleDialog({
   const isSuperuser = role?.name === "platform_admin";
   const groups = permissions.data ?? [];
 
+  const [permQuery, setPermQuery] = useState("");
+
+  // Only permissions this role's scope can hold; then apply the in-dialog search.
+  const shownGroups = useMemo(() => {
+    const needle = permQuery.trim().toLowerCase();
+    return groups
+      .map((g) => ({
+        ...g,
+        permissions: g.permissions.filter(
+          (p) =>
+            (!role || p.scope === role.scope) &&
+            (needle === "" ||
+              p.key.toLowerCase().includes(needle) ||
+              p.description.toLowerCase().includes(needle)),
+        ),
+      }))
+      .filter((g) => g.permissions.length > 0);
+  }, [groups, role, permQuery]);
+
   // Roles offered as a parent: same scope, excluding self and any role whose
   // chain already reaches this one (obvious cycle).
   const parentOptions = useMemo(() => {
@@ -546,6 +565,19 @@ function EditRoleDialog({
       const next = new Set(prev);
       if (isChecked) next.add(key);
       else next.delete(key);
+      return next;
+    });
+  }
+
+  /** Toggle every non-inherited permission of a group on/off at once. */
+  function toggleGroup(perms: { key: string }[], on: boolean) {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      for (const p of perms) {
+        if (inherited.has(p.key)) continue; // inherited perms are fixed
+        if (on) next.add(p.key);
+        else next.delete(p.key);
+      }
       return next;
     });
   }
@@ -628,6 +660,25 @@ function EditRoleDialog({
             </Alert>
           )}
 
+          {!isSuperuser && role && (
+            <p className="text-xs text-muted-foreground">
+              This is a <span className="font-medium text-foreground">{role.scope}</span> role
+              — it can hold {role.scope}-scoped permissions.
+            </p>
+          )}
+
+          {!isSuperuser && !permissions.isLoading && !permissions.isError && groups.length > 0 && (
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                className="pl-8"
+                placeholder="Search permissions…"
+                value={permQuery}
+                onChange={(e) => setPermQuery(e.target.value)}
+              />
+            </div>
+          )}
+
           <div className="space-y-4">
             {permissions.isLoading ? (
               <p className="text-sm text-muted-foreground">Loading…</p>
@@ -635,42 +686,53 @@ function EditRoleDialog({
               <p className="text-sm text-destructive">
                 {permissions.error?.message ?? "Failed to load permissions."}
               </p>
+            ) : shownGroups.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No permissions match your search.</p>
             ) : (
-              groups.map((group) => (
-                <div key={group.group} className="space-y-1.5">
-                  <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                    {group.group}
-                  </h3>
-                  <div className="grid grid-cols-1 gap-x-6 gap-y-1.5 rounded-md border p-3 sm:grid-cols-2">
-                    {group.permissions.map((p) => {
-                      const id = `perm-${p.key}`;
-                      const isInherited = inherited.has(p.key);
-                      return (
-                        <div key={p.key} className="flex items-center gap-2">
-                          <Checkbox
-                            id={id}
-                            checked={isInherited || checked.has(p.key)}
-                            disabled={isSuperuser || isInherited}
-                            onCheckedChange={(c) => toggle(p.key, c === true)}
-                          />
-                          <Label
-                            htmlFor={id}
-                            className="cursor-pointer font-normal"
-                            title={p.description}
-                          >
-                            {p.key}
-                          </Label>
-                          {isInherited && (
-                            <Badge variant="secondary" className="font-normal">
-                              inherited
-                            </Badge>
-                          )}
-                        </div>
-                      );
-                    })}
+              shownGroups.map((group) => {
+                const editable = group.permissions.filter((p) => !inherited.has(p.key));
+                const allOn = editable.length > 0 && editable.every((p) => checked.has(p.key));
+                return (
+                  <div key={group.group} className="space-y-1.5">
+                    <div className="flex items-center gap-2">
+                      {!isSuperuser && editable.length > 0 && (
+                        <Checkbox
+                          aria-label={`Select all ${group.group}`}
+                          checked={allOn}
+                          onCheckedChange={(c) => toggleGroup(editable, c === true)}
+                        />
+                      )}
+                      <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        {group.group}
+                      </h3>
+                    </div>
+                    <div className="grid grid-cols-1 gap-x-6 gap-y-1.5 rounded-md border p-3 sm:grid-cols-2">
+                      {group.permissions.map((p) => {
+                        const id = `perm-${p.key}`;
+                        const isInherited = inherited.has(p.key);
+                        return (
+                          <div key={p.key} className="flex items-center gap-2">
+                            <Checkbox
+                              id={id}
+                              checked={isInherited || checked.has(p.key)}
+                              disabled={isSuperuser || isInherited}
+                              onCheckedChange={(c) => toggle(p.key, c === true)}
+                            />
+                            <Label htmlFor={id} className="cursor-pointer font-normal" title={p.description}>
+                              {p.key}
+                            </Label>
+                            {isInherited && (
+                              <Badge variant="secondary" className="font-normal">
+                                inherited
+                              </Badge>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>

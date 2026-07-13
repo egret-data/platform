@@ -139,6 +139,27 @@ describe("RolesPage", () => {
   test("Edit dialog prefills checked permissions from listPermissions and Save persists the toggled set", async () => {
     const user = userEvent.setup();
     vi.mocked(api.setRolePermissions).mockResolvedValue(undefined);
+    // custom_role is a workspace role; the matrix only shows workspace-scoped
+    // permissions, so this fixture matches the role's scope.
+    vi.mocked(api.listPermissions).mockResolvedValue([
+      {
+        group: "Catalog",
+        permissions: [
+          {
+            key: "catalog.read",
+            description: "Read catalog metadata",
+            roles: ["data_steward", "custom_role"],
+            scope: "workspace",
+          },
+          {
+            key: "catalog.write",
+            description: "Write catalog metadata",
+            roles: ["data_steward"],
+            scope: "workspace",
+          },
+        ],
+      },
+    ]);
 
     renderPage();
     await screen.findByText("custom_role");
@@ -178,6 +199,27 @@ describe("RolesPage", () => {
         inheritedPermissions: [],
       },
     ]);
+    // custom_role is a workspace role; scope its catalog perms to workspace so
+    // the (scope-filtered) matrix shows them.
+    vi.mocked(api.listPermissions).mockResolvedValue([
+      {
+        group: "Catalog",
+        permissions: [
+          {
+            key: "catalog.read",
+            description: "Read catalog metadata",
+            roles: ["data_steward", "custom_role"],
+            scope: "workspace",
+          },
+          {
+            key: "catalog.write",
+            description: "Write catalog metadata",
+            roles: ["data_steward"],
+            scope: "workspace",
+          },
+        ],
+      },
+    ]);
     // custom_role (r2) inherits catalog.write from its parent (read-only row).
     vi.mocked(api.getRole).mockResolvedValue({
       id: "r2",
@@ -211,6 +253,69 @@ describe("RolesPage", () => {
     expect(inheritedCb).toBeDisabled();
     expect(inheritedCb).toHaveAttribute("data-state", "checked");
     expect(screen.getByText("inherited")).toBeInTheDocument();
+  });
+
+  test("Edit dialog for a workspace role hides platform-scoped permissions, filters by search, and select-all-per-group toggles", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.setRolePermissions).mockResolvedValue(undefined);
+    // A workspace group and a platform group; only the workspace one is holdable
+    // by custom_role (a workspace role).
+    vi.mocked(api.listPermissions).mockResolvedValue([
+      {
+        group: "Charts",
+        permissions: [
+          {
+            key: "chart:read",
+            description: "Read charts",
+            roles: [],
+            scope: "workspace",
+          },
+        ],
+      },
+      {
+        group: "Engines",
+        permissions: [
+          {
+            key: "engine:read",
+            description: "Read engines",
+            roles: [],
+            scope: "platform",
+          },
+        ],
+      },
+    ]);
+    vi.mocked(api.getRole).mockResolvedValue({
+      id: "r2",
+      scope: "workspace",
+      name: "custom_role",
+      description: "A custom workspace role",
+      permissionCount: 1,
+      assigneeCount: 0,
+      parentRoleId: null,
+      inheritedPermissions: [],
+    });
+
+    renderPage();
+    await screen.findByText("custom_role");
+
+    await user.click(screen.getByRole("button", { name: /Actions for custom_role/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit permissions" }));
+    await screen.findByRole("heading", { name: /Edit role — custom_role/i });
+
+    // The workspace permission renders; the platform group/permission does not.
+    expect(await screen.findByRole("checkbox", { name: "chart:read" })).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "engine:read" })).toBeNull();
+    expect(screen.queryByText("Engines")).toBeNull();
+
+    // Searching for "chart" keeps chart:read visible.
+    await user.type(screen.getByPlaceholderText("Search permissions…"), "chart");
+    expect(screen.getByRole("checkbox", { name: "chart:read" })).toBeInTheDocument();
+
+    // Clicking the group's select-all toggles chart:read's checkbox on.
+    const chartCb = screen.getByRole("checkbox", { name: "chart:read" });
+    expect(chartCb).toHaveAttribute("data-state", "unchecked");
+    await user.click(screen.getByRole("checkbox", { name: "Select all Charts" }));
+    expect(chartCb).toHaveAttribute("data-state", "checked");
   });
 
   test("clicking the assignee count opens the assignees dialog and lists them", async () => {
