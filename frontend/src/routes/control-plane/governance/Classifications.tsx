@@ -1,10 +1,14 @@
 import { useEffect, useState } from "react";
-import { MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { Lock, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 
+import { listRoles } from "@/api/access";
 import {
   type Tag,
+  useClearTagAccessPolicy,
   useCreateTag,
   useDeleteTag,
+  useSetTagAccessPolicy,
   useTags,
   useUpdateTag,
 } from "@/api/tags";
@@ -15,6 +19,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import {
   Dialog,
@@ -35,6 +40,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { errorStatus } from "@/lib/httpStatus";
+
+const rolesQueryKey = ["control-plane", "access", "roles"] as const;
 
 const DEFAULT_COLOR = "#6366f1";
 
@@ -108,6 +115,20 @@ export default function Classifications() {
       sortable: true,
       value: (t) => t.assignment_count,
       cell: (t) => <Badge variant="secondary">{t.assignment_count}</Badge>,
+    },
+    {
+      key: "clearance",
+      label: "Clearance",
+      value: (t) => t.required_roles.length,
+      cell: (t) =>
+        t.required_roles.length > 0 ? (
+          <Badge variant="warning" className="gap-1">
+            <Lock className="h-3 w-3" />
+            Gated: {t.required_roles.join(", ")}
+          </Badge>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        ),
     },
     {
       key: "actions",
@@ -339,9 +360,18 @@ function EditTagDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const updateTag = useUpdateTag();
+  const setAccessPolicy = useSetTagAccessPolicy();
+  const clearAccessPolicy = useClearTagAccessPolicy();
+  const roles = useQuery({
+    queryKey: rolesQueryKey,
+    queryFn: listRoles,
+    retry: false,
+    enabled: tag !== null,
+  });
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [color, setColor] = useState(DEFAULT_COLOR);
+  const [requiredRoles, setRequiredRoles] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -349,6 +379,7 @@ function EditTagDialog({
       setName(tag.name);
       setDescription(tag.description);
       setColor(tag.color || DEFAULT_COLOR);
+      setRequiredRoles(tag.required_roles);
       setError(null);
     }
   }, [tag]);
@@ -356,6 +387,12 @@ function EditTagDialog({
   function handleOpenChange(next: boolean) {
     if (!next) setError(null);
     onOpenChange(next);
+  }
+
+  function toggleRole(roleName: string, checked: boolean) {
+    setRequiredRoles((prev) =>
+      checked ? [...prev, roleName] : prev.filter((r) => r !== roleName),
+    );
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -369,11 +406,18 @@ function EditTagDialog({
         description: description.trim(),
         color,
       });
+      if (requiredRoles.length > 0) {
+        await setAccessPolicy.mutateAsync({ id: tag.id, required_roles: requiredRoles });
+      } else if (tag.required_roles.length > 0) {
+        await clearAccessPolicy.mutateAsync(tag.id);
+      }
       handleOpenChange(false);
     } catch (err) {
       setError((err as Error).message ?? "Failed to save tag.");
     }
   }
+
+  const saving = updateTag.isPending || setAccessPolicy.isPending || clearAccessPolicy.isPending;
 
   return (
     <Dialog open={tag !== null} onOpenChange={handleOpenChange}>
@@ -428,13 +472,44 @@ function EditTagDialog({
                 onChange={(e) => setColor(e.target.value)}
               />
             </div>
+
+            <div className="space-y-1.5">
+              <Label>Required roles (clearance)</Label>
+              <div className="max-h-40 space-y-2 overflow-y-auto rounded-md border p-3">
+                {roles.isLoading ? (
+                  <p className="text-sm text-muted-foreground">Loading roles…</p>
+                ) : roles.data && roles.data.length > 0 ? (
+                  roles.data.map((r) => {
+                    const id = `edit-tag-clearance-${r.id}`;
+                    return (
+                      <div key={r.id} className="flex items-center gap-2">
+                        <Checkbox
+                          id={id}
+                          checked={requiredRoles.includes(r.name)}
+                          onCheckedChange={(c) => toggleRole(r.name, c === true)}
+                        />
+                        <Label htmlFor={id} className="cursor-pointer font-normal">
+                          {r.name}
+                        </Label>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <p className="text-sm text-muted-foreground">No roles defined.</p>
+                )}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Objects tagged this can only be opened by principals holding one of
+                these roles. Empty = no restriction.
+              </p>
+            </div>
           </div>
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
               Cancel
             </Button>
-            <Button type="submit" disabled={updateTag.isPending}>
+            <Button type="submit" disabled={saving}>
               Save
             </Button>
           </DialogFooter>

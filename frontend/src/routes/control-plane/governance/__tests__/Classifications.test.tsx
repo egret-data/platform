@@ -5,10 +5,12 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import Classifications from "@/routes/control-plane/governance/Classifications";
 import * as tagsApi from "@/api/tags";
+import * as accessApi from "@/api/access";
 import { useAuth } from "@/auth/useAuth";
 import type { Me } from "@/api/hooks";
 
 vi.mock("@/api/tags");
+vi.mock("@/api/access");
 vi.mock("@/auth/useAuth");
 
 const ADMIN_ME: Me = {
@@ -27,6 +29,7 @@ const TAGS: tagsApi.Tag[] = [
     color: "#e11d48",
     assignment_count: 3,
     created_at: "2026-07-01T00:00:00Z",
+    required_roles: [],
   },
   {
     id: "t2",
@@ -36,6 +39,38 @@ const TAGS: tagsApi.Tag[] = [
     color: "#0ea5e9",
     assignment_count: 0,
     created_at: "2026-07-02T00:00:00Z",
+    required_roles: [],
+  },
+  {
+    id: "t3",
+    key: "finance",
+    name: "Finance",
+    description: "Finance-restricted data",
+    color: "#16a34a",
+    assignment_count: 1,
+    created_at: "2026-07-03T00:00:00Z",
+    required_roles: ["finance_cleared"],
+  },
+];
+
+const ROLES: accessApi.AccessRole[] = [
+  {
+    id: "r1",
+    scope: "platform",
+    name: "finance_cleared",
+    description: "Finance clearance",
+    permissionCount: 0,
+    assigneeCount: 0,
+    inheritedPermissions: [],
+  },
+  {
+    id: "r2",
+    scope: "platform",
+    name: "security_cleared",
+    description: "Security clearance",
+    permissionCount: 0,
+    assigneeCount: 0,
+    inheritedPermissions: [],
   },
 ];
 
@@ -85,6 +120,15 @@ describe("Classifications", () => {
       mutateAsync: vi.fn().mockResolvedValue(undefined),
       isPending: false,
     } as unknown as ReturnType<typeof tagsApi.useDeleteTag>);
+    vi.mocked(tagsApi.useSetTagAccessPolicy).mockReturnValue({
+      mutateAsync: vi.fn().mockResolvedValue(undefined),
+      isPending: false,
+    } as unknown as ReturnType<typeof tagsApi.useSetTagAccessPolicy>);
+    vi.mocked(tagsApi.useClearTagAccessPolicy).mockReturnValue({
+      mutateAsync: vi.fn().mockResolvedValue(undefined),
+      isPending: false,
+    } as unknown as ReturnType<typeof tagsApi.useClearTagAccessPolicy>);
+    vi.mocked(accessApi.listRoles).mockResolvedValue(ROLES);
   });
 
   test("renders tags in the table with name, key, description, and assignment count", async () => {
@@ -205,5 +249,50 @@ describe("Classifications", () => {
     expect(await screen.findByText("PII")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /New tag/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Actions for PII/i })).toBeInTheDocument();
+  });
+
+  test("a tag with required_roles shows a gated badge in the table", async () => {
+    renderPage();
+
+    expect(await screen.findByText("Finance")).toBeInTheDocument();
+    expect(screen.getByText(/Gated.*finance_cleared/i)).toBeInTheDocument();
+  });
+
+  test("a tag with empty required_roles shows no gated badge", async () => {
+    renderPage();
+
+    await screen.findByText("PII");
+    // "PII" and "Internal" both have required_roles: [] — no gated badge
+    // anywhere in their row. Only the "Finance" row (required_roles: [...])
+    // should render one.
+    expect(screen.queryAllByText(/Gated/i)).toHaveLength(1);
+  });
+
+  test("editing a tag, selecting a role, and saving calls useSetTagAccessPolicy with the selected roles", async () => {
+    const user = userEvent.setup();
+    const mutateAsync = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(tagsApi.useSetTagAccessPolicy).mockReturnValue({
+      mutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof tagsApi.useSetTagAccessPolicy>);
+
+    renderPage();
+    await screen.findByText("PII");
+
+    await user.click(screen.getByRole("button", { name: /Actions for PII/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    await screen.findByRole("heading", { name: /Edit tag — PII/i });
+
+    const roleCheckbox = await screen.findByRole("checkbox", { name: "finance_cleared" });
+    await user.click(roleCheckbox);
+
+    await user.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith({
+        id: "t1",
+        required_roles: ["finance_cleared"],
+      }),
+    );
   });
 });
