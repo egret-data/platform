@@ -36,6 +36,7 @@ export interface ObjectGrantRollup {
   principal_name: string | null;
   role: string;
   effect: string;
+  expires_at: string | null;
 }
 
 export function useWorkspaceRoleCatalog(ws: string) {

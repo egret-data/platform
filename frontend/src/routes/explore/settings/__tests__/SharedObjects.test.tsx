@@ -59,6 +59,7 @@ const chartShare = {
   principal_name: "Engineering",
   role: "ws_viewer",
   effect: "allow",
+  expires_at: null,
 };
 
 const dashboardDeny = {
@@ -70,6 +71,31 @@ const dashboardDeny = {
   principal_name: "bob@example.com",
   role: "ws_editor",
   effect: "deny",
+  expires_at: null,
+};
+
+const futureExpiryShare = {
+  kind: "dataset",
+  object_id: "obj-ds-1",
+  object_name: "Customer Dataset",
+  principal_type: "user" as const,
+  principal_id: "u-alice",
+  principal_name: "alice@example.com",
+  role: "ws_viewer",
+  effect: "allow",
+  expires_at: "2099-01-01T00:00:00Z",
+};
+
+const expiredShare = {
+  kind: "notebook",
+  object_id: "obj-nb-1",
+  object_name: "Analysis Notebook",
+  principal_type: "user" as const,
+  principal_id: "u-carol",
+  principal_name: "carol@example.com",
+  role: "ws_editor",
+  effect: "allow",
+  expires_at: "2000-01-01T00:00:00Z",
 };
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
@@ -169,6 +195,27 @@ describe("SharedObjects page", () => {
     renderPage();
 
     expect(screen.getByTestId("list-skeleton")).toBeInTheDocument();
+  });
+
+  it("shows grant expiry: '—' when null, a date when in the future, and an Expired badge when in the past", () => {
+    sharesMock.mockReturnValue({
+      data: [chartShare, futureExpiryShare, expiredShare],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    renderPage();
+
+    // null expiry → em dash placeholder.
+    expect(screen.getByText("—")).toBeInTheDocument();
+
+    // Future expiry → visibly marked as expired is false; text should NOT
+    // read "Expired" for this row, and the row is still findable.
+    expect(screen.getByText("Customer Dataset")).toBeInTheDocument();
+
+    // Past expiry → an "Expired" badge, visible (not color-only).
+    expect(screen.getByText("Analysis Notebook")).toBeInTheDocument();
+    expect(screen.getByText("Expired")).toBeInTheDocument();
   });
 
   it("shows an empty state when nothing is shared", () => {
