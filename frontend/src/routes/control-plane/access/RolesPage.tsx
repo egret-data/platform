@@ -794,13 +794,14 @@ function EditRoleDialog({
               shownGroups.map((group) => {
                 const editable = group.permissions.filter((p) => !inherited.has(p.key));
                 const allOn = editable.length > 0 && editable.every((p) => checked.has(p.key));
+                const someOn = editable.some((p) => checked.has(p.key));
                 return (
                   <div key={group.group} className="space-y-1.5">
                     <div className="flex items-center gap-2">
                       {!isSuperuser && editable.length > 0 && (
                         <Checkbox
                           aria-label={`Select all ${group.group}`}
-                          checked={allOn}
+                          checked={allOn ? true : someOn ? "indeterminate" : false}
                           onCheckedChange={(c) => toggleGroup(editable, c === true)}
                         />
                       )}

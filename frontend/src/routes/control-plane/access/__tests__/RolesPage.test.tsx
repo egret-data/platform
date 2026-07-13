@@ -175,6 +175,13 @@ describe("RolesPage", () => {
     expect(readCheckbox).toHaveAttribute("data-state", "checked");
     expect(writeCheckbox).toHaveAttribute("data-state", "unchecked");
 
+    // With one-of-two editable perms checked, the group's select-all is tri-state
+    // indeterminate (Radix exposes this as aria-checked="mixed").
+    expect(screen.getByRole("checkbox", { name: "Select all Catalog" })).toHaveAttribute(
+      "aria-checked",
+      "mixed",
+    );
+
     await user.click(writeCheckbox);
     await user.click(screen.getByRole("button", { name: /^Save$/i }));
 
