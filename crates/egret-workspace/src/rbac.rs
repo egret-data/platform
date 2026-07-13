@@ -26,6 +26,7 @@ impl Authorizer {
             "SELECT DISTINCT r.name FROM access_grants ag \
              JOIN roles r ON r.id = ag.role_id \
              WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1 \
+               AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
                AND ( (ag.principal_type = 'user'  AND ag.principal_id = $2) \
                   OR (ag.principal_type = 'group' AND ag.principal_id IN \
                          (SELECT group_id FROM user_groups WHERE user_id = $2)) )",
@@ -56,6 +57,7 @@ impl Authorizer {
                           (SELECT group_id FROM user_groups WHERE user_id = $1)) ) \
                  AND ag.scope_type = 'object' \
                  AND ag.effect = 'allow' \
+                 AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
                  AND ( (ag.object_type = 'folder'    AND ag.scope_id IN (SELECT id FROM analytics.folders    WHERE workspace_id = $2)) \
                     OR (ag.object_type = 'dashboard' AND ag.scope_id IN (SELECT id FROM analytics.dashboards WHERE workspace_id = $2)) \
                     OR (ag.object_type = 'chart'     AND ag.scope_id IN (SELECT id FROM analytics.charts     WHERE workspace_id = $2)) \

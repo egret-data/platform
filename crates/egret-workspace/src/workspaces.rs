@@ -124,6 +124,7 @@ impl WorkspaceRepo {
                 "SELECT DISTINCT w.id, w.slug, w.name, w.status FROM workspaces w \
                  JOIN access_grants ag ON ag.scope_id = w.id AND ag.scope_type = 'workspace' \
                  WHERE w.status = 'active' \
+                   AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
                    AND ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
                       OR (ag.principal_type = 'group' AND ag.principal_id IN \
                              (SELECT group_id FROM user_groups WHERE user_id = $1)) ) \

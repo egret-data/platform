@@ -58,7 +58,8 @@ impl AccessGrantStore {
                         (SELECT group_id FROM user_groups WHERE user_id = $1)) ) \
                AND ( ag.scope_type = 'platform' \
                   OR (ag.scope_type = 'workspace' AND ag.scope_id = $2) \
-                  OR (ag.scope_type = 'object' AND ag.scope_id = ANY($3)) )",
+                  OR (ag.scope_type = 'object' AND ag.scope_id = ANY($3)) ) \
+               AND (ag.expires_at IS NULL OR ag.expires_at > now())",
         )
         .bind(user_id.0)
         .bind(ws.map(|w| w.0))

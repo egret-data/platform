@@ -117,6 +117,7 @@ impl AccessResolver {
                    'direct' AS source
               FROM access_grants ag JOIN roles r ON r.id = ag.role_id
              WHERE ag.principal_type = $1 AND ag.principal_id = $2
+               AND (ag.expires_at IS NULL OR ag.expires_at > now())
             UNION ALL
             SELECT ag.scope_type, ag.scope_id, ag.object_type, ag.effect,
                    r.name AS role,
@@ -126,6 +127,7 @@ impl AccessResolver {
               JOIN groups g ON g.id = ag.principal_id AND ag.principal_type = 'group'
              WHERE $1 = 'user'
                AND ag.principal_id IN (SELECT group_id FROM user_groups WHERE user_id = $2)
+               AND (ag.expires_at IS NULL OR ag.expires_at > now())
         ";
         sqlx::query_as::<_, GrantRow>(sql)
             .bind(ptype)
@@ -425,7 +427,8 @@ impl AccessResolver {
 
         // 1. Direct object grants on THIS object.
         let direct: Vec<WhoRow> = sqlx::query_as(&format!(
-            "{principal_select} WHERE ag.scope_type = 'object' AND ag.scope_id = $1"
+            "{principal_select} WHERE ag.scope_type = 'object' AND ag.scope_id = $1 \
+              AND (ag.expires_at IS NULL OR ag.expires_at > now())"
         ))
         .bind(id)
         .fetch_all(&self.db.pool)
@@ -434,7 +437,8 @@ impl AccessResolver {
 
         // 2. Workspace-role holders on THIS object's OWN workspace (cascade).
         let workspace: Vec<WhoRow> = sqlx::query_as(&format!(
-            "{principal_select} WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1"
+            "{principal_select} WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1 \
+              AND (ag.expires_at IS NULL OR ag.expires_at > now())"
         ))
         .bind(ws_id)
         .fetch_all(&self.db.pool)
@@ -444,7 +448,8 @@ impl AccessResolver {
         // 3. Platform admins (superusers — reach every object).
         let platform: Vec<WhoRow> = sqlx::query_as(&format!(
             "{principal_select} \
-              WHERE ag.scope_type = 'platform' AND r.name = 'platform_admin' AND ag.effect = 'allow'"
+              WHERE ag.scope_type = 'platform' AND r.name = 'platform_admin' AND ag.effect = 'allow' \
+                AND (ag.expires_at IS NULL OR ag.expires_at > now())"
         ))
         .fetch_all(&self.db.pool)
         .await
