@@ -308,7 +308,7 @@ mod tests {
             .add(
                 cedar_policy::Policy::parse(
                     Some("classification:test".parse().unwrap()),
-                    classification_forbid("confidential", &["finance_cleared".into()]),
+                    classification_forbid("confidential", &["finance_cleared".into()], &[]),
                 )
                 .unwrap(),
             )
@@ -385,6 +385,151 @@ mod tests {
             decide_ctx(&gated, &confidential, &["ws_viewer"], false),
             Decision::Deny,
             "(f) a deny-effect clearance grant is filtered out of context.roles → still denied"
+        );
+    }
+
+    /// Access P3.4: a classification `forbid` whose clearance is a GROUP gates a
+    /// tagged object on the request context's `groups`. Cleared = required role OR
+    /// required group; platform_admin always exempt.
+    #[test]
+    fn classification_forbid_gates_tagged_object_on_context_groups() {
+        use crate::pdp::templates::classification_forbid;
+
+        let subject = Subject {
+            user_id: UserId::new(),
+            group_ids: vec![],
+        };
+        let ws = WorkspaceId::new();
+        let d1 = uuid::Uuid::new_v4();
+        let role_id = uuid::Uuid::new_v4();
+        let g_cleared = uuid::Uuid::new_v4(); // the required department group
+        let g_other = uuid::Uuid::new_v4(); // an unrelated group
+
+        // ws_viewer permit (dashboard:read cascades from a ws grant).
+        let mut base = PolicySet::new();
+        base.add_template(
+            Template::parse(
+                Some(format!("role:{role_id}").parse().unwrap()),
+                template_for_role("ws_viewer", "workspace", &["dashboard:read".into()]),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let names: RoleNames = std::iter::once((role_id, "ws_viewer".to_string())).collect();
+        let grants = vec![Grant {
+            role_id,
+            scope_type: "workspace".into(),
+            scope_id: Some(ws.0),
+            object_type: None,
+            effect: "allow".into(),
+        }];
+        let permit_ps = link_grants(base, &subject, &grants, &names);
+
+        // + a classification forbid gated by GROUP g_cleared AND role finance_cleared.
+        let mut gated = permit_ps.clone();
+        gated
+            .add(
+                cedar_policy::Policy::parse(
+                    Some("classification:test".parse().unwrap()),
+                    classification_forbid(
+                        "confidential",
+                        &["finance_cleared".into()],
+                        &[g_cleared],
+                    ),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let confidential = vec!["confidential".to_string()];
+        let decide_ctx = |roles: &[&str], groups: &[uuid::Uuid], is_admin: bool| -> Decision {
+            let resource = object("dashboard", d1, None, ws);
+            let entities = build_entities(&subject, &resource, &confidential);
+            let (p, a, r) = request_uids(&subject, "dashboard:read", &resource);
+            let groups: Vec<String> = groups.iter().map(|g| g.to_string()).collect();
+            let ctx = Context::from_json_value(
+                serde_json::json!({ "is_platform_admin": is_admin, "roles": roles, "groups": groups }),
+                None,
+            )
+            .unwrap();
+            let req = Request::new(p, a, r, ctx, None).unwrap();
+            Authorizer::new()
+                .is_authorized(&req, &gated, &entities)
+                .decision()
+        };
+
+        // In the required group → Allow.
+        assert_eq!(
+            decide_ctx(&[], &[g_cleared], false),
+            Decision::Allow,
+            "membership in the required group must clear the gate"
+        );
+        // In an unrelated group, no cleared role → Deny.
+        assert_eq!(
+            decide_ctx(&[], &[g_other], false),
+            Decision::Deny,
+            "an unrelated group must NOT clear the gate"
+        );
+        // No group but holding the cleared ROLE → Allow (role OR group).
+        assert_eq!(
+            decide_ctx(&["finance_cleared"], &[], false),
+            Decision::Allow,
+            "the cleared role alone must satisfy the gate"
+        );
+        // In the group OR holding the role → Allow.
+        assert_eq!(
+            decide_ctx(&["finance_cleared"], &[g_cleared], false),
+            Decision::Allow
+        );
+        // No role, no group → Deny.
+        assert_eq!(
+            decide_ctx(&[], &[], false),
+            Decision::Deny,
+            "neither a cleared role nor a required group → denied"
+        );
+        // platform_admin flag → Allow regardless.
+        assert_eq!(
+            decide_ctx(&[], &[g_other], true),
+            Decision::Allow,
+            "platform_admin is never locked out"
+        );
+    }
+
+    /// Access P3.4: a group-gated tag with BOTH clearance lists empty is NO gate
+    /// (`load_inner` emits nothing; here we assert the classification helper's own
+    /// both-empty behavior is a no-op gate by leaving it out of the set entirely,
+    /// mirroring `load_inner`'s skip). A tagged object with no forbid → Allow.
+    #[test]
+    fn classification_both_empty_is_no_gate() {
+        let subject = Subject {
+            user_id: UserId::new(),
+            group_ids: vec![],
+        };
+        let ws = WorkspaceId::new();
+        let d1 = uuid::Uuid::new_v4();
+        let role_id = uuid::Uuid::new_v4();
+        let ps = viewer_ps_for_grant(
+            &subject,
+            Grant {
+                role_id,
+                scope_type: "workspace".into(),
+                scope_id: Some(ws.0),
+                object_type: None,
+                effect: "allow".into(),
+            },
+        );
+        // No classification forbid added (both-empty ⇒ load_inner skips) → the
+        // tagged object is allowed by the underlying permit.
+        let resource = object("dashboard", d1, None, ws);
+        let entities = build_entities(&subject, &resource, &["confidential".to_string()]);
+        let (p, a, r) = request_uids(&subject, "dashboard:read", &resource);
+        let req = Request::new(p, a, r, Context::empty(), None).unwrap();
+        assert_eq!(
+            Authorizer::new()
+                .is_authorized(&req, &ps, &entities)
+                .decision(),
+            Decision::Allow,
+            "a both-empty classification policy is no gate"
         );
     }
 

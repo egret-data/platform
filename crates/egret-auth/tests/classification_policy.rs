@@ -216,6 +216,133 @@ async fn classification_forbid_gates_tagged_object() {
     );
 }
 
+/// Access P3.4: clearance by GROUP. A tag gated ONLY by a group (required_groups
+/// = [G], required_roles = []) allows a subject in G, denies one not in G and
+/// without a cleared role, allows a subject in G OR holding a cleared role, and
+/// always exempts platform_admin. `authorize` reads the subject's group_ids
+/// straight off the `Subject` (OIDC group claims) — no DB group lookup.
+#[tokio::test]
+async fn classification_forbid_gates_tagged_object_by_group() {
+    use egret_core::GroupId;
+
+    let Some(db) = connect().await else {
+        eprintln!("skip: DATABASE_URL unset");
+        return;
+    };
+    let action = "dashboard:read";
+
+    // ws_editor genuinely holds dashboard:read (the underlying permit).
+    let ws_editor_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM roles WHERE scope = 'workspace' AND name = 'ws_editor'")
+            .fetch_one(&db.pool)
+            .await
+            .expect("seeded ws role `ws_editor` must exist");
+
+    // A gated tag `dept-only` clearing on GROUP g_cleared (no required roles).
+    let g_cleared = Uuid::new_v4(); // the required department group id
+    let tag_key = format!("dept-{}", Uuid::new_v4().simple());
+    let tag_id: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, 'Dept') RETURNING id")
+            .bind(&tag_key)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+
+    let w = seed_workspace(&db).await;
+    let d1 = Uuid::new_v4(); // tagged dept-only
+
+    sqlx::query(
+        "INSERT INTO tag_assignments (tag_id, object_type, object_id) VALUES ($1, 'dashboard', $2)",
+    )
+    .bind(tag_id)
+    .bind(d1)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    // GROUP-ONLY clearance: required_roles EMPTY, required_groups = [g_cleared].
+    // (The role-OR-group Cedar decision is covered by the entities unit test.)
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, '{}', $2)",
+    )
+    .bind(tag_id)
+    .bind(vec![g_cleared])
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let bus = egret_events::EventBus::new();
+    let pdp = CedarPdp::build(db.clone(), &bus).await.unwrap();
+
+    // The permit-holder user (ws_editor grant).
+    let u = seed_user(&db).await;
+    grant_ws(&db, u, ws_editor_id, w).await;
+
+    // (deny) NOT in the group, no cleared role → forbid wins.
+    let not_in_group = Subject {
+        user_id: u,
+        group_ids: vec![GroupId(Uuid::new_v4())], // some unrelated group
+    };
+    let deny = pdp
+        .authorize(&not_in_group, action, &dashboard(d1, w))
+        .await
+        .unwrap();
+    assert!(
+        !deny.allow,
+        "a subject not in the required group (and no cleared role) must be DENIED"
+    );
+
+    // (allow) IN the required group → cleared.
+    let in_group = Subject {
+        user_id: u,
+        group_ids: vec![GroupId(g_cleared)],
+    };
+    let allow_group = pdp
+        .authorize(&in_group, action, &dashboard(d1, w))
+        .await
+        .unwrap();
+    assert!(
+        allow_group.allow,
+        "membership in the required group must clear the gate"
+    );
+
+    // (admin) platform_admin never locked out.
+    let admin = seed_user(&db).await;
+    let platform_admin_role_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM roles WHERE scope = 'platform' AND name = 'platform_admin'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("seeded platform role `platform_admin` must exist");
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, 'platform', NULL)",
+    )
+    .bind(admin.0)
+    .bind(platform_admin_role_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let admin_subject = Subject {
+        user_id: admin,
+        group_ids: vec![],
+    };
+    let admin_allow = pdp
+        .authorize(&admin_subject, action, &dashboard(d1, w))
+        .await
+        .unwrap();
+    assert!(
+        admin_allow.allow,
+        "platform_admin must NEVER be locked out of a group-gated tagged object"
+    );
+
+    eprintln!(
+        "classification_forbid_gates_tagged_object_by_group OK: not-in-group-deny={}, in-group-allow={}, admin-allow={}",
+        !deny.allow, allow_group.allow, admin_allow.allow
+    );
+}
+
 /// FIX 1b (defense in depth): a classification row whose `required_roles` somehow
 /// holds a Cedar-breaking value (inserted RAW here, bypassing `set_policy`'s
 /// FIX-1a validation) must NOT fail the whole PDP reload — `load_inner` LOGS and

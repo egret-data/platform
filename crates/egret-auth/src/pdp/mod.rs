@@ -165,16 +165,18 @@ impl CedarPdp {
         // is NO gate → no policy emitted. These are static (no slots), so they
         // ride along in the `templates` clone every request with zero per-request
         // cost. The join resolves the validated tag KEY used in Cedar.
-        let class_rows: Vec<(uuid::Uuid, String, Vec<String>)> = sqlx::query_as(
-            "SELECT cp.tag_id, t.key, cp.required_roles \
+        let class_rows: Vec<(uuid::Uuid, String, Vec<String>, Vec<uuid::Uuid>)> = sqlx::query_as(
+            "SELECT cp.tag_id, t.key, cp.required_roles, cp.required_groups \
              FROM classification_policies cp JOIN tags t ON t.id = cp.tag_id",
         )
         .fetch_all(&db.pool)
         .await
         .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!(e)))?;
-        for (tag_id, key, required_roles) in class_rows {
-            if required_roles.is_empty() {
-                continue; // informational tag only — no clearance gate
+        for (tag_id, key, required_roles, required_groups) in class_rows {
+            // Clearance = >=1 required ROLE OR >=1 required GROUP (Access P3.4).
+            // BOTH empty ⇒ informational tag only, NO clearance gate → emit nothing.
+            if required_roles.is_empty() && required_groups.is_empty() {
+                continue;
             }
             let pid: PolicyId = format!("classification:{tag_id}")
                 .parse()
@@ -187,7 +189,7 @@ impl CedarPdp {
             // Role/admin templates above keep `?`-propagating as before.
             let policy = match cedar_policy::Policy::parse(
                 Some(pid),
-                templates::classification_forbid(&key, &required_roles),
+                templates::classification_forbid(&key, &required_roles, &required_groups),
             ) {
                 Ok(p) => p,
                 Err(e) => {
@@ -298,8 +300,13 @@ impl Pdp for CedarPdp {
             .filter(|g| g.effect == "allow")
             .filter_map(|g| inner.role_names.get(&g.role_id).cloned())
             .collect();
+        // The subject's group ids as strings (Access P3.4 clearance-by-group): the
+        // classification `forbid`'s `unless` checks `context.groups.containsAny(..)`
+        // against the required-group uuids. Groups come straight off the Subject
+        // (OIDC group claims → departments); NO extra query.
+        let groups: Vec<String> = subject.group_ids.iter().map(|g| g.0.to_string()).collect();
         let context = Context::from_json_value(
-            serde_json::json!({ "is_platform_admin": is_admin, "roles": roles }),
+            serde_json::json!({ "is_platform_admin": is_admin, "roles": roles, "groups": groups }),
             None,
         )
         .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("context: {e:?}")))?;

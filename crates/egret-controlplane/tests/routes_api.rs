@@ -2201,3 +2201,93 @@ async fn tag_access_policy_crud_and_permissions() {
         "cleared policy → empty required_roles; body={entry}"
     );
 }
+
+/// Access P3.4: `PUT /tags/{id}/access-policy` accepts `required_groups` (group
+/// ids as strings), the list surfaces them, and a NON-uuid group id is rejected
+/// `400` (never spliced unvalidated into a Cedar policy string — the P3.3 lesson).
+#[tokio::test]
+async fn tag_access_policy_group_clearance_and_uuid_validation() {
+    let Some(mut f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    let manager = session_for_with_permission(&f, "clspg_manager", "tag:manage").await;
+    let reader = session_for_with_permission(&f, "clspg_reader", "tag:read").await;
+    attach_real_pdp(&mut f).await;
+
+    let key = format!("dept-{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/tags",
+            &manager,
+            Some(serde_json::json!({ "key": key, "name": "Dept" })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create tag; body={j}");
+    let id = j["id"].as_str().expect("tag id").to_string();
+
+    // Set a GROUP-only clearance policy with two valid uuids.
+    let g1 = Uuid::new_v4().to_string();
+    let g2 = Uuid::new_v4().to_string();
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/tags/{id}/access-policy"),
+            &manager,
+            Some(serde_json::json!({ "required_roles": [], "required_groups": [g1, g2] })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "set group policy must be 200"
+    );
+
+    // GET /tags surfaces required_groups.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/tags", &reader, None))
+        .await
+        .unwrap();
+    let (_, j) = into_json(resp).await;
+    let entry = j
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id)
+        .expect("tag in list")
+        .clone();
+    assert_eq!(
+        entry["required_groups"],
+        serde_json::json!([g1, g2]),
+        "list must surface the set required_groups; body={entry}"
+    );
+
+    // A NON-uuid group id → 400 BadRequest (never spliced into Cedar).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/tags/{id}/access-policy"),
+            &manager,
+            Some(serde_json::json!({ "required_groups": ["not-a-uuid"] })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "a non-uuid required_groups entry must be rejected 400"
+    );
+}

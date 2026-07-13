@@ -28,6 +28,7 @@ const tag = (overrides: Partial<Tag>): Tag => ({
   assignment_count: 0,
   created_at: "2026-01-01T00:00:00Z",
   required_roles: [],
+  required_groups: [],
   ...overrides,
 });
 

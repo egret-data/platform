@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Lock, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 
-import { listRoles } from "@/api/access";
+import { listGroups, listRoles } from "@/api/access";
 import {
   type Tag,
   useClearTagAccessPolicy,
@@ -42,6 +42,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { errorStatus } from "@/lib/httpStatus";
 
 const rolesQueryKey = ["control-plane", "access", "roles"] as const;
+const groupsQueryKey = ["control-plane", "access", "groups"] as const;
 
 const DEFAULT_COLOR = "#6366f1";
 
@@ -73,6 +74,18 @@ export default function Classifications() {
   const tags = useTags();
   const rows = tags.data ?? [];
   const deleteTag = useDeleteTag();
+
+  // Fetched here (not just inside the editor) so the table's Gated badge can
+  // resolve `required_groups` UUIDs to names.
+  const groups = useQuery({
+    queryKey: groupsQueryKey,
+    queryFn: listGroups,
+    retry: false,
+  });
+  const groupNameById = useMemo(
+    () => new Map((groups.data ?? []).map((g) => [g.id, g.name])),
+    [groups.data],
+  );
 
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<Tag | null>(null);
@@ -119,16 +132,23 @@ export default function Classifications() {
     {
       key: "clearance",
       label: "Clearance",
-      value: (t) => t.required_roles.length,
-      cell: (t) =>
-        t.required_roles.length > 0 ? (
+      value: (t) => t.required_roles.length + t.required_groups.length,
+      cell: (t) => {
+        const gated = t.required_roles.length > 0 || t.required_groups.length > 0;
+        if (!gated) return <span className="text-muted-foreground">—</span>;
+        const parts: string[] = [];
+        if (t.required_roles.length > 0) parts.push(t.required_roles.join(", "));
+        if (t.required_groups.length > 0) {
+          const names = t.required_groups.map((id) => groupNameById.get(id) ?? id);
+          parts.push(`groups: ${names.join(", ")}`);
+        }
+        return (
           <Badge variant="warning" className="gap-1">
             <Lock className="h-3 w-3" />
-            Gated: {t.required_roles.join(", ")}
+            Gated: {parts.join(" + ")}
           </Badge>
-        ) : (
-          <span className="text-muted-foreground">—</span>
-        ),
+        );
+      },
     },
     {
       key: "actions",
@@ -368,10 +388,17 @@ function EditTagDialog({
     retry: false,
     enabled: tag !== null,
   });
+  const groups = useQuery({
+    queryKey: groupsQueryKey,
+    queryFn: listGroups,
+    retry: false,
+    enabled: tag !== null,
+  });
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [color, setColor] = useState(DEFAULT_COLOR);
   const [requiredRoles, setRequiredRoles] = useState<string[]>([]);
+  const [requiredGroups, setRequiredGroups] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -380,6 +407,7 @@ function EditTagDialog({
       setDescription(tag.description);
       setColor(tag.color || DEFAULT_COLOR);
       setRequiredRoles(tag.required_roles);
+      setRequiredGroups(tag.required_groups);
       setError(null);
     }
   }, [tag]);
@@ -395,6 +423,12 @@ function EditTagDialog({
     );
   }
 
+  function toggleGroup(groupId: string, checked: boolean) {
+    setRequiredGroups((prev) =>
+      checked ? [...prev, groupId] : prev.filter((g) => g !== groupId),
+    );
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!tag) return;
@@ -406,9 +440,13 @@ function EditTagDialog({
         description: description.trim(),
         color,
       });
-      if (requiredRoles.length > 0) {
-        await setAccessPolicy.mutateAsync({ id: tag.id, required_roles: requiredRoles });
-      } else if (tag.required_roles.length > 0) {
+      if (requiredRoles.length > 0 || requiredGroups.length > 0) {
+        await setAccessPolicy.mutateAsync({
+          id: tag.id,
+          required_roles: requiredRoles,
+          required_groups: requiredGroups,
+        });
+      } else if (tag.required_roles.length > 0 || tag.required_groups.length > 0) {
         await clearAccessPolicy.mutateAsync(tag.id);
       }
       handleOpenChange(false);
@@ -501,6 +539,37 @@ function EditTagDialog({
               <p className="text-xs text-muted-foreground">
                 Objects tagged this can only be opened by principals holding one of
                 these roles. Empty = no restriction.
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label>Required groups (clearance)</Label>
+              <div className="max-h-40 space-y-2 overflow-y-auto rounded-md border p-3">
+                {groups.isLoading ? (
+                  <p className="text-sm text-muted-foreground">Loading groups…</p>
+                ) : groups.data && groups.data.length > 0 ? (
+                  groups.data.map((g) => {
+                    const id = `edit-tag-clearance-group-${g.id}`;
+                    return (
+                      <div key={g.id} className="flex items-center gap-2">
+                        <Checkbox
+                          id={id}
+                          checked={requiredGroups.includes(g.id)}
+                          onCheckedChange={(c) => toggleGroup(g.id, c === true)}
+                        />
+                        <Label htmlFor={id} className="cursor-pointer font-normal">
+                          {g.name}
+                        </Label>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <p className="text-sm text-muted-foreground">No groups defined.</p>
+                )}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                …or belonging to one of these groups. Empty = no restriction from
+                groups.
               </p>
             </div>
           </div>
