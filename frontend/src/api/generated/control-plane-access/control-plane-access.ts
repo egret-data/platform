@@ -28,6 +28,7 @@ import type {
   AddMemberInput,
   AssignRoleInput,
   ControlPlaneAccessGetEffectiveAccessParams,
+  ControlPlaneAccessWhoCanAccessParams,
   ControlPlaneUserDto,
   CreateGroupInput,
   CreateRoleInput,
@@ -42,7 +43,8 @@ import type {
   RoleDto,
   SetPermissionsInput,
   UpdateRoleInput,
-  UpdateUserInput
+  UpdateUserInput,
+  WhoCanAccess
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -1009,7 +1011,156 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getControlPlaneAccessSetRolePermissionsMutationOptions(options), queryClient);
     }
-    export type controlPlaneAccessListGroupsResponse200 = {
+    export type controlPlaneAccessWhoCanAccessResponse200 = {
+  data: WhoCanAccess
+  status: 200
+}
+
+export type controlPlaneAccessWhoCanAccessResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessWhoCanAccessResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessWhoCanAccessResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessWhoCanAccessResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessWhoCanAccessResponseSuccess = (controlPlaneAccessWhoCanAccessResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneAccessWhoCanAccessResponseError = (controlPlaneAccessWhoCanAccessResponse401 | controlPlaneAccessWhoCanAccessResponse403 | controlPlaneAccessWhoCanAccessResponse404 | controlPlaneAccessWhoCanAccessResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessWhoCanAccessResponse = (controlPlaneAccessWhoCanAccessResponseSuccess | controlPlaneAccessWhoCanAccessResponseError)
+
+export const getControlPlaneAccessWhoCanAccessUrl = (params: ControlPlaneAccessWhoCanAccessParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/control-plane/access/who-can-access?${stringifiedParams}` : `/api/control-plane/access/who-can-access`
+}
+
+/**
+ * @summary `GET /access/who-can-access` — the reverse of `/access/effective` (AX-3):
+for one object (`kind` + `id`), enumerate every principal who can reach it
+and why (direct object grants, the object's workspace-role holders, and
+platform admins). Read-only, so it gates on `role:read`. An unknown `kind`
+or a missing object surfaces `egret_core::Error::NotFound` → 404.
+ */
+export const controlPlaneAccessWhoCanAccess = async (params: ControlPlaneAccessWhoCanAccessParams, options?: RequestInit): Promise<controlPlaneAccessWhoCanAccessResponse> => {
+
+  return customInstance<controlPlaneAccessWhoCanAccessResponse>(getControlPlaneAccessWhoCanAccessUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessWhoCanAccessQueryKey = (params?: ControlPlaneAccessWhoCanAccessParams,) => {
+    return [
+    `/api/control-plane/access/who-can-access`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getControlPlaneAccessWhoCanAccessQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneAccessWhoCanAccess>>, TError = ErrorBody>(params: ControlPlaneAccessWhoCanAccessParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessWhoCanAccess>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneAccessWhoCanAccessQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneAccessWhoCanAccess>>> = ({ signal }) => controlPlaneAccessWhoCanAccess(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessWhoCanAccess>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneAccessWhoCanAccessQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessWhoCanAccess>>>
+export type ControlPlaneAccessWhoCanAccessQueryError = ErrorBody
+
+
+export function useControlPlaneAccessWhoCanAccess<TData = Awaited<ReturnType<typeof controlPlaneAccessWhoCanAccess>>, TError = ErrorBody>(
+ params: ControlPlaneAccessWhoCanAccessParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessWhoCanAccess>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneAccessWhoCanAccess>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneAccessWhoCanAccess>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneAccessWhoCanAccess<TData = Awaited<ReturnType<typeof controlPlaneAccessWhoCanAccess>>, TError = ErrorBody>(
+ params: ControlPlaneAccessWhoCanAccessParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessWhoCanAccess>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneAccessWhoCanAccess>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneAccessWhoCanAccess>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneAccessWhoCanAccess<TData = Awaited<ReturnType<typeof controlPlaneAccessWhoCanAccess>>, TError = ErrorBody>(
+ params: ControlPlaneAccessWhoCanAccessParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessWhoCanAccess>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary `GET /access/who-can-access` — the reverse of `/access/effective` (AX-3):
+for one object (`kind` + `id`), enumerate every principal who can reach it
+and why (direct object grants, the object's workspace-role holders, and
+platform admins). Read-only, so it gates on `role:read`. An unknown `kind`
+or a missing object surfaces `egret_core::Error::NotFound` → 404.
+ */
+
+export function useControlPlaneAccessWhoCanAccess<TData = Awaited<ReturnType<typeof controlPlaneAccessWhoCanAccess>>, TError = ErrorBody>(
+ params: ControlPlaneAccessWhoCanAccessParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessWhoCanAccess>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneAccessWhoCanAccessQueryOptions(params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneAccessListGroupsResponse200 = {
   data: GroupDto[]
   status: 200
 }

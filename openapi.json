@@ -1424,6 +1424,88 @@
         }
       }
     },
+    "/api/control-plane/access/who-can-access": {
+      "get": {
+        "tags": [
+          "control-plane-access"
+        ],
+        "summary": "`GET /access/who-can-access` — the reverse of `/access/effective` (AX-3):\nfor one object (`kind` + `id`), enumerate every principal who can reach it\nand why (direct object grants, the object's workspace-role holders, and\nplatform admins). Read-only, so it gates on `role:read`. An unknown `kind`\nor a missing object surfaces `egret_core::Error::NotFound` → 404.",
+        "operationId": "who_can_access",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Object kind: chart | dashboard | dataset | notebook | saved_query | folder",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "query",
+            "description": "Object UUID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Principals who can access the object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoCanAccess"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing role:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown object kind or no such object",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/audit": {
       "get": {
         "tags": [
@@ -16463,6 +16545,136 @@
         }
       }
     },
+    "/api/ws/{workspace}/roles": {
+      "get": {
+        "tags": [
+          "workspace-members"
+        ],
+        "summary": "`GET /ws/{workspace}/roles` — the workspace-scope role catalog with each\nrole's direct permissions. Read-only, so a workspace admin can SEE what each\nrole grants; gated on `workspace:manage_members` (the same gate as the\nmember routes) rather than the platform-level `role:read`.",
+        "operationId": "list_workspace_roles",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workspace-scope roles with their permissions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/WsRoleDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workspace permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/shares": {
+      "get": {
+        "tags": [
+          "workspace-members"
+        ],
+        "summary": "`GET /ws/{workspace}/shares` — every OBJECT grant whose object lives in THIS\nworkspace (charts, dashboards, datasets, folders, notebooks, saved queries),\nenriched with object name, role name, principal name and effect. Read-only, so\na workspace admin can SEE what has been shared; gated on\n`workspace:manage_members` (the same gate as the member/role routes). The\nobject set is restricted to this workspace in SQL — a grant on an object in\nanother workspace is never returned (cross-workspace IDOR guard).",
+        "operationId": "list_workspace_shares",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Object grants whose object lives in this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ObjectGrantRollupDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workspace permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/sqllab/databases/{db}/catalogs": {
       "get": {
         "tags": [
@@ -17766,6 +17978,39 @@
   },
   "components": {
     "schemas": {
+      "AccessEntry": {
+        "type": "object",
+        "required": [
+          "principal_type",
+          "principal_id",
+          "access",
+          "effect",
+          "source"
+        ],
+        "properties": {
+          "principal_type": {
+            "type": "string"
+          },
+          "principal_id": {
+            "type": "string"
+          },
+          "principal_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "access": {
+            "type": "string"
+          },
+          "effect": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        }
+      },
       "AccessItemInput": {
         "type": "object",
         "properties": {
@@ -20785,7 +21030,7 @@
           },
           "principal_id": {
             "type": "string",
-            "format": "uuid"
+            "description": "A user's email, a group's name, or a UUID."
           },
           "role": {
             "type": "string",
@@ -20794,6 +21039,14 @@
           "effect": {
             "type": "string",
             "description": "`allow` (default) | `deny`. A deny blocks the principal on this object."
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Optional expiry (RFC3339). `None` = never expires (unchanged default).\nEnforced at read time by the PDP/admission predicates, not here."
           }
         }
       },
@@ -20833,6 +21086,91 @@
           "effect": {
             "type": "string",
             "description": "`allow` | `deny`."
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Optional expiry (P2a). `None` = never expires. This is the object's own\ndirect-grant list (manage-only), so an expired grant is still listed\nhere — only the read-time admission predicates exclude expired grants."
+          }
+        }
+      },
+      "ObjectGrantRollupDto": {
+        "type": "object",
+        "required": [
+          "kind",
+          "object_id",
+          "principal_type",
+          "principal_id",
+          "role",
+          "effect"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "object_id": {
+            "type": "string"
+          },
+          "object_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "principal_type": {
+            "type": "string"
+          },
+          "principal_id": {
+            "type": "string"
+          },
+          "principal_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "type": "string"
+          },
+          "effect": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional expiry (RFC3339). `None` = never expires. This is the\nmanagement roll-up, so an expired grant is still returned (not filtered)."
+          }
+        }
+      },
+      "ObjectRef": {
+        "type": "object",
+        "required": [
+          "kind",
+          "id"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workspace_slug": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -22821,6 +23159,25 @@
           }
         }
       },
+      "WhoCanAccess": {
+        "type": "object",
+        "description": "Reverse of `EffectiveAccess`: for one object, every principal who can reach it\nand why (`who_can_access`). Mirror of the principal→access resolver.",
+        "required": [
+          "object",
+          "entries"
+        ],
+        "properties": {
+          "object": {
+            "$ref": "#/components/schemas/ObjectRef"
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AccessEntry"
+            }
+          }
+        }
+      },
       "WorkspaceDto": {
         "type": "object",
         "required": [
@@ -22868,6 +23225,57 @@
           },
           "source": {
             "type": "string"
+          }
+        }
+      },
+      "WsPermDto": {
+        "type": "object",
+        "required": [
+          "key",
+          "description",
+          "group"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "group": {
+            "type": "string"
+          }
+        }
+      },
+      "WsRoleDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "permissions"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "parent_role_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WsPermDto"
+            }
           }
         }
       }

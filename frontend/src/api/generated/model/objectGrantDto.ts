@@ -23,4 +23,11 @@ export interface ObjectGrantDto {
   role: string;
   /** `allow` | `deny`. */
   effect: string;
+  /**
+     * Optional expiry (P2a). `None` = never expires. This is the object's own
+     * direct-grant list (manage-only), so an expired grant is still listed
+     * here — only the read-time admission predicates exclude expired grants.
+     * @nullable
+     */
+  expires_at?: string | null;
 }
