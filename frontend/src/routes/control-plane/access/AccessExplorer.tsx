@@ -1,10 +1,11 @@
-import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { Search, ShieldAlert } from "lucide-react";
 
 import { getEffectiveAccess, type EffectiveAccess } from "@/api/access";
 import { listPrincipals } from "@/api/policies";
+import { EffectBadge, denyStyle } from "@/components/access/EffectBadge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -17,17 +18,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Column, FilterableTable } from "@/components/explore/FilterableTable";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { errorStatus } from "@/lib/httpStatus";
 
 type PrincipalType = "user" | "group";
-
-/** Narrow a react-query error into an HTTP status when one is present. */
-function errorStatus(err: unknown): number | undefined {
-  if (err && typeof err === "object" && "status" in err) {
-    const s = (err as { status?: unknown }).status;
-    if (typeof s === "number") return s;
-  }
-  return undefined;
-}
 
 /**
  * Turn a grant `source` ("direct" | "group:{name}") into a human suffix.
@@ -50,27 +44,6 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
       <h2 className="text-sm font-semibold">{title}</h2>
       {children}
     </section>
-  );
-}
-
-const allowStyle: CSSProperties = {
-  backgroundColor: "color-mix(in oklab, var(--success) 16%, transparent)",
-  color: "var(--success)",
-  borderColor: "color-mix(in oklab, var(--success) 32%, transparent)",
-};
-const denyStyle: CSSProperties = {
-  backgroundColor: "color-mix(in oklab, var(--destructive) 16%, transparent)",
-  color: "var(--destructive)",
-  borderColor: "color-mix(in oklab, var(--destructive) 32%, transparent)",
-};
-
-/** allow/deny badge tinted with the semantic success/destructive token. */
-function EffectBadge({ effect }: { effect: string }) {
-  const deny = effect === "deny";
-  return (
-    <Badge className="border font-normal" style={deny ? denyStyle : allowStyle}>
-      {effect}
-    </Badge>
   );
 }
 
@@ -128,7 +101,7 @@ export default function AccessExplorer() {
           Pick a user or group to see their effective access.
         </p>
       ) : q.isLoading ? (
-        <p className="py-10 text-center text-sm text-muted-foreground">Loading…</p>
+        <ListSkeleton rows={4} cols={2} />
       ) : forbidden ? (
         <Alert variant="destructive">
           <AlertDescription>

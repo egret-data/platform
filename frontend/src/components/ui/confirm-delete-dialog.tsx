@@ -13,10 +13,11 @@ interface ConfirmDeleteDialogProps {
   description: string;
   confirmText?: string; // text user must type, default "delete"
   onConfirm: () => void;
+  children?: React.ReactNode;
 }
 
 export const ConfirmDeleteDialog: React.FC<ConfirmDeleteDialogProps> = ({
-  open, onOpenChange, title, description, confirmText = 'delete', onConfirm,
+  open, onOpenChange, title, description, confirmText = 'delete', onConfirm, children,
 }) => {
   const [inputValue, setInputValue] = useState('');
 
@@ -35,6 +36,7 @@ export const ConfirmDeleteDialog: React.FC<ConfirmDeleteDialogProps> = ({
           <AlertDialogTitle>{title}</AlertDialogTitle>
           <AlertDialogDescription>{description}</AlertDialogDescription>
         </AlertDialogHeader>
+        {children && <div className="text-sm text-muted-foreground">{children}</div>}
         <div className="space-y-2">
           <p className="text-sm">Type <span className="font-mono font-bold">{confirmText}</span> to confirm:</p>
           <Input

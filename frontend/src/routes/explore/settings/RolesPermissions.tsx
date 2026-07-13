@@ -6,15 +6,7 @@ import { FilterableTable, type Column } from "@/components/explore/FilterableTab
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
-
-/** Narrow the react-query error into an HTTP status if we have one. */
-function errorStatus(err: unknown): number | undefined {
-  if (err && typeof err === "object" && "status" in err) {
-    const s = (err as { status?: unknown }).status;
-    if (typeof s === "number") return s;
-  }
-  return undefined;
-}
+import { errorStatus } from "@/lib/httpStatus";
 
 /** Built-in role names, seeded on install — mirrors RolesPage's own copy. */
 const SEEDED_ROLE_NAMES = new Set(["ws_admin", "ws_editor", "ws_viewer"]);

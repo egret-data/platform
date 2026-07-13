@@ -1,8 +1,9 @@
-import { useMemo, useState, type CSSProperties } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { MoreHorizontal } from "lucide-react";
 
 import { useWorkspaceShares, type ObjectGrantRollup } from "@/api/workspaceAccess";
+import { EffectBadge } from "@/components/access/EffectBadge";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -16,36 +17,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-
-/** Narrow the react-query error into an HTTP status if we have one. */
-function errorStatus(err: unknown): number | undefined {
-  if (err && typeof err === "object" && "status" in err) {
-    const s = (err as { status?: unknown }).status;
-    if (typeof s === "number") return s;
-  }
-  return undefined;
-}
-
-const allowStyle: CSSProperties = {
-  backgroundColor: "color-mix(in oklab, var(--success) 16%, transparent)",
-  color: "var(--success)",
-  borderColor: "color-mix(in oklab, var(--success) 32%, transparent)",
-};
-const denyStyle: CSSProperties = {
-  backgroundColor: "color-mix(in oklab, var(--destructive) 16%, transparent)",
-  color: "var(--destructive)",
-  borderColor: "color-mix(in oklab, var(--destructive) 32%, transparent)",
-};
-
-/** allow/deny badge tinted with the semantic success/destructive token. */
-function EffectBadge({ effect }: { effect: string }) {
-  const deny = effect === "deny";
-  return (
-    <Badge className="border font-normal" style={deny ? denyStyle : allowStyle}>
-      {effect}
-    </Badge>
-  );
-}
+import { errorStatus } from "@/lib/httpStatus";
 
 /** Object identifying a row's share target, used to open ShareDialog. */
 interface ShareTarget {
