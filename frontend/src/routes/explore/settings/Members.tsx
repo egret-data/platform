@@ -1,10 +1,11 @@
 import { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { Loader2, MoreHorizontal, Trash2, X } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ListChecks, Loader2, MoreHorizontal, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 
 import {
+  membersKey,
   useAddMember,
   useRemoveMember,
   useWorkspaceMembers,
@@ -15,6 +16,9 @@ import { listPrincipals } from "@/api/policies";
 import { useAuth } from "@/auth/useAuth";
 import { timeAgo, fullTimestamp } from "@/lib/relativeTime";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { useBulkSelect } from "@/hooks/useBulkSelect";
+import { runBulk } from "@/lib/runBulk";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -28,12 +32,21 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -80,10 +93,18 @@ export default function Members() {
   const removeMut = useRemoveMember(ws);
 
   const [removeTarget, setRemoveTarget] = useState<WorkspaceMember | null>(null);
+  const [bulkRoleOpen, setBulkRoleOpen] = useState(false);
 
   const members = membersQ.data ?? [];
   const roles = rolesQ.data ?? [];
   const forbidden = errorStatus(membersQ.error) === 403;
+
+  const qc = useQueryClient();
+  const mid = (m: WorkspaceMember) => `${m.principal_type}:${m.principal_id}`;
+  const bulkRows = useMemo(() => members.map((m) => ({ ...m, id: mid(m) })), [members]);
+  const bulk = useBulkSelect(bulkRows);
+  const selectedMembers = () => bulkRows.filter((m) => bulk.selected.has(m.id));
+  const refreshMembers = () => qc.invalidateQueries({ queryKey: membersKey(ws) });
 
   const adminCount = useMemo(
     () => members.filter((m) => m.role === ADMIN_ROLE).length,
@@ -123,6 +144,25 @@ export default function Members() {
     );
     setRemoveTarget(null);
   };
+
+  async function bulkRemove() {
+    const targets = selectedMembers();
+    await runBulk({
+      items: targets,
+      op: (m) =>
+        removeMut.mutateAsync({ principal_type: m.principal_type, principal_id: m.principal_id }),
+      undo: (m) =>
+        addMut.mutateAsync({
+          principal_type: m.principal_type,
+          principal_id: m.principal_id,
+          role: m.role,
+        }),
+      verb: "Removed",
+      noun: "members",
+      refresh: refreshMembers,
+    });
+    bulk.clear();
+  }
 
   const columns: Column<WorkspaceMember>[] = [
     {
@@ -233,6 +273,16 @@ export default function Members() {
               People and groups with access to <span className="font-medium">{ws}</span>.
             </p>
           </div>
+          {!forbidden && !membersQ.isLoading && (
+            <Button
+              size="sm"
+              variant={bulk.bulkMode ? "secondary" : "outline"}
+              onClick={() => bulk.setBulkMode(!bulk.bulkMode)}
+              aria-pressed={bulk.bulkMode}
+            >
+              <ListChecks className="mr-1 h-4 w-4" /> {bulk.bulkMode ? "Done" : "Bulk select"}
+            </Button>
+          )}
         </div>
         <div
           className="rounded-md border border-highlight/40 bg-highlight/5 px-3 py-2 text-xs text-muted-foreground"
@@ -244,9 +294,7 @@ export default function Members() {
       </header>
 
       {membersQ.isLoading ? (
-        <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" /> Loading members…
-        </div>
+        <ListSkeleton rows={5} cols={6} />
       ) : forbidden ? (
         <p className="rounded-md border bg-muted/40 px-4 py-6 text-sm text-muted-foreground" role="alert">
           Only workspace admins can manage members.
@@ -270,6 +318,21 @@ export default function Members() {
 
           <p className="text-sm text-muted-foreground">{summary}</p>
 
+          {bulk.bulkMode && bulk.someSelected && (
+            <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 p-2 text-sm">
+              <span className="font-medium">{bulk.selectedIds.length} selected</span>
+              <Button size="sm" variant="outline" onClick={bulkRemove}>
+                Remove
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => setBulkRoleOpen(true)}>
+                Set role…
+              </Button>
+              <Button size="sm" variant="ghost" className="ml-auto" onClick={bulk.clear}>
+                Clear
+              </Button>
+            </div>
+          )}
+
           <FilterableTable
             rows={members}
             columns={columns}
@@ -277,6 +340,9 @@ export default function Members() {
             searchPlaceholder="Search members…"
             initialSort={{ key: "member", dir: "asc" }}
             emptyText="No members yet."
+            selection={
+              bulk.bulkMode ? { selected: bulk.selected, onToggle: bulk.toggle } : undefined
+            }
           />
         </>
       )}
@@ -306,7 +372,110 @@ export default function Members() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <BulkSetRoleDialog
+        open={bulkRoleOpen}
+        roles={roles}
+        count={bulk.selectedIds.length}
+        onOpenChange={setBulkRoleOpen}
+        onConfirm={async (newRole) => {
+          const targets = selectedMembers();
+          await runBulk({
+            items: targets,
+            op: (m) =>
+              addMut.mutateAsync({
+                principal_type: m.principal_type,
+                principal_id: m.principal_id,
+                role: newRole,
+              }),
+            undo: (m) =>
+              addMut.mutateAsync({
+                principal_type: m.principal_type,
+                principal_id: m.principal_id,
+                role: m.role,
+              }),
+            verb: "Set role for",
+            noun: "members",
+            refresh: refreshMembers,
+          });
+          bulk.clear();
+        }}
+      />
     </div>
+  );
+}
+
+/** In-file dialog to pick a workspace role and apply it to the selected members. */
+function BulkSetRoleDialog({
+  open,
+  roles,
+  count,
+  onOpenChange,
+  onConfirm,
+}: {
+  open: boolean;
+  roles: { name: string }[];
+  count: number;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: (role: string) => Promise<void>;
+}) {
+  const [role, setRole] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function handleApply() {
+    if (!role) return;
+    setSaving(true);
+    try {
+      await onConfirm(role);
+      onOpenChange(false);
+      setRole("");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Set role</DialogTitle>
+          <DialogDescription>
+            Apply a workspace role to the {count} selected member{count === 1 ? "" : "s"}.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="my-4 space-y-1.5">
+          <Label htmlFor="bulk-set-role">Role</Label>
+          <Select value={role} onValueChange={setRole}>
+            <SelectTrigger id="bulk-set-role" className="w-full">
+              <span className="flex items-center gap-2">
+                {role && <RoleDot role={role} />}
+                <SelectValue placeholder="Select a role…" />
+              </span>
+            </SelectTrigger>
+            <SelectContent>
+              {roles.map((r) => (
+                <SelectItem key={r.name} value={r.name}>
+                  <span className="flex items-center gap-2">
+                    <RoleDot role={r.name} />
+                    {r.name}
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="button" onClick={handleApply} disabled={saving || !role}>
+            Apply
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

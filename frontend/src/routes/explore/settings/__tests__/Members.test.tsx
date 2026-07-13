@@ -14,6 +14,7 @@ const removeMutate = vi.fn();
 const authMock = vi.fn();
 
 vi.mock("@/api/members", () => ({
+  membersKey: (ws: string) => ["ws", ws, "members"],
   useWorkspaceMembers: (...args: unknown[]) => membersMock(...args),
   useWorkspaceRoles: () => rolesMock(),
   useAddMember: () => ({ mutate: addMutate, mutateAsync: addMutate, isPending: false }),
@@ -170,5 +171,49 @@ describe("Members page", () => {
   it("shows the scope clarifier", () => {
     renderPage();
     expect(screen.getByText(/apply only inside/i)).toBeInTheDocument();
+  });
+
+  it("shows a skeleton while members are loading", () => {
+    membersMock.mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      isError: false,
+      error: null,
+    });
+    renderPage();
+    expect(screen.getByTestId("list-skeleton")).toBeInTheDocument();
+  });
+
+  it("entering bulk mode reveals the selection checkbox column", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    // No checkboxes until bulk mode is on.
+    expect(screen.queryByLabelText("Select all")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+
+    expect(screen.getByLabelText("Select all")).toBeInTheDocument();
+    expect(screen.getAllByLabelText("Select row")).toHaveLength(2);
+  });
+
+  it("bulk-removing a selected member calls removeMut with the composite principal", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole("button", { name: "Bulk select" }));
+
+    // Rows sort by member asc → [alice, bob]; select the first (alice).
+    const rowChecks = screen.getAllByLabelText("Select row");
+    await user.click(rowChecks[0]);
+
+    await user.click(screen.getByRole("button", { name: "Remove" }));
+
+    await waitFor(() => {
+      expect(removeMutate).toHaveBeenCalledWith({
+        principal_type: "user",
+        principal_id: "alice-id",
+      });
+    });
   });
 });
