@@ -1713,3 +1713,163 @@ async fn audit_query_paginates_and_gates() {
         "a role:read holder (non-admin) must not read the audit trail"
     );
 }
+
+// ---------- Who-can-access (reverse effective-access) ----------
+
+/// Seed a `chart` (with its owning workspace → database → dataset chain) plus a
+/// direct object grant on it, and return the chart id. The grant makes the
+/// chart's `who_can_access` entries non-empty.
+async fn seed_chart_with_grant(f: &Fixture) -> Uuid {
+    let ws_slug = format!("wca-ws-{}", Uuid::new_v4().simple());
+    let (ws_id,): (Uuid,) =
+        sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, 'WCA WS') RETURNING id")
+            .bind(&ws_slug)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("insert workspace");
+
+    let db_name = format!("wca-db-{}", Uuid::new_v4().simple());
+    let (db_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id) \
+         VALUES ($1, 'trino', 'localhost', 8080, $2) RETURNING id",
+    )
+    .bind(&db_name)
+    .bind(ws_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert database");
+
+    let ds_name = format!("wca-ds-{}", Uuid::new_v4().simple());
+    let (ds_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO analytics.datasets (workspace_id, database_id, name, table_name) \
+         VALUES ($1, $2, $3, 't') RETURNING id",
+    )
+    .bind(ws_id)
+    .bind(db_id)
+    .bind(&ds_name)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert dataset");
+
+    let chart_name = format!("wca-chart-{}", Uuid::new_v4().simple());
+    let (chart_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO analytics.charts (workspace_id, dataset_id, name, viz_type, params) \
+         VALUES ($1, $2, $3, 'table', '{}'::jsonb) RETURNING id",
+    )
+    .bind(ws_id)
+    .bind(ds_id)
+    .bind(&chart_name)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert chart");
+
+    // A grantee user holding some role directly on this chart (object scope).
+    let grantee_email = format!("wca_grantee_{}@egret.local", Uuid::new_v4().simple());
+    let grantee = f
+        .users
+        .insert_local(&grantee_email, "Grantee", "x")
+        .await
+        .expect("insert grantee")
+        .0;
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id, object_type) \
+         SELECT 'user', $1, id, 'object', $2, 'chart' FROM roles WHERE scope='workspace' LIMIT 1",
+    )
+    .bind(grantee)
+    .bind(chart_id)
+    .execute(&f.db.pool)
+    .await
+    .expect("insert object grant");
+
+    chart_id
+}
+
+/// `GET /access/who-can-access?kind=&id=` (reverse effective-access): a
+/// `role:read` caller gets the object + its non-empty access entries (200); an
+/// unknown kind or a missing object is 404; a caller without `role:read` is 403
+/// (the gate is `require(role:read)` on `state.pdp`, so run under a real PDP).
+#[tokio::test]
+async fn who_can_access_lists_principals_and_gates() {
+    let Some(mut f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    // Seed the scoped principals BEFORE building the PDP (it snapshots the roles
+    // catalog at build); data seeding is PDP-independent.
+    let reader = session_for_with_permission(&f, "wca_reader", "role:read").await;
+    let wrong = session_for_with_permission(&f, "wca_wrong", "user:read").await;
+    let chart_id = seed_chart_with_grant(&f).await;
+    attach_real_pdp(&mut f).await;
+
+    // role:read → 200 with an object + non-empty entries.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/access/who-can-access?kind=chart&id={chart_id}"),
+            &reader,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "who-can-access; body={j}");
+    assert_eq!(j["object"]["kind"], "chart", "object kind; body={j}");
+    let entries = j["entries"].as_array().expect("entries array");
+    assert!(!entries.is_empty(), "entries must be non-empty; body={j}");
+
+    // Unknown kind → 404.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/access/who-can-access?kind=bogus&id={chart_id}"),
+            &reader,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "an unknown object kind must be 404"
+    );
+
+    // A random (nonexistent) object → 404.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/access/who-can-access?kind=chart&id={}", Uuid::new_v4()),
+            &reader,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "a missing object must be 404"
+    );
+
+    // A caller without role:read → 403.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/access/who-can-access?kind=chart&id={chart_id}"),
+            &wrong,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without role:read must not query who-can-access"
+    );
+}

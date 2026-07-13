@@ -71,6 +71,32 @@ pub struct DenyEntry {
     pub source: String,
 }
 
+/// Reverse of `EffectiveAccess`: for one object, every principal who can reach it
+/// and why (`who_can_access`). Mirror of the principal→access resolver.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct WhoCanAccess {
+    pub object: ObjectRef,
+    pub entries: Vec<AccessEntry>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ObjectRef {
+    pub kind: String,
+    pub id: String,
+    pub name: Option<String>,
+    pub workspace_slug: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AccessEntry {
+    pub principal_type: String,
+    pub principal_id: String,
+    pub principal_name: Option<String>,
+    pub access: String,
+    pub effect: String,
+    pub source: String, // "direct" | "workspace:{slug}" | "platform"
+}
+
 #[derive(Clone)]
 pub struct AccessResolver {
     db: Db,
@@ -358,6 +384,104 @@ impl AccessResolver {
             denies,
         })
     }
+
+    /// Reverse of `resolve`: for one object, list every principal who can reach it
+    /// and why. Three provenance layers, each a parameterized query scoped to THIS
+    /// object (direct) or THIS object's OWN workspace (workspace-role holders) —
+    /// the object→workspace resolution is the cross-workspace guard — plus global
+    /// platform admins. Groups are listed as principals, not expanded to members
+    /// (parity with `resolve`). Read-only.
+    pub async fn who_can_access(
+        &self,
+        kind: &str,
+        id: Uuid,
+    ) -> Result<WhoCanAccess, egret_core::Error> {
+        let table = Self::object_table(kind)
+            .ok_or_else(|| egret_core::Error::NotFound(format!("unknown object kind: {kind}")))?;
+
+        // Resolve the object → its name + owning workspace (id + slug). The only
+        // spliced value is the `'static` table literal from `object_table`.
+        let sql = format!(
+            "SELECT o.name::text, o.workspace_id, w.slug \
+               FROM analytics.{table} o \
+               JOIN workspaces w ON w.id = o.workspace_id \
+              WHERE o.id = $1"
+        );
+        let (name, ws_id, ws_slug): (Option<String>, Uuid, String) = sqlx::query_as(&sql)
+            .bind(id)
+            .fetch_optional(&self.db.pool)
+            .await
+            .map_err(db_err)?
+            .ok_or_else(|| egret_core::Error::NotFound(format!("{kind}: {id}")))?;
+
+        // Shared principal-name projection: COALESCE(user email, group name).
+        let principal_select = "SELECT ag.principal_type, ag.principal_id, \
+                   COALESCE(u.email::text, g.name) AS principal_name, \
+                   r.name AS access, ag.effect \
+              FROM access_grants ag \
+              JOIN roles r ON r.id = ag.role_id \
+              LEFT JOIN users u  ON u.id = ag.principal_id AND ag.principal_type = 'user' \
+              LEFT JOIN groups g ON g.id = ag.principal_id AND ag.principal_type = 'group'";
+
+        // 1. Direct object grants on THIS object.
+        let direct: Vec<WhoRow> = sqlx::query_as(&format!(
+            "{principal_select} WHERE ag.scope_type = 'object' AND ag.scope_id = $1"
+        ))
+        .bind(id)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+
+        // 2. Workspace-role holders on THIS object's OWN workspace (cascade).
+        let workspace: Vec<WhoRow> = sqlx::query_as(&format!(
+            "{principal_select} WHERE ag.scope_type = 'workspace' AND ag.scope_id = $1"
+        ))
+        .bind(ws_id)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+
+        // 3. Platform admins (superusers — reach every object).
+        let platform: Vec<WhoRow> = sqlx::query_as(&format!(
+            "{principal_select} \
+              WHERE ag.scope_type = 'platform' AND r.name = 'platform_admin' AND ag.effect = 'allow'"
+        ))
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+
+        let ws_source = format!("workspace:{ws_slug}");
+        let mut entries: Vec<AccessEntry> = Vec::new();
+        entries.extend(
+            direct
+                .into_iter()
+                .map(|r| r.into_entry("direct".to_string())),
+        );
+        entries.extend(
+            workspace
+                .into_iter()
+                .map(|r| r.into_entry(ws_source.clone())),
+        );
+        entries.extend(
+            platform
+                .into_iter()
+                .map(|r| r.into_entry("platform".to_string())),
+        );
+        entries.sort_by(|a, b| {
+            (a.source.as_str(), a.principal_name.as_deref())
+                .cmp(&(b.source.as_str(), b.principal_name.as_deref()))
+        });
+
+        Ok(WhoCanAccess {
+            object: ObjectRef {
+                kind: kind.to_string(),
+                id: id.to_string(),
+                name,
+                workspace_slug: Some(ws_slug),
+            },
+            entries,
+        })
+    }
 }
 
 #[derive(sqlx::FromRow, Clone)]
@@ -368,4 +492,28 @@ struct GrantRow {
     effect: String,
     role: String,
     source: String,
+}
+
+/// One access-grant row projected for `who_can_access` (before its `source` label
+/// is attached by the caller — the label depends on which query produced it).
+#[derive(sqlx::FromRow)]
+struct WhoRow {
+    principal_type: String,
+    principal_id: Uuid,
+    principal_name: Option<String>,
+    access: String,
+    effect: String,
+}
+
+impl WhoRow {
+    fn into_entry(self, source: String) -> AccessEntry {
+        AccessEntry {
+            principal_type: self.principal_type,
+            principal_id: self.principal_id.to_string(),
+            principal_name: self.principal_name,
+            access: self.access,
+            effect: self.effect,
+            source,
+        }
+    }
 }

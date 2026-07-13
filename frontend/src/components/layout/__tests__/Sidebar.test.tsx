@@ -158,6 +158,14 @@ describe("Sidebar – Access control group", () => {
       "href",
       "/control-plane/users",
     );
+    expect(screen.getByRole("link", { name: "Overview" })).toHaveAttribute(
+      "href",
+      "/control-plane/access-overview",
+    );
+    expect(screen.getByRole("link", { name: "Who can access" })).toHaveAttribute(
+      "href",
+      "/control-plane/who-can-access",
+    );
     expect(screen.getByRole("link", { name: "Groups" })).toHaveAttribute(
       "href",
       "/control-plane/groups",
@@ -170,6 +178,14 @@ describe("Sidebar – Access control group", () => {
       "href",
       "/control-plane/permissions",
     );
+  });
+
+  test("Overview is the first item in the Access control group", () => {
+    renderSidebar("/control-plane/workspaces");
+    const overview = screen.getByRole("link", { name: "Overview" });
+    const users = screen.getByRole("link", { name: "Users" });
+    // Overview must precede Users (which was previously the first item).
+    expect(overview.compareDocumentPosition(users) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
 

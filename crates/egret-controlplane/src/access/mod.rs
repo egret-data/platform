@@ -64,6 +64,7 @@ pub fn router() -> Router<CpState> {
         .route("/access/roles/{id}/assignees", get(list_role_assignees))
         .route("/permissions", get(list_permissions))
         .route("/access/effective", get(get_effective_access))
+        .route("/access/who-can-access", get(who_can_access))
 }
 
 /// Reject removing a role assignment that holds the last `platform_admin`
@@ -1121,6 +1122,43 @@ async fn get_effective_access(
     Ok(Json(ea))
 }
 
+#[derive(Debug, Deserialize)]
+struct WhoCanAccessQuery {
+    kind: String,
+    id: Uuid,
+}
+
+/// `GET /access/who-can-access` — the reverse of `/access/effective` (AX-3):
+/// for one object (`kind` + `id`), enumerate every principal who can reach it
+/// and why (direct object grants, the object's workspace-role holders, and
+/// platform admins). Read-only, so it gates on `role:read`. An unknown `kind`
+/// or a missing object surfaces `egret_core::Error::NotFound` → 404.
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/access/who-can-access",
+    tag = "control-plane-access",
+    params(
+        ("kind" = String, Query, description = "Object kind: chart | dashboard | dataset | notebook | saved_query | folder"),
+        ("id" = Uuid, Query, description = "Object UUID"),
+    ),
+    responses(
+        (status = 200, description = "Principals who can access the object", body = egret_auth::effective::WhoCanAccess),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing role:read permission", body = ErrorBody),
+        (status = 404, description = "Unknown object kind or no such object", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn who_can_access(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    axum::extract::Query(q): axum::extract::Query<WhoCanAccessQuery>,
+) -> Result<Json<egret_auth::effective::WhoCanAccess>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "role:read").await?;
+    let wca = st.access_resolver.who_can_access(&q.kind, q.id).await?;
+    Ok(Json(wca))
+}
+
 /// OpenAPI fragment for the control-plane Access router (users/groups/roles/
 /// permissions). Merged into `egret_controlplane::openapi()`. `UserDto` is
 /// emitted as `ControlPlaneUserDto` (see its `#[schema(as = …)]`) to avoid
@@ -1151,6 +1189,7 @@ async fn get_effective_access(
         list_role_assignees,
         list_permissions,
         get_effective_access,
+        who_can_access,
     ),
     components(schemas(
         UserDto,
@@ -1177,6 +1216,9 @@ async fn get_effective_access(
         egret_auth::effective::WorkspaceMembership,
         egret_auth::effective::ObjectGrant,
         egret_auth::effective::DenyEntry,
+        egret_auth::effective::WhoCanAccess,
+        egret_auth::effective::ObjectRef,
+        egret_auth::effective::AccessEntry,
         ErrorBody,
     )),
     tags((name = "control-plane-access", description = "Platform access control: users, groups, roles, and the permission catalog")),
