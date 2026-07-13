@@ -526,6 +526,104 @@ describe("RolesPage", () => {
     expect(screen.getByText("—")).toBeInTheDocument();
   });
 
+  test("Delete confirmation shows the impact: assignee count and inheriting-role count", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.listRoles).mockResolvedValue([
+      {
+        id: "analyst-id",
+        scope: "workspace",
+        name: "analyst",
+        description: "Analyst role",
+        permissionCount: 3,
+        assigneeCount: 5,
+        inheritedPermissions: [],
+      },
+      {
+        id: "junior-id",
+        scope: "workspace",
+        name: "junior",
+        description: "Junior role",
+        permissionCount: 1,
+        assigneeCount: 0,
+        parentRoleId: "analyst-id",
+        inheritedPermissions: [],
+      },
+    ]);
+
+    renderPage();
+    await screen.findAllByText("analyst");
+
+    await user.click(screen.getByRole("button", { name: /Actions for analyst/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+
+    await screen.findByRole("heading", { name: /Delete "analyst"\?/i });
+    expect(screen.getByText(/5 assignee/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 role[^.]*inherit/i)).toBeInTheDocument();
+  });
+
+  test("Edit permissions dialog shows the same impact summary", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.listRoles).mockResolvedValue([
+      {
+        id: "analyst-id",
+        scope: "workspace",
+        name: "analyst",
+        description: "Analyst role",
+        permissionCount: 3,
+        assigneeCount: 5,
+        inheritedPermissions: [],
+      },
+      {
+        id: "junior-id",
+        scope: "workspace",
+        name: "junior",
+        description: "Junior role",
+        permissionCount: 1,
+        assigneeCount: 0,
+        parentRoleId: "analyst-id",
+        inheritedPermissions: [],
+      },
+    ]);
+    vi.mocked(api.getRole).mockImplementation(async (id) => {
+      const found =
+        id === "analyst-id"
+          ? {
+              id: "analyst-id",
+              scope: "workspace" as const,
+              name: "analyst",
+              description: "Analyst role",
+              permissionCount: 3,
+              assigneeCount: 5,
+              inheritedPermissions: [],
+            }
+          : ROLES[0];
+      return { ...found, inheritedPermissions: [] };
+    });
+
+    renderPage();
+    await screen.findAllByText("analyst");
+
+    await user.click(screen.getByRole("button", { name: /Actions for analyst/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit permissions" }));
+
+    await screen.findByRole("heading", { name: /Edit role — analyst/i });
+    expect(screen.getByText(/5 assignee/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 role[^.]*inherit/i)).toBeInTheDocument();
+  });
+
+  test("a role with no assignees and no inheriting roles does not claim assignees", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("custom_role");
+
+    // custom_role has assigneeCount 0 and nothing inherits from it in ROLES.
+    await user.click(screen.getByRole("button", { name: /Actions for custom_role/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+
+    await screen.findByRole("heading", { name: /Delete "custom_role"\?/i });
+    expect(screen.queryByText(/[1-9]\d* assignee/i)).not.toBeInTheDocument();
+  });
+
   test("a non-admin role:read viewer sees a read-only table: no New role button and no Actions menu", async () => {
     const NON_ADMIN_ME: Me = {
       user_id: "2",

@@ -17,6 +17,7 @@ import {
 } from "@/api/access";
 import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
+import { RoleImpactNotice } from "@/components/access/RoleImpactNotice";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -441,7 +442,9 @@ export default function RolesPage() {
           if (deleteTarget) deleteMutation.mutate(deleteTarget.id);
           setDeleteTarget(null);
         }}
-      />
+      >
+        {deleteTarget && <RoleImpactNotice role={deleteTarget} roles={rows} />}
+      </ConfirmDeleteDialog>
     </div>
   );
 }
@@ -725,6 +728,8 @@ function EditRoleDialog({
               <AlertDescription>{error}</AlertDescription>
             </Alert>
           )}
+
+          {role && <RoleImpactNotice role={role} roles={roles} />}
 
           <div className="space-y-1.5">
             <Label htmlFor="edit-role-description">Description</Label>
