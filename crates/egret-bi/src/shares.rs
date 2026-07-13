@@ -82,6 +82,10 @@ pub struct ObjectGrantBody {
     /// `allow` (default) | `deny`. A deny blocks the principal on this object.
     #[serde(default = "default_effect")]
     pub effect: String,
+    /// Optional expiry (RFC3339). `None` = never expires (unchanged default).
+    /// Enforced at read time by the PDP/admission predicates, not here.
+    #[serde(default)]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 fn default_effect() -> String {
@@ -227,8 +231,8 @@ async fn grant_put(
     // return the canonical row whether we inserted or it already existed.
     sqlx::query(
         "INSERT INTO access_grants \
-           (principal_type, principal_id, role_id, scope_type, object_type, scope_id, effect, granted_by) \
-         VALUES ($1, $2, $3, 'object', $4, $5, $6, $7) ON CONFLICT DO NOTHING",
+           (principal_type, principal_id, role_id, scope_type, object_type, scope_id, effect, granted_by, expires_at) \
+         VALUES ($1, $2, $3, 'object', $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
     )
     .bind(&b.principal_type)
     .bind(pid)
@@ -237,6 +241,7 @@ async fn grant_put(
     .bind(id)
     .bind(&b.effect)
     .bind(ctx.principal.user_id.0)
+    .bind(b.expires_at)
     .execute(&st.db.pool)
     .await
     .map_err(|e| BiApiError::from(crate::BiError::Db(e)))?;
