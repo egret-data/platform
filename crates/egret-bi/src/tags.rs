@@ -5,6 +5,8 @@
 //! Enforcement (tags feeding access decisions) is a later phase — this repo just
 //! stores and lists the classification metadata.
 
+use egret_auth::events::RolesChanged;
+use egret_events::EventBus;
 use egret_metastore::Db;
 use uuid::Uuid;
 
@@ -211,5 +213,85 @@ impl TagRepo {
             .bind(object_id)
             .fetch_all(&self.db.pool)
             .await?)
+    }
+}
+
+/// Store for **classification access policies** (Access P3.3): one row per tag
+/// binding it to a set of clearance role NAMES. Semantics: a principal must hold
+/// `>= 1` of `required_roles` to access objects carrying that tag. An **empty**
+/// `required_roles` list is NO gate (the tag is informational only) — enforcement
+/// applies only when the list is non-empty.
+///
+/// MODEL + CRUD ONLY in this task: no authorization decision reads this table yet
+/// (the Cedar PDP loader that consumes `list_policies` is a later task). Mutations
+/// publish [`RolesChanged`] on the shared bus — the SAME reload event the Cedar
+/// PDP already subscribes to — so a future `load_inner` reading this table stays
+/// fresh with no extra plumbing, exactly as the role/permission CRUD does.
+#[derive(Clone)]
+pub struct ClassificationPolicyRepo {
+    db: Db,
+    bus: EventBus,
+}
+
+impl ClassificationPolicyRepo {
+    pub fn new(db: Db, bus: EventBus) -> Self {
+        Self { db, bus }
+    }
+
+    /// UPSERT the required-role list for `tag_id` (INSERT ... ON CONFLICT (tag_id)
+    /// DO UPDATE). Publishes `RolesChanged` so the PDP reloads its policy set.
+    pub async fn set_policy(
+        &self,
+        tag_id: Uuid,
+        required_roles: &[String],
+        by: Option<Uuid>,
+    ) -> Result<(), BiError> {
+        sqlx::query(
+            "INSERT INTO classification_policies (tag_id, required_roles, created_by, updated_at) \
+             VALUES ($1, $2, $3, now()) \
+             ON CONFLICT (tag_id) DO UPDATE SET \
+                 required_roles = EXCLUDED.required_roles, \
+                 updated_at = now()",
+        )
+        .bind(tag_id)
+        .bind(required_roles)
+        .bind(by)
+        .execute(&self.db.pool)
+        .await?;
+        self.bus.publish(RolesChanged);
+        Ok(())
+    }
+
+    /// Remove a tag's classification policy (idempotent — deletes zero or one row).
+    /// Publishes `RolesChanged` so the PDP reloads its policy set.
+    pub async fn clear_policy(&self, tag_id: Uuid) -> Result<(), BiError> {
+        sqlx::query("DELETE FROM classification_policies WHERE tag_id = $1")
+            .bind(tag_id)
+            .execute(&self.db.pool)
+            .await?;
+        self.bus.publish(RolesChanged);
+        Ok(())
+    }
+
+    /// The required-role list for one tag, or `None` if no policy row exists.
+    /// (An existing row with an empty array is `Some(vec![])` — a NO-gate policy.)
+    pub async fn get_policy(&self, tag_id: Uuid) -> Result<Option<Vec<String>>, BiError> {
+        Ok(sqlx::query_scalar::<_, Vec<String>>(
+            "SELECT required_roles FROM classification_policies WHERE tag_id = $1",
+        )
+        .bind(tag_id)
+        .fetch_optional(&self.db.pool)
+        .await?)
+    }
+
+    /// Every classification policy as `(tag_id, required_roles)`, ordered by
+    /// `tag_id`. Consumed by the future PDP loader and by the tag-list UI (to show
+    /// which tags are gated).
+    pub async fn list_policies(&self) -> Result<Vec<(Uuid, Vec<String>)>, BiError> {
+        Ok(sqlx::query_as::<_, (Uuid, Vec<String>)>(
+            "SELECT tag_id, required_roles FROM classification_policies ORDER BY tag_id",
+        )
+        .fetch_all(&self.db.pool)
+        .await?)
     }
 }

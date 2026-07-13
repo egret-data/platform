@@ -29,6 +29,10 @@ pub fn router() -> Router<CpState> {
     Router::new()
         .route("/tags", get(list_tags).post(create_tag))
         .route("/tags/{id}", patch(update_tag).delete(delete_tag))
+        .route(
+            "/tags/{id}/access-policy",
+            axum::routing::put(set_access_policy).delete(clear_access_policy),
+        )
 }
 
 // snake_case (house convention here): matches the FE `Tag` type and the sibling
@@ -42,6 +46,12 @@ pub struct TagDto {
     pub color: String,
     pub assignment_count: i64,
     pub created_at: String,
+    /// Classification access policy (Access P3.3): clearance role names a
+    /// principal needs `>= 1` of to access objects carrying this tag. Empty = no
+    /// gate (informational tag). Populated by the tag list from `list_policies`;
+    /// empty on the create/update responses (those don't touch the policy).
+    #[serde(default)]
+    pub required_roles: Vec<String>,
 }
 
 impl From<Tag> for TagDto {
@@ -54,6 +64,7 @@ impl From<Tag> for TagDto {
             color: t.color,
             assignment_count: t.assignment_count,
             created_at: t.created_at.to_rfc3339(),
+            required_roles: Vec::new(),
         }
     }
 }
@@ -92,7 +103,24 @@ struct UpdateTag {
 async fn list_tags(State(st): State<CpState>, Auth(p): Auth) -> Result<Json<Vec<TagDto>>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "tag:read").await?;
     let tags = st.tags.list().await?;
-    Ok(Json(tags.into_iter().map(TagDto::from).collect()))
+    // Overlay each tag's classification access policy (Access P3.3) so the FE can
+    // show which tags are gated. One extra query, joined in memory by tag id.
+    let policies: std::collections::HashMap<Uuid, Vec<String>> = st
+        .classification_policies
+        .list_policies()
+        .await?
+        .into_iter()
+        .collect();
+    Ok(Json(
+        tags.into_iter()
+            .map(|t| {
+                let required_roles = policies.get(&t.id).cloned().unwrap_or_default();
+                let mut dto = TagDto::from(t);
+                dto.required_roles = required_roles;
+                dto
+            })
+            .collect(),
+    ))
 }
 
 #[utoipa::path(
@@ -184,10 +212,69 @@ async fn delete_tag(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+struct SetAccessPolicy {
+    /// Clearance role NAMES; a principal needs `>= 1` to access objects carrying
+    /// this tag. Empty = no gate (informational tag only).
+    #[serde(default)]
+    required_roles: Vec<String>,
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/control-plane/tags/{id}/access-policy",
+    tag = "control-plane-tags",
+    params(("id" = Uuid, Path, description = "Tag id")),
+    request_body = SetAccessPolicy,
+    responses(
+        (status = 200, description = "Classification access policy set"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing tag:manage permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn set_access_policy(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(body): Json<SetAccessPolicy>,
+) -> Result<StatusCode, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "tag:manage").await?;
+    // The repo publishes `RolesChanged` on the shared bus so the Cedar PDP
+    // reloads its policy set (the SAME reload event the role/permission CRUD
+    // emits) — a future PDP loader reading `classification_policies` stays fresh.
+    st.classification_policies
+        .set_policy(id, &body.required_roles, Some(p.user_id.0))
+        .await?;
+    Ok(StatusCode::OK)
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/control-plane/tags/{id}/access-policy",
+    tag = "control-plane-tags",
+    params(("id" = Uuid, Path, description = "Tag id")),
+    responses(
+        (status = 200, description = "Classification access policy cleared"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing tag:manage permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn clear_access_policy(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "tag:manage").await?;
+    st.classification_policies.clear_policy(id).await?;
+    Ok(StatusCode::OK)
+}
+
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(list_tags, create_tag, update_tag, delete_tag),
-    components(schemas(TagDto, CreateTag, UpdateTag, ErrorBody)),
-    tags((name = "control-plane-tags", description = "Platform classification-tag catalog (Access P3.1, metadata only)")),
+    paths(list_tags, create_tag, update_tag, delete_tag, set_access_policy, clear_access_policy),
+    components(schemas(TagDto, CreateTag, UpdateTag, SetAccessPolicy, ErrorBody)),
+    tags((name = "control-plane-tags", description = "Platform classification-tag catalog (Access P3.1) + access policies (P3.3)")),
 )]
 pub struct ControlPlaneTagsApi;

@@ -83,6 +83,10 @@ fn build_app(
         audit,
         audit_store: egret_audit::AuditStore::new(db.clone()),
         tags: egret_bi::TagRepo::new(db.clone()),
+        classification_policies: egret_bi::ClassificationPolicyRepo::new(
+            db.clone(),
+            egret_events::EventBus::new(),
+        ),
     })
 }
 
@@ -640,6 +644,10 @@ async fn setup_isolated_schema() -> Option<Fixture> {
         audit,
         audit_store: egret_audit::AuditStore::new(db.clone()),
         tags: egret_bi::TagRepo::new(db.clone()),
+        classification_policies: egret_bi::ClassificationPolicyRepo::new(
+            db.clone(),
+            egret_events::EventBus::new(),
+        ),
     });
 
     Some(Fixture {
@@ -2023,5 +2031,173 @@ async fn tag_catalog_crud_and_permissions() {
     assert!(
         !tags.iter().any(|t| t["id"] == id),
         "deleted tag must not be listed; body={j}"
+    );
+}
+
+/// `PUT/DELETE /api/control-plane/tags/{id}/access-policy` (Access P3.3):
+/// `tag:manage` sets the required clearance roles (surfaced by `GET /tags` as
+/// `required_roles`); DELETE clears them; a principal without `tag:manage` is
+/// Forbidden. Model + CRUD only — no PDP enforcement is asserted here.
+#[tokio::test]
+async fn tag_access_policy_crud_and_permissions() {
+    let Some(mut f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    let manager = session_for_with_permission(&f, "clsp_manager", "tag:manage").await;
+    let reader = session_for_with_permission(&f, "clsp_reader", "tag:read").await;
+    attach_real_pdp(&mut f).await;
+
+    // Seed a tag to attach the policy to.
+    let key = format!("secret-{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/tags",
+            &manager,
+            Some(serde_json::json!({ "key": key, "name": "Secret" })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create tag; body={j}");
+    let id = j["id"].as_str().expect("tag id").to_string();
+
+    // A fresh tag has no policy → required_roles is [] in the list.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/tags", &reader, None))
+        .await
+        .unwrap();
+    let (_, j) = into_json(resp).await;
+    let entry = j
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id)
+        .expect("tag in list")
+        .clone();
+    assert_eq!(
+        entry["required_roles"],
+        serde_json::json!([]),
+        "a tag with no policy has empty required_roles; body={entry}"
+    );
+
+    // A non-tag:manage principal must NOT set the policy.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/tags/{id}/access-policy"),
+            &reader,
+            Some(serde_json::json!({ "required_roles": ["clearance_high"] })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "tag:read alone must not set an access policy"
+    );
+
+    // tag:manage sets the required clearance roles.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/tags/{id}/access-policy"),
+            &manager,
+            Some(serde_json::json!({ "required_roles": ["clearance_high", "auditor"] })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "set access policy must be 200"
+    );
+
+    // GET /tags now reflects the required_roles.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/tags", &reader, None))
+        .await
+        .unwrap();
+    let (_, j) = into_json(resp).await;
+    let entry = j
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id)
+        .expect("tag in list")
+        .clone();
+    assert_eq!(
+        entry["required_roles"],
+        serde_json::json!(["clearance_high", "auditor"]),
+        "list must surface the set required_roles; body={entry}"
+    );
+
+    // A non-tag:manage principal must NOT clear the policy.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/tags/{id}/access-policy"),
+            &reader,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "tag:read alone must not clear an access policy"
+    );
+
+    // tag:manage clears the policy.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/tags/{id}/access-policy"),
+            &manager,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "clear access policy must be 200"
+    );
+
+    // required_roles is empty again.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/tags", &reader, None))
+        .await
+        .unwrap();
+    let (_, j) = into_json(resp).await;
+    let entry = j
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == id)
+        .expect("tag in list")
+        .clone();
+    assert_eq!(
+        entry["required_roles"],
+        serde_json::json!([]),
+        "cleared policy → empty required_roles; body={entry}"
     );
 }
