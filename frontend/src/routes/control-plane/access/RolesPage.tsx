@@ -19,6 +19,7 @@ import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -376,7 +377,9 @@ export default function RolesPage() {
               { label: "workspace", value: rows.length - platform },
             ]}
           />
-          {treeView ? (
+          {roles.isLoading ? (
+            <ListSkeleton rows={6} cols={7} />
+          ) : treeView ? (
             <>
               <p className="text-xs text-muted-foreground">
                 Tree view shows the full hierarchy — switch to list to search or filter.
@@ -391,11 +394,9 @@ export default function RolesPage() {
               searchPlaceholder="Search roles…"
               initialSort={{ key: "name", dir: "asc" }}
               emptyText={
-                roles.isLoading
-                  ? "Loading…"
-                  : roles.isError
-                    ? (roles.error?.message ?? "Failed to load roles.")
-                    : "No roles."
+                roles.isError
+                  ? (roles.error?.message ?? "Failed to load roles.")
+                  : "No roles."
               }
               filters={
                 <FacetSelect

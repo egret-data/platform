@@ -62,6 +62,14 @@ describe("GroupsPage", () => {
     vi.mocked(api.getGroupMembers).mockResolvedValue(GROUP_MEMBERS);
   });
 
+  test("shows a skeleton while the group list is loading", async () => {
+    // A promise that never resolves keeps the query in its loading state.
+    vi.mocked(api.listGroups).mockReturnValue(new Promise<api.AccessGroup[]>(() => {}));
+    renderPage();
+    expect(await screen.findByTestId("list-skeleton")).toBeInTheDocument();
+    expect(screen.queryByText("No groups.")).not.toBeInTheDocument();
+  });
+
   test("renders rows from the mocked group list", async () => {
     renderPage();
     expect(await screen.findByText("Engineering")).toBeInTheDocument();

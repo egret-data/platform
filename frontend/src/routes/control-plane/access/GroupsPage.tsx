@@ -24,6 +24,7 @@ import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -270,31 +271,33 @@ export default function GroupsPage() {
               { label: "members", value: totalMembers },
             ]}
           />
-          <FilterableTable
-            rows={filtered}
-            columns={columns}
-            getId={(g) => g.id}
-            searchPlaceholder="Search groups…"
-            initialSort={{ key: "name", dir: "asc" }}
-            emptyText={
-              groups.isLoading
-                ? "Loading…"
-                : groups.isError
+          {groups.isLoading ? (
+            <ListSkeleton rows={6} cols={5} />
+          ) : (
+            <FilterableTable
+              rows={filtered}
+              columns={columns}
+              getId={(g) => g.id}
+              searchPlaceholder="Search groups…"
+              initialSort={{ key: "name", dir: "asc" }}
+              emptyText={
+                groups.isError
                   ? (groups.error?.message ?? "Failed to load groups.")
                   : "No groups."
-            }
-            filters={
-              <FacetSelect
-                label="Source"
-                value={sourceFacet}
-                onChange={setSourceFacet}
-                options={[
-                  { value: "local", label: "Local" },
-                  { value: "oidc", label: "OIDC" },
-                ]}
-              />
-            }
-          />
+              }
+              filters={
+                <FacetSelect
+                  label="Source"
+                  value={sourceFacet}
+                  onChange={setSourceFacet}
+                  options={[
+                    { value: "local", label: "Local" },
+                    { value: "oidc", label: "OIDC" },
+                  ]}
+                />
+              }
+            />
+          )}
         </CardContent>
       </Card>
 

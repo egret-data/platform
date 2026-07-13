@@ -84,6 +84,14 @@ describe("RolesPage", () => {
     });
   });
 
+  test("shows a skeleton while the role list is loading", async () => {
+    // A promise that never resolves keeps the query in its loading state.
+    vi.mocked(api.listRoles).mockReturnValue(new Promise<api.AccessRole[]>(() => {}));
+    renderPage();
+    expect(await screen.findByTestId("list-skeleton")).toBeInTheDocument();
+    expect(screen.queryByText("No roles.")).not.toBeInTheDocument();
+  });
+
   test("renders rows, marks the seeded role built-in, and disables its delete action", async () => {
     const user = userEvent.setup();
     renderPage();
