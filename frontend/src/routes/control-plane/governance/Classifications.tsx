@@ -1,0 +1,445 @@
+import { useEffect, useState } from "react";
+import { MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+
+import {
+  type Tag,
+  useCreateTag,
+  useDeleteTag,
+  useTags,
+  useUpdateTag,
+} from "@/api/tags";
+import { useAuth } from "@/auth/useAuth";
+import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { errorStatus } from "@/lib/httpStatus";
+
+const DEFAULT_COLOR = "#6366f1";
+
+/** Small rounded color swatch used next to a tag's name. */
+function TagSwatch({ color }: { color: string }) {
+  return (
+    <span
+      aria-hidden="true"
+      className="inline-block h-3 w-3 shrink-0 rounded-full border border-border"
+      style={{ backgroundColor: color || DEFAULT_COLOR }}
+    />
+  );
+}
+
+/**
+ * Control Plane → Data Governance → Classifications.
+ *
+ * Lists the org-wide catalog of classification tags used to classify data
+ * and BI objects. Create/edit/delete are gated on `platform_admin` or the
+ * `tag:manage` permission; everyone with `tag:read` (route-gated in App.tsx)
+ * sees the read-only table.
+ */
+export default function Classifications() {
+  const { me } = useAuth();
+  const isAdmin =
+    (me?.platform_roles.includes("platform_admin") ?? false) ||
+    (me?.permissions?.includes("tag:manage") ?? false);
+
+  const tags = useTags();
+  const rows = tags.data ?? [];
+  const deleteTag = useDeleteTag();
+
+  const [createOpen, setCreateOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState<Tag | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Tag | null>(null);
+
+  const forbidden = errorStatus(tags.error) === 403;
+
+  const columns: Column<Tag>[] = [
+    {
+      key: "name",
+      label: "Tag",
+      sortable: true,
+      className: "font-medium",
+      value: (t) => t.name,
+      cell: (t) => (
+        <span className="flex items-center gap-2">
+          <TagSwatch color={t.color} />
+          {t.name}
+        </span>
+      ),
+    },
+    {
+      key: "key",
+      label: "Key",
+      sortable: true,
+      value: (t) => t.key,
+      cell: (t) => <span className="font-mono text-xs">{t.key}</span>,
+    },
+    {
+      key: "description",
+      label: "Description",
+      value: (t) => t.description,
+      cell: (t) => (
+        <span className="text-muted-foreground">{t.description || "—"}</span>
+      ),
+    },
+    {
+      key: "objects",
+      label: "Objects",
+      sortable: true,
+      value: (t) => t.assignment_count,
+      cell: (t) => <Badge variant="secondary">{t.assignment_count}</Badge>,
+    },
+    {
+      key: "actions",
+      label: "",
+      className: "text-right",
+      cell: (t) =>
+        isAdmin && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" aria-label={`Actions for ${t.name}`}>
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={() => setEditTarget(t)}>
+                <Pencil className="mr-2 h-4 w-4" />
+                Edit
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                className="text-destructive focus:text-destructive"
+                onClick={() => setDeleteTarget(t)}
+              >
+                <Trash2 className="mr-2 h-4 w-4" />
+                Delete
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ),
+    },
+  ];
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h1 className="text-2xl font-semibold leading-tight">Classifications</h1>
+        <p className="text-sm text-muted-foreground">
+          Define the tags used to classify data and BI objects.
+        </p>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-2">
+            <CardTitle className="text-lg">All tags</CardTitle>
+            {isAdmin && (
+              <Button size="sm" onClick={() => setCreateOpen(true)}>
+                <Plus className="mr-1 h-4 w-4" />
+                New tag
+              </Button>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          {tags.isLoading ? (
+            <ListSkeleton rows={6} cols={5} />
+          ) : forbidden ? (
+            <Alert variant="destructive">
+              <AlertDescription>
+                You need the <code>tag:read</code> permission.
+              </AlertDescription>
+            </Alert>
+          ) : tags.isError ? (
+            <Alert variant="destructive">
+              <AlertDescription>
+                {(tags.error as Error)?.message ?? "Failed to load tags."}
+              </AlertDescription>
+            </Alert>
+          ) : (
+            <FilterableTable
+              rows={rows}
+              columns={columns}
+              getId={(t) => t.id}
+              searchPlaceholder="Search tags…"
+              initialSort={{ key: "name", dir: "asc" }}
+              emptyText="No tags yet."
+            />
+          )}
+        </CardContent>
+      </Card>
+
+      <CreateTagDialog open={createOpen} onOpenChange={setCreateOpen} />
+      <EditTagDialog
+        tag={editTarget}
+        onOpenChange={(o) => {
+          if (!o) setEditTarget(null);
+        }}
+      />
+
+      <ConfirmDeleteDialog
+        open={deleteTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) setDeleteTarget(null);
+        }}
+        title={deleteTarget ? `Delete "${deleteTarget.name}"?` : "Delete tag?"}
+        description="This tag will be permanently removed from the catalog and from every object it's assigned to."
+        confirmText="delete"
+        onConfirm={() => {
+          if (deleteTarget) deleteTag.mutate(deleteTarget.id);
+          setDeleteTarget(null);
+        }}
+      />
+    </div>
+  );
+}
+
+function CreateTagDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const createTag = useCreateTag();
+  const [key, setKey] = useState("");
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [color, setColor] = useState(DEFAULT_COLOR);
+  const [error, setError] = useState<string | null>(null);
+
+  function reset() {
+    setKey("");
+    setName("");
+    setDescription("");
+    setColor(DEFAULT_COLOR);
+    setError(null);
+  }
+
+  function handleOpenChange(next: boolean) {
+    if (!next) reset();
+    onOpenChange(next);
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    try {
+      await createTag.mutateAsync({
+        key: key.trim(),
+        name: name.trim(),
+        description: description.trim(),
+        color,
+      });
+      handleOpenChange(false);
+    } catch (err) {
+      setError((err as Error).message ?? "Failed to create tag.");
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogContent>
+        <form onSubmit={handleSubmit}>
+          <DialogHeader>
+            <DialogTitle>New tag</DialogTitle>
+            <DialogDescription>
+              Create a classification tag that can be assigned to data and BI objects.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="my-4 space-y-4">
+            {error && (
+              <Alert variant="destructive">
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+
+            <div className="space-y-1.5">
+              <Label htmlFor="new-tag-key">Key</Label>
+              <Input
+                id="new-tag-key"
+                value={key}
+                onChange={(e) => setKey(e.target.value)}
+                required
+                autoFocus
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="new-tag-name">Name</Label>
+              <Input
+                id="new-tag-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="new-tag-description">Description</Label>
+              <Textarea
+                id="new-tag-description"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="new-tag-color">Color</Label>
+              <Input
+                id="new-tag-color"
+                type="color"
+                className="h-9 w-16 p-1"
+                value={color}
+                onChange={(e) => setColor(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={createTag.isPending}>
+              Create
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function EditTagDialog({
+  tag,
+  onOpenChange,
+}: {
+  tag: Tag | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const updateTag = useUpdateTag();
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [color, setColor] = useState(DEFAULT_COLOR);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (tag) {
+      setName(tag.name);
+      setDescription(tag.description);
+      setColor(tag.color || DEFAULT_COLOR);
+      setError(null);
+    }
+  }, [tag]);
+
+  function handleOpenChange(next: boolean) {
+    if (!next) setError(null);
+    onOpenChange(next);
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!tag) return;
+    setError(null);
+    try {
+      await updateTag.mutateAsync({
+        id: tag.id,
+        name: name.trim(),
+        description: description.trim(),
+        color,
+      });
+      handleOpenChange(false);
+    } catch (err) {
+      setError((err as Error).message ?? "Failed to save tag.");
+    }
+  }
+
+  return (
+    <Dialog open={tag !== null} onOpenChange={handleOpenChange}>
+      <DialogContent>
+        <form onSubmit={handleSubmit}>
+          <DialogHeader>
+            <DialogTitle>Edit tag — {tag?.name}</DialogTitle>
+            <DialogDescription>
+              The key is immutable once a tag is created.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="my-4 space-y-4">
+            {error && (
+              <Alert variant="destructive">
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+
+            <div className="space-y-1.5">
+              <Label htmlFor="edit-tag-key">Key</Label>
+              <Input id="edit-tag-key" value={tag?.key ?? ""} readOnly disabled />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="edit-tag-name">Name</Label>
+              <Input
+                id="edit-tag-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+                autoFocus
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="edit-tag-description">Description</Label>
+              <Textarea
+                id="edit-tag-description"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="edit-tag-color">Color</Label>
+              <Input
+                id="edit-tag-color"
+                type="color"
+                className="h-9 w-16 p-1"
+                value={color}
+                onChange={(e) => setColor(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={updateTag.isPending}>
+              Save
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}

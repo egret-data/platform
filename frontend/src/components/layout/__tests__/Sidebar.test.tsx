@@ -203,6 +203,14 @@ describe("Sidebar – Control Plane Data Governance group", () => {
       "/control-plane/audit-log",
     );
   });
+
+  test("renders the Classifications item at /control-plane/classifications", () => {
+    renderSidebar("/control-plane/workspaces");
+    expect(screen.getByRole("link", { name: "Classifications" })).toHaveAttribute(
+      "href",
+      "/control-plane/classifications",
+    );
+  });
 });
 
 describe("Sidebar – permission-based filtering", () => {
@@ -247,6 +255,7 @@ describe("Sidebar – permission-based filtering", () => {
       "Roles",
       "Permissions",
       "Policies",
+      "Classifications",
       "Audit log",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
