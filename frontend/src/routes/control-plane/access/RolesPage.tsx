@@ -140,6 +140,8 @@ export default function RolesPage() {
     onError: (err) => setDeleteError(err.message ?? "Failed to delete role."),
   });
 
+  const nameById = useMemo(() => new Map(rows.map((r) => [r.id, r.name])), [rows]);
+
   const columns: Column<AccessRole>[] = [
     {
       key: "scope",
@@ -164,6 +166,20 @@ export default function RolesPage() {
           )}
         </>
       ),
+    },
+    {
+      key: "parent",
+      label: "Inherits from",
+      sortable: true,
+      value: (r) => (r.parentRoleId ? (nameById.get(r.parentRoleId) ?? "") : ""),
+      cell: (r) =>
+        r.parentRoleId && nameById.get(r.parentRoleId) ? (
+          <Badge variant="outline" className="font-normal">
+            {nameById.get(r.parentRoleId)}
+          </Badge>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        ),
     },
     {
       key: "description",
@@ -248,8 +264,8 @@ export default function RolesPage() {
       <div>
         <h1 className="text-2xl font-semibold leading-tight">Roles</h1>
         <p className="text-sm text-muted-foreground">
-          Platform and workspace roles, their permission grants, and how many
-          users/groups are assigned.
+          Platform roles apply across all of egret; workspace roles apply inside a single
+          workspace and are assigned per-workspace on that workspace's Members page.
         </p>
       </div>
 

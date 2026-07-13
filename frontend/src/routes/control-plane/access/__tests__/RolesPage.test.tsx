@@ -426,6 +426,42 @@ describe("RolesPage", () => {
     ).not.toBeInTheDocument();
   });
 
+  test("the Inherits from column shows the parent role's name as a chip, and — for a root role", async () => {
+    // A parent role and a child whose parentRoleId points at it.
+    vi.mocked(api.listRoles).mockResolvedValue([
+      {
+        id: "p1",
+        scope: "workspace",
+        name: "base_role",
+        description: "Parent role",
+        permissionCount: 1,
+        assigneeCount: 0,
+        inheritedPermissions: [],
+      },
+      {
+        id: "c1",
+        scope: "workspace",
+        name: "child_role",
+        description: "Inherits from base_role",
+        permissionCount: 2,
+        assigneeCount: 0,
+        parentRoleId: "p1",
+        inheritedPermissions: [],
+      },
+    ]);
+
+    renderPage();
+    await screen.findByText("child_role");
+
+    // The child's row renders the parent's name (base_role) in the Inherits
+    // from column. base_role also appears as its own row's Name cell, so assert
+    // that the parent name is present at least twice (own row + child's chip).
+    expect(screen.getAllByText("base_role").length).toBeGreaterThanOrEqual(2);
+
+    // The root role (base_role, no parentRoleId) renders an em dash placeholder.
+    expect(screen.getByText("—")).toBeInTheDocument();
+  });
+
   test("a non-admin role:read viewer sees a read-only table: no New role button and no Actions menu", async () => {
     const NON_ADMIN_ME: Me = {
       user_id: "2",
