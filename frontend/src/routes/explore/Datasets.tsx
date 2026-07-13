@@ -14,6 +14,7 @@ import { useDatasets, useDataset, useDatasetListMutations, useDeleteDataset, typ
 import { CreateDatasetDialog } from "@/components/dataset/CreateDatasetDialog";
 import { DatasetActionsMenu } from "@/components/dataset/DatasetActionsMenu";
 import { ShareDialog } from "@/components/sharing/ShareDialog";
+import { TagDialog } from "@/components/access/TagEditor";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SortableHeader } from "@/components/explore/SortableHeader";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -48,6 +49,7 @@ export default function Datasets() {
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" }>({ key: "updated_at", dir: "desc" });
   const [pendingDelete, setPendingDelete] = useState<DatasetSummary | null>(null);
   const [shareTarget, setShareTarget] = useState<DatasetSummary | null>(null);
+  const [tagsTarget, setTagsTarget] = useState<DatasetSummary | null>(null);
   const [folderShare, setFolderShare] = useState<{ id: string; name: string } | null>(null);
   const [folderDialog, setFolderDialog] = useState<{ mode: "new" | "rename" | "move" | "bulkmove"; ds?: DatasetSummary; folder?: { id: string; name: string } } | null>(null);
   const [dupId, setDupId] = useState<string | null>(null);
@@ -130,7 +132,8 @@ export default function Datasets() {
         onTrash={(x) => trash.mutateAsync(x.id).then(() => toast.success("Moved to Trash")).catch((e) => toast.error(String(e)))}
         onRestore={(x) => restore.mutateAsync(x.id).catch((e) => toast.error(String(e)))}
         onDeletePermanent={(x) => setPendingDelete(x)}
-        onShare={(x) => setShareTarget(x)} /></td>
+        onShare={(x) => setShareTarget(x)}
+        onTags={(x) => setTagsTarget(x)} /></td>
     </tr>
   );
 
@@ -325,6 +328,17 @@ export default function Datasets() {
           name={folderShare.name}
           open={folderShare !== null}
           onOpenChange={(o) => { if (!o) setFolderShare(null); }}
+        />
+      )}
+
+      {tagsTarget && (
+        <TagDialog
+          ws={ws}
+          kind="dataset"
+          id={tagsTarget.id}
+          name={tagsTarget.name}
+          open={tagsTarget !== null}
+          onOpenChange={(o) => { if (!o) setTagsTarget(null); }}
         />
       )}
     </div>
