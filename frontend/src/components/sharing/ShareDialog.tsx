@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { listPrincipals } from "@/api/policies";
+import { errorStatus } from "@/lib/httpStatus";
 import {
   getSharesGrantListQueryKey,
   useSharesGrantDelete,
@@ -81,15 +82,6 @@ function NoAccessBadge() {
       No access
     </Badge>
   );
-}
-
-/** Narrow the react-query error into an HTTP status if we have one. */
-function errorStatus(err: unknown): number | undefined {
-  if (err && typeof err === "object" && "status" in err) {
-    const s = (err as { status?: unknown }).status;
-    if (typeof s === "number") return s;
-  }
-  return undefined;
 }
 
 interface Props {

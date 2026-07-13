@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { type PermissionCatalogGroup, listPermissions } from "@/api/access";
 import { ApiError } from "@/api/client";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -79,7 +80,7 @@ export default function PermissionsPage() {
           </AlertDescription>
         </Alert>
       ) : permissions.isLoading ? (
-        <p className="text-sm text-muted-foreground">Loading…</p>
+        <ListSkeleton rows={6} cols={3} />
       ) : groups.length === 0 ? (
         <p className="text-sm text-muted-foreground">No permissions defined.</p>
       ) : filteredGroups.length === 0 ? (

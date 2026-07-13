@@ -1,4 +1,4 @@
-import { useMemo, type CSSProperties } from "react";
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 
@@ -6,6 +6,7 @@ import { getWhoCanAccess, type WhoCanAccess as WhoCanAccessData } from "@/api/wh
 import { useWorkspaceShares } from "@/api/workspaceAccess";
 import { adminWorkspacesListWs } from "@/api/generated/admin-workspaces/admin-workspaces";
 import type { WorkspaceDto } from "@/api/generated/model";
+import { EffectBadge } from "@/components/access/EffectBadge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -17,15 +18,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Column, FilterableTable } from "@/components/explore/FilterableTable";
-
-/** Narrow a react-query error into an HTTP status when one is present. */
-function errorStatus(err: unknown): number | undefined {
-  if (err && typeof err === "object" && "status" in err) {
-    const s = (err as { status?: unknown }).status;
-    if (typeof s === "number") return s;
-  }
-  return undefined;
-}
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { errorStatus } from "@/lib/httpStatus";
 
 /**
  * Turn an access-entry `source` ("direct" | "workspace:{slug}" | "platform")
@@ -41,27 +35,6 @@ function sourceLabel(source: string): string {
 /** Muted source suffix, e.g. "direct grant" / "via workspace demo" / "platform admin". */
 function SourceSuffix({ source }: { source: string }) {
   return <span className="text-xs text-muted-foreground">{sourceLabel(source)}</span>;
-}
-
-const allowStyle: CSSProperties = {
-  backgroundColor: "color-mix(in oklab, var(--success) 16%, transparent)",
-  color: "var(--success)",
-  borderColor: "color-mix(in oklab, var(--success) 32%, transparent)",
-};
-const denyStyle: CSSProperties = {
-  backgroundColor: "color-mix(in oklab, var(--destructive) 16%, transparent)",
-  color: "var(--destructive)",
-  borderColor: "color-mix(in oklab, var(--destructive) 32%, transparent)",
-};
-
-/** allow/deny badge tinted with the semantic success/destructive token. */
-function EffectBadge({ effect }: { effect: string }) {
-  const deny = effect === "deny";
-  return (
-    <Badge className="border font-normal" style={deny ? denyStyle : allowStyle}>
-      {effect}
-    </Badge>
-  );
 }
 
 /**
@@ -120,7 +93,7 @@ export default function WhoCanAccess() {
           Pick an object to see who can access it.
         </p>
       ) : q.isLoading ? (
-        <p className="py-10 text-center text-sm text-muted-foreground">Loading…</p>
+        <ListSkeleton rows={4} cols={4} />
       ) : forbidden ? (
         <Alert variant="destructive">
           <AlertDescription>
