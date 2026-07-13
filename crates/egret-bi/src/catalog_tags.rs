@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use crate::error::BiApiError;
 use crate::routes::BiState;
+use crate::shares::TagDto;
 use crate::tags::Tag;
 
 /// The catalog-manage permission gating catalog-tag WRITES (assign/unassign);
@@ -240,18 +241,14 @@ fn list_select(predicate: &str) -> String {
 // ── Endpoints ────────────────────────────────────────────────────────────────
 
 /// A catalog resource tag on the wire (snake_case). `column` is empty for a
-/// table-level tag.
+/// table-level tag. The tag itself is nested under `tag` (the full P3.1 tag
+/// shape, matching the FE `Tag` type) so the browse UI can read `a.tag`.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ResourceTagDto {
     pub schema: String,
     pub table: String,
     pub column: String,
-    pub tag_id: Uuid,
-    pub key: String,
-    pub name: String,
-    pub description: String,
-    pub color: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub tag: TagDto,
 }
 
 impl From<CatalogTagAssignment> for ResourceTagDto {
@@ -260,12 +257,7 @@ impl From<CatalogTagAssignment> for ResourceTagDto {
             schema: a.schema,
             table: a.table,
             column: a.column,
-            tag_id: a.tag.id,
-            key: a.tag.key,
-            name: a.tag.name,
-            description: a.tag.description,
-            color: a.tag.color,
-            created_at: a.tag.created_at,
+            tag: a.tag.into(),
         }
     }
 }

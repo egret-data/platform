@@ -218,6 +218,33 @@ async fn resource_tag_assign_list_unassign_and_gating() {
         "GET must distinguish the column tag (email) from the table tag (empty column); got {listed}"
     );
 
+    // 3a. BOUNDARY: the wire shape MUST nest the tag under `tag` (the FE reads
+    // `a.tag.id` — a flat DTO would crash the browse UI). Deserialize and assert
+    // the nested structure by field, not by substring.
+    let parsed: serde_json::Value = serde_json::from_str(&listed).expect("resource-tags is JSON");
+    let arr = parsed.as_array().expect("resource-tags is a JSON array");
+    let col_entry = arr
+        .iter()
+        .find(|e| e["column"] == "email")
+        .expect("an entry for the email column");
+    assert_eq!(
+        col_entry["tag"]["id"],
+        serde_json::json!(col_tag.id.to_string()),
+        "the tag must be nested under `tag` with the column tag's id; got {col_entry}"
+    );
+    assert_eq!(
+        col_entry["tag"]["name"], "Secret",
+        "nested `tag.name` must be the column tag's name; got {col_entry}"
+    );
+    assert_eq!(
+        col_entry["column"], "email",
+        "the entry's column coordinate must be `email`; got {col_entry}"
+    );
+    assert!(
+        col_entry.get("tag_id").is_none() && col_entry["tag"].get("key").is_some(),
+        "the DTO must be nested (no flat `tag_id`; `tag` carries the full tag shape); got {col_entry}"
+    );
+
     // 4. A plain user (no warehouse perm) PUT → 403.
     let resp = app
         .clone()
