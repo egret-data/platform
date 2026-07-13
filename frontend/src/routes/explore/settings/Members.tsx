@@ -288,8 +288,10 @@ export default function Members() {
           className="rounded-md border border-highlight/40 bg-highlight/5 px-3 py-2 text-xs text-muted-foreground"
           role="note"
         >
-          Workspace roles apply only inside <span className="font-medium">{ws}</span>.
-          Platform-wide access is granted separately in Control Plane → Access control.
+          Workspace roles apply only inside <span className="font-medium">{ws}</span> — see the{" "}
+          <span className="font-medium">Roles &amp; permissions</span> tab for what each grants.
+          Platform-wide access is granted separately in{" "}
+          <span className="font-medium">Control Plane → Access control</span>.
         </div>
       </header>
 
