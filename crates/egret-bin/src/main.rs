@@ -1027,6 +1027,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let workspace = WorkspaceState {
         workspaces: WorkspaceRepo::new(db.clone()),
         members: MemberRepo::new(db.clone()),
+        access_views: egret_workspace::access_views::AccessViewsRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
         pdp: pdp.clone(),
         users: users.clone(),
