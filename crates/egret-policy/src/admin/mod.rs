@@ -24,8 +24,8 @@ use egret_core::http::ErrorBody;
 use crate::PolicyStore;
 pub use error::PolicyHttpError;
 pub use ranger_json::{
-    editor_to_ranger_json, masking_to_ranger_json, rowfilter_to_ranger_json, MaskingPolicyInput,
-    RangerPolicy, RowFilterPolicyInput,
+    editor_to_ranger_json, is_tag_kind, masking_to_ranger_json, rowfilter_to_ranger_json,
+    tag_editor_to_ranger_json, MaskingPolicyInput, RangerPolicy, RowFilterPolicyInput,
 };
 pub use reader::{EngineBinding, EngineBindingReader, EngineReadError};
 use std::sync::Arc;
@@ -114,9 +114,17 @@ pub fn summarize_policy(id: i64, service: &str, enabled: bool, body: &Value) -> 
         .filter_map(|k| level(k))
         .collect::<Vec<_>>()
         .join(".");
-    // Non-table resources (trinouser, function, procedure, queryid, …) don't fit
-    // the catalog.schema.table.column path — surface them as "type: value" so the
-    // list view isn't blank for e.g. impersonation policies.
+    // Tag policies (Access P3.2) key on a single `tag` resource rather than the
+    // catalog.schema.table.column path — surface it as "tag: <name>" so the
+    // Policies list isn't blank for a tag-based mask/row/access policy.
+    if resource_path.is_empty() {
+        if let Some(tag) = level("tag") {
+            resource_path = format!("tag: {tag}");
+        }
+    }
+    // Other non-table resources (trinouser, function, procedure, queryid, …)
+    // don't fit the catalog.schema.table.column path — surface them as
+    // "type: value" so the list view isn't blank for e.g. impersonation policies.
     if resource_path.is_empty() {
         if let Some(obj) = res {
             for (k, v) in obj {
@@ -727,6 +735,36 @@ pub struct SeedResult {
     pub created: i64,
 }
 
+/// Resolve the tag service a tag policy is stored under and build its body.
+/// The editor form's `service` is the trino PROFILE; its tag service is that
+/// profile's `config.tagService` link, falling back to the `<profile>_tag`
+/// naming convention. Returns the tag `ServiceRow` + the serialized policy
+/// (body bound to the tag service, `serviceType:"tag"`).
+async fn resolve_tag_service_and_body(
+    st: &PolicyAdminState,
+    v: &Value,
+) -> Result<(crate::store::ServiceRow, RangerPolicy), PolicyHttpError> {
+    let profile = v
+        .get("service")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            PolicyHttpError::BadRequest("tag policy requires a `service` (trino profile)".into())
+        })?;
+    let trino = st.store.get_service(profile).await?;
+    let tag_service_name = trino
+        .config_jsonb
+        .get("tagService")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{profile}_tag"));
+    let tag_svc = st.store.get_service(&tag_service_name).await?;
+    let pol = tag_editor_to_ranger_json(v, &tag_svc.name).map_err(PolicyHttpError::BadRequest)?;
+    Ok((tag_svc, pol))
+}
+
 /// POST /policies — create an Access/Masking/Row-filter policy (by `kind`).
 ///
 /// Missing `kind` defaults to "access" (see `editor_to_ranger_json`), so the
@@ -757,6 +795,27 @@ async fn create_policy(
     Json(v): Json<Value>,
 ) -> Result<Json<Value>, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:create").await?;
+
+    // Tag policies (Access P3.2) are authored against a trino profile but stored
+    // under that profile's tag service. Resolve the tag service, build the
+    // `serviceType:"tag"` body, and store it there. The generic access/masking/
+    // rowfilter path below is unchanged.
+    if is_tag_kind(&v) {
+        let (svc, pol) = resolve_tag_service_and_body(&st, &v).await?;
+        if pol.name.trim().is_empty() {
+            return Err(PolicyHttpError::BadRequest(
+                "policy name is required".into(),
+            ));
+        }
+        let id = st.store.create_policy(svc.id, &pol.name, &pol.body).await?;
+        if !pol.is_enabled {
+            st.store
+                .update_policy(id, &pol.name, &pol.body, false)
+                .await?;
+        }
+        return Ok(Json(json!({ "id": id })));
+    }
+
     let pol = editor_to_ranger_json(&v).map_err(PolicyHttpError::BadRequest)?;
     if pol.name.trim().is_empty() {
         return Err(PolicyHttpError::BadRequest(
