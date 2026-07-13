@@ -30,6 +30,7 @@ import WorkspaceSettings from "@/routes/explore/settings/WorkspaceSettings";
 import Members from "@/routes/explore/settings/Members";
 import RolesPermissions from "@/routes/explore/settings/RolesPermissions";
 import SharedObjects from "@/routes/explore/settings/SharedObjects";
+import AccessRequests from "@/routes/explore/settings/AccessRequests";
 import { Placeholder } from "@/routes/Placeholder";
 import ControlPlaneEngines from "@/routes/control-plane/ControlPlaneEngines";
 import EngineDetail from "@/routes/control-plane/EngineDetail";
@@ -88,6 +89,7 @@ function ExploreRoutes() {
             <Route path="members" element={<Members />} />
             <Route path="roles" element={<RolesPermissions />} />
             <Route path="shares" element={<SharedObjects />} />
+            <Route path="requests" element={<AccessRequests />} />
           </Route>
           <Route path="*" element={<Navigate to="sql-lab" replace />} />
         </Routes>

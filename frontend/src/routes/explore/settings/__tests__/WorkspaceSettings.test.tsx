@@ -37,10 +37,19 @@ vi.mock("@/components/sharing/ShareDialog", () => ({
   ShareDialog: () => null,
 }));
 
+const requestsMock = vi.fn();
+
+vi.mock("@/api/accessRequests", () => ({
+  useWorkspaceRequests: (...args: unknown[]) => requestsMock(...args),
+  useApproveRequest: () => ({ mutate: vi.fn(), isPending: false }),
+  useDenyRequest: () => ({ mutate: vi.fn(), isPending: false }),
+}));
+
 import WorkspaceSettings from "@/routes/explore/settings/WorkspaceSettings";
 import Members from "@/routes/explore/settings/Members";
 import RolesPermissions from "@/routes/explore/settings/RolesPermissions";
 import SharedObjects from "@/routes/explore/settings/SharedObjects";
+import AccessRequests from "@/routes/explore/settings/AccessRequests";
 
 // ── Render helper ─────────────────────────────────────────────────────────────
 
@@ -56,6 +65,7 @@ function renderAt(path: string) {
               <Route path="members" element={<Members />} />
               <Route path="roles" element={<RolesPermissions />} />
               <Route path="shares" element={<SharedObjects />} />
+              <Route path="requests" element={<AccessRequests />} />
             </Route>
           </Routes>
         </MemoryRouter>
@@ -72,9 +82,11 @@ beforeEach(() => {
   membersMock.mockReset();
   rolesMock.mockReset();
   authMock.mockReset();
+  requestsMock.mockReset();
 
   roleCatalogMock.mockReturnValue({ data: [], isLoading: false, isError: false, error: null });
   sharesMock.mockReturnValue({ data: [], isLoading: false, isError: false, error: null });
+  requestsMock.mockReturnValue({ data: [], isLoading: false, isError: false, error: null });
   membersMock.mockReturnValue({ data: [], isLoading: false, isError: false, error: null });
   rolesMock.mockReturnValue({ data: [], isLoading: false, isError: false });
   authMock.mockReturnValue({
@@ -92,6 +104,7 @@ describe("WorkspaceSettings tab navigation", () => {
     expect(screen.getByRole("link", { name: "Members" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Roles & permissions" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Shared objects" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Requests" })).toBeInTheDocument();
   });
 
   it("marks Roles & permissions active at /roles, and Members not active", () => {
