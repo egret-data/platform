@@ -1,0 +1,285 @@
+//! Catalog resource-tag control-plane endpoints (Access P3.2). DB-gated;
+//! self-skips without DATABASE_URL. Builds a REAL `CedarPdp` after `migrate()`.
+//!
+//! Proves: a platform_admin (holds `warehouse:update`/`warehouse:read` via the
+//! PDP bypass) PUTs a table-level and a column-level tag → 200; GET
+//! `?schema=&table=` lists BOTH (distinguishing table vs column); DELETE removes
+//! one → 200 (GET then omits it). A plain user (no warehouse perm) PUT → 403.
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use egret_bi::{
+    BiState, ChartRepo, DashboardRepo, DatasetRepo, SavedQueryRepo, SchemaService, TagRepo,
+};
+use egret_metastore::Db;
+use std::sync::Arc;
+use tower::ServiceExt;
+use uuid::Uuid;
+
+struct NoMinter;
+#[async_trait::async_trait]
+impl egret_analytics_api::engine_token::EngineTokenMinter for NoMinter {
+    async fn mint(
+        &self,
+        _user: uuid::Uuid,
+    ) -> Result<
+        egret_analytics_api::engine_token::EngineToken,
+        egret_analytics_api::engine_token::BrokerError,
+    > {
+        Err(egret_analytics_api::engine_token::BrokerError::NoRefreshToken)
+    }
+}
+
+fn build_state(db: Db, pdp: Arc<dyn egret_core::authz::Pdp>) -> BiState {
+    BiState {
+        db: db.clone(),
+        users: egret_auth::users::UserRepo::new(db.clone()),
+        engine_minter: Arc::new(NoMinter),
+        saved: SavedQueryRepo::new(db.clone()),
+        schema: SchemaService::new(),
+        databases: egret_query::DatabaseRepo::new(
+            db.clone(),
+            egret_secrets::SecretStore::new(db.clone(), None),
+            egret_secrets::WorkspaceSecretStore::new(
+                db.clone(),
+                egret_secrets::SecretStore::new(db.clone(), None),
+            ),
+        ),
+        sessions: egret_auth::session::SessionService::new(
+            db.clone(),
+            chrono::Duration::hours(24),
+            chrono::Duration::minutes(60),
+        ),
+        workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
+        authz: egret_workspace::rbac::Authorizer::new(db.clone()),
+        pdp,
+        charts: ChartRepo::new(db.clone()),
+        datasets: DatasetRepo::new(db.clone()),
+        dashboards: DashboardRepo::new(db.clone()),
+        folders: egret_bi::folder::FolderRepo::new(db),
+        audit: egret_audit::AuditSink::new(16).0,
+    }
+}
+
+/// Insert a user; when `admin` grant it platform_admin (PDP bypass).
+async fn seed_user(db: &Db, admin: bool) -> Uuid {
+    let uid: Uuid =
+        sqlx::query_scalar("INSERT INTO users (provider, email) VALUES ('local', $1) RETURNING id")
+            .bind(format!("u_{}@egret.local", Uuid::new_v4().simple()))
+            .fetch_one(&db.pool)
+            .await
+            .expect("insert user");
+    if admin {
+        sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+             SELECT 'user', $1, id, 'platform', NULL FROM roles WHERE scope='platform' AND name='platform_admin'",
+        )
+        .bind(uid)
+        .execute(&db.pool)
+        .await
+        .expect("grant platform_admin");
+    }
+    uid
+}
+
+async fn session_for(sessions: &egret_auth::session::SessionService, uid: Uuid) -> String {
+    sessions
+        .create(egret_core::ids::UserId(uid), "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token
+}
+
+async fn body_string(resp: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+#[tokio::test]
+async fn resource_tag_assign_list_unassign_and_gating() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    let admin = seed_user(&db, true).await;
+    let plain = seed_user(&db, false).await;
+
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let st = build_state(db.clone(), pdp);
+    let sessions = st.sessions.clone();
+
+    // Two tags: one for the table, one for a column.
+    let tags = TagRepo::new(db.clone());
+    let tbl_tag = tags
+        .create(
+            &format!("pii-{}", Uuid::new_v4().simple()),
+            "PII",
+            "Personal data",
+            "#ff0000",
+            Some(admin),
+        )
+        .await
+        .expect("create table tag");
+    let col_tag = tags
+        .create(
+            &format!("secret-{}", Uuid::new_v4().simple()),
+            "Secret",
+            "Secret column",
+            "#00ff00",
+            Some(admin),
+        )
+        .await
+        .expect("create column tag");
+
+    let wh = Uuid::new_v4();
+    let admin_tok = session_for(&sessions, admin).await;
+    let plain_tok = session_for(&sessions, plain).await;
+
+    let app = egret_bi::resource_tags_router().with_state(st);
+    let uri = format!("/control-plane/warehouses/{wh}/resource-tags");
+
+    // 1. platform_admin assigns a TABLE-level tag (no column) → 200.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&uri)
+                .header("Cookie", format!("egret_session={admin_tok}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "schema": "analytics", "table": "orders", "tag_id": tbl_tag.id
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let s = resp.status();
+    assert!(
+        s.is_success(),
+        "platform_admin must assign a table tag; got {s}: {}",
+        body_string(resp).await
+    );
+
+    // 2. platform_admin assigns a COLUMN-level tag → 200.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&uri)
+                .header("Cookie", format!("egret_session={admin_tok}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "schema": "analytics", "table": "orders",
+                        "column": "email", "tag_id": col_tag.id
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "assign column tag");
+
+    // 3. GET lists BOTH: the table tag (empty column) and the column tag.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("{uri}?schema=analytics&table=orders"))
+                .header("Cookie", format!("egret_session={admin_tok}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let listed = body_string(resp).await;
+    assert!(
+        listed.contains(&tbl_tag.id.to_string()) && listed.contains(&col_tag.id.to_string()),
+        "GET must list both the table and column tags; got {listed}"
+    );
+    assert!(
+        listed.contains("\"column\":\"email\"") && listed.contains("\"column\":\"\""),
+        "GET must distinguish the column tag (email) from the table tag (empty column); got {listed}"
+    );
+
+    // 4. A plain user (no warehouse perm) PUT → 403.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&uri)
+                .header("Cookie", format!("egret_session={plain_tok}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "schema": "analytics", "table": "orders", "tag_id": tbl_tag.id
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a user without warehouse:update must NOT tag a catalog resource"
+    );
+
+    // 5. DELETE the column tag → 200, then GET no longer lists it (table tag stays).
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(&uri)
+                .header("Cookie", format!("egret_session={admin_tok}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "schema": "analytics", "table": "orders",
+                        "column": "email", "tag_id": col_tag.id
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "unassign column tag");
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("{uri}?schema=analytics&table=orders"))
+                .header("Cookie", format!("egret_session={admin_tok}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let listed = body_string(resp).await;
+    assert!(
+        !listed.contains(&col_tag.id.to_string()) && listed.contains(&tbl_tag.id.to_string()),
+        "after unassign, GET drops the column tag but keeps the table tag; got {listed}"
+    );
+}

@@ -1,5 +1,6 @@
 //! BI layer: SQL Lab (saved queries + schema introspection) and dataset persistence.
 
+pub mod catalog_tags;
 pub mod chart;
 pub mod chartquery;
 mod dashboard;
@@ -15,6 +16,7 @@ pub mod shares;
 pub mod tags;
 mod typegen;
 
+pub use catalog_tags::{resource_tags_router, CatalogTagAssignment, CatalogTagRepo};
 pub use chart::{Chart, ChartRepo};
 pub use dashboard::{Dashboard, DashboardCard, DashboardRepo, DashboardTab, NewCard, NewTab};
 pub use dataset::{Dataset, DatasetColumn, DatasetRepo, Metric, NewColumn, SourceSpec};
@@ -38,6 +40,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     doc.merge(routes::BiSqlLabApi::openapi());
     doc.merge(routes::BiDashboardApi::openapi());
     doc.merge(shares::BiSharesApi::openapi());
+    doc.merge(catalog_tags::CatalogTagsApi::openapi());
     doc
 }
 pub use saved::{SavedQuery, SavedQueryRepo};
