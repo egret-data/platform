@@ -52,6 +52,12 @@ pub struct TagDto {
     /// empty on the create/update responses (those don't touch the policy).
     #[serde(default)]
     pub required_roles: Vec<String>,
+    /// Classification clearance by GROUP (Access P3.4): group ids (as strings) a
+    /// principal needs to belong to `>= 1` of to access objects carrying this tag.
+    /// Cleared = `>= 1` required role OR `>= 1` required group; both empty = no
+    /// gate. Populated by the tag list from `list_policies`.
+    #[serde(default)]
+    pub required_groups: Vec<String>,
 }
 
 impl From<Tag> for TagDto {
@@ -65,6 +71,7 @@ impl From<Tag> for TagDto {
             assignment_count: t.assignment_count,
             created_at: t.created_at.to_rfc3339(),
             required_roles: Vec::new(),
+            required_groups: Vec::new(),
         }
     }
 }
@@ -105,18 +112,22 @@ async fn list_tags(State(st): State<CpState>, Auth(p): Auth) -> Result<Json<Vec<
     let tags = st.tags.list().await?;
     // Overlay each tag's classification access policy (Access P3.3) so the FE can
     // show which tags are gated. One extra query, joined in memory by tag id.
-    let policies: std::collections::HashMap<Uuid, Vec<String>> = st
+    let policies: std::collections::HashMap<Uuid, (Vec<String>, Vec<Uuid>)> = st
         .classification_policies
         .list_policies()
         .await?
         .into_iter()
+        .map(|(id, roles, groups)| (id, (roles, groups)))
         .collect();
     Ok(Json(
         tags.into_iter()
             .map(|t| {
-                let required_roles = policies.get(&t.id).cloned().unwrap_or_default();
+                let (required_roles, required_groups) =
+                    policies.get(&t.id).cloned().unwrap_or_default();
                 let mut dto = TagDto::from(t);
                 dto.required_roles = required_roles;
+                // Emit group ids as strings so the FE consumes a single type.
+                dto.required_groups = required_groups.iter().map(|g| g.to_string()).collect();
                 dto
             })
             .collect(),
@@ -215,9 +226,14 @@ async fn delete_tag(
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 struct SetAccessPolicy {
     /// Clearance role NAMES; a principal needs `>= 1` to access objects carrying
-    /// this tag. Empty = no gate (informational tag only).
+    /// this tag. Cleared = `>= 1` role OR `>= 1` group; both empty = no gate.
     #[serde(default)]
     required_roles: Vec<String>,
+    /// Clearance GROUP ids (as strings; Access P3.4). Each is parsed as a `Uuid`
+    /// before hitting the repo — a non-uuid entry is rejected `400 BadRequest`
+    /// (never spliced unvalidated into a Cedar policy string).
+    #[serde(default)]
+    required_groups: Vec<String>,
 }
 
 #[utoipa::path(
@@ -240,11 +256,27 @@ async fn set_access_policy(
     Json(body): Json<SetAccessPolicy>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "tag:manage").await?;
+    // SECURITY (Access P3.4): parse each group id as a `Uuid` BEFORE it reaches
+    // the repo / Cedar policy string. A non-uuid entry is rejected `400` — never
+    // splice unvalidated text into a Cedar policy (the P3.3 injection lesson).
+    let required_groups = body
+        .required_groups
+        .iter()
+        .map(|g| {
+            Uuid::parse_str(g)
+                .map_err(|_| CpError::BadRequest(format!("required_groups must be uuids: {g:?}")))
+        })
+        .collect::<Result<Vec<Uuid>, _>>()?;
     // The repo publishes `RolesChanged` on the shared bus so the Cedar PDP
     // reloads its policy set (the SAME reload event the role/permission CRUD
-    // emits) — a future PDP loader reading `classification_policies` stays fresh.
+    // emits) — the PDP loader reading `classification_policies` stays fresh.
     st.classification_policies
-        .set_policy(id, &body.required_roles, Some(p.user_id.0))
+        .set_policy(
+            id,
+            &body.required_roles,
+            &required_groups,
+            Some(p.user_id.0),
+        )
         .await?;
     Ok(StatusCode::OK)
 }

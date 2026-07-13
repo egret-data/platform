@@ -49,11 +49,18 @@ pub fn deny_template_for_role(role_name: &str, scope: &str, perms: &[String]) ->
 }
 
 /// The Cedar `forbid` body for a **classification (clearance) policy** (Access
-/// P3.3): a resource carrying `tag_key` is FORBIDDEN unless the request context
-/// either lists one of `required_roles` OR carries the scope-correct
-/// `is_platform_admin` flag (so a platform superuser is never locked out).
-/// Deny-wins holds (Cedar forbid > permit), so this overrides any permit that
-/// would otherwise grant access to a tagged object.
+/// P3.3 + P3.4): a resource carrying `tag_key` is FORBIDDEN unless the request
+/// context either lists one of `required_roles`, belongs to one of
+/// `required_groups`, OR carries the scope-correct `is_platform_admin` flag (so a
+/// platform superuser is never locked out). Deny-wins holds (Cedar forbid >
+/// permit), so this overrides any permit that would otherwise grant access to a
+/// tagged object.
+///
+/// CLEARANCE model (P3.4): in egret, OIDC groups model departments. A principal
+/// is cleared if they hold a required ROLE **OR** belong to a required GROUP —
+/// the two disjuncts are OR-ed. If `required_groups` is empty its disjunct is
+/// OMITTED entirely (never `containsAny([])`, which would be a vacuous `false`
+/// and — being harmless — is skipped for clarity); likewise `required_roles`.
 ///
 /// The platform-admin exemption is keyed on `context.is_platform_admin` — a flag
 /// the PDP computes scope-correctly (platform scope + name `platform_admin`) —
@@ -61,19 +68,49 @@ pub fn deny_template_for_role(role_name: &str, scope: &str, perms: &[String]) ->
 /// role that merely happens to be named `platform_admin` therefore CANNOT bypass
 /// the gate (its name would land in `context.roles`, but never sets the flag).
 ///
-/// `has` guards (`resource has tags`, `context has roles`,
+/// `has` guards (`resource has tags`, `context has roles`, `context has groups`,
 /// `context has is_platform_admin`) keep the policy inert on a resource/context
 /// lacking the attribute rather than erroring. `tag_key` and the role names are
-/// admin-defined **validated** identifiers (lowercase alnum/`:`/`_`/`-`), but are
-/// still emitted as quoted Cedar string literals.
-pub fn classification_forbid(tag_key: &str, required_roles: &[String]) -> String {
-    let roles: Vec<String> = required_roles.iter().map(|r| format!("\"{r}\"")).collect();
-    let roles = roles.join(", ");
+/// admin-defined **validated** identifiers (lowercase alnum/`:`/`_`/`-`); the
+/// group ids are `Uuid`-typed (read from a `uuid[]` column, inherently valid) —
+/// all are emitted as quoted Cedar string literals.
+pub fn classification_forbid(
+    tag_key: &str,
+    required_roles: &[String],
+    required_groups: &[uuid::Uuid],
+) -> String {
+    // Each clearance disjunct is a `context.X.containsAny([..])` guarded by a
+    // `context has X`. Emit a disjunct ONLY for a non-empty list.
+    let mut disjuncts: Vec<String> = Vec::new();
+    if !required_roles.is_empty() {
+        let roles = required_roles
+            .iter()
+            .map(|r| format!("\"{r}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        disjuncts.push(format!(
+            "(context has roles && context.roles.containsAny([{roles}]))"
+        ));
+    }
+    if !required_groups.is_empty() {
+        // Group ids are `Uuid`-typed (not free text) so splicing them as quoted
+        // string literals is injection-safe by construction.
+        let groups = required_groups
+            .iter()
+            .map(|g| format!("\"{g}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        disjuncts.push(format!(
+            "(context has groups && context.groups.containsAny([{groups}]))"
+        ));
+    }
+    // The scope-correct platform_admin exemption is ALWAYS present.
+    disjuncts.push("(context has is_platform_admin && context.is_platform_admin)".to_string());
+    let unless = disjuncts.join(" || ");
     format!(
         "forbid(principal, action, resource) \
          when {{ resource has tags && resource.tags.contains(\"{tag_key}\") }} \
-         unless {{ (context has roles && context.roles.containsAny([{roles}])) \
-             || (context has is_platform_admin && context.is_platform_admin) }};"
+         unless {{ {unless} }};"
     )
 }
 
@@ -156,7 +193,7 @@ mod tests {
         // scope-correctly by the PDP), NOT on a bare `"platform_admin"` role name
         // in `context.roles`. So the emitted string must (a) reference the flag in
         // a disjunction and (b) NOT append the bare name literal.
-        let s = classification_forbid("confidential", &["finance_cleared".into()]);
+        let s = classification_forbid("confidential", &["finance_cleared".into()], &[]);
         assert!(
             s.contains("context has is_platform_admin && context.is_platform_admin"),
             "forbid must gate on the scope-correct is_platform_admin flag, got: {s}"
@@ -169,8 +206,55 @@ mod tests {
             !s.contains("\"platform_admin\""),
             "forbid must NOT append a bare platform_admin role literal, got: {s}"
         );
+        // With no required_groups, the group disjunct is omitted entirely.
+        assert!(
+            !s.contains("context.groups"),
+            "empty required_groups must omit the group disjunct, got: {s}"
+        );
         // It must parse as a Cedar policy.
         cedar_policy::Policy::parse(None, &s).expect("classification forbid parses");
+    }
+
+    #[test]
+    fn classification_forbid_emits_group_disjunct_and_parses() {
+        // P3.4: a group-only gate emits a `context.groups.containsAny([<uuid>])`
+        // disjunct (guarded by `context has groups`), NO roles disjunct, and still
+        // carries the platform_admin flag exemption.
+        let g1 = uuid::Uuid::new_v4();
+        let g2 = uuid::Uuid::new_v4();
+        let s = classification_forbid("confidential", &[], &[g1, g2]);
+        assert!(
+            s.contains(&format!("context.groups.containsAny([\"{g1}\", \"{g2}\"])")),
+            "forbid must honor the required clearance groups as quoted uuids, got: {s}"
+        );
+        assert!(
+            s.contains("context has groups"),
+            "group disjunct must be `has`-guarded, got: {s}"
+        );
+        assert!(
+            !s.contains("context.roles"),
+            "an empty required_roles must omit the roles disjunct, got: {s}"
+        );
+        assert!(
+            s.contains("context has is_platform_admin && context.is_platform_admin"),
+            "the platform_admin exemption stays, got: {s}"
+        );
+        cedar_policy::Policy::parse(None, &s).expect("group classification forbid parses");
+    }
+
+    #[test]
+    fn classification_forbid_both_roles_and_groups_disjoined() {
+        // Both lists non-empty → roles OR groups OR admin-flag.
+        let g1 = uuid::Uuid::new_v4();
+        let s = classification_forbid("confidential", &["finance_cleared".into()], &[g1]);
+        assert!(s.contains("context.roles.containsAny([\"finance_cleared\"])"));
+        assert!(s.contains(&format!("context.groups.containsAny([\"{g1}\"])")));
+        // The two clearance disjuncts must be OR-ed (not AND-ed).
+        assert!(
+            s.contains(")) || ((context has groups") || s.contains(")) || (context has groups"),
+            "roles and groups disjuncts must be OR-ed, got: {s}"
+        );
+        cedar_policy::Policy::parse(None, &s).expect("combined classification forbid parses");
     }
 
     #[test]
@@ -182,7 +266,7 @@ mod tests {
         // bare-name vs flag).
         let policy = cedar_policy::Policy::parse(
             Some("classification:test".parse().unwrap()),
-            classification_forbid("confidential", &["finance_cleared".into()]),
+            classification_forbid("confidential", &["finance_cleared".into()], &[]),
         )
         .unwrap();
         let mut ps = PolicySet::new();

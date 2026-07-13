@@ -216,17 +216,17 @@ impl TagRepo {
     }
 }
 
-/// Store for **classification access policies** (Access P3.3): one row per tag
-/// binding it to a set of clearance role NAMES. Semantics: a principal must hold
-/// `>= 1` of `required_roles` to access objects carrying that tag. An **empty**
-/// `required_roles` list is NO gate (the tag is informational only) — enforcement
-/// applies only when the list is non-empty.
+/// Store for **classification access policies** (Access P3.3 + P3.4): one row per
+/// tag binding it to a set of clearance role NAMES and/or clearance GROUP ids.
+/// Semantics: a principal is CLEARED for objects carrying the tag iff they hold
+/// `>= 1` of `required_roles` **OR** belong to `>= 1` of `required_groups` (in
+/// egret OIDC groups model departments). BOTH lists **empty** is NO gate (the tag
+/// is informational only) — enforcement applies only when at least one is set.
 ///
-/// MODEL + CRUD ONLY in this task: no authorization decision reads this table yet
-/// (the Cedar PDP loader that consumes `list_policies` is a later task). Mutations
-/// publish [`RolesChanged`] on the shared bus — the SAME reload event the Cedar
-/// PDP already subscribes to — so a future `load_inner` reading this table stays
-/// fresh with no extra plumbing, exactly as the role/permission CRUD does.
+/// The Cedar PDP `load_inner` consumes `list_policies` to compile one `forbid` per
+/// gated tag. Mutations publish [`RolesChanged`] on the shared bus — the SAME
+/// reload event the PDP subscribes to — so the compiled policy set stays fresh
+/// with no extra plumbing, exactly as the role/permission CRUD does.
 #[derive(Clone)]
 pub struct ClassificationPolicyRepo {
     db: Db,
@@ -259,31 +259,41 @@ impl ClassificationPolicyRepo {
         Self { db, bus }
     }
 
-    /// UPSERT the required-role list for `tag_id` (INSERT ... ON CONFLICT (tag_id)
-    /// DO UPDATE). Publishes `RolesChanged` so the PDP reloads its policy set.
+    /// UPSERT the required-role and required-group lists for `tag_id` (INSERT ...
+    /// ON CONFLICT (tag_id) DO UPDATE). Publishes `RolesChanged` so the PDP
+    /// reloads its policy set.
     ///
     /// Every entry in `required_roles` is validated against a safe role-name
     /// charset BEFORE the INSERT (so the CP handler and any other caller are all
     /// covered) — a single bad entry rejects the whole call with `BadRequest`,
-    /// preventing Cedar policy-string injection in the PDP loader.
+    /// preventing Cedar policy-string injection in the PDP loader. `required_groups`
+    /// are already-typed `Uuid`s (a `uuid[]` column can only hold valid uuids), so
+    /// the parse-validation of the string→uuid boundary happens in the CRUD layer.
+    ///
+    /// CLEARANCE (Access P3.4): cleared = >=1 required ROLE OR >=1 required GROUP.
+    /// BOTH lists empty = NO gate (informational tag only).
     pub async fn set_policy(
         &self,
         tag_id: Uuid,
         required_roles: &[String],
+        required_groups: &[Uuid],
         by: Option<Uuid>,
     ) -> Result<(), BiError> {
         for role in required_roles {
             validate_role_name(role)?;
         }
         sqlx::query(
-            "INSERT INTO classification_policies (tag_id, required_roles, created_by, updated_at) \
-             VALUES ($1, $2, $3, now()) \
+            "INSERT INTO classification_policies \
+                 (tag_id, required_roles, required_groups, created_by, updated_at) \
+             VALUES ($1, $2, $3, $4, now()) \
              ON CONFLICT (tag_id) DO UPDATE SET \
                  required_roles = EXCLUDED.required_roles, \
+                 required_groups = EXCLUDED.required_groups, \
                  updated_at = now()",
         )
         .bind(tag_id)
         .bind(required_roles)
+        .bind(required_groups)
         .bind(by)
         .execute(&self.db.pool)
         .await?;
@@ -302,23 +312,29 @@ impl ClassificationPolicyRepo {
         Ok(())
     }
 
-    /// The required-role list for one tag, or `None` if no policy row exists.
-    /// (An existing row with an empty array is `Some(vec![])` — a NO-gate policy.)
-    pub async fn get_policy(&self, tag_id: Uuid) -> Result<Option<Vec<String>>, BiError> {
-        Ok(sqlx::query_scalar::<_, Vec<String>>(
-            "SELECT required_roles FROM classification_policies WHERE tag_id = $1",
+    /// The required-role and required-group lists for one tag, or `None` if no
+    /// policy row exists. (An existing row with both arrays empty is
+    /// `Some((vec![], vec![]))` — a NO-gate policy.)
+    pub async fn get_policy(
+        &self,
+        tag_id: Uuid,
+    ) -> Result<Option<(Vec<String>, Vec<Uuid>)>, BiError> {
+        Ok(sqlx::query_as::<_, (Vec<String>, Vec<Uuid>)>(
+            "SELECT required_roles, required_groups \
+             FROM classification_policies WHERE tag_id = $1",
         )
         .bind(tag_id)
         .fetch_optional(&self.db.pool)
         .await?)
     }
 
-    /// Every classification policy as `(tag_id, required_roles)`, ordered by
-    /// `tag_id`. Consumed by the future PDP loader and by the tag-list UI (to show
-    /// which tags are gated).
-    pub async fn list_policies(&self) -> Result<Vec<(Uuid, Vec<String>)>, BiError> {
-        Ok(sqlx::query_as::<_, (Uuid, Vec<String>)>(
-            "SELECT tag_id, required_roles FROM classification_policies ORDER BY tag_id",
+    /// Every classification policy as `(tag_id, required_roles, required_groups)`,
+    /// ordered by `tag_id`. Consumed by the PDP loader and by the tag-list UI (to
+    /// show which tags are gated).
+    pub async fn list_policies(&self) -> Result<Vec<(Uuid, Vec<String>, Vec<Uuid>)>, BiError> {
+        Ok(sqlx::query_as::<_, (Uuid, Vec<String>, Vec<Uuid>)>(
+            "SELECT tag_id, required_roles, required_groups \
+             FROM classification_policies ORDER BY tag_id",
         )
         .fetch_all(&self.db.pool)
         .await?)
