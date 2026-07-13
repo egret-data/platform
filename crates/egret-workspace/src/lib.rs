@@ -1,5 +1,6 @@
 //! `egret-workspace` — workspace entity, membership, and RBAC authorization.
 
+pub mod access_requests;
 pub mod access_views;
 pub mod context;
 pub mod mapping;

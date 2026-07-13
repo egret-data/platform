@@ -65,3 +65,4 @@ mod tests {
 // migration registry: 0062_engine_mgmt_schema (moves engines/engine_catalogs to engine_mgmt schema)
 // migration registry: 0077_saved_query_objects (saved_queries.folder_id + saved_query:{read,manage} grants)
 // migration registry: 0078_access_grant_expires_at (time-bound grants: access_grants.expires_at + partial index)
+// migration registry: 0079 access_requests (join-request → approval workflow: access_requests table)
