@@ -1319,6 +1319,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         pdp: pdp.clone(),
         audit: audit_sink.clone(),
         audit_store: audit_store.clone(),
+        tags: egret_bi::TagRepo::new(db.clone()),
     });
 
     // Catalog seam admin router (E3d-3): warehouses / catalog-roles / grants /
