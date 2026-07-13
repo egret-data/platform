@@ -182,6 +182,18 @@ pub static PERMISSIONS: &[Permission] = &[
         Scope::Platform
     ),
     perm!(
+        "tag:read",
+        "Classifications",
+        "View classification tags",
+        Scope::Platform
+    ),
+    perm!(
+        "tag:manage",
+        "Classifications",
+        "Create, edit, and delete classification tags",
+        Scope::Platform
+    ),
+    perm!(
         "workspace:read",
         "Workspaces",
         "View workspaces",
@@ -382,6 +394,25 @@ mod tests {
     fn saved_query_perms_are_known() {
         assert!(is_known("saved_query:read"));
         assert!(is_known("saved_query:manage"));
+    }
+    #[test]
+    fn tag_perms_are_known_and_delegatable() {
+        // The classification perms are grantable governance perms (data_steward
+        // holds tag:read/tag:manage), NOT admin-graph actions. Object tag
+        // assignment reuses object-manage (`<kind>:manage`), so there is no
+        // dedicated `tag:assign` perm.
+        assert!(is_known("tag:read"));
+        assert!(is_known("tag:manage"));
+        assert!(!is_known("tag:assign"));
+        assert!(!is_admin_graph("tag:manage"));
+        assert!(groups().contains(&"Classifications"));
+        // tag:read/manage are platform-scoped catalog perms.
+        assert!(PERMISSIONS
+            .iter()
+            .any(|p| p.key == "tag:read" && p.scope == Scope::Platform));
+        assert!(PERMISSIONS
+            .iter()
+            .any(|p| p.key == "tag:manage" && p.scope == Scope::Platform));
     }
     #[test]
     fn workspace_actions_present_and_scoped() {

@@ -4,7 +4,7 @@ import {
   BarChart3, Bell, Boxes, ChevronDown, ChevronRight, Compass, Database,
   FolderKanban, Gauge, HardDrive, KeyRound, LayoutDashboard, ListChecks, type LucideIcon,
   NotebookText, PanelLeftClose, PanelLeftOpen, Plug, ScanSearch, ScrollText, Server, Settings, Share2, ShieldCheck,
-  SquareTerminal, Table2, UserCog, Users, UsersRound, Waypoints, Workflow,
+  SquareTerminal, Table2, Tags, UserCog, Users, UsersRound, Waypoints, Workflow,
 } from "lucide-react";
 import {
   Tooltip,
@@ -87,6 +87,7 @@ const CONTROL_PLANE_GROUPS: NavGroup[] = [
     heading: "Data Governance",
     items: [
       { label: "Policies", icon: ShieldCheck, perm: "policy:read" },
+      { label: "Classifications", icon: Tags, perm: "tag:read", to: "classifications" },
       { label: "Audit log", icon: ScrollText },
     ],
   },

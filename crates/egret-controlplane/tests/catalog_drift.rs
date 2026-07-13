@@ -33,7 +33,12 @@ const ALLOWED_UNENFORCED: &[&str] = &[];
 
 /// Control-plane source files scanned for `require_permission(..., "key")`
 /// call sites, relative to this crate's `src/`.
-const CONTROLPLANE_FILES: &[&str] = &["storage.rs", "secrets.rs", "access/mod.rs"];
+///
+/// `tag:read`/`tag:manage` (Access P3.1) are enforced in `tags.rs` via
+/// `authz::require`. Per-object tag assignment has no dedicated `tag:assign`
+/// perm — it reuses object-manage (`require_object(manage_action(kind))`) in
+/// `egret-bi/src/shares.rs`, so there is no catalog key to enforce there.
+const CONTROLPLANE_FILES: &[&str] = &["storage.rs", "secrets.rs", "access/mod.rs", "tags.rs"];
 
 /// Extra source files (outside this crate) that enforce catalog permissions
 /// through a different gate function. Path is relative to this crate's

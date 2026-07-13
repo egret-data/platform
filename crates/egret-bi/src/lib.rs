@@ -12,6 +12,7 @@ mod routes;
 mod saved;
 mod schema;
 pub mod shares;
+pub mod tags;
 mod typegen;
 
 pub use chart::{Chart, ChartRepo};
@@ -41,4 +42,5 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
 }
 pub use saved::{SavedQuery, SavedQueryRepo};
 pub use schema::SchemaService;
+pub use tags::{Tag, TagRepo};
 pub use typegen::{generic_type, GenericType};

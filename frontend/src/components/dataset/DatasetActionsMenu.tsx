@@ -10,7 +10,7 @@ import type { Folder } from "@/api/folders";
  * Per-row actions. Live: Edit, Refresh, Duplicate (virtual), Move to folder,
  * Move to Trash. Trashed: Restore, Delete permanently.
  */
-export function DatasetActionsMenu({ ws, ds, trashed, folders, onDuplicate, onMove, onNewFolder, onTrash, onRestore, onDeletePermanent, onShare }: {
+export function DatasetActionsMenu({ ws, ds, trashed, folders, onDuplicate, onMove, onNewFolder, onTrash, onRestore, onDeletePermanent, onShare, onTags }: {
   ws: string;
   ds: DatasetSummary;
   trashed: boolean;
@@ -22,6 +22,7 @@ export function DatasetActionsMenu({ ws, ds, trashed, folders, onDuplicate, onMo
   onRestore: (ds: DatasetSummary) => void;
   onDeletePermanent: (ds: DatasetSummary) => void;
   onShare?: (ds: DatasetSummary) => void;
+  onTags?: (ds: DatasetSummary) => void;
 }) {
   const nav = useNavigate();
   const refresh = useRefreshDataset(ws, ds.id);
@@ -52,6 +53,7 @@ export function DatasetActionsMenu({ ws, ds, trashed, folders, onDuplicate, onMo
         onNewFolder={() => onNewFolder(ds)}
       />
       {onShare && <DropdownMenuItem onClick={() => onShare(ds)}>Share…</DropdownMenuItem>}
+      {onTags && <DropdownMenuItem onClick={() => onTags(ds)}>Tags…</DropdownMenuItem>}
       <DropdownMenuSeparator />
       <DropdownMenuItem onClick={() => onTrash(ds)}>Move to Trash</DropdownMenuItem>
     </RowActionsMenu>

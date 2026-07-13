@@ -16,6 +16,7 @@ pub mod audit;
 mod error;
 mod secrets;
 mod storage;
+mod tags;
 
 pub use error::CpError;
 
@@ -62,6 +63,9 @@ pub struct CpState {
     pub audit: egret_audit::AuditSink,
     /// Read side of the audit trail (B4), backing `GET /control-plane/audit`.
     pub audit_store: egret_audit::AuditStore,
+    /// Platform classification-tag catalog (Access P3.1, metadata only — see
+    /// `egret_bi::tags`).
+    pub tags: egret_bi::TagRepo,
 }
 
 // The `Auth(principal)` extractor pulls `SessionService` from the router state.
@@ -79,6 +83,7 @@ pub fn control_plane_router() -> Router<CpState> {
         .merge(secrets::router())
         .merge(access::router())
         .merge(audit::audit_router())
+        .merge(tags::router())
 }
 
 /// The control-plane seam's OpenAPI document (E0·P4b-3): the access, storage,
@@ -91,5 +96,6 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     doc.merge(storage::ControlPlaneStorageApi::openapi());
     doc.merge(secrets::ControlPlaneSecretsApi::openapi());
     doc.merge(audit::ControlPlaneAuditApi::openapi());
+    doc.merge(tags::ControlPlaneTagsApi::openapi());
     doc
 }

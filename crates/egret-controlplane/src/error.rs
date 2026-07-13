@@ -72,6 +72,20 @@ impl From<SecretsError> for CpError {
     }
 }
 
+/// `egret_bi::BiError` is what `TagRepo` (the `tags` module) returns.
+impl From<egret_bi::BiError> for CpError {
+    fn from(e: egret_bi::BiError) -> Self {
+        use egret_bi::BiError as E;
+        match e {
+            E::NotFound(_) => CpError::NotFound,
+            E::Forbidden => CpError::Forbidden,
+            E::BadRequest(s) => CpError::BadRequest(s),
+            E::Conflict(s) => CpError::Conflict(s),
+            E::Engine(_) | E::Db(_) => CpError::Internal,
+        }
+    }
+}
+
 /// `egret_core::Error` is what the identity/RBAC repos (`UserRepo`, `GroupRepo`,
 /// `RoleRepo`) return, used by the `access` module.
 impl From<egret_core::Error> for CpError {

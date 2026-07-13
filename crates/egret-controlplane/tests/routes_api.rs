@@ -82,6 +82,7 @@ fn build_app(
         pdp,
         audit,
         audit_store: egret_audit::AuditStore::new(db.clone()),
+        tags: egret_bi::TagRepo::new(db.clone()),
     })
 }
 
@@ -638,6 +639,7 @@ async fn setup_isolated_schema() -> Option<Fixture> {
         pdp: std::sync::Arc::new(AllowAllPdp),
         audit,
         audit_store: egret_audit::AuditStore::new(db.clone()),
+        tags: egret_bi::TagRepo::new(db.clone()),
     });
 
     Some(Fixture {
@@ -1871,5 +1873,155 @@ async fn who_can_access_lists_principals_and_gates() {
         resp.status(),
         StatusCode::FORBIDDEN,
         "a principal without role:read must not query who-can-access"
+    );
+}
+
+// ---------- Tag catalog (Access P3.1) ----------
+
+/// `GET/POST/PATCH/DELETE /api/control-plane/tags`: `tag:read` gates the list,
+/// `tag:manage` gates every write. Proves the full CRUD lifecycle plus the two
+/// permission gates and the repo's duplicate-key `Conflict` → 409 mapping.
+#[tokio::test]
+async fn tag_catalog_crud_and_permissions() {
+    let Some(mut f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+
+    let manager = session_for_with_permission(&f, "tag_manager", "tag:manage").await;
+    let reader = session_for_with_permission(&f, "tag_reader", "tag:read").await;
+    let plain = session_for(&f, "tag_plain", false).await;
+    attach_real_pdp(&mut f).await;
+
+    // A caller without tag:read must not list tags.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/tags", &plain, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a principal without tag:read must not list tags"
+    );
+
+    // tag:manage creates a tag.
+    let key = format!("pii-{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/tags",
+            &manager,
+            Some(serde_json::json!({ "key": key, "name": "PII" })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create tag; body={j}");
+    assert_eq!(j["key"], key, "created tag key; body={j}");
+    assert_eq!(j["name"], "PII", "created tag name; body={j}");
+    assert_eq!(
+        j["assignment_count"], 0,
+        "fresh tag has 0 assignments (snake_case, matches FE); body={j}"
+    );
+    let id = j["id"].as_str().expect("tag id").to_string();
+
+    // tag:read sees it in the list.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/tags", &reader, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list tags; body={j}");
+    let tags = j.as_array().expect("tags array");
+    assert!(
+        tags.iter().any(|t| t["id"] == id),
+        "listed tags must include the created tag; body={j}"
+    );
+
+    // tag:read alone must not create a tag.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/tags",
+            &reader,
+            Some(serde_json::json!({ "key": format!("nope-{}", Uuid::new_v4().simple()), "name": "Nope" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a tag:read-only principal must not create tags"
+    );
+
+    // Duplicate key → 409.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/tags",
+            &manager,
+            Some(serde_json::json!({ "key": key, "name": "PII dup" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "a duplicate tag key must be 409"
+    );
+
+    // tag:manage updates the tag.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PATCH",
+            &format!("/tags/{id}"),
+            &manager,
+            Some(serde_json::json!({ "name": "PII Updated" })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "update tag; body={j}");
+    assert_eq!(j["name"], "PII Updated", "updated name; body={j}");
+    assert_eq!(j["key"], key, "key is immutable across update; body={j}");
+
+    // tag:manage deletes the tag.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &format!("/tags/{id}"), &manager, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "delete tag must be 204"
+    );
+
+    // It's gone from the list.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", "/tags", &reader, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list tags after delete; body={j}");
+    let tags = j.as_array().expect("tags array");
+    assert!(
+        !tags.iter().any(|t| t["id"] == id),
+        "deleted tag must not be listed; body={j}"
     );
 }
