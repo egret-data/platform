@@ -35,6 +35,10 @@ impl PolicyPort for PolicyStore {
             .map_err(Into::into)
     }
 
+    async fn ensure_tag_def(&self) -> Result<(), PolicyError> {
+        crate::service_def::seed_tag(self).await.map_err(Into::into)
+    }
+
     async fn list_services(&self) -> Result<Vec<PolicyService>, PolicyError> {
         Ok(self
             .list_services()

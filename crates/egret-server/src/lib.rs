@@ -202,7 +202,8 @@ pub fn build_router(state: AppState) -> Router {
             .merge(egret_bi::chart_router())
             .merge(egret_bi::dashboard_router())
             .merge(egret_bi::folder_router())
-            .merge(egret_bi::shares_router());
+            .merge(egret_bi::shares_router())
+            .merge(egret_bi::resource_tags_router());
         let group = Router::new()
             .nest("/api", bi_routes)
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))

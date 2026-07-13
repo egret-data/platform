@@ -308,6 +308,122 @@ pub fn editor_to_ranger_json(v: &Value) -> Result<RangerPolicy, String> {
     }
 }
 
+// ── Tag-based policies (Access P3.2) ────────────────────────────────────────
+//
+// A tag policy is the same shape as a trino resource policy — the SAME
+// item/mask/rowfilter buckets — but bound to the tag service and keyed on a
+// classification TAG rather than a catalog.schema.table.column path. We reuse
+// the trino builders verbatim and only retarget the service binding + resource
+// selector; nothing about the enforcement item structure changes. Enforcement
+// is LIVE-ONLY (the Ranger tag plugin applies the mask/filter); the body shape,
+// summary, and storage are unit-tested here.
+
+/// Rewrite a trino-shaped body into a TAG policy: `serviceType:"tag"`,
+/// `service:<tagService>`, and a single `tag` resource. Leaves the
+/// policyType/item buckets (`policyItems`/`dataMaskPolicyItems`/
+/// `rowFilterPolicyItems`) exactly as the trino builder produced them.
+fn tagify(body: &mut Value, tag: &str, tag_service: &str) {
+    if let Value::Object(m) = body {
+        m.insert("serviceType".into(), Value::from("tag"));
+        m.insert("service".into(), Value::from(tag_service.to_string()));
+        m.insert(
+            "resources".into(),
+            json!({ "tag": { "values": [tag], "isExcludes": false, "isRecursive": false } }),
+        );
+        // A tag policy targets exactly one tag — no additional resource hierarchies.
+        m.remove("additionalResources");
+    }
+}
+
+/// Tag access policy (policyType 0) keyed on `tag`, stored under `tag_service`.
+pub fn tag_access_to_ranger_json(input: &AccessPolicyInput, tag: &str, tag_service: &str) -> Value {
+    let mut body = access_to_ranger_json(input);
+    tagify(&mut body, tag, tag_service);
+    body
+}
+
+/// Tag masking policy (policyType 1) keyed on `tag`, stored under `tag_service`.
+pub fn tag_masking_to_ranger_json(
+    input: &MaskingPolicyInput,
+    tag: &str,
+    tag_service: &str,
+) -> Value {
+    let mut body = masking_to_ranger_json(input);
+    tagify(&mut body, tag, tag_service);
+    body
+}
+
+/// Tag row-filter policy (policyType 2) keyed on `tag`, stored under `tag_service`.
+pub fn tag_rowfilter_to_ranger_json(
+    input: &RowFilterPolicyInput,
+    tag: &str,
+    tag_service: &str,
+) -> Value {
+    let mut body = rowfilter_to_ranger_json(input);
+    tagify(&mut body, tag, tag_service);
+    body
+}
+
+/// True if an editor form is a tag policy (`kind` starts with `tag-`).
+pub fn is_tag_kind(v: &Value) -> bool {
+    v.get("kind")
+        .and_then(Value::as_str)
+        .map(|k| k.starts_with("tag-"))
+        .unwrap_or(false)
+}
+
+/// Dispatch a tag-policy editor form (`{kind:"tag-*", tag, ...}`) to the right
+/// serializer. `tag_service` is the resolved `<profile>_tag` service name the
+/// handler looked up; the body's `service` binds to it. The trino profile the
+/// editor targeted arrives in the form's `service` field and is ignored here
+/// (the handler used it to resolve `tag_service`).
+pub fn tag_editor_to_ranger_json(v: &Value, tag_service: &str) -> Result<RangerPolicy, String> {
+    let kind = v
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("tag-access");
+    let tag = v
+        .get("tag")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "tag policy requires a non-empty `tag`".to_string())?
+        .to_string();
+    match kind {
+        "tag-access" => {
+            let inp: AccessPolicyInput =
+                serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+            Ok(RangerPolicy {
+                name: inp.name.clone(),
+                service: tag_service.to_string(),
+                is_enabled: inp.is_enabled,
+                body: tag_access_to_ranger_json(&inp, &tag, tag_service),
+            })
+        }
+        "tag-masking" => {
+            let inp: MaskingPolicyInput =
+                serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+            Ok(RangerPolicy {
+                name: inp.name.clone(),
+                service: tag_service.to_string(),
+                is_enabled: inp.is_enabled,
+                body: tag_masking_to_ranger_json(&inp, &tag, tag_service),
+            })
+        }
+        "tag-rowfilter" => {
+            let inp: RowFilterPolicyInput =
+                serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+            Ok(RangerPolicy {
+                name: inp.name.clone(),
+                service: tag_service.to_string(),
+                is_enabled: inp.is_enabled,
+                body: tag_rowfilter_to_ranger_json(&inp, &tag, tag_service),
+            })
+        }
+        other => Err(format!("unknown tag policy kind: {other}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::summarize_policy;
@@ -560,5 +676,103 @@ mod tests {
             editor_to_ranger_json(&json!({"name":"x","service":"trino","resources":{},"items":[]}))
                 .unwrap();
         assert_eq!(d.body["policyType"], 0);
+    }
+
+    // ── Tag-based policies (Access P3.2) ─────────────────────────────────────
+
+    #[test]
+    fn tag_masking_body_targets_tag_service() {
+        let inp: MaskingPolicyInput = serde_json::from_value(json!({
+            "kind": "tag-masking", "name": "mask-pii", "service": "eng", "tag": "pii",
+            "isEnabled": true,
+            "items": [{"users": ["alice"], "groups": ["pii"], "maskType": "MASK_HASH"}]
+        }))
+        .unwrap();
+        let body = tag_masking_to_ranger_json(&inp, "pii", "eng_tag");
+        assert_eq!(body["serviceType"], "tag");
+        assert_eq!(body["service"], "eng_tag");
+        assert_eq!(body["policyType"], 1);
+        assert_eq!(body["resources"]["tag"]["values"][0], "pii");
+        assert_eq!(body["resources"]["tag"]["isRecursive"], false);
+        // No catalog/schema/table/column selectors on a tag policy.
+        assert!(body["resources"].get("catalog").is_none());
+        assert!(body.get("additionalResources").is_none());
+        let items = body["dataMaskPolicyItems"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["dataMaskInfo"]["dataMaskType"], "MASK_HASH");
+        assert_eq!(items[0]["users"][0], "alice");
+    }
+
+    #[test]
+    fn tag_access_body_has_policy_items() {
+        let inp: AccessPolicyInput = serde_json::from_value(json!({
+            "kind": "tag-access", "name": "allow-pii-read", "service": "eng", "tag": "pii",
+            "isEnabled": true,
+            "items": [{"groups": ["analysts"], "accesses": ["select"], "effect": "allow"}]
+        }))
+        .unwrap();
+        let body = tag_access_to_ranger_json(&inp, "pii", "eng_tag");
+        assert_eq!(body["serviceType"], "tag");
+        assert_eq!(body["policyType"], 0);
+        assert_eq!(body["resources"]["tag"]["values"][0], "pii");
+        let items = body["policyItems"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["groups"][0], "analysts");
+        assert_eq!(items[0]["accesses"][0]["type"], "select");
+    }
+
+    #[test]
+    fn tag_rowfilter_body_has_row_filter_info() {
+        let inp: RowFilterPolicyInput = serde_json::from_value(json!({
+            "kind": "tag-rowfilter", "name": "pii-us-only", "service": "eng", "tag": "pii",
+            "isEnabled": true,
+            "items": [{"groups": ["analysts"], "filterExpr": "country = 'US'"}]
+        }))
+        .unwrap();
+        let body = tag_rowfilter_to_ranger_json(&inp, "pii", "eng_tag");
+        assert_eq!(body["serviceType"], "tag");
+        assert_eq!(body["policyType"], 2);
+        assert_eq!(body["resources"]["tag"]["values"][0], "pii");
+        let items = body["rowFilterPolicyItems"].as_array().unwrap();
+        assert_eq!(items[0]["rowFilterInfo"]["filterExpr"], "country = 'US'");
+    }
+
+    #[test]
+    fn tag_dispatcher_routes_by_kind_and_requires_tag() {
+        let m = tag_editor_to_ranger_json(
+            &json!({"kind":"tag-masking","name":"m","service":"eng","tag":"pii",
+                    "items":[{"groups":["g"],"maskType":"MASK_NULL"}]}),
+            "eng_tag",
+        )
+        .unwrap();
+        assert_eq!(m.body["policyType"], 1);
+        assert_eq!(m.body["serviceType"], "tag");
+        assert_eq!(m.service, "eng_tag");
+        assert_eq!(m.name, "m");
+
+        assert!(is_tag_kind(&json!({"kind":"tag-access"})));
+        assert!(!is_tag_kind(&json!({"kind":"masking"})));
+
+        // Missing/empty `tag` is a bad request.
+        assert!(tag_editor_to_ranger_json(
+            &json!({"kind":"tag-access","name":"x","service":"eng","items":[]}),
+            "eng_tag"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn tag_policy_summary_surfaces_tag_resource() {
+        let inp: MaskingPolicyInput = serde_json::from_value(json!({
+            "kind": "tag-masking", "name": "mask-pii", "service": "eng", "tag": "pii",
+            "isEnabled": true,
+            "items": [{"groups": ["pii"], "maskType": "MASK_HASH"}]
+        }))
+        .unwrap();
+        let body = tag_masking_to_ranger_json(&inp, "pii", "eng_tag");
+        let s = summarize_policy(9, "eng_tag", true, &body);
+        assert_eq!(s.policy_type, "masking");
+        assert_eq!(s.resource_path, "tag: pii");
+        assert!(s.principals.contains(&"pii".to_string()));
     }
 }

@@ -65,11 +65,14 @@ pub(crate) struct RangerServiceTags {
     pub op: String,
     pub service_name: String,
     pub tag_version: i64,
-    /// Tag map keyed by tag-id (empty this phase).
+    /// Tag map keyed by numeric tag-id → tag-def instance.
     #[schema(value_type = Object)]
     pub tags: serde_json::Map<String, serde_json::Value>,
     #[schema(value_type = Vec<Object>)]
     pub service_resources: Vec<serde_json::Value>,
+    /// `{ "<resourceId>": [<tagId>, ...] }` linking each resource to its tags.
+    #[schema(value_type = Object)]
+    pub resource_to_tag_ids: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Doc-only mirror of the `{ "serviceDefs": [...] }` envelope `list_defs` returns.

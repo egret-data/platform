@@ -4,5 +4,5 @@
 pub mod dto;
 pub mod port;
 
-pub use dto::{PolicyService, ServicePolicies, ServiceTags};
+pub use dto::{PolicyService, ServicePolicies, ServiceTags, TagAssignment};
 pub use port::{PolicyError, PolicyPort};

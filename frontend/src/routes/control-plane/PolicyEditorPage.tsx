@@ -17,6 +17,7 @@ import {
   updatePolicy,
 } from "@/api/policies";
 import { ApiError } from "@/api/client";
+import { useTags } from "@/api/tags";
 import {
   Accordion,
   AccordionContent,
@@ -30,6 +31,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { MaskItemTable } from "@/components/policy/MaskItemTable";
@@ -238,6 +240,15 @@ export default function PolicyEditorPage() {
   // Details) — mirrors EngineDetail's `ConfigurationTab` vertical nav.
   const [section, setSection] = useState("resource");
 
+  // Policy scope: "resource" (the existing catalog/schema/table/column
+  // picker) vs "tag" (a single classification tag — the BE resolves the tag
+  // service from the chosen trino profile and dispatches on `kind:"tag-*"`).
+  // Defaults to "resource" so unmodified behavior is unchanged.
+  const [scope, setScope] = useState<"resource" | "tag">("resource");
+  const [tag, setTag] = useState("");
+  const tagsQuery = useTags();
+  const tagOptions = tagsQuery.data ?? [];
+
   const policyQuery = useQuery<Record<string, unknown>, ApiError>({
     queryKey: ["control-plane", "policy", id],
     queryFn: () => getPolicy(Number(id)),
@@ -279,8 +290,21 @@ export default function PolicyEditorPage() {
 
   const profileUrl = `/control-plane/policies/${encodeURIComponent(service)}`;
 
+  // In Tag mode the wire `kind` becomes "tag-<kind>" and a `tag` field
+  // carries the selected tag name; `service` stays the trino profile (the BE
+  // resolves the tag service from it). Resource-only fields (`resources`/
+  // `additional`) are dropped — the BE overwrites/ignores them anyway, since
+  // a tag policy targets exactly one tag, not a resource hierarchy. In
+  // Resource mode the payload is exactly `form`, unchanged.
+  const buildPayload = (): any => {
+    if (scope !== "tag") return form;
+    const tagKind = kind === "masking" ? "tag-masking" : kind === "rowfilter" ? "tag-rowfilter" : "tag-access";
+    const { resources: _resources, additional: _additional, ...rest } = form;
+    return { ...rest, kind: tagKind, tag };
+  };
+
   const save = useMutation<{ id: number }, ApiError>({
-    mutationFn: () => (id ? updatePolicy(Number(id), form) : createPolicy(form)),
+    mutationFn: () => (id ? updatePolicy(Number(id), buildPayload()) : createPolicy(buildPayload())),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
       navigate(profileUrl);
@@ -305,10 +329,14 @@ export default function PolicyEditorPage() {
 
   // Any resource entry the def marks mandatory but that's still empty —
   // blocks Save. (Per-field "Required" hint is rendered by ResourceSelector
-  // itself via ResourceLevelEditor's `invalid` prop.)
-  const missingRequired: boolean = Object.entries(form.resources as Record<string, ResourceLevel>).some(
-    ([name, lvl]) => resDefByName(name)?.mandatory && lvl.values.length === 0,
-  );
+  // itself via ResourceLevelEditor's `invalid` prop.) In Tag mode, a tag
+  // must be selected instead.
+  const missingRequired: boolean =
+    scope === "tag"
+      ? !tag
+      : Object.entries(form.resources as Record<string, ResourceLevel>).some(
+          ([name, lvl]) => resDefByName(name)?.mandatory && lvl.values.length === 0,
+        );
 
   const kindTitle =
     kind === "masking" ? "Masking" : kind === "rowfilter" ? "Row filter" : "Permissions";
@@ -317,8 +345,10 @@ export default function PolicyEditorPage() {
 
   // At-a-glance summary of the resource being configured, e.g. `iceberg.sales.*.*`
   // for a catalog/schema/table/column chain, or `role: *` / `trinouser: *`
-  // for a single non-table resource.
+  // for a single non-table resource. In Tag mode it's just `tag: <name>`,
+  // matching the BE's `summarize_policy` output for tag policies.
   const resourcePreview = (() => {
+    if (scope === "tag") return tag ? `tag: ${tag}` : "…";
     const keys = Object.keys(form.resources);
     if (keys.length === 0) return "…";
     if (keys.every((k) => TABLE_LEVELS.includes(k))) {
@@ -345,8 +375,12 @@ export default function PolicyEditorPage() {
   // Non-default field counts per section, driving the nav badges (same idea
   // as engine config's `sectionCounts`).
   const resourceCount =
-    Object.values(form.resources).filter((l: any) => l.values.length > 0).length +
-    (kind === "access" ? form.additional.length : 0);
+    scope === "tag"
+      ? tag
+        ? 1
+        : 0
+      : Object.values(form.resources).filter((l: any) => l.values.length > 0).length +
+        (kind === "access" ? form.additional.length : 0);
   const rulesCount =
     form.items.length +
     (kind === "access" ? form.allowExceptions.length + form.denyExceptions.length : 0);
@@ -475,74 +509,128 @@ export default function PolicyEditorPage() {
             <div className="min-w-0 flex-1">
               {section === "resource" && (
                 <ConfigSection
-                  title="Resource"
-                  description="The Trino resource this policy applies to. Use * for wildcards."
+                  title={scope === "tag" ? "Tag" : "Resource"}
+                  description={
+                    scope === "tag"
+                      ? "The classification tag this policy applies to. Ranger resolves the tag service from this profile automatically."
+                      : "The Trino resource this policy applies to. Use * for wildcards."
+                  }
                 >
+                  <div className="flex items-center gap-2" role="group" aria-label="Policy scope">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={scope === "resource" ? "secondary" : "outline"}
+                      aria-pressed={scope === "resource"}
+                      onClick={() => setScope("resource")}
+                    >
+                      By resource
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant={scope === "tag" ? "secondary" : "outline"}
+                      aria-pressed={scope === "tag"}
+                      onClick={() => setScope("tag")}
+                    >
+                      By tag
+                    </Button>
+                  </div>
+
                   <p className="font-mono text-xs text-muted-foreground">{resourcePreview}</p>
-                  <ResourceSelector
-                    resourceDefs={resDefs}
-                    service={service}
-                    value={form.resources}
-                    onChange={(r) => setForm((f: any) => ({ ...f, resources: r }))}
-                    onLeafChange={setLeaf}
-                  />
-                  {missingRequired && (
-                    <p className="text-xs text-muted-foreground">
-                      Fill the required resource levels.
-                    </p>
-                  )}
-                  {kind === "access" && (
+
+                  {scope === "tag" ? (
+                    <div className="space-y-1.5">
+                      <FieldLabel label="Tag" htmlFor="policy-tag" />
+                      <Select value={tag} onValueChange={setTag}>
+                        <SelectTrigger
+                          id="policy-tag"
+                          aria-label="Tag"
+                          size="sm"
+                          className="h-9 w-64"
+                        >
+                          <SelectValue placeholder="Select a tag…" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {tagOptions.map((t) => (
+                            <SelectItem key={t.id} value={t.name}>
+                              {t.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      {missingRequired && (
+                        <p className="text-xs text-muted-foreground">Select a tag to continue.</p>
+                      )}
+                    </div>
+                  ) : (
                     <>
-                      {form.additional.map((res: Record<string, ResourceLevel>, i: number) => (
-                        <div key={i} className="mt-4 flex gap-3 border-t pt-4">
-                          <div className="min-w-0 flex-1">
-                            <ResourceSelector
-                              resourceDefs={resDefs}
-                              service={service}
-                              value={res}
-                              onChange={(r) =>
-                                setForm((f: any) => ({
-                                  ...f,
-                                  additional: f.additional.map((a: any, j: number) =>
-                                    j === i ? r : a,
-                                  ),
-                                }))
-                              }
-                            />
-                          </div>
+                      <ResourceSelector
+                        resourceDefs={resDefs}
+                        service={service}
+                        value={form.resources}
+                        onChange={(r) => setForm((f: any) => ({ ...f, resources: r }))}
+                        onLeafChange={setLeaf}
+                      />
+                      {missingRequired && (
+                        <p className="text-xs text-muted-foreground">
+                          Fill the required resource levels.
+                        </p>
+                      )}
+                      {kind === "access" && (
+                        <>
+                          {form.additional.map((res: Record<string, ResourceLevel>, i: number) => (
+                            <div key={i} className="mt-4 flex gap-3 border-t pt-4">
+                              <div className="min-w-0 flex-1">
+                                <ResourceSelector
+                                  resourceDefs={resDefs}
+                                  service={service}
+                                  value={res}
+                                  onChange={(r) =>
+                                    setForm((f: any) => ({
+                                      ...f,
+                                      additional: f.additional.map((a: any, j: number) =>
+                                        j === i ? r : a,
+                                      ),
+                                    }))
+                                  }
+                                />
+                              </div>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="iconSm"
+                                title="Remove resource"
+                                aria-label={`remove resource ${i}`}
+                                onClick={() =>
+                                  setForm((f: any) => ({
+                                    ...f,
+                                    additional: f.additional.filter(
+                                      (_: unknown, j: number) => j !== i,
+                                    ),
+                                  }))
+                                }
+                              >
+                                <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
+                              </Button>
+                            </div>
+                          ))}
                           <Button
                             type="button"
-                            variant="ghost"
-                            size="iconSm"
-                            title="Remove resource"
-                            aria-label={`remove resource ${i}`}
+                            variant="outline"
+                            size="sm"
+                            className="mt-4"
                             onClick={() =>
                               setForm((f: any) => ({
                                 ...f,
-                                additional: f.additional.filter(
-                                  (_: unknown, j: number) => j !== i,
-                                ),
+                                additional: [...f.additional, {}],
                               }))
                             }
                           >
-                            <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
+                            <Plus className="mr-1 h-4 w-4" /> Add resource
                           </Button>
-                        </div>
-                      ))}
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="mt-4"
-                        onClick={() =>
-                          setForm((f: any) => ({
-                            ...f,
-                            additional: [...f.additional, {}],
-                          }))
-                        }
-                      >
-                        <Plus className="mr-1 h-4 w-4" /> Add resource
-                      </Button>
+                        </>
+                      )}
                     </>
                   )}
                 </ConfigSection>

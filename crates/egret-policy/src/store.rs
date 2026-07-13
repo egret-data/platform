@@ -22,6 +22,22 @@ pub struct ServiceRow {
     pub r#type: String,
     pub config_jsonb: Value,
     pub policy_version: i64,
+    /// Monotonic tag-assignment version; the Ranger tag-download plugin polls this
+    /// (parallel to `policy_version`) to know when to re-pull catalog tags.
+    pub tag_version: i64,
+}
+
+/// One catalog resource → tag pairing for a service's warehouse(s), the row
+/// feeding `ServiceTags::from_assignments`. Column order matches the tuple the
+/// builder consumes: `(catalog, schema, table, column, tag_id, tag_name)`.
+#[derive(Debug, sqlx::FromRow)]
+pub struct TagAssignmentRow {
+    pub catalog: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub column_name: String,
+    pub tag_id: String,
+    pub tag_name: String,
 }
 
 impl PolicyStore {
@@ -74,7 +90,7 @@ impl PolicyStore {
     ) -> Result<ServiceRow, PolicyStoreError> {
         sqlx::query_as::<_, ServiceRow>(
             r#"INSERT INTO policy.authz_services (name, type, config_jsonb)
-               VALUES ($1,$2,$3) RETURNING id, name, type, config_jsonb, policy_version"#,
+               VALUES ($1,$2,$3) RETURNING id, name, type, config_jsonb, policy_version, tag_version"#,
         )
         .bind(name)
         .bind(typ)
@@ -91,7 +107,7 @@ impl PolicyStore {
 
     pub async fn get_service(&self, name: &str) -> Result<ServiceRow, PolicyStoreError> {
         sqlx::query_as::<_, ServiceRow>(
-            r#"SELECT id, name, type, config_jsonb, policy_version FROM policy.authz_services WHERE name = $1"#,
+            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version FROM policy.authz_services WHERE name = $1"#,
         )
         .bind(name)
         .fetch_optional(&self.db.pool)
@@ -101,7 +117,7 @@ impl PolicyStore {
 
     pub async fn list_services(&self) -> Result<Vec<ServiceRow>, PolicyStoreError> {
         Ok(sqlx::query_as::<_, ServiceRow>(
-            r#"SELECT id, name, type, config_jsonb, policy_version FROM policy.authz_services ORDER BY name"#,
+            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version FROM policy.authz_services ORDER BY name"#,
         )
         .fetch_all(&self.db.pool)
         .await?)
@@ -129,6 +145,44 @@ impl PolicyStore {
         .fetch_all(&self.db.pool)
         .await?;
         Ok(rows.into_iter().collect())
+    }
+
+    /// Catalog resource → tag rows for a service's warehouse(s), feeding the
+    /// Ranger tag download (`ServiceTags::from_assignments`).
+    ///
+    /// SERVICE → CATALOG-NAME MAPPING (documented assumption, tuned in the live
+    /// smoke): a policy profile (`policy.authz_services`) is bound to warehouses
+    /// through the engine seam — `engine_mgmt.engines.authz_service_id`. Each such
+    /// warehouse's tag assignments (keyed by `warehouse_id`) are served under a
+    /// Trino catalog name taken as the **warehouse name** (`warehouses.name`),
+    /// which matches engine provisioning (it sets `iceberg.rest-catalog.warehouse
+    /// = <warehouse name>`). This is a bounded, read-only, parameterized cross-seam
+    /// read on the serving path; if the live Trino catalog name differs from the
+    /// warehouse name, this query's `w.name AS catalog` is the single tuning spot.
+    /// Distinct `(catalog, schema, table, column, tag)` rows only (multiple engines
+    /// on one warehouse are de-duplicated).
+    pub async fn tag_assignments_for_service(
+        &self,
+        service_id: i64,
+    ) -> Result<Vec<TagAssignmentRow>, PolicyStoreError> {
+        Ok(sqlx::query_as::<_, TagAssignmentRow>(
+            r#"SELECT DISTINCT
+                   w.name           AS catalog,
+                   a.schema_name    AS schema_name,
+                   a.table_name     AS table_name,
+                   a.column_name    AS column_name,
+                   t.id::text       AS tag_id,
+                   t.name           AS tag_name
+               FROM catalog_tag_assignments a
+               JOIN tags t              ON t.id = a.tag_id
+               JOIN catalog.warehouses w  ON w.id = a.warehouse_id
+               JOIN engine_mgmt.engines e ON e.warehouse_id = a.warehouse_id
+               WHERE e.authz_service_id = $1
+               ORDER BY w.name, a.schema_name, a.table_name, a.column_name, t.name"#,
+        )
+        .bind(service_id)
+        .fetch_all(&self.db.pool)
+        .await?)
     }
 }
 

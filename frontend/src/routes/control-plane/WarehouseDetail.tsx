@@ -26,6 +26,7 @@ import {
   Shield,
   ShieldCheck,
   Table2,
+  Tag as TagIcon,
   Trash2,
 } from "lucide-react";
 
@@ -73,6 +74,7 @@ import {
 } from "@/api/controlPlane";
 import { useMyWorkspaces } from "@/api/hooks";
 import { ApiError } from "@/api/client";
+import { CatalogTagDialog } from "@/components/access/CatalogTagEditor";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1303,6 +1305,7 @@ function TableDetailView({
   });
   const d = detail.data;
   const transform = (t: string, col: string) => (t === "identity" ? col : `${t}(${col})`);
+  const [tagsDialog, setTagsDialog] = useState<{ open: boolean; column?: string }>({ open: false });
 
   return (
     <div>
@@ -1330,6 +1333,15 @@ function TableDetailView({
             />
           </div>
           {tabular.protected && <span className="text-xs text-amber-600">Protected from drops</span>}
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1 px-2 text-muted-foreground"
+            onClick={() => setTagsDialog({ open: true, column: undefined })}
+          >
+            <TagIcon className="h-3.5 w-3.5" />
+            Tags
+          </Button>
         </div>
         {!isView && d && (
           <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
@@ -1357,6 +1369,9 @@ function TableDetailView({
                   <TableHead>Name</TableHead>
                   <TableHead>Type</TableHead>
                   <TableHead className="text-right">Required</TableHead>
+                  <TableHead className="text-right">
+                    <span className="sr-only">Tags</span>
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -1372,6 +1387,17 @@ function TableDetailView({
                       ) : (
                         <span className="text-muted-foreground">—</span>
                       )}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 gap-1 px-2 text-muted-foreground"
+                        onClick={() => setTagsDialog({ open: true, column: col.name })}
+                        aria-label={`Tags for ${col.name}`}
+                      >
+                        <TagIcon className="h-3.5 w-3.5" />
+                      </Button>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -1407,6 +1433,9 @@ function TableDetailView({
                   <TableHead>Name</TableHead>
                   <TableHead>Type</TableHead>
                   <TableHead className="text-right">Required</TableHead>
+                  <TableHead className="text-right">
+                    <span className="sr-only">Tags</span>
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -1422,6 +1451,17 @@ function TableDetailView({
                       ) : (
                         <span className="text-muted-foreground">—</span>
                       )}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 gap-1 px-2 text-muted-foreground"
+                        onClick={() => setTagsDialog({ open: true, column: col.name })}
+                        aria-label={`Tags for ${col.name}`}
+                      >
+                        <TagIcon className="h-3.5 w-3.5" />
+                      </Button>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -1511,6 +1551,15 @@ function TableDetailView({
       ) : (
         <p className="p-6 text-center text-sm text-destructive">Failed to load table detail.</p>
       )}
+
+      <CatalogTagDialog
+        warehouseId={warehouseId}
+        schema={namespace}
+        table={table}
+        column={tagsDialog.column}
+        open={tagsDialog.open}
+        onOpenChange={(open) => setTagsDialog((prev) => ({ ...prev, open }))}
+      />
     </div>
   );
 }

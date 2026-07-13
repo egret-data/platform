@@ -15,8 +15,10 @@ pub use admin::{
 };
 pub use error::PolicyStoreError;
 pub use ranger::{ranger_router, RangerState};
-pub use service_def::{seed_trino, trino_service_def, TRINO_DEF_NAME};
-pub use store::{PolicyRow, PolicyStore};
+pub use service_def::{
+    seed_tag, seed_trino, tag_service_def, trino_service_def, TAG_DEF_NAME, TRINO_DEF_NAME,
+};
+pub use store::{PolicyRow, PolicyStore, ServiceRow, TagAssignmentRow};
 
 /// The Policy/Ranger seam's OpenAPI document (E0·P4b-5): the admin Policies
 /// console router (`/api/control-plane`) and the Ranger Admin REST serving

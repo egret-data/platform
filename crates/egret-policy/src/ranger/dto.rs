@@ -2,7 +2,7 @@
 //! now live in the `egret-policy-api` contract crate (E2a); re-exported here so
 //! the router/handlers are unchanged. Only the envelope is typed; policies and
 //! the service-def pass through as `serde_json::Value` (stored verbatim as jsonb).
-pub use egret_policy_api::{ServicePolicies, ServiceTags};
+pub use egret_policy_api::{ServicePolicies, ServiceTags, TagAssignment};
 
 #[cfg(test)]
 mod tests {

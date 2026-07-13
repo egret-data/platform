@@ -427,6 +427,104 @@ async fn admin_can_create_masking_and_rowfilter_policies() {
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
 
+/// Access P3.2 — a tag policy authored against a trino profile is stored under
+/// that profile's tag service (resolved via `config.tagService`), lists under
+/// the tag service, and is served by `enabled_policies_for_service`.
+#[tokio::test]
+async fn admin_can_create_tag_policy_under_tag_service() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "tagpol", true).await;
+    egret_policy::seed_trino(&f.store)
+        .await
+        .expect("seed trino");
+    egret_policy::seed_tag(&f.store).await.expect("seed tag");
+
+    let suffix = Uuid::new_v4().simple();
+    let tag_name = format!("tag-{suffix}");
+    let tag_svc = f
+        .store
+        .create_service(&tag_name, "tag", &serde_json::json!({}))
+        .await
+        .expect("create tag service");
+    let trino_name = format!("trino-{suffix}");
+    let trino_svc = f
+        .store
+        .create_service(
+            &trino_name,
+            "trino",
+            &serde_json::json!({ "tagService": tag_name }),
+        )
+        .await
+        .expect("create trino profile");
+
+    // Author a tag-masking policy against the TRINO profile.
+    let create = serde_json::json!({
+        "kind": "tag-masking", "name": "mask-pii", "service": trino_name, "tag": "pii",
+        "isEnabled": true,
+        "items": [{"groups": ["pii"], "maskType": "MASK_HASH"}]
+    });
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req("POST", "/policies", &token, Some(create)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create tag policy; body={body}");
+    let id = body["id"].as_i64().expect("id");
+
+    // It lists under the TAG service (not the trino profile) with a tag path.
+    let (status, list) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "GET",
+                &format!("/policies?service={tag_name}&type=masking"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "list tag policies; body={list}");
+    let arr = list.as_array().expect("array");
+    assert_eq!(arr.len(), 1, "one tag summary; body={list}");
+    assert_eq!(arr[0]["resource_path"], serde_json::json!("tag: pii"));
+    assert_eq!(arr[0]["service"], serde_json::json!(tag_name));
+
+    // The trino profile itself has no policies.
+    let (_, trino_list) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "GET",
+                &format!("/policies?service={trino_name}"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(trino_list.as_array().expect("array").len(), 0);
+
+    // download_tags path: enabled_policies_for_service(tagService) returns it.
+    let served = f
+        .store
+        .enabled_policies_for_service(tag_svc.id)
+        .await
+        .expect("enabled policies");
+    assert_eq!(served.len(), 1, "served under tag service");
+    assert_eq!(served[0]["serviceType"], "tag");
+    assert_eq!(served[0]["resources"]["tag"]["values"][0], "pii");
+    assert_eq!(served[0]["id"].as_i64(), Some(id));
+
+    f.store.delete_service(trino_svc.id).await.expect("cleanup");
+    f.store.delete_service(tag_svc.id).await.expect("cleanup");
+}
+
 #[tokio::test]
 async fn admin_gets_trino_config_for_profile() {
     let Some(f) = setup().await else {

@@ -1448,9 +1448,44 @@ async fn create_engine(
             if let Err(e) = st.authz.ensure_trino_def().await {
                 tracing::warn!(error = %e, "ensure_trino_def failed during auto-bind");
             }
+            // Provision a TAG service alongside the trino profile (Access P3.2),
+            // one tag service per trino profile, so tag-based masking/row-filter
+            // policies can exist and `download_tags` has a service to serve. The
+            // trino profile's config carries `tagService = <name>_tag`, the
+            // standard Ranger field linking a resource service to its tag service.
+            //
+            // LIVE-ONLY: the `tagService` config key + any `ranger.plugin.tag.*`
+            // download wiring are validated against the real Ranger tag plugin at
+            // runtime, NOT in CI. If the plugin doesn't pick up tags, THIS is the
+            // tuning spot. Best-effort like the rest of auto-bind: a failure here
+            // never fails provisioning (the profile still works untagged).
+            let tag_service_name = format!("{}_tag", b.name);
+            let tag_wired = {
+                if let Err(e) = st.authz.ensure_tag_def().await {
+                    tracing::warn!(error = %e, "ensure_tag_def failed during auto-bind");
+                }
+                match st
+                    .authz
+                    .create_service(&tag_service_name, "tag", &serde_json::json!({}))
+                    .await
+                {
+                    Ok(_) => true,
+                    // A same-name tag service already exists (retry) — still wire it.
+                    Err(egret_policy_api::PolicyError::AlreadyExists(_)) => true,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "create tag service failed during auto-bind");
+                        false
+                    }
+                }
+            };
+            let trino_config = if tag_wired {
+                serde_json::json!({ "tagService": tag_service_name })
+            } else {
+                serde_json::json!({})
+            };
             match st
                 .authz
-                .create_service(&b.name, "trino", &serde_json::json!({}))
+                .create_service(&b.name, "trino", &trino_config)
                 .await
             {
                 Ok(svc) => Some(svc.id),
