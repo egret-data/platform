@@ -294,7 +294,7 @@ export default function Members() {
       </header>
 
       {membersQ.isLoading ? (
-        <ListSkeleton rows={5} cols={5} />
+        <ListSkeleton rows={5} cols={6} />
       ) : forbidden ? (
         <p className="rounded-md border bg-muted/40 px-4 py-6 text-sm text-muted-foreground" role="alert">
           Only workspace admins can manage members.
@@ -341,14 +341,7 @@ export default function Members() {
             initialSort={{ key: "member", dir: "asc" }}
             emptyText="No members yet."
             selection={
-              bulk.bulkMode
-                ? {
-                    selected: bulk.selected,
-                    onToggle: bulk.toggle,
-                    allSelected: bulk.allSelected,
-                    onToggleAll: bulk.toggleAll,
-                  }
-                : undefined
+              bulk.bulkMode ? { selected: bulk.selected, onToggle: bulk.toggle } : undefined
             }
           />
         </>

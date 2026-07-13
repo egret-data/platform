@@ -104,10 +104,10 @@ export default function UsersPage() {
             className="border-transparent"
             style={{ backgroundColor: "var(--success)", color: "var(--success-foreground)" }}
           >
-            active
+            {u.status}
           </Badge>
         ) : (
-          <Badge variant="secondary">disabled</Badge>
+          <Badge variant="secondary">{u.status}</Badge>
         ),
     },
     {
@@ -279,14 +279,7 @@ export default function UsersPage() {
                   : "No users."
               }
               selection={
-                bulk.bulkMode
-                  ? {
-                      selected: bulk.selected,
-                      onToggle: bulk.toggle,
-                      allSelected: bulk.allSelected,
-                      onToggleAll: bulk.toggleAll,
-                    }
-                  : undefined
+                bulk.bulkMode ? { selected: bulk.selected, onToggle: bulk.toggle } : undefined
               }
               filters={
                 <>

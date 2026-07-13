@@ -20,17 +20,20 @@ it("renders no checkbox column without selection", () => {
 
 it("renders checkboxes and fires selection callbacks", () => {
   const onToggle = vi.fn();
-  const onToggleAll = vi.fn();
   render(
     <FilterableTable
       rows={rows}
       columns={columns}
       getId={(r) => r.id}
-      selection={{ selected: new Set(["a"]), onToggle, allSelected: false, onToggleAll }}
+      selection={{ selected: new Set(["a"]), onToggle }}
     />,
   );
+  // "Select all" toggles only the visible rows not already selected.
   fireEvent.click(screen.getByLabelText("Select all"));
-  expect(onToggleAll).toHaveBeenCalled();
+  expect(onToggle).toHaveBeenCalledWith("b");
+  expect(onToggle).not.toHaveBeenCalledWith("a");
+
+  onToggle.mockClear();
   const rowBoxes = screen.getAllByLabelText("Select row");
   fireEvent.click(rowBoxes[1]);
   expect(onToggle).toHaveBeenCalledWith("b");

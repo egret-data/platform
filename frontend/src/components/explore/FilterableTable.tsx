@@ -42,8 +42,6 @@ export function FilterableTable<T>({
   selection?: {
     selected: Set<string>;
     onToggle: (id: string) => void;
-    allSelected: boolean;
-    onToggleAll: () => void;
   };
 }) {
   const [q, setQ] = useState("");
@@ -101,15 +99,25 @@ export function FilterableTable<T>({
         <Table>
           <TableHeader>
             <TableRow>
-              {selection && (
-                <TableHead className="w-8">
-                  <Checkbox
-                    aria-label="Select all"
-                    checked={selection.allSelected}
-                    onCheckedChange={() => selection.onToggleAll()}
-                  />
-                </TableHead>
-              )}
+              {selection && (() => {
+                const shownIds = shown.map(getId);
+                const allShownSelected =
+                  shownIds.length > 0 && shownIds.every((id) => selection.selected.has(id));
+                return (
+                  <TableHead className="w-8">
+                    <Checkbox
+                      aria-label="Select all"
+                      checked={allShownSelected}
+                      onCheckedChange={() => {
+                        const target = !allShownSelected;
+                        for (const id of shownIds) {
+                          if (selection.selected.has(id) !== target) selection.onToggle(id);
+                        }
+                      }}
+                    />
+                  </TableHead>
+                );
+              })()}
               {columns.map((c) =>
                 c.sortable ? (
                   <SortableHeader
