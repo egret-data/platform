@@ -345,6 +345,10 @@ async fn ws_state(db: &Db) -> WorkspaceState {
         workspaces: WorkspaceRepo::new(db.clone()),
         members: egret_workspace::members::MemberRepo::new(db.clone()),
         access_views: egret_workspace::access_views::AccessViewsRepo::new(db.clone()),
+        access_requests: egret_workspace::access_requests::AccessRequestRepo::new(
+            db.clone(),
+            egret_workspace::members::MemberRepo::new(db.clone()),
+        ),
         authz: egret_workspace::rbac::Authorizer::new(db.clone()),
         pdp: build_pdp(db).await,
         users: UserRepo::new(db.clone()),

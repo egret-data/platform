@@ -20,5 +20,6 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     doc.merge(routes::AdminWorkspaceApi::openapi());
     doc.merge(routes::AdminUserApi::openapi());
     doc.merge(routes::WsMemberApi::openapi());
+    doc.merge(routes::AccessRequestApi::openapi());
     doc
 }

@@ -9,7 +9,8 @@ use egret_auth::oidc_routes::{oidc_router, OidcRoutesState};
 use egret_auth::routes::{auth_router, AuthState};
 use egret_metastore::Db;
 use egret_workspace::routes::{
-    admin_user_router, admin_workspace_router, me_router, ws_member_router, WorkspaceState,
+    access_request_router, admin_user_router, admin_workspace_router, me_router, ws_member_router,
+    WorkspaceState,
 };
 
 /// Application state shared by all handlers.
@@ -157,6 +158,7 @@ pub fn build_router(state: AppState) -> Router {
             )
             .nest("/api/ws", ws_member_router())
             .nest("/api/me", me_router())
+            .nest("/api", access_request_router())
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
             .with_state(ws);
         router = router.merge(admin);
