@@ -59,6 +59,16 @@ vi.mock("@/api/policies", async (orig) => ({
   resourceLookup: () => Promise.resolve([]),
 }));
 
+vi.mock("@/api/tags", () => ({
+  useTags: () => ({
+    data: [
+      { id: "t1", key: "pii", name: "pii", description: "", color: "#f00", assignment_count: 0, created_at: "" },
+      { id: "t2", key: "phi", name: "phi", description: "", color: "#0f0", assignment_count: 0, created_at: "" },
+    ],
+    isLoading: false,
+  }),
+}));
+
 import PolicyEditorPage from "../PolicyEditorPage";
 
 function wrap(ui: React.ReactNode) {
@@ -267,5 +277,77 @@ describe("PolicyEditorPage", () => {
     const override = screen.getByLabelText("Override") as HTMLElement;
     expect(override).toBeInTheDocument();
     expect(override).not.toBeChecked();
+  });
+
+  it("toggling to Tag mode shows the tag select and hides the resource picker", async () => {
+    wrap(<PolicyEditorPage />);
+    await screen.findByLabelText("Policy name");
+
+    // Resource mode (default) renders the catalog/schema/table/column chain.
+    expect((await screen.findAllByPlaceholderText("value or * (Enter to add)")).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: /by tag/i }));
+
+    expect(screen.queryByPlaceholderText("value or * (Enter to add)")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Tag")).toBeInTheDocument();
+  });
+
+  it("submits a tag + masking policy with kind:tag-masking, tag, service, and mask items", async () => {
+    routeParams = { service: "trino", kind: "masking" };
+    wrap(<PolicyEditorPage />);
+    fireEvent.change(await screen.findByLabelText("Policy name"), {
+      target: { value: "mask-pii" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /by tag/i }));
+    fireEvent.click(screen.getByLabelText("Tag"));
+    fireEvent.click(await screen.findByRole("option", { name: "pii" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^save$/i })).not.toBeDisabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(createPolicy).toHaveBeenCalled());
+
+    const arg = createPolicy.mock.calls[0][0] as {
+      kind: string;
+      tag: string;
+      service: string;
+      name: string;
+      items: unknown[];
+    };
+    expect(arg.kind).toBe("tag-masking");
+    expect(arg.tag).toBe("pii");
+    expect(arg.service).toBe("trino");
+    expect(arg.name).toBe("mask-pii");
+    expect(arg.items.length).toBeGreaterThan(0);
+    expect(updatePolicy).not.toHaveBeenCalled();
+  });
+
+  it("submits kind:masking with resources in Resource mode (no regression)", async () => {
+    routeParams = { service: "trino", kind: "masking" };
+    wrap(<PolicyEditorPage />);
+    fireEvent.change(await screen.findByLabelText("Policy name"), {
+      target: { value: "mask-catalog" },
+    });
+
+    const catalogInput = screen.getAllByPlaceholderText("value or * (Enter to add)")[0];
+    fireEvent.change(catalogInput, { target: { value: "iceberg" } });
+    fireEvent.keyDown(catalogInput, { key: "Enter" });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^save$/i })).not.toBeDisabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(createPolicy).toHaveBeenCalled());
+
+    const arg = createPolicy.mock.calls[0][0] as {
+      kind: string;
+      tag?: string;
+      resources: { catalog: { values: string[] } };
+    };
+    expect(arg.kind).toBe("masking");
+    expect(arg.resources.catalog.values).toEqual(["iceberg"]);
+    expect(arg.tag).toBeUndefined();
   });
 });
