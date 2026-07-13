@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Table,
   TableBody,
@@ -29,6 +30,7 @@ export function FilterableTable<T>({
   filters,
   initialSort,
   emptyText = "No results.",
+  selection,
 }: {
   rows: T[];
   columns: Column<T>[];
@@ -37,6 +39,12 @@ export function FilterableTable<T>({
   filters?: ReactNode;
   initialSort?: SortState<string>;
   emptyText?: string;
+  selection?: {
+    selected: Set<string>;
+    onToggle: (id: string) => void;
+    allSelected: boolean;
+    onToggleAll: () => void;
+  };
 }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState<SortState<string> | undefined>(initialSort);
@@ -93,6 +101,15 @@ export function FilterableTable<T>({
         <Table>
           <TableHeader>
             <TableRow>
+              {selection && (
+                <TableHead className="w-8">
+                  <Checkbox
+                    aria-label="Select all"
+                    checked={selection.allSelected}
+                    onCheckedChange={() => selection.onToggleAll()}
+                  />
+                </TableHead>
+              )}
               {columns.map((c) =>
                 c.sortable ? (
                   <SortableHeader
@@ -115,7 +132,7 @@ export function FilterableTable<T>({
             {shown.length === 0 ? (
               <TableRow className="hover:bg-transparent">
                 <TableCell
-                  colSpan={columns.length}
+                  colSpan={columns.length + (selection ? 1 : 0)}
                   className="py-6 text-center text-muted-foreground"
                 >
                   {emptyText}
@@ -124,6 +141,15 @@ export function FilterableTable<T>({
             ) : (
               shown.map((row) => (
                 <TableRow key={getId(row)}>
+                  {selection && (
+                    <TableCell className="w-8">
+                      <Checkbox
+                        aria-label="Select row"
+                        checked={selection.selected.has(getId(row))}
+                        onCheckedChange={() => selection.onToggle(getId(row))}
+                      />
+                    </TableCell>
+                  )}
                   {columns.map((c) => (
                     <TableCell key={c.key} className={c.className}>
                       {c.cell(row)}
