@@ -1,5 +1,5 @@
 import { useMemo, useState, type CSSProperties } from "react";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { MoreHorizontal } from "lucide-react";
 
 import { useWorkspaceShares, type ObjectGrantRollup } from "@/api/workspaceAccess";
@@ -64,6 +64,7 @@ interface ShareTarget {
  */
 export default function SharedObjects() {
   const ws = useParams().workspace!;
+  const navigate = useNavigate();
   const q = useWorkspaceShares(ws);
 
   const rows = q.data ?? [];
@@ -160,6 +161,15 @@ export default function SharedObjects() {
               }
             >
               Manage sharing…
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={() =>
+                navigate(
+                  `/control-plane/who-can-access?ws=${ws}&kind=${r.kind}&id=${r.object_id}`,
+                )
+              }
+            >
+              Who can access?
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

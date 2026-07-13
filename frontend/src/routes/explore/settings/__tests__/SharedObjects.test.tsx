@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Routes, Route } from "react-router-dom";
+import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 // ── Mock factories ────────────────────────────────────────────────────────────
@@ -28,6 +28,12 @@ import SharedObjects from "@/routes/explore/settings/SharedObjects";
 
 // ── Render helper ─────────────────────────────────────────────────────────────
 
+/** Probe that surfaces the current location as text so navigation can be asserted. */
+function LocationProbe() {
+  const loc = useLocation();
+  return <div data-testid="location-probe">{`${loc.pathname}${loc.search}`}</div>;
+}
+
 function renderPage() {
   const qc = new QueryClient();
   return render(
@@ -35,6 +41,7 @@ function renderPage() {
       <MemoryRouter initialEntries={["/explore/eng/settings/shares"]}>
         <Routes>
           <Route path="/explore/:workspace/settings/shares" element={<SharedObjects />} />
+          <Route path="*" element={<LocationProbe />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -125,6 +132,19 @@ describe("SharedObjects page", () => {
     const dialog = await screen.findByTestId("mock-share-dialog");
     expect(dialog).toHaveAttribute("data-kind", "chart");
     expect(dialog).toHaveAttribute("data-id", "obj-chart-1");
+  });
+
+  it("deep-links to who-can-access for the row's object when 'Who can access?' is clicked", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole("button", { name: "Actions for Revenue Chart" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Who can access?" }));
+
+    const probe = await screen.findByTestId("location-probe");
+    expect(probe).toHaveTextContent(
+      "/control-plane/who-can-access?ws=eng&kind=chart&id=obj-chart-1",
+    );
   });
 
   it("shows a 403-forbidden message for non-admins", () => {
