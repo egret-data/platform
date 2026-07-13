@@ -975,6 +975,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         egret_policy::seed_trino(&store)
             .await
             .map_err(anyhow::Error::from)?;
+        // Seed the tag service-def too (Access P3.2) so tag-based policies +
+        // `download_tags` have a service-def. LIVE-ONLY field correctness; see
+        // `egret_policy::seed_tag`.
+        egret_policy::seed_tag(&store)
+            .await
+            .map_err(anyhow::Error::from)?;
         Some(egret_policy::RangerState {
             store,
             auth_token: config.ranger.auth_token.clone().into(),

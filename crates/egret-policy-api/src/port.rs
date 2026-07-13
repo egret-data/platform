@@ -24,6 +24,10 @@ pub trait PolicyPort: Send + Sync {
     /// Ensure the built-in `trino` service-def is seeded. Idempotent.
     async fn ensure_trino_def(&self) -> Result<(), PolicyError>;
 
+    /// Ensure the built-in `tag` service-def is seeded. Idempotent. Required
+    /// before a tag service instance can be created for tag-based policies.
+    async fn ensure_tag_def(&self) -> Result<(), PolicyError>;
+
     /// List all policy profiles (services).
     async fn list_services(&self) -> Result<Vec<PolicyService>, PolicyError>;
 

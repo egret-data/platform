@@ -53,6 +53,10 @@ impl CatalogTagRepo {
     /// Attach `tag_id` to a catalog resource. Idempotent — a re-assign is a no-op
     /// (ON CONFLICT DO NOTHING on the composite primary key). `column = ""` tags
     /// the whole table.
+    ///
+    /// Bumps `tag_version` on every policy service bound to this warehouse (see
+    /// [`Self::bump_bound_tag_versions`]) in the SAME transaction, so the Ranger
+    /// tag-download plugin re-polls `download_tags` instead of 304-ing forever.
     pub async fn assign_catalog(
         &self,
         tag_id: Uuid,
@@ -62,6 +66,12 @@ impl CatalogTagRepo {
         column: &str,
         assigned_by: Option<Uuid>,
     ) -> Result<(), BiApiError> {
+        let mut tx = self
+            .db
+            .pool
+            .begin()
+            .await
+            .map_err(crate::error::BiError::from)?;
         sqlx::query(
             "INSERT INTO catalog_tag_assignments \
                  (tag_id, warehouse_id, schema_name, table_name, column_name, assigned_by) \
@@ -74,13 +84,17 @@ impl CatalogTagRepo {
         .bind(table)
         .bind(column)
         .bind(assigned_by)
-        .execute(&self.db.pool)
+        .execute(&mut *tx)
         .await
         .map_err(crate::error::BiError::from)?;
+        Self::bump_bound_tag_versions(&mut tx, warehouse_id).await?;
+        tx.commit().await.map_err(crate::error::BiError::from)?;
         Ok(())
     }
 
     /// Detach `tag_id` from a catalog resource (idempotent — deletes 0 or 1 row).
+    /// Bumps the bound services' `tag_version` in the same transaction (see
+    /// [`Self::assign_catalog`]).
     pub async fn unassign_catalog(
         &self,
         tag_id: Uuid,
@@ -89,6 +103,12 @@ impl CatalogTagRepo {
         table: &str,
         column: &str,
     ) -> Result<(), BiApiError> {
+        let mut tx = self
+            .db
+            .pool
+            .begin()
+            .await
+            .map_err(crate::error::BiError::from)?;
         sqlx::query(
             "DELETE FROM catalog_tag_assignments \
              WHERE tag_id = $1 AND warehouse_id = $2 AND schema_name = $3 \
@@ -99,7 +119,37 @@ impl CatalogTagRepo {
         .bind(schema)
         .bind(table)
         .bind(column)
-        .execute(&self.db.pool)
+        .execute(&mut *tx)
+        .await
+        .map_err(crate::error::BiError::from)?;
+        Self::bump_bound_tag_versions(&mut tx, warehouse_id).await?;
+        tx.commit().await.map_err(crate::error::BiError::from)?;
+        Ok(())
+    }
+
+    /// Bump `policy.authz_services.tag_version` for every policy service bound to
+    /// `warehouse_id`. The binding is the engine seam:
+    /// `engine_mgmt.engines.authz_service_id` -> the warehouse's engine(s) (the
+    /// same join `PolicyStore::tag_assignments_for_service` uses on the serving
+    /// side). A monotonic `tag_version` is how the Ranger tag-download plugin
+    /// (which polls `download_tags?lastKnownVersion=`) learns a warehouse's
+    /// catalog-tag assignments changed; without the bump it 304s forever. Runs on
+    /// the caller's transaction. Parameterized, cross-seam-but-same-DB write.
+    async fn bump_bound_tag_versions(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        warehouse_id: Uuid,
+    ) -> Result<(), BiApiError> {
+        sqlx::query(
+            "UPDATE policy.authz_services s \
+                SET tag_version = tag_version + 1, updated_at = now() \
+             WHERE s.id IN ( \
+                 SELECT DISTINCT e.authz_service_id \
+                 FROM engine_mgmt.engines e \
+                 WHERE e.warehouse_id = $1 AND e.authz_service_id IS NOT NULL \
+             )",
+        )
+        .bind(warehouse_id)
+        .execute(&mut **tx)
         .await
         .map_err(crate::error::BiError::from)?;
         Ok(())
