@@ -1,28 +1,35 @@
-import { NavLink, Outlet, useParams } from "react-router-dom";
-import { Users } from "lucide-react";
+import { NavLink, Outlet } from "react-router-dom";
 
-const TABS = [{ to: "members", label: "Members", icon: Users }];
+const TABS = [
+  { to: "members", label: "Members" },
+  { to: "roles", label: "Roles & permissions" },
+  { to: "shares", label: "Shared objects" },
+];
 
 export default function WorkspaceSettings() {
-  const ws = useParams().workspace!;
   return (
     <div className="p-4">
       <h1 className="mb-4 text-lg font-semibold">Workspace settings</h1>
-      <div className="grid grid-cols-[180px_1fr] gap-6">
-        <nav className="flex flex-col gap-1">
-          {TABS.map((t) => (
-            <NavLink
-              key={t.to}
-              to={`/explore/${ws}/settings/${t.to}`}
-              className={({ isActive }) =>
-                `flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium ${isActive ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground"}`
-              }
-            >
-              <t.icon className="h-4 w-4" /> {t.label}
-            </NavLink>
-          ))}
-        </nav>
-        <div className="min-w-0"><Outlet /></div>
+      <nav className="mb-6 flex gap-1 border-b border-border" aria-label="Workspace settings sections">
+        {TABS.map((t) => (
+          <NavLink
+            key={t.to}
+            to={t.to}
+            end
+            className={({ isActive }) =>
+              `-mb-px border-b-2 px-3 py-2 text-sm transition-colors ${
+                isActive
+                  ? "border-primary font-semibold text-foreground"
+                  : "border-transparent font-medium text-muted-foreground hover:border-border hover:text-foreground"
+              }`
+            }
+          >
+            {t.label}
+          </NavLink>
+        ))}
+      </nav>
+      <div className="min-w-0">
+        <Outlet />
       </div>
     </div>
   );
