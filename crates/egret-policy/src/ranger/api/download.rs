@@ -1,6 +1,6 @@
 //! Policy download + tags download endpoints (Ranger plugin polling protocol).
 
-use crate::ranger::dto::{ServicePolicies, ServiceTags};
+use crate::ranger::dto::{ServicePolicies, ServiceTags, TagAssignment};
 use crate::ranger::error::RangerError;
 use crate::ranger::routes::{
     RangerErrorBody, RangerServicePolicies, RangerServiceTags, RangerState,
@@ -55,7 +55,9 @@ pub async fn download_policies(
 
 /// `GET /tags/download/{service}?lastKnownVersion=N`
 ///
-/// Returns an empty well-formed tag payload so the plugin doesn't error (tag policies deferred).
+/// Serves the real resource→tag mapping (`catalog_tag_assignments`) for the
+/// service's warehouse(s) as a Ranger `ServiceTags`. Returns 304 when the
+/// plugin's cached `tagVersion` matches the current one; 200 otherwise.
 #[utoipa::path(
     get,
     path = "/service/tags/download/{service}",
@@ -65,7 +67,8 @@ pub async fn download_policies(
         DownloadParams,
     ),
     responses(
-        (status = 200, description = "An empty, well-formed tag payload (tag policies deferred)", body = RangerServiceTags),
+        (status = 200, description = "The service's catalog tag assignments (plugin tag-download envelope)", body = RangerServiceTags),
+        (status = 304, description = "Not modified — the plugin's lastKnownVersion matches the current tag version"),
         (status = 401, description = "Missing or invalid bearer token (when a ranger auth token is configured)"),
         (status = 404, description = "No such policy profile", body = RangerErrorBody),
         (status = 500, description = "Internal error", body = RangerErrorBody),
@@ -74,8 +77,28 @@ pub async fn download_policies(
 pub async fn download_tags(
     State(s): State<RangerState>,
     Path(service): Path<String>,
-    Query(_q): Query<DownloadParams>,
+    Query(q): Query<DownloadParams>,
 ) -> Result<Response, RangerError> {
-    let _ = s.store.get_service(&service).await?; // 404 if unknown
-    Ok(Json(ServiceTags::empty(service)).into_response())
+    let svc = s.store.get_service(&service).await?; // 404 if unknown
+    if q.last_known_version == Some(svc.tag_version) {
+        return Ok(StatusCode::NOT_MODIFIED.into_response());
+    }
+    let assignments = s
+        .store
+        .tag_assignments_for_service(svc.id)
+        .await?
+        .into_iter()
+        .map(|r| {
+            TagAssignment::new(
+                r.catalog,
+                r.schema_name,
+                r.table_name,
+                r.column_name,
+                r.tag_id,
+                r.tag_name,
+            )
+        })
+        .collect();
+    let tags = ServiceTags::from_assignments(svc.name, svc.tag_version, assignments);
+    Ok(Json(tags).into_response())
 }
