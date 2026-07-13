@@ -43,6 +43,12 @@ fn manage_action(kind: &str) -> String {
     }
 }
 
+/// The action a caller must hold on the object to read it (and its tags). Every
+/// kind uses `<kind>:read` (including `notebook:read`).
+fn read_action(kind: &str) -> String {
+    format!("{kind}:read")
+}
+
 /// Resolve `(kind, id)` to the `ObjectRef` (folder + workspace ancestry) the PDP
 /// needs. `NotFound` if the object is absent, `InvalidInput` for an unknown kind.
 pub async fn object_ref(db: &Db, kind: &str, id: Uuid) -> Result<ObjectRef, Error> {
@@ -121,6 +127,42 @@ pub fn shares_router() -> Router<BiState> {
             "/ws/{workspace}/objects/{kind}/{id}/grants/{grant_id}",
             delete(grant_delete),
         )
+        .route(
+            "/ws/{workspace}/objects/{kind}/{id}/tags",
+            axum::routing::get(object_tags_list),
+        )
+        .route(
+            "/ws/{workspace}/objects/{kind}/{id}/tags/{tag_id}",
+            put(object_tag_assign).delete(object_tag_unassign),
+        )
+}
+
+/// A classification tag carried by an object (Access P3.1). Local snake_case DTO
+/// so egret-bi does not depend on egret-controlplane. `assignment_count` is the
+/// tag's global assignment count (as computed by `TagRepo`).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TagDto {
+    pub id: Uuid,
+    pub key: String,
+    pub name: String,
+    pub description: String,
+    pub color: String,
+    pub assignment_count: i64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<crate::tags::Tag> for TagDto {
+    fn from(t: crate::tags::Tag) -> Self {
+        TagDto {
+            id: t.id,
+            key: t.key,
+            name: t.name,
+            description: t.description,
+            color: t.color,
+            assignment_count: t.assignment_count,
+            created_at: t.created_at,
+        }
+    }
 }
 
 /// Validate the share role name and reject anything outside the sharable set.
@@ -416,11 +458,144 @@ async fn grant_list(
     ))
 }
 
+// ── Per-object classification tags (Access P3.1) ─────────────────────────────
+// Reads gate on object READ (`require_object(read_action(kind))`), writes on
+// object MANAGE (`require_object(manage_action(kind))`), same as the per-object
+// BI handlers. Cross-workspace targets 404 via `resolve`. Metadata only — no
+// authorization decision reads these assignments in this phase.
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/objects/{kind}/{id}/tags",
+    tag = "shares",
+    params(
+        WorkspacePath,
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query"),
+        ("id" = Uuid, Path, description = "Object id"),
+    ),
+    responses(
+        (status = 200, description = "The object's classification tags", body = Vec<TagDto>),
+        (status = 400, description = "Unknown kind", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing <kind>:read on the object", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such object in this workspace", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn object_tags_list(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, kind, id)): Path<(String, String, Uuid)>,
+) -> Result<Json<Vec<TagDto>>, BiApiError> {
+    let obj = resolve(&st, &ctx, &kind, id).await?;
+    require_object(&*st.pdp, &ctx, &read_action(&kind), obj)
+        .await
+        .map_err(BiApiError::from)?;
+    let tags = crate::tags::TagRepo::new(st.db.clone())
+        .tags_for_object(&kind, id)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(tags.into_iter().map(TagDto::from).collect()))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/ws/{workspace}/objects/{kind}/{id}/tags/{tag_id}",
+    tag = "shares",
+    params(
+        WorkspacePath,
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query"),
+        ("id" = Uuid, Path, description = "Object id"),
+        ("tag_id" = Uuid, Path, description = "Tag id to assign"),
+    ),
+    responses(
+        (status = 200, description = "Tag assigned (idempotent)", body = egret_core::Ack),
+        (status = 400, description = "Unknown kind", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing <kind>:manage on the object", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such object in this workspace", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn object_tag_assign(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, kind, id, tag_id)): Path<(String, String, Uuid, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    let obj = resolve(&st, &ctx, &kind, id).await?;
+    require_object(&*st.pdp, &ctx, &manage_action(&kind), obj)
+        .await
+        .map_err(BiApiError::from)?;
+    crate::tags::TagRepo::new(st.db.clone())
+        .assign(tag_id, &kind, id, Some(ctx.principal.user_id.0))
+        .await
+        .map_err(BiApiError::from)?;
+    st.audit.emit(egret_audit::AuditEvent::Mutation {
+        actor: Some(ctx.principal.user_id.0),
+        workspace_id: Some(ctx.workspace_id.0),
+        action: "tag:assign".into(),
+        resource_type: "object".into(),
+        resource_id: Some(format!("{kind}:{id}")),
+        detail: serde_json::json!({ "tag_id": tag_id }),
+    });
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/objects/{kind}/{id}/tags/{tag_id}",
+    tag = "shares",
+    params(
+        WorkspacePath,
+        ("kind" = String, Path, description = "Object kind: dashboard | chart | dataset | folder | notebook | saved_query"),
+        ("id" = Uuid, Path, description = "Object id"),
+        ("tag_id" = Uuid, Path, description = "Tag id to unassign"),
+    ),
+    responses(
+        (status = 200, description = "Tag unassigned (idempotent)", body = egret_core::Ack),
+        (status = 400, description = "Unknown kind", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing <kind>:manage on the object", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such object in this workspace", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn object_tag_unassign(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, kind, id, tag_id)): Path<(String, String, Uuid, Uuid)>,
+) -> Result<Json<serde_json::Value>, BiApiError> {
+    let obj = resolve(&st, &ctx, &kind, id).await?;
+    require_object(&*st.pdp, &ctx, &manage_action(&kind), obj)
+        .await
+        .map_err(BiApiError::from)?;
+    crate::tags::TagRepo::new(st.db.clone())
+        .unassign(tag_id, &kind, id)
+        .await
+        .map_err(BiApiError::from)?;
+    st.audit.emit(egret_audit::AuditEvent::Mutation {
+        actor: Some(ctx.principal.user_id.0),
+        workspace_id: Some(ctx.workspace_id.0),
+        action: "tag:unassign".into(),
+        resource_type: "object".into(),
+        resource_id: Some(format!("{kind}:{id}")),
+        detail: serde_json::json!({ "tag_id": tag_id }),
+    });
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 /// OpenAPI fragment for the object-share router.
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(grant_put, grant_delete, grant_list),
-    components(schemas(ObjectGrantBody, ObjectGrantDto)),
+    paths(
+        grant_put,
+        grant_delete,
+        grant_list,
+        object_tags_list,
+        object_tag_assign,
+        object_tag_unassign,
+    ),
+    components(schemas(ObjectGrantBody, ObjectGrantDto, TagDto)),
     tags((name = "shares", description = "Per-object grants: share a dashboard / chart / dataset / folder with a user or group at a workspace role")),
 )]
 pub struct BiSharesApi;
