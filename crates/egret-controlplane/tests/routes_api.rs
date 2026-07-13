@@ -237,6 +237,40 @@ fn req(method: &str, uri: &str, token: &str, body: Option<serde_json::Value>) ->
     b.body(body).unwrap()
 }
 
+/// Regression: `control_plane_router()` is nested at `/api/control-plane` in
+/// `egret-server`, so every route inside it MUST be relative to that nest.
+/// `audit_router` once used `/control-plane/audit`, which double-prefixed to
+/// `/api/control-plane/control-plane/audit` and 404'd the FE (it calls
+/// `/api/control-plane/audit`). `build_app` mounts the router BARE, so it can't
+/// catch this — mount it exactly as production does and assert the audit path
+/// resolves (a doubled route would 404 here).
+#[tokio::test]
+async fn audit_route_resolves_under_the_control_plane_nest() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL unset");
+        return;
+    };
+    let nested = axum::Router::new().nest("/api/control-plane", f.app.clone());
+    let resp = nested
+        .oneshot(
+            HttpRequest::builder()
+                .method("GET")
+                .uri("/api/control-plane/audit?limit=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // No session cookie → 401 (route exists, auth required). A double-prefixed
+    // route would 404 here — the invariant is: NOT 404.
+    assert_ne!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "audit must resolve at /api/control-plane/audit (route must be relative to the nest)"
+    );
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test]
 async fn non_admin_is_forbidden() {
     let Some(mut f) = setup().await else {
@@ -1634,7 +1668,7 @@ async fn audit_query_paginates_and_gates() {
         .clone()
         .oneshot(req(
             "GET",
-            &format!("/control-plane/audit?actor={actor}&kind=decision&limit=1"),
+            &format!("/audit?actor={actor}&kind=decision&limit=1"),
             &admin,
             None,
         ))
@@ -1667,9 +1701,7 @@ async fn audit_query_paginates_and_gates() {
         .clone()
         .oneshot(req(
             "GET",
-            &format!(
-                "/control-plane/audit?actor={actor}&kind=decision&limit=1&cursor={cursor_enc}"
-            ),
+            &format!("/audit?actor={actor}&kind=decision&limit=1&cursor={cursor_enc}"),
             &admin,
             None,
         ))
@@ -1697,7 +1729,7 @@ async fn audit_query_paginates_and_gates() {
     let resp = f
         .app
         .clone()
-        .oneshot(req("GET", "/control-plane/audit", &plain, None))
+        .oneshot(req("GET", "/audit", &plain, None))
         .await
         .unwrap();
     assert_eq!(
@@ -1714,7 +1746,7 @@ async fn audit_query_paginates_and_gates() {
     let resp = f
         .app
         .clone()
-        .oneshot(req("GET", "/control-plane/audit", &steward, None))
+        .oneshot(req("GET", "/audit", &steward, None))
         .await
         .unwrap();
     assert_eq!(
