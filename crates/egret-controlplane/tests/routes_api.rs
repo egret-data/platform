@@ -2117,10 +2117,14 @@ async fn tag_access_policy_crud_and_permissions() {
         ))
         .await
         .unwrap();
+    // Regression: the response MUST carry a parseable JSON body — the FE `apiJson`
+    // calls `.json()`, and an empty 200 body throws "Unexpected end of JSON input"
+    // (caught in a live browser smoke, not by a status-only assertion).
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "set access policy must be 200");
     assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "set access policy must be 200"
+        j["ok"], true,
+        "set access policy returns a JSON body; body={j}"
     );
 
     // GET /tags now reflects the required_roles.
@@ -2174,10 +2178,11 @@ async fn tag_access_policy_crud_and_permissions() {
         ))
         .await
         .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "clear access policy must be 200");
     assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "clear access policy must be 200"
+        j["ok"], true,
+        "clear access policy returns a JSON body; body={j}"
     );
 
     // required_roles is empty again.

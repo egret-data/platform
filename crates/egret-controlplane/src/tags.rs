@@ -254,7 +254,7 @@ async fn set_access_policy(
     Auth(p): Auth,
     Path(id): Path<Uuid>,
     Json(body): Json<SetAccessPolicy>,
-) -> Result<StatusCode, CpError> {
+) -> Result<Json<serde_json::Value>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "tag:manage").await?;
     // SECURITY (Access P3.4): parse each group id as a `Uuid` BEFORE it reaches
     // the repo / Cedar policy string. A non-uuid entry is rejected `400` — never
@@ -278,7 +278,9 @@ async fn set_access_policy(
             Some(p.user_id.0),
         )
         .await?;
-    Ok(StatusCode::OK)
+    // Return a JSON body (not a bare 200) so the FE `apiJson` can parse it —
+    // an empty 200 body throws "Unexpected end of JSON input" client-side.
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 #[utoipa::path(
@@ -297,10 +299,10 @@ async fn clear_access_policy(
     State(st): State<CpState>,
     Auth(p): Auth,
     Path(id): Path<Uuid>,
-) -> Result<StatusCode, CpError> {
+) -> Result<Json<serde_json::Value>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "tag:manage").await?;
     st.classification_policies.clear_policy(id).await?;
-    Ok(StatusCode::OK)
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 #[derive(utoipa::OpenApi)]
