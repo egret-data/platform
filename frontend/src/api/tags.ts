@@ -30,6 +30,12 @@ export interface Tag {
    * object's own access grants).
    */
   required_roles: string[];
+  /**
+   * Clearance group UUIDs required to open objects carrying this tag — a
+   * principal is cleared if they hold a `required_roles` role OR belong to
+   * one of these groups. Empty = not group-gated.
+   */
+  required_groups: string[];
 }
 
 export const tagsQueryKey = ["tags"] as const;
@@ -90,18 +96,23 @@ export function useDeleteTag() {
 
 /**
  * Sets the clearance policy for a tag: objects carrying it become openable
- * only by principals holding one of `required_roles` (Cedar PDP-enforced).
- * Passing an empty array clears the gate — same effect as
- * `useClearTagAccessPolicy`, kept separate for callers that always PUT.
+ * only by principals holding one of `required_roles` OR belonging to one of
+ * `required_groups` (Cedar PDP-enforced). Passing both as empty arrays
+ * clears the gate — same effect as `useClearTagAccessPolicy`, kept separate
+ * for callers that always PUT.
  */
 export function useSetTagAccessPolicy() {
   const queryClient = useQueryClient();
-  return useMutation<void, Error, { id: string; required_roles: string[] }>({
-    mutationFn: async ({ id, required_roles }) => {
+  return useMutation<
+    void,
+    Error,
+    { id: string; required_roles: string[]; required_groups: string[] }
+  >({
+    mutationFn: async ({ id, required_roles, required_groups }) => {
       await apiJson<void>(`/control-plane/tags/${id}/access-policy`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ required_roles }),
+        body: JSON.stringify({ required_roles, required_groups }),
       });
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: tagsQueryKey }),

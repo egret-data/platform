@@ -30,6 +30,7 @@ const TAGS: tagsApi.Tag[] = [
     assignment_count: 3,
     created_at: "2026-07-01T00:00:00Z",
     required_roles: [],
+    required_groups: [],
   },
   {
     id: "t2",
@@ -40,6 +41,7 @@ const TAGS: tagsApi.Tag[] = [
     assignment_count: 0,
     created_at: "2026-07-02T00:00:00Z",
     required_roles: [],
+    required_groups: [],
   },
   {
     id: "t3",
@@ -50,8 +52,33 @@ const TAGS: tagsApi.Tag[] = [
     assignment_count: 1,
     created_at: "2026-07-03T00:00:00Z",
     required_roles: ["finance_cleared"],
+    required_groups: [],
   },
 ];
+
+const GROUP_GATED_TAG: tagsApi.Tag = {
+  id: "t4",
+  key: "security",
+  name: "Security",
+  description: "Security-restricted data",
+  color: "#a855f7",
+  assignment_count: 2,
+  created_at: "2026-07-04T00:00:00Z",
+  required_roles: [],
+  required_groups: ["g1"],
+};
+
+const BOTH_GATED_TAG: tagsApi.Tag = {
+  id: "t5",
+  key: "both",
+  name: "BothGated",
+  description: "Gated by role and group",
+  color: "#f59e0b",
+  assignment_count: 0,
+  created_at: "2026-07-05T00:00:00Z",
+  required_roles: ["finance_cleared"],
+  required_groups: ["g1"],
+};
 
 const ROLES: accessApi.AccessRole[] = [
   {
@@ -72,6 +99,11 @@ const ROLES: accessApi.AccessRole[] = [
     assigneeCount: 0,
     inheritedPermissions: [],
   },
+];
+
+const GROUPS: accessApi.AccessGroup[] = [
+  { id: "g1", name: "Security Team", source: "local", memberCount: 4, roles: [] },
+  { id: "g2", name: "Finance Team", source: "local", memberCount: 6, roles: [] },
 ];
 
 function mockUseAuth(me: Me | null = ADMIN_ME) {
@@ -129,6 +161,7 @@ describe("Classifications", () => {
       isPending: false,
     } as unknown as ReturnType<typeof tagsApi.useClearTagAccessPolicy>);
     vi.mocked(accessApi.listRoles).mockResolvedValue(ROLES);
+    vi.mocked(accessApi.listGroups).mockResolvedValue(GROUPS);
   });
 
   test("renders tags in the table with name, key, description, and assignment count", async () => {
@@ -292,6 +325,54 @@ describe("Classifications", () => {
       expect(mutateAsync).toHaveBeenCalledWith({
         id: "t1",
         required_roles: ["finance_cleared"],
+        required_groups: [],
+      }),
+    );
+  });
+
+  test("a tag with required_groups (and no required_roles) shows a gated badge with the group name", async () => {
+    mockTagsQuery({ data: [GROUP_GATED_TAG] });
+    renderPage();
+
+    expect(await screen.findByText("Security")).toBeInTheDocument();
+    expect(await screen.findByText(/Gated.*Security Team/i)).toBeInTheDocument();
+  });
+
+  test("a tag gated by both a role and a group shows both in the badge", async () => {
+    mockTagsQuery({ data: [BOTH_GATED_TAG] });
+    renderPage();
+
+    expect(await screen.findByText("BothGated")).toBeInTheDocument();
+    const badge = await screen.findByText(/Gated.*Security Team/i);
+    expect(badge).toHaveTextContent("finance_cleared");
+    expect(badge).toHaveTextContent("Security Team");
+  });
+
+  test("editing a tag, selecting a group, and saving calls useSetTagAccessPolicy with the selected roles and groups", async () => {
+    const user = userEvent.setup();
+    const mutateAsync = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(tagsApi.useSetTagAccessPolicy).mockReturnValue({
+      mutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof tagsApi.useSetTagAccessPolicy>);
+
+    renderPage();
+    await screen.findByText("PII");
+
+    await user.click(screen.getByRole("button", { name: /Actions for PII/i }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    await screen.findByRole("heading", { name: /Edit tag — PII/i });
+
+    const groupCheckbox = await screen.findByRole("checkbox", { name: "Security Team" });
+    await user.click(groupCheckbox);
+
+    await user.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith({
+        id: "t1",
+        required_roles: [],
+        required_groups: ["g1"],
       }),
     );
   });
