@@ -89,3 +89,86 @@ async fn set_get_update_clear_and_cascade() {
         "deleting the tag must CASCADE-delete its classification policy"
     );
 }
+
+/// FIX 1a (security): `set_policy` validates every `required_roles` entry against
+/// a safe role-name charset BEFORE the INSERT, so a `tag:manage` caller cannot
+/// inject a Cedar policy-string payload (which would either break the PDP reload
+/// or splice a `|| true` that disables the clearance gate). A single bad entry
+/// rejects the whole call with `BadRequest` (→ HTTP 400); a valid list is Ok.
+#[tokio::test]
+async fn set_policy_rejects_injection_payloads() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    let tags = TagRepo::new(db.clone());
+    let pol = ClassificationPolicyRepo::new(db.clone(), EventBus::new());
+    let by = seed_user(&db).await;
+    let key = format!("secret-{}", Uuid::new_v4().simple());
+    let tag = tags
+        .create(&key, "Secret", "Restricted", "#000000", Some(by))
+        .await
+        .expect("create tag");
+
+    // A quote-injection entry → rejected.
+    let bad_quote = pol
+        .set_policy(tag.id, &["bad\"role".to_string()], Some(by))
+        .await;
+    assert!(
+        matches!(bad_quote, Err(egret_bi::BiError::BadRequest(_))),
+        "a role name containing a quote must be rejected as BadRequest, got {bad_quote:?}"
+    );
+
+    // A `|| true` gate-disabling payload → rejected.
+    let bad_inject = pol
+        .set_policy(
+            tag.id,
+            &["x\"]) || true || context.roles.containsAny([\"y".to_string()],
+            Some(by),
+        )
+        .await;
+    assert!(
+        matches!(bad_inject, Err(egret_bi::BiError::BadRequest(_))),
+        "a `|| true` injection payload must be rejected, got {bad_inject:?}"
+    );
+
+    // Other unsafe chars (backslash, bracket, space, pipe, empty) → rejected;
+    // and a MIXED list with one bad entry rejects the WHOLE call (no partial write).
+    for bad in ["back\\slash", "brack]et", "has space", "pi|pe", "", "UPPER"] {
+        let r = pol.set_policy(tag.id, &[bad.to_string()], Some(by)).await;
+        assert!(
+            matches!(r, Err(egret_bi::BiError::BadRequest(_))),
+            "role name {bad:?} must be rejected, got {r:?}"
+        );
+    }
+    let mixed = pol
+        .set_policy(
+            tag.id,
+            &["finance_cleared".to_string(), "bad\"role".to_string()],
+            Some(by),
+        )
+        .await;
+    assert!(
+        matches!(mixed, Err(egret_bi::BiError::BadRequest(_))),
+        "one bad entry must reject the whole call, got {mixed:?}"
+    );
+    assert_eq!(
+        pol.get_policy(tag.id).await.expect("get"),
+        None,
+        "a rejected set_policy must not have written any row"
+    );
+
+    // A valid list (egret role names: lowercase + `_`/`:`/`-`) → Ok.
+    let good = vec![
+        "finance_cleared".to_string(),
+        "data_steward".to_string(),
+        "role:sub-team".to_string(),
+    ];
+    pol.set_policy(tag.id, &good, Some(by))
+        .await
+        .expect("valid clearance role names must be accepted");
+    assert_eq!(pol.get_policy(tag.id).await.expect("get"), Some(good));
+}

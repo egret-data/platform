@@ -233,6 +233,27 @@ pub struct ClassificationPolicyRepo {
     bus: EventBus,
 }
 
+/// A clearance role name is spliced verbatim into a Cedar `forbid` string literal
+/// by the PDP loader, so it MUST be a safe role-name slug: non-empty, lowercase
+/// ascii alphanumerics plus `:`, `_`, `-` (matching egret role names like
+/// `ws_viewer`, `data_steward`). This rejects `"`, `\`, `]`, spaces and `|`, which
+/// would otherwise let a `tag:manage` caller inject/break the Cedar policy
+/// (policy-string injection → forbid-parse failure → PDP reload DoS, or a
+/// `|| true` payload disabling the gate).
+fn validate_role_name(role: &str) -> Result<(), BiError> {
+    let ok = !role.is_empty()
+        && role
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, ':' | '_' | '-'));
+    if !ok {
+        return Err(BiError::BadRequest(format!(
+            "invalid clearance role name (must be non-empty lowercase ascii \
+             alphanumerics, ':', '_' or '-'): {role:?}"
+        )));
+    }
+    Ok(())
+}
+
 impl ClassificationPolicyRepo {
     pub fn new(db: Db, bus: EventBus) -> Self {
         Self { db, bus }
@@ -240,12 +261,20 @@ impl ClassificationPolicyRepo {
 
     /// UPSERT the required-role list for `tag_id` (INSERT ... ON CONFLICT (tag_id)
     /// DO UPDATE). Publishes `RolesChanged` so the PDP reloads its policy set.
+    ///
+    /// Every entry in `required_roles` is validated against a safe role-name
+    /// charset BEFORE the INSERT (so the CP handler and any other caller are all
+    /// covered) — a single bad entry rejects the whole call with `BadRequest`,
+    /// preventing Cedar policy-string injection in the PDP loader.
     pub async fn set_policy(
         &self,
         tag_id: Uuid,
         required_roles: &[String],
         by: Option<Uuid>,
     ) -> Result<(), BiError> {
+        for role in required_roles {
+            validate_role_name(role)?;
+        }
         sqlx::query(
             "INSERT INTO classification_policies (tag_id, required_roles, created_by, updated_at) \
              VALUES ($1, $2, $3, now()) \

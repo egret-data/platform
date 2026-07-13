@@ -314,53 +314,77 @@ mod tests {
             )
             .unwrap();
 
-        // Decide a dashboard-read on `d1` with the given context.roles and tag keys.
-        let decide_ctx = |ps: &PolicySet, tags: &[String], roles: &[&str]| -> Decision {
-            let resource = object("dashboard", d1, None, ws);
-            let entities = build_entities(&subject, &resource, tags);
-            let (p, a, r) = request_uids(&subject, "dashboard:read", &resource);
-            let ctx = Context::from_json_value(
-                serde_json::json!({ "is_platform_admin": false, "roles": roles }),
-                None,
-            )
-            .unwrap();
-            let req = Request::new(p, a, r, ctx, None).unwrap();
-            Authorizer::new()
-                .is_authorized(&req, ps, &entities)
-                .decision()
-        };
+        // Decide a dashboard-read on `d1` with the given context.roles, tag keys,
+        // and scope-correct `is_platform_admin` flag.
+        let decide_ctx =
+            |ps: &PolicySet, tags: &[String], roles: &[&str], is_admin: bool| -> Decision {
+                let resource = object("dashboard", d1, None, ws);
+                let entities = build_entities(&subject, &resource, tags);
+                let (p, a, r) = request_uids(&subject, "dashboard:read", &resource);
+                let ctx = Context::from_json_value(
+                    serde_json::json!({ "is_platform_admin": is_admin, "roles": roles }),
+                    None,
+                )
+                .unwrap();
+                let req = Request::new(p, a, r, ctx, None).unwrap();
+                Authorizer::new()
+                    .is_authorized(&req, ps, &entities)
+                    .decision()
+            };
 
         let confidential = vec!["confidential".to_string()];
 
         // (a) tagged + NOT cleared (only ws_viewer) → Deny.
         assert_eq!(
-            decide_ctx(&gated, &confidential, &["ws_viewer"]),
+            decide_ctx(&gated, &confidential, &["ws_viewer"], false),
             Decision::Deny,
             "(a) tagged object without a cleared role must be denied"
         );
         // (b) tagged + cleared (finance_cleared) → Allow.
         assert_eq!(
-            decide_ctx(&gated, &confidential, &["ws_viewer", "finance_cleared"]),
+            decide_ctx(
+                &gated,
+                &confidential,
+                &["ws_viewer", "finance_cleared"],
+                false
+            ),
             Decision::Allow,
             "(b) a cleared role must satisfy the forbid's unless"
         );
-        // (c) tagged + platform_admin (auto-appended to unless) → Allow.
+        // (c) tagged + scope-correct is_platform_admin flag → Allow (never locked out).
         assert_eq!(
-            decide_ctx(&gated, &confidential, &["platform_admin"]),
+            decide_ctx(&gated, &confidential, &[], true),
             Decision::Allow,
-            "(c) platform_admin is never locked out of a tagged object"
+            "(c) a platform_admin (scope-correct flag) is never locked out of a tagged object"
+        );
+        // (c2) FIX 3: a WORKSPACE role merely NAMED `platform_admin` (bare name in
+        // context.roles, WITHOUT the is_platform_admin flag) must NOT bypass — the
+        // exemption keys on the scope-correct flag, not the role name.
+        assert_eq!(
+            decide_ctx(&gated, &confidential, &["platform_admin"], false),
+            Decision::Deny,
+            "(c2) a ws role named platform_admin must NOT bypass without the flag"
         );
         // (d) SAME forbid in the set but object UNtagged (tags:[]) → Allow (when is false).
         assert_eq!(
-            decide_ctx(&gated, &[], &["ws_viewer"]),
+            decide_ctx(&gated, &[], &["ws_viewer"], false),
             Decision::Allow,
             "(d) an untagged object is unaffected by the classification forbid"
         );
         // (e) object tagged confidential but NO classification forbid in the set → Allow.
         assert_eq!(
-            decide_ctx(&permit_ps, &confidential, &["ws_viewer"]),
+            decide_ctx(&permit_ps, &confidential, &["ws_viewer"], false),
             Decision::Allow,
             "(e) a tag with no policy is informational only — no gate"
+        );
+        // (f) deny-grant-not-clearance (FIX 2, at the Cedar layer): `authorize`
+        // builds context.roles from ALLOW grants only, so a subject whose ONLY
+        // source of `finance_cleared` is a DENY grant arrives here with that role
+        // ABSENT from context.roles → the gate still denies.
+        assert_eq!(
+            decide_ctx(&gated, &confidential, &["ws_viewer"], false),
+            Decision::Deny,
+            "(f) a deny-effect clearance grant is filtered out of context.roles → still denied"
         );
     }
 

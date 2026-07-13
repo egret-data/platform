@@ -179,16 +179,33 @@ impl CedarPdp {
             let pid: PolicyId = format!("classification:{tag_id}")
                 .parse()
                 .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e:?}")))?;
-            let policy = cedar_policy::Policy::parse(
+            // Defense in depth: `required_roles` is validated on write (safe
+            // role-name charset), but a malformed row that somehow slipped past
+            // validation (direct DB edit, legacy row) must NOT fail the whole PDP
+            // reload — that would break authz for everyone and block boot
+            // (DoS / stale-authz fail-open). LOG and SKIP just this row instead.
+            // Role/admin templates above keep `?`-propagating as before.
+            let policy = match cedar_policy::Policy::parse(
                 Some(pid),
                 templates::classification_forbid(&key, &required_roles),
-            )
-            .map_err(|e| {
-                egret_core::Error::Internal(anyhow::anyhow!("classification policy: {e:?}"))
-            })?;
-            templates.add(policy).map_err(|e| {
-                egret_core::Error::Internal(anyhow::anyhow!("add classification: {e:?}"))
-            })?;
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(
+                        tag_id = %tag_id, tag_key = %key, error = ?e,
+                        "skipping malformed classification forbid policy; the tag's \
+                         clearance gate is INERT until the policy is corrected"
+                    );
+                    continue;
+                }
+            };
+            if let Err(e) = templates.add(policy) {
+                tracing::warn!(
+                    tag_id = %tag_id, tag_key = %key, error = ?e,
+                    "skipping classification forbid policy that failed to add to the set"
+                );
+                continue;
+            }
         }
         Ok(PdpInner {
             templates,
@@ -273,8 +290,12 @@ impl Pdp for CedarPdp {
         });
         // The distinct role NAMES the subject holds (from the grants already
         // loaded), fed to the classification `forbid`'s `unless` clearance check.
+        // ALLOW-effect grants only: a `deny`-effect grant strips access, so its
+        // role name must NOT count as clearance (otherwise a deny grant on the
+        // clearance role would perversely satisfy the `unless` and unlock the gate).
         let roles: std::collections::BTreeSet<String> = grants
             .iter()
+            .filter(|g| g.effect == "allow")
             .filter_map(|g| inner.role_names.get(&g.role_id).cloned())
             .collect();
         let context = Context::from_json_value(

@@ -215,3 +215,118 @@ async fn classification_forbid_gates_tagged_object() {
         !deny.allow, untagged.allow, allow.allow, admin_allow.allow
     );
 }
+
+/// FIX 1b (defense in depth): a classification row whose `required_roles` somehow
+/// holds a Cedar-breaking value (inserted RAW here, bypassing `set_policy`'s
+/// FIX-1a validation) must NOT fail the whole PDP reload — `load_inner` LOGS and
+/// SKIPS that one row, so the PDP still boots and every OTHER gate keeps working.
+/// One poisoned row must never DoS authz / fail-open the process.
+#[tokio::test]
+async fn poisoned_classification_row_is_skipped_not_fatal() {
+    let Some(db) = connect().await else {
+        eprintln!("skip: DATABASE_URL unset");
+        return;
+    };
+
+    let action = "dashboard:read";
+    let ws_editor_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM roles WHERE scope = 'workspace' AND name = 'ws_editor'")
+            .fetch_one(&db.pool)
+            .await
+            .expect("seeded ws role `ws_editor` must exist");
+
+    // A GOOD gated tag on D_good (valid clearance role) — must still enforce.
+    let good_key = format!("good-{}", Uuid::new_v4().simple());
+    let good_tag: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, 'Good') RETURNING id")
+            .bind(&good_key)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let cleared_name = format!("finance_cleared_{}", Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO roles (scope, name, description) VALUES ('platform', $1, 'clearance')",
+    )
+    .bind(&cleared_name)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO classification_policies (tag_id, required_roles) VALUES ($1, $2)")
+        .bind(good_tag)
+        .bind(vec![cleared_name.clone()])
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    // A POISONED gated tag on D_bad — required_roles holds a Cedar-injection value.
+    // Inserted RAW (no repo validation) to simulate a legacy / hand-edited row.
+    let bad_key = format!("bad-{}", Uuid::new_v4().simple());
+    let bad_tag: Uuid =
+        sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, 'Bad') RETURNING id")
+            .bind(&bad_key)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    sqlx::query("INSERT INTO classification_policies (tag_id, required_roles) VALUES ($1, $2)")
+        .bind(bad_tag)
+        .bind(vec![
+            "x\"]) || true || context.roles.containsAny([\"y".to_string()
+        ])
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let w = seed_workspace(&db).await;
+    let d_good = Uuid::new_v4();
+    let d_bad = Uuid::new_v4();
+    for (tag, obj) in [(good_tag, d_good), (bad_tag, d_bad)] {
+        sqlx::query(
+            "INSERT INTO tag_assignments (tag_id, object_type, object_id) VALUES ($1, 'dashboard', $2)",
+        )
+        .bind(tag)
+        .bind(obj)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+
+    // The PDP must BUILD despite the poisoned row (FIX 1b: skip-and-log).
+    let bus = egret_events::EventBus::new();
+    let pdp = CedarPdp::build(db.clone(), &bus)
+        .await
+        .expect("PDP must load even with a poisoned classification row");
+
+    // A ws_editor (no clearance) is denied the GOOD tagged object → the surviving
+    // gate still enforces.
+    let u = seed_user(&db).await;
+    grant_ws(&db, u, ws_editor_id, w).await;
+    let subject = Subject {
+        user_id: u,
+        group_ids: vec![],
+    };
+    let good_decision = pdp
+        .authorize(&subject, action, &dashboard(d_good, w))
+        .await
+        .unwrap();
+    assert!(
+        !good_decision.allow,
+        "the valid classification gate must still enforce after skipping the poisoned row"
+    );
+
+    // The BAD tagged object's gate was SKIPPED (inert), so the ws_editor permit
+    // stands → allowed. The point is the reload did not fail; this row is simply
+    // ungated until corrected.
+    let bad_decision = pdp
+        .authorize(&subject, action, &dashboard(d_bad, w))
+        .await
+        .unwrap();
+    assert!(
+        bad_decision.allow,
+        "the poisoned row's gate is inert (skipped), so the underlying permit stands"
+    );
+
+    eprintln!(
+        "poisoned_classification_row_is_skipped_not_fatal OK: good-denied={}, bad-inert-allowed={}",
+        !good_decision.allow, bad_decision.allow
+    );
+}
