@@ -397,6 +397,55 @@ describe("RolesPage", () => {
     expect(screen.queryByText("data_steward")).not.toBeInTheDocument();
   });
 
+  test("the Tree view toggle renders the hierarchy and hides the search box; List view restores it", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.listRoles).mockResolvedValue([
+      {
+        id: "p1",
+        scope: "platform",
+        name: "base_role",
+        description: "Parent role",
+        permissionCount: 1,
+        assigneeCount: 0,
+        inheritedPermissions: [],
+      },
+      {
+        id: "c1",
+        scope: "platform",
+        name: "child_role",
+        description: "Inherits from base_role",
+        permissionCount: 2,
+        assigneeCount: 0,
+        parentRoleId: "p1",
+        inheritedPermissions: [],
+      },
+      {
+        id: "w1",
+        scope: "workspace",
+        name: "ws_role",
+        description: "A workspace role",
+        permissionCount: 1,
+        assigneeCount: 0,
+        inheritedPermissions: [],
+      },
+    ]);
+
+    renderPage();
+    await screen.findByText("ws_role");
+    expect(screen.getByPlaceholderText("Search roles…")).toBeInTheDocument();
+
+    // Switch to Tree view: the (nested) child role renders and the search box
+    // disappears (search/filter live in the table, which is unmounted).
+    await user.click(screen.getByRole("button", { name: "Tree view" }));
+    expect(screen.getByText("child_role")).toBeInTheDocument();
+    expect(screen.getByText("ws_role")).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Search roles…")).toBeNull();
+
+    // Switch back to List view: the search box returns.
+    await user.click(screen.getByRole("button", { name: "List view" }));
+    expect(screen.getByPlaceholderText("Search roles…")).toBeInTheDocument();
+  });
+
   test("the summary strip shows total, platform, and workspace counts", async () => {
     renderPage();
     await screen.findByText("data_steward");

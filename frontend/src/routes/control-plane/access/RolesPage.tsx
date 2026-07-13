@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
 
@@ -102,6 +102,72 @@ function isSeeded(role: AccessRole): boolean {
   return SEEDED_ROLE_NAMES.has(role.name);
 }
 
+/** Read-only indented tree of the role hierarchy, grouped by scope. */
+function RolesTree({
+  roles,
+  isAdmin,
+  onEdit,
+}: {
+  roles: AccessRole[];
+  isAdmin: boolean;
+  onEdit: (role: AccessRole) => void;
+}) {
+  const childrenOf = useMemo(() => {
+    const ids = new Set(roles.map((r) => r.id));
+    const m = new Map<string | null, AccessRole[]>();
+    for (const r of roles) {
+      const parent = r.parentRoleId && ids.has(r.parentRoleId) ? r.parentRoleId : null;
+      const arr = m.get(parent) ?? [];
+      arr.push(r);
+      m.set(parent, arr);
+    }
+    return m;
+  }, [roles]);
+
+  const renderNode = (r: AccessRole, depth: number): ReactNode => {
+    if (depth > 64) return null; // cycle guard (DB prevents cycles)
+    const kids = childrenOf.get(r.id) ?? [];
+    return (
+      <div key={r.id}>
+        <button
+          type="button"
+          disabled={!isAdmin}
+          onClick={() => isAdmin && onEdit(r)}
+          className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent disabled:cursor-default disabled:hover:bg-transparent"
+          style={{ paddingLeft: `${8 + depth * 20}px` }}
+        >
+          <span className="font-medium">{r.name}</span>
+          {isSeeded(r) && (
+            <Badge variant="secondary" className="font-normal">
+              built-in
+            </Badge>
+          )}
+        </button>
+        {kids.map((k) => renderNode(k, depth + 1))}
+      </div>
+    );
+  };
+
+  const scopes: ("platform" | "workspace")[] = ["platform", "workspace"];
+  const roots = childrenOf.get(null) ?? [];
+  return (
+    <div className="space-y-4">
+      {scopes.map((scope) => {
+        const scopeRoots = roots.filter((r) => r.scope === scope);
+        if (scopeRoots.length === 0) return null;
+        return (
+          <div key={scope} className="space-y-1">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              {scope}
+            </h3>
+            {scopeRoots.map((r) => renderNode(r, 0))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /**
  * Control Plane → Access control → Roles.
  *
@@ -130,6 +196,7 @@ export default function RolesPage() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [assigneesTarget, setAssigneesTarget] = useState<AccessRole | null>(null);
   const [scopeFacet, setScopeFacet] = useState(FACET_ALL);
+  const [treeView, setTreeView] = useState(false);
 
   const deleteMutation = useMutation<void, ApiError, string>({
     mutationFn: (id) => deleteRole(id),
@@ -278,12 +345,22 @@ export default function RolesPage() {
                 Edit a role's permissions to change what it grants.
               </CardDescription>
             </div>
-            {isAdmin && (
-              <Button size="sm" onClick={() => setCreateOpen(true)}>
-                <Plus className="mr-1 h-4 w-4" />
-                New role
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant={treeView ? "secondary" : "outline"}
+                onClick={() => setTreeView((v) => !v)}
+                aria-pressed={treeView}
+              >
+                {treeView ? "List view" : "Tree view"}
               </Button>
-            )}
+              {isAdmin && (
+                <Button size="sm" onClick={() => setCreateOpen(true)}>
+                  <Plus className="mr-1 h-4 w-4" />
+                  New role
+                </Button>
+              )}
+            </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -299,31 +376,40 @@ export default function RolesPage() {
               { label: "workspace", value: rows.length - platform },
             ]}
           />
-          <FilterableTable
-            rows={filtered}
-            columns={columns}
-            getId={(r) => r.id}
-            searchPlaceholder="Search roles…"
-            initialSort={{ key: "name", dir: "asc" }}
-            emptyText={
-              roles.isLoading
-                ? "Loading…"
-                : roles.isError
-                  ? (roles.error?.message ?? "Failed to load roles.")
-                  : "No roles."
-            }
-            filters={
-              <FacetSelect
-                label="Scope"
-                value={scopeFacet}
-                onChange={setScopeFacet}
-                options={[
-                  { value: "platform", label: "Platform" },
-                  { value: "workspace", label: "Workspace" },
-                ]}
-              />
-            }
-          />
+          {treeView ? (
+            <>
+              <p className="text-xs text-muted-foreground">
+                Tree view shows the full hierarchy — switch to list to search or filter.
+              </p>
+              <RolesTree roles={rows} isAdmin={isAdmin} onEdit={setEditTarget} />
+            </>
+          ) : (
+            <FilterableTable
+              rows={filtered}
+              columns={columns}
+              getId={(r) => r.id}
+              searchPlaceholder="Search roles…"
+              initialSort={{ key: "name", dir: "asc" }}
+              emptyText={
+                roles.isLoading
+                  ? "Loading…"
+                  : roles.isError
+                    ? (roles.error?.message ?? "Failed to load roles.")
+                    : "No roles."
+              }
+              filters={
+                <FacetSelect
+                  label="Scope"
+                  value={scopeFacet}
+                  onChange={setScopeFacet}
+                  options={[
+                    { value: "platform", label: "Platform" },
+                    { value: "workspace", label: "Workspace" },
+                  ]}
+                />
+              }
+            />
+          )}
         </CardContent>
       </Card>
 
