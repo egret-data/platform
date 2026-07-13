@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Compass, MoreHorizontal, Pencil, Plus, ShieldCheck } from "lucide-react";
+import { Compass, ListChecks, MoreHorizontal, Pencil, Plus, ShieldCheck } from "lucide-react";
 
 import {
   type AccessRole,
@@ -17,6 +17,7 @@ import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/useAuth";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -44,8 +45,17 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { TagCombobox } from "@/components/ui/tag-combobox";
+import { useBulkSelect } from "@/hooks/useBulkSelect";
+import { runBulk } from "@/lib/runBulk";
 
 export const usersQueryKey = ["control-plane", "access", "users"] as const;
 const rolesQueryKey = ["control-plane", "access", "roles"] as const;
@@ -88,9 +98,17 @@ export default function UsersPage() {
     {
       key: "status",
       label: "Status",
-      cell: (u) => (
-        <Badge variant={u.status === "active" ? "default" : "secondary"}>{u.status}</Badge>
-      ),
+      cell: (u) =>
+        u.status === "active" ? (
+          <Badge
+            className="border-transparent"
+            style={{ backgroundColor: "var(--success)", color: "var(--success-foreground)" }}
+          >
+            active
+          </Badge>
+        ) : (
+          <Badge variant="secondary">disabled</Badge>
+        ),
     },
     {
       key: "roles",
@@ -166,6 +184,25 @@ export default function UsersPage() {
   const total = rows.length;
   const active = rows.filter((u) => u.status === "active").length;
 
+  const bulk = useBulkSelect(filtered);
+  const qc = useQueryClient();
+  const refreshUsers = () => qc.invalidateQueries({ queryKey: usersQueryKey });
+  const selectedUsers = () => filtered.filter((u) => bulk.selected.has(u.id));
+  const [bulkRoleOpen, setBulkRoleOpen] = useState(false);
+
+  async function bulkSetStatus(status: "active" | "disabled") {
+    const targets = selectedUsers();
+    await runBulk({
+      items: targets,
+      op: (u) => updateUser(u.id, { status }),
+      undo: (u) => updateUser(u.id, { status: u.status }),
+      verb: status === "disabled" ? "Disabled" : "Enabled",
+      noun: "users",
+      refresh: refreshUsers,
+    });
+    bulk.clear();
+  }
+
   return (
     <div className="space-y-5">
       <div>
@@ -184,10 +221,20 @@ export default function UsersPage() {
                 Local and SSO accounts with access to egret.
               </CardDescription>
             </div>
-            <Button size="sm" onClick={() => setCreateOpen(true)}>
-              <Plus className="mr-1 h-4 w-4" />
-              New user
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant={bulk.bulkMode ? "secondary" : "outline"}
+                onClick={() => bulk.setBulkMode(!bulk.bulkMode)}
+                aria-pressed={bulk.bulkMode}
+              >
+                <ListChecks className="mr-1 h-4 w-4" /> {bulk.bulkMode ? "Done" : "Bulk select"}
+              </Button>
+              <Button size="sm" onClick={() => setCreateOpen(true)}>
+                <Plus className="mr-1 h-4 w-4" />
+                New user
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -198,39 +245,70 @@ export default function UsersPage() {
               { label: "disabled", value: total - active },
             ]}
           />
-          <FilterableTable
-            rows={filtered}
-            columns={columns}
-            getId={(u) => u.id}
-            searchPlaceholder="Search users…"
-            initialSort={{ key: "email", dir: "asc" }}
-            emptyText={
-              users.isLoading
-                ? "Loading…"
-                : users.isError
+          {bulk.bulkMode && bulk.someSelected && (
+            <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 p-2 text-sm">
+              <span className="font-medium">{bulk.selectedIds.length} selected</span>
+              <Button size="sm" variant="outline" onClick={() => bulkSetStatus("disabled")}>
+                Disable
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => bulkSetStatus("active")}>
+                Enable
+              </Button>
+              {isAdmin && (
+                <Button size="sm" variant="outline" onClick={() => setBulkRoleOpen(true)}>
+                  Assign role…
+                </Button>
+              )}
+              <Button size="sm" variant="ghost" className="ml-auto" onClick={bulk.clear}>
+                Clear
+              </Button>
+            </div>
+          )}
+          {users.isLoading ? (
+            <ListSkeleton rows={6} cols={7} />
+          ) : (
+            <FilterableTable
+              rows={filtered}
+              columns={columns}
+              getId={(u) => u.id}
+              searchPlaceholder="Search users…"
+              initialSort={{ key: "email", dir: "asc" }}
+              emptyText={
+                users.isError
                   ? (users.error?.message ?? "Failed to load users.")
                   : "No users."
-            }
-            filters={
-              <>
-                <FacetSelect
-                  label="Status"
-                  value={statusFacet}
-                  onChange={setStatusFacet}
-                  options={[
-                    { value: "active", label: "Active" },
-                    { value: "disabled", label: "Disabled" },
-                  ]}
-                />
-                <FacetSelect
-                  label="Provider"
-                  value={providerFacet}
-                  onChange={setProviderFacet}
-                  options={PROVIDER_OPTIONS}
-                />
-              </>
-            }
-          />
+              }
+              selection={
+                bulk.bulkMode
+                  ? {
+                      selected: bulk.selected,
+                      onToggle: bulk.toggle,
+                      allSelected: bulk.allSelected,
+                      onToggleAll: bulk.toggleAll,
+                    }
+                  : undefined
+              }
+              filters={
+                <>
+                  <FacetSelect
+                    label="Status"
+                    value={statusFacet}
+                    onChange={setStatusFacet}
+                    options={[
+                      { value: "active", label: "Active" },
+                      { value: "disabled", label: "Disabled" },
+                    ]}
+                  />
+                  <FacetSelect
+                    label="Provider"
+                    value={providerFacet}
+                    onChange={setProviderFacet}
+                    options={PROVIDER_OPTIONS}
+                  />
+                </>
+              }
+            />
+          )}
         </CardContent>
       </Card>
 
@@ -247,7 +325,93 @@ export default function UsersPage() {
           if (!o) setRolesTarget(null);
         }}
       />
+      <BulkAssignRoleDialog
+        open={bulkRoleOpen}
+        users={selectedUsers()}
+        onOpenChange={setBulkRoleOpen}
+        refresh={refreshUsers}
+        onDone={() => bulk.clear()}
+      />
     </div>
+  );
+}
+
+function BulkAssignRoleDialog({
+  open,
+  users,
+  onOpenChange,
+  refresh,
+  onDone,
+}: {
+  open: boolean;
+  users: AccessUser[];
+  onOpenChange: (open: boolean) => void;
+  refresh: () => void;
+  onDone: () => void;
+}) {
+  const roles = useQuery<AccessRole[], ApiError>({
+    queryKey: rolesQueryKey,
+    queryFn: listRoles,
+    retry: false,
+  });
+  const [roleId, setRoleId] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function handleAssign() {
+    if (!roleId) return;
+    setSaving(true);
+    try {
+      await runBulk({
+        items: users,
+        op: (u) => assignUserRole(u.id, roleId),
+        undo: (u) => unassignUserRole(u.id, roleId),
+        verb: "Assigned a role to",
+        noun: "users",
+        refresh,
+      });
+      onDone();
+      onOpenChange(false);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Assign role</DialogTitle>
+          <DialogDescription>
+            Add a role to the {users.length} selected user{users.length === 1 ? "" : "s"}.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="my-4 space-y-1.5">
+          <Label htmlFor="bulk-assign-role">Role</Label>
+          <Select value={roleId} onValueChange={setRoleId}>
+            <SelectTrigger id="bulk-assign-role" className="w-full">
+              <SelectValue placeholder="Select a role…" />
+            </SelectTrigger>
+            <SelectContent>
+              {(roles.data ?? []).map((r) => (
+                <SelectItem key={r.id} value={r.id}>
+                  {r.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="button" onClick={handleAssign} disabled={saving || !roleId}>
+            Assign
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

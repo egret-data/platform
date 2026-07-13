@@ -196,6 +196,40 @@ describe("UsersPage", () => {
     await waitFor(() => expect(api.unassignUserRole).toHaveBeenCalledWith("u1", "r1"));
   });
 
+  test("bulk-selecting two users and clicking Disable calls updateUser for both", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.updateUser).mockResolvedValue(USERS[0]);
+
+    renderPage();
+    await screen.findByText("alice@example.com");
+
+    // Enter bulk mode → a checkbox column appears.
+    await user.click(screen.getByRole("button", { name: /Bulk select/i }));
+
+    const aliceRow = screen.getByText("alice@example.com").closest("tr") as HTMLElement;
+    const bobRow = screen.getByText("bob@example.com").closest("tr") as HTMLElement;
+    await user.click(within(aliceRow).getByRole("checkbox", { name: "Select row" }));
+    await user.click(within(bobRow).getByRole("checkbox", { name: "Select row" }));
+
+    // The bulk action bar reports the selection and offers Disable.
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^Disable$/ }));
+
+    await waitFor(() =>
+      expect(api.updateUser).toHaveBeenCalledWith("u1", { status: "disabled" }),
+    );
+    await waitFor(() =>
+      expect(api.updateUser).toHaveBeenCalledWith("u2", { status: "disabled" }),
+    );
+  });
+
+  test("shows a loading skeleton while the user list is pending", () => {
+    // Never-resolving fetch keeps the query in its loading state.
+    vi.mocked(api.listUsers).mockReturnValue(new Promise(() => {}));
+    renderPage();
+    expect(screen.getByTestId("list-skeleton")).toBeInTheDocument();
+  });
+
   test("a non-admin user:read viewer can still create/edit users but not assign roles", async () => {
     const NON_ADMIN_ME: Me = {
       user_id: "2",
