@@ -74,7 +74,8 @@ pub async fn object_ref(db: &Db, kind: &str, id: Uuid) -> Result<ObjectRef, Erro
 pub struct ObjectGrantBody {
     /// `user` | `group`.
     pub principal_type: String,
-    pub principal_id: Uuid,
+    /// A user's email, a group's name, or a UUID.
+    pub principal_id: String,
     /// `ws_viewer` (Viewer, read) | `ws_editor` (Editor, manage). For a "Blocked"
     /// grant, send `ws_editor` with `effect="deny"`.
     pub role: String,
@@ -138,6 +139,25 @@ fn valid_effect(e: &str) -> Result<(), BiApiError> {
     }
 }
 
+/// Resolve a principal identifier to its id: a real UUID passes through; else a
+/// user is looked up by email and a group by name. `NotFound` if unknown.
+async fn resolve_principal_id(db: &Db, ptype: &str, ident: &str) -> Result<Uuid, Error> {
+    if let Ok(u) = Uuid::parse_str(ident) {
+        return Ok(u);
+    }
+    let sql = match ptype {
+        "user" => "SELECT id FROM users WHERE email = $1",
+        "group" => "SELECT id FROM groups WHERE name = $1",
+        _ => return Err(Error::InvalidInput(format!("bad principal_type: {ptype}"))),
+    };
+    sqlx::query_scalar(sql)
+        .bind(ident)
+        .fetch_optional(&db.pool)
+        .await
+        .map_err(|e| Error::Internal(e.into()))?
+        .ok_or_else(|| Error::NotFound(format!("{ptype}: {ident}")))
+}
+
 /// Resolve `(kind, id)` to its `ObjectRef` and assert it lives in the path
 /// workspace (else cross-tenant → `NotFound`). Shared by the share API and the
 /// per-object BI handlers so both apply the same object + workspace guard before
@@ -191,6 +211,10 @@ async fn grant_put(
     valid_role(&b.role)?;
     valid_effect(&b.effect)?;
 
+    let pid = resolve_principal_id(&st.db, &b.principal_type, &b.principal_id)
+        .await
+        .map_err(BiApiError::from)?;
+
     let role_id: Uuid =
         sqlx::query_scalar("SELECT id FROM roles WHERE scope = 'workspace' AND name = $1")
             .bind(&b.role)
@@ -207,7 +231,7 @@ async fn grant_put(
          VALUES ($1, $2, $3, 'object', $4, $5, $6, $7) ON CONFLICT DO NOTHING",
     )
     .bind(&b.principal_type)
-    .bind(b.principal_id)
+    .bind(pid)
     .bind(role_id)
     .bind(&kind)
     .bind(id)
@@ -223,7 +247,7 @@ async fn grant_put(
            AND scope_type = 'object' AND scope_id = $4 AND effect = $5",
     )
     .bind(&b.principal_type)
-    .bind(b.principal_id)
+    .bind(pid)
     .bind(role_id)
     .bind(id)
     .bind(&b.effect)
@@ -248,7 +272,7 @@ async fn grant_put(
     Ok(Json(ObjectGrantDto {
         id: grant_id,
         principal_type: b.principal_type,
-        principal_id: b.principal_id,
+        principal_id: pid,
         // The FE re-fetches the list (which resolves names) after a PUT, so we
         // don't resolve here.
         principal_name: None,

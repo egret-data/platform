@@ -203,6 +203,127 @@ async fn editor_can_put_deny_grant_and_list_shows_it() {
     );
 }
 
+/// The ShareDialog picker sends a user's EMAIL (or a group's name), not a UUID.
+/// `grant_put` must resolve it server-side: a known email → 200 and a grant row
+/// keyed by the user's real UUID; an unknown email → 4xx (NotFound), not 422.
+#[tokio::test]
+async fn grant_put_resolves_principal_by_email() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    let owner = seed_user(&db).await;
+    let slug = format!("resolve-{}", Uuid::new_v4().simple());
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'Resolve Test', $2, 'active') RETURNING id",
+    )
+    .bind(&slug)
+    .bind(owner)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert workspace");
+
+    let editor = seed_user(&db).await;
+    add_member(&db, ws, editor, "ws_editor").await; // holds dashboard:manage
+
+    // The grantee, seeded with a KNOWN email — the value the picker sends.
+    let target_email = format!("grantee_{}@egret.local", Uuid::new_v4().simple());
+    let target: Uuid =
+        sqlx::query_scalar("INSERT INTO users (provider, email) VALUES ('local', $1) RETURNING id")
+            .bind(&target_email)
+            .fetch_one(&db.pool)
+            .await
+            .expect("insert grantee");
+
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let st = build_state(db.clone(), pdp);
+    let sessions = st.sessions.clone();
+    let editor_tok = session_for(&sessions, editor).await;
+
+    let d = st
+        .dashboards
+        .create(ws, "D", "", Some(owner))
+        .await
+        .unwrap()
+        .id;
+
+    let app = shares_router().merge(dashboard_router()).with_state(st);
+
+    // PUT a grant addressing the principal by EMAIL (not UUID) → 200.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/ws/{slug}/objects/dashboard/{d}/grants"))
+                .header("Cookie", format!("egret_session={editor_tok}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"principal_type":"user","principal_id":"{target_email}","role":"ws_viewer","effect":"allow"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let s = resp.status();
+    assert!(
+        s.is_success(),
+        "PUT with an email principal_id must resolve and return 200 (not 422); got {s}: {}",
+        body_string(resp).await
+    );
+    let created = body_string(resp).await;
+    let created_json: serde_json::Value = serde_json::from_str(&created).unwrap();
+    // The DTO must carry the resolved real UUID, not the email.
+    assert_eq!(
+        created_json["principal_id"].as_str(),
+        Some(target.to_string().as_str()),
+        "DTO principal_id must be the resolved UUID; got {created}"
+    );
+
+    // A grant row keyed by the target's REAL uuid must now exist.
+    let cnt: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM access_grants \
+         WHERE scope_type = 'object' AND scope_id = $1 AND principal_id = $2 AND effect = 'allow'",
+    )
+    .bind(d)
+    .bind(target)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(cnt, 1, "exactly one allow grant for the resolved user uuid");
+
+    // An unknown email must be rejected with a client error (NotFound), not 422.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/ws/{slug}/objects/dashboard/{d}/grants"))
+                .header("Cookie", format!("egret_session={editor_tok}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"principal_type":"user","principal_id":"nobody@nowhere.invalid","role":"ws_viewer","effect":"allow"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let s = resp.status();
+    assert!(
+        s.is_client_error(),
+        "unknown email must be a 4xx, got {s}: {}",
+        body_string(resp).await
+    );
+}
+
 /// A non-member holding ONLY a deny grant on an object in the workspace must NOT
 /// be admitted as an object-guest (admission filters `effect = 'allow'`).
 #[tokio::test]
