@@ -47,7 +47,12 @@ pub struct AuditPage {
 }
 
 pub fn audit_router() -> Router<CpState> {
-    Router::new().route("/control-plane/audit", get(list_audit))
+    // Route is RELATIVE to the `/api/control-plane` nest in `egret-server`
+    // (like every sibling `access::router()` route, e.g. `/users`). A leading
+    // `/control-plane/…` here would double-prefix to `/api/control-plane/
+    // control-plane/audit` — which 404s the FE (it calls `/api/control-plane/
+    // audit`, matching the `#[utoipa::path]` below).
+    Router::new().route("/audit", get(list_audit))
 }
 
 fn parse_cursor(s: &str) -> Option<(chrono::DateTime<chrono::Utc>, i64)> {

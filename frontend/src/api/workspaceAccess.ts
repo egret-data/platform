@@ -51,6 +51,9 @@ export function useWorkspaceShares(ws: string) {
   return useQuery<ObjectGrantRollup[]>({
     queryKey: ["ws", ws, "shares"],
     queryFn: () => apiJson<ObjectGrantRollup[]>(`/ws/${ws}/shares`),
+    // Guard against firing `/ws//shares` (404) before a workspace is chosen —
+    // Who-can-access calls this with `ws=""` until the picker selects one.
+    enabled: ws.length > 0,
     retry: false,
   });
 }
