@@ -236,6 +236,7 @@ async fn ws_state(db: &Db) -> WorkspaceState {
     WorkspaceState {
         workspaces: WorkspaceRepo::new(db.clone()),
         members: MemberRepo::new(db.clone()),
+        access_views: egret_workspace::access_views::AccessViewsRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
         pdp: build_pdp(db).await,
         users: UserRepo::new(db.clone()),

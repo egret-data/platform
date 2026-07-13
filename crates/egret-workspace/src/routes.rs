@@ -11,6 +11,7 @@ use egret_core::{Ack, Error, Pagination, UserId, WorkspaceId, WorkspacePath};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::access_views::AccessViewsRepo;
 use crate::context::WsContext;
 use crate::members::MemberRepo;
 use crate::rbac::Authorizer;
@@ -20,6 +21,8 @@ use crate::workspaces::WorkspaceRepo;
 pub struct WorkspaceState {
     pub workspaces: WorkspaceRepo,
     pub members: MemberRepo,
+    /// Read-only workspace-scope role catalog (roles + their permissions).
+    pub access_views: AccessViewsRepo,
     pub authz: Authorizer,
     pub pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
     pub users: UserRepo,
@@ -440,6 +443,7 @@ pub fn ws_member_router() -> Router<WorkspaceState> {
     Router::new()
         .route("/{workspace}/members", get(list_members).post(add_member))
         .route("/{workspace}/members/{ptype}/{pid}", delete(remove_member))
+        .route("/{workspace}/roles", get(list_workspace_roles))
 }
 
 #[utoipa::path(
@@ -622,6 +626,75 @@ async fn remove_member(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+// ── Workspace role catalog (read-only) ───────────────────────────────────────
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct WsPermDto {
+    pub key: String,
+    pub description: String,
+    pub group: String,
+}
+impl From<crate::access_views::WsPerm> for WsPermDto {
+    fn from(p: crate::access_views::WsPerm) -> Self {
+        WsPermDto {
+            key: p.key,
+            description: p.description,
+            group: p.group,
+        }
+    }
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct WsRoleDto {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub parent_role_id: Option<String>,
+    pub permissions: Vec<WsPermDto>,
+}
+impl From<crate::access_views::WsRole> for WsRoleDto {
+    fn from(r: crate::access_views::WsRole) -> Self {
+        WsRoleDto {
+            id: r.id.to_string(),
+            name: r.name,
+            description: r.description,
+            parent_role_id: r.parent_role_id.map(|p| p.to_string()),
+            permissions: r.permissions.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// `GET /ws/{workspace}/roles` — the workspace-scope role catalog with each
+/// role's direct permissions. Read-only, so a workspace admin can SEE what each
+/// role grants; gated on `workspace:manage_members` (the same gate as the
+/// member routes) rather than the platform-level `role:read`.
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/roles",
+    tag = "workspace-members",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "Workspace-scope roles with their permissions", body = Vec<WsRoleDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_workspace_roles(
+    State(st): State<WorkspaceState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<Vec<WsRoleDto>>, AuthError> {
+    egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
+        .await
+        .map_err(AuthError)?;
+    let roles = st
+        .access_views
+        .list_workspace_roles_with_perms()
+        .await
+        .map_err(AuthError)?;
+    Ok(Json(roles.into_iter().map(Into::into).collect()))
+}
+
 // ── OpenAPI fragments (E0·P4b-2) ─────────────────────────────────────────────
 //
 // One doc struct per router, merged in `egret_workspace::openapi()`. Full mounted
@@ -659,8 +732,8 @@ pub struct AdminUserApi;
 /// OpenAPI fragment for the workspace-membership router (`/api/ws/{workspace}/members`).
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(list_members, add_member, remove_member),
-    components(schemas(MemberDto, AddMember, Ack, ErrorBody)),
+    paths(list_members, add_member, remove_member, list_workspace_roles),
+    components(schemas(MemberDto, AddMember, WsRoleDto, WsPermDto, Ack, ErrorBody)),
     tags((name = "workspace-members", description = "Workspace membership (add/remove principals)")),
 )]
 pub struct WsMemberApi;
