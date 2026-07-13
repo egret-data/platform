@@ -12,6 +12,7 @@
 export interface ObjectGrantBody {
   /** `user` | `group`. */
   principal_type: string;
+  /** A user's email, a group's name, or a UUID. */
   principal_id: string;
   /**
      * `ws_viewer` (Viewer, read) | `ws_editor` (Editor, manage). For a "Blocked"
@@ -20,4 +21,10 @@ export interface ObjectGrantBody {
   role: string;
   /** `allow` (default) | `deny`. A deny blocks the principal on this object. */
   effect?: string;
+  /**
+     * Optional expiry (RFC3339). `None` = never expires (unchanged default).
+     * Enforced at read time by the PDP/admission predicates, not here.
+     * @nullable
+     */
+  expires_at?: string | null;
 }

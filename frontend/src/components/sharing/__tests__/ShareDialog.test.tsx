@@ -181,6 +181,47 @@ test("calls the DELETE hook when removing a direct grant", async () => {
   expect(delMutate.mock.calls[0][0]).toMatchObject({ grantId: "g1" });
 });
 
+test("calls the PUT hook with an RFC3339 expires_at when an expiry date is chosen", async () => {
+  renderDialog();
+  await userEvent.type(screen.getByLabelText("User email"), "dana@egret.local");
+  await userEvent.type(screen.getByLabelText("Access expires"), "2030-01-15");
+  await userEvent.click(screen.getByRole("button", { name: "Add" }));
+
+  expect(putMutate).toHaveBeenCalledTimes(1);
+  const body = putMutate.mock.calls[0][0].data;
+  expect(body.principal_id).toBe("dana@egret.local");
+  expect(body.expires_at).toBe(new Date("2030-01-15T23:59:59").toISOString());
+});
+
+test("sends no expires_at when the expiry date is left blank", async () => {
+  renderDialog();
+  await userEvent.type(screen.getByLabelText("User email"), "erin@egret.local");
+  await userEvent.click(screen.getByRole("button", { name: "Add" }));
+
+  expect(putMutate).toHaveBeenCalledTimes(1);
+  expect(putMutate.mock.calls[0][0].data).toEqual({
+    principal_type: "user",
+    principal_id: "erin@egret.local",
+    role: "ws_viewer",
+    effect: "allow",
+  });
+});
+
+test("renders an existing grant's expiry", () => {
+  directResult = ok([
+    {
+      id: "g1",
+      principal_type: "user",
+      principal_id: "frank@egret.local",
+      role: "ws_viewer",
+      effect: "allow",
+      expires_at: "2030-06-01T23:59:59.000Z",
+    },
+  ]);
+  renderDialog();
+  expect(screen.getByText("expires 2030-06-01")).toBeInTheDocument();
+});
+
 test("shows a permission message (no crash) on a 403 from the list", () => {
   directResult = { data: undefined, isLoading: false, isError: true, error: { status: 403 } };
   renderDialog();

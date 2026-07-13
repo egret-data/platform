@@ -708,6 +708,9 @@ pub struct ObjectGrantRollupDto {
     pub principal_name: Option<String>,
     pub role: String,
     pub effect: String,
+    /// Optional expiry (RFC3339). `None` = never expires. This is the
+    /// management roll-up, so an expired grant is still returned (not filtered).
+    pub expires_at: Option<String>,
 }
 impl From<crate::access_views::ObjectGrantRollup> for ObjectGrantRollupDto {
     fn from(g: crate::access_views::ObjectGrantRollup) -> Self {
@@ -720,6 +723,7 @@ impl From<crate::access_views::ObjectGrantRollup> for ObjectGrantRollupDto {
             principal_name: g.principal_name,
             role: g.role,
             effect: g.effect,
+            expires_at: g.expires_at.map(|t| t.to_rfc3339()),
         }
     }
 }

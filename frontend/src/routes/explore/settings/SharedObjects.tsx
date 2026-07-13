@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { MoreHorizontal } from "lucide-react";
 
 import { useWorkspaceShares, type ObjectGrantRollup } from "@/api/workspaceAccess";
-import { EffectBadge } from "@/components/access/EffectBadge";
+import { EffectBadge, denyStyle } from "@/components/access/EffectBadge";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -18,6 +18,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { errorStatus } from "@/lib/httpStatus";
+import { fullTimestamp } from "@/lib/relativeTime";
 
 /** Object identifying a row's share target, used to open ShareDialog. */
 interface ShareTarget {
@@ -112,6 +113,34 @@ export default function SharedObjects() {
       cell: (r) => <EffectBadge effect={r.effect} />,
     },
     {
+      key: "expires",
+      label: "Expires",
+      sortable: true,
+      // Null sorts last regardless of direction (treated as "far future").
+      value: (r) => (r.expires_at ? new Date(r.expires_at).getTime() : Number.MAX_SAFE_INTEGER),
+      cell: (r) => {
+        if (!r.expires_at) {
+          return <span className="text-sm text-muted-foreground">—</span>;
+        }
+        const expired = new Date(r.expires_at) < new Date();
+        if (expired) {
+          return (
+            <Badge className="border font-normal" style={denyStyle}>
+              Expired
+            </Badge>
+          );
+        }
+        return (
+          <span
+            className="text-sm text-muted-foreground"
+            title={fullTimestamp(r.expires_at)}
+          >
+            {new Date(r.expires_at).toLocaleDateString()}
+          </span>
+        );
+      },
+    },
+    {
       key: "actions",
       label: "",
       className: "text-right",
@@ -160,7 +189,7 @@ export default function SharedObjects() {
       </header>
 
       {q.isLoading ? (
-        <ListSkeleton rows={6} cols={5} />
+        <ListSkeleton rows={6} cols={6} />
       ) : forbidden ? (
         <p
           className="rounded-md border bg-muted/40 px-4 py-6 text-sm text-muted-foreground"

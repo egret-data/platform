@@ -28,7 +28,9 @@ import type {
   Ack,
   AddMember,
   ErrorBody,
-  MemberDto
+  MemberDto,
+  ObjectGrantRollupDto,
+  WsRoleDto
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -367,3 +369,279 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getWorkspaceMembersRemoveMemberMutationOptions(options), queryClient);
     }
+    export type workspaceMembersListWorkspaceRolesResponse200 = {
+  data: WsRoleDto[]
+  status: 200
+}
+
+export type workspaceMembersListWorkspaceRolesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workspaceMembersListWorkspaceRolesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workspaceMembersListWorkspaceRolesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workspaceMembersListWorkspaceRolesResponseSuccess = (workspaceMembersListWorkspaceRolesResponse200) & {
+  headers: Headers;
+};
+export type workspaceMembersListWorkspaceRolesResponseError = (workspaceMembersListWorkspaceRolesResponse401 | workspaceMembersListWorkspaceRolesResponse403 | workspaceMembersListWorkspaceRolesResponse500) & {
+  headers: Headers;
+};
+
+export type workspaceMembersListWorkspaceRolesResponse = (workspaceMembersListWorkspaceRolesResponseSuccess | workspaceMembersListWorkspaceRolesResponseError)
+
+export const getWorkspaceMembersListWorkspaceRolesUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/roles`
+}
+
+/**
+ * @summary `GET /ws/{workspace}/roles` — the workspace-scope role catalog with each
+role's direct permissions. Read-only, so a workspace admin can SEE what each
+role grants; gated on `workspace:manage_members` (the same gate as the
+member routes) rather than the platform-level `role:read`.
+ */
+export const workspaceMembersListWorkspaceRoles = async (workspace: string, options?: RequestInit): Promise<workspaceMembersListWorkspaceRolesResponse> => {
+
+  return customInstance<workspaceMembersListWorkspaceRolesResponse>(getWorkspaceMembersListWorkspaceRolesUrl(workspace),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkspaceMembersListWorkspaceRolesQueryKey = (workspace: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/roles`
+    ] as const;
+    }
+
+
+export const getWorkspaceMembersListWorkspaceRolesQueryOptions = <TData = Awaited<ReturnType<typeof workspaceMembersListWorkspaceRoles>>, TError = ErrorBody>(workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListWorkspaceRoles>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkspaceMembersListWorkspaceRolesQueryKey(workspace);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workspaceMembersListWorkspaceRoles>>> = ({ signal }) => workspaceMembersListWorkspaceRoles(workspace, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListWorkspaceRoles>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkspaceMembersListWorkspaceRolesQueryResult = NonNullable<Awaited<ReturnType<typeof workspaceMembersListWorkspaceRoles>>>
+export type WorkspaceMembersListWorkspaceRolesQueryError = ErrorBody
+
+
+export function useWorkspaceMembersListWorkspaceRoles<TData = Awaited<ReturnType<typeof workspaceMembersListWorkspaceRoles>>, TError = ErrorBody>(
+ workspace: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListWorkspaceRoles>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workspaceMembersListWorkspaceRoles>>,
+          TError,
+          Awaited<ReturnType<typeof workspaceMembersListWorkspaceRoles>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkspaceMembersListWorkspaceRoles<TData = Awaited<ReturnType<typeof workspaceMembersListWorkspaceRoles>>, TError = ErrorBody>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListWorkspaceRoles>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workspaceMembersListWorkspaceRoles>>,
+          TError,
+          Awaited<ReturnType<typeof workspaceMembersListWorkspaceRoles>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkspaceMembersListWorkspaceRoles<TData = Awaited<ReturnType<typeof workspaceMembersListWorkspaceRoles>>, TError = ErrorBody>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListWorkspaceRoles>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary `GET /ws/{workspace}/roles` — the workspace-scope role catalog with each
+role's direct permissions. Read-only, so a workspace admin can SEE what each
+role grants; gated on `workspace:manage_members` (the same gate as the
+member routes) rather than the platform-level `role:read`.
+ */
+
+export function useWorkspaceMembersListWorkspaceRoles<TData = Awaited<ReturnType<typeof workspaceMembersListWorkspaceRoles>>, TError = ErrorBody>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListWorkspaceRoles>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkspaceMembersListWorkspaceRolesQueryOptions(workspace,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workspaceMembersListWorkspaceSharesResponse200 = {
+  data: ObjectGrantRollupDto[]
+  status: 200
+}
+
+export type workspaceMembersListWorkspaceSharesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workspaceMembersListWorkspaceSharesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workspaceMembersListWorkspaceSharesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workspaceMembersListWorkspaceSharesResponseSuccess = (workspaceMembersListWorkspaceSharesResponse200) & {
+  headers: Headers;
+};
+export type workspaceMembersListWorkspaceSharesResponseError = (workspaceMembersListWorkspaceSharesResponse401 | workspaceMembersListWorkspaceSharesResponse403 | workspaceMembersListWorkspaceSharesResponse500) & {
+  headers: Headers;
+};
+
+export type workspaceMembersListWorkspaceSharesResponse = (workspaceMembersListWorkspaceSharesResponseSuccess | workspaceMembersListWorkspaceSharesResponseError)
+
+export const getWorkspaceMembersListWorkspaceSharesUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/shares`
+}
+
+/**
+ * @summary `GET /ws/{workspace}/shares` — every OBJECT grant whose object lives in THIS
+workspace (charts, dashboards, datasets, folders, notebooks, saved queries),
+enriched with object name, role name, principal name and effect. Read-only, so
+a workspace admin can SEE what has been shared; gated on
+`workspace:manage_members` (the same gate as the member/role routes). The
+object set is restricted to this workspace in SQL — a grant on an object in
+another workspace is never returned (cross-workspace IDOR guard).
+ */
+export const workspaceMembersListWorkspaceShares = async (workspace: string, options?: RequestInit): Promise<workspaceMembersListWorkspaceSharesResponse> => {
+
+  return customInstance<workspaceMembersListWorkspaceSharesResponse>(getWorkspaceMembersListWorkspaceSharesUrl(workspace),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkspaceMembersListWorkspaceSharesQueryKey = (workspace: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/shares`
+    ] as const;
+    }
+
+
+export const getWorkspaceMembersListWorkspaceSharesQueryOptions = <TData = Awaited<ReturnType<typeof workspaceMembersListWorkspaceShares>>, TError = ErrorBody>(workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListWorkspaceShares>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkspaceMembersListWorkspaceSharesQueryKey(workspace);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workspaceMembersListWorkspaceShares>>> = ({ signal }) => workspaceMembersListWorkspaceShares(workspace, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListWorkspaceShares>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkspaceMembersListWorkspaceSharesQueryResult = NonNullable<Awaited<ReturnType<typeof workspaceMembersListWorkspaceShares>>>
+export type WorkspaceMembersListWorkspaceSharesQueryError = ErrorBody
+
+
+export function useWorkspaceMembersListWorkspaceShares<TData = Awaited<ReturnType<typeof workspaceMembersListWorkspaceShares>>, TError = ErrorBody>(
+ workspace: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListWorkspaceShares>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workspaceMembersListWorkspaceShares>>,
+          TError,
+          Awaited<ReturnType<typeof workspaceMembersListWorkspaceShares>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkspaceMembersListWorkspaceShares<TData = Awaited<ReturnType<typeof workspaceMembersListWorkspaceShares>>, TError = ErrorBody>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListWorkspaceShares>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workspaceMembersListWorkspaceShares>>,
+          TError,
+          Awaited<ReturnType<typeof workspaceMembersListWorkspaceShares>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkspaceMembersListWorkspaceShares<TData = Awaited<ReturnType<typeof workspaceMembersListWorkspaceShares>>, TError = ErrorBody>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListWorkspaceShares>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary `GET /ws/{workspace}/shares` — every OBJECT grant whose object lives in THIS
+workspace (charts, dashboards, datasets, folders, notebooks, saved queries),
+enriched with object name, role name, principal name and effect. Read-only, so
+a workspace admin can SEE what has been shared; gated on
+`workspace:manage_members` (the same gate as the member/role routes). The
+object set is restricted to this workspace in SQL — a grant on an object in
+another workspace is never returned (cross-workspace IDOR guard).
+ */
+
+export function useWorkspaceMembersListWorkspaceShares<TData = Awaited<ReturnType<typeof workspaceMembersListWorkspaceShares>>, TError = ErrorBody>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListWorkspaceShares>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkspaceMembersListWorkspaceSharesQueryOptions(workspace,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+

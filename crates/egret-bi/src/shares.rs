@@ -82,6 +82,10 @@ pub struct ObjectGrantBody {
     /// `allow` (default) | `deny`. A deny blocks the principal on this object.
     #[serde(default = "default_effect")]
     pub effect: String,
+    /// Optional expiry (RFC3339). `None` = never expires (unchanged default).
+    /// Enforced at read time by the PDP/admission predicates, not here.
+    #[serde(default)]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 fn default_effect() -> String {
@@ -101,6 +105,10 @@ pub struct ObjectGrantDto {
     pub role: String,
     /// `allow` | `deny`.
     pub effect: String,
+    /// Optional expiry (P2a). `None` = never expires. This is the object's own
+    /// direct-grant list (manage-only), so an expired grant is still listed
+    /// here — only the read-time admission predicates exclude expired grants.
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub fn shares_router() -> Router<BiState> {
@@ -227,8 +235,8 @@ async fn grant_put(
     // return the canonical row whether we inserted or it already existed.
     sqlx::query(
         "INSERT INTO access_grants \
-           (principal_type, principal_id, role_id, scope_type, object_type, scope_id, effect, granted_by) \
-         VALUES ($1, $2, $3, 'object', $4, $5, $6, $7) ON CONFLICT DO NOTHING",
+           (principal_type, principal_id, role_id, scope_type, object_type, scope_id, effect, granted_by, expires_at) \
+         VALUES ($1, $2, $3, 'object', $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING",
     )
     .bind(&b.principal_type)
     .bind(pid)
@@ -237,12 +245,16 @@ async fn grant_put(
     .bind(id)
     .bind(&b.effect)
     .bind(ctx.principal.user_id.0)
+    .bind(b.expires_at)
     .execute(&st.db.pool)
     .await
     .map_err(|e| BiApiError::from(crate::BiError::Db(e)))?;
 
-    let grant_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM access_grants \
+    // Re-read the canonical row (not `b.expires_at`): `ON CONFLICT DO NOTHING`
+    // means a pre-existing grant keeps its stored expiry, which may differ
+    // from what this PUT asked for.
+    let (grant_id, expires_at): (Uuid, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
+        "SELECT id, expires_at FROM access_grants \
          WHERE principal_type = $1 AND principal_id = $2 AND role_id = $3 \
            AND scope_type = 'object' AND scope_id = $4 AND effect = $5",
     )
@@ -278,6 +290,7 @@ async fn grant_put(
         principal_name: None,
         role: b.role,
         effect: b.effect,
+        expires_at,
     }))
 }
 
@@ -363,10 +376,19 @@ async fn grant_list(
     // LEFT JOIN resolves the grantee's display name: a user's email or a group's
     // name (following egret-auth `assignees_named`). `email` is `citext`, so cast
     // to `text` for a uniform `Option<String>` column.
-    let rows: Vec<(Uuid, String, Uuid, Option<String>, String, String)> = sqlx::query_as(
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        Uuid,
+        String,
+        Uuid,
+        Option<String>,
+        String,
+        String,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )> = sqlx::query_as(
         "SELECT ag.id, ag.principal_type, ag.principal_id, \
                 COALESCE(u.email::text, g.name) AS principal_name, \
-                r.name AS role, ag.effect \
+                r.name AS role, ag.effect, ag.expires_at \
          FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
          LEFT JOIN users u ON ag.principal_type = 'user' AND u.id = ag.principal_id \
          LEFT JOIN groups g ON ag.principal_type = 'group' AND g.id = ag.principal_id \
@@ -379,14 +401,17 @@ async fn grant_list(
     .map_err(|e| BiApiError::from(crate::BiError::Db(e)))?;
     Ok(Json(
         rows.into_iter()
-            .map(|(gid, pt, pid, name, role, effect)| ObjectGrantDto {
-                id: gid,
-                principal_type: pt,
-                principal_id: pid,
-                principal_name: name,
-                role,
-                effect,
-            })
+            .map(
+                |(gid, pt, pid, name, role, effect, expires_at)| ObjectGrantDto {
+                    id: gid,
+                    principal_type: pt,
+                    principal_id: pid,
+                    principal_name: name,
+                    role,
+                    effect,
+                    expires_at,
+                },
+            )
             .collect(),
     ))
 }

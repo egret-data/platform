@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
@@ -59,17 +59,37 @@ interface GrantBody {
   principal_id: string;
   role: string;
   effect: string;
+  /** RFC3339 timestamp. Omitted (undefined) = no expiry. */
+  expires_at?: string;
 }
 
 /**
  * Map a selected role option to a grant body. The "Blocked" sentinel becomes a
- * `ws_editor` deny grant; a real role is an allow grant.
+ * `ws_editor` deny grant; a real role is an allow grant. `expiresAt` is an
+ * end-of-local-day RFC3339 string, or empty/undefined for no expiry.
  */
-function grantBody(principal_type: string, principal_id: string, role: string): GrantBody {
-  if (role === BLOCKED_VALUE) {
-    return { principal_type, principal_id, role: "ws_editor", effect: "deny" };
-  }
-  return { principal_type, principal_id, role, effect: "allow" };
+function grantBody(
+  principal_type: string,
+  principal_id: string,
+  role: string,
+  expiresAt?: string,
+): GrantBody {
+  const base =
+    role === BLOCKED_VALUE
+      ? { principal_type, principal_id, role: "ws_editor", effect: "deny" }
+      : { principal_type, principal_id, role, effect: "allow" };
+  return expiresAt ? { ...base, expires_at: expiresAt } : base;
+}
+
+/** Convert a `yyyy-mm-dd` date-input value to an end-of-local-day RFC3339 timestamp. */
+function toExpiresAt(dateValue: string): string | undefined {
+  if (!dateValue) return undefined;
+  return new Date(`${dateValue}T23:59:59`).toISOString();
+}
+
+/** Render an ISO timestamp's date portion, e.g. "2030-06-01". */
+function expiryDateLabel(iso: string): string {
+  return iso.slice(0, 10);
 }
 
 /** Red "No access" badge shown for a deny grant, using the destructive token. */
@@ -205,6 +225,14 @@ export function ShareDialog({ ws, kind, id, folderId, name, open, onOpenChange }
                   {direct.map((g) => (
                     <li key={g.id} className="flex items-center gap-2 px-3 py-2">
                       <PrincipalLabel grant={g} />
+                      {g.expires_at && (
+                        <span
+                          className="shrink-0 text-xs text-muted-foreground"
+                          title="Expiry can't be edited in place; remove and re-add the grant to change it"
+                        >
+                          expires {expiryDateLabel(g.expires_at)}
+                        </span>
+                      )}
                       <div className="ml-auto flex items-center gap-1">
                         {g.effect === "deny" ? (
                           <NoAccessBadge />
@@ -317,6 +345,14 @@ function AddGrantRow({
   const [value, setValue] = useState("");
   const [role, setRole] = useState<string>("ws_viewer");
   const [showSuggest, setShowSuggest] = useState(false);
+  // Optional expiry date (yyyy-mm-dd from the date input). Empty = never
+  // expires — the unchanged default. This only affects NEW grants: the PUT
+  // endpoint is `ON CONFLICT DO NOTHING`, so re-PUTting an existing
+  // (principal, object, role) never updates its stored expiry. To change an
+  // existing grant's expiry, remove it (Trash2 button below) and re-add it
+  // here with the new date.
+  const [expiresAt, setExpiresAt] = useState("");
+  const expiresAtId = useId();
 
   const suggestQ = useQuery({
     queryKey: ["share-principals", type, value],
@@ -329,8 +365,9 @@ function AddGrantRow({
 
   const submit = () => {
     if (!canAdd) return;
-    onAdd(grantBody(type, value.trim(), role));
+    onAdd(grantBody(type, value.trim(), role, toExpiresAt(expiresAt)));
     setValue("");
+    setExpiresAt("");
     setShowSuggest(false);
   };
 
@@ -410,6 +447,17 @@ function AddGrantRow({
         <Button onClick={submit} disabled={!canAdd}>
           {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Add"}
         </Button>
+      </div>
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <label htmlFor={expiresAtId}>Access expires</label>
+        <Input
+          id={expiresAtId}
+          type="date"
+          className="h-8 w-40"
+          value={expiresAt}
+          onChange={(e) => setExpiresAt(e.target.value)}
+        />
+        <span>optional — leave blank for no expiry</span>
       </div>
       {value.trim().length > 0 && showSuggest && (
         <button

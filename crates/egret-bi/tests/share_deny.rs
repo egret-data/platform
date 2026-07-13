@@ -394,3 +394,129 @@ async fn lone_deny_grant_does_not_admit() {
         "a lone deny grant must not admit an object-guest"
     );
 }
+
+/// `grant_put` accepts an `expires_at` in the request body (P2a Task 2, part A)
+/// and persists it on the `access_grants` row. Omitting it must leave the row's
+/// `expires_at` NULL (never expires — unchanged default behavior).
+#[tokio::test]
+async fn grant_put_persists_expires_at_when_given_and_null_when_omitted() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+
+    let owner = seed_user(&db).await;
+    let slug = format!("expiry-{}", Uuid::new_v4().simple());
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'Expiry Test', $2, 'active') RETURNING id",
+    )
+    .bind(&slug)
+    .bind(owner)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert workspace");
+
+    let editor = seed_user(&db).await;
+    add_member(&db, ws, editor, "ws_editor").await; // holds dashboard:manage
+    let with_expiry = seed_user(&db).await;
+    let without_expiry = seed_user(&db).await;
+
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let st = build_state(db.clone(), pdp);
+    let sessions = st.sessions.clone();
+    let editor_tok = session_for(&sessions, editor).await;
+
+    let d = st
+        .dashboards
+        .create(ws, "D", "", Some(owner))
+        .await
+        .unwrap()
+        .id;
+
+    let app = shares_router().merge(dashboard_router()).with_state(st);
+
+    // PUT a grant WITH expires_at set (1 day out, RFC3339) → 200.
+    let expiry = chrono::Utc::now() + chrono::Duration::days(1);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/ws/{slug}/objects/dashboard/{d}/grants"))
+                .header("Cookie", format!("egret_session={editor_tok}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"principal_type":"user","principal_id":"{with_expiry}","role":"ws_viewer","effect":"allow","expires_at":"{}"}}"#,
+                    expiry.to_rfc3339()
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let s = resp.status();
+    assert!(
+        s.is_success(),
+        "grant_put with expires_at must succeed; got {s}: {}",
+        body_string(resp).await
+    );
+
+    // PUT a grant WITHOUT expires_at → 200, row stays NULL.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/ws/{slug}/objects/dashboard/{d}/grants"))
+                .header("Cookie", format!("egret_session={editor_tok}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"principal_type":"user","principal_id":"{without_expiry}","role":"ws_viewer","effect":"allow"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let s = resp.status();
+    assert!(
+        s.is_success(),
+        "grant_put without expires_at must still succeed; got {s}: {}",
+        body_string(resp).await
+    );
+
+    // Read both rows back directly from access_grants.
+    let persisted: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT expires_at FROM access_grants \
+         WHERE scope_type = 'object' AND scope_id = $1 AND principal_id = $2",
+    )
+    .bind(d)
+    .bind(with_expiry)
+    .fetch_one(&db.pool)
+    .await
+    .expect("fetch grant with expiry");
+    let persisted = persisted.expect("expires_at must be populated when supplied in the body");
+    assert!(
+        (persisted - expiry).num_seconds().abs() <= 1,
+        "persisted expires_at ({persisted}) must match the requested value ({expiry})"
+    );
+
+    let unset: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT expires_at FROM access_grants \
+         WHERE scope_type = 'object' AND scope_id = $1 AND principal_id = $2",
+    )
+    .bind(d)
+    .bind(without_expiry)
+    .fetch_one(&db.pool)
+    .await
+    .expect("fetch grant without expiry");
+    assert!(
+        unset.is_none(),
+        "expires_at must be NULL when omitted from the body; got {unset:?}"
+    );
+}

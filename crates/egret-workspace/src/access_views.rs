@@ -62,6 +62,10 @@ pub struct ObjectGrantRollup {
     pub role: String,
     /// 'allow' | 'deny' (legacy NULL rows coalesced to 'allow').
     pub effect: String,
+    /// Optional expiry (P2a). `None` = never expires. This is the MANAGEMENT
+    /// roll-up, so an expired grant is still listed here (no expiry filter) —
+    /// only the read-time admission predicates exclude expired grants.
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl AccessViewsRepo {
@@ -155,7 +159,8 @@ impl AccessViewsRepo {
              SELECT o.kind, o.id AS object_id, o.name AS object_name, \
                     ag.principal_type, ag.principal_id, \
                     COALESCE(u.email::text, g.name) AS principal_name, \
-                    r.name AS role, COALESCE(ag.effect, 'allow') AS effect \
+                    r.name AS role, COALESCE(ag.effect, 'allow') AS effect, \
+                    ag.expires_at \
              FROM access_grants ag \
              JOIN ws_objects o ON o.kind = ag.object_type AND o.id = ag.scope_id \
              JOIN roles r ON r.id = ag.role_id \
@@ -180,6 +185,7 @@ impl AccessViewsRepo {
                 principal_name: r.principal_name,
                 role: r.role,
                 effect: r.effect,
+                expires_at: r.expires_at,
             })
             .collect())
     }
@@ -195,6 +201,7 @@ struct ObjectGrantRow {
     principal_name: Option<String>,
     role: String,
     effect: String,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(sqlx::FromRow)]

@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from './accessEntry';
 export * from './accessItemInput';
 export * from './accessPolicyInput';
 export * from './accessPolicyInputAdditionalItem';
@@ -43,6 +44,7 @@ export * from './columnMeta';
 export * from './configFile';
 export * from './connOptions';
 export * from './controlPlaneAccessGetEffectiveAccessParams';
+export * from './controlPlaneAccessWhoCanAccessParams';
 export * from './controlPlaneAuditListAuditParams';
 export * from './controlPlaneCatalogSearchTabularsParams';
 export * from './controlPlaneEnginesPodLogsFollowParams';
@@ -142,6 +144,8 @@ export * from './objectDto';
 export * from './objectGrant';
 export * from './objectGrantBody';
 export * from './objectGrantDto';
+export * from './objectGrantRollupDto';
+export * from './objectRef';
 export * from './oidcOidcCallbackParams';
 export * from './orderBy';
 export * from './partitionDto';
@@ -248,5 +252,8 @@ export * from './updateWorkspace';
 export * from './userDto';
 export * from './warehouseConfigDto';
 export * from './warehouseDto';
+export * from './whoCanAccess';
 export * from './workspaceDto';
 export * from './workspaceMembership';
+export * from './wsPermDto';
+export * from './wsRoleDto';

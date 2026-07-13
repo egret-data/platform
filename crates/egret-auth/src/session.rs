@@ -136,6 +136,7 @@ impl SessionService {
             "SELECT DISTINCT r.name FROM access_grants ag \
              JOIN roles r ON r.id = ag.role_id \
              WHERE ag.scope_type = 'platform' \
+               AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
                AND ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
                   OR (ag.principal_type = 'group' AND ag.principal_id IN \
                          (SELECT group_id FROM user_groups WHERE user_id = $1)) )",
@@ -157,6 +158,7 @@ impl SessionService {
             "WITH RECURSIVE granted AS ( \
                SELECT ag.role_id FROM access_grants ag \
                WHERE ag.scope_type = 'platform' \
+                 AND (ag.expires_at IS NULL OR ag.expires_at > now()) \
                  AND ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
                     OR (ag.principal_type = 'group' AND ag.principal_id IN \
                            (SELECT group_id FROM user_groups WHERE user_id = $1)) ) \

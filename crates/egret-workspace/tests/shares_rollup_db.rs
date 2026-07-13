@@ -97,10 +97,26 @@ async fn grant_object(
     object_id: Uuid,
     effect: &str,
 ) {
+    grant_object_expiring(db, ptype, pid, role, object_type, object_id, effect, None).await
+}
+
+/// Insert an object-scoped grant (allow/deny) on `object_id` for a principal,
+/// with an optional `expires_at`.
+#[allow(clippy::too_many_arguments)]
+async fn grant_object_expiring(
+    db: &Db,
+    ptype: &str,
+    pid: Uuid,
+    role: Uuid,
+    object_type: &str,
+    object_id: Uuid,
+    effect: &str,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+) {
     sqlx::query(
         "INSERT INTO access_grants \
-           (principal_type, principal_id, role_id, scope_type, scope_id, object_type, effect) \
-         VALUES ($1, $2, $3, 'object', $4, $5, $6)",
+           (principal_type, principal_id, role_id, scope_type, scope_id, object_type, effect, expires_at) \
+         VALUES ($1, $2, $3, 'object', $4, $5, $6, $7)",
     )
     .bind(ptype)
     .bind(pid)
@@ -108,6 +124,7 @@ async fn grant_object(
     .bind(object_id)
     .bind(object_type)
     .bind(effect)
+    .bind(expires_at)
     .execute(&db.pool)
     .await
     .unwrap();
@@ -197,4 +214,101 @@ async fn lists_object_grants_scoped_to_workspace() {
     assert_eq!(deny.principal_id, u.0);
     assert_eq!(deny.principal_name.as_deref(), Some(u_email.as_str()));
     assert_eq!(deny.role, "ws_editor");
+}
+
+/// The roll-up surfaces each grant's `expires_at` (P2a Task 2, part B): a grant
+/// seeded with an expiry returns it (round-tripped), a grant seeded without one
+/// returns `None`. The roll-up is the SharedObjects MANAGEMENT view, so it must
+/// keep listing an EXPIRED grant too (no expiry filter here — that's the read-time
+/// admission predicate's job, not this view's).
+#[tokio::test]
+async fn lists_object_grants_with_expires_at() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let repo = AccessViewsRepo::new(db.clone());
+    let wrepo = WorkspaceRepo::new(db.clone());
+
+    let owner = seed_user_email(
+        &db,
+        &format!("own-{}@t.local", uuid::Uuid::new_v4().simple()),
+    )
+    .await;
+
+    let w = wrepo.create(&uniq("ws"), "W", owner).await.unwrap();
+    let database_id = seed_database(&db, w.id).await;
+    let (chart_c, _name) = seed_chart(&db, w.id, database_id).await;
+    let viewer = role_id(&db, "ws_viewer").await;
+
+    // Grant A: has an expiry (1 hour in the future).
+    let g_expiring = seed_group(&db, &uniq("Expiring Team")).await;
+    let expiry = chrono::Utc::now() + chrono::Duration::hours(1);
+    grant_object_expiring(
+        &db,
+        "group",
+        g_expiring,
+        viewer,
+        "chart",
+        chart_c,
+        "allow",
+        Some(expiry),
+    )
+    .await;
+
+    // Grant B: an EXPIRED grant — must still be listed (management roll-up, no
+    // expiry filter).
+    let g_expired = seed_group(&db, &uniq("Expired Team")).await;
+    let past = chrono::Utc::now() - chrono::Duration::hours(1);
+    grant_object_expiring(
+        &db,
+        "group",
+        g_expired,
+        viewer,
+        "chart",
+        chart_c,
+        "allow",
+        Some(past),
+    )
+    .await;
+
+    // Grant C: no expiry — NULL.
+    let g_forever = seed_group(&db, &uniq("Forever Team")).await;
+    grant_object(&db, "group", g_forever, viewer, "chart", chart_c, "allow").await;
+
+    let rows = repo.list_object_grants(w.id).await.unwrap();
+    assert_eq!(rows.len(), 3, "all three grants listed, expired included");
+
+    let a = rows
+        .iter()
+        .find(|r| r.principal_id == g_expiring)
+        .expect("expiring grant listed");
+    let a_expires = a
+        .expires_at
+        .expect("expiring grant must round-trip expires_at");
+    assert!(
+        (a_expires - expiry).num_seconds().abs() <= 1,
+        "round-tripped expires_at ({a_expires}) must match seeded value ({expiry})"
+    );
+
+    let b = rows
+        .iter()
+        .find(|r| r.principal_id == g_expired)
+        .expect("expired grant must still be listed by the management roll-up");
+    let b_expires = b
+        .expires_at
+        .expect("expired grant must round-trip expires_at");
+    assert!(
+        (b_expires - past).num_seconds().abs() <= 1,
+        "round-tripped expires_at ({b_expires}) must match seeded past value ({past})"
+    );
+
+    let c = rows
+        .iter()
+        .find(|r| r.principal_id == g_forever)
+        .expect("no-expiry grant listed");
+    assert_eq!(
+        c.expires_at, None,
+        "a grant seeded without expires_at must round-trip to None"
+    );
 }
