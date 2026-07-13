@@ -444,6 +444,7 @@ pub fn ws_member_router() -> Router<WorkspaceState> {
         .route("/{workspace}/members", get(list_members).post(add_member))
         .route("/{workspace}/members/{ptype}/{pid}", delete(remove_member))
         .route("/{workspace}/roles", get(list_workspace_roles))
+        .route("/{workspace}/shares", get(list_workspace_shares))
 }
 
 #[utoipa::path(
@@ -695,6 +696,68 @@ async fn list_workspace_roles(
     Ok(Json(roles.into_iter().map(Into::into).collect()))
 }
 
+// ── Workspace object-grant roll-up (read-only) ───────────────────────────────
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct ObjectGrantRollupDto {
+    pub kind: String,
+    pub object_id: String,
+    pub object_name: Option<String>,
+    pub principal_type: String,
+    pub principal_id: String,
+    pub principal_name: Option<String>,
+    pub role: String,
+    pub effect: String,
+}
+impl From<crate::access_views::ObjectGrantRollup> for ObjectGrantRollupDto {
+    fn from(g: crate::access_views::ObjectGrantRollup) -> Self {
+        ObjectGrantRollupDto {
+            kind: g.kind,
+            object_id: g.object_id.to_string(),
+            object_name: g.object_name,
+            principal_type: g.principal_type,
+            principal_id: g.principal_id.to_string(),
+            principal_name: g.principal_name,
+            role: g.role,
+            effect: g.effect,
+        }
+    }
+}
+
+/// `GET /ws/{workspace}/shares` — every OBJECT grant whose object lives in THIS
+/// workspace (charts, dashboards, datasets, folders, notebooks, saved queries),
+/// enriched with object name, role name, principal name and effect. Read-only, so
+/// a workspace admin can SEE what has been shared; gated on
+/// `workspace:manage_members` (the same gate as the member/role routes). The
+/// object set is restricted to this workspace in SQL — a grant on an object in
+/// another workspace is never returned (cross-workspace IDOR guard).
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/shares",
+    tag = "workspace-members",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "Object grants whose object lives in this workspace", body = Vec<ObjectGrantRollupDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_workspace_shares(
+    State(st): State<WorkspaceState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<Vec<ObjectGrantRollupDto>>, AuthError> {
+    egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
+        .await
+        .map_err(AuthError)?;
+    let grants = st
+        .access_views
+        .list_object_grants(ctx.workspace_id)
+        .await
+        .map_err(AuthError)?;
+    Ok(Json(grants.into_iter().map(Into::into).collect()))
+}
+
 // ── OpenAPI fragments (E0·P4b-2) ─────────────────────────────────────────────
 //
 // One doc struct per router, merged in `egret_workspace::openapi()`. Full mounted
@@ -732,8 +795,8 @@ pub struct AdminUserApi;
 /// OpenAPI fragment for the workspace-membership router (`/api/ws/{workspace}/members`).
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(list_members, add_member, remove_member, list_workspace_roles),
-    components(schemas(MemberDto, AddMember, WsRoleDto, WsPermDto, Ack, ErrorBody)),
+    paths(list_members, add_member, remove_member, list_workspace_roles, list_workspace_shares),
+    components(schemas(MemberDto, AddMember, WsRoleDto, WsPermDto, ObjectGrantRollupDto, Ack, ErrorBody)),
     tags((name = "workspace-members", description = "Workspace membership (add/remove principals)")),
 )]
 pub struct WsMemberApi;

@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use egret_core::Result;
+use egret_core::{Result, WorkspaceId};
 use egret_metastore::Db;
 use uuid::Uuid;
 
@@ -43,6 +43,25 @@ pub struct WsPerm {
     pub key: String,
     pub description: String,
     pub group: String,
+}
+
+/// One OBJECT grant whose object lives in a given workspace, enriched with the
+/// object's display name, the granted role name, the principal's display name,
+/// and the grant `effect` ('allow' | 'deny').
+#[derive(Debug, Clone)]
+pub struct ObjectGrantRollup {
+    /// Object type: 'chart' | 'dashboard' | 'notebook' | 'dataset' | 'saved_query' | 'folder'.
+    pub kind: String,
+    pub object_id: Uuid,
+    pub object_name: Option<String>,
+    /// Principal type: 'user' | 'group' | 'service'.
+    pub principal_type: String,
+    pub principal_id: Uuid,
+    pub principal_name: Option<String>,
+    /// The granted role's name (e.g. 'ws_viewer').
+    pub role: String,
+    /// 'allow' | 'deny' (legacy NULL rows coalesced to 'allow').
+    pub effect: String,
 }
 
 impl AccessViewsRepo {
@@ -102,6 +121,80 @@ impl AccessViewsRepo {
         }
         Ok(out)
     }
+
+    /// Every OBJECT grant whose object lives in `workspace_id`, enriched with the
+    /// object's name, the granted role name, the principal's display name and the
+    /// grant effect.
+    ///
+    /// Object → workspace resolution reuses the same object tables the object-scope
+    /// admission path uses (`Authorizer::has_object_grant_in_workspace`): a
+    /// `UNION ALL` over the six object tables (each carries `workspace_id` + a
+    /// `name` column), filtered to this workspace, then joined back to
+    /// `access_grants` on `(object_type, scope_id)`. Restricting the object set to
+    /// this workspace in SQL is the cross-workspace IDOR guard — a grant on an
+    /// object that lives in another workspace can never join through, so it is
+    /// never returned.
+    pub async fn list_object_grants(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<ObjectGrantRollup>> {
+        // Object tables — all in the `analytics` schema, each with `workspace_id`
+        // and a `name` display column (confirmed against migrations 0012/0014/0015/
+        // 0021/0037 + 0010 saved_queries, moved to `analytics` in 0067):
+        //   analytics.charts, analytics.dashboards, analytics.datasets,
+        //   analytics.folders, analytics.notebooks, analytics.saved_queries.
+        let rows = sqlx::query_as::<_, ObjectGrantRow>(
+            "WITH ws_objects (kind, id, name) AS ( \
+                 SELECT 'chart',       id, name FROM analytics.charts        WHERE workspace_id = $1 \
+                 UNION ALL SELECT 'dashboard',   id, name FROM analytics.dashboards    WHERE workspace_id = $1 \
+                 UNION ALL SELECT 'dataset',     id, name FROM analytics.datasets      WHERE workspace_id = $1 \
+                 UNION ALL SELECT 'folder',      id, name FROM analytics.folders       WHERE workspace_id = $1 \
+                 UNION ALL SELECT 'notebook',    id, name FROM analytics.notebooks     WHERE workspace_id = $1 \
+                 UNION ALL SELECT 'saved_query', id, name FROM analytics.saved_queries WHERE workspace_id = $1 \
+             ) \
+             SELECT o.kind, o.id AS object_id, o.name AS object_name, \
+                    ag.principal_type, ag.principal_id, \
+                    COALESCE(u.email::text, g.name) AS principal_name, \
+                    r.name AS role, COALESCE(ag.effect, 'allow') AS effect \
+             FROM access_grants ag \
+             JOIN ws_objects o ON o.kind = ag.object_type AND o.id = ag.scope_id \
+             JOIN roles r ON r.id = ag.role_id \
+             LEFT JOIN users  u ON ag.principal_type = 'user'  AND u.id = ag.principal_id \
+             LEFT JOIN groups g ON ag.principal_type = 'group' AND g.id = ag.principal_id \
+             WHERE ag.scope_type = 'object' \
+             ORDER BY o.kind, o.name, r.name",
+        )
+        .bind(workspace_id.0)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| ObjectGrantRollup {
+                kind: r.kind,
+                object_id: r.object_id,
+                object_name: r.object_name,
+                principal_type: r.principal_type,
+                principal_id: r.principal_id,
+                principal_name: r.principal_name,
+                role: r.role,
+                effect: r.effect,
+            })
+            .collect())
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct ObjectGrantRow {
+    kind: String,
+    object_id: Uuid,
+    object_name: Option<String>,
+    principal_type: String,
+    principal_id: Uuid,
+    principal_name: Option<String>,
+    role: String,
+    effect: String,
 }
 
 #[derive(sqlx::FromRow)]
