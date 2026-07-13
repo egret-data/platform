@@ -1,5 +1,6 @@
 //! `egret-workspace` — workspace entity, membership, and RBAC authorization.
 
+pub mod access_requests;
 pub mod access_views;
 pub mod context;
 pub mod mapping;
@@ -19,5 +20,6 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     doc.merge(routes::AdminWorkspaceApi::openapi());
     doc.merge(routes::AdminUserApi::openapi());
     doc.merge(routes::WsMemberApi::openapi());
+    doc.merge(routes::AccessRequestApi::openapi());
     doc
 }

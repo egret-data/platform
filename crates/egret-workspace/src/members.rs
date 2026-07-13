@@ -25,6 +25,21 @@ impl MemberRepo {
         role: &str,
         by: UserId,
     ) -> Result<()> {
+        self.add_with_expiry(ws, ptype, pid, role, by, None).await
+    }
+
+    /// Like [`add`](Self::add), but stamps a time-boxed `expires_at` on the grant
+    /// (P2a). `None` = never expires (identical to `add`). Used by the
+    /// access-request approval path to grant time-limited membership.
+    pub async fn add_with_expiry(
+        &self,
+        ws: WorkspaceId,
+        ptype: &str,
+        pid: Uuid,
+        role: &str,
+        by: UserId,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<()> {
         if ptype != "user" && ptype != "group" {
             return Err(Error::InvalidInput(format!("bad principal_type: {ptype}")));
         }
@@ -55,8 +70,8 @@ impl MemberRepo {
         .map_err(db_err)?;
         sqlx::query(
             "INSERT INTO access_grants \
-               (principal_type, principal_id, role_id, scope_type, scope_id, granted_by) \
-             SELECT $1, $2, r.id, 'workspace', $3, $4 FROM roles r \
+               (principal_type, principal_id, role_id, scope_type, scope_id, granted_by, expires_at) \
+             SELECT $1, $2, r.id, 'workspace', $3, $4, $6 FROM roles r \
              WHERE r.scope = 'workspace' AND r.name = $5 \
              ON CONFLICT DO NOTHING",
         )
@@ -65,6 +80,7 @@ impl MemberRepo {
         .bind(ws.0)
         .bind(by.0)
         .bind(role)
+        .bind(expires_at)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;

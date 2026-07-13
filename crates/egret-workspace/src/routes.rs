@@ -11,6 +11,7 @@ use egret_core::{Ack, Error, Pagination, UserId, WorkspaceId, WorkspacePath};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::access_requests::{AccessRequestEnriched, AccessRequestRepo};
 use crate::access_views::AccessViewsRepo;
 use crate::context::WsContext;
 use crate::members::MemberRepo;
@@ -23,6 +24,9 @@ pub struct WorkspaceState {
     pub members: MemberRepo,
     /// Read-only workspace-scope role catalog (roles + their permissions).
     pub access_views: AccessViewsRepo,
+    /// Join-request → approval workflow (P2b). Backs the requester endpoints
+    /// (`/api/access-requests/*`).
+    pub access_requests: AccessRequestRepo,
     pub authz: Authorizer,
     pub pdp: std::sync::Arc<dyn egret_core::authz::Pdp>,
     pub users: UserRepo,
@@ -269,6 +273,213 @@ pub fn me_router() -> Router<WorkspaceState> {
     Router::new().route("/workspaces", get(list_my_workspaces))
 }
 
+// ── Access-request (join-request) routes — requester side (P2b) ───────────────
+//
+// Any authenticated user (`Auth(p)`, NOT workspace-scoped `WsContext`) may list
+// the workspaces they can join, file a join request, list their own requests, and
+// cancel a still-pending one. Approval lives on the workspace-scoped approver
+// router. Mounted at `/api`.
+
+/// A workspace a user may request to join (they are not already a member).
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct JoinableWorkspaceDto {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+}
+
+/// A join request as seen by the requester.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct AccessRequestDto {
+    pub id: String,
+    pub workspace_id: String,
+    pub workspace_name: Option<String>,
+    pub requester_id: String,
+    pub requester_name: Option<String>,
+    pub requested_role: String,
+    pub reason: String,
+    pub status: String,
+    pub decided_by: Option<String>,
+    pub decided_at: Option<String>,
+    pub decision_note: Option<String>,
+    pub expires_at: Option<String>,
+    pub created_at: String,
+}
+
+impl From<AccessRequestEnriched> for AccessRequestDto {
+    fn from(r: AccessRequestEnriched) -> Self {
+        AccessRequestDto {
+            id: r.id.to_string(),
+            workspace_id: r.workspace_id.to_string(),
+            workspace_name: r.workspace_name,
+            requester_id: r.requester_id.to_string(),
+            requester_name: r.requester_name,
+            requested_role: r.requested_role,
+            reason: r.reason,
+            status: r.status,
+            decided_by: r.decided_by.map(|id| id.to_string()),
+            decided_at: r.decided_at.map(|t| t.to_rfc3339()),
+            decision_note: r.decision_note,
+            expires_at: r.expires_at.map(|t| t.to_rfc3339()),
+            created_at: r.created_at.to_rfc3339(),
+        }
+    }
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct CreateAccessRequest {
+    pub workspace_id: Uuid,
+    pub role: Option<String>,
+    pub reason: Option<String>,
+}
+
+pub fn access_request_router() -> Router<WorkspaceState> {
+    Router::new()
+        .route("/access-requests/joinable", get(list_joinable))
+        .route(
+            "/access-requests",
+            post(create_access_request).get(list_my_access_requests),
+        )
+        .route("/access-requests/mine", get(list_my_access_requests))
+        .route("/access-requests/{id}/cancel", post(cancel_access_request))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/access-requests/joinable",
+    tag = "access-requests",
+    responses(
+        (status = 200, description = "Active workspaces the caller may request to join", body = Vec<JoinableWorkspaceDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_joinable(
+    State(st): State<WorkspaceState>,
+    Auth(p): Auth,
+) -> Result<Json<Vec<JoinableWorkspaceDto>>, AuthError> {
+    let rows = st
+        .access_requests
+        .joinable(p.user_id)
+        .await
+        .map_err(AuthError)?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(id, slug, name)| JoinableWorkspaceDto {
+                id: id.to_string(),
+                slug,
+                name,
+            })
+            .collect(),
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/access-requests",
+    tag = "access-requests",
+    request_body = CreateAccessRequest,
+    responses(
+        (status = 201, description = "Join request filed", body = AccessRequestDto),
+        (status = 400, description = "Already a member or workspace not joinable", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 409, description = "A pending request for this workspace already exists", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn create_access_request(
+    State(st): State<WorkspaceState>,
+    Auth(p): Auth,
+    Json(body): Json<CreateAccessRequest>,
+) -> Result<(axum::http::StatusCode, Json<AccessRequestDto>), AuthError> {
+    // Only workspaces the caller is NOT already a member of (and that are active)
+    // are valid targets. `joinable` is the authoritative membership check: if the
+    // target isn't in it, the caller is already a member or the ws is inactive.
+    let joinable = st
+        .access_requests
+        .joinable(p.user_id)
+        .await
+        .map_err(AuthError)?;
+    if !joinable.iter().any(|(id, _, _)| *id == body.workspace_id) {
+        return Err(AuthError(Error::Conflict(
+            "already a member or workspace not joinable".into(),
+        )));
+    }
+
+    let role = body.role.as_deref().unwrap_or("ws_viewer");
+    let reason = body.reason.as_deref().unwrap_or("");
+    let req = st
+        .access_requests
+        .create(p.user_id, WorkspaceId(body.workspace_id), role, reason)
+        .await
+        .map_err(AuthError)?;
+
+    // Return the enriched DTO shape (workspace/requester names are None on the
+    // freshly-created row — the requester already knows both).
+    let enriched = AccessRequestEnriched {
+        id: req.id,
+        requester_id: req.requester_id,
+        workspace_id: req.workspace_id,
+        requested_role: req.requested_role,
+        reason: req.reason,
+        status: req.status,
+        decided_by: req.decided_by,
+        decided_at: req.decided_at,
+        decision_note: req.decision_note,
+        expires_at: req.expires_at,
+        created_at: req.created_at,
+        requester_name: None,
+        workspace_name: None,
+    };
+    Ok((axum::http::StatusCode::CREATED, Json(enriched.into())))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/access-requests/mine",
+    tag = "access-requests",
+    responses(
+        (status = 200, description = "The caller's own join requests, newest first", body = Vec<AccessRequestDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_my_access_requests(
+    State(st): State<WorkspaceState>,
+    Auth(p): Auth,
+) -> Result<Json<Vec<AccessRequestDto>>, AuthError> {
+    let rows = st
+        .access_requests
+        .list_for_requester(p.user_id)
+        .await
+        .map_err(AuthError)?;
+    Ok(Json(rows.into_iter().map(Into::into).collect()))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/access-requests/{id}/cancel",
+    tag = "access-requests",
+    params(("id" = Uuid, Path, description = "Access-request id")),
+    responses(
+        (status = 200, description = "Request cancelled", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 404, description = "No pending request to cancel for this user", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn cancel_access_request(
+    State(st): State<WorkspaceState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AuthError> {
+    st.access_requests
+        .cancel(id, p.user_id)
+        .await
+        .map_err(AuthError)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 // ── Admin user routes (Task 8) ───────────────────────────────────────────────
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -445,6 +656,18 @@ pub fn ws_member_router() -> Router<WorkspaceState> {
         .route("/{workspace}/members/{ptype}/{pid}", delete(remove_member))
         .route("/{workspace}/roles", get(list_workspace_roles))
         .route("/{workspace}/shares", get(list_workspace_shares))
+        .route(
+            "/{workspace}/access-requests",
+            get(list_workspace_access_requests),
+        )
+        .route(
+            "/{workspace}/access-requests/{id}/approve",
+            post(approve_access_request),
+        )
+        .route(
+            "/{workspace}/access-requests/{id}/deny",
+            post(deny_access_request),
+        )
 }
 
 #[utoipa::path(
@@ -762,6 +985,172 @@ async fn list_workspace_shares(
     Ok(Json(grants.into_iter().map(Into::into).collect()))
 }
 
+// ── Workspace access-request approver routes (P2b) ───────────────────────────
+//
+// The APPROVER side of the join-request workflow: a workspace admin reviews the
+// pending queue and approves (→ member added with role + optional expiry via the
+// repo's single grant path) or denies. Workspace-scoped and gated on
+// `workspace:manage_members` (same as the member routes). The cross-workspace +
+// pending guards live in `AccessRequestRepo::{approve,deny}` — surfaced here as
+// 404 (`NotFound`) / 409 (`Conflict`) via `AuthError`.
+
+#[derive(Deserialize)]
+pub struct AccessRequestStatusQuery {
+    /// Filter by request status; defaults to `pending`.
+    pub status: Option<String>,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct ApproveAccessRequest {
+    /// Role to grant the requester; defaults to the originally requested role.
+    pub role: Option<String>,
+    /// Optional time-boxed expiry for the membership grant.
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct DenyAccessRequest {
+    /// Optional note recorded on the denied request.
+    pub note: Option<String>,
+}
+
+/// `GET /ws/{workspace}/access-requests?status=` — the workspace's join requests
+/// filtered by `status` (default `pending`). Gated on `workspace:manage_members`.
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/access-requests",
+    tag = "workspace-members",
+    params(
+        WorkspacePath,
+        ("status" = Option<String>, Query, description = "Filter by status (default: pending)"),
+    ),
+    responses(
+        (status = 200, description = "The workspace's join requests, newest first", body = Vec<AccessRequestDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_workspace_access_requests(
+    State(st): State<WorkspaceState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<AccessRequestStatusQuery>,
+) -> Result<Json<Vec<AccessRequestDto>>, AuthError> {
+    egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
+        .await
+        .map_err(AuthError)?;
+    let status = q.status.as_deref().unwrap_or("pending");
+    let rows = st
+        .access_requests
+        .list_for_workspace(ctx.workspace_id, status)
+        .await
+        .map_err(AuthError)?;
+    Ok(Json(rows.into_iter().map(Into::into).collect()))
+}
+
+/// `POST /ws/{workspace}/access-requests/{id}/approve` — approve a pending request:
+/// add the requester as a member with the chosen role + optional expiry via the
+/// repo's single grant path, then mark it approved. The repo enforces the
+/// cross-workspace guard (`NotFound` → 404) and pending guard (`Conflict` → 409).
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/access-requests/{id}/approve",
+    tag = "workspace-members",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Access-request id"),
+    ),
+    request_body = ApproveAccessRequest,
+    responses(
+        (status = 200, description = "Request approved and member added", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 404, description = "No such request in this workspace", body = ErrorBody),
+        (status = 409, description = "Request already decided", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn approve_access_request(
+    State(st): State<WorkspaceState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    Json(body): Json<ApproveAccessRequest>,
+) -> Result<Json<serde_json::Value>, AuthError> {
+    egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
+        .await
+        .map_err(AuthError)?;
+    st.access_requests
+        .approve(
+            id,
+            ctx.workspace_id,
+            body.role.as_deref(),
+            body.expires_at,
+            ctx.principal.user_id,
+        )
+        .await
+        .map_err(AuthError)?;
+    st.audit.emit(egret_audit::AuditEvent::Mutation {
+        actor: Some(ctx.principal.user_id.0),
+        workspace_id: Some(ctx.workspace_id.0),
+        action: "access_request:approve".into(),
+        resource_type: "access_request".into(),
+        resource_id: Some(id.to_string()),
+        detail: serde_json::json!({
+            "role": body.role,
+            "expires_at": body.expires_at.map(|t| t.to_rfc3339()),
+        }),
+    });
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// `POST /ws/{workspace}/access-requests/{id}/deny` — deny a pending request with
+/// an optional note. The repo enforces the cross-workspace + pending guards.
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/access-requests/{id}/deny",
+    tag = "workspace-members",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Access-request id"),
+    ),
+    request_body = DenyAccessRequest,
+    responses(
+        (status = 200, description = "Request denied", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 409, description = "Request not pending or not in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn deny_access_request(
+    State(st): State<WorkspaceState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    Json(body): Json<DenyAccessRequest>,
+) -> Result<Json<serde_json::Value>, AuthError> {
+    egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
+        .await
+        .map_err(AuthError)?;
+    st.access_requests
+        .deny(
+            id,
+            ctx.workspace_id,
+            body.note.as_deref(),
+            ctx.principal.user_id,
+        )
+        .await
+        .map_err(AuthError)?;
+    st.audit.emit(egret_audit::AuditEvent::Mutation {
+        actor: Some(ctx.principal.user_id.0),
+        workspace_id: Some(ctx.workspace_id.0),
+        action: "access_request:deny".into(),
+        resource_type: "access_request".into(),
+        resource_id: Some(id.to_string()),
+        detail: serde_json::json!({ "note": body.note }),
+    });
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 // ── OpenAPI fragments (E0·P4b-2) ─────────────────────────────────────────────
 //
 // One doc struct per router, merged in `egret_workspace::openapi()`. Full mounted
@@ -777,6 +1166,15 @@ async fn list_workspace_shares(
     tags((name = "me", description = "The caller's own workspaces")),
 )]
 pub struct MeApi;
+
+/// OpenAPI fragment for the requester-side access-request router (`/api`).
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(list_joinable, create_access_request, list_my_access_requests, cancel_access_request),
+    components(schemas(JoinableWorkspaceDto, AccessRequestDto, CreateAccessRequest, Ack, ErrorBody)),
+    tags((name = "access-requests", description = "Workspace join requests (requester side)")),
+)]
+pub struct AccessRequestApi;
 
 /// OpenAPI fragment for the platform-admin workspace router (`/api/admin/workspaces`).
 #[derive(utoipa::OpenApi)]
@@ -799,8 +1197,28 @@ pub struct AdminUserApi;
 /// OpenAPI fragment for the workspace-membership router (`/api/ws/{workspace}/members`).
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(list_members, add_member, remove_member, list_workspace_roles, list_workspace_shares),
-    components(schemas(MemberDto, AddMember, WsRoleDto, WsPermDto, ObjectGrantRollupDto, Ack, ErrorBody)),
+    paths(
+        list_members,
+        add_member,
+        remove_member,
+        list_workspace_roles,
+        list_workspace_shares,
+        list_workspace_access_requests,
+        approve_access_request,
+        deny_access_request,
+    ),
+    components(schemas(
+        MemberDto,
+        AddMember,
+        WsRoleDto,
+        WsPermDto,
+        ObjectGrantRollupDto,
+        AccessRequestDto,
+        ApproveAccessRequest,
+        DenyAccessRequest,
+        Ack,
+        ErrorBody,
+    )),
     tags((name = "workspace-members", description = "Workspace membership (add/remove principals)")),
 )]
 pub struct WsMemberApi;

@@ -4,6 +4,7 @@ const TABS = [
   { to: "members", label: "Members" },
   { to: "roles", label: "Roles & permissions" },
   { to: "shares", label: "Shared objects" },
+  { to: "requests", label: "Requests" },
 ];
 
 export default function WorkspaceSettings() {
