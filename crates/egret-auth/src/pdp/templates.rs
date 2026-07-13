@@ -48,6 +48,28 @@ pub fn deny_template_for_role(role_name: &str, scope: &str, perms: &[String]) ->
     format!("forbid(principal in ?principal, action in [{actions}], resource {op} ?resource);")
 }
 
+/// The Cedar `forbid` body for a **classification (clearance) policy** (Access
+/// P3.3): a resource carrying `tag_key` is FORBIDDEN unless the request context
+/// lists one of `required_roles`. `"platform_admin"` is ALWAYS appended to the
+/// clearance list so a superuser is never locked out. Deny-wins holds (Cedar
+/// forbid > permit), so this overrides any permit that would otherwise grant
+/// access to a tagged object.
+///
+/// `has` guards (`resource has tags`, `context has roles`) keep the policy inert
+/// on a resource/context lacking the attribute rather than erroring. `tag_key`
+/// and the role names are admin-defined **validated** identifiers (lowercase
+/// alnum/`:`/`-`), but are still emitted as quoted Cedar string literals.
+pub fn classification_forbid(tag_key: &str, required_roles: &[String]) -> String {
+    let mut roles: Vec<String> = required_roles.iter().map(|r| format!("\"{r}\"")).collect();
+    roles.push("\"platform_admin\"".to_string());
+    let roles = roles.join(", ");
+    format!(
+        "forbid(principal, action, resource) \
+         when {{ resource has tags && resource.tags.contains(\"{tag_key}\") }} \
+         unless {{ context has roles && context.roles.containsAny([{roles}]) }};"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

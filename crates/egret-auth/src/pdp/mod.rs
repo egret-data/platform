@@ -157,6 +157,39 @@ impl CedarPdp {
         templates
             .add(forbid)
             .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("add forbid: {e:?}")))?;
+
+        // Classification (clearance) policies (Access P3.3): one static `forbid`
+        // per gated tag. A resource carrying the tag key is forbidden unless the
+        // request context lists a cleared role (platform_admin always appended).
+        // `forbid` beats `permit`, so this is deny-wins. An EMPTY `required_roles`
+        // is NO gate → no policy emitted. These are static (no slots), so they
+        // ride along in the `templates` clone every request with zero per-request
+        // cost. The join resolves the validated tag KEY used in Cedar.
+        let class_rows: Vec<(uuid::Uuid, String, Vec<String>)> = sqlx::query_as(
+            "SELECT cp.tag_id, t.key, cp.required_roles \
+             FROM classification_policies cp JOIN tags t ON t.id = cp.tag_id",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!(e)))?;
+        for (tag_id, key, required_roles) in class_rows {
+            if required_roles.is_empty() {
+                continue; // informational tag only — no clearance gate
+            }
+            let pid: PolicyId = format!("classification:{tag_id}")
+                .parse()
+                .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e:?}")))?;
+            let policy = cedar_policy::Policy::parse(
+                Some(pid),
+                templates::classification_forbid(&key, &required_roles),
+            )
+            .map_err(|e| {
+                egret_core::Error::Internal(anyhow::anyhow!("classification policy: {e:?}"))
+            })?;
+            templates.add(policy).map_err(|e| {
+                egret_core::Error::Internal(anyhow::anyhow!("add classification: {e:?}"))
+            })?;
+        }
         Ok(PdpInner {
             templates,
             role_names,
@@ -214,7 +247,22 @@ impl Pdp for CedarPdp {
         let inner = self.inner.load();
         let policies =
             entities::link_grants(inner.templates.clone(), subject, &grants, &inner.role_names);
-        let ents = entities::build_entities(subject, resource);
+        // The object's classification tag keys, so a classification `forbid` can
+        // gate on `resource.tags.contains("<key>")`. ONE extra query, and only for
+        // an Object resource; platform/workspace decisions carry no tags.
+        let object_tags: Vec<String> = match resource {
+            Resource::Object(o) => sqlx::query_scalar(
+                "SELECT t.key FROM tag_assignments ta JOIN tags t ON t.id = ta.tag_id \
+                 WHERE ta.object_type = $1 AND ta.object_id = $2",
+            )
+            .bind(&o.kind)
+            .bind(o.id)
+            .fetch_all(&self.db.pool)
+            .await
+            .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!(e)))?,
+            _ => Vec::new(),
+        };
+        let ents = entities::build_entities(subject, resource, &object_tags);
         let (p, a, r) = entities::request_uids(subject, action, resource);
         // Feed the admin-graph `forbid` its exemption flag: true iff the subject
         // holds a platform-scoped grant on the `platform_admin` role. Computed
@@ -223,9 +271,17 @@ impl Pdp for CedarPdp {
             g.scope_type == "platform"
                 && inner.role_names.get(&g.role_id).map(String::as_str) == Some("platform_admin")
         });
-        let context =
-            Context::from_json_value(serde_json::json!({ "is_platform_admin": is_admin }), None)
-                .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("context: {e:?}")))?;
+        // The distinct role NAMES the subject holds (from the grants already
+        // loaded), fed to the classification `forbid`'s `unless` clearance check.
+        let roles: std::collections::BTreeSet<String> = grants
+            .iter()
+            .filter_map(|g| inner.role_names.get(&g.role_id).cloned())
+            .collect();
+        let context = Context::from_json_value(
+            serde_json::json!({ "is_platform_admin": is_admin, "roles": roles }),
+            None,
+        )
+        .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("context: {e:?}")))?;
         let req = Request::new(p, a, r, context, None)
             .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("{e:?}")))?;
         let resp = Authorizer::new().is_authorized(&req, &policies, &ents);

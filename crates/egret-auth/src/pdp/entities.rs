@@ -1,7 +1,9 @@
 //! Convert a `Subject` + its `Grant`s + a `Resource` into Cedar `Entities`,
 //! request UIDs, and per-grant template-linked policies.
 
-use cedar_policy::{Entities, Entity, EntityUid, PolicyId, PolicySet, SlotId};
+use cedar_policy::{
+    Entities, Entity, EntityUid, PolicyId, PolicySet, RestrictedExpression, SlotId,
+};
 use egret_core::authz::{Resource, Subject};
 use std::collections::HashMap;
 
@@ -51,7 +53,12 @@ fn scope_uid(
 /// Build entities: the user, its group memberships, and the resource hierarchy
 /// (Workspace in Platform). Grants' scope entities are included so `resource in
 /// ?resource` resolves.
-pub fn build_entities(subject: &Subject, resource: &Resource) -> Entities {
+///
+/// `object_tags` are the classification tag KEYS carried by the object under
+/// decision; they become the Object entity's `tags` Set attribute so a
+/// classification `forbid` policy can gate on `resource.tags.contains("<key>")`.
+/// For non-Object resources the slice is ignored (pass `&[]`).
+pub fn build_entities(subject: &Subject, resource: &Resource, object_tags: &[String]) -> Entities {
     let mut es: Vec<Entity> = Vec::new();
     let groups: std::collections::HashSet<EntityUid> = subject
         .group_ids
@@ -94,14 +101,26 @@ pub fn build_entities(subject: &Subject, resource: &Resource) -> Entities {
                 }
                 None => ws,
             };
-            // Object in (folder | workspace).
+            // Object in (folder | workspace), carrying its classification tag keys
+            // as a `tags` Set attribute so a classification `forbid` can gate on
+            // `resource.tags.contains("<key>")`.
             let obj: EntityUid = format!("Egret::Object::\"{}:{}\"", o.kind, o.id)
                 .parse()
                 .unwrap();
-            es.push(Entity::new_no_attrs(
-                obj,
-                std::iter::once(object_parent).collect(),
-            ));
+            let mut attrs = HashMap::new();
+            attrs.insert(
+                "tags".to_string(),
+                RestrictedExpression::new_set(
+                    object_tags
+                        .iter()
+                        .cloned()
+                        .map(RestrictedExpression::new_string),
+                ),
+            );
+            es.push(
+                Entity::new(obj, attrs, std::iter::once(object_parent).collect())
+                    .expect("object entity"),
+            );
         }
     }
     Entities::from_entities(es, None).expect("entities build")
@@ -196,7 +215,7 @@ mod tests {
         let ps = link_grants(ps, &subject, &grants, &names);
 
         let resource = Resource::Workspace(ws);
-        let entities = build_entities(&subject, &resource);
+        let entities = build_entities(&subject, &resource, &[]);
         let (p, a, r) = request_uids(&subject, "dashboard:read", &resource);
         let req = Request::new(p, a, r, Context::empty(), None).unwrap();
         let resp = Authorizer::new().is_authorized(&req, &ps, &entities);
@@ -204,7 +223,7 @@ mod tests {
 
         // A different workspace is denied.
         let other = Resource::Workspace(WorkspaceId::new());
-        let entities2 = build_entities(&subject, &other);
+        let entities2 = build_entities(&subject, &other, &[]);
         let (p2, a2, r2) = request_uids(&subject, "dashboard:read", &other);
         let req2 = Request::new(p2, a2, r2, Context::empty(), None).unwrap();
         assert_eq!(
@@ -231,7 +250,7 @@ mod tests {
     }
 
     fn decide(ps: &PolicySet, subject: &Subject, resource: &Resource) -> Decision {
-        let entities = build_entities(subject, resource);
+        let entities = build_entities(subject, resource, &[]);
         let (p, a, r) = request_uids(subject, "dashboard:read", resource);
         let req = Request::new(p, a, r, Context::empty(), None).unwrap();
         Authorizer::new()
@@ -246,6 +265,103 @@ mod tests {
             folder_id: folder,
             workspace_id: ws,
         })
+    }
+
+    /// Access P3.3: a classification `forbid` gates a tagged object on the
+    /// request context's `roles`. Deny-wins (forbid > permit) so a tagged object
+    /// is DENIED unless the context lists a cleared role (or platform_admin).
+    #[test]
+    fn classification_forbid_gates_tagged_object_on_context_roles() {
+        use crate::pdp::templates::classification_forbid;
+
+        let subject = Subject {
+            user_id: UserId::new(),
+            group_ids: vec![],
+        };
+        let ws = WorkspaceId::new();
+        let d1 = uuid::Uuid::new_v4();
+        let role_id = uuid::Uuid::new_v4();
+
+        // A ws_viewer template linked to a workspace grant → permits dashboard:read.
+        let mut base = PolicySet::new();
+        base.add_template(
+            Template::parse(
+                Some(format!("role:{role_id}").parse().unwrap()),
+                template_for_role("ws_viewer", "workspace", &["dashboard:read".into()]),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let names: RoleNames = std::iter::once((role_id, "ws_viewer".to_string())).collect();
+        let grants = vec![Grant {
+            role_id,
+            scope_type: "workspace".into(),
+            scope_id: Some(ws.0),
+            object_type: None,
+            effect: "allow".into(),
+        }];
+        let permit_ps = link_grants(base, &subject, &grants, &names);
+
+        // + a classification forbid: tag `confidential` requires `finance_cleared`.
+        let mut gated = permit_ps.clone();
+        gated
+            .add(
+                cedar_policy::Policy::parse(
+                    Some("classification:test".parse().unwrap()),
+                    classification_forbid("confidential", &["finance_cleared".into()]),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        // Decide a dashboard-read on `d1` with the given context.roles and tag keys.
+        let decide_ctx = |ps: &PolicySet, tags: &[String], roles: &[&str]| -> Decision {
+            let resource = object("dashboard", d1, None, ws);
+            let entities = build_entities(&subject, &resource, tags);
+            let (p, a, r) = request_uids(&subject, "dashboard:read", &resource);
+            let ctx = Context::from_json_value(
+                serde_json::json!({ "is_platform_admin": false, "roles": roles }),
+                None,
+            )
+            .unwrap();
+            let req = Request::new(p, a, r, ctx, None).unwrap();
+            Authorizer::new()
+                .is_authorized(&req, ps, &entities)
+                .decision()
+        };
+
+        let confidential = vec!["confidential".to_string()];
+
+        // (a) tagged + NOT cleared (only ws_viewer) → Deny.
+        assert_eq!(
+            decide_ctx(&gated, &confidential, &["ws_viewer"]),
+            Decision::Deny,
+            "(a) tagged object without a cleared role must be denied"
+        );
+        // (b) tagged + cleared (finance_cleared) → Allow.
+        assert_eq!(
+            decide_ctx(&gated, &confidential, &["ws_viewer", "finance_cleared"]),
+            Decision::Allow,
+            "(b) a cleared role must satisfy the forbid's unless"
+        );
+        // (c) tagged + platform_admin (auto-appended to unless) → Allow.
+        assert_eq!(
+            decide_ctx(&gated, &confidential, &["platform_admin"]),
+            Decision::Allow,
+            "(c) platform_admin is never locked out of a tagged object"
+        );
+        // (d) SAME forbid in the set but object UNtagged (tags:[]) → Allow (when is false).
+        assert_eq!(
+            decide_ctx(&gated, &[], &["ws_viewer"]),
+            Decision::Allow,
+            "(d) an untagged object is unaffected by the classification forbid"
+        );
+        // (e) object tagged confidential but NO classification forbid in the set → Allow.
+        assert_eq!(
+            decide_ctx(&permit_ps, &confidential, &["ws_viewer"]),
+            Decision::Allow,
+            "(e) a tag with no policy is informational only — no gate"
+        );
     }
 
     #[test]
