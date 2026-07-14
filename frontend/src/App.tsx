@@ -33,6 +33,8 @@ import SharedObjects from "@/routes/explore/settings/SharedObjects";
 import AccessRequests from "@/routes/explore/settings/AccessRequests";
 import WorkspaceGeneral from "@/routes/explore/settings/WorkspaceGeneral";
 import { Placeholder } from "@/routes/Placeholder";
+import Workspaces from "@/routes/control-plane/Workspaces";
+import WorkspaceDetail from "@/routes/control-plane/WorkspaceDetail";
 import ControlPlaneEngines from "@/routes/control-plane/ControlPlaneEngines";
 import EngineDetail from "@/routes/control-plane/EngineDetail";
 import ControlPlaneStorage from "@/routes/control-plane/ControlPlaneStorage";
@@ -133,7 +135,8 @@ function ControlPlaneRoutes() {
       <AppShell>
         <Routes>
           <Route index element={<ControlPlaneIndex />} />
-          <Route path="workspaces" element={<RequireGlobalAdmin><Placeholder title="Workspaces" /></RequireGlobalAdmin>} />
+          <Route path="workspaces" element={<RequireGlobalAdmin><Workspaces /></RequireGlobalAdmin>} />
+          <Route path="workspaces/:id" element={<RequireGlobalAdmin><WorkspaceDetail /></RequireGlobalAdmin>} />
           <Route path="engines" element={<RequirePermission perm="engine:read"><ControlPlaneEngines /></RequirePermission>} />
           <Route path="engines/:id" element={<RequirePermission perm="engine:read"><EngineDetail /></RequirePermission>} />
           <Route path="warehouses" element={<RequirePermission perm="warehouse:read"><Warehouses /></RequirePermission>} />
