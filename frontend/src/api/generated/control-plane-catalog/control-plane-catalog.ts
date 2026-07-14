@@ -25,10 +25,12 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  Ack,
   AddGrantBody,
   CatalogRoleDto,
   ClientDto,
   ColumnDto,
+  ControlPlaneCatalogListResourceTagsParams,
   ControlPlaneCatalogSearchTabularsParams,
   CreateClientBody,
   CreateRoleBody,
@@ -42,6 +44,8 @@ import type {
   NamespaceDto,
   ProtectionBody,
   ProtectionDto,
+  ResourceTagBody,
+  ResourceTagDto,
   RotateCredBody,
   SchemaDto,
   SearchResultDto,
@@ -3199,4 +3203,330 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getControlPlaneCatalogUndropTabularMutationOptions(options), queryClient);
+    }
+    export type controlPlaneCatalogListResourceTagsResponse200 = {
+  data: ResourceTagDto[]
+  status: 200
+}
+
+export type controlPlaneCatalogListResourceTagsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneCatalogListResourceTagsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneCatalogListResourceTagsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneCatalogListResourceTagsResponseSuccess = (controlPlaneCatalogListResourceTagsResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneCatalogListResourceTagsResponseError = (controlPlaneCatalogListResourceTagsResponse401 | controlPlaneCatalogListResourceTagsResponse403 | controlPlaneCatalogListResourceTagsResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneCatalogListResourceTagsResponse = (controlPlaneCatalogListResourceTagsResponseSuccess | controlPlaneCatalogListResourceTagsResponseError)
+
+export const getControlPlaneCatalogListResourceTagsUrl = (warehouseId: string,
+    params: ControlPlaneCatalogListResourceTagsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/control-plane/warehouses/${encodeURIComponent(warehouseId)}/resource-tags?${stringifiedParams}` : `/api/control-plane/warehouses/${encodeURIComponent(warehouseId)}/resource-tags`
+}
+
+export const controlPlaneCatalogListResourceTags = async (warehouseId: string,
+    params: ControlPlaneCatalogListResourceTagsParams, options?: RequestInit): Promise<controlPlaneCatalogListResourceTagsResponse> => {
+
+  return customInstance<controlPlaneCatalogListResourceTagsResponse>(getControlPlaneCatalogListResourceTagsUrl(warehouseId,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneCatalogListResourceTagsQueryKey = (warehouseId: string,
+    params?: ControlPlaneCatalogListResourceTagsParams,) => {
+    return [
+    `/api/control-plane/warehouses/${encodeURIComponent(warehouseId)}/resource-tags`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getControlPlaneCatalogListResourceTagsQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneCatalogListResourceTags>>, TError = ErrorBody>(warehouseId: string,
+    params: ControlPlaneCatalogListResourceTagsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneCatalogListResourceTags>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneCatalogListResourceTagsQueryKey(warehouseId,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneCatalogListResourceTags>>> = ({ signal }) => controlPlaneCatalogListResourceTags(warehouseId,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: warehouseId !== null && warehouseId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneCatalogListResourceTags>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneCatalogListResourceTagsQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneCatalogListResourceTags>>>
+export type ControlPlaneCatalogListResourceTagsQueryError = ErrorBody
+
+
+export function useControlPlaneCatalogListResourceTags<TData = Awaited<ReturnType<typeof controlPlaneCatalogListResourceTags>>, TError = ErrorBody>(
+ warehouseId: string,
+    params: ControlPlaneCatalogListResourceTagsParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneCatalogListResourceTags>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneCatalogListResourceTags>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneCatalogListResourceTags>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneCatalogListResourceTags<TData = Awaited<ReturnType<typeof controlPlaneCatalogListResourceTags>>, TError = ErrorBody>(
+ warehouseId: string,
+    params: ControlPlaneCatalogListResourceTagsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneCatalogListResourceTags>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneCatalogListResourceTags>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneCatalogListResourceTags>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneCatalogListResourceTags<TData = Awaited<ReturnType<typeof controlPlaneCatalogListResourceTags>>, TError = ErrorBody>(
+ warehouseId: string,
+    params: ControlPlaneCatalogListResourceTagsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneCatalogListResourceTags>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useControlPlaneCatalogListResourceTags<TData = Awaited<ReturnType<typeof controlPlaneCatalogListResourceTags>>, TError = ErrorBody>(
+ warehouseId: string,
+    params: ControlPlaneCatalogListResourceTagsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneCatalogListResourceTags>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneCatalogListResourceTagsQueryOptions(warehouseId,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneCatalogAssignResourceTagResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type controlPlaneCatalogAssignResourceTagResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneCatalogAssignResourceTagResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneCatalogAssignResourceTagResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneCatalogAssignResourceTagResponseSuccess = (controlPlaneCatalogAssignResourceTagResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneCatalogAssignResourceTagResponseError = (controlPlaneCatalogAssignResourceTagResponse401 | controlPlaneCatalogAssignResourceTagResponse403 | controlPlaneCatalogAssignResourceTagResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneCatalogAssignResourceTagResponse = (controlPlaneCatalogAssignResourceTagResponseSuccess | controlPlaneCatalogAssignResourceTagResponseError)
+
+export const getControlPlaneCatalogAssignResourceTagUrl = (warehouseId: string,) => {
+
+
+
+
+  return `/api/control-plane/warehouses/${encodeURIComponent(warehouseId)}/resource-tags`
+}
+
+export const controlPlaneCatalogAssignResourceTag = async (warehouseId: string,
+    resourceTagBody: ResourceTagBody, options?: RequestInit): Promise<controlPlaneCatalogAssignResourceTagResponse> => {
+
+  return customInstance<controlPlaneCatalogAssignResourceTagResponse>(getControlPlaneCatalogAssignResourceTagUrl(warehouseId),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(resourceTagBody)
+  }
+);}
+
+
+
+
+
+export const getControlPlaneCatalogAssignResourceTagMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogAssignResourceTag>>, TError,{warehouseId: string;data: ResourceTagBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogAssignResourceTag>>, TError,{warehouseId: string;data: ResourceTagBody}, TContext> => {
+
+const mutationKey = ['controlPlaneCatalogAssignResourceTag'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneCatalogAssignResourceTag>>, {warehouseId: string;data: ResourceTagBody}> = (props) => {
+          const {warehouseId,data} = props ?? {};
+
+          return  controlPlaneCatalogAssignResourceTag(warehouseId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneCatalogAssignResourceTagMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneCatalogAssignResourceTag>>>
+    export type ControlPlaneCatalogAssignResourceTagMutationBody = ResourceTagBody
+    export type ControlPlaneCatalogAssignResourceTagMutationError = ErrorBody
+
+    export const useControlPlaneCatalogAssignResourceTag = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogAssignResourceTag>>, TError,{warehouseId: string;data: ResourceTagBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneCatalogAssignResourceTag>>,
+        TError,
+        {warehouseId: string;data: ResourceTagBody},
+        TContext
+      > => {
+      return useMutation(getControlPlaneCatalogAssignResourceTagMutationOptions(options), queryClient);
+    }
+    export type controlPlaneCatalogUnassignResourceTagResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type controlPlaneCatalogUnassignResourceTagResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneCatalogUnassignResourceTagResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneCatalogUnassignResourceTagResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneCatalogUnassignResourceTagResponseSuccess = (controlPlaneCatalogUnassignResourceTagResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneCatalogUnassignResourceTagResponseError = (controlPlaneCatalogUnassignResourceTagResponse401 | controlPlaneCatalogUnassignResourceTagResponse403 | controlPlaneCatalogUnassignResourceTagResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneCatalogUnassignResourceTagResponse = (controlPlaneCatalogUnassignResourceTagResponseSuccess | controlPlaneCatalogUnassignResourceTagResponseError)
+
+export const getControlPlaneCatalogUnassignResourceTagUrl = (warehouseId: string,) => {
+
+
+
+
+  return `/api/control-plane/warehouses/${encodeURIComponent(warehouseId)}/resource-tags`
+}
+
+export const controlPlaneCatalogUnassignResourceTag = async (warehouseId: string,
+    resourceTagBody: ResourceTagBody, options?: RequestInit): Promise<controlPlaneCatalogUnassignResourceTagResponse> => {
+
+  return customInstance<controlPlaneCatalogUnassignResourceTagResponse>(getControlPlaneCatalogUnassignResourceTagUrl(warehouseId),
+  {
+    ...options,
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(resourceTagBody)
+  }
+);}
+
+
+
+
+
+export const getControlPlaneCatalogUnassignResourceTagMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogUnassignResourceTag>>, TError,{warehouseId: string;data: ResourceTagBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogUnassignResourceTag>>, TError,{warehouseId: string;data: ResourceTagBody}, TContext> => {
+
+const mutationKey = ['controlPlaneCatalogUnassignResourceTag'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneCatalogUnassignResourceTag>>, {warehouseId: string;data: ResourceTagBody}> = (props) => {
+          const {warehouseId,data} = props ?? {};
+
+          return  controlPlaneCatalogUnassignResourceTag(warehouseId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneCatalogUnassignResourceTagMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneCatalogUnassignResourceTag>>>
+    export type ControlPlaneCatalogUnassignResourceTagMutationBody = ResourceTagBody
+    export type ControlPlaneCatalogUnassignResourceTagMutationError = ErrorBody
+
+    export const useControlPlaneCatalogUnassignResourceTag = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogUnassignResourceTag>>, TError,{warehouseId: string;data: ResourceTagBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneCatalogUnassignResourceTag>>,
+        TError,
+        {warehouseId: string;data: ResourceTagBody},
+        TContext
+      > => {
+      return useMutation(getControlPlaneCatalogUnassignResourceTagMutationOptions(options), queryClient);
     }

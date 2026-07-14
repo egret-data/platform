@@ -29,8 +29,10 @@ import type {
   AdminWorkspacesListWsParams,
   CreateWorkspace,
   ErrorBody,
+  TransferOwner,
   UpdateWorkspace,
-  WorkspaceDto
+  WorkspaceDto,
+  WorkspaceStatsDto
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -592,4 +594,324 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getAdminWorkspacesArchiveWsMutationOptions(options), queryClient);
+    }
+    export type adminWorkspacesRestoreWsResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type adminWorkspacesRestoreWsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type adminWorkspacesRestoreWsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type adminWorkspacesRestoreWsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type adminWorkspacesRestoreWsResponseSuccess = (adminWorkspacesRestoreWsResponse200) & {
+  headers: Headers;
+};
+export type adminWorkspacesRestoreWsResponseError = (adminWorkspacesRestoreWsResponse401 | adminWorkspacesRestoreWsResponse403 | adminWorkspacesRestoreWsResponse500) & {
+  headers: Headers;
+};
+
+export type adminWorkspacesRestoreWsResponse = (adminWorkspacesRestoreWsResponseSuccess | adminWorkspacesRestoreWsResponseError)
+
+export const getAdminWorkspacesRestoreWsUrl = (id: string,) => {
+
+
+
+
+  return `/api/admin/workspaces/${encodeURIComponent(id)}/restore`
+}
+
+export const adminWorkspacesRestoreWs = async (id: string, options?: RequestInit): Promise<adminWorkspacesRestoreWsResponse> => {
+
+  return customInstance<adminWorkspacesRestoreWsResponse>(getAdminWorkspacesRestoreWsUrl(id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getAdminWorkspacesRestoreWsMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof adminWorkspacesRestoreWs>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof adminWorkspacesRestoreWs>>, TError,{id: string}, TContext> => {
+
+const mutationKey = ['adminWorkspacesRestoreWs'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof adminWorkspacesRestoreWs>>, {id: string}> = (props) => {
+          const {id} = props ?? {};
+
+          return  adminWorkspacesRestoreWs(id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AdminWorkspacesRestoreWsMutationResult = NonNullable<Awaited<ReturnType<typeof adminWorkspacesRestoreWs>>>
+
+    export type AdminWorkspacesRestoreWsMutationError = ErrorBody
+
+    export const useAdminWorkspacesRestoreWs = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof adminWorkspacesRestoreWs>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof adminWorkspacesRestoreWs>>,
+        TError,
+        {id: string},
+        TContext
+      > => {
+      return useMutation(getAdminWorkspacesRestoreWsMutationOptions(options), queryClient);
+    }
+    export type adminWorkspacesWorkspaceStatsResponse200 = {
+  data: WorkspaceStatsDto
+  status: 200
+}
+
+export type adminWorkspacesWorkspaceStatsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type adminWorkspacesWorkspaceStatsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type adminWorkspacesWorkspaceStatsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type adminWorkspacesWorkspaceStatsResponseSuccess = (adminWorkspacesWorkspaceStatsResponse200) & {
+  headers: Headers;
+};
+export type adminWorkspacesWorkspaceStatsResponseError = (adminWorkspacesWorkspaceStatsResponse401 | adminWorkspacesWorkspaceStatsResponse403 | adminWorkspacesWorkspaceStatsResponse500) & {
+  headers: Headers;
+};
+
+export type adminWorkspacesWorkspaceStatsResponse = (adminWorkspacesWorkspaceStatsResponseSuccess | adminWorkspacesWorkspaceStatsResponseError)
+
+export const getAdminWorkspacesWorkspaceStatsUrl = (id: string,) => {
+
+
+
+
+  return `/api/admin/workspaces/${encodeURIComponent(id)}/stats`
+}
+
+export const adminWorkspacesWorkspaceStats = async (id: string, options?: RequestInit): Promise<adminWorkspacesWorkspaceStatsResponse> => {
+
+  return customInstance<adminWorkspacesWorkspaceStatsResponse>(getAdminWorkspacesWorkspaceStatsUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getAdminWorkspacesWorkspaceStatsQueryKey = (id: string,) => {
+    return [
+    `/api/admin/workspaces/${encodeURIComponent(id)}/stats`
+    ] as const;
+    }
+
+
+export const getAdminWorkspacesWorkspaceStatsQueryOptions = <TData = Awaited<ReturnType<typeof adminWorkspacesWorkspaceStats>>, TError = ErrorBody>(id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminWorkspacesWorkspaceStats>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getAdminWorkspacesWorkspaceStatsQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof adminWorkspacesWorkspaceStats>>> = ({ signal }) => adminWorkspacesWorkspaceStats(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof adminWorkspacesWorkspaceStats>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type AdminWorkspacesWorkspaceStatsQueryResult = NonNullable<Awaited<ReturnType<typeof adminWorkspacesWorkspaceStats>>>
+export type AdminWorkspacesWorkspaceStatsQueryError = ErrorBody
+
+
+export function useAdminWorkspacesWorkspaceStats<TData = Awaited<ReturnType<typeof adminWorkspacesWorkspaceStats>>, TError = ErrorBody>(
+ id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminWorkspacesWorkspaceStats>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof adminWorkspacesWorkspaceStats>>,
+          TError,
+          Awaited<ReturnType<typeof adminWorkspacesWorkspaceStats>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useAdminWorkspacesWorkspaceStats<TData = Awaited<ReturnType<typeof adminWorkspacesWorkspaceStats>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminWorkspacesWorkspaceStats>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof adminWorkspacesWorkspaceStats>>,
+          TError,
+          Awaited<ReturnType<typeof adminWorkspacesWorkspaceStats>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useAdminWorkspacesWorkspaceStats<TData = Awaited<ReturnType<typeof adminWorkspacesWorkspaceStats>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminWorkspacesWorkspaceStats>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useAdminWorkspacesWorkspaceStats<TData = Awaited<ReturnType<typeof adminWorkspacesWorkspaceStats>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminWorkspacesWorkspaceStats>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getAdminWorkspacesWorkspaceStatsQueryOptions(id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type adminWorkspacesTransferOwnerResponse200 = {
+  data: WorkspaceDto
+  status: 200
+}
+
+export type adminWorkspacesTransferOwnerResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type adminWorkspacesTransferOwnerResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type adminWorkspacesTransferOwnerResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type adminWorkspacesTransferOwnerResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type adminWorkspacesTransferOwnerResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type adminWorkspacesTransferOwnerResponseSuccess = (adminWorkspacesTransferOwnerResponse200) & {
+  headers: Headers;
+};
+export type adminWorkspacesTransferOwnerResponseError = (adminWorkspacesTransferOwnerResponse400 | adminWorkspacesTransferOwnerResponse401 | adminWorkspacesTransferOwnerResponse403 | adminWorkspacesTransferOwnerResponse404 | adminWorkspacesTransferOwnerResponse500) & {
+  headers: Headers;
+};
+
+export type adminWorkspacesTransferOwnerResponse = (adminWorkspacesTransferOwnerResponseSuccess | adminWorkspacesTransferOwnerResponseError)
+
+export const getAdminWorkspacesTransferOwnerUrl = (id: string,) => {
+
+
+
+
+  return `/api/admin/workspaces/${encodeURIComponent(id)}/transfer`
+}
+
+export const adminWorkspacesTransferOwner = async (id: string,
+    transferOwner: TransferOwner, options?: RequestInit): Promise<adminWorkspacesTransferOwnerResponse> => {
+
+  return customInstance<adminWorkspacesTransferOwnerResponse>(getAdminWorkspacesTransferOwnerUrl(id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(transferOwner)
+  }
+);}
+
+
+
+
+
+export const getAdminWorkspacesTransferOwnerMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof adminWorkspacesTransferOwner>>, TError,{id: string;data: TransferOwner}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof adminWorkspacesTransferOwner>>, TError,{id: string;data: TransferOwner}, TContext> => {
+
+const mutationKey = ['adminWorkspacesTransferOwner'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof adminWorkspacesTransferOwner>>, {id: string;data: TransferOwner}> = (props) => {
+          const {id,data} = props ?? {};
+
+          return  adminWorkspacesTransferOwner(id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AdminWorkspacesTransferOwnerMutationResult = NonNullable<Awaited<ReturnType<typeof adminWorkspacesTransferOwner>>>
+    export type AdminWorkspacesTransferOwnerMutationBody = TransferOwner
+    export type AdminWorkspacesTransferOwnerMutationError = ErrorBody
+
+    export const useAdminWorkspacesTransferOwner = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof adminWorkspacesTransferOwner>>, TError,{id: string;data: TransferOwner}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof adminWorkspacesTransferOwner>>,
+        TError,
+        {id: string;data: TransferOwner},
+        TContext
+      > => {
+      return useMutation(getAdminWorkspacesTransferOwnerMutationOptions(options), queryClient);
     }

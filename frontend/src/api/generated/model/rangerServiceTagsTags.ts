@@ -7,6 +7,6 @@
  */
 
 /**
- * Tag map keyed by tag-id (empty this phase).
+ * Tag map keyed by numeric tag-id → tag-def instance.
  */
 export type RangerServiceTagsTags = { [key: string]: unknown };

@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { RangerServiceTagsResourceToTagIds } from './rangerServiceTagsResourceToTagIds';
 import type { RangerServiceTagsServiceResourcesItem } from './rangerServiceTagsServiceResourcesItem';
 import type { RangerServiceTagsTags } from './rangerServiceTagsTags';
 
@@ -15,7 +16,9 @@ export interface RangerServiceTags {
   op: string;
   serviceName: string;
   tagVersion: number;
-  /** Tag map keyed by tag-id (empty this phase). */
+  /** Tag map keyed by numeric tag-id → tag-def instance. */
   tags: RangerServiceTagsTags;
   serviceResources: RangerServiceTagsServiceResourcesItem[];
+  /** `{ "<resourceId>": [<tagId>, ...] }` linking each resource to its tags. */
+  resourceToTagIds: RangerServiceTagsResourceToTagIds;
 }

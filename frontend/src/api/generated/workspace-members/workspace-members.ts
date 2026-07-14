@@ -25,11 +25,15 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  AccessRequestDto,
   Ack,
   AddMember,
+  ApproveAccessRequest,
+  DenyAccessRequest,
   ErrorBody,
   MemberDto,
   ObjectGrantRollupDto,
+  WorkspaceMembersListWorkspaceAccessRequestsParams,
   WsRoleDto
 } from '../model';
 
@@ -55,7 +59,380 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   return result;
 };
 
-export type workspaceMembersListMembersResponse200 = {
+export type workspaceMembersListWorkspaceAccessRequestsResponse200 = {
+  data: AccessRequestDto[]
+  status: 200
+}
+
+export type workspaceMembersListWorkspaceAccessRequestsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workspaceMembersListWorkspaceAccessRequestsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workspaceMembersListWorkspaceAccessRequestsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workspaceMembersListWorkspaceAccessRequestsResponseSuccess = (workspaceMembersListWorkspaceAccessRequestsResponse200) & {
+  headers: Headers;
+};
+export type workspaceMembersListWorkspaceAccessRequestsResponseError = (workspaceMembersListWorkspaceAccessRequestsResponse401 | workspaceMembersListWorkspaceAccessRequestsResponse403 | workspaceMembersListWorkspaceAccessRequestsResponse500) & {
+  headers: Headers;
+};
+
+export type workspaceMembersListWorkspaceAccessRequestsResponse = (workspaceMembersListWorkspaceAccessRequestsResponseSuccess | workspaceMembersListWorkspaceAccessRequestsResponseError)
+
+export const getWorkspaceMembersListWorkspaceAccessRequestsUrl = (workspace: string,
+    params?: WorkspaceMembersListWorkspaceAccessRequestsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/access-requests?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/access-requests`
+}
+
+/**
+ * @summary `GET /ws/{workspace}/access-requests?status=` — the workspace's join requests
+filtered by `status` (default `pending`). Gated on `workspace:manage_members`.
+ */
+export const workspaceMembersListWorkspaceAccessRequests = async (workspace: string,
+    params?: WorkspaceMembersListWorkspaceAccessRequestsParams, options?: RequestInit): Promise<workspaceMembersListWorkspaceAccessRequestsResponse> => {
+
+  return customInstance<workspaceMembersListWorkspaceAccessRequestsResponse>(getWorkspaceMembersListWorkspaceAccessRequestsUrl(workspace,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkspaceMembersListWorkspaceAccessRequestsQueryKey = (workspace: string,
+    params?: WorkspaceMembersListWorkspaceAccessRequestsParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/access-requests`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkspaceMembersListWorkspaceAccessRequestsQueryOptions = <TData = Awaited<ReturnType<typeof workspaceMembersListWorkspaceAccessRequests>>, TError = ErrorBody>(workspace: string,
+    params?: WorkspaceMembersListWorkspaceAccessRequestsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListWorkspaceAccessRequests>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkspaceMembersListWorkspaceAccessRequestsQueryKey(workspace,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workspaceMembersListWorkspaceAccessRequests>>> = ({ signal }) => workspaceMembersListWorkspaceAccessRequests(workspace,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListWorkspaceAccessRequests>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkspaceMembersListWorkspaceAccessRequestsQueryResult = NonNullable<Awaited<ReturnType<typeof workspaceMembersListWorkspaceAccessRequests>>>
+export type WorkspaceMembersListWorkspaceAccessRequestsQueryError = ErrorBody
+
+
+export function useWorkspaceMembersListWorkspaceAccessRequests<TData = Awaited<ReturnType<typeof workspaceMembersListWorkspaceAccessRequests>>, TError = ErrorBody>(
+ workspace: string,
+    params: undefined |  WorkspaceMembersListWorkspaceAccessRequestsParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListWorkspaceAccessRequests>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workspaceMembersListWorkspaceAccessRequests>>,
+          TError,
+          Awaited<ReturnType<typeof workspaceMembersListWorkspaceAccessRequests>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkspaceMembersListWorkspaceAccessRequests<TData = Awaited<ReturnType<typeof workspaceMembersListWorkspaceAccessRequests>>, TError = ErrorBody>(
+ workspace: string,
+    params?: WorkspaceMembersListWorkspaceAccessRequestsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListWorkspaceAccessRequests>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workspaceMembersListWorkspaceAccessRequests>>,
+          TError,
+          Awaited<ReturnType<typeof workspaceMembersListWorkspaceAccessRequests>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkspaceMembersListWorkspaceAccessRequests<TData = Awaited<ReturnType<typeof workspaceMembersListWorkspaceAccessRequests>>, TError = ErrorBody>(
+ workspace: string,
+    params?: WorkspaceMembersListWorkspaceAccessRequestsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListWorkspaceAccessRequests>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary `GET /ws/{workspace}/access-requests?status=` — the workspace's join requests
+filtered by `status` (default `pending`). Gated on `workspace:manage_members`.
+ */
+
+export function useWorkspaceMembersListWorkspaceAccessRequests<TData = Awaited<ReturnType<typeof workspaceMembersListWorkspaceAccessRequests>>, TError = ErrorBody>(
+ workspace: string,
+    params?: WorkspaceMembersListWorkspaceAccessRequestsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workspaceMembersListWorkspaceAccessRequests>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkspaceMembersListWorkspaceAccessRequestsQueryOptions(workspace,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workspaceMembersApproveAccessRequestResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type workspaceMembersApproveAccessRequestResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workspaceMembersApproveAccessRequestResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workspaceMembersApproveAccessRequestResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workspaceMembersApproveAccessRequestResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workspaceMembersApproveAccessRequestResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workspaceMembersApproveAccessRequestResponseSuccess = (workspaceMembersApproveAccessRequestResponse200) & {
+  headers: Headers;
+};
+export type workspaceMembersApproveAccessRequestResponseError = (workspaceMembersApproveAccessRequestResponse401 | workspaceMembersApproveAccessRequestResponse403 | workspaceMembersApproveAccessRequestResponse404 | workspaceMembersApproveAccessRequestResponse409 | workspaceMembersApproveAccessRequestResponse500) & {
+  headers: Headers;
+};
+
+export type workspaceMembersApproveAccessRequestResponse = (workspaceMembersApproveAccessRequestResponseSuccess | workspaceMembersApproveAccessRequestResponseError)
+
+export const getWorkspaceMembersApproveAccessRequestUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/access-requests/${encodeURIComponent(id)}/approve`
+}
+
+/**
+ * @summary `POST /ws/{workspace}/access-requests/{id}/approve` — approve a pending request:
+add the requester as a member with the chosen role + optional expiry via the
+repo's single grant path, then mark it approved. The repo enforces the
+cross-workspace guard (`NotFound` → 404) and pending guard (`Conflict` → 409).
+ */
+export const workspaceMembersApproveAccessRequest = async (workspace: string,
+    id: string,
+    approveAccessRequest: ApproveAccessRequest, options?: RequestInit): Promise<workspaceMembersApproveAccessRequestResponse> => {
+
+  return customInstance<workspaceMembersApproveAccessRequestResponse>(getWorkspaceMembersApproveAccessRequestUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(approveAccessRequest)
+  }
+);}
+
+
+
+
+
+export const getWorkspaceMembersApproveAccessRequestMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workspaceMembersApproveAccessRequest>>, TError,{workspace: string;id: string;data: ApproveAccessRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workspaceMembersApproveAccessRequest>>, TError,{workspace: string;id: string;data: ApproveAccessRequest}, TContext> => {
+
+const mutationKey = ['workspaceMembersApproveAccessRequest'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workspaceMembersApproveAccessRequest>>, {workspace: string;id: string;data: ApproveAccessRequest}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  workspaceMembersApproveAccessRequest(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkspaceMembersApproveAccessRequestMutationResult = NonNullable<Awaited<ReturnType<typeof workspaceMembersApproveAccessRequest>>>
+    export type WorkspaceMembersApproveAccessRequestMutationBody = ApproveAccessRequest
+    export type WorkspaceMembersApproveAccessRequestMutationError = ErrorBody
+
+    /**
+ * @summary `POST /ws/{workspace}/access-requests/{id}/approve` — approve a pending request:
+add the requester as a member with the chosen role + optional expiry via the
+repo's single grant path, then mark it approved. The repo enforces the
+cross-workspace guard (`NotFound` → 404) and pending guard (`Conflict` → 409).
+ */
+export const useWorkspaceMembersApproveAccessRequest = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workspaceMembersApproveAccessRequest>>, TError,{workspace: string;id: string;data: ApproveAccessRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workspaceMembersApproveAccessRequest>>,
+        TError,
+        {workspace: string;id: string;data: ApproveAccessRequest},
+        TContext
+      > => {
+      return useMutation(getWorkspaceMembersApproveAccessRequestMutationOptions(options), queryClient);
+    }
+    export type workspaceMembersDenyAccessRequestResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type workspaceMembersDenyAccessRequestResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workspaceMembersDenyAccessRequestResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workspaceMembersDenyAccessRequestResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workspaceMembersDenyAccessRequestResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workspaceMembersDenyAccessRequestResponseSuccess = (workspaceMembersDenyAccessRequestResponse200) & {
+  headers: Headers;
+};
+export type workspaceMembersDenyAccessRequestResponseError = (workspaceMembersDenyAccessRequestResponse401 | workspaceMembersDenyAccessRequestResponse403 | workspaceMembersDenyAccessRequestResponse409 | workspaceMembersDenyAccessRequestResponse500) & {
+  headers: Headers;
+};
+
+export type workspaceMembersDenyAccessRequestResponse = (workspaceMembersDenyAccessRequestResponseSuccess | workspaceMembersDenyAccessRequestResponseError)
+
+export const getWorkspaceMembersDenyAccessRequestUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/access-requests/${encodeURIComponent(id)}/deny`
+}
+
+/**
+ * @summary `POST /ws/{workspace}/access-requests/{id}/deny` — deny a pending request with
+an optional note. The repo enforces the cross-workspace + pending guards.
+ */
+export const workspaceMembersDenyAccessRequest = async (workspace: string,
+    id: string,
+    denyAccessRequest: DenyAccessRequest, options?: RequestInit): Promise<workspaceMembersDenyAccessRequestResponse> => {
+
+  return customInstance<workspaceMembersDenyAccessRequestResponse>(getWorkspaceMembersDenyAccessRequestUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(denyAccessRequest)
+  }
+);}
+
+
+
+
+
+export const getWorkspaceMembersDenyAccessRequestMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workspaceMembersDenyAccessRequest>>, TError,{workspace: string;id: string;data: DenyAccessRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workspaceMembersDenyAccessRequest>>, TError,{workspace: string;id: string;data: DenyAccessRequest}, TContext> => {
+
+const mutationKey = ['workspaceMembersDenyAccessRequest'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workspaceMembersDenyAccessRequest>>, {workspace: string;id: string;data: DenyAccessRequest}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  workspaceMembersDenyAccessRequest(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkspaceMembersDenyAccessRequestMutationResult = NonNullable<Awaited<ReturnType<typeof workspaceMembersDenyAccessRequest>>>
+    export type WorkspaceMembersDenyAccessRequestMutationBody = DenyAccessRequest
+    export type WorkspaceMembersDenyAccessRequestMutationError = ErrorBody
+
+    /**
+ * @summary `POST /ws/{workspace}/access-requests/{id}/deny` — deny a pending request with
+an optional note. The repo enforces the cross-workspace + pending guards.
+ */
+export const useWorkspaceMembersDenyAccessRequest = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workspaceMembersDenyAccessRequest>>, TError,{workspace: string;id: string;data: DenyAccessRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workspaceMembersDenyAccessRequest>>,
+        TError,
+        {workspace: string;id: string;data: DenyAccessRequest},
+        TContext
+      > => {
+      return useMutation(getWorkspaceMembersDenyAccessRequestMutationOptions(options), queryClient);
+    }
+    export type workspaceMembersListMembersResponse200 = {
   data: MemberDto[]
   status: 200
 }
