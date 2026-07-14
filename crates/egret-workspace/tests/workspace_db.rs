@@ -507,13 +507,11 @@ async fn workspace_dto_exposes_owner_and_created() {
     .await;
     assert!(body["created_at"].is_string(), "created_at present");
     // the admin who created it is the owner; name defaults may be empty -> null
-    assert!(
-        body.get("owner_name").is_some(),
-        "owner_name field present"
-    );
+    assert!(body.get("owner_name").is_some(), "owner_name field present");
     assert!(body.get("created_by").is_some(), "created_by present");
     assert_eq!(
-        body["created_by"], _admin.0.to_string(),
+        body["created_by"],
+        _admin.0.to_string(),
         "created_by is the admin who created the workspace"
     );
 }
@@ -634,9 +632,11 @@ async fn transfer_owner_sets_owner_and_adds_admin() {
         .await,
     )
     .await;
-    let has_admin = members.as_array().unwrap().iter().any(|m| {
-        m["principal_id"] == bob.0.to_string() && m["role"] == "ws_admin"
-    });
+    let has_admin = members
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["principal_id"] == bob.0.to_string() && m["role"] == "ws_admin");
     assert!(has_admin, "new owner added as ws_admin");
 }
 
