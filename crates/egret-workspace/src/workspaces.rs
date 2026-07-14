@@ -127,6 +127,18 @@ impl WorkspaceRepo {
         Ok(())
     }
 
+    /// Reassign a workspace's owner (`created_by`). Backs the control-plane
+    /// ownership-transfer route.
+    pub async fn set_owner(&self, id: WorkspaceId, owner: UserId) -> Result<()> {
+        sqlx::query("UPDATE workspaces SET created_by = $1 WHERE id = $2")
+            .bind(owner.0)
+            .bind(id.0)
+            .execute(&self.db.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     /// Count queries submitted in a workspace. Raw COUNT against the stable
     /// `query.queries` table (created in migration 0009, moved into the `query`
     /// schema in 0066); no Rust dependency on egret-query.

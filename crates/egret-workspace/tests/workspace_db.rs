@@ -570,6 +570,77 @@ async fn workspace_stats_returns_member_and_query_counts() {
 }
 
 #[tokio::test]
+async fn transfer_owner_sets_owner_and_adds_admin() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let (st, _admin, cookie) = admin_ctx(&db).await;
+    // The members route resolves the workspace by SLUG, so mount both routers.
+    let app = axum::Router::new()
+        .nest("/api/admin", admin_workspace_router())
+        .nest("/api/ws", ws_member_router())
+        .with_state(st);
+
+    let created = body_json(
+        send(
+            &app,
+            &cookie,
+            "POST",
+            "/api/admin/workspaces",
+            Some(serde_json::json!({"slug": uniq("xfer"), "name": "Transfer WS"})),
+        )
+        .await,
+    )
+    .await;
+    let ws_id = created["id"].as_str().unwrap().to_string();
+    let ws_slug = created["slug"].as_str().unwrap().to_string();
+
+    let bob = seed_user(&db).await;
+
+    let res = send(
+        &app,
+        &cookie,
+        "POST",
+        &format!("/api/admin/workspaces/{ws_id}/transfer"),
+        Some(serde_json::json!({ "new_owner_id": bob.0.to_string() })),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // owner reflected in the DTO
+    let got = body_json(
+        send(
+            &app,
+            &cookie,
+            "GET",
+            &format!("/api/admin/workspaces/{ws_id}"),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(got["created_by"], bob.0.to_string());
+
+    // bob is now a ws_admin member (member route keyed by slug)
+    let members = body_json(
+        send(
+            &app,
+            &cookie,
+            "GET",
+            &format!("/api/ws/{ws_slug}/members"),
+            None,
+        )
+        .await,
+    )
+    .await;
+    let has_admin = members.as_array().unwrap().iter().any(|m| {
+        m["principal_id"] == bob.0.to_string() && m["role"] == "ws_admin"
+    });
+    assert!(has_admin, "new owner added as ws_admin");
+}
+
+#[tokio::test]
 async fn create_workspace_requires_platform_permission() {
     let Some(db) = connect().await else {
         eprintln!("skip");
