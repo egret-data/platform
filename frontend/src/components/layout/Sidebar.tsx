@@ -3,7 +3,7 @@ import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
   BarChart3, Bell, Boxes, ChevronDown, ChevronRight, Compass, Database,
   FolderKanban, Gauge, HardDrive, KeyRound, LayoutDashboard, ListChecks, type LucideIcon,
-  NotebookText, PanelLeftClose, PanelLeftOpen, Plug, ScanSearch, ScrollText, Server, Settings, Share2, ShieldCheck,
+  NotebookText, PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Server, Settings, Share2, ShieldCheck,
   SquareTerminal, Table2, Tags, UserCog, Users, UsersRound, Waypoints, Workflow,
 } from "lucide-react";
 import {
@@ -79,8 +79,7 @@ const CONTROL_PLANE_GROUPS: NavGroup[] = [
   {
     heading: "Access",
     items: [
-      { label: "Access explorer", icon: Compass, perm: "role:read", to: "access-explorer" },
-      { label: "Who can access", icon: ScanSearch, perm: "role:read", to: "who-can-access" },
+      { label: "Access Explorer", icon: Compass, perm: "role:read", to: "access-explorer" },
       { label: "Permissions", icon: ListChecks, perm: "role:read" },
     ],
   },

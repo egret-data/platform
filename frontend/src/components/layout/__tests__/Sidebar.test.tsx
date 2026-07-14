@@ -164,9 +164,9 @@ describe("Sidebar – Identity + Access groups", () => {
       "href",
       "/control-plane/access-overview",
     );
-    expect(screen.getByRole("link", { name: "Who can access" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Access Explorer" })).toHaveAttribute(
       "href",
-      "/control-plane/who-can-access",
+      "/control-plane/access-explorer",
     );
     expect(screen.getByRole("link", { name: "Groups" })).toHaveAttribute(
       "href",
