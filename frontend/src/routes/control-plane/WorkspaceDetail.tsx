@@ -26,6 +26,13 @@ import {
   useAdminWorkspacesWorkspaceStats,
 } from "@/api/generated/admin-workspaces/admin-workspaces";
 import { useControlPlaneAuditListAudit } from "@/api/generated/control-plane-audit/control-plane-audit";
+import {
+  getControlPlaneEnginesListWorkspaceEnginesQueryKey,
+  useControlPlaneEnginesAssignWorkspaceEngine,
+  useControlPlaneEnginesListEngines,
+  useControlPlaneEnginesListWorkspaceEngines,
+  useControlPlaneEnginesUnassignWorkspaceEngine,
+} from "@/api/generated/control-plane-engines/control-plane-engines";
 import { listUsers } from "@/api/access";
 import { useApproveRequest, useDenyRequest, useWorkspaceRequests } from "@/api/accessRequests";
 import { MembersPanel } from "@/components/access/MembersPanel";
@@ -366,35 +373,212 @@ function ResourcesTab({ workspaceId }: { workspaceId: string }) {
   ];
 
   return (
-    <div className="space-y-3">
-      <p className="text-sm text-muted-foreground">
-        Warehouses open filtered to this workspace. Storage, Engines, and Secrets are platform-wide
-        resources and open their full control-plane lists.
-      </p>
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        {resources.map((r) => {
-          const Icon = r.icon;
-          return (
-            <Link key={r.title} to={r.to} aria-label={r.title}>
-              <Card className="transition-colors hover:border-primary/50 hover:bg-accent/40">
-                <CardHeader className="flex flex-row items-center gap-3 space-y-0">
-                  <Icon className="h-5 w-5 shrink-0 text-muted-foreground" />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center justify-between gap-2">
-                      <CardTitle className="text-base">{r.title}</CardTitle>
-                      <Badge variant="outline" className="shrink-0 text-xs font-normal">
-                        {r.scope}
-                      </Badge>
+    <div className="space-y-6">
+      <AssignedEnginesSection workspaceId={workspaceId} />
+
+      <div className="space-y-3">
+        <p className="text-sm text-muted-foreground">
+          Warehouses open filtered to this workspace. Storage, Engines, and Secrets are platform-wide
+          resources and open their full control-plane lists.
+        </p>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {resources.map((r) => {
+            const Icon = r.icon;
+            return (
+              <Link key={r.title} to={r.to} aria-label={r.title}>
+                <Card className="transition-colors hover:border-primary/50 hover:bg-accent/40">
+                  <CardHeader className="flex flex-row items-center gap-3 space-y-0">
+                    <Icon className="h-5 w-5 shrink-0 text-muted-foreground" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <CardTitle className="text-base">{r.title}</CardTitle>
+                        <Badge variant="outline" className="shrink-0 text-xs font-normal">
+                          {r.scope}
+                        </Badge>
+                      </div>
+                      <CardDescription>{r.desc}</CardDescription>
                     </div>
-                    <CardDescription>{r.desc}</CardDescription>
-                  </div>
-                </CardHeader>
-              </Card>
-            </Link>
-          );
-        })}
+                  </CardHeader>
+                </Card>
+              </Link>
+            );
+          })}
+        </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Assigned engines for this workspace (control-plane view). Lists the engines
+ * assigned to the workspace with a Remove action, plus an "Assign engine" dialog
+ * whose picker offers the platform engines not already assigned. Assign/remove
+ * hit the CP workspace-engine endpoints; the backend 400s when the engine has no
+ * JWT auth, surfaced here as a toast.
+ */
+function AssignedEnginesSection({ workspaceId }: { workspaceId: string }) {
+  const qc = useQueryClient();
+  const [assignOpen, setAssignOpen] = useState(false);
+
+  const assignedQ = useControlPlaneEnginesListWorkspaceEngines(workspaceId, {
+    query: { retry: false },
+  });
+  const assigned = assignedQ.data?.status === 200 ? assignedQ.data.data : [];
+
+  const invalidate = () =>
+    qc.invalidateQueries({
+      queryKey: getControlPlaneEnginesListWorkspaceEnginesQueryKey(workspaceId),
+    });
+
+  const unassignMut = useControlPlaneEnginesUnassignWorkspaceEngine({
+    mutation: {
+      onSuccess: () => {
+        toast.success("Engine removed");
+        invalidate();
+      },
+      onError: (e) => toast.error(String(e)),
+    },
+  });
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <CardTitle className="text-lg">Assigned engines</CardTitle>
+            <CardDescription>
+              Egret-provisioned engines this workspace can query. Only JWT-enabled
+              engines can be assigned.
+            </CardDescription>
+          </div>
+          <Button size="sm" onClick={() => setAssignOpen(true)}>
+            <Cpu className="mr-1 h-4 w-4" /> Assign engine
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {assignedQ.isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading engines…</p>
+        ) : assigned.length === 0 ? (
+          <p className="rounded-md border bg-muted/40 px-4 py-6 text-sm text-muted-foreground">
+            No engines assigned to this workspace yet.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {assigned.map((e) => (
+              <div
+                key={e.id}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <Cpu className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="truncate text-sm font-medium">{e.name}</span>
+                  <Badge variant="secondary">{e.type}</Badge>
+                  <Badge variant="outline">{e.status}</Badge>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="text-destructive hover:text-destructive"
+                  disabled={unassignMut.isPending}
+                  onClick={() => unassignMut.mutate({ id: workspaceId, engineId: e.id })}
+                >
+                  <Trash2 className="mr-1 h-4 w-4" /> Remove
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+
+      <AssignEngineDialog
+        open={assignOpen}
+        onOpenChange={setAssignOpen}
+        workspaceId={workspaceId}
+        assignedIds={assigned.map((e) => e.id)}
+        onDone={invalidate}
+      />
+    </Card>
+  );
+}
+
+function AssignEngineDialog({
+  open,
+  onOpenChange,
+  workspaceId,
+  assignedIds,
+  onDone,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  workspaceId: string;
+  assignedIds: string[];
+  onDone: () => void;
+}) {
+  const [engineId, setEngineId] = useState("");
+  const enginesQ = useControlPlaneEnginesListEngines({ query: { retry: false } });
+  const allEngines = enginesQ.data?.status === 200 ? enginesQ.data.data : [];
+  const candidates = allEngines.filter((e) => !assignedIds.includes(e.id));
+
+  useEffect(() => {
+    if (open) setEngineId("");
+  }, [open]);
+
+  const assignMut = useControlPlaneEnginesAssignWorkspaceEngine({
+    mutation: {
+      onSuccess: () => {
+        toast.success("Engine assigned");
+        onDone();
+        onOpenChange(false);
+      },
+      onError: (e) => toast.error(String(e)),
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Assign engine</DialogTitle>
+          <DialogDescription>
+            Assign an egret-provisioned engine to this workspace. Only JWT-enabled
+            engines can be assigned.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="my-4 space-y-1.5">
+          <Label htmlFor="assign-engine">Engine</Label>
+          <Select value={engineId} onValueChange={setEngineId}>
+            <SelectTrigger id="assign-engine" className="w-full">
+              <SelectValue placeholder="Select an engine…" />
+            </SelectTrigger>
+            <SelectContent>
+              {candidates.map((e) => (
+                <SelectItem key={e.id} value={e.id}>
+                  {e.name} ({e.type})
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {candidates.length === 0 && (
+            <p className="text-xs text-muted-foreground">
+              All engines are already assigned.
+            </p>
+          )}
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            disabled={!engineId || assignMut.isPending}
+            onClick={() => assignMut.mutate({ id: workspaceId, data: { engineId } })}
+          >
+            Assign
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
