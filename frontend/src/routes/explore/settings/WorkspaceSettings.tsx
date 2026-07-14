@@ -1,7 +1,19 @@
-import { Database, Inbox, type LucideIcon, Settings2, Share2, ShieldCheck, Users } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  Database,
+  Inbox,
+  type LucideIcon,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Settings2,
+  Share2,
+  ShieldCheck,
+  Users,
+} from "lucide-react";
 import { NavLink, Outlet, useParams } from "react-router-dom";
 
 import { useMyWorkspaces } from "@/api/hooks";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 type SettingsItem = { to: string; label: string; icon: LucideIcon };
 type SettingsGroup = { heading: string; items: SettingsItem[] };
@@ -35,10 +47,56 @@ const GROUPS: SettingsGroup[] = [
 
 const ALL_ITEMS = GROUPS.flatMap((g) => g.items);
 
-const itemBase =
-  "flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const itemActive = "bg-primary/10 font-medium text-primary";
 const itemIdle = "text-muted-foreground hover:bg-accent hover:text-foreground";
+const focusRing = "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+/** localStorage key remembering whether the settings nav is collapsed to a rail. */
+const COLLAPSED_KEY = "egret:ws-settings-nav-collapsed";
+
+function loadCollapsed(): boolean {
+  try {
+    return localStorage.getItem(COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** A single section link — full (icon + label) or, when collapsed, an icon-only
+ *  rail button with a tooltip so it stays identifiable. */
+function NavItem({ item, collapsed }: { item: SettingsItem; collapsed: boolean }) {
+  const Icon = item.icon;
+  const link = (
+    <NavLink
+      to={item.to}
+      end
+      className={({ isActive }) =>
+        collapsed
+          ? `flex h-9 w-9 items-center justify-center rounded-md transition-colors ${focusRing} ${
+              isActive ? itemActive : itemIdle
+            }`
+          : `flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors ${focusRing} ${
+              isActive ? itemActive : itemIdle
+            }`
+      }
+    >
+      <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
+      {collapsed ? (
+        <span className="sr-only">{item.label}</span>
+      ) : (
+        <span className="truncate">{item.label}</span>
+      )}
+    </NavLink>
+  );
+
+  if (!collapsed) return link;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{link}</TooltipTrigger>
+      <TooltipContent side="right">{item.label}</TooltipContent>
+    </Tooltip>
+  );
+}
 
 /**
  * Workspace settings shell.
@@ -46,13 +104,27 @@ const itemIdle = "text-muted-foreground hover:bg-accent hover:text-foreground";
  * A settings-hub layout: a page title on top, then a grouped section nav on the
  * left with the active section rendered in the Outlet on the right. The h1 is a
  * full page title (text-2xl) so it clearly outranks each section's own heading.
- * On narrow screens the left nav collapses into a horizontally scrollable tab
- * strip so the content still gets the full width.
+ * The desktop nav collapses to an icon rail (mirroring the main sidebar) to hand
+ * the content pane more room; the choice is remembered. On narrow screens the
+ * nav becomes a horizontally scrollable tab strip instead.
  */
 export default function WorkspaceSettings() {
   const { workspace: slug } = useParams();
   const { data: workspaces } = useMyWorkspaces(true);
   const ws = workspaces?.find((w) => w.slug === slug);
+
+  const [collapsed, setCollapsed] = useState(loadCollapsed);
+  useEffect(() => {
+    try {
+      localStorage.setItem(COLLAPSED_KEY, collapsed ? "1" : "0");
+    } catch {
+      /* ignore persistence failures (private mode, etc.) */
+    }
+  }, [collapsed]);
+
+  const gridCols = collapsed
+    ? "lg:grid-cols-[3.25rem_minmax(0,1fr)]"
+    : "lg:grid-cols-[13rem_minmax(0,1fr)]";
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-6">
@@ -89,37 +161,58 @@ export default function WorkspaceSettings() {
         ))}
       </nav>
 
-      <div className="lg:grid lg:grid-cols-[13rem_minmax(0,1fr)] lg:gap-8">
-        {/* Desktop: grouped vertical settings nav. */}
+      <div className={`lg:grid lg:gap-8 ${gridCols}`}>
+        {/* Desktop: grouped vertical settings nav, collapsible to an icon rail. */}
         <nav
-          className="hidden self-start lg:sticky lg:top-6 lg:block"
+          className={`hidden self-start lg:sticky lg:top-6 lg:flex lg:flex-col ${
+            collapsed ? "lg:items-center" : ""
+          }`}
           aria-label="Workspace settings sections"
         >
-          {GROUPS.map((group) => (
-            <div key={group.heading} className="mb-5 last:mb-0">
-              <p className="mb-1 px-3 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                {group.heading}
-              </p>
-              <div className="space-y-0.5">
-                {group.items.map((item) => {
-                  const Icon = item.icon;
-                  return (
-                    <NavLink
-                      key={item.to}
-                      to={item.to}
-                      end
-                      className={({ isActive }) =>
-                        `${itemBase} ${isActive ? itemActive : itemIdle}`
-                      }
-                    >
-                      <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
-                      <span className="truncate">{item.label}</span>
-                    </NavLink>
-                  );
-                })}
+          {GROUPS.map((group, groupIndex) =>
+            collapsed ? (
+              <div
+                key={group.heading}
+                className={`space-y-0.5 ${
+                  groupIndex > 0 ? "mt-2 w-full border-t border-border pt-2" : ""
+                }`}
+              >
+                {group.items.map((item) => (
+                  <NavItem key={item.to} item={item} collapsed />
+                ))}
               </div>
-            </div>
-          ))}
+            ) : (
+              <div key={group.heading} className="mb-5 last:mb-0">
+                <p className="mb-1 px-3 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                  {group.heading}
+                </p>
+                <div className="space-y-0.5">
+                  {group.items.map((item) => (
+                    <NavItem key={item.to} item={item} collapsed={false} />
+                  ))}
+                </div>
+              </div>
+            ),
+          )}
+
+          <button
+            type="button"
+            onClick={() => setCollapsed((c) => !c)}
+            aria-label={collapsed ? "Expand settings navigation" : "Collapse settings navigation"}
+            aria-pressed={collapsed}
+            className={`mt-3 flex items-center gap-2 rounded-md py-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground ${focusRing} ${
+              collapsed ? "h-9 w-9 justify-center" : "border-t border-border px-3"
+            }`}
+          >
+            {collapsed ? (
+              <PanelLeftOpen className="h-4 w-4 shrink-0" aria-hidden="true" />
+            ) : (
+              <>
+                <PanelLeftClose className="h-4 w-4 shrink-0" aria-hidden="true" />
+                <span>Collapse</span>
+              </>
+            )}
+          </button>
         </nav>
 
         <div className="min-w-0">

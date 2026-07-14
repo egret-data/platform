@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
-  BarChart3, Bell, Boxes, ChevronDown, ChevronRight, Compass, Database,
+  BarChart3, Bell, Boxes, ChevronDown, ChevronRight, Compass,
   FolderKanban, Gauge, HardDrive, KeyRound, LayoutDashboard, ListChecks, type LucideIcon,
   NotebookText, PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Server, Settings, Share2, ShieldCheck,
   SquareTerminal, Table2, Tags, UserCog, Users, UsersRound, Waypoints, Workflow,
@@ -52,7 +52,8 @@ const EXPLORE_GROUPS: NavGroup[] = [
   {
     heading: "Manage",
     items: [
-      { label: "Engines", icon: Database, to: "settings/engines" },
+      // Engine connections live inside Workspace settings → Connections now,
+      // so they're reached from there rather than duplicated at top level.
       { label: "Workspace settings", icon: Settings, to: "settings/members" },
     ],
   },

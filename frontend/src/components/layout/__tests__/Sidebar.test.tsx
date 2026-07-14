@@ -65,15 +65,17 @@ describe("Sidebar – workspace zones", () => {
       "Workflows",
       "Alerts",
       "Data Lineage",
-      "Engines",
+      "Workspace settings",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
     }
-    // 'Databases' was renamed to 'Engines' in Manage.
+    // Engine connections moved into Workspace settings → Connections, so they're
+    // no longer a top-level Manage item; the Manage entry is Workspace settings.
     expect(screen.queryByRole("link", { name: "Databases" })).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Engines" })).toHaveAttribute(
+    expect(screen.queryByRole("link", { name: "Engines" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Workspace settings" })).toHaveAttribute(
       "href",
-      "/explore/eng/engines",
+      "/explore/eng/settings/members",
     );
   });
 
