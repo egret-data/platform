@@ -82,4 +82,9 @@ pub struct Database {
     /// B3a: run BI queries as the caller's per-user engine JWT (delegation).
     #[serde(default)]
     pub delegated: bool,
+    /// Set when this row was materialized by an engine→workspace assignment.
+    /// A non-null `engine_id` marks the connection provisioned (read-only,
+    /// per-user-delegated) and links it back to the source engine.
+    #[serde(default)]
+    pub engine_id: Option<Uuid>,
 }

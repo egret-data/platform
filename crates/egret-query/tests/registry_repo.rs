@@ -77,6 +77,88 @@ fn uniq(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4().simple())
 }
 
+/// Seed a storage connection + warehouse (owned by `workspace_id`) + engine,
+/// returning the engine id — the FK target that marks a `query.databases` row
+/// provisioned. Uses raw SQL against the shared schemas so this crate needn't
+/// depend on the catalog/engine seams' stores.
+async fn seed_engine(db: &Db, workspace_id: Uuid) -> Uuid {
+    let sc_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections \
+           (name, provider, region, bucket, access_key, path_style) \
+         VALUES ($1, 's3', 'us-east-1', 'warehouse', 'egret', true) RETURNING id",
+    )
+    .bind(uniq("store"))
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed storage connection");
+
+    let wh_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(uniq("wh"))
+    .bind(workspace_id)
+    .bind(sc_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed warehouse");
+
+    sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec) \
+         VALUES ($1, 'trino', 'egret-engines', $2, '{}'::jsonb) RETURNING id",
+    )
+    .bind(uniq("eng"))
+    .bind(wh_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed engine")
+}
+
+#[tokio::test]
+async fn create_provisioned_sets_engine_id_and_delegated() {
+    let Some((r, _ws, db, wid)) = repo_with_db(true).await else {
+        eprintln!("skip");
+        return;
+    };
+    let engine_id = seed_engine(&db, wid).await;
+
+    let created = r
+        .create_provisioned(
+            wid,
+            engine_id,
+            &uniq("trino-prov"),
+            "trino",
+            "trino-prod-coordinator.engines.svc",
+            8080,
+            &serde_json::json!({ "catalog": "sale" }),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(created.delegated, "provisioned rows are delegated");
+    assert!(!created.has_secret, "provisioned rows bind no secret");
+    assert_eq!(created.engine_id, Some(engine_id));
+
+    // engine_id survives a round-trip through get + list_for_workspace.
+    let fetched = r.get(created.id).await.unwrap();
+    assert_eq!(fetched.engine_id, Some(engine_id));
+    assert!(fetched.delegated);
+    assert!(r
+        .list_for_workspace(wid)
+        .await
+        .unwrap()
+        .iter()
+        .any(|d| d.id == created.id && d.engine_id == Some(engine_id)));
+
+    // delete_by_engine removes it and is idempotent.
+    r.delete_by_engine(wid, engine_id).await.unwrap();
+    assert!(matches!(
+        r.get(created.id).await.unwrap_err(),
+        egret_query::DatabaseError::NotFound(_)
+    ));
+    r.delete_by_engine(wid, engine_id).await.unwrap();
+}
+
 #[tokio::test]
 async fn register_list_get_delete() {
     let Some((r, ws, wid)) = repo(true).await else {

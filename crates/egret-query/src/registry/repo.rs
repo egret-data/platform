@@ -26,6 +26,7 @@ pub(crate) struct Row {
     secret_id: Option<Uuid>,
     status: String,
     delegated: bool,
+    engine_id: Option<Uuid>,
 }
 
 impl Row {
@@ -43,6 +44,7 @@ impl Row {
             has_secret: self.secret_id.is_some(),
             status: self.status,
             delegated: self.delegated,
+            engine_id: self.engine_id,
         })
     }
 }
@@ -84,7 +86,7 @@ impl DatabaseRepo {
         sqlx::query_as::<_, Row>(
             "INSERT INTO query.databases (name, engine, host, port, options, secret_id, created_by, workspace_id, delegated) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
-             RETURNING id, name, engine, host, port, options, secret_id, status, delegated",
+             RETURNING id, name, engine, host, port, options, secret_id, status, delegated, engine_id",
         )
         .bind(&input.name)
         .bind(input.engine.as_str())
@@ -106,9 +108,65 @@ impl DatabaseRepo {
         .into_database()
     }
 
+    /// Materialize a read-only, per-user-delegated connection for a provisioned
+    /// engine assigned to a workspace. `delegated = true` so the query path mints
+    /// the caller's engine JWT; `engine_id` marks the row read-only + links the
+    /// source engine. No secret is bound (`secret_id = NULL`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_provisioned(
+        &self,
+        workspace_id: Uuid,
+        engine_id: Uuid,
+        name: &str,
+        engine: &str,
+        host: &str,
+        port: i32,
+        options: &serde_json::Value,
+        created_by: Option<UserId>,
+    ) -> Result<Database, DatabaseError> {
+        sqlx::query_as::<_, Row>(
+            "INSERT INTO query.databases \
+               (name, engine, host, port, options, secret_id, created_by, workspace_id, delegated, engine_id) \
+             VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, true, $8) \
+             RETURNING id, name, engine, host, port, options, secret_id, status, delegated, engine_id",
+        )
+        .bind(name)
+        .bind(engine)
+        .bind(host)
+        .bind(port)
+        .bind(options)
+        .bind(created_by.map(|u| u.0))
+        .bind(workspace_id)
+        .bind(engine_id)
+        .fetch_one(&self.db.pool)
+        .await
+        .map_err(|e| match &e {
+            sqlx::Error::Database(d) if d.is_unique_violation() => {
+                DatabaseError::AlreadyExists(name.to_string())
+            }
+            _ => DatabaseError::Db(e),
+        })?
+        .into_database()
+    }
+
+    /// Remove the materialized connection(s) for an engine assignment in a
+    /// workspace (used when unassigning the engine). Idempotent.
+    pub async fn delete_by_engine(
+        &self,
+        workspace_id: Uuid,
+        engine_id: Uuid,
+    ) -> Result<(), DatabaseError> {
+        sqlx::query("DELETE FROM query.databases WHERE workspace_id = $1 AND engine_id = $2")
+            .bind(workspace_id)
+            .bind(engine_id)
+            .execute(&self.db.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn get(&self, id: Uuid) -> Result<Database, DatabaseError> {
         sqlx::query_as::<_, Row>(
-            "SELECT id, name, engine, host, port, options, secret_id, status, delegated \
+            "SELECT id, name, engine, host, port, options, secret_id, status, delegated, engine_id \
              FROM query.databases WHERE id = $1",
         )
         .bind(id)
@@ -128,7 +186,7 @@ impl DatabaseRepo {
         workspace_id: Uuid,
     ) -> Result<Vec<Database>, DatabaseError> {
         let rows = sqlx::query_as::<_, Row>(
-            "SELECT id, name, engine, host, port, options, secret_id, status, delegated \
+            "SELECT id, name, engine, host, port, options, secret_id, status, delegated, engine_id \
              FROM query.databases WHERE workspace_id = $1 ORDER BY name",
         )
         .bind(workspace_id)
@@ -187,7 +245,7 @@ impl DatabaseRepo {
         id: Uuid,
     ) -> Result<Database, DatabaseError> {
         sqlx::query_as::<_, Row>(
-            "SELECT id, name, engine, host, port, options, secret_id, status, delegated \
+            "SELECT id, name, engine, host, port, options, secret_id, status, delegated, engine_id \
              FROM query.databases WHERE id = $1 AND workspace_id = $2",
         )
         .bind(id)
