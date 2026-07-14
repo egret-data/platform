@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
@@ -28,7 +29,7 @@ const vizLabel = (v: string) => vizMeta(v)?.name ?? v;
 export default function Charts() {
   const ws = useParams().workspace!;
   const [showTrash, setShowTrash] = useState(false);
-  const { data: charts, isLoading } = useCharts(ws, { trashed: showTrash });
+  const { data: charts, isLoading, isError, error } = useCharts(ws, { trashed: showTrash });
   const { remove, duplicate, trash, restore, addBookmark, removeBookmark } = useChartMutations(ws);
   const { data: folders = [] } = useFolders(ws, "charts");
   const setFolder = useSetFolder(ws, "charts");
@@ -165,6 +166,10 @@ export default function Charts() {
 
       {isLoading ? (
         <ListSkeleton cols={4} />
+      ) : isError ? (
+        <Alert variant="destructive">
+          <AlertDescription>{(error as Error)?.message ?? "Failed to load charts."}</AlertDescription>
+        </Alert>
       ) : hasData ? (
         <>
           <div className="mb-3 flex flex-wrap items-center gap-2">

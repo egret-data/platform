@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useParams } from "react-router-dom";
+import { toast } from "sonner";
 import {
   CheckCircle2,
   Database as DatabaseIcon,
@@ -260,7 +261,11 @@ export default function DatabasesPage() {
         description="This engine connection will be removed. Any SQL Lab tabs or charts that reference it may break."
         confirmText="delete"
         onConfirm={() => {
-          if (deleteTarget) deleteMutation.mutate(deleteTarget.id);
+          if (deleteTarget)
+            deleteMutation.mutate(deleteTarget.id, {
+              onSuccess: () => toast.success("Connection deleted"),
+              onError: (e) => toast.error(String((e as Error)?.message ?? e)),
+            });
         }}
       />
     </section>
