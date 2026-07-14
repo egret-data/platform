@@ -17,6 +17,7 @@ import { toast } from "sonner";
 import {
   getAdminWorkspacesGetWsQueryKey,
   getAdminWorkspacesListWsQueryKey,
+  getAdminWorkspacesWorkspaceStatsQueryKey,
   useAdminWorkspacesArchiveWs,
   useAdminWorkspacesGetWs,
   useAdminWorkspacesRestoreWs,
@@ -108,6 +109,8 @@ export default function WorkspaceDetail() {
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: getAdminWorkspacesGetWsQueryKey(id) });
     qc.invalidateQueries({ queryKey: getAdminWorkspacesListWsQueryKey() });
+    // Transfer adds the new owner as a member, so the Overview member stat must refresh too.
+    qc.invalidateQueries({ queryKey: getAdminWorkspacesWorkspaceStatsQueryKey(id) });
   };
 
   const archiveMut = useAdminWorkspacesArchiveWs({
