@@ -30,6 +30,7 @@ import {
   sessionRulesToForm,
 } from "./EngineResourceGroups";
 import { knownProperties } from "./config/knownProperties";
+import { diffConfig } from "./config/configDiff";
 
 // Re-exported so config sub-tab components (Tasks 2-5) can import from the hook.
 export type { SessionRuleForm };
@@ -876,19 +877,32 @@ export function useEngineConfigForm(
 
   const [error, setError] = useState<string | null>(null);
 
-  const [dirty, setDirty] = useState(false);
-  const skipDirty = useRef(true); // skip the initial mount + every prefill
-  // Latest `dirty`, readable inside the prefill effect without a stale closure.
-  const dirtyRef = useRef(dirty);
-  dirtyRef.current = dirty;
+  // `dirty` is computed further down as a content diff (built payload vs stored
+  // spec) rather than tracked imperatively — the old effect-based flag flipped
+  // true spuriously because the 5s status poll hands back a new-but-identical
+  // `engine.spec` object each tick, whose fresh array/object references tripped
+  // the change effect.
+  //
+  // The prefill effect needs to know whether the user has UNSAVED edits (so it
+  // doesn't clobber them) — distinct from "the incoming spec differs from the
+  // form". We track that with two refs: the form's current built config, and the
+  // spec content the form was last synced from. "Unsaved edits" = built differs
+  // from the last-synced spec (not from the newly-polled one, which is briefly
+  // ahead of the form during an external update).
+  const builtRef = useRef<TrinoConfig | undefined>(undefined);
+  const loadedSpecRef = useRef<TrinoConfig | undefined>(undefined);
 
   // Keep inputs in sync when the polled engine changes (e.g. an external update).
   useEffect(() => {
-    // Guard: never clobber in-progress edits. A 5s status poll re-renders with a
-    // new (identical) `engine.spec`; without this the reset would discard unsaved
-    // edits. First-load prefill + external updates while clean (dirty=false) still
-    // apply.
-    if (dirtyRef.current) return;
+    // Never clobber in-progress edits: if the form no longer matches what we last
+    // loaded, the user has edited it — skip the re-sync. On first load
+    // (`loadedSpecRef` unset) we always prefill.
+    if (
+      loadedSpecRef.current !== undefined &&
+      diffConfig(loadedSpecRef.current, builtRef.current ?? {}).length > 0
+    ) {
+      return;
+    }
     const next = engine.spec.trinoConfig;
     setQueryMaxMemory(next?.queryMaxMemory ?? "");
     setLogLevel(next?.logLevel ?? "INFO");
@@ -957,70 +971,15 @@ export function useEngineConfigForm(
     setAutoscaleMode(next?.autoscaling?.mode ?? "");
     setAutoscaleHpa(hpaToForm(next?.autoscaling?.hpa));
     setAutoscaleKeda(kedaToForm(next?.autoscaling?.keda));
-    // A re-sync from the server must not mark the form dirty.
-    skipDirty.current = true;
-    setDirty(false);
+    // Remember what the form now reflects, so the next poll/update can tell a real
+    // user edit apart from an identical (or externally-changed) spec.
+    loadedSpecRef.current = next;
   }, [engine.spec]);
-
-  // Mark dirty on any user edit (the initial mount + every prefill are skipped).
-  useEffect(() => {
-    if (skipDirty.current) {
-      skipDirty.current = false;
-      return;
-    }
-    setDirty(true);
-  }, [
-    queryMaxMemory,
-    logLevel,
-    configProps,
-    env,
-    eventListener,
-    nodeProps,
-    logProps,
-    ftEnabled,
-    retryPolicy,
-    exchangeStorageConnId,
-    exchangePrefix,
-    coordinator,
-    worker,
-    gsEnabled,
-    gracePeriod,
-    resourceGroups,
-    sessionRules,
-    passwordUsers,
-    jwtEnabled,
-    jwksUri,
-    requiredAudience,
-    ingressEnabled,
-    ingressHost,
-    ingressClassName,
-    ingressTlsSecret,
-    ingressAnnotations,
-    serviceAccount,
-    image,
-    imagePullSecrets,
-    imagePullPolicy,
-    podSecurityContext,
-    containerSecurityContext,
-    initContainers,
-    sidecarContainers,
-    envFrom,
-    configMounts,
-    secretMounts,
-    deploymentStrategy,
-    deploymentAnnotations,
-    revisionHistoryLimit,
-    progressDeadlineSeconds,
-    shareProcessNamespace,
-    autoscaleMode,
-    autoscaleHpa,
-    autoscaleKeda,
-  ]);
 
   const saveMutation = useMutation<Engine, ApiError, CreateEngineInput>({
     mutationFn: (input) => updateEngine(engine.id, input),
     onSuccess: () => {
-      setDirty(false);
+      // `dirty` recomputes to false once the refetched spec matches the payload.
       queryClient.invalidateQueries({ queryKey: ["cp", "engine", engine.id] });
     },
   });
@@ -1275,6 +1234,14 @@ export function useEngineConfigForm(
       setError((err as ApiError).message ?? "Failed to update engine.");
     }
   }
+
+  // Content-based dirty flag: the built (omit-empty) payload differs from the
+  // stored spec. Robust to the 5s status poll returning new-but-identical object
+  // references, and consistent with the Review-changes dialog (which diffs the
+  // same before/after). `tc` is the stored `engine.spec.trinoConfig`.
+  const dirty = diffConfig(tc ?? {}, builtTrinoConfig).length > 0;
+  // Expose the current built config to the prefill effect's unsaved-edits guard.
+  builtRef.current = builtTrinoConfig;
 
   return {
     queryMaxMemory,
