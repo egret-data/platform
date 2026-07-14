@@ -218,3 +218,83 @@ async fn update_engine_catalog_reflects_in_get() {
         .unwrap()
         .is_none());
 }
+
+/// Seed a warehouse (+ its workspace), an engine on it, and a user to be the
+/// `assigned_by`. Returns `(engine_id, workspace_id, user_id)`. The warehouse's
+/// workspace id is recovered from the `warehouses` row (the catalog seam owns it).
+async fn seed_engine_and_ws(
+    catalog: &CatalogStore,
+    engine_mgmt: &EngineMgmtStore,
+    prefix: &str,
+) -> (Uuid, Uuid, Uuid) {
+    let (wh_id, _wh_name) = seed_warehouse(catalog, prefix).await;
+    let ws_id: Uuid =
+        sqlx::query_scalar("SELECT workspace_id FROM catalog.warehouses WHERE id = $1")
+            .bind(wh_id)
+            .fetch_one(catalog.pool())
+            .await
+            .expect("warehouse workspace_id");
+
+    let eng_name = format!("{prefix}-eng-{}", Uuid::new_v4().simple());
+    let spec = serde_json::json!({ "coordinatorReplicas": 1, "workerReplicas": 2 });
+    let engine = engine_mgmt
+        .create_engine(&eng_name, "trino", "egret-engines", wh_id, &spec)
+        .await
+        .unwrap();
+
+    let email = format!("{prefix}-{}@egret.local", Uuid::new_v4().simple());
+    let user_id: Uuid =
+        sqlx::query_scalar("INSERT INTO users (email, provider) VALUES ($1,'local') RETURNING id")
+            .bind(&email)
+            .fetch_one(catalog.pool())
+            .await
+            .expect("seed user");
+
+    (engine.id, ws_id, user_id)
+}
+
+#[tokio::test]
+async fn assign_list_unassign_engine_workspace() {
+    let Some((catalog, engine_mgmt)) = stores().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    let (engine_id, ws_id, admin) = seed_engine_and_ws(&catalog, &engine_mgmt, "assign").await;
+
+    engine_mgmt
+        .assign_workspace(engine_id, ws_id, admin)
+        .await
+        .unwrap();
+
+    // re-assign is idempotent (ON CONFLICT DO NOTHING)
+    engine_mgmt
+        .assign_workspace(engine_id, ws_id, admin)
+        .await
+        .unwrap();
+
+    let ws = engine_mgmt
+        .list_workspaces_for_engine(engine_id)
+        .await
+        .unwrap();
+    assert_eq!(ws.len(), 1);
+    assert_eq!(ws[0].workspace_id, ws_id);
+
+    let engines = engine_mgmt.list_engines_for_workspace(ws_id).await.unwrap();
+    assert_eq!(engines.len(), 1);
+    assert_eq!(engines[0].id, engine_id);
+
+    engine_mgmt
+        .unassign_workspace(engine_id, ws_id)
+        .await
+        .unwrap();
+    assert!(engine_mgmt
+        .list_workspaces_for_engine(engine_id)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(engine_mgmt
+        .list_engines_for_workspace(ws_id)
+        .await
+        .unwrap()
+        .is_empty());
+}

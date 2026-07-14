@@ -38,6 +38,17 @@ pub struct EngineCatalog {
     pub created_at: DateTime<Utc>,
 }
 
+/// A workspace an engine is assigned to (join of `engine_mgmt.engine_workspaces`
+/// with `workspaces` for the display name/slug).
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct EngineWorkspace {
+    pub engine_id: Uuid,
+    pub workspace_id: Uuid,
+    pub name: String,
+    pub slug: String,
+    pub assigned_at: DateTime<Utc>,
+}
+
 #[derive(Clone)]
 pub struct EngineMgmtStore {
     db: Db,
@@ -228,5 +239,72 @@ impl EngineMgmtStore {
             .execute(self.pool())
             .await?;
         Ok(())
+    }
+
+    // engine ↔ workspace assignments -------------------------------------------
+
+    /// Assign an engine to a workspace. Idempotent: re-assigning is a no-op.
+    pub async fn assign_workspace(
+        &self,
+        engine_id: Uuid,
+        workspace_id: Uuid,
+        by: Uuid,
+    ) -> Result<(), EngineMgmtError> {
+        sqlx::query(
+            "INSERT INTO engine_mgmt.engine_workspaces (engine_id, workspace_id, assigned_by) \
+             VALUES ($1,$2,$3) ON CONFLICT (engine_id, workspace_id) DO NOTHING",
+        )
+        .bind(engine_id)
+        .bind(workspace_id)
+        .bind(by)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Remove an engine↔workspace assignment. No-op if it doesn't exist.
+    pub async fn unassign_workspace(
+        &self,
+        engine_id: Uuid,
+        workspace_id: Uuid,
+    ) -> Result<(), EngineMgmtError> {
+        sqlx::query(
+            "DELETE FROM engine_mgmt.engine_workspaces WHERE engine_id=$1 AND workspace_id=$2",
+        )
+        .bind(engine_id)
+        .bind(workspace_id)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Workspaces this engine is assigned to (with display name/slug).
+    pub async fn list_workspaces_for_engine(
+        &self,
+        engine_id: Uuid,
+    ) -> Result<Vec<EngineWorkspace>, EngineMgmtError> {
+        Ok(sqlx::query_as::<_, EngineWorkspace>(
+            "SELECT ew.engine_id, ew.workspace_id, w.name, w.slug, ew.assigned_at \
+             FROM engine_mgmt.engine_workspaces ew JOIN workspaces w ON w.id = ew.workspace_id \
+             WHERE ew.engine_id = $1 ORDER BY w.name",
+        )
+        .bind(engine_id)
+        .fetch_all(self.pool())
+        .await?)
+    }
+
+    /// Engines assigned to a workspace.
+    pub async fn list_engines_for_workspace(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<Engine>, EngineMgmtError> {
+        Ok(sqlx::query_as::<_, Engine>(
+            "SELECT e.id, e.name, e.type, e.namespace, e.warehouse_id, e.spec, e.status, e.authz_service_id, e.created_at \
+             FROM engine_mgmt.engines e JOIN engine_mgmt.engine_workspaces ew ON ew.engine_id = e.id \
+             WHERE ew.workspace_id = $1 ORDER BY e.name",
+        )
+        .bind(workspace_id)
+        .fetch_all(self.pool())
+        .await?)
     }
 }
