@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 
 import { type Storage, listStorage } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
@@ -118,6 +119,18 @@ export function EngineConfigReliability(props: {
                 )}
               </SelectContent>
             </Select>
+            {(storage.data ?? []).length === 0 && (
+              <p className="text-xs text-muted-foreground">
+                No storage connections yet.{" "}
+                <Link
+                  to="/control-plane/storage"
+                  className="text-primary hover:underline"
+                >
+                  Add a storage connection
+                </Link>
+                .
+              </p>
+            )}
           </div>
           <div className="space-y-1.5">
             <FieldLabel

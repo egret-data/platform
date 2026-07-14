@@ -11,6 +11,7 @@ import {
 import { ApiError } from "@/api/client";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
 
 function fmtSize(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -101,7 +102,9 @@ export default function StorageBrowser() {
 
         <CardContent className="p-0">
           {listing.isLoading ? (
-            <p className="py-14 text-center text-sm text-muted-foreground">Loading…</p>
+            <div className="p-5">
+              <ListSkeleton rows={8} cols={2} />
+            </div>
           ) : listing.isError ? (
             <p className="py-14 text-center text-sm text-destructive">
               {(listing.error as ApiError).message}
@@ -117,9 +120,9 @@ export default function StorageBrowser() {
                   onClick={() => setPrefix(f)}
                   className="flex w-full items-center gap-2 border-b px-5 py-2.5 text-left text-sm transition-colors hover:bg-muted"
                 >
-                  <Folder className="h-4 w-4 shrink-0 text-amber-500" />
+                  <Folder className="h-4 w-4 shrink-0 text-highlight" />
                   <span className="truncate">{f.slice(prefix.length).replace(/\/$/, "")}</span>
-                  <Badge variant="outline" className="ml-auto text-[10px] uppercase">
+                  <Badge variant="outline" className="ml-auto text-xs uppercase">
                     folder
                   </Badge>
                 </button>
@@ -131,7 +134,7 @@ export default function StorageBrowser() {
                 >
                   <File className="h-4 w-4 shrink-0 text-muted-foreground" />
                   <span className="flex-1 truncate font-mono text-xs">{o.key.slice(prefix.length)}</span>
-                  <span className="shrink-0 text-xs text-muted-foreground">{fmtSize(o.size)}</span>
+                  <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{fmtSize(o.size)}</span>
                   <a
                     href={`/api/control-plane/storage/${id}/download?key=${encodeURIComponent(o.key)}`}
                     download

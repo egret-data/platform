@@ -111,6 +111,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
@@ -229,11 +230,11 @@ export default function WarehouseDetail() {
   );
 }
 
-/** engine → teal, notebook → violet, external → amber. */
+/** engine → primary (teal), notebook → success (green), external → highlight (amber). */
 function consumerDot(type: string): string {
-  if (type === "engine") return "bg-teal-500";
-  if (type === "notebook") return "bg-violet-500";
-  if (type === "external") return "bg-amber-500";
+  if (type === "engine") return "bg-primary";
+  if (type === "notebook") return "bg-success";
+  if (type === "external") return "bg-highlight";
   return "bg-muted-foreground";
 }
 
@@ -250,7 +251,7 @@ function CopyButton({ value }: { value: string }) {
         window.setTimeout(() => setCopied(false), 1200);
       }}
     >
-      {copied ? <Check className="h-3.5 w-3.5 text-teal-600" /> : <Copy className="h-3.5 w-3.5" />}
+      {copied ? <Check className="h-3.5 w-3.5 text-primary" /> : <Copy className="h-3.5 w-3.5" />}
     </button>
   );
 }
@@ -322,11 +323,11 @@ function WarehouseSummary({
                 variant="outline"
                 className={
                   provisioned
-                    ? "mt-1 gap-1 border-teal-500/30 bg-teal-500/10 text-teal-700"
-                    : "mt-1 gap-1 border-amber-500/30 bg-amber-500/10 text-amber-700"
+                    ? "mt-1 gap-1 border-primary/30 bg-primary/10 text-primary"
+                    : "mt-1 gap-1 border-highlight/30 bg-highlight/10 text-highlight"
                 }
               >
-                <span className={`h-1.5 w-1.5 rounded-full ${provisioned ? "bg-teal-500" : "bg-amber-500"}`} />
+                <span className={`h-1.5 w-1.5 rounded-full ${provisioned ? "bg-primary" : "bg-highlight"}`} />
                 {provisioned ? "Provisioned" : "Pending"}
               </Badge>
             </div>
@@ -354,7 +355,7 @@ function WarehouseSummary({
               className="flex min-w-[76px] flex-col items-center rounded-lg border bg-muted/30 px-3 py-2"
             >
               <s.icon className="h-4 w-4 text-muted-foreground" />
-              <span className="mt-1 text-lg font-semibold leading-none">{s.value}</span>
+              <span className="mt-1 text-lg font-semibold leading-none tabular-nums">{s.value}</span>
               <span className="text-xs text-muted-foreground">{s.label}</span>
             </div>
           ))}
@@ -406,15 +407,15 @@ function RolesTab({ warehouseId }: { warehouseId: string }) {
       <CardHeader>
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <CardTitle className="flex items-center gap-2 text-lg">
+            <CardTitle aria-level={2} className="flex items-center gap-2 text-lg">
               <ShieldCheck className="h-5 w-5 text-muted-foreground" />
               Catalog roles
             </CardTitle>
             <CardDescription>
               Keyed by consumer-type
-              <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-teal-500" />engine</span>
-              <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-violet-500" />notebook</span>
-              <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-amber-500" />external</span>
+              <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-primary" />engine</span>
+              <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-success" />notebook</span>
+              <span className="mx-1 inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-highlight" />external</span>
               — their grants gate reads/writes on the warehouse.
             </CardDescription>
           </div>
@@ -451,7 +452,7 @@ function RolesTab({ warehouseId }: { warehouseId: string }) {
                       {roles.error?.message ?? "Couldn't load roles."}
                     </span>
                   ) : roles.isLoading ? (
-                    "Loading…"
+                    <ListSkeleton rows={3} cols={4} />
                   ) : (
                     "No roles yet — add one to grant catalog access."
                   )}
@@ -568,7 +569,7 @@ function RoleRow({
           </div>
         )}
       </TableCell>
-      <TableCell className="text-center text-sm text-muted-foreground">{clientCount}</TableCell>
+      <TableCell className="text-center text-sm tabular-nums text-muted-foreground">{clientCount}</TableCell>
       <TableCell className="text-right">
         <div className="flex items-center justify-end gap-1">
           <Button variant="outline" size="sm" onClick={() => setAddOpen(true)}>
@@ -780,7 +781,9 @@ function AddGrantDialog({
           <DialogHeader>
             <DialogTitle>Add grant</DialogTitle>
             <DialogDescription>
-              A `write`/`manage` privilege permits writes; any grant permits reads.
+              A <code className="font-mono text-xs">write</code>/
+              <code className="font-mono text-xs">manage</code> privilege permits writes; any grant
+              permits reads.
             </DialogDescription>
           </DialogHeader>
           <div className="my-4 space-y-4">
@@ -889,7 +892,7 @@ function ClientsTab({ warehouseId }: { warehouseId: string }) {
       <CardHeader>
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
-            <CardTitle className="flex items-center gap-2 text-lg">
+            <CardTitle aria-level={2} className="flex items-center gap-2 text-lg">
               <KeyRound className="h-5 w-5 text-muted-foreground" />
               Catalog Clients
             </CardTitle>
@@ -930,7 +933,7 @@ function ClientsTab({ warehouseId }: { warehouseId: string }) {
                       {clients.error?.message ?? "Couldn't load clients."}
                     </span>
                   ) : clients.isLoading ? (
-                    "Loading…"
+                    <ListSkeleton rows={3} cols={4} />
                   ) : (roles.data ?? []).length === 0 ? (
                     "Add a role first, then create a client for it."
                   ) : (
@@ -1203,7 +1206,9 @@ function BrowseTab({ warehouseId }: { warehouseId: string }) {
         <div className="max-h-[520px] overflow-y-auto py-1">
           {q ? (
             results.isLoading ? (
-              <BrowseEmpty>Searching…</BrowseEmpty>
+              <div className="p-2">
+                <ListSkeleton rows={5} cols={1} />
+              </div>
             ) : (results.data ?? []).length === 0 ? (
               <BrowseEmpty icon={Search}>No matches for “{q}”.</BrowseEmpty>
             ) : (
@@ -1238,7 +1243,9 @@ function BrowseTab({ warehouseId }: { warehouseId: string }) {
               </span>
             </BrowseEmpty>
           ) : namespaces.isLoading ? (
-            <BrowseEmpty>Loading…</BrowseEmpty>
+            <div className="p-2">
+              <ListSkeleton rows={6} cols={1} />
+            </div>
           ) : list.length === 0 ? (
             <BrowseEmpty icon={Database}>This warehouse has no namespaces yet.</BrowseEmpty>
           ) : (
@@ -1325,7 +1332,7 @@ function ProtectToggle({
       aria-label={isProtected ? "Unprotect" : "Protect"}
       className={`shrink-0 rounded p-1 transition-colors ${
         isProtected
-          ? "text-amber-500 hover:text-amber-600"
+          ? "text-highlight hover:text-highlight/80"
           : "text-muted-foreground/40 opacity-0 hover:text-foreground group-hover:opacity-100"
       } ${className ?? ""}`}
     >
@@ -1380,7 +1387,9 @@ function NsNode({
       {open && (
         <div className="pb-1">
           {tabulars.isLoading ? (
-            <p className="px-9 py-1.5 text-xs text-muted-foreground">Loading…</p>
+            <div className="px-9 py-1.5">
+              <ListSkeleton rows={2} cols={1} />
+            </div>
           ) : (tabulars.data ?? []).length === 0 ? (
             <p className="px-9 py-1.5 text-xs text-muted-foreground">No tables.</p>
           ) : (
@@ -1400,7 +1409,7 @@ function NsNode({
                   <Table2 className={`h-3.5 w-3.5 shrink-0 ${active ? "text-primary" : "text-muted-foreground"}`} />
                   <span className="flex-1 truncate">{t.name}</span>
                   {t.protected && (
-                    <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-amber-500" aria-label="protected" />
+                    <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-highlight" aria-label="protected" />
                   )}
                   {t.kind === "view" && (
                     <Badge variant="outline" className="text-[10px] uppercase">view</Badge>
@@ -1453,10 +1462,10 @@ function TableDetailView({
           <span className="font-medium text-foreground">{table}</span>
         </div>
         <div className="mt-1 flex items-center gap-2">
-          <h3 className="flex items-center gap-2 text-lg font-semibold">
+          <h2 className="flex items-center gap-2 text-lg font-semibold">
             <Table2 className="h-5 w-5 text-primary" />
             {table}
-          </h3>
+          </h2>
           {isView && (
             <Badge variant="outline" className="uppercase">view</Badge>
           )}
@@ -1470,7 +1479,7 @@ function TableDetailView({
               onError={onProtectError}
             />
           </div>
-          {tabular.protected && <span className="text-xs text-amber-600">Protected from drops</span>}
+          {tabular.protected && <span className="text-xs text-highlight">Protected from drops</span>}
           <Button
             variant="ghost"
             size="sm"
@@ -1499,7 +1508,7 @@ function TableDetailView({
       {isView ? (
         <div className="p-5">
           {viewCols.isLoading ? (
-            <p className="text-center text-sm text-muted-foreground">Loading…</p>
+            <ListSkeleton rows={5} cols={3} />
           ) : viewCols.data ? (
             <Table>
               <TableHeader>
@@ -1521,7 +1530,7 @@ function TableDetailView({
                     </TableCell>
                     <TableCell className="text-right">
                       {col.required ? (
-                        <Check className="ml-auto h-4 w-4 text-teal-600" />
+                        <Check className="ml-auto h-4 w-4 text-primary" />
                       ) : (
                         <span className="text-muted-foreground">—</span>
                       )}
@@ -1546,7 +1555,9 @@ function TableDetailView({
           )}
         </div>
       ) : detail.isLoading ? (
-        <p className="p-6 text-center text-sm text-muted-foreground">Loading…</p>
+        <div className="p-5">
+          <ListSkeleton rows={6} cols={3} />
+        </div>
       ) : d ? (
         <Tabs defaultValue="schema" className="p-5">
           <TabsList>
@@ -1585,7 +1596,7 @@ function TableDetailView({
                     </TableCell>
                     <TableCell className="text-right">
                       {col.required ? (
-                        <Check className="ml-auto h-4 w-4 text-teal-600" />
+                        <Check className="ml-auto h-4 w-4 text-primary" />
                       ) : (
                         <span className="text-muted-foreground">—</span>
                       )}
@@ -1676,7 +1687,7 @@ function TableDetailView({
                       <TableCell className="text-sm text-muted-foreground">
                         {new Date(snap.timestampMs).toLocaleString()}
                       </TableCell>
-                      <TableCell className="text-right font-mono text-xs">
+                      <TableCell className="text-right font-mono text-xs tabular-nums">
                         {snap.summary["added-records"] ?? snap.summary["total-records"] ?? "—"}
                       </TableCell>
                     </TableRow>
@@ -1736,7 +1747,7 @@ function DeletedTablesDialog({
         </DialogHeader>
         <div className="max-h-[420px] overflow-y-auto">
           {deleted.isLoading ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p>
+            <ListSkeleton rows={4} cols={3} />
           ) : rows.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">Nothing to recover.</p>
           ) : (
@@ -1846,54 +1857,60 @@ function SettingsTab({ warehouseId }: { warehouseId: string }) {
     <div className="grid gap-4 md:grid-cols-2">
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
+          <CardTitle aria-level={2} className="flex items-center gap-2 text-base">
             <Power className="h-4 w-4 text-muted-foreground" />
             Status &amp; statistics
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="flex items-center gap-2">
-            <Badge
-              variant="outline"
-              className={
-                c?.active
-                  ? "gap-1 border-teal-500/30 bg-teal-500/10 text-teal-700"
-                  : "gap-1 border-muted-foreground/30 bg-muted text-muted-foreground"
-              }
-            >
-              <span className={`h-1.5 w-1.5 rounded-full ${c?.active ? "bg-teal-500" : "bg-muted-foreground"}`} />
-              {config.isLoading ? "…" : c?.active ? "Active" : "Inactive"}
-            </Badge>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={statusMut.isPending || !c}
-              onClick={() => statusMut.mutate(!c?.active)}
-            >
-              {c?.active ? "Deactivate" : "Activate"}
-            </Button>
-          </div>
-          <div className="flex gap-6 text-sm">
-            <div>
-              <div className="text-xs uppercase tracking-wide text-muted-foreground">Tables</div>
-              <div className="text-lg font-semibold">{c?.numTables ?? "—"}</div>
-            </div>
-            <div>
-              <div className="text-xs uppercase tracking-wide text-muted-foreground">Views</div>
-              <div className="text-lg font-semibold">{c?.numViews ?? "—"}</div>
-            </div>
-          </div>
-          {c?.statsUpdatedMs ? (
-            <p className="text-xs text-muted-foreground">
-              Statistics as of {new Date(c.statsUpdatedMs).toLocaleString()}
-            </p>
-          ) : null}
+          {config.isLoading ? (
+            <ListSkeleton rows={3} cols={2} />
+          ) : (
+            <>
+              <div className="flex items-center gap-2">
+                <Badge
+                  variant="outline"
+                  className={
+                    c?.active
+                      ? "gap-1 border-primary/30 bg-primary/10 text-primary"
+                      : "gap-1 border-muted-foreground/30 bg-muted text-muted-foreground"
+                  }
+                >
+                  <span className={`h-1.5 w-1.5 rounded-full ${c?.active ? "bg-primary" : "bg-muted-foreground"}`} />
+                  {c?.active ? "Active" : "Inactive"}
+                </Badge>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={statusMut.isPending || !c}
+                  onClick={() => statusMut.mutate(!c?.active)}
+                >
+                  {c?.active ? "Deactivate" : "Activate"}
+                </Button>
+              </div>
+              <div className="flex gap-6 text-sm">
+                <div>
+                  <div className="text-xs uppercase tracking-wide text-muted-foreground">Tables</div>
+                  <div className="text-lg font-semibold tabular-nums">{c?.numTables ?? "—"}</div>
+                </div>
+                <div>
+                  <div className="text-xs uppercase tracking-wide text-muted-foreground">Views</div>
+                  <div className="text-lg font-semibold tabular-nums">{c?.numViews ?? "—"}</div>
+                </div>
+              </div>
+              {c?.statsUpdatedMs ? (
+                <p className="text-xs text-muted-foreground">
+                  Statistics as of {new Date(c.statsUpdatedMs).toLocaleString()}
+                </p>
+              ) : null}
+            </>
+          )}
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
+          <CardTitle aria-level={2} className="flex items-center gap-2 text-base">
             <Trash2 className="h-4 w-4 text-muted-foreground" />
             Soft-delete retention
           </CardTitle>
@@ -1953,7 +1970,7 @@ function SettingsTab({ warehouseId }: { warehouseId: string }) {
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
+          <CardTitle aria-level={2} className="flex items-center gap-2 text-base">
             <ShieldCheck className="h-4 w-4 text-muted-foreground" />
             Format-version policy
           </CardTitle>
@@ -1987,7 +2004,7 @@ function SettingsTab({ warehouseId }: { warehouseId: string }) {
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
+          <CardTitle aria-level={2} className="flex items-center gap-2 text-base">
             <HardDrive className="h-4 w-4 text-muted-foreground" />
             Storage credential
           </CardTitle>
@@ -2025,7 +2042,7 @@ function WarehouseTasksCard({ warehouseId }: { warehouseId: string }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
+        <CardTitle aria-level={2} className="flex items-center gap-2 text-base">
           <ListChecks className="h-4 w-4 text-muted-foreground" />
           Background tasks
         </CardTitle>
@@ -2040,7 +2057,7 @@ function WarehouseTasksCard({ warehouseId }: { warehouseId: string }) {
             {tasks.error?.message ?? "Couldn't load background tasks."}
           </p>
         ) : tasks.isLoading ? (
-          <p className="py-4 text-center text-sm text-muted-foreground">Loading…</p>
+          <ListSkeleton rows={3} cols={3} />
         ) : rows.length === 0 ? (
           <p className="py-4 text-center text-sm text-muted-foreground">No pending tasks.</p>
         ) : (
@@ -2162,7 +2179,7 @@ SELECT * FROM demo_ns.events;`;
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-lg">
+        <CardTitle aria-level={2} className="flex items-center gap-2 text-lg">
           <Cable className="h-5 w-5 text-muted-foreground" />
           Connect an engine
         </CardTitle>
