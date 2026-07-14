@@ -275,5 +275,8 @@ export * from './workspaceEngineDto';
 export * from './workspaceMembership';
 export * from './workspaceMembersListWorkspaceAccessRequestsParams';
 export * from './workspaceStatsDto';
+export * from './wsEngineCatalogDto';
+export * from './wsEngineDetailDto';
+export * from './wsEngineListDto';
 export * from './wsPermDto';
 export * from './wsRoleDto';
