@@ -44,12 +44,6 @@ const EXPLORE_GROUPS: NavGroup[] = [
     ],
   },
   {
-    heading: "Data Governance",
-    items: [
-      { label: "Data Lineage", icon: Share2 },
-    ],
-  },
-  {
     heading: "Manage",
     items: [
       // Engine connections live inside Workspace settings → Connections now,
@@ -89,6 +83,10 @@ const CONTROL_PLANE_GROUPS: NavGroup[] = [
     items: [
       { label: "Policies", icon: ShieldCheck, perm: "policy:read" },
       { label: "Classifications", icon: Tags, perm: "tag:read", to: "classifications" },
+      // Lineage is a platform-wide (cross-workspace) governance view, so it lives
+      // here rather than inside a single workspace. Admin-only until the real
+      // feature + its permission land.
+      { label: "Data Lineage", icon: Share2, to: "data-lineage" },
       { label: "Audit log", icon: ScrollText },
     ],
   },

@@ -87,7 +87,6 @@ function ExploreRoutes() {
           <Route path="pipelines" element={<Placeholder title="Pipelines" />} />
           <Route path="workflows" element={<Placeholder title="Workflows" />} />
           <Route path="alerts" element={<Placeholder title="Alerts" />} />
-          <Route path="data-lineage" element={<Placeholder title="Data Lineage" />} />
           <Route path="settings" element={<WorkspaceSettings />}>
             <Route index element={<Navigate to="members" replace />} />
             <Route path="members" element={<Members />} />
@@ -147,6 +146,7 @@ function ControlPlaneRoutes() {
           <Route path="policies/:service/:kind/new" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
           <Route path="policies/:service/:kind/:id" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
           <Route path="classifications" element={<RequirePermission perm="tag:read"><Classifications /></RequirePermission>} />
+          <Route path="data-lineage" element={<RequireGlobalAdmin><Placeholder title="Data Lineage" /></RequireGlobalAdmin>} />
           <Route path="users" element={<RequirePermission perm="user:read"><UsersPage /></RequirePermission>} />
           <Route path="groups" element={<RequirePermission perm="group:read"><GroupsPage /></RequirePermission>} />
           <Route path="roles" element={<RequirePermission perm="role:read"><RolesPage /></RequirePermission>} />
