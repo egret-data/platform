@@ -26,6 +26,7 @@ import type {
 
 import type {
   AddCatalogBody,
+  AssignEngineBody,
   CatalogTestDto,
   ClusterDto,
   ControlPlaneEnginesPodLogsFollowParams,
@@ -35,11 +36,14 @@ import type {
   EngineCatalogDto,
   EngineDetailDto,
   EngineDto,
+  EngineWorkspaceDto,
   ErrorBody,
   PodLogsDto,
   QueryDetailDto,
   QueryDto,
-  UpdateCatalogBody
+  SetWorkspacesBody,
+  UpdateCatalogBody,
+  WorkspaceEngineDto
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -64,7 +68,329 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   return result;
 };
 
-export type controlPlaneEnginesListEnginesResponse200 = {
+export type controlPlaneEnginesListWorkspaceEnginesResponse200 = {
+  data: WorkspaceEngineDto[]
+  status: 200
+}
+
+export type controlPlaneEnginesListWorkspaceEnginesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesListWorkspaceEnginesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesListWorkspaceEnginesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesListWorkspaceEnginesResponseSuccess = (controlPlaneEnginesListWorkspaceEnginesResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesListWorkspaceEnginesResponseError = (controlPlaneEnginesListWorkspaceEnginesResponse401 | controlPlaneEnginesListWorkspaceEnginesResponse403 | controlPlaneEnginesListWorkspaceEnginesResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesListWorkspaceEnginesResponse = (controlPlaneEnginesListWorkspaceEnginesResponseSuccess | controlPlaneEnginesListWorkspaceEnginesResponseError)
+
+export const getControlPlaneEnginesListWorkspaceEnginesUrl = (id: string,) => {
+
+
+
+
+  return `/api/admin/workspaces/${encodeURIComponent(id)}/engines`
+}
+
+export const controlPlaneEnginesListWorkspaceEngines = async (id: string, options?: RequestInit): Promise<controlPlaneEnginesListWorkspaceEnginesResponse> => {
+
+  return customInstance<controlPlaneEnginesListWorkspaceEnginesResponse>(getControlPlaneEnginesListWorkspaceEnginesUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesListWorkspaceEnginesQueryKey = (id: string,) => {
+    return [
+    `/api/admin/workspaces/${encodeURIComponent(id)}/engines`
+    ] as const;
+    }
+
+
+export const getControlPlaneEnginesListWorkspaceEnginesQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneEnginesListWorkspaceEngines>>, TError = ErrorBody>(id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListWorkspaceEngines>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneEnginesListWorkspaceEnginesQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneEnginesListWorkspaceEngines>>> = ({ signal }) => controlPlaneEnginesListWorkspaceEngines(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListWorkspaceEngines>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneEnginesListWorkspaceEnginesQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesListWorkspaceEngines>>>
+export type ControlPlaneEnginesListWorkspaceEnginesQueryError = ErrorBody
+
+
+export function useControlPlaneEnginesListWorkspaceEngines<TData = Awaited<ReturnType<typeof controlPlaneEnginesListWorkspaceEngines>>, TError = ErrorBody>(
+ id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListWorkspaceEngines>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneEnginesListWorkspaceEngines>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneEnginesListWorkspaceEngines>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneEnginesListWorkspaceEngines<TData = Awaited<ReturnType<typeof controlPlaneEnginesListWorkspaceEngines>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListWorkspaceEngines>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneEnginesListWorkspaceEngines>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneEnginesListWorkspaceEngines>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneEnginesListWorkspaceEngines<TData = Awaited<ReturnType<typeof controlPlaneEnginesListWorkspaceEngines>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListWorkspaceEngines>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useControlPlaneEnginesListWorkspaceEngines<TData = Awaited<ReturnType<typeof controlPlaneEnginesListWorkspaceEngines>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListWorkspaceEngines>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneEnginesListWorkspaceEnginesQueryOptions(id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneEnginesAssignWorkspaceEngineResponse204 = {
+  data: void
+  status: 204
+}
+
+export type controlPlaneEnginesAssignWorkspaceEngineResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneEnginesAssignWorkspaceEngineResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesAssignWorkspaceEngineResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesAssignWorkspaceEngineResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesAssignWorkspaceEngineResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesAssignWorkspaceEngineResponseSuccess = (controlPlaneEnginesAssignWorkspaceEngineResponse204) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesAssignWorkspaceEngineResponseError = (controlPlaneEnginesAssignWorkspaceEngineResponse400 | controlPlaneEnginesAssignWorkspaceEngineResponse401 | controlPlaneEnginesAssignWorkspaceEngineResponse403 | controlPlaneEnginesAssignWorkspaceEngineResponse404 | controlPlaneEnginesAssignWorkspaceEngineResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesAssignWorkspaceEngineResponse = (controlPlaneEnginesAssignWorkspaceEngineResponseSuccess | controlPlaneEnginesAssignWorkspaceEngineResponseError)
+
+export const getControlPlaneEnginesAssignWorkspaceEngineUrl = (id: string,) => {
+
+
+
+
+  return `/api/admin/workspaces/${encodeURIComponent(id)}/engines`
+}
+
+export const controlPlaneEnginesAssignWorkspaceEngine = async (id: string,
+    assignEngineBody: AssignEngineBody, options?: RequestInit): Promise<controlPlaneEnginesAssignWorkspaceEngineResponse> => {
+
+  return customInstance<controlPlaneEnginesAssignWorkspaceEngineResponse>(getControlPlaneEnginesAssignWorkspaceEngineUrl(id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(assignEngineBody)
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesAssignWorkspaceEngineMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesAssignWorkspaceEngine>>, TError,{id: string;data: AssignEngineBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesAssignWorkspaceEngine>>, TError,{id: string;data: AssignEngineBody}, TContext> => {
+
+const mutationKey = ['controlPlaneEnginesAssignWorkspaceEngine'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneEnginesAssignWorkspaceEngine>>, {id: string;data: AssignEngineBody}> = (props) => {
+          const {id,data} = props ?? {};
+
+          return  controlPlaneEnginesAssignWorkspaceEngine(id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneEnginesAssignWorkspaceEngineMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesAssignWorkspaceEngine>>>
+    export type ControlPlaneEnginesAssignWorkspaceEngineMutationBody = AssignEngineBody
+    export type ControlPlaneEnginesAssignWorkspaceEngineMutationError = ErrorBody
+
+    export const useControlPlaneEnginesAssignWorkspaceEngine = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesAssignWorkspaceEngine>>, TError,{id: string;data: AssignEngineBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneEnginesAssignWorkspaceEngine>>,
+        TError,
+        {id: string;data: AssignEngineBody},
+        TContext
+      > => {
+      return useMutation(getControlPlaneEnginesAssignWorkspaceEngineMutationOptions(options), queryClient);
+    }
+    export type controlPlaneEnginesUnassignWorkspaceEngineResponse204 = {
+  data: void
+  status: 204
+}
+
+export type controlPlaneEnginesUnassignWorkspaceEngineResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesUnassignWorkspaceEngineResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesUnassignWorkspaceEngineResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesUnassignWorkspaceEngineResponseSuccess = (controlPlaneEnginesUnassignWorkspaceEngineResponse204) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesUnassignWorkspaceEngineResponseError = (controlPlaneEnginesUnassignWorkspaceEngineResponse401 | controlPlaneEnginesUnassignWorkspaceEngineResponse403 | controlPlaneEnginesUnassignWorkspaceEngineResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesUnassignWorkspaceEngineResponse = (controlPlaneEnginesUnassignWorkspaceEngineResponseSuccess | controlPlaneEnginesUnassignWorkspaceEngineResponseError)
+
+export const getControlPlaneEnginesUnassignWorkspaceEngineUrl = (id: string,
+    engineId: string,) => {
+
+
+
+
+  return `/api/admin/workspaces/${encodeURIComponent(id)}/engines/${encodeURIComponent(engineId)}`
+}
+
+export const controlPlaneEnginesUnassignWorkspaceEngine = async (id: string,
+    engineId: string, options?: RequestInit): Promise<controlPlaneEnginesUnassignWorkspaceEngineResponse> => {
+
+  return customInstance<controlPlaneEnginesUnassignWorkspaceEngineResponse>(getControlPlaneEnginesUnassignWorkspaceEngineUrl(id,engineId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesUnassignWorkspaceEngineMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesUnassignWorkspaceEngine>>, TError,{id: string;engineId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesUnassignWorkspaceEngine>>, TError,{id: string;engineId: string}, TContext> => {
+
+const mutationKey = ['controlPlaneEnginesUnassignWorkspaceEngine'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneEnginesUnassignWorkspaceEngine>>, {id: string;engineId: string}> = (props) => {
+          const {id,engineId} = props ?? {};
+
+          return  controlPlaneEnginesUnassignWorkspaceEngine(id,engineId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneEnginesUnassignWorkspaceEngineMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesUnassignWorkspaceEngine>>>
+
+    export type ControlPlaneEnginesUnassignWorkspaceEngineMutationError = ErrorBody
+
+    export const useControlPlaneEnginesUnassignWorkspaceEngine = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesUnassignWorkspaceEngine>>, TError,{id: string;engineId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneEnginesUnassignWorkspaceEngine>>,
+        TError,
+        {id: string;engineId: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneEnginesUnassignWorkspaceEngineMutationOptions(options), queryClient);
+    }
+    export type controlPlaneEnginesListEnginesResponse200 = {
   data: EngineDto[]
   status: 200
 }
@@ -2458,4 +2784,236 @@ export const useControlPlaneEnginesRestartEngine = <TError = ErrorBody,
         TContext
       > => {
       return useMutation(getControlPlaneEnginesRestartEngineMutationOptions(options), queryClient);
+    }
+    export type controlPlaneEnginesListEngineWorkspacesResponse200 = {
+  data: EngineWorkspaceDto[]
+  status: 200
+}
+
+export type controlPlaneEnginesListEngineWorkspacesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesListEngineWorkspacesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesListEngineWorkspacesResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesListEngineWorkspacesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesListEngineWorkspacesResponseSuccess = (controlPlaneEnginesListEngineWorkspacesResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesListEngineWorkspacesResponseError = (controlPlaneEnginesListEngineWorkspacesResponse401 | controlPlaneEnginesListEngineWorkspacesResponse403 | controlPlaneEnginesListEngineWorkspacesResponse404 | controlPlaneEnginesListEngineWorkspacesResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesListEngineWorkspacesResponse = (controlPlaneEnginesListEngineWorkspacesResponseSuccess | controlPlaneEnginesListEngineWorkspacesResponseError)
+
+export const getControlPlaneEnginesListEngineWorkspacesUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/engines/${encodeURIComponent(id)}/workspaces`
+}
+
+export const controlPlaneEnginesListEngineWorkspaces = async (id: string, options?: RequestInit): Promise<controlPlaneEnginesListEngineWorkspacesResponse> => {
+
+  return customInstance<controlPlaneEnginesListEngineWorkspacesResponse>(getControlPlaneEnginesListEngineWorkspacesUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesListEngineWorkspacesQueryKey = (id: string,) => {
+    return [
+    `/api/control-plane/engines/${encodeURIComponent(id)}/workspaces`
+    ] as const;
+    }
+
+
+export const getControlPlaneEnginesListEngineWorkspacesQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneEnginesListEngineWorkspaces>>, TError = ErrorBody>(id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListEngineWorkspaces>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneEnginesListEngineWorkspacesQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneEnginesListEngineWorkspaces>>> = ({ signal }) => controlPlaneEnginesListEngineWorkspaces(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListEngineWorkspaces>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneEnginesListEngineWorkspacesQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesListEngineWorkspaces>>>
+export type ControlPlaneEnginesListEngineWorkspacesQueryError = ErrorBody
+
+
+export function useControlPlaneEnginesListEngineWorkspaces<TData = Awaited<ReturnType<typeof controlPlaneEnginesListEngineWorkspaces>>, TError = ErrorBody>(
+ id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListEngineWorkspaces>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneEnginesListEngineWorkspaces>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneEnginesListEngineWorkspaces>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneEnginesListEngineWorkspaces<TData = Awaited<ReturnType<typeof controlPlaneEnginesListEngineWorkspaces>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListEngineWorkspaces>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneEnginesListEngineWorkspaces>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneEnginesListEngineWorkspaces>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneEnginesListEngineWorkspaces<TData = Awaited<ReturnType<typeof controlPlaneEnginesListEngineWorkspaces>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListEngineWorkspaces>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useControlPlaneEnginesListEngineWorkspaces<TData = Awaited<ReturnType<typeof controlPlaneEnginesListEngineWorkspaces>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneEnginesListEngineWorkspaces>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneEnginesListEngineWorkspacesQueryOptions(id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneEnginesSetEngineWorkspacesResponse200 = {
+  data: EngineWorkspaceDto[]
+  status: 200
+}
+
+export type controlPlaneEnginesSetEngineWorkspacesResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneEnginesSetEngineWorkspacesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneEnginesSetEngineWorkspacesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneEnginesSetEngineWorkspacesResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneEnginesSetEngineWorkspacesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneEnginesSetEngineWorkspacesResponseSuccess = (controlPlaneEnginesSetEngineWorkspacesResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneEnginesSetEngineWorkspacesResponseError = (controlPlaneEnginesSetEngineWorkspacesResponse400 | controlPlaneEnginesSetEngineWorkspacesResponse401 | controlPlaneEnginesSetEngineWorkspacesResponse403 | controlPlaneEnginesSetEngineWorkspacesResponse404 | controlPlaneEnginesSetEngineWorkspacesResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneEnginesSetEngineWorkspacesResponse = (controlPlaneEnginesSetEngineWorkspacesResponseSuccess | controlPlaneEnginesSetEngineWorkspacesResponseError)
+
+export const getControlPlaneEnginesSetEngineWorkspacesUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/engines/${encodeURIComponent(id)}/workspaces`
+}
+
+export const controlPlaneEnginesSetEngineWorkspaces = async (id: string,
+    setWorkspacesBody: SetWorkspacesBody, options?: RequestInit): Promise<controlPlaneEnginesSetEngineWorkspacesResponse> => {
+
+  return customInstance<controlPlaneEnginesSetEngineWorkspacesResponse>(getControlPlaneEnginesSetEngineWorkspacesUrl(id),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setWorkspacesBody)
+  }
+);}
+
+
+
+
+
+export const getControlPlaneEnginesSetEngineWorkspacesMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesSetEngineWorkspaces>>, TError,{id: string;data: SetWorkspacesBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesSetEngineWorkspaces>>, TError,{id: string;data: SetWorkspacesBody}, TContext> => {
+
+const mutationKey = ['controlPlaneEnginesSetEngineWorkspaces'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneEnginesSetEngineWorkspaces>>, {id: string;data: SetWorkspacesBody}> = (props) => {
+          const {id,data} = props ?? {};
+
+          return  controlPlaneEnginesSetEngineWorkspaces(id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneEnginesSetEngineWorkspacesMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneEnginesSetEngineWorkspaces>>>
+    export type ControlPlaneEnginesSetEngineWorkspacesMutationBody = SetWorkspacesBody
+    export type ControlPlaneEnginesSetEngineWorkspacesMutationError = ErrorBody
+
+    export const useControlPlaneEnginesSetEngineWorkspaces = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesSetEngineWorkspaces>>, TError,{id: string;data: SetWorkspacesBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneEnginesSetEngineWorkspaces>>,
+        TError,
+        {id: string;data: SetWorkspacesBody},
+        TContext
+      > => {
+      return useMutation(getControlPlaneEnginesSetEngineWorkspacesMutationOptions(options), queryClient);
     }
