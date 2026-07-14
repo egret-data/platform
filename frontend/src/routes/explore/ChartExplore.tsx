@@ -40,6 +40,7 @@ import { SectionLabel } from "@/components/chart/settings/SectionLabel";
 import { pruneUnits } from "@/components/chart/temporal-units";
 import { TemporalUnitSelect } from "@/components/chart/TemporalUnitSelect";
 import { MAPS } from "@/components/chart/echarts/maps/registry";
+import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 
 const UNDERLINE_LIST = "h-auto w-full justify-start gap-4 rounded-none border-b bg-transparent p-0";
 const UNDERLINE_TRIGGER = "rounded-none border-b-2 border-transparent px-0 pb-2 text-sm data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none";
@@ -99,6 +100,9 @@ export default function ChartExplore() {
   // Guarded so a mid-edit refetch/remount cannot re-seed and clobber in-progress edits;
   // seeds exactly once per chart id.
   const hydratedRef = useRef<string | null>(null);
+  // Serialized "clean" builder config, captured once the builder is ready (see below).
+  // `dirty` compares the live config to this baseline to drive the beforeunload guard.
+  const snapshotRef = useRef<string | null>(null);
   useEffect(() => {
     const c = existing.data;
     if (!c || hydratedRef.current === id) return;
@@ -354,6 +358,11 @@ export default function ChartExplore() {
     return { spec: specForRun(), columnSettings, conditionalFormatting, tableState };
   }
 
+  // Serialize the full builder config exactly as it would be persisted — the same
+  // payload builder Save uses (paramsForSave) plus the dataset + viz identity that
+  // live outside ChartParams. Used only for dirty-tracking (never gates Save).
+  const serializeConfig = () => JSON.stringify({ datasetId, viz, params: paramsForSave() });
+
   // Distribute a ChartParams emitted by ChartSettingsSections back into the local
   // display state. The settings component only edits these five display fields,
   // so we only fan those out (everything else in ChartExplore's state model is
@@ -377,10 +386,13 @@ export default function ChartExplore() {
     try {
       if (id) {
         await mutations.update.mutateAsync({ id, dataset_id: datasetId, name: saveName.trim(), description: saveDesc, viz_type: viz, params: paramsForSave() });
+        // Re-baseline so the just-saved state is clean (equivalent to `!justSaved`).
+        snapshotRef.current = serializeConfig();
         setSaveOpen(false);
         toast.success("Saved");
       } else {
         const created = await mutations.create.mutateAsync({ dataset_id: datasetId, name: saveName.trim(), description: saveDesc, viz_type: viz, params: paramsForSave() });
+        snapshotRef.current = serializeConfig();
         setSaveOpen(false);
         toast.success("Saved");
         navigate(`/explore/${ws}/charts/${created.id}`);
@@ -407,6 +419,29 @@ export default function ChartExplore() {
     setCartesian({ yMetrics: [] }); setPie({}); setScalar({}); setProgress({}); setGauge({}); setFunnel({}); setWaterfall({}); setSmart({}); setBox({}); setSankey({});
     setTemporalUnits({});
   }
+
+  // Capture the "clean" baseline once the builder is ready: for a new chart that's the
+  // empty default builder (first render); for a saved chart we wait until hydration has
+  // seeded the state (hydratedRef === id) so the baseline reflects the loaded chart.
+  useEffect(() => {
+    if (snapshotRef.current !== null) return;
+    if (id && hydratedRef.current !== id) return;
+    snapshotRef.current = serializeConfig();
+  });
+  // beforeunload guard only — never gates Save/Run. Errs toward an extra prompt (safe),
+  // never toward silently dropping edits.
+  const dirty = snapshotRef.current !== null && serializeConfig() !== snapshotRef.current;
+  useUnsavedChangesWarning(dirty);
+
+  // Data/Display builder tab in the URL (?tab=), default "data" (preserves prior behavior).
+  const builderTab = searchParams.get("tab") ?? "data";
+  const setBuilderTab = (v: string) =>
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (v === "data") next.delete("tab");
+      else next.set("tab", v);
+      return next;
+    }, { replace: true });
 
   const isRunning = status.data?.status === "queued" || status.data?.status === "running";
   const vizMeta = CHART_TYPES.find((t) => t.key === viz);
@@ -464,7 +499,7 @@ export default function ChartExplore() {
           </Button>
         </div>
 
-        <Tabs defaultValue="data">
+        <Tabs value={builderTab} onValueChange={setBuilderTab}>
           <TabsList className={UNDERLINE_LIST}>
             <TabsTrigger value="data" className={UNDERLINE_TRIGGER}>Data</TabsTrigger>
             <TabsTrigger value="display" className={UNDERLINE_TRIGGER}>Display</TabsTrigger>
