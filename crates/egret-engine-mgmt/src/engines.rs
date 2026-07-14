@@ -1514,6 +1514,28 @@ async fn create_engine(
             .await
         {
             tracing::warn!(error = %e, "set_engine_authz_service failed during auto-bind");
+        } else {
+            // Re-provision now that the engine is bound. The first `provision`
+            // above ran BEFORE auto-bind set `authz_service_id`, so its spec had
+            // no `RangerBinding` → the pod got no `access-control.properties`.
+            // `build_provision_req` reads `authz_service_id`, so re-building here
+            // and `update`-ing lands the Ranger plugin config (Access P3.2). Best
+            // effort: a failure leaves a working-but-unenforced engine an admin
+            // can re-provision. Refetch to pick up the freshly-set binding.
+            match st.engine_mgmt.get_engine(engine.id).await {
+                Ok(Some(bound)) => match build_provision_req(&st, &bound).await {
+                    Ok(req2) => {
+                        if let Err(msg) = prov.update(&req2).await {
+                            tracing::warn!(engine = %bound.name, %msg,
+                                "re-provision after auto-bind failed; engine unenforced until next update");
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = ?e,
+                        "rebuild provision req after auto-bind failed"),
+                },
+                Ok(None) => {}
+                Err(e) => tracing::warn!(error = %e, "refetch engine after auto-bind failed"),
+            }
         }
     }
 

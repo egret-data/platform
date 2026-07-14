@@ -49,7 +49,33 @@ pub async fn download_policies(
     }
     let def = s.store.get_service_def(&svc.r#type).await?.def_jsonb;
     let policies = s.store.enabled_policies_for_service(svc.id).await?;
-    let sp = ServicePolicies::new(svc.name, svc.id, svc.policy_version, def, policies, None);
+    // The tag service this resource service is linked to (trino profiles carry
+    // `tagService = <name>_tag`), captured before `svc.name` is moved below.
+    let tag_service = svc
+        .config_jsonb
+        .get("tagService")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let mut sp = ServicePolicies::new(svc.name, svc.id, svc.policy_version, def, policies, None);
+    // Embed the tag service's def + policies as `tagPolicies` so the Trino
+    // apache-ranger plugin turns on tag-based masking/row-filter evaluation and
+    // its tag enricher. Without this, tag policies download fine on their own
+    // service but the resource plugin never consults them → masking silently
+    // no-ops. Best-effort: a missing/unreadable tag service just omits the block.
+    if let Some(name) = tag_service {
+        if let Ok(tsvc) = s.store.get_service(&name).await {
+            let tdef = s.store.get_service_def(&tsvc.r#type).await?.def_jsonb;
+            let tpolicies = s.store.enabled_policies_for_service(tsvc.id).await?;
+            sp.tag_policies = Some(Box::new(ServicePolicies::new(
+                tsvc.name,
+                tsvc.id,
+                tsvc.policy_version,
+                tdef,
+                tpolicies,
+                None,
+            )));
+        }
+    }
     Ok(Json(sp).into_response())
 }
 

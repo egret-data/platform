@@ -29,6 +29,16 @@ pub struct ServicePolicies {
     pub policies: Vec<Value>,
     #[serde(default = "default_audit_mode")]
     pub audit_mode: String,
+    /// The associated TAG service's policies, embedded so the Trino apache-ranger
+    /// plugin enables tag-based masking/row-filter evaluation and the tag enricher
+    /// (which then polls `/tags/download/<tagService>`). Omitted (`NON_EMPTY`) for a
+    /// resource service with no bound tag service. Standard Ranger `tagPolicies`.
+    #[serde(
+        rename = "tagPolicies",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub tag_policies: Option<Box<ServicePolicies>>,
 }
 
 fn default_audit_mode() -> String {
@@ -52,6 +62,7 @@ impl ServicePolicies {
             service_def,
             policies,
             audit_mode: default_audit_mode(),
+            tag_policies: None,
         }
     }
 }
@@ -104,7 +115,7 @@ pub struct ServiceTags {
     pub tag_version: i64,
     /// Keyed by numeric tag-id (Long-as-string per Ranger wire format) → tag-def instance.
     pub tags: serde_json::Map<String, Value>,
-    /// Each entry: `{ id, serviceResource: { resourceElements: { catalog, schema, table, column } } }`.
+    /// Each entry: `{ id, isEnabled, serviceName, resourceElements: { catalog, schema, table, column } }`.
     pub service_resources: Vec<Value>,
     /// `{ "<resourceId>": [<tagId>, ...] }` — links each resource to its tags.
     pub resource_to_tag_ids: serde_json::Map<String, Value>,
@@ -190,9 +201,16 @@ impl ServiceTags {
             if !column.is_empty() {
                 elements.insert("column".into(), json!({ "values": [column] }));
             }
+            // Ranger `RangerServiceResource`: `resourceElements` sits DIRECTLY on
+            // the entry (with `isEnabled`), NOT nested under a `serviceResource`
+            // key. The tag plugin ignores unknown fields, so the old nesting made
+            // it deserialize an element-less resource — tags never matched any
+            // catalog.schema.table.column and masking silently no-op'd.
             service_resources.push(json!({
                 "id": rnum,
-                "serviceResource": { "resourceElements": elements },
+                "isEnabled": true,
+                "serviceName": service_name.clone(),
+                "resourceElements": elements,
             }));
             if let Some(tids) = res_tags.get(&rnum) {
                 resource_to_tag_ids.insert(rnum.to_string(), json!(tids));
@@ -288,8 +306,9 @@ mod tests {
         // Two distinct resources: table-level then column-level.
         let srs = j["serviceResources"].as_array().unwrap();
         assert_eq!(srs.len(), 2, "two distinct resources, got {srs:?}");
-        let els0 = &srs[0]["serviceResource"]["resourceElements"];
+        let els0 = &srs[0]["resourceElements"];
         assert_eq!(srs[0]["id"], 1);
+        assert_eq!(srs[0]["isEnabled"], true);
         assert_eq!(els0["catalog"]["values"][0], "wh1");
         assert_eq!(els0["schema"]["values"][0], "sales");
         assert_eq!(els0["table"]["values"][0], "orders");
@@ -297,7 +316,7 @@ mod tests {
             els0.get("column").is_none(),
             "table-level ('' column) must omit the column element, got {els0}"
         );
-        let els1 = &srs[1]["serviceResource"]["resourceElements"];
+        let els1 = &srs[1]["resourceElements"];
         assert_eq!(srs[1]["id"], 2);
         assert_eq!(els1["column"]["values"][0], "email");
 
