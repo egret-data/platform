@@ -8,6 +8,7 @@ import {
 } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ArrowLeft, Eraser, Play, Plus, RotateCcw, Square } from "lucide-react";
+import { toast } from "sonner";
 
 import {
   type Cell,
@@ -29,6 +30,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import type { ApiError } from "@/api/client";
 
 // ── Cell with autosave ────────────────────────────────────────────────────────
 
@@ -243,6 +246,26 @@ export default function NotebookPage() {
     );
   }
 
+  // A 404 is a genuine "missing notebook" — fall through to the not-found UI
+  // below. Any other fetch error is a real failure and gets its own alert.
+  const isNotFound = (notebook.error as ApiError | null)?.status === 404;
+  if (notebook.isError && !isNotFound) {
+    return (
+      <section className="flex flex-col items-center gap-3 p-8 text-center">
+        <Alert variant="destructive" className="max-w-md text-left">
+          <AlertDescription>Failed to load notebook. Please try again.</AlertDescription>
+        </Alert>
+        <Link
+          to={`/explore/${ws}/notebooks`}
+          className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" />
+          Back to notebooks
+        </Link>
+      </section>
+    );
+  }
+
   if (!notebook.data) {
     return (
       <section className="p-8 text-center text-muted-foreground">
@@ -337,7 +360,7 @@ export default function NotebookPage() {
             <Button
               size="sm"
               variant="outline"
-              onClick={() => kernel.interrupt().catch(() => {})}
+              onClick={() => kernel.interrupt().catch((e) => toast.error(String((e as Error)?.message ?? e)))}
             >
               <Square className="h-3.5 w-3.5" />
               Interrupt
@@ -345,7 +368,7 @@ export default function NotebookPage() {
             <Button
               size="sm"
               variant="outline"
-              onClick={() => kernel.restart().catch(() => {})}
+              onClick={() => kernel.restart().catch((e) => toast.error(String((e as Error)?.message ?? e)))}
             >
               <RotateCcw className="h-3.5 w-3.5" />
               Restart
