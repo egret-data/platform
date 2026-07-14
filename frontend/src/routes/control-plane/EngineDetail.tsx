@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Loader2, Plus, RotateCw, Server, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 
 import {
   type CatalogTestResult,
@@ -17,6 +18,12 @@ import {
   restartEngine,
   testEngineCatalog,
 } from "@/api/controlPlane";
+import {
+  getControlPlaneEnginesListEngineWorkspacesQueryKey,
+  useControlPlaneEnginesListEngineWorkspaces,
+  useControlPlaneEnginesSetEngineWorkspaces,
+} from "@/api/generated/control-plane-engines/control-plane-engines";
+import { useAdminWorkspacesListWs } from "@/api/generated/admin-workspaces/admin-workspaces";
 import { ApiError } from "@/api/client";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -33,6 +40,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Card,
   CardContent,
@@ -195,6 +203,7 @@ function EngineTabs({
       <TabsList>
         <TabsTrigger value="overview">Overview</TabsTrigger>
         <TabsTrigger value="catalogs">Catalogs</TabsTrigger>
+        <TabsTrigger value="workspaces">Workspaces</TabsTrigger>
         <TabsTrigger value="configuration">Configuration</TabsTrigger>
         <TabsTrigger value="security">Security &amp; Exposure</TabsTrigger>
         <TabsTrigger value="monitor">Monitor</TabsTrigger>
@@ -207,6 +216,10 @@ function EngineTabs({
 
       <TabsContent value="catalogs">
         <CatalogsCard engine={engine} />
+      </TabsContent>
+
+      <TabsContent value="workspaces">
+        <WorkspacesCard engineId={engineId} />
       </TabsContent>
 
       <TabsContent value="configuration">
@@ -944,6 +957,130 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
           if (selected !== ADD_CATALOG) removeMutation.mutate(selected);
         }}
       />
+    </Card>
+  );
+}
+
+// ── Workspaces ───────────────────────────────────────────────────────────────
+//
+// Assign this engine to workspaces. Only JWT-capable engines can be assigned
+// (the backend 400s otherwise — the error is surfaced as a toast). A checkbox
+// per workspace drives the full desired set, which is PUT wholesale on Save.
+
+function WorkspacesCard({ engineId }: { engineId: string }) {
+  const queryClient = useQueryClient();
+
+  const allWsQ = useAdminWorkspacesListWs(undefined, { query: { retry: false } });
+  const allWs = allWsQ.data?.status === 200 ? allWsQ.data.data : [];
+
+  const assignedQ = useControlPlaneEnginesListEngineWorkspaces(engineId, {
+    query: { retry: false },
+  });
+
+  // Local selection, seeded from the assigned set once it loads. `seeded` guards
+  // against re-seeding (which would clobber unsaved toggles) on later refetches.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (seededRef.current) return;
+    if (assignedQ.data?.status !== 200) return;
+    seededRef.current = true;
+    setSelected(new Set(assignedQ.data.data.map((w) => w.workspaceId)));
+  }, [assignedQ.data]);
+
+  const toggle = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const setMut = useControlPlaneEnginesSetEngineWorkspaces({
+    mutation: {
+      onSuccess: () => {
+        queryClient.invalidateQueries({
+          queryKey: getControlPlaneEnginesListEngineWorkspacesQueryKey(engineId),
+        });
+        toast.success("Workspace assignments saved");
+      },
+      onError: (e) => toast.error(String(e)),
+    },
+  });
+
+  const save = () =>
+    setMut.mutate({ id: engineId, data: { workspaceIds: [...selected] } });
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-start justify-between gap-3">
+          <div className="space-y-1.5">
+            <CardTitle className="text-lg">Workspaces</CardTitle>
+            <CardDescription>
+              Workspaces this engine is assigned to. Only engines with JWT
+              authentication enabled can be assigned; saving otherwise returns an
+              error.
+            </CardDescription>
+          </div>
+          <Button type="button" onClick={save} disabled={setMut.isPending}>
+            {setMut.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+            Save
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {allWsQ.isError ? (
+          <Alert variant="destructive">
+            <AlertDescription>
+              {(allWsQ.error as unknown as ApiError | null)?.message ??
+                "Failed to load workspaces."}
+            </AlertDescription>
+          </Alert>
+        ) : !allWsQ.data || !assignedQ.data ? (
+          <ListSkeleton rows={5} cols={2} />
+        ) : allWs.length === 0 ? (
+          <p className="py-10 text-center text-sm text-muted-foreground">
+            No workspaces yet.
+          </p>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-10">
+                  <span className="sr-only">Assigned</span>
+                </TableHead>
+                <TableHead>Workspace</TableHead>
+                <TableHead>Slug</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {allWs.map((ws) => {
+                const checked = selected.has(ws.id);
+                return (
+                  <TableRow
+                    key={ws.id}
+                    className="cursor-pointer"
+                    onClick={() => toggle(ws.id)}
+                  >
+                    <TableCell onClick={(e) => e.stopPropagation()}>
+                      <Checkbox
+                        checked={checked}
+                        onCheckedChange={() => toggle(ws.id)}
+                        aria-label={`Assign to ${ws.name}`}
+                      />
+                    </TableCell>
+                    <TableCell className="font-medium">{ws.name}</TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground">
+                      {ws.slug}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        )}
+      </CardContent>
     </Card>
   );
 }
