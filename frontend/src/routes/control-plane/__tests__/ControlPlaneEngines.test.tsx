@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
@@ -57,7 +57,9 @@ describe("ControlPlaneEngines", () => {
 
   test("shows a live status badge", async () => {
     renderPage();
-    expect(await screen.findByText("running")).toBeInTheDocument();
+    // "running" also appears as a SummaryStrip label, so scope to the engine row.
+    const row = (await screen.findByText("analytics-trino")).closest("tr")!;
+    expect(within(row).getByText("running")).toBeInTheDocument();
   });
 
   test("opens the Add engine dialog on the Trino tab", async () => {
