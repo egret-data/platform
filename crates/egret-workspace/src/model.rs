@@ -10,6 +10,9 @@ pub struct Workspace {
     pub slug: String,
     pub name: String,
     pub status: String, // active | archived
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_by: Option<Uuid>,
+    pub owner_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

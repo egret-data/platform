@@ -471,6 +471,54 @@ async fn restore_reactivates_an_archived_workspace() {
 }
 
 #[tokio::test]
+async fn workspace_dto_exposes_owner_and_created() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let (st, _admin, cookie) = admin_ctx(&db).await;
+    let app = axum::Router::new()
+        .nest("/api/admin", admin_workspace_router())
+        .with_state(st);
+
+    let created = body_json(
+        send(
+            &app,
+            &cookie,
+            "POST",
+            "/api/admin/workspaces",
+            Some(serde_json::json!({"slug": uniq("owned"), "name": "Owned WS"})),
+        )
+        .await,
+    )
+    .await;
+    let ws = created["id"].as_str().unwrap().to_string();
+
+    let body = body_json(
+        send(
+            &app,
+            &cookie,
+            "GET",
+            &format!("/api/admin/workspaces/{ws}"),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert!(body["created_at"].is_string(), "created_at present");
+    // the admin who created it is the owner; name defaults may be empty -> null
+    assert!(
+        body.get("owner_name").is_some(),
+        "owner_name field present"
+    );
+    assert!(body.get("created_by").is_some(), "created_by present");
+    assert_eq!(
+        body["created_by"], _admin.0.to_string(),
+        "created_by is the admin who created the workspace"
+    );
+}
+
+#[tokio::test]
 async fn create_workspace_requires_platform_permission() {
     let Some(db) = connect().await else {
         eprintln!("skip");

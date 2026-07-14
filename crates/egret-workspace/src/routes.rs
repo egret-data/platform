@@ -58,6 +58,9 @@ pub struct WorkspaceDto {
     pub slug: String,
     pub name: String,
     pub status: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_by: Option<String>,
+    pub owner_name: Option<String>,
 }
 impl From<crate::model::Workspace> for WorkspaceDto {
     fn from(w: crate::model::Workspace) -> Self {
@@ -66,6 +69,9 @@ impl From<crate::model::Workspace> for WorkspaceDto {
             slug: w.slug,
             name: w.name,
             status: w.status,
+            created_at: w.created_at,
+            created_by: w.created_by.map(|u| u.to_string()),
+            owner_name: w.owner_name,
         }
     }
 }
