@@ -71,8 +71,10 @@ describe("Policies page (profiles landing)", () => {
 
   it("renders the policy count badge", async () => {
     wrap(<Policies />);
-    await screen.findByRole("link", { name: "trino" });
-    expect(screen.getByText("3")).toBeInTheDocument();
-    expect(screen.getByText("0")).toBeInTheDocument();
+    // Scope counts to their own rows — the SummaryStrip also renders totals.
+    const trinoRow = (await screen.findByRole("link", { name: "trino" })).closest("tr");
+    expect(trinoRow?.textContent).toContain("3");
+    const starrocksRow = screen.getByRole("link", { name: "starrocks" }).closest("tr");
+    expect(starrocksRow?.textContent).toContain("0");
   });
 });

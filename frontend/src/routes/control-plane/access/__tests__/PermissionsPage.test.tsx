@@ -44,25 +44,38 @@ function renderPage() {
 }
 
 describe("PermissionsPage", () => {
-  test("renders group headings, permission keys, and role badges", async () => {
+  test("renders permission keys, their area, and role badges", async () => {
     vi.mocked(api.listPermissions).mockResolvedValue(GROUPS);
     renderPage();
 
-    expect(await screen.findByText("Users")).toBeInTheDocument();
-    expect(screen.getByText("Policies")).toBeInTheDocument();
-    expect(screen.getByText("users.read")).toBeInTheDocument();
+    expect(await screen.findByText("users.read")).toBeInTheDocument();
     expect(screen.getByText("policies.read")).toBeInTheDocument();
+    // Areas surface as a column badge (the "Users" area has two permissions).
+    expect(screen.getAllByText("Users").length).toBeGreaterThan(0);
+    expect(screen.getByText("Policies")).toBeInTheDocument();
+    // Roles a permission is granted to.
     expect(screen.getAllByText("Admin").length).toBeGreaterThan(0);
     expect(screen.getByText("Analyst")).toBeInTheDocument();
+  });
+
+  test("summarises the catalog in the strip", async () => {
+    vi.mocked(api.listPermissions).mockResolvedValue(GROUPS);
+    renderPage();
+
+    await screen.findByText("users.read");
+    // 3 permissions across 2 areas; 2 granted, 1 ungranted.
+    expect(screen.getByText("permissions")).toBeInTheDocument();
+    expect(screen.getByText("areas")).toBeInTheDocument();
+    expect(screen.getByText("granted")).toBeInTheDocument();
+    expect(screen.getByText("ungranted")).toBeInTheDocument();
   });
 
   test("renders a muted dash when a permission has no roles granted", async () => {
     vi.mocked(api.listPermissions).mockResolvedValue(GROUPS);
     renderPage();
 
-    await screen.findByText("users.write");
     // The row for users.write should show a "—" placeholder rather than a badge.
-    const row = screen.getByText("users.write").closest("tr");
+    const row = (await screen.findByText("users.write")).closest("tr");
     expect(row).not.toBeNull();
     expect(row!.textContent).toContain("—");
   });
@@ -90,36 +103,32 @@ const SEARCH_GROUPS: api.PermissionCatalogGroup[] = [
 ];
 
 describe("PermissionsPage search", () => {
-  test("filters permissions across grouped cards and restores when cleared", async () => {
+  test("filters the table and restores when cleared", async () => {
     vi.mocked(api.listPermissions).mockResolvedValue(SEARCH_GROUPS);
     const user = userEvent.setup();
     renderPage();
 
-    // Initially every permission renders across both groups.
+    // Initially every permission renders.
     expect(await screen.findByText("chart:read")).toBeInTheDocument();
     expect(screen.getByText("chart:manage")).toBeInTheDocument();
     expect(screen.getByText("engine:read")).toBeInTheDocument();
-    expect(screen.getByText("Engines")).toBeInTheDocument();
 
     const box = screen.getByPlaceholderText("Search permissions…");
 
-    // Typing "chart" keeps the chart permissions and hides the Engines group.
+    // Typing "chart" keeps the chart permissions and hides the engine row.
     await user.type(box, "chart");
     expect(screen.getByText("chart:read")).toBeInTheDocument();
     expect(screen.getByText("chart:manage")).toBeInTheDocument();
     expect(screen.queryByText("engine:read")).not.toBeInTheDocument();
-    expect(screen.queryByText("Engines")).not.toBeInTheDocument();
 
-    // A nonsense query matches nothing → the no-matches message shows.
+    // A nonsense query matches nothing.
     await user.clear(box);
     await user.type(box, "zzzznope");
     expect(screen.queryByText("chart:read")).not.toBeInTheDocument();
-    expect(screen.getByText(/No permissions match/)).toBeInTheDocument();
 
     // Clearing the search restores every permission.
     await user.clear(box);
     expect(screen.getByText("chart:read")).toBeInTheDocument();
     expect(screen.getByText("engine:read")).toBeInTheDocument();
-    expect(screen.getByText("Engines")).toBeInTheDocument();
   });
 });
