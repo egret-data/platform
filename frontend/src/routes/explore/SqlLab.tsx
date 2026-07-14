@@ -18,6 +18,7 @@ function SqlLabWorkspace({ ws }: { ws: string }) {
 
   return (
     <div className="flex h-full flex-col">
+      <h1 className="sr-only">SQL Lab</h1>
       <div className="flex items-center gap-1 border-b bg-muted/30 px-1">
         {tabs.map((t) => (
           <div key={t.id} className={`flex items-center gap-1 border-b-2 px-3 py-1.5 text-sm ${t.id === activeId ? "border-primary bg-background font-medium text-foreground" : "border-transparent text-muted-foreground hover:bg-accent"}`}>
@@ -28,7 +29,7 @@ function SqlLabWorkspace({ ws }: { ws: string }) {
             ) : (
               <button onClick={() => setActive(t.id)} onDoubleClick={() => setEditing(t.id)} className="max-w-[12rem] truncate">{t.title}</button>
             )}
-            <button onClick={() => closeTab(t.id)} className="text-muted-foreground hover:text-foreground"><X className="h-3 w-3" /></button>
+            <button onClick={() => closeTab(t.id)} aria-label={`Close ${t.title}`} className="text-muted-foreground hover:text-foreground"><X className="h-3 w-3" /></button>
           </div>
         ))}
         <button onClick={addTab} className="px-2 py-1 text-muted-foreground hover:text-foreground" title="New tab"><Plus className="h-4 w-4" /></button>

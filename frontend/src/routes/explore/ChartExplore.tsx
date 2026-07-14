@@ -909,6 +909,7 @@ export default function ChartExplore() {
 
       {/* Main area (full-width preview) */}
       <div className="flex-1 overflow-auto p-4 space-y-3">
+        <h1 className="sr-only">{saveName || "New chart"}</h1>
         <div className="flex items-center gap-2">
           <Button onClick={run} disabled={build.isPending || submit.isPending} size="sm">
             {(build.isPending || submit.isPending) ? "Building…" : "Run"}

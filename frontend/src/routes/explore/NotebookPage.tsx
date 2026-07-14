@@ -357,6 +357,7 @@ export default function NotebookPage() {
 
   return (
     <section className="flex flex-col gap-4 p-4">
+      <h1 className="sr-only">{nb.name}</h1>
       {/* Header */}
       <div className="flex flex-col gap-3">
         <Link

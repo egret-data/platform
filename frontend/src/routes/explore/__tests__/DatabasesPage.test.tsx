@@ -137,9 +137,9 @@ describe("DatabasesPage", () => {
     // engine badges
     expect(screen.getAllByText("trino").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("starrocks")).toBeInTheDocument();
-    // status badges
-    expect(screen.getByText("ok")).toBeInTheDocument();
-    expect(screen.getByText("error")).toBeInTheDocument();
+    // status badges (humanized labels; raw "ok"/"error" only survive as SummaryStrip counts)
+    expect(screen.getByText("Healthy")).toBeInTheDocument();
+    expect(screen.getByText("Error")).toBeInTheDocument();
     // secret badges
     expect(screen.getByText("Configured")).toBeInTheDocument();
     expect(screen.getByText("Not set")).toBeInTheDocument();

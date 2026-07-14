@@ -22,6 +22,7 @@ import { RowActionsMenu } from "@/components/explore/RowActionsMenu";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SortableHeader, type SortState } from "@/components/explore/SortableHeader";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ShareDialog } from "@/components/sharing/ShareDialog";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
@@ -358,7 +359,7 @@ export default function Notebooks() {
               }
             >
               <Star
-                className={`h-4 w-4 ${nb.bookmarked ? "fill-amber-400 text-amber-400" : "text-muted-foreground"}`}
+                className={`h-4 w-4 ${nb.bookmarked ? "fill-highlight text-highlight" : "text-muted-foreground"}`}
               />
             </Button>
           )}
@@ -519,6 +520,15 @@ export default function Notebooks() {
                 </Button>
               </>
             )}
+          </div>
+
+          <div className="mb-3">
+            <SummaryStrip
+              items={[
+                { label: "notebooks", value: rows.length },
+                ...(folders.length ? [{ label: "folders", value: folders.length }] : []),
+              ]}
+            />
           </div>
 
           {rows.length > 0 ? (

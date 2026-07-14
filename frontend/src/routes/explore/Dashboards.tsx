@@ -14,6 +14,7 @@ import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SortableHeader, type SortState } from "@/components/explore/SortableHeader";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { DashboardActionsMenu } from "@/components/chart/dashboard/DashboardActionsMenu";
 import { ShareDialog } from "@/components/sharing/ShareDialog";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
@@ -99,7 +100,7 @@ export default function Dashboards() {
           {!showTrash && (
             <Button size="sm" variant="ghost" className="h-7 w-7 p-0" aria-label={`${d.bookmarked ? "unbookmark" : "bookmark"} ${d.name}`}
               onClick={() => guard((d.bookmarked ? removeBookmark : addBookmark).mutateAsync(d.id))}>
-              <Star className={`h-4 w-4 ${d.bookmarked ? "fill-amber-400 text-amber-400" : "text-muted-foreground"}`} />
+              <Star className={`h-4 w-4 ${d.bookmarked ? "fill-highlight text-highlight" : "text-muted-foreground"}`} />
             </Button>
           )}
           <Link className="font-medium hover:underline" to={`/explore/${ws}/dashboards/${d.id}`}>{d.name}</Link>
@@ -189,6 +190,15 @@ export default function Dashboards() {
                 </Button>
               </>
             )}
+          </div>
+
+          <div className="mb-3">
+            <SummaryStrip
+              items={[
+                { label: "dashboards", value: rows.length },
+                ...(folders.length ? [{ label: "folders", value: folders.length }] : []),
+              ]}
+            />
           </div>
 
           {rows.length > 0 ? (
