@@ -227,7 +227,17 @@ export default function RolesPage() {
       value: (r) => r.name,
       cell: (r) => (
         <>
-          {r.name}
+          {isAdmin ? (
+            <button
+              type="button"
+              onClick={() => setEditTarget(r)}
+              className="font-medium text-primary hover:underline"
+            >
+              {r.name}
+            </button>
+          ) : (
+            r.name
+          )}
           {isSeeded(r) && (
             <Badge variant="secondary" className="ml-2 font-normal">
               built-in

@@ -146,7 +146,7 @@ export default function Warehouses() {
                 rows.map((wh) => (
                   <TableRow key={wh.id}>
                     <TableCell className="font-medium">
-                      <Link to={`/control-plane/warehouses/${wh.id}`} className="hover:underline">
+                      <Link to={`/control-plane/warehouses/${wh.id}`} className="text-primary font-medium hover:underline">
                         {wh.name}
                       </Link>
                     </TableCell>

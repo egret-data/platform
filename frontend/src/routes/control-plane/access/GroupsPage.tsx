@@ -114,7 +114,18 @@ export default function GroupsPage() {
       sortable: true,
       className: "font-medium",
       value: (g) => g.name,
-      cell: (g) => g.name,
+      cell: (g) =>
+        g.source === "oidc" ? (
+          g.name
+        ) : (
+          <button
+            type="button"
+            onClick={() => setRenameTarget(g)}
+            className="font-medium text-primary hover:underline"
+          >
+            {g.name}
+          </button>
+        ),
     },
     {
       key: "source",

@@ -142,7 +142,18 @@ export default function ControlPlaneStorage() {
               ) : (
                 rows.map((conn) => (
                   <TableRow key={conn.id}>
-                    <TableCell className="font-medium">{conn.name}</TableCell>
+                    <TableCell className="font-medium">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditing(conn);
+                          setAddOpen(true);
+                        }}
+                        className="font-medium text-primary hover:underline"
+                      >
+                        {conn.name}
+                      </button>
+                    </TableCell>
                     <TableCell className="text-muted-foreground">
                       {conn.purpose ?? "—"}
                     </TableCell>

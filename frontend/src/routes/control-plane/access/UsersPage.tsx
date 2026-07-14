@@ -92,7 +92,22 @@ export default function UsersPage() {
   const [providerFacet, setProviderFacet] = useState(FACET_ALL);
 
   const columns: Column<AccessUser>[] = [
-    { key: "email", label: "Email", sortable: true, className: "font-medium", value: (u) => u.email, cell: (u) => u.email },
+    {
+      key: "email",
+      label: "Email",
+      sortable: true,
+      className: "font-medium",
+      value: (u) => u.email,
+      cell: (u) => (
+        <button
+          type="button"
+          onClick={() => setEditTarget(u)}
+          className="text-primary hover:underline"
+        >
+          {u.email}
+        </button>
+      ),
+    },
     { key: "name", label: "Name", sortable: true, value: (u) => u.name, cell: (u) => u.name },
     { key: "provider", label: "Provider", cell: (u) => <Badge variant="outline">{u.provider}</Badge> },
     {
