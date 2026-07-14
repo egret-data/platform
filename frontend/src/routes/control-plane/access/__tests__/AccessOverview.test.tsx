@@ -166,16 +166,16 @@ describe("AccessOverview", () => {
     renderPage(NON_ADMIN_ME);
 
     // Wait for KPI tiles to settle so we know the page finished rendering.
-    await screen.findByText("Access control");
+    await screen.findByText("Access & governance");
     expect(screen.queryByText(/recent changes/i)).not.toBeInTheDocument();
     expect(auditApi.useControlPlaneAuditListAudit).not.toHaveBeenCalled();
   });
 
-  test("renders a quick link to Who can access", async () => {
+  test("renders a quick link to the Access Explorer", async () => {
     renderPage();
 
-    const link = await screen.findByRole("link", { name: /who can access/i });
-    expect(link).toHaveAttribute("href", "/control-plane/who-can-access");
+    const link = await screen.findByRole("link", { name: /^Access Explorer$/ });
+    expect(link).toHaveAttribute("href", "/control-plane/access-explorer");
   });
 
   test("degrades gracefully when a sub-query fails (never blanks the page)", async () => {
@@ -184,7 +184,7 @@ describe("AccessOverview", () => {
     renderPage();
 
     // Page still renders the header and other tiles; groups tile shows "—".
-    expect(await screen.findByText("Access control")).toBeInTheDocument();
+    expect(await screen.findByText("Access & governance")).toBeInTheDocument();
     expect(await screen.findByText("—")).toBeInTheDocument();
   });
 });

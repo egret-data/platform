@@ -1,6 +1,7 @@
-import type { ReactNode } from "react";
+import type { ComponentType, ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
+import { ArrowRight, Compass, ShieldCheck, UserCog, Users } from "lucide-react";
 
 import { listGroups, listRoles, listUsers } from "@/api/access";
 import { useControlPlaneAuditListAudit } from "@/api/generated/control-plane-audit/control-plane-audit";
@@ -8,6 +9,48 @@ import { useAuth } from "@/auth/useAuth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { timeAgo } from "@/lib/relativeTime";
 import { cn } from "@/lib/utils";
+
+/**
+ * egret's access model, top to bottom — the conceptual scaffolding that ties the
+ * otherwise-flat menu items together: identity feeds RBAC, which combines with
+ * per-object grants, and the data plane enforces classification rules in-engine.
+ */
+const ACCESS_LAYERS: {
+  icon: ComponentType<{ className?: string }>;
+  name: string;
+  desc: string;
+  to: string;
+  cta: string;
+}[] = [
+  {
+    icon: Users,
+    name: "Identity",
+    desc: "Who — users & groups, synced from OIDC.",
+    to: "/control-plane/users",
+    cta: "Users",
+  },
+  {
+    icon: UserCog,
+    name: "Roles & permissions",
+    desc: "RBAC — which actions each role grants.",
+    to: "/control-plane/roles",
+    cta: "Roles",
+  },
+  {
+    icon: Compass,
+    name: "Object grants",
+    desc: "Per-object access (Cedar) — who can open a dataset, chart or dashboard.",
+    to: "/control-plane/access-explorer",
+    cta: "Explore",
+  },
+  {
+    icon: ShieldCheck,
+    name: "Data plane",
+    desc: "Column masking & row filters by tag (Ranger), enforced in the query engine.",
+    to: "/control-plane/policies",
+    cta: "Policies",
+  },
+];
 
 /** A count is "unknown" while its query is loading or has failed. */
 type Loadable<T> = { status: "loading" } | { status: "error" } | { status: "ok"; value: T };
@@ -26,8 +69,10 @@ const QUICK_LINKS = [
   { to: "/control-plane/groups", label: "Groups" },
   { to: "/control-plane/roles", label: "Roles" },
   { to: "/control-plane/permissions", label: "Permissions" },
-  { to: "/control-plane/access-explorer", label: "Access explorer" },
-  { to: "/control-plane/who-can-access", label: "Who can access" },
+  { to: "/control-plane/access-explorer", label: "Access Explorer" },
+  { to: "/control-plane/policies", label: "Policies" },
+  { to: "/control-plane/classifications", label: "Classifications" },
+  { to: "/control-plane/audit-log", label: "Audit log" },
 ];
 
 /**
@@ -96,9 +141,10 @@ export default function AccessOverview() {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-2xl font-semibold leading-tight">Access control</h1>
+        <h1 className="text-2xl font-semibold leading-tight">Access &amp; governance</h1>
         <p className="text-sm text-muted-foreground">
-          Overview of identities, roles, and recent access changes.
+          Who can access what, through which layer — plus the posture issues worth your
+          attention.
         </p>
       </div>
 
@@ -120,6 +166,40 @@ export default function AccessOverview() {
           highlight={highlightAdmins}
         />
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">How access works</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <ol className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {ACCESS_LAYERS.map((layer, i) => (
+              <li key={layer.name} className="relative rounded-lg border p-3">
+                <div className="flex items-center gap-2">
+                  <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-primary/10 text-primary">
+                    <layer.icon className="h-4 w-4" />
+                  </span>
+                  <span className="text-sm font-medium leading-tight">{layer.name}</span>
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">{layer.desc}</p>
+                <Link
+                  to={layer.to}
+                  className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-primary underline-offset-2 hover:underline"
+                >
+                  {layer.cta}
+                  <ArrowRight className="h-3 w-3" />
+                </Link>
+                {i < ACCESS_LAYERS.length - 1 && (
+                  <ArrowRight
+                    className="absolute -right-2.5 top-1/2 hidden h-4 w-4 -translate-y-1/2 text-border lg:block"
+                    aria-hidden
+                  />
+                )}
+              </li>
+            ))}
+          </ol>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
