@@ -3,7 +3,7 @@ import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
   BarChart3, Bell, Boxes, ChevronDown, ChevronRight, Compass, Database,
   FolderKanban, Gauge, HardDrive, KeyRound, LayoutDashboard, ListChecks, type LucideIcon,
-  NotebookText, PanelLeftClose, PanelLeftOpen, Plug, ScanSearch, ScrollText, Server, Settings, Share2, ShieldCheck,
+  NotebookText, PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Server, Settings, Share2, ShieldCheck,
   SquareTerminal, Table2, Tags, UserCog, Users, UsersRound, Waypoints, Workflow,
 } from "lucide-react";
 import {
@@ -58,37 +58,47 @@ const EXPLORE_GROUPS: NavGroup[] = [
   },
 ];
 
-// Control Plane = global-admin only; platform-level concerns: workspaces,
-// engine provisioning, and user role/workspace assignment.
+// Control Plane = global-admin only. Grouped by a mental model, not a feature
+// list, so admins know where to go: Overview (posture hub) → Identity (who) →
+// Access (what they can do/see) → Data governance (data-plane rules) →
+// Infrastructure (the platform itself). Every route is unchanged; only the
+// grouping/ordering moved (Access-UX IA redesign).
 const CONTROL_PLANE_GROUPS: NavGroup[] = [
   {
-    heading: "Control Plane",
+    heading: "Overview",
+    items: [{ label: "Overview", icon: Gauge, perm: "user:read", to: "access-overview" }],
+  },
+  {
+    heading: "Identity",
+    items: [
+      { label: "Users", icon: Users, perm: "user:read" },
+      { label: "Groups", icon: UsersRound, perm: "group:read" },
+      { label: "Roles", icon: UserCog, perm: "role:read" },
+    ],
+  },
+  {
+    heading: "Access",
+    items: [
+      { label: "Access Explorer", icon: Compass, perm: "role:read", to: "access-explorer" },
+      { label: "Permissions", icon: ListChecks, perm: "role:read" },
+    ],
+  },
+  {
+    heading: "Data governance",
+    items: [
+      { label: "Policies", icon: ShieldCheck, perm: "policy:read" },
+      { label: "Classifications", icon: Tags, perm: "tag:read", to: "classifications" },
+      { label: "Audit log", icon: ScrollText },
+    ],
+  },
+  {
+    heading: "Infrastructure",
     items: [
       { label: "Workspaces", icon: FolderKanban },
       { label: "Engines", icon: Server, perm: "engine:read" },
       { label: "Warehouses", icon: Boxes, perm: "warehouse:read" },
       { label: "Storage", icon: HardDrive, perm: "storage:read" },
       { label: "Secrets", icon: KeyRound, perm: "secret:read" },
-    ],
-  },
-  {
-    heading: "Access control",
-    items: [
-      { label: "Overview", icon: Gauge, perm: "user:read", to: "access-overview" },
-      { label: "Users", icon: Users, perm: "user:read" },
-      { label: "Groups", icon: UsersRound, perm: "group:read" },
-      { label: "Roles", icon: UserCog, perm: "role:read" },
-      { label: "Permissions", icon: ListChecks, perm: "role:read" },
-      { label: "Access explorer", icon: Compass, perm: "role:read", to: "access-explorer" },
-      { label: "Who can access", icon: ScanSearch, perm: "role:read", to: "who-can-access" },
-    ],
-  },
-  {
-    heading: "Data Governance",
-    items: [
-      { label: "Policies", icon: ShieldCheck, perm: "policy:read" },
-      { label: "Classifications", icon: Tags, perm: "tag:read", to: "classifications" },
-      { label: "Audit log", icon: ScrollText },
     ],
   },
 ];

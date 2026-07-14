@@ -117,10 +117,10 @@ describe("Sidebar – workspace zones", () => {
   });
 });
 
-describe("Sidebar – Control Plane group", () => {
-  test("renders the Control Plane items (Workspaces, Engines, Warehouses, Storage, Secrets)", () => {
+describe("Sidebar – Infrastructure group", () => {
+  test("renders the Infrastructure items (Workspaces, Engines, Warehouses, Storage, Secrets)", () => {
     renderSidebar("/control-plane/workspaces");
-    expect(screen.getByText("Control Plane")).toBeInTheDocument();
+    expect(screen.getByText("Infrastructure")).toBeInTheDocument();
 
     expect(screen.getByRole("link", { name: "Workspaces" })).toHaveAttribute(
       "href",
@@ -149,10 +149,12 @@ describe("Sidebar – Control Plane group", () => {
   });
 });
 
-describe("Sidebar – Access control group", () => {
+describe("Sidebar – Identity + Access groups", () => {
   test("renders Users, Groups, Roles, Permissions at their /control-plane routes", () => {
     renderSidebar("/control-plane/workspaces");
-    expect(screen.getByText("Access control")).toBeInTheDocument();
+    // The old flat "Access control" group is split into a mental-model IA.
+    expect(screen.getByText("Identity")).toBeInTheDocument();
+    expect(screen.getByText("Access")).toBeInTheDocument();
 
     expect(screen.getByRole("link", { name: "Users" })).toHaveAttribute(
       "href",
@@ -162,9 +164,9 @@ describe("Sidebar – Access control group", () => {
       "href",
       "/control-plane/access-overview",
     );
-    expect(screen.getByRole("link", { name: "Who can access" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Access Explorer" })).toHaveAttribute(
       "href",
-      "/control-plane/who-can-access",
+      "/control-plane/access-explorer",
     );
     expect(screen.getByRole("link", { name: "Groups" })).toHaveAttribute(
       "href",
@@ -180,11 +182,11 @@ describe("Sidebar – Access control group", () => {
     );
   });
 
-  test("Overview is the first item in the Access control group", () => {
+  test("Overview leads the Control Plane, ahead of the Identity group", () => {
     renderSidebar("/control-plane/workspaces");
     const overview = screen.getByRole("link", { name: "Overview" });
     const users = screen.getByRole("link", { name: "Users" });
-    // Overview must precede Users (which was previously the first item).
+    // Overview is its own top zone and must precede the Identity group's Users.
     expect(overview.compareDocumentPosition(users) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });
@@ -192,7 +194,7 @@ describe("Sidebar – Access control group", () => {
 describe("Sidebar – Control Plane Data Governance group", () => {
   test("renders the Policies item at /control-plane/policies", () => {
     renderSidebar("/control-plane/workspaces");
-    expect(screen.getByText("Data Governance")).toBeInTheDocument();
+    expect(screen.getByText("Data governance")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Policies" })).toHaveAttribute(
       "href",
       "/control-plane/policies",
@@ -228,12 +230,14 @@ describe("Sidebar – permission-based filtering", () => {
     expect(screen.queryByRole("link", { name: "Roles" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Workspaces" })).not.toBeInTheDocument();
 
-    // Groups with no visible items are dropped entirely, heading included.
-    expect(screen.queryByText("Access control")).not.toBeInTheDocument();
-    // The "Control Plane" heading (Workspaces/Engines/Warehouses/Storage/Secrets)
-    // has nothing visible for this user either.
-    expect(screen.queryByText("Control Plane")).not.toBeInTheDocument();
-    expect(screen.getByText("Data Governance")).toBeInTheDocument();
+    // Groups with no visible items are dropped entirely, heading included:
+    // Identity + Access need user/group/role:read; Infrastructure needs
+    // engine/warehouse/storage/secret:read — none visible for a policy:read user.
+    expect(screen.queryByText("Identity")).not.toBeInTheDocument();
+    expect(screen.queryByText("Access")).not.toBeInTheDocument();
+    expect(screen.queryByText("Infrastructure")).not.toBeInTheDocument();
+    // Only the Data governance group (Policies) survives.
+    expect(screen.getByText("Data governance")).toBeInTheDocument();
   });
 
   test("a platform_admin sees every Control Plane item regardless of permissions", () => {

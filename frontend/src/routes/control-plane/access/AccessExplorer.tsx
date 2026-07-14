@@ -4,7 +4,11 @@ import { useSearchParams } from "react-router-dom";
 import { Search, ShieldAlert } from "lucide-react";
 
 import { getEffectiveAccess, type EffectiveAccess } from "@/api/access";
+import { getWhoCanAccess, type WhoCanAccess as WhoCanAccessData } from "@/api/whoCanAccess";
 import { listPrincipals } from "@/api/policies";
+import { useWorkspaceShares } from "@/api/workspaceAccess";
+import { adminWorkspacesListWs } from "@/api/generated/admin-workspaces/admin-workspaces";
+import type { WorkspaceDto } from "@/api/generated/model";
 import { EffectBadge, denyStyle } from "@/components/access/EffectBadge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -17,11 +21,78 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Column, FilterableTable } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { errorStatus } from "@/lib/httpStatus";
 
+/** Which way the explorer reads: principal → their access, or object → who can access it. */
+type Direction = "principal" | "object";
 type PrincipalType = "user" | "group";
+
+/**
+ * Control Plane → Access → Access Explorer.
+ *
+ * A single, bidirectional read-only view of the access graph:
+ *  - **principal** direction: pick a user or group and see their *effective*
+ *    access (platform roles, resolved permissions, workspaces, shared objects,
+ *    and explicit denies), each annotated with provenance.
+ *  - **object** direction: pick an object and see every principal who can
+ *    access it — direct grants, workspace roles, and platform admins.
+ *
+ * The direction is derived from the URL so old deep-links keep working:
+ * `?user=`/`?group=` → principal, `?kind=&id=` → object, otherwise `?dir=`
+ * (default principal). Flipping the toggle clears the other direction's params.
+ */
+export default function AccessExplorer() {
+  const [sp, setSp] = useSearchParams();
+  const kind = sp.get("kind");
+  const id = sp.get("id");
+  const userId = sp.get("user");
+  const groupId = sp.get("group");
+  const dirParam = sp.get("dir");
+
+  const direction: Direction =
+    kind && id
+      ? "object"
+      : userId || groupId
+        ? "principal"
+        : dirParam === "object"
+          ? "object"
+          : "principal";
+
+  // Switching direction resets the selection: keep only `?dir=` and drop the
+  // other direction's params (user/group vs. ws/kind/id).
+  const setDirection = (next: Direction) => {
+    if (next === direction) return;
+    setSp({ dir: next });
+  };
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h1 className="text-2xl font-semibold leading-tight">Access Explorer</h1>
+        <p className="text-sm text-muted-foreground">
+          Explore access both ways — a user or group and everything they can reach, or an
+          object and everyone who can reach it — with full provenance.
+        </p>
+      </div>
+
+      <Tabs value={direction} onValueChange={(v) => setDirection(v as Direction)}>
+        <TabsList>
+          <TabsTrigger value="principal">User or group → can access</TabsTrigger>
+          <TabsTrigger value="object">Object → who can access</TabsTrigger>
+        </TabsList>
+      </Tabs>
+
+      {direction === "principal" ? <PrincipalDirection /> : <ObjectDirection />}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Principal direction: user/group → their effective access
+ * ------------------------------------------------------------------ */
 
 /**
  * Turn a grant `source` ("direct" | "group:{name}") into a human suffix.
@@ -47,16 +118,8 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-/**
- * Control Plane → Access control → Access explorer.
- *
- * Read-only view of a user's or group's *effective* access — the platform
- * roles, resolved permissions, workspace memberships, shared objects, and
- * explicit denies that apply to them, each annotated with where it comes from
- * (direct vs. inherited via a group / parent role). The principal is chosen at
- * the top and deep-linked via `?user=<id>` / `?group=<id>`.
- */
-export default function AccessExplorer() {
+/** Picker + effective-access report for a chosen principal. */
+function PrincipalDirection() {
   const [sp, setSp] = useSearchParams();
   const userId = sp.get("user");
   const groupId = sp.get("group");
@@ -74,15 +137,7 @@ export default function AccessExplorer() {
   const data = q.data;
 
   return (
-    <div className="space-y-5">
-      <div>
-        <h1 className="text-2xl font-semibold leading-tight">Access explorer</h1>
-        <p className="text-sm text-muted-foreground">
-          Inspect the effective access of a user or group — roles, permissions,
-          workspaces, and shared objects — with full provenance.
-        </p>
-      </div>
-
+    <>
       <Card>
         <CardHeader>
           <CardTitle className="text-lg">Principal</CardTitle>
@@ -115,14 +170,14 @@ export default function AccessExplorer() {
           </AlertDescription>
         </Alert>
       ) : data ? (
-        <Report data={data} />
+        <PrincipalReport data={data} />
       ) : null}
-    </div>
+    </>
   );
 }
 
 /** The full effective-access report for a resolved principal. */
-function Report({ data }: { data: EffectiveAccess }) {
+function PrincipalReport({ data }: { data: EffectiveAccess }) {
   const { principal } = data;
   const isSuper = principal.is_platform_admin;
 
@@ -362,6 +417,247 @@ function PrincipalPicker({
               </li>
             ))}
           </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Object direction: object → who can access it
+ * ------------------------------------------------------------------ */
+
+/**
+ * Turn an access-entry `source` ("direct" | "workspace:{slug}" | "platform")
+ * into a human suffix.
+ */
+function objectSourceLabel(source: string): string {
+  if (source === "direct") return "direct grant";
+  if (source === "platform") return "platform admin";
+  if (source.startsWith("workspace:")) return `via workspace ${source.slice("workspace:".length)}`;
+  return source;
+}
+
+/** Muted source suffix, e.g. "direct grant" / "via workspace demo" / "platform admin". */
+function ObjectSourceSuffix({ source }: { source: string }) {
+  return <span className="text-xs text-muted-foreground">{objectSourceLabel(source)}</span>;
+}
+
+/** Picker + who-can-access report for a chosen object. */
+function ObjectDirection() {
+  const [sp, setSp] = useSearchParams();
+  const ws = sp.get("ws");
+  const kind = sp.get("kind");
+  const id = sp.get("id");
+
+  const q = useQuery({
+    queryKey: ["cp", "who-can-access", kind, id],
+    queryFn: () => getWhoCanAccess(kind!, id!),
+    enabled: !!kind && !!id,
+    retry: false,
+  });
+
+  const forbidden = errorStatus(q.error) === 403;
+  const notFound = errorStatus(q.error) === 404;
+  const data = q.data;
+
+  return (
+    <>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">Object</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <ObjectPicker
+            ws={ws}
+            kind={kind}
+            id={id}
+            onPickWorkspace={(newWs) => setSp({ dir: "object", ws: newWs })}
+            onPickObject={(newKind, newId) =>
+              setSp({ dir: "object", ws: ws ?? "", kind: newKind, id: newId })
+            }
+          />
+        </CardContent>
+      </Card>
+
+      {!kind || !id ? (
+        <p className="py-10 text-center text-sm text-muted-foreground">
+          Pick an object to see who can access it.
+        </p>
+      ) : q.isLoading ? (
+        <ListSkeleton rows={4} cols={4} />
+      ) : forbidden ? (
+        <Alert variant="destructive">
+          <AlertDescription>
+            You need the <code>role:read</code> permission.
+          </AlertDescription>
+        </Alert>
+      ) : notFound ? (
+        <p className="py-10 text-center text-sm text-muted-foreground">Object not found.</p>
+      ) : q.isError ? (
+        <Alert variant="destructive">
+          <AlertDescription>
+            {(q.error as Error)?.message ?? "Failed to load access."}
+          </AlertDescription>
+        </Alert>
+      ) : data ? (
+        <ObjectReport data={data} />
+      ) : null}
+    </>
+  );
+}
+
+/** The full who-can-access report for a resolved object. */
+function ObjectReport({ data }: { data: WhoCanAccessData }) {
+  const { object, entries } = data;
+
+  const columns: Column<WhoCanAccessData["entries"][number]>[] = [
+    {
+      key: "principal",
+      label: "Principal",
+      sortable: true,
+      value: (e) => e.principal_name ?? e.principal_id,
+      cell: (e) => (
+        <span className="flex min-w-0 items-center gap-2">
+          <Badge variant="outline" className="shrink-0">
+            {e.principal_type === "group" ? "Group" : "User"}
+          </Badge>
+          <span className="truncate text-sm" title={e.principal_id}>
+            {e.principal_name ?? e.principal_id}
+          </span>
+        </span>
+      ),
+    },
+    {
+      key: "access",
+      label: "Access",
+      sortable: true,
+      value: (e) => e.access,
+      cell: (e) => <Badge variant="outline">{e.access}</Badge>,
+    },
+    {
+      key: "effect",
+      label: "Effect",
+      sortable: true,
+      value: (e) => e.effect,
+      cell: (e) => <EffectBadge effect={e.effect} />,
+    },
+    {
+      key: "source",
+      label: "Source",
+      sortable: true,
+      value: (e) => objectSourceLabel(e.source),
+      cell: (e) => <ObjectSourceSuffix source={e.source} />,
+    },
+  ];
+
+  return (
+    <Card>
+      <CardContent className="space-y-6 pt-6">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="secondary" className="shrink-0 font-normal">
+            {object.kind}
+          </Badge>
+          <span className="text-lg font-semibold" title={object.id}>
+            {object.name ?? object.id}
+          </span>
+          {object.workspace_slug && (
+            <span className="text-sm text-muted-foreground">/{object.workspace_slug}</span>
+          )}
+        </div>
+
+        <FilterableTable
+          rows={entries}
+          columns={columns}
+          getId={(e) => `${e.principal_type}:${e.principal_id}:${e.source}:${e.access}`}
+          searchPlaceholder="Search principals…"
+          initialSort={{ key: "principal", dir: "asc" }}
+          emptyText="No one has access."
+        />
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * Object chooser: a workspace `<Select>` followed by an object `<Select>`
+ * populated from that workspace's shared-object rollup (`useWorkspaceShares`).
+ * Picking an arbitrary object outside the shared-object rollup isn't
+ * supported yet — a known follow-up.
+ */
+function ObjectPicker({
+  ws,
+  kind,
+  id,
+  onPickWorkspace,
+  onPickObject,
+}: {
+  ws: string | null;
+  kind: string | null;
+  id: string | null;
+  onPickWorkspace: (ws: string) => void;
+  onPickObject: (kind: string, id: string) => void;
+}) {
+  const wsListQ = useQuery({
+    queryKey: ["cp", "admin-workspaces", "list"],
+    queryFn: async () => (await adminWorkspacesListWs({ per_page: 200 })).data,
+    retry: false,
+  });
+  const workspaces = (wsListQ.data ?? []) as WorkspaceDto[];
+
+  const sharesQ = useWorkspaceShares(ws ?? "");
+  const shares = ws ? (sharesQ.data ?? []) : [];
+
+  const objects = useMemo(() => {
+    const seen = new Set<string>();
+    const out: { kind: string; object_id: string; object_name: string | null }[] = [];
+    for (const s of shares) {
+      if (seen.has(s.object_id)) continue;
+      seen.add(s.object_id);
+      out.push({ kind: s.kind, object_id: s.object_id, object_name: s.object_name });
+    }
+    return out;
+  }, [shares]);
+
+  const objectValue = kind && id ? `${kind}:${id}` : undefined;
+
+  return (
+    <div className="flex flex-wrap items-start gap-2">
+      <Select value={ws ?? undefined} onValueChange={onPickWorkspace}>
+        <SelectTrigger className="h-9 w-56" aria-label="Workspace">
+          <SelectValue placeholder="Select a workspace…" />
+        </SelectTrigger>
+        <SelectContent>
+          {workspaces.map((w) => (
+            <SelectItem key={w.id} value={w.slug}>
+              {w.name}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+
+      <div className="flex flex-col gap-1">
+        <Select
+          value={objectValue}
+          disabled={!ws}
+          onValueChange={(v) => {
+            const sep = v.indexOf(":");
+            onPickObject(v.slice(0, sep), v.slice(sep + 1));
+          }}
+        >
+          <SelectTrigger className="h-9 w-72" aria-label="Object">
+            <SelectValue placeholder="Select an object…" />
+          </SelectTrigger>
+          <SelectContent>
+            {objects.map((o) => (
+              <SelectItem key={o.object_id} value={`${o.kind}:${o.object_id}`}>
+                {o.kind} · {o.object_name ?? o.object_id}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {ws && !sharesQ.isLoading && objects.length === 0 && (
+          <p className="text-xs text-muted-foreground">No shared objects in this workspace.</p>
         )}
       </div>
     </div>

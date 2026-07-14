@@ -80,6 +80,12 @@ describe("AccessExplorer", () => {
     expect(screen.getByText("Finance")).toBeInTheDocument();
   });
 
+  test("renders the bidirectional direction toggle", () => {
+    renderPage();
+    expect(screen.getByRole("tab", { name: /User or group/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /Object/i })).toBeInTheDocument();
+  });
+
   test("preselects the principal from ?user= and calls getEffectiveAccess", async () => {
     renderPage("?user=alice-id");
 
