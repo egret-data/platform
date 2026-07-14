@@ -351,7 +351,7 @@ export default function DashboardView() {
       )}
 <div className={effectiveWidth === "fixed" ? "mx-auto w-full max-w-[1200px]" : ""}>
       {dash.deleted_at && (
-        <div className="mb-3 flex items-center justify-between rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
+        <div className="mb-3 flex items-center justify-between rounded-md border border-highlight/40 bg-highlight/10 px-3 py-2 text-sm">
           <span>This dashboard is in the trash.</span>
           <Button size="sm" variant="outline" onClick={async () => { try { await restoreMut.mutateAsync(dash.id); } catch (e) { toast.error(String(e)); } }}>Restore</Button>
         </div>
@@ -368,7 +368,7 @@ export default function DashboardView() {
             <>
               <Button size="sm" variant="ghost" aria-label={dash.bookmarked ? "remove bookmark" : "add bookmark"}
                 onClick={async () => { try { await (dash.bookmarked ? removeBookmark : addBookmark).mutateAsync(dash.id); } catch (e) { toast.error(String(e)); } }}>
-                <Star className={`h-4 w-4 ${dash.bookmarked ? "fill-amber-400 text-amber-400" : ""}`} />
+                <Star className={`h-4 w-4 ${dash.bookmarked ? "fill-highlight text-highlight" : ""}`} />
               </Button>
               <label className="flex items-center gap-1 text-xs text-muted-foreground">
                 <span className="sr-only">Auto-refresh</span>

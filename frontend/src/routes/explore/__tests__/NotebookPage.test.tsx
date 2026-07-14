@@ -261,8 +261,9 @@ describe("NotebookPage", () => {
 
   it("renders a markdown cell with rendered HTML (h1 for # hi)", () => {
     renderAt();
-    // react-markdown should render "# hi" as an <h1>
-    const heading = screen.getByRole("heading", { level: 1 });
+    // react-markdown should render "# hi" as an <h1> (scoped by name to skip the
+    // sr-only page-title heading that carries the notebook name).
+    const heading = screen.getByRole("heading", { level: 1, name: "hi" });
     expect(heading).toHaveTextContent("hi");
   });
 

@@ -23,7 +23,9 @@ import {
   useUpdateDatabase,
 } from "@/api/databases";
 import { ApiError } from "@/api/client";
+import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -53,6 +55,13 @@ function statusVariant(status: string): "default" | "destructive" | "secondary" 
   if (status === "ok") return "default";
   if (status === "error") return "destructive";
   return "secondary";
+}
+
+/** Turn the raw status enum into a human-readable label (variant mapping unchanged). */
+function humanizeStatus(status: string): string {
+  if (status === "ok") return "Healthy";
+  if (status === "error") return "Error";
+  return status.charAt(0).toUpperCase() + status.slice(1);
 }
 
 export default function DatabasesPage() {
@@ -120,6 +129,129 @@ export default function DatabasesPage() {
 
   const rows = dbs.data ?? [];
 
+  const columns: Column<DatabaseConn>[] = [
+    {
+      key: "name",
+      label: "Name",
+      sortable: true,
+      value: (conn) => conn.name,
+      cell: (conn) => <span className="font-medium">{conn.name}</span>,
+    },
+    {
+      key: "engine",
+      label: "Engine",
+      sortable: true,
+      value: (conn) => conn.engine,
+      cell: (conn) => (
+        <span className="flex items-center gap-1.5">
+          <Badge variant="secondary">{conn.engine}</Badge>
+          {conn.delegated ? (
+            <Badge
+              className="border-transparent bg-highlight text-highlight-foreground"
+              title="Queries run as the signed-in user (per-user delegation)"
+            >
+              Per-user
+            </Badge>
+          ) : null}
+        </span>
+      ),
+    },
+    {
+      key: "host",
+      label: "Host:Port",
+      sortable: true,
+      value: (conn) => `${conn.host}:${conn.port}`,
+      cell: (conn) => (
+        <span className="font-mono text-muted-foreground">
+          {conn.host}:{conn.port}
+        </span>
+      ),
+    },
+    {
+      key: "status",
+      label: "Status",
+      sortable: true,
+      value: (conn) => conn.status,
+      cell: (conn) => (
+        <Badge variant={statusVariant(conn.status)}>{humanizeStatus(conn.status)}</Badge>
+      ),
+    },
+    {
+      key: "secret",
+      label: "Secret",
+      cell: (conn) => (
+        <Badge variant={conn.has_secret ? "secondary" : "outline"}>
+          {conn.has_secret ? "Configured" : "Not set"}
+        </Badge>
+      ),
+    },
+    {
+      key: "actions",
+      label: "Actions",
+      className: "text-right",
+      cell: (conn) => {
+        const result = testResult[conn.id];
+        return (
+          <div className="flex items-center justify-end gap-1">
+            {result && (
+              <span
+                className={`mr-1 inline-flex items-center gap-1 text-xs ${
+                  result.ok ? "text-success" : "text-destructive"
+                }`}
+                role="status"
+              >
+                {result.ok ? (
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                ) : (
+                  <XCircle className="h-3.5 w-3.5" />
+                )}
+                {result.ok ? "OK" : (result.message ?? "Failed")}
+              </span>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-muted-foreground"
+              onClick={() => handleTest(conn)}
+              disabled={testingId === conn.id}
+              aria-label={`Test connection for ${conn.name}`}
+            >
+              {testingId === conn.id ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Zap className="h-4 w-4" />
+              )}
+              Test
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-muted-foreground"
+              onClick={() => setEditTarget(conn)}
+              aria-label={`Edit ${conn.name}`}
+            >
+              <Pencil className="h-4 w-4" />
+              Edit
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-muted-foreground hover:text-destructive"
+              onClick={() => setDeleteTarget(conn)}
+              aria-label={`Delete ${conn.name}`}
+            >
+              <Trash2 className="h-4 w-4" />
+              Delete
+            </Button>
+          </div>
+        );
+      },
+    },
+  ];
+
+  const okCount = rows.filter((c) => c.status === "ok").length;
+  const errorCount = rows.filter((c) => c.status === "error").length;
+
   return (
     <section>
       <SectionHeader onAdd={() => setAddOpen(true)} />
@@ -130,106 +262,22 @@ export default function DatabasesPage() {
             <p>No engines connected yet.</p>
           </div>
         ) : (
-          <table className="w-full text-sm">
-            <thead className="text-left text-muted-foreground">
-              <tr className="border-b border-border">
-                <th className="py-2 pr-4 font-medium">Name</th>
-                <th className="py-2 pr-4 font-medium">Engine</th>
-                <th className="py-2 pr-4 font-medium">Host:Port</th>
-                <th className="py-2 pr-4 font-medium">Status</th>
-                <th className="py-2 pr-4 font-medium">Secret</th>
-                <th className="py-2 font-medium sr-only">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((conn) => {
-                const result = testResult[conn.id];
-                return (
-                  <tr key={conn.id} className="border-b border-border last:border-b-0">
-                    <td className="py-2 pr-4 font-medium">{conn.name}</td>
-                    <td className="py-2 pr-4">
-                      <span className="flex items-center gap-1.5">
-                        <Badge variant="secondary">{conn.engine}</Badge>
-                        {conn.delegated ? (
-                          <Badge
-                            className="border-transparent bg-highlight text-highlight-foreground"
-                            title="Queries run as the signed-in user (per-user delegation)"
-                          >
-                            Per-user
-                          </Badge>
-                        ) : null}
-                      </span>
-                    </td>
-                    <td className="py-2 pr-4 font-mono text-muted-foreground">
-                      {conn.host}:{conn.port}
-                    </td>
-                    <td className="py-2 pr-4">
-                      <Badge variant={statusVariant(conn.status)}>{conn.status}</Badge>
-                    </td>
-                    <td className="py-2 pr-4">
-                      <Badge variant={conn.has_secret ? "secondary" : "outline"}>
-                        {conn.has_secret ? "Configured" : "Not set"}
-                      </Badge>
-                    </td>
-                    <td className="py-2 text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        {result && (
-                          <span
-                            className={`mr-1 inline-flex items-center gap-1 text-xs ${
-                              result.ok ? "text-emerald-600" : "text-destructive"
-                            }`}
-                            role="status"
-                          >
-                            {result.ok ? (
-                              <CheckCircle2 className="h-3.5 w-3.5" />
-                            ) : (
-                              <XCircle className="h-3.5 w-3.5" />
-                            )}
-                            {result.ok ? "OK" : (result.message ?? "Failed")}
-                          </span>
-                        )}
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="text-muted-foreground"
-                          onClick={() => handleTest(conn)}
-                          disabled={testingId === conn.id}
-                          aria-label={`Test connection for ${conn.name}`}
-                        >
-                          {testingId === conn.id ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <Zap className="h-4 w-4" />
-                          )}
-                          Test
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="text-muted-foreground"
-                          onClick={() => setEditTarget(conn)}
-                          aria-label={`Edit ${conn.name}`}
-                        >
-                          <Pencil className="h-4 w-4" />
-                          Edit
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="text-muted-foreground hover:text-destructive"
-                          onClick={() => setDeleteTarget(conn)}
-                          aria-label={`Delete ${conn.name}`}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                          Delete
-                        </Button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <div className="space-y-3">
+            <SummaryStrip
+              items={[
+                { label: "connections", value: rows.length },
+                { label: "ok", value: okCount },
+                { label: "error", value: errorCount },
+              ]}
+            />
+            <FilterableTable
+              rows={rows}
+              columns={columns}
+              getId={(conn) => conn.id}
+              searchPlaceholder="Search connections…"
+              initialSort={{ key: "name", dir: "asc" }}
+            />
+          </div>
         )}
       </div>
 
