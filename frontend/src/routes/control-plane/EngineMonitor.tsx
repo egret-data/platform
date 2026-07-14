@@ -13,6 +13,8 @@ import {
   listQueries,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Dialog,
@@ -260,15 +262,16 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
             <TableBody>
               {rows.length === 0 ? (
                 <TableRow className="hover:bg-transparent">
-                  <TableCell
-                    colSpan={9}
-                    className="py-10 text-center text-muted-foreground"
-                  >
-                    {queries.isLoading
-                      ? "Loading…"
-                      : unreachable
-                        ? "—"
-                        : "No queries."}
+                  <TableCell colSpan={9} className="py-6">
+                    {queries.isLoading ? (
+                      <ListSkeleton rows={6} cols={5} />
+                    ) : (
+                      <p className="py-4 text-center text-muted-foreground">
+                        {unreachable
+                          ? "Coordinator unreachable — no live queries."
+                          : "No queries."}
+                      </p>
+                    )}
                   </TableCell>
                 </TableRow>
               ) : (
@@ -276,7 +279,15 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
                   <TableRow
                     key={q.id}
                     className="cursor-pointer"
+                    role="button"
+                    tabIndex={0}
                     onClick={() => setSelectedQid(q.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setSelectedQid(q.id);
+                      }
+                    }}
                   >
                     <TableCell className="font-mono text-xs">
                       {truncate(q.id, 20)}
@@ -456,7 +467,7 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              className="bg-destructive text-white hover:bg-destructive/90"
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={(e) => {
                 e.preventDefault();
                 if (killTarget) killMutation.mutate(killTarget.id);
@@ -477,24 +488,14 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
 
 /** A compact strip of cluster-wide counters + node count. */
 function ClusterStrip({ cluster }: { cluster: ClusterInfo | undefined }) {
-  const stats: { label: string; value: number }[] = [
-    { label: "Running", value: cluster?.running ?? 0 },
-    { label: "Queued", value: cluster?.queued ?? 0 },
-    { label: "Blocked", value: cluster?.blocked ?? 0 },
-    { label: "Nodes", value: cluster?.nodes.length ?? 0 },
-  ];
   return (
-    <Card>
-      <CardContent className="grid grid-cols-2 gap-4 py-4 sm:grid-cols-4">
-        {stats.map((s) => (
-          <div key={s.label} className="space-y-0.5">
-            <p className="text-xs uppercase tracking-wide text-muted-foreground">
-              {s.label}
-            </p>
-            <p className="text-2xl font-semibold tabular-nums">{s.value}</p>
-          </div>
-        ))}
-      </CardContent>
-    </Card>
+    <SummaryStrip
+      items={[
+        { label: "running", value: cluster?.running ?? 0 },
+        { label: "queued", value: cluster?.queued ?? 0 },
+        { label: "blocked", value: cluster?.blocked ?? 0 },
+        { label: "nodes", value: cluster?.nodes.length ?? 0 },
+      ]}
+    />
   );
 }

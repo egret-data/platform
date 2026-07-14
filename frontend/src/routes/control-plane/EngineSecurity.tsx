@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { Plus, Trash2 } from "lucide-react";
 
 import { type Secret, listSecrets } from "@/api/controlPlane";
@@ -151,6 +152,18 @@ export function EngineSecurity(props: {
             <Plus className="h-4 w-4" />
             Add user
           </Button>
+          {(secrets.data ?? []).length === 0 && (
+            <p className="text-xs text-muted-foreground">
+              No secrets yet.{" "}
+              <Link
+                to="/control-plane/secrets"
+                className="text-primary hover:underline"
+              >
+                Create a secret
+              </Link>{" "}
+              to hold a user password.
+            </p>
+          )}
         </div>
       </ConfigSection>
 

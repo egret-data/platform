@@ -30,11 +30,13 @@ function SuggestKeyInput({
   placeholder,
   onChange,
   suggestions,
+  ariaLabel,
 }: {
   value: string;
   placeholder?: string;
   onChange: (key: string) => void;
   suggestions: { key: string; help?: string }[];
+  ariaLabel?: string;
 }) {
   const [focused, setFocused] = useState(false);
   const query = value.trim().toLowerCase();
@@ -53,6 +55,7 @@ function SuggestKeyInput({
       <Input
         value={value}
         placeholder={placeholder}
+        aria-label={ariaLabel}
         onChange={(e) => onChange(e.target.value)}
         onFocus={() => setFocused(true)}
         onBlur={() => window.setTimeout(() => setFocused(false), 120)}
@@ -110,6 +113,7 @@ export function KeyValueEditor({
             <SuggestKeyInput
               value={row.key}
               placeholder={keyPlaceholder}
+              ariaLabel={keyPlaceholder}
               suggestions={keySuggestions}
               onChange={(key) =>
                 onChange(rows.map((r, j) => (j === i ? { ...r, key } : r)))
@@ -119,6 +123,7 @@ export function KeyValueEditor({
             <Input
               value={row.key}
               placeholder={keyPlaceholder}
+              aria-label={keyPlaceholder}
               onChange={(e) =>
                 onChange(
                   rows.map((r, j) => (j === i ? { ...r, key: e.target.value } : r)),
@@ -129,6 +134,7 @@ export function KeyValueEditor({
           <Input
             value={row.value}
             placeholder={valuePlaceholder}
+            aria-label={valuePlaceholder}
             onChange={(e) =>
               onChange(
                 rows.map((r, j) => (j === i ? { ...r, value: e.target.value } : r)),
@@ -366,21 +372,25 @@ export function ResourceGroupsSection({
               <Input
                 value={s.user ?? ""}
                 placeholder="user"
+                aria-label="Selector user match"
                 onChange={(e) => setSel("user", e.target.value || undefined)}
               />
               <Input
                 value={s.source ?? ""}
                 placeholder="source"
+                aria-label="Selector source match"
                 onChange={(e) => setSel("source", e.target.value || undefined)}
               />
               <Input
                 value={s.queryType ?? ""}
                 placeholder="queryType"
+                aria-label="Selector query type match"
                 onChange={(e) => setSel("queryType", e.target.value || undefined)}
               />
               <Input
                 value={s.group}
                 placeholder="global.etl"
+                aria-label="Selector group path"
                 onChange={(e) => setSel("group", e.target.value)}
               />
               <Button

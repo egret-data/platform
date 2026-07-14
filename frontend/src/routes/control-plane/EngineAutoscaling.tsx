@@ -11,6 +11,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { ConfigSection } from "./config/ConfigSection";
+import { FieldLabel } from "./config/FieldLabel";
 import { RawJsonField } from "./config/RawJsonField";
 import {
   type AutoscaleMode,
@@ -55,12 +57,18 @@ function HpaEditor({
     onChange((prev) => ({ ...prev, [k]: v }));
 
   return (
-    <div className="space-y-4 rounded-lg border p-4">
+    <ConfigSection
+      title="HorizontalPodAutoscaler"
+      description="Scale the worker Deployment on CPU/memory targets via a native Kubernetes HPA."
+      docsUrl="https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/"
+    >
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
         <div className="space-y-1.5">
-          <Label htmlFor="as-hpa-max" className="text-xs">
-            maxReplicas
-          </Label>
+          <FieldLabel
+            htmlFor="as-hpa-max"
+            label="Max replicas"
+            help="Upper bound on worker pods the HPA may scale to."
+          />
           <Input
             id="as-hpa-max"
             type="number"
@@ -70,9 +78,11 @@ function HpaEditor({
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="as-hpa-cpu" className="text-xs">
-            targetCpuPercent
-          </Label>
+          <FieldLabel
+            htmlFor="as-hpa-cpu"
+            label="Target CPU %"
+            help="Target average CPU utilization; the HPA adds pods above this."
+          />
           <Input
             id="as-hpa-cpu"
             type="number"
@@ -82,9 +92,11 @@ function HpaEditor({
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="as-hpa-mem" className="text-xs">
-            targetMemoryPercent
-          </Label>
+          <FieldLabel
+            htmlFor="as-hpa-mem"
+            label="Target memory %"
+            help="Target average memory utilization; the HPA adds pods above this."
+          />
           <Input
             id="as-hpa-mem"
             type="number"
@@ -101,7 +113,7 @@ function HpaEditor({
         onChange={(v) => set("behaviorRaw", rawToText(v))}
         placeholder='{"scaleDown": {"stabilizationWindowSeconds": 300}}'
       />
-    </div>
+    </ConfigSection>
   );
 }
 
@@ -133,9 +145,11 @@ function TriggerRow({
     <div className="space-y-3 rounded-md border p-3">
       <div className="flex items-start gap-2">
         <div className="flex-1 space-y-1.5">
-          <Label htmlFor={`${idPrefix}-kind`} className="text-xs">
-            Trigger kind
-          </Label>
+          <FieldLabel
+            htmlFor={`${idPrefix}-kind`}
+            label="Trigger kind"
+            help="Which KEDA scaler drives this trigger."
+          />
           <Select
             value={value.kind}
             onValueChange={(v) => onChange({ ...value, kind: v })}
@@ -167,9 +181,11 @@ function TriggerRow({
       {value.kind === "cron" && (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div className="space-y-1.5">
-            <Label htmlFor={`${idPrefix}-cron-start`} className="text-xs">
-              start (cron)
-            </Label>
+            <FieldLabel
+              htmlFor={`${idPrefix}-cron-start`}
+              label="Start (cron)"
+              help="Cron expression marking the start of the scaled-up window."
+            />
             <Input
               id={`${idPrefix}-cron-start`}
               value={value.cron.start}
@@ -178,9 +194,11 @@ function TriggerRow({
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor={`${idPrefix}-cron-end`} className="text-xs">
-              end (cron)
-            </Label>
+            <FieldLabel
+              htmlFor={`${idPrefix}-cron-end`}
+              label="End (cron)"
+              help="Cron expression marking the end of the scaled-up window."
+            />
             <Input
               id={`${idPrefix}-cron-end`}
               value={value.cron.end}
@@ -189,9 +207,11 @@ function TriggerRow({
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor={`${idPrefix}-cron-replicas`} className="text-xs">
-              desiredReplicas
-            </Label>
+            <FieldLabel
+              htmlFor={`${idPrefix}-cron-replicas`}
+              label="Desired replicas"
+              help="Replica count to hold during the cron window."
+            />
             <Input
               id={`${idPrefix}-cron-replicas`}
               type="number"
@@ -201,9 +221,11 @@ function TriggerRow({
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor={`${idPrefix}-cron-tz`} className="text-xs">
-              timezone
-            </Label>
+            <FieldLabel
+              htmlFor={`${idPrefix}-cron-tz`}
+              label="Timezone"
+              help="IANA timezone the cron expressions are evaluated in."
+            />
             <Input
               id={`${idPrefix}-cron-tz`}
               value={value.cron.timezone}
@@ -217,9 +239,11 @@ function TriggerRow({
       {value.kind === "prometheus" && (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div className="space-y-1.5">
-            <Label htmlFor={`${idPrefix}-prom-addr`} className="text-xs">
-              serverAddress
-            </Label>
+            <FieldLabel
+              htmlFor={`${idPrefix}-prom-addr`}
+              label="Server address"
+              help="Prometheus server URL KEDA queries."
+            />
             <Input
               id={`${idPrefix}-prom-addr`}
               value={value.prometheus.serverAddress}
@@ -228,9 +252,11 @@ function TriggerRow({
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor={`${idPrefix}-prom-metric`} className="text-xs">
-              metricName
-            </Label>
+            <FieldLabel
+              htmlFor={`${idPrefix}-prom-metric`}
+              label="Metric name"
+              help="Name KEDA records the external metric under."
+            />
             <Input
               id={`${idPrefix}-prom-metric`}
               value={value.prometheus.metricName}
@@ -239,9 +265,11 @@ function TriggerRow({
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor={`${idPrefix}-prom-query`} className="text-xs">
-              query
-            </Label>
+            <FieldLabel
+              htmlFor={`${idPrefix}-prom-query`}
+              label="Query"
+              help="PromQL query whose result drives scaling."
+            />
             <Input
               id={`${idPrefix}-prom-query`}
               value={value.prometheus.query}
@@ -250,9 +278,11 @@ function TriggerRow({
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor={`${idPrefix}-prom-threshold`} className="text-xs">
-              threshold
-            </Label>
+            <FieldLabel
+              htmlFor={`${idPrefix}-prom-threshold`}
+              label="Threshold"
+              help="Target value per replica; KEDA scales to keep the query at this."
+            />
             <Input
               id={`${idPrefix}-prom-threshold`}
               value={value.prometheus.threshold}
@@ -289,16 +319,18 @@ function KedaEditor({
     onChange((prev) => ({ ...prev, [k]: v }));
 
   return (
-    <div className="space-y-4 rounded-lg border p-4">
-      <p className="text-xs text-muted-foreground">
-        KEDA requires the KEDA operator installed in the cluster.
-      </p>
-
+    <ConfigSection
+      title="KEDA ScaledObject"
+      description="Event-driven autoscaling (cron / Prometheus / raw triggers). Requires the KEDA operator installed in the cluster."
+      docsUrl="https://keda.sh/docs/latest/concepts/scaling-deployments/"
+    >
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
         <div className="space-y-1.5">
-          <Label htmlFor="as-keda-min" className="text-xs">
-            minReplicaCount
-          </Label>
+          <FieldLabel
+            htmlFor="as-keda-min"
+            label="Min replicas"
+            help="Fewest worker pods to keep; KEDA can scale to zero when 0."
+          />
           <Input
             id="as-keda-min"
             type="number"
@@ -308,9 +340,11 @@ function KedaEditor({
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="as-keda-max" className="text-xs">
-            maxReplicaCount
-          </Label>
+          <FieldLabel
+            htmlFor="as-keda-max"
+            label="Max replicas"
+            help="Most worker pods KEDA may scale to."
+          />
           <Input
             id="as-keda-max"
             type="number"
@@ -320,9 +354,11 @@ function KedaEditor({
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="as-keda-poll" className="text-xs">
-            pollingInterval
-          </Label>
+          <FieldLabel
+            htmlFor="as-keda-poll"
+            label="Polling interval (s)"
+            help="How often KEDA evaluates the triggers, in seconds."
+          />
           <Input
             id="as-keda-poll"
             type="number"
@@ -332,9 +368,11 @@ function KedaEditor({
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="as-keda-cooldown" className="text-xs">
-            cooldownPeriod
-          </Label>
+          <FieldLabel
+            htmlFor="as-keda-cooldown"
+            label="Cooldown (s)"
+            help="Seconds to wait after the last trigger before scaling back down."
+          />
           <Input
             id="as-keda-cooldown"
             type="number"
@@ -384,7 +422,7 @@ function KedaEditor({
         onChange={(v) => set("fallbackRaw", rawToText(v))}
         placeholder='{"failureThreshold": 3, "replicas": 2}'
       />
-    </div>
+    </ConfigSection>
   );
 }
 

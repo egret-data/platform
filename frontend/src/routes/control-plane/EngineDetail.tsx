@@ -19,6 +19,7 @@ import {
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -150,9 +151,7 @@ export default function EngineDetail() {
           </AlertDescription>
         </Alert>
       ) : !data ? (
-        <p className="py-14 text-center text-sm text-muted-foreground">
-          Loading…
-        </p>
+        <ListSkeleton rows={6} cols={3} />
       ) : (
         <EngineTabs engine={data} engineId={id} />
       )}
@@ -440,7 +439,7 @@ function StatusCard({
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              className="bg-destructive text-white hover:bg-destructive/90"
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={(e) => {
                 e.preventDefault();
                 restartMutation.mutate(engineId);
@@ -743,7 +742,7 @@ function CatalogTestSection({
 
       {testMutation.data?.ok && (
         <Alert>
-          <AlertDescription className="text-emerald-600">
+          <AlertDescription className="text-success">
             Connection OK
           </AlertDescription>
         </Alert>
@@ -844,9 +843,7 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
             </AlertDescription>
           </Alert>
         ) : !catalogs.data ? (
-          <p className="py-10 text-center text-sm text-muted-foreground">
-            Loading…
-          </p>
+          <ListSkeleton rows={5} cols={2} />
         ) : (
           <div className="flex flex-col gap-4 md:flex-row">
             <nav className="shrink-0 space-y-1 md:w-56">
@@ -909,7 +906,7 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
                   </AlertDescription>
                 </Alert>
               ) : !detail.data ? (
-                <p className="text-sm text-muted-foreground">Loading…</p>
+                <ListSkeleton rows={5} cols={2} />
               ) : (
                 <div className="space-y-4">
                   <CatalogForm
