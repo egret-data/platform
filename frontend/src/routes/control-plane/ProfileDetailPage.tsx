@@ -32,7 +32,9 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Table,
@@ -111,14 +113,20 @@ export default function ProfileDetailPage() {
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <Badge variant="secondary">{profile?.type ?? "trino"}</Badge>
+            {profiles.isLoading && !profile ? (
+              <Skeleton className="h-5 w-16" />
+            ) : (
+              <Badge variant="secondary">{profile?.type ?? "trino"}</Badge>
+            )}
           </div>
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3 p-5">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm text-muted-foreground">Engines:</span>
-            {profile && profile.engines.length > 0 ? (
+            {profiles.isLoading && !profile ? (
+              <Skeleton className="h-5 w-24" />
+            ) : profile && profile.engines.length > 0 ? (
               profile.engines.map((e) => (
                 <Badge key={e.id} variant="outline">
                   {e.name}
@@ -154,6 +162,23 @@ export default function ProfileDetailPage() {
         <Alert variant="destructive">
           <AlertDescription>
             {profiles.error?.message ?? "Failed to load profile."}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {seedDefaults.isError && (
+        <Alert variant="destructive">
+          <AlertDescription>
+            {(seedDefaults.error as ApiError)?.message ?? "Failed to seed default policies."}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {seedDefaults.isSuccess && (
+        <Alert>
+          <AlertDescription>
+            Seeded {seedDefaults.data.created} default{" "}
+            {seedDefaults.data.created === 1 ? "policy" : "policies"}.
           </AlertDescription>
         </Alert>
       )}
@@ -206,11 +231,16 @@ function PolicyTypeTable({
 
   const [deleteTarget, setDeleteTarget] = useState<PolicySummary | null>(null);
   const [togglingId, setTogglingId] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const del = useMutation({
     mutationFn: (id: number) => deletePolicy(id),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] }),
+    onSuccess: () => {
+      setError(null);
+      queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
+    },
+    onError: (e: unknown) =>
+      setError((e as ApiError)?.message ?? "Failed to delete policy."),
   });
 
   const toggleEnabled = useMutation({
@@ -218,8 +248,15 @@ function PolicyTypeTable({
       setPolicyEnabled(id, enabled),
     onMutate: ({ id }) => setTogglingId(id),
     onSettled: () => setTogglingId(null),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] }),
+    onSuccess: () => {
+      setError(null);
+      queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
+    },
+    onError: (e: unknown) => {
+      setError((e as ApiError)?.message ?? "Failed to update policy.");
+      // Refetch so the Switch snaps back to the real server state.
+      queryClient.invalidateQueries({ queryKey: ["control-plane", "policies"] });
+    },
   });
 
   const goToNew = () =>
@@ -245,7 +282,12 @@ function PolicyTypeTable({
           </Button>
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-3">
+        {error && (
+          <Alert variant="destructive">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
         <Table>
           <TableHeader>
             <TableRow>
@@ -350,7 +392,7 @@ function PolicyTypeTable({
                       {policies.error?.message ?? "Failed to load policies."}
                     </span>
                   ) : policies.isLoading ? (
-                    "Loading…"
+                    <ListSkeleton rows={4} cols={COLUMNS.length} />
                   ) : (
                     `No ${label.toLowerCase()} policies for this profile.`
                   )}

@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Download } from "lucide-react";
+import { Download, Server } from "lucide-react";
 
 import { type Profile, listProfiles } from "@/api/policies";
 import { ApiError } from "@/api/client";
@@ -139,11 +139,22 @@ export default function Policies() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-lg">Policy profiles</CardTitle>
-          <CardDescription>
-            Each engine enforces one profile; tag profiles carry classification-based
-            masking &amp; row-filters.
-          </CardDescription>
+          <div className="flex items-start justify-between gap-3">
+            <div className="space-y-1.5">
+              <CardTitle className="text-lg">Policy profiles</CardTitle>
+              <CardDescription>
+                Each engine enforces one profile; tag profiles carry classification-based
+                masking &amp; row-filters. Profiles are created automatically when you
+                provision an engine — there is no separate &ldquo;new profile&rdquo; step.
+              </CardDescription>
+            </div>
+            <Button asChild variant="outline" size="sm" className="shrink-0">
+              <Link to="/control-plane/engines">
+                <Server className="mr-1.5 h-4 w-4" />
+                Provision an engine
+              </Link>
+            </Button>
+          </div>
         </CardHeader>
         <CardContent className="space-y-4">
           <SummaryStrip
@@ -165,7 +176,7 @@ export default function Policies() {
               emptyText={
                 profiles.isError
                   ? (profiles.error?.message ?? "Failed to load profiles.")
-                  : "No profiles yet."
+                  : "No profiles yet — provision an engine to create one."
               }
               filters={
                 typeOptions.length > 1 ? (
