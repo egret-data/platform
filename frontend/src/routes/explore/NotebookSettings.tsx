@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { Loader2, BookOpen } from "lucide-react";
 import { toast } from "sonner";
@@ -23,12 +23,15 @@ export default function NotebookSettings() {
   const [engineIds, setEngineIds] = useState<Set<string>>(new Set());
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  // Seed checked state from server data whenever it loads/changes.
+  // Seed checked state from server data once per workspace. Guarded so a
+  // background refetch cannot re-seed and overwrite the user's unsaved toggles.
+  const hydratedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (data) {
+    if (data && hydratedRef.current !== ws) {
+      hydratedRef.current = ws;
       setEngineIds(new Set(data.engines.filter((e) => e.enabled).map((e) => e.id)));
     }
-  }, [data]);
+  }, [data, ws]);
 
   function toggleEngine(id: string) {
     setEngineIds((prev) => {

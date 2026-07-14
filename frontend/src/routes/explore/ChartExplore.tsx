@@ -33,6 +33,8 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { FieldZone } from "@/components/chart/config/FieldZone";
 import { SectionLabel } from "@/components/chart/settings/SectionLabel";
 import { pruneUnits } from "@/components/chart/temporal-units";
@@ -93,10 +95,14 @@ export default function ChartExplore() {
   const [drillMenu, setDrillMenu] = useState<{ ctx: DrillContext; x: number; y: number } | null>(null);
   const [recordsFilters, setRecordsFilters] = useState<ChartFilter[] | null>(null);
 
-  // hydrate from a saved chart once it loads (dataset/viz/controls + save dialog fields)
+  // hydrate from a saved chart once it loads (dataset/viz/controls + save dialog fields).
+  // Guarded so a mid-edit refetch/remount cannot re-seed and clobber in-progress edits;
+  // seeds exactly once per chart id.
+  const hydratedRef = useRef<string | null>(null);
   useEffect(() => {
     const c = existing.data;
-    if (!c) return;
+    if (!c || hydratedRef.current === id) return;
+    hydratedRef.current = id ?? "new";
     setDatasetId(c.dataset_id);
     setViz(c.viz_type);
     const p = c.params;
@@ -414,6 +420,29 @@ export default function ChartExplore() {
         <h1 className="mb-1 mt-2 text-lg font-semibold">Choose a visualization</h1>
         <p className="mb-4 text-sm text-muted-foreground">Pick a chart type to start building.</p>
         <ChartTypeGallery onSelect={(k) => { setViz(k); setSearchParams({ type: k }); }} />
+      </div>
+    );
+  }
+
+  // ── Edit mode: gate on the saved-chart fetch so we never render the blank
+  //    default builder while the chart is still loading or after it errors. ──
+  if (id && existing.isLoading) {
+    return (
+      <div className="mx-auto max-w-3xl p-6">
+        <Link className="text-xs text-muted-foreground hover:underline" to={`/explore/${ws}/charts`}>← Charts</Link>
+        <div className="mt-4">
+          <ListSkeleton rows={4} cols={1} />
+        </div>
+      </div>
+    );
+  }
+  if (id && existing.isError) {
+    return (
+      <div className="mx-auto max-w-3xl p-6">
+        <Link className="text-xs text-muted-foreground hover:underline" to={`/explore/${ws}/charts`}>← Charts</Link>
+        <Alert variant="destructive" className="mt-4">
+          <AlertDescription>Failed to load this chart. Please try again.</AlertDescription>
+        </Alert>
       </div>
     );
   }

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
@@ -26,7 +27,7 @@ export default function Dashboards() {
   const ws = useParams().workspace!;
   const nav = useNavigate();
   const [showTrash, setShowTrash] = useState(false);
-  const { data, isLoading } = useDashboards(ws, { trashed: showTrash });
+  const { data, isLoading, isError, error } = useDashboards(ws, { trashed: showTrash });
   const { create, remove, duplicate, trash, restore, addBookmark, removeBookmark } = useDashboardMutations(ws);
   const { data: folders = [] } = useFolders(ws, "dashboards");
   const setFolder = useSetFolder(ws, "dashboards");
@@ -232,8 +233,17 @@ export default function Dashboards() {
             <p className="text-muted-foreground">{onlyBookmarked ? "No bookmarked dashboards." : "No dashboards match the current filters."}</p>
           )}
         </>
+      ) : isError ? (
+        <Alert variant="destructive">
+          <AlertDescription>{(error as Error)?.message ?? "Failed to load dashboards."}</AlertDescription>
+        </Alert>
+      ) : showTrash ? (
+        <p className="text-muted-foreground">Trash is empty.</p>
       ) : (
-        <p className="text-muted-foreground">{showTrash ? "Trash is empty." : "No dashboards yet."}</p>
+        <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
+          <p>No dashboards yet. Compose charts into a shareable dashboard.</p>
+          <Button className="mt-3" onClick={() => setOpen(true)}>Create your first dashboard</Button>
+        </div>
       )}
 
       <FolderNameDialog

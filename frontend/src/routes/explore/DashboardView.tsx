@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Info, LayoutDashboard, Pencil, Star } from "lucide-react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { type Layout } from "react-grid-layout";
 import { useDashboard, useDashboardMutations, type DashboardCard as Card, type DashboardParameter } from "@/api/dashboards";
 import { useCharts, type Chart, type ChartFilter } from "@/api/charts";
@@ -51,7 +52,7 @@ function StaticOptions({ slug, values, onLoaded }: { slug: string; values: strin
 
 export default function DashboardView() {
   const { workspace: ws, id } = useParams() as { workspace: string; id: string };
-  const { data: dash, isLoading } = useDashboard(ws, id);
+  const { data: dash, isLoading, isError } = useDashboard(ws, id);
   const { data: charts } = useCharts(ws);
   const { update, restore: restoreMut, addBookmark, removeBookmark } = useDashboardMutations(ws);
   const [editing, setEditing] = useState(false);
@@ -96,6 +97,20 @@ export default function DashboardView() {
     setNewCardId(null);
   }, [id]);
 
+  if (isError) {
+    return (
+      <div className="p-4">
+        <Alert variant="destructive">
+          <AlertDescription>
+            Failed to load this dashboard. Please try again.{" "}
+            <Link to={`/explore/${ws}/dashboards`} className="font-medium underline">
+              Back to dashboards
+            </Link>
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
   if (isLoading || !dash) return <div className="p-4 text-muted-foreground">Loading…</div>;
 
   const dashboard = dash;

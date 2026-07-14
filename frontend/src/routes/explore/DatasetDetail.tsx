@@ -9,6 +9,8 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { useDataset, useRefreshDataset, useDeleteDataset, useUpdateDataset } from "@/api/datasets";
 import { ColumnsTab } from "@/components/dataset/ColumnsTab";
 import { MetricsTab } from "@/components/dataset/MetricsTab";
@@ -18,7 +20,7 @@ export default function DatasetDetail() {
   const { workspace: ws = "", id = "" } = useParams();
   const nav = useNavigate();
   const listHref = `/explore/${ws}/datasets`;
-  const { data: ds, isLoading } = useDataset(ws, id || null);
+  const { data: ds, isLoading, isError, error } = useDataset(ws, id || null);
   const refresh = useRefreshDataset(ws, id);
   const del = useDeleteDataset(ws);
   const update = useUpdateDataset(ws, id);
@@ -42,7 +44,16 @@ export default function DatasetDetail() {
     }
   }, [ds, searchParams]);
 
-  if (isLoading) return <div className="p-4 text-muted-foreground">Loading…</div>;
+  if (isLoading) return <div className="p-4"><ListSkeleton cols={3} /></div>;
+  if (isError)
+    return (
+      <div className="p-4">
+        <Alert variant="destructive">
+          <AlertDescription>{(error as Error)?.message ?? "Failed to load dataset."}</AlertDescription>
+        </Alert>
+        <Link className="mt-3 inline-block text-sm underline" to={listHref}>← Back to datasets</Link>
+      </div>
+    );
   if (!ds) return <div className="p-4">Not found. <Link className="underline" to={listHref}>Back</Link></div>;
 
   const source = ds.kind === "virtual" ? ds.sql : [ds.catalog, ds.schema, ds.table].filter(Boolean).join(".");
@@ -139,7 +150,7 @@ export default function DatasetDetail() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={() => del.mutate(id, { onSuccess: () => { toast.success("Deleted"); nav(listHref); } })}>
+              onClick={() => del.mutate(id, { onSuccess: () => { toast.success("Deleted"); nav(listHref); }, onError: (e) => toast.error(String((e as Error)?.message ?? e)) })}>
               Delete
             </AlertDialogAction>
           </AlertDialogFooter>

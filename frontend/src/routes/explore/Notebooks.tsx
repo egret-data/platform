@@ -22,6 +22,7 @@ import { RowActionsMenu } from "@/components/explore/RowActionsMenu";
 import { RelativeTime } from "@/components/explore/RelativeTime";
 import { SortableHeader, type SortState } from "@/components/explore/SortableHeader";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ShareDialog } from "@/components/sharing/ShareDialog";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { Badge } from "@/components/ui/badge";
@@ -254,7 +255,7 @@ export default function Notebooks() {
   const navigate = useNavigate();
 
   const [showTrash, setShowTrash] = useState(false);
-  const { data, isLoading } = useNotebooks(ws, { trashed: showTrash });
+  const { data, isLoading, isError, error } = useNotebooks(ws, { trashed: showTrash });
 
   const { data: folders = [] } = useFolders(ws, "notebooks");
   const setFolder = useSetFolder(ws, "notebooks");
@@ -488,6 +489,10 @@ export default function Notebooks() {
 
       {isLoading ? (
         <ListSkeleton cols={5} />
+      ) : isError ? (
+        <Alert variant="destructive">
+          <AlertDescription>{(error as Error)?.message ?? "Failed to load notebooks."}</AlertDescription>
+        </Alert>
       ) : hasData ? (
         <>
           <div className="mb-3 flex flex-wrap items-center gap-2">

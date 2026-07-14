@@ -321,7 +321,13 @@ describe("DatabasesPage", () => {
     fireEvent.click(confirmBtn);
 
     await waitFor(() => {
-      expect(deleteMutate).toHaveBeenCalledWith("db-1");
+      expect(deleteMutate).toHaveBeenCalledWith(
+        "db-1",
+        expect.objectContaining({
+          onSuccess: expect.any(Function),
+          onError: expect.any(Function),
+        }),
+      );
     });
   });
 

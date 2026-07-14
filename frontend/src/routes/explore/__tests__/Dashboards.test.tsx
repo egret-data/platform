@@ -44,6 +44,8 @@ describe("Dashboards list", () => {
   it("lists dashboards with their card counts", () => {
     renderAt();
     expect(screen.getByText("Ops")).toBeInTheDocument();
-    expect(screen.getByText((t) => t.includes("3"))).toBeInTheDocument();
+    // Card-count cell — exact match, so a relative-time like "3 weeks ago"
+    // (from updated_at) doesn't also match a loose `includes("3")`.
+    expect(screen.getByText("3")).toBeInTheDocument();
   });
 });

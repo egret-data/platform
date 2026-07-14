@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
@@ -32,7 +33,7 @@ function sourceOf(d: DatasetSummary): string {
 export default function Datasets() {
   const ws = useParams().workspace!;
   const [showTrash, setShowTrash] = useState(false);
-  const { data, isLoading } = useDatasets(ws, { trashed: showTrash });
+  const { data, isLoading, isError, error } = useDatasets(ws, { trashed: showTrash });
   const { data: databases } = useDatabases(ws);
   const { trash, restore, addBookmark, removeBookmark } = useDatasetListMutations(ws);
   const del = useDeleteDataset(ws);
@@ -178,6 +179,10 @@ export default function Datasets() {
 
       {isLoading ? (
         <ListSkeleton cols={6} />
+      ) : isError ? (
+        <Alert variant="destructive">
+          <AlertDescription>{(error as Error)?.message ?? "Failed to load datasets."}</AlertDescription>
+        </Alert>
       ) : hasData ? (
         <>
           <div className="mb-3 flex flex-wrap items-center gap-2">
