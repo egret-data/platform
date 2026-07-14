@@ -19,11 +19,11 @@ const WAREHOUSE: api.Warehouse = {
   lakekeeperWarehouseId: "lk-123",
 };
 
-function renderPage() {
+function renderPage(entry = "/control-plane/warehouses") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[entry]}>
         <Warehouses />
       </MemoryRouter>
     </QueryClientProvider>,
@@ -52,6 +52,31 @@ describe("Warehouses", () => {
     vi.mocked(api.listWarehouses).mockResolvedValue([]);
     renderPage();
     expect(await screen.findByText(/No warehouses yet/i)).toBeInTheDocument();
+  });
+
+  test("?workspace= filter scopes the list to one workspace + shows a filter banner", async () => {
+    vi.mocked(hooks.useMyWorkspaces).mockReturnValue({
+      data: [
+        { id: "ws1", slug: "eng", name: "Engineering" },
+        { id: "ws2", slug: "sales", name: "Sales" },
+      ],
+    } as ReturnType<typeof hooks.useMyWorkspaces>);
+    vi.mocked(api.listWarehouses).mockResolvedValue([
+      WAREHOUSE,
+      { ...WAREHOUSE, id: "w2", name: "sales-wh", workspaceId: "ws2" },
+    ]);
+    renderPage("/control-plane/warehouses?workspace=ws1");
+
+    // Only ws1's warehouse is shown; ws2's is filtered out.
+    expect(await screen.findByText("analytics")).toBeInTheDocument();
+    expect(screen.queryByText("sales-wh")).not.toBeInTheDocument();
+
+    // Filter banner names the workspace and offers a clear link.
+    expect(screen.getByText(/Filtered to workspace/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Show all workspaces/i })).toHaveAttribute(
+      "href",
+      "/control-plane/warehouses",
+    );
   });
 
   test("opens the Add dialog", async () => {

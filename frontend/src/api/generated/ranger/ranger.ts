@@ -691,6 +691,11 @@ export type rangerDownloadTagsResponse200 = {
   status: 200
 }
 
+export type rangerDownloadTagsResponse304 = {
+  data: void
+  status: 304
+}
+
 export type rangerDownloadTagsResponse401 = {
   data: void
   status: 401
@@ -709,7 +714,7 @@ export type rangerDownloadTagsResponse500 = {
 export type rangerDownloadTagsResponseSuccess = (rangerDownloadTagsResponse200) & {
   headers: Headers;
 };
-export type rangerDownloadTagsResponseError = (rangerDownloadTagsResponse401 | rangerDownloadTagsResponse404 | rangerDownloadTagsResponse500) & {
+export type rangerDownloadTagsResponseError = (rangerDownloadTagsResponse304 | rangerDownloadTagsResponse401 | rangerDownloadTagsResponse404 | rangerDownloadTagsResponse500) & {
   headers: Headers;
 };
 
@@ -732,7 +737,9 @@ export const getRangerDownloadTagsUrl = (service: string,
 }
 
 /**
- * Returns an empty well-formed tag payload so the plugin doesn't error (tag policies deferred).
+ * Serves the real resource→tag mapping (`catalog_tag_assignments`) for the
+ * service's warehouse(s) as a Ranger `ServiceTags`. Returns 304 when the
+ * plugin's cached `tagVersion` matches the current one; 200 otherwise.
  * @summary `GET /tags/download/{service}?lastKnownVersion=N`
  */
 export const rangerDownloadTags = async (service: string,

@@ -28,7 +28,8 @@ import type {
   Ack,
   ErrorBody,
   ObjectGrantBody,
-  ObjectGrantDto
+  ObjectGrantDto,
+  TagDto
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -418,4 +419,371 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getSharesGrantDeleteMutationOptions(options), queryClient);
+    }
+    export type sharesObjectTagsListResponse200 = {
+  data: TagDto[]
+  status: 200
+}
+
+export type sharesObjectTagsListResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type sharesObjectTagsListResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type sharesObjectTagsListResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type sharesObjectTagsListResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type sharesObjectTagsListResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type sharesObjectTagsListResponseSuccess = (sharesObjectTagsListResponse200) & {
+  headers: Headers;
+};
+export type sharesObjectTagsListResponseError = (sharesObjectTagsListResponse400 | sharesObjectTagsListResponse401 | sharesObjectTagsListResponse403 | sharesObjectTagsListResponse404 | sharesObjectTagsListResponse500) & {
+  headers: Headers;
+};
+
+export type sharesObjectTagsListResponse = (sharesObjectTagsListResponseSuccess | sharesObjectTagsListResponseError)
+
+export const getSharesObjectTagsListUrl = (workspace: string,
+    kind: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/objects/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/tags`
+}
+
+export const sharesObjectTagsList = async (workspace: string,
+    kind: string,
+    id: string, options?: RequestInit): Promise<sharesObjectTagsListResponse> => {
+
+  return customInstance<sharesObjectTagsListResponse>(getSharesObjectTagsListUrl(workspace,kind,id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getSharesObjectTagsListQueryKey = (workspace: string,
+    kind: string,
+    id: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/objects/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/tags`
+    ] as const;
+    }
+
+
+export const getSharesObjectTagsListQueryOptions = <TData = Awaited<ReturnType<typeof sharesObjectTagsList>>, TError = ErrorBody>(workspace: string,
+    kind: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof sharesObjectTagsList>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getSharesObjectTagsListQueryKey(workspace,kind,id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof sharesObjectTagsList>>> = ({ signal }) => sharesObjectTagsList(workspace,kind,id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && kind !== null && kind !== undefined && id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof sharesObjectTagsList>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type SharesObjectTagsListQueryResult = NonNullable<Awaited<ReturnType<typeof sharesObjectTagsList>>>
+export type SharesObjectTagsListQueryError = ErrorBody
+
+
+export function useSharesObjectTagsList<TData = Awaited<ReturnType<typeof sharesObjectTagsList>>, TError = ErrorBody>(
+ workspace: string,
+    kind: string,
+    id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof sharesObjectTagsList>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof sharesObjectTagsList>>,
+          TError,
+          Awaited<ReturnType<typeof sharesObjectTagsList>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useSharesObjectTagsList<TData = Awaited<ReturnType<typeof sharesObjectTagsList>>, TError = ErrorBody>(
+ workspace: string,
+    kind: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof sharesObjectTagsList>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof sharesObjectTagsList>>,
+          TError,
+          Awaited<ReturnType<typeof sharesObjectTagsList>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useSharesObjectTagsList<TData = Awaited<ReturnType<typeof sharesObjectTagsList>>, TError = ErrorBody>(
+ workspace: string,
+    kind: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof sharesObjectTagsList>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useSharesObjectTagsList<TData = Awaited<ReturnType<typeof sharesObjectTagsList>>, TError = ErrorBody>(
+ workspace: string,
+    kind: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof sharesObjectTagsList>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getSharesObjectTagsListQueryOptions(workspace,kind,id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type sharesObjectTagAssignResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type sharesObjectTagAssignResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type sharesObjectTagAssignResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type sharesObjectTagAssignResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type sharesObjectTagAssignResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type sharesObjectTagAssignResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type sharesObjectTagAssignResponseSuccess = (sharesObjectTagAssignResponse200) & {
+  headers: Headers;
+};
+export type sharesObjectTagAssignResponseError = (sharesObjectTagAssignResponse400 | sharesObjectTagAssignResponse401 | sharesObjectTagAssignResponse403 | sharesObjectTagAssignResponse404 | sharesObjectTagAssignResponse500) & {
+  headers: Headers;
+};
+
+export type sharesObjectTagAssignResponse = (sharesObjectTagAssignResponseSuccess | sharesObjectTagAssignResponseError)
+
+export const getSharesObjectTagAssignUrl = (workspace: string,
+    kind: string,
+    id: string,
+    tagId: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/objects/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}`
+}
+
+export const sharesObjectTagAssign = async (workspace: string,
+    kind: string,
+    id: string,
+    tagId: string, options?: RequestInit): Promise<sharesObjectTagAssignResponse> => {
+
+  return customInstance<sharesObjectTagAssignResponse>(getSharesObjectTagAssignUrl(workspace,kind,id,tagId),
+  {
+    ...options,
+    method: 'PUT'
+
+
+  }
+);}
+
+
+
+
+
+export const getSharesObjectTagAssignMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sharesObjectTagAssign>>, TError,{workspace: string;kind: string;id: string;tagId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof sharesObjectTagAssign>>, TError,{workspace: string;kind: string;id: string;tagId: string}, TContext> => {
+
+const mutationKey = ['sharesObjectTagAssign'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof sharesObjectTagAssign>>, {workspace: string;kind: string;id: string;tagId: string}> = (props) => {
+          const {workspace,kind,id,tagId} = props ?? {};
+
+          return  sharesObjectTagAssign(workspace,kind,id,tagId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SharesObjectTagAssignMutationResult = NonNullable<Awaited<ReturnType<typeof sharesObjectTagAssign>>>
+
+    export type SharesObjectTagAssignMutationError = ErrorBody
+
+    export const useSharesObjectTagAssign = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sharesObjectTagAssign>>, TError,{workspace: string;kind: string;id: string;tagId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof sharesObjectTagAssign>>,
+        TError,
+        {workspace: string;kind: string;id: string;tagId: string},
+        TContext
+      > => {
+      return useMutation(getSharesObjectTagAssignMutationOptions(options), queryClient);
+    }
+    export type sharesObjectTagUnassignResponse200 = {
+  data: Ack
+  status: 200
+}
+
+export type sharesObjectTagUnassignResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type sharesObjectTagUnassignResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type sharesObjectTagUnassignResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type sharesObjectTagUnassignResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type sharesObjectTagUnassignResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type sharesObjectTagUnassignResponseSuccess = (sharesObjectTagUnassignResponse200) & {
+  headers: Headers;
+};
+export type sharesObjectTagUnassignResponseError = (sharesObjectTagUnassignResponse400 | sharesObjectTagUnassignResponse401 | sharesObjectTagUnassignResponse403 | sharesObjectTagUnassignResponse404 | sharesObjectTagUnassignResponse500) & {
+  headers: Headers;
+};
+
+export type sharesObjectTagUnassignResponse = (sharesObjectTagUnassignResponseSuccess | sharesObjectTagUnassignResponseError)
+
+export const getSharesObjectTagUnassignUrl = (workspace: string,
+    kind: string,
+    id: string,
+    tagId: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/objects/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}`
+}
+
+export const sharesObjectTagUnassign = async (workspace: string,
+    kind: string,
+    id: string,
+    tagId: string, options?: RequestInit): Promise<sharesObjectTagUnassignResponse> => {
+
+  return customInstance<sharesObjectTagUnassignResponse>(getSharesObjectTagUnassignUrl(workspace,kind,id,tagId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getSharesObjectTagUnassignMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sharesObjectTagUnassign>>, TError,{workspace: string;kind: string;id: string;tagId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof sharesObjectTagUnassign>>, TError,{workspace: string;kind: string;id: string;tagId: string}, TContext> => {
+
+const mutationKey = ['sharesObjectTagUnassign'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof sharesObjectTagUnassign>>, {workspace: string;kind: string;id: string;tagId: string}> = (props) => {
+          const {workspace,kind,id,tagId} = props ?? {};
+
+          return  sharesObjectTagUnassign(workspace,kind,id,tagId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SharesObjectTagUnassignMutationResult = NonNullable<Awaited<ReturnType<typeof sharesObjectTagUnassign>>>
+
+    export type SharesObjectTagUnassignMutationError = ErrorBody
+
+    export const useSharesObjectTagUnassign = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sharesObjectTagUnassign>>, TError,{workspace: string;kind: string;id: string;tagId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof sharesObjectTagUnassign>>,
+        TError,
+        {workspace: string;kind: string;id: string;tagId: string},
+        TContext
+      > => {
+      return useMutation(getSharesObjectTagUnassignMutationOptions(options), queryClient);
     }

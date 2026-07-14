@@ -11,4 +11,9 @@ export interface WorkspaceDto {
   slug: string;
   name: string;
   status: string;
+  created_at: string;
+  /** @nullable */
+  created_by?: string | null;
+  /** @nullable */
+  owner_name?: string | null;
 }

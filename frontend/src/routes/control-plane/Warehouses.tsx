@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Boxes, Loader2, Plus, Trash2 } from "lucide-react";
 
@@ -79,8 +79,12 @@ export default function Warehouses() {
   const [addOpen, setAddOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Warehouse | null>(null);
 
-  const rows = warehouses.data ?? [];
+  // Optional `?workspace=<id>` filter — set when arriving from a workspace's
+  // Resources tab so the list is scoped to that one workspace's warehouses.
+  const [searchParams] = useSearchParams();
+  const wsFilter = searchParams.get("workspace");
   const wsName = (id: string) => workspaces.data?.find((w) => w.id === id)?.name ?? id.slice(0, 8);
+  const rows = (warehouses.data ?? []).filter((w) => !wsFilter || w.workspaceId === wsFilter);
   const storageName = (id: string) => storage.data?.find((s) => s.id === id)?.name ?? id.slice(0, 8);
 
   return (
@@ -120,6 +124,16 @@ export default function Warehouses() {
             />
           );
         })()}
+        {wsFilter && (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-sm">
+            <span className="text-muted-foreground">
+              Filtered to workspace <span className="font-medium text-foreground">{wsName(wsFilter)}</span>
+            </span>
+            <Link to="/control-plane/warehouses" className="ml-auto text-primary hover:underline">
+              Show all workspaces
+            </Link>
+          </div>
+        )}
         {warehouses.isError ? (
           <Alert variant="destructive">
             <AlertDescription>Failed to load warehouses. Please try again.</AlertDescription>
@@ -139,7 +153,11 @@ export default function Warehouses() {
               {rows.length === 0 ? (
                 <TableRow className="hover:bg-transparent">
                   <TableCell colSpan={COLUMNS.length} className="py-10 text-center text-muted-foreground">
-                    {warehouses.isLoading ? "Loading…" : "No warehouses yet — add one to get started."}
+                    {warehouses.isLoading
+                      ? "Loading…"
+                      : wsFilter
+                        ? "No warehouses for this workspace."
+                        : "No warehouses yet — add one to get started."}
                   </TableCell>
                 </TableRow>
               ) : (

@@ -58,6 +58,9 @@ pub struct WorkspaceDto {
     pub slug: String,
     pub name: String,
     pub status: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub created_by: Option<String>,
+    pub owner_name: Option<String>,
 }
 impl From<crate::model::Workspace> for WorkspaceDto {
     fn from(w: crate::model::Workspace) -> Self {
@@ -66,8 +69,22 @@ impl From<crate::model::Workspace> for WorkspaceDto {
             slug: w.slug,
             name: w.name,
             status: w.status,
+            created_at: w.created_at,
+            created_by: w.created_by.map(|u| u.to_string()),
+            owner_name: w.owner_name,
         }
     }
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct WorkspaceStatsDto {
+    pub member_count: i64,
+    pub query_count: i64,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct TransferOwner {
+    pub new_owner_id: String,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -92,6 +109,9 @@ pub fn admin_workspace_router() -> Router<WorkspaceState> {
             "/workspaces/{id}",
             get(get_ws).put(update_ws).delete(archive_ws),
         )
+        .route("/workspaces/{id}/restore", post(restore_ws))
+        .route("/workspaces/{id}/stats", get(workspace_stats))
+        .route("/workspaces/{id}/transfer", post(transfer_owner))
 }
 
 #[utoipa::path(
@@ -242,6 +262,128 @@ async fn archive_ws(
         .await
         .map_err(AuthError)?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/workspaces/{id}/stats",
+    tag = "admin-workspaces",
+    params(("id" = Uuid, Path, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Workspace usage stats", body = WorkspaceStatsDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing platform permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn workspace_stats(
+    State(st): State<WorkspaceState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<WorkspaceStatsDto>, AuthError> {
+    egret_core::authz::require(&*st.pdp, &p, "workspace:read")
+        .await
+        .map_err(AuthError)?;
+    let wid = WorkspaceId(id);
+    let member_count = st.members.list(wid).await.map_err(AuthError)?.len() as i64;
+    let query_count = st.workspaces.count_queries(wid).await.map_err(AuthError)?;
+    Ok(Json(WorkspaceStatsDto {
+        member_count,
+        query_count,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/admin/workspaces/{id}/restore",
+    tag = "admin-workspaces",
+    params(("id" = Uuid, Path, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Workspace restored", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing platform permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn restore_ws(
+    State(st): State<WorkspaceState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AuthError> {
+    egret_core::authz::require(&*st.pdp, &p, "workspace:archive")
+        .await
+        .map_err(AuthError)?;
+    st.workspaces
+        .set_status(WorkspaceId(id), "active")
+        .await
+        .map_err(AuthError)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/admin/workspaces/{id}/transfer",
+    tag = "admin-workspaces",
+    params(("id" = Uuid, Path, description = "Workspace id")),
+    request_body = TransferOwner,
+    responses(
+        (status = 200, description = "Workspace updated", body = WorkspaceDto),
+        (status = 400, description = "Invalid owner id", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing platform permission", body = ErrorBody),
+        (status = 404, description = "No such workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn transfer_owner(
+    State(st): State<WorkspaceState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(body): Json<TransferOwner>,
+) -> Result<Json<WorkspaceDto>, AuthError> {
+    egret_core::authz::require(&*st.pdp, &p, "workspace:update")
+        .await
+        .map_err(AuthError)?;
+    let new_owner = Uuid::parse_str(&body.new_owner_id)
+        .map_err(|_| AuthError(Error::InvalidInput("new_owner_id must be a uuid".into())))?;
+    let wid = WorkspaceId(id);
+
+    // Ensure the workspace exists (404 otherwise).
+    let _ = st
+        .workspaces
+        .get_by_id(wid)
+        .await
+        .map_err(AuthError)?
+        .ok_or(AuthError(Error::NotFound("workspace".into())))?;
+
+    // Make the new owner a ws_admin (idempotent upsert; role-replace if already
+    // a member). `MemberRepo::add(ws, ptype, pid, role, by)` — `by` is a UserId.
+    st.members
+        .add(wid, "user", new_owner, "ws_admin", p.user_id)
+        .await
+        .map_err(AuthError)?;
+
+    st.workspaces
+        .set_owner(wid, UserId(new_owner))
+        .await
+        .map_err(AuthError)?;
+
+    st.audit.emit(egret_audit::AuditEvent::Mutation {
+        actor: Some(p.user_id.0),
+        workspace_id: Some(id),
+        action: "workspace:transfer_owner".into(),
+        resource_type: "workspace".into(),
+        resource_id: Some(id.to_string()),
+        detail: serde_json::json!({ "new_owner_id": new_owner }),
+    });
+
+    let ws = st
+        .workspaces
+        .get_by_id(wid)
+        .await
+        .map_err(AuthError)?
+        .ok_or(AuthError(Error::NotFound("workspace".into())))?;
+    Ok(Json(ws.into()))
 }
 
 // ── Me routes (Task 1 / Phase 0b) ────────────────────────────────────────────
@@ -1179,8 +1321,8 @@ pub struct AccessRequestApi;
 /// OpenAPI fragment for the platform-admin workspace router (`/api/admin/workspaces`).
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(create_ws, list_ws, get_ws, update_ws, archive_ws),
-    components(schemas(WorkspaceDto, CreateWorkspace, UpdateWorkspace, Ack, ErrorBody)),
+    paths(create_ws, list_ws, get_ws, update_ws, archive_ws, restore_ws, workspace_stats, transfer_owner),
+    components(schemas(WorkspaceDto, WorkspaceStatsDto, TransferOwner, CreateWorkspace, UpdateWorkspace, Ack, ErrorBody)),
     tags((name = "admin-workspaces", description = "Platform-admin workspace lifecycle")),
 )]
 pub struct AdminWorkspaceApi;
