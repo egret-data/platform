@@ -93,7 +93,21 @@ export default function UsersPage() {
 
   const columns: Column<AccessUser>[] = [
     { key: "email", label: "Email", sortable: true, className: "font-medium", value: (u) => u.email, cell: (u) => u.email },
-    { key: "name", label: "Name", sortable: true, value: (u) => u.name, cell: (u) => u.name },
+    {
+      key: "name",
+      label: "Name",
+      sortable: true,
+      value: (u) => u.name,
+      cell: (u) => (
+        <button
+          type="button"
+          onClick={() => setEditTarget(u)}
+          className="font-medium text-primary hover:underline"
+        >
+          {u.name}
+        </button>
+      ),
+    },
     { key: "provider", label: "Provider", cell: (u) => <Badge variant="outline">{u.provider}</Badge> },
     {
       key: "status",

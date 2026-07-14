@@ -211,7 +211,7 @@ function EngineTable({
               <TableCell className="font-medium">
                 <Link
                   to={`/control-plane/engines/${engine.id}`}
-                  className="hover:underline"
+                  className="text-primary hover:underline"
                 >
                   {engine.name}
                 </Link>
