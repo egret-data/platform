@@ -18,6 +18,7 @@ import {
   testEngineCatalog,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
+import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -172,6 +173,9 @@ function EngineTabs({
   engineId: string;
 }) {
   const cfg = useEngineConfigForm(engine);
+  // Warn before refresh/close while a config or security edit is unsaved — these
+  // saves re-provision the engine, so a lost edit is expensive.
+  useUnsavedChangesWarning(cfg.dirty);
 
   return (
     <Tabs defaultValue="overview" className="space-y-5">

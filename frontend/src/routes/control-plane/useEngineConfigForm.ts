@@ -1374,7 +1374,10 @@ export function useEngineConfigForm(
     error,
     dirty,
     saving: saveMutation.isPending,
-    saved: saveMutation.isSuccess,
+    // Transient: the "Saved" banner clears the moment the user edits again, so it
+    // never lingers next to unsaved changes and mislead them into thinking those
+    // are persisted.
+    saved: saveMutation.isSuccess && !dirty,
     save,
     sectionCounts: sectionCountsValue,
     builtTrinoConfig,
