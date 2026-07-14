@@ -129,6 +129,9 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
         // which add X-Forwarded-* headers. Trino (Jetty) rejects requests carrying
         // those unless process-forwarded is enabled, so set it unconditionally.
         out.push_str("http-server.process-forwarded=true\n");
+        if spec.ranger.is_some() {
+            out.push_str("access-control.config-files=/etc/trino/access-control.properties\n");
+        }
         if let Some(auth) = &cfg.auth {
             if let Some(t) = auth_type(auth) {
                 out.push_str(&format!("http-server.authentication.type={t}\n"));
@@ -312,6 +315,31 @@ pub fn trino_config_map(spec: &EngineSpec) -> Value {
                 ),
             );
         }
+    }
+
+    if let Some(r) = &spec.ranger {
+        data.insert(
+            "access-control.properties".into(),
+            json!(format!(
+                "access-control.name=ranger\nranger.service.name={}\nranger.plugin.config.resource=/etc/trino/ranger-trino-security.xml\n",
+                r.service_name
+            )),
+        );
+        data.insert(
+            "ranger-trino-security.xml".into(),
+            json!(format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<configuration>\n\
+  <property><name>ranger.plugin.trino.service.name</name><value>{svc}</value></property>\n\
+  <property><name>ranger.plugin.trino.policy.rest.url</name><value>{url}</value></property>\n\
+  <property><name>ranger.plugin.trino.policy.source.impl</name><value>org.apache.ranger.admin.client.RangerAdminRESTClient</value></property>\n\
+  <property><name>ranger.plugin.trino.policy.cache.dir</name><value>/tmp/ranger/{svc}/policycache</value></property>\n\
+  <property><name>ranger.plugin.trino.policy.pollIntervalMs</name><value>{poll}</value></property>\n\
+  <property><name>ranger.plugin.trino.policy.rest.client.connection.timeoutMs</name><value>120000</value></property>\n\
+  <property><name>ranger.plugin.trino.policy.rest.client.read.timeoutMs</name><value>30000</value></property>\n\
+</configuration>\n",
+                svc = r.service_name, url = r.egret_url, poll = r.poll_interval_ms
+            )),
+        );
     }
 
     json!({
@@ -565,6 +593,10 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
             volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/password-authenticator.properties", "subPath": "password-authenticator.properties" }));
             volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/auth/password/password.db", "subPath": "password.db" }));
         }
+    }
+    if spec.ranger.is_some() {
+        volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/access-control.properties", "subPath": "access-control.properties" }));
+        volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/ranger-trino-security.xml", "subPath": "ranger-trino-security.xml" }));
     }
 
     // probes: readiness always (generous default), liveness/startup only if configured.
@@ -1252,7 +1284,60 @@ mod tests {
                 properties: props,
                 env: cat_env,
             }],
+            ranger: None,
         }
+    }
+
+    #[test]
+    fn ranger_binding_templates_access_control() {
+        let mut spec = sample_spec();
+        spec.ranger = Some(RangerBinding {
+            service_name: "demo2".into(),
+            egret_url: "http://host.docker.internal:8080".into(),
+            poll_interval_ms: 30_000,
+        });
+        let cm = trino_config_map(&spec);
+        let data = &cm["data"];
+        let ac = data["access-control.properties"].as_str().unwrap();
+        assert!(ac.contains("access-control.name=ranger"));
+        assert!(ac.contains("ranger.service.name=demo2"));
+        assert!(ac.contains("ranger.plugin.config.resource=/etc/trino/ranger-trino-security.xml"));
+        let xml = data["ranger-trino-security.xml"].as_str().unwrap();
+        assert!(xml.contains("<name>ranger.plugin.trino.policy.rest.url</name>"));
+        assert!(xml.contains("<value>http://host.docker.internal:8080</value>"));
+        assert!(xml.contains("<name>ranger.plugin.trino.service.name</name>"));
+        assert!(xml.contains("<value>demo2</value>"));
+        let cc = data["config-coordinator.properties"].as_str().unwrap();
+        assert!(cc.contains("access-control.config-files=/etc/trino/access-control.properties"));
+    }
+    #[test]
+    fn no_ranger_binding_omits_access_control() {
+        let cm = trino_config_map(&sample_spec());
+        assert!(cm["data"].get("access-control.properties").is_none());
+        assert!(cm["data"].get("ranger-trino-security.xml").is_none());
+        assert!(!cm["data"]["config-coordinator.properties"]
+            .as_str()
+            .unwrap()
+            .contains("access-control.config-files"));
+    }
+    #[test]
+    fn ranger_binding_mounts_config_files() {
+        let mut spec = sample_spec();
+        spec.ranger = Some(RangerBinding {
+            service_name: "demo2".into(),
+            egret_url: "http://host.docker.internal:8080".into(),
+            poll_interval_ms: 30_000,
+        });
+        let dep = trino_deployment(&spec, Role::Coordinator);
+        let mounts = dep["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap();
+        let paths: Vec<&str> = mounts
+            .iter()
+            .map(|m| m["mountPath"].as_str().unwrap())
+            .collect();
+        assert!(paths.contains(&"/etc/trino/access-control.properties"));
+        assert!(paths.contains(&"/etc/trino/ranger-trino-security.xml"));
     }
 
     #[test]

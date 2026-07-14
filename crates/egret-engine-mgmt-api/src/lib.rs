@@ -352,6 +352,20 @@ pub struct CatalogSpec {
     pub env: BTreeMap<String, String>,
 }
 
+/// Ranger tag/policy enforcement wiring (Access P3.2). `Some` when the engine is
+/// bound to a policy profile; the orchestrator then templates
+/// `access-control.properties` + `ranger-trino-security.xml` so the bundled
+/// `apache-ranger` plugin polls egret's Ranger-Admin `/service` download API.
+#[derive(Clone, Debug)]
+pub struct RangerBinding {
+    /// `ranger.service.name` — the bound trino profile's name.
+    pub service_name: String,
+    /// Base URL the plugin polls; egret appends `/service/...`. Reuse `engine_egret_url`.
+    pub egret_url: String,
+    /// Policy/tag poll interval in ms (default 30_000).
+    pub poll_interval_ms: u32,
+}
+
 /// Desired state of a Trino engine.
 #[derive(Clone, Debug)]
 pub struct EngineSpec {
@@ -360,6 +374,8 @@ pub struct EngineSpec {
     pub image_version: String, // official trinodb/trino tag, e.g. "470"
     pub config: TrinoConfig,
     pub catalogs: Vec<CatalogSpec>,
+    /// Ranger enforcement wiring; `None` = no access control templated (open engine).
+    pub ranger: Option<RangerBinding>,
 }
 
 #[derive(Clone, Debug, Default)]
