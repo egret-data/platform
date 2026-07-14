@@ -60,6 +60,11 @@ pub struct DatabaseDetailDto {
     pub has_secret: bool,
     pub status: String,
     pub delegated: bool,
+    /// Set (as a UUID string) when this connection was materialized by an
+    /// engine→workspace assignment (read-only, provisioned by egret); `None`
+    /// for a self-service connection. The frontend uses it to split the
+    /// workspace Engines page into provisioned vs. self-service groups.
+    pub engine_id: Option<String>,
 }
 
 impl From<Database> for DatabaseDetailDto {
@@ -74,6 +79,7 @@ impl From<Database> for DatabaseDetailDto {
             has_secret: d.has_secret,
             status: d.status,
             delegated: d.delegated,
+            engine_id: d.engine_id.map(|u| u.to_string()),
         }
     }
 }

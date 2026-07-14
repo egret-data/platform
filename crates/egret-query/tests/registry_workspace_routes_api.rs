@@ -524,6 +524,85 @@ async fn provisioned_databases_are_read_only() {
     );
 }
 
+/// B1: the workspace database list/detail DTO carries `engine_id` so the
+/// frontend can tell a provisioned (read-only) row from a self-service one.
+#[tokio::test]
+async fn ws_database_list_and_detail_expose_engine_id() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, f.ws_a, "admin", "ws_admin").await;
+
+    let engine_id = seed_engine(&f.db, f.ws_a.0).await;
+    let provisioned = f
+        .repo
+        .create_provisioned(
+            f.ws_a.0,
+            engine_id,
+            &format!("prov-{}", Uuid::new_v4().simple()),
+            "trino",
+            "trino-prod-coordinator.egret-engines.svc",
+            8080,
+            &serde_json::json!({}),
+            None,
+        )
+        .await
+        .expect("materialize provisioned connection");
+
+    let base = format!("/ws/{}/databases", f.slug_a);
+
+    // LIST carries engine_id on the provisioned row.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &base, &token, None))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list; body={json}");
+    let row = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"].as_str() == Some(provisioned.id.to_string().as_str()))
+        .expect("provisioned row listed");
+    assert_eq!(
+        row["engine_id"].as_str(),
+        Some(engine_id.to_string().as_str()),
+        "list DTO carries engine_id; body={row}"
+    );
+
+    // DETAIL carries engine_id too.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &format!("{base}/{}", provisioned.id), &token, None))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "detail; body={json}");
+    assert_eq!(
+        json["engine_id"].as_str(),
+        Some(engine_id.to_string().as_str()),
+        "detail DTO carries engine_id; body={json}"
+    );
+
+    // A self-service connection has engine_id null.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &base, &token, Some(db_body("self-service"))))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "create self-service; body={json}");
+    assert!(
+        json["engine_id"].is_null(),
+        "a self-service connection has engine_id null; body={json}"
+    );
+}
+
 #[tokio::test]
 async fn test_unsaved_unreachable_host_is_200_not_ok() {
     let Some(f) = setup().await else {
