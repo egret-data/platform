@@ -127,6 +127,19 @@ impl WorkspaceRepo {
         Ok(())
     }
 
+    /// Count queries submitted in a workspace. Raw COUNT against the stable
+    /// `query.queries` table (created in migration 0009, moved into the `query`
+    /// schema in 0066); no Rust dependency on egret-query.
+    pub async fn count_queries(&self, id: WorkspaceId) -> Result<i64> {
+        let (n,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM query.queries WHERE workspace_id = $1")
+                .bind(id.0)
+                .fetch_one(&self.db.pool)
+                .await
+                .map_err(db_err)?;
+        Ok(n)
+    }
+
     /// Workspaces the principal can access: all active if `include_all` (platform_admin),
     /// else those where the user is a member directly or via a group.
     pub async fn list_for_principal(

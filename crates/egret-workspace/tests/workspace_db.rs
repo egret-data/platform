@@ -519,6 +519,57 @@ async fn workspace_dto_exposes_owner_and_created() {
 }
 
 #[tokio::test]
+async fn workspace_stats_returns_member_and_query_counts() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let (st, admin, cookie) = admin_ctx(&db).await;
+    let app = axum::Router::new()
+        .nest("/api/admin", admin_workspace_router())
+        .with_state(st.clone());
+
+    let created = body_json(
+        send(
+            &app,
+            &cookie,
+            "POST",
+            "/api/admin/workspaces",
+            Some(serde_json::json!({"slug": uniq("stats"), "name": "Stats WS"})),
+        )
+        .await,
+    )
+    .await;
+    let ws_id = created["id"].as_str().unwrap();
+    let wid = egret_core::WorkspaceId(uuid::Uuid::parse_str(ws_id).unwrap());
+
+    // Creation does not auto-add the creator to `access_grants`, so seed one
+    // member directly through the repo to exercise the count.
+    let member = seed_user(&db).await;
+    st.members
+        .add(wid, "user", member.0, "ws_viewer", admin)
+        .await
+        .unwrap();
+
+    let body = body_json(
+        send(
+            &app,
+            &cookie,
+            "GET",
+            &format!("/api/admin/workspaces/{ws_id}/stats"),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        body["member_count"].as_i64().unwrap() >= 1,
+        "seeded member counts"
+    );
+    assert_eq!(body["query_count"], 0);
+}
+
+#[tokio::test]
 async fn create_workspace_requires_platform_permission() {
     let Some(db) = connect().await else {
         eprintln!("skip");

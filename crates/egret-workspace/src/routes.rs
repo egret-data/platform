@@ -76,6 +76,12 @@ impl From<crate::model::Workspace> for WorkspaceDto {
     }
 }
 
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct WorkspaceStatsDto {
+    pub member_count: i64,
+    pub query_count: i64,
+}
+
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateWorkspace {
     pub slug: String,
@@ -99,6 +105,7 @@ pub fn admin_workspace_router() -> Router<WorkspaceState> {
             get(get_ws).put(update_ws).delete(archive_ws),
         )
         .route("/workspaces/{id}/restore", post(restore_ws))
+        .route("/workspaces/{id}/stats", get(workspace_stats))
 }
 
 #[utoipa::path(
@@ -249,6 +256,35 @@ async fn archive_ws(
         .await
         .map_err(AuthError)?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/workspaces/{id}/stats",
+    tag = "admin-workspaces",
+    params(("id" = Uuid, Path, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Workspace usage stats", body = WorkspaceStatsDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing platform permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn workspace_stats(
+    State(st): State<WorkspaceState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<WorkspaceStatsDto>, AuthError> {
+    egret_core::authz::require(&*st.pdp, &p, "workspace:read")
+        .await
+        .map_err(AuthError)?;
+    let wid = WorkspaceId(id);
+    let member_count = st.members.list(wid).await.map_err(AuthError)?.len() as i64;
+    let query_count = st.workspaces.count_queries(wid).await.map_err(AuthError)?;
+    Ok(Json(WorkspaceStatsDto {
+        member_count,
+        query_count,
+    }))
 }
 
 #[utoipa::path(
@@ -1213,8 +1249,8 @@ pub struct AccessRequestApi;
 /// OpenAPI fragment for the platform-admin workspace router (`/api/admin/workspaces`).
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(create_ws, list_ws, get_ws, update_ws, archive_ws, restore_ws),
-    components(schemas(WorkspaceDto, CreateWorkspace, UpdateWorkspace, Ack, ErrorBody)),
+    paths(create_ws, list_ws, get_ws, update_ws, archive_ws, restore_ws, workspace_stats),
+    components(schemas(WorkspaceDto, WorkspaceStatsDto, CreateWorkspace, UpdateWorkspace, Ack, ErrorBody)),
     tags((name = "admin-workspaces", description = "Platform-admin workspace lifecycle")),
 )]
 pub struct AdminWorkspaceApi;
