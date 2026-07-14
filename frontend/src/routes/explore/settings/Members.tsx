@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ListChecks, Loader2, Lock, MoreHorizontal, Trash2, X } from "lucide-react";
+import { ListChecks, Loader2, Lock, MoreHorizontal, Trash2, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -87,6 +87,7 @@ export default function Members() {
 
   const [removeTarget, setRemoveTarget] = useState<WorkspaceMember | null>(null);
   const [bulkRoleOpen, setBulkRoleOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
 
   const members = membersQ.data ?? [];
   const roles = rolesQ.data ?? [];
@@ -267,14 +268,19 @@ export default function Members() {
             </p>
           </div>
           {!forbidden && !membersQ.isLoading && (
-            <Button
-              size="sm"
-              variant={bulk.bulkMode ? "secondary" : "outline"}
-              onClick={() => bulk.setBulkMode(!bulk.bulkMode)}
-              aria-pressed={bulk.bulkMode}
-            >
-              <ListChecks className="mr-1 h-4 w-4" /> {bulk.bulkMode ? "Done" : "Bulk select"}
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button size="sm" onClick={() => setAddOpen(true)}>
+                <UserPlus className="mr-1 h-4 w-4" /> Add member
+              </Button>
+              <Button
+                size="sm"
+                variant={bulk.bulkMode ? "secondary" : "outline"}
+                onClick={() => bulk.setBulkMode(!bulk.bulkMode)}
+                aria-pressed={bulk.bulkMode}
+              >
+                <ListChecks className="mr-1 h-4 w-4" /> {bulk.bulkMode ? "Done" : "Bulk select"}
+              </Button>
+            </div>
           )}
         </div>
         <div
@@ -300,17 +306,6 @@ export default function Members() {
         </p>
       ) : (
         <>
-          <AddMemberRow
-            roles={roles}
-            pending={addMut.isPending}
-            onAdd={(body) =>
-              addMut.mutate(body, {
-                onSuccess: () => toast.success("Member added"),
-                onError: (e) => toast.error(String(e)),
-              })
-            }
-          />
-
           <p className="text-sm text-muted-foreground">{summary}</p>
 
           {bulk.bulkMode && bulk.someSelected && (
@@ -341,6 +336,14 @@ export default function Members() {
           />
         </>
       )}
+
+      <AddMemberDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        roles={roles}
+        pending={addMut.isPending}
+        onAdd={(body) => addMut.mutateAsync(body)}
+      />
 
       <AlertDialog open={!!removeTarget} onOpenChange={(o) => !o && setRemoveTarget(null)}>
         <AlertDialogContent>
@@ -522,130 +525,165 @@ function RoleCell({
 }
 
 /**
- * Add-a-member row: a principal-type toggle, a search/select for the principal
- * (suggestions from the policy principal picker), and a workspace-role select.
- * Adapted from ShareDialog's AddGrantRow — the picked principal's `name` is sent
- * as `principal_id`, matching what the members POST endpoint expects.
+ * Add-a-member dialog: a principal-type toggle, a search/select for the
+ * principal (suggestions from the policy principal picker), and a workspace-role
+ * select. Opened from the header's "Add member" button so the form stays out of
+ * the way until needed. Adapted from ShareDialog's AddGrantRow — the picked
+ * principal's `name` is sent as `principal_id`, matching the members POST
+ * endpoint.
  */
-function AddMemberRow({
+function AddMemberDialog({
+  open,
+  onOpenChange,
   roles,
   pending,
   onAdd,
 }: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   roles: { name: string }[];
   pending: boolean;
-  onAdd: (body: { principal_type: string; principal_id: string; role: string }) => void;
+  onAdd: (body: { principal_type: string; principal_id: string; role: string }) => Promise<unknown>;
 }) {
   const [type, setType] = useState<"user" | "group">("user");
   const [value, setValue] = useState("");
   const [role, setRole] = useState<string>("");
   const [showSuggest, setShowSuggest] = useState(false);
 
-  const effectiveRole = role || roles.find((r) => r.name.includes("viewer"))?.name || roles[0]?.name || "";
+  // Reset the form each time the dialog is (re)opened.
+  useEffect(() => {
+    if (open) {
+      setType("user");
+      setValue("");
+      setRole("");
+      setShowSuggest(false);
+    }
+  }, [open]);
+
+  const effectiveRole =
+    role || roles.find((r) => r.name.includes("viewer"))?.name || roles[0]?.name || "";
 
   const suggestQ = useQuery({
     queryKey: ["member-principals", type, value],
     queryFn: () => listPrincipals(value, type),
-    enabled: showSuggest && value.trim().length > 0,
+    enabled: open && showSuggest && value.trim().length > 0,
   });
   const suggestions = useMemo(() => suggestQ.data ?? [], [suggestQ.data]);
   const canAdd = value.trim().length > 0 && !!effectiveRole && !pending;
 
-  const submit = () => {
+  const submit = async () => {
     if (!canAdd) return;
-    onAdd({ principal_type: type, principal_id: value.trim(), role: effectiveRole });
-    setValue("");
-    setShowSuggest(false);
+    try {
+      await onAdd({ principal_type: type, principal_id: value.trim(), role: effectiveRole });
+      toast.success("Member added");
+      onOpenChange(false);
+    } catch (e) {
+      toast.error(String(e));
+    }
   };
 
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/30 p-3">
-      <Select
-        value={type}
-        onValueChange={(v) => {
-          setType(v as "user" | "group");
-          setValue("");
-        }}
-      >
-        <SelectTrigger className="h-9 w-24" aria-label="Principal type">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="user">User</SelectItem>
-          <SelectItem value="group">Group</SelectItem>
-        </SelectContent>
-      </Select>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Add member</DialogTitle>
+          <DialogDescription>Give a user or group a role in this workspace.</DialogDescription>
+        </DialogHeader>
 
-      <div className="relative min-w-[12rem] flex-1">
-        <Input
-          className="h-9"
-          aria-label={type === "group" ? "Group name" : "User email"}
-          placeholder={type === "group" ? "Group name…" : "User email…"}
-          value={value}
-          onChange={(e) => {
-            setValue(e.target.value);
-            setShowSuggest(true);
-          }}
-          onFocus={() => setShowSuggest(true)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              submit();
-            }
-          }}
-        />
-        {showSuggest && value.trim().length > 0 && suggestions.length > 0 && (
-          <ul className="absolute z-10 mt-1 max-h-48 w-full overflow-auto rounded-md border bg-popover p-1 shadow-md">
-            {suggestions.map((p) => (
-              <li key={p.name}>
-                <button
-                  type="button"
-                  className="w-full rounded px-2 py-1.5 text-left text-sm hover:bg-accent"
-                  onClick={() => {
-                    setValue(p.name);
-                    setShowSuggest(false);
-                  }}
-                >
-                  <span className="font-medium">{p.label}</span>
-                  {p.label !== p.name && (
-                    <span className="ml-1 text-xs text-muted-foreground">{p.name}</span>
-                  )}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+        <div className="space-y-4 py-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="add-member-type">Type</Label>
+            <Select
+              value={type}
+              onValueChange={(v) => {
+                setType(v as "user" | "group");
+                setValue("");
+              }}
+            >
+              <SelectTrigger id="add-member-type" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="user">User</SelectItem>
+                <SelectItem value="group">Group</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
 
-      <Select value={effectiveRole} onValueChange={setRole}>
-        <SelectTrigger className="h-9 w-40" aria-label="Role">
-          <SelectValue placeholder="Role…" />
-        </SelectTrigger>
-        <SelectContent>
-          {roles.map((r) => (
-            <SelectItem key={r.name} value={r.name}>
-              <span className="flex items-center gap-2">
-                <RoleDot role={r.name} />
-                {r.name}
-              </span>
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+          <div className="space-y-1.5">
+            <Label htmlFor="add-member-principal">{type === "group" ? "Group name" : "User email"}</Label>
+            <div className="relative">
+              <Input
+                id="add-member-principal"
+                autoFocus
+                aria-label={type === "group" ? "Group name" : "User email"}
+                placeholder={type === "group" ? "Group name…" : "User email…"}
+                value={value}
+                onChange={(e) => {
+                  setValue(e.target.value);
+                  setShowSuggest(true);
+                }}
+                onFocus={() => setShowSuggest(true)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void submit();
+                  }
+                }}
+              />
+              {showSuggest && value.trim().length > 0 && suggestions.length > 0 && (
+                <ul className="absolute z-10 mt-1 max-h-48 w-full overflow-auto rounded-md border bg-popover p-1 shadow-md">
+                  {suggestions.map((p) => (
+                    <li key={p.name}>
+                      <button
+                        type="button"
+                        className="w-full rounded px-2 py-1.5 text-left text-sm hover:bg-accent"
+                        onClick={() => {
+                          setValue(p.name);
+                          setShowSuggest(false);
+                        }}
+                      >
+                        <span className="font-medium">{p.label}</span>
+                        {p.label !== p.name && (
+                          <span className="ml-1 text-xs text-muted-foreground">{p.name}</span>
+                        )}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
 
-      <Button onClick={submit} disabled={!canAdd}>
-        {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Add member"}
-      </Button>
+          <div className="space-y-1.5">
+            <Label htmlFor="add-member-role">Role</Label>
+            <Select value={effectiveRole} onValueChange={setRole}>
+              <SelectTrigger id="add-member-role" className="w-full" aria-label="Role">
+                <SelectValue placeholder="Role…" />
+              </SelectTrigger>
+              <SelectContent>
+                {roles.map((r) => (
+                  <SelectItem key={r.name} value={r.name}>
+                    <span className="flex items-center gap-2">
+                      <RoleDot role={r.name} />
+                      {r.name}
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
 
-      {value.trim().length > 0 && showSuggest && (
-        <button
-          type="button"
-          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-          onClick={() => setShowSuggest(false)}
-        >
-          <X className="h-3 w-3" /> hide
-        </button>
-      )}
-    </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="button" onClick={submit} disabled={!canAdd}>
+            {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : "Add member"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
