@@ -5,6 +5,7 @@
 //! (a dev-only dependency here), exactly like `create_engine`'s auto-wiring in
 //! control-plane. DB-gated; self-skips without `DATABASE_URL`.
 use egret_catalog_engine::CatalogStore;
+use egret_engine_mgmt::store::Engine;
 use egret_engine_mgmt::EngineMgmtStore;
 use egret_metastore::Db;
 use uuid::Uuid;
@@ -297,4 +298,36 @@ async fn assign_list_unassign_engine_workspace() {
         .await
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn coordinator_host_and_jwt_check() {
+    let e = Engine {
+        id: Uuid::nil(),
+        name: "trino-prod".into(),
+        r#type: "trino".into(),
+        namespace: "engines".into(),
+        warehouse_id: Uuid::nil(),
+        spec: serde_json::json!({ "trinoConfig": { "auth": { "jwt": { "jwksUri": "http://kc/jwks" } } } }),
+        status: "running".into(),
+        authz_service_id: None,
+        created_at: chrono::Utc::now(),
+    };
+    assert_eq!(e.coordinator_host(), "trino-prod-coordinator.engines.svc");
+    assert_eq!(e.coordinator_port(), 8080);
+    assert!(e.supports_jwt_delegation());
+
+    // auth present but no jwt block → not assignable
+    let e2 = Engine {
+        spec: serde_json::json!({ "trinoConfig": { "auth": {} } }),
+        ..e.clone()
+    };
+    assert!(!e2.supports_jwt_delegation());
+
+    // no auth block at all → not assignable
+    let e3 = Engine {
+        spec: serde_json::json!({ "trinoConfig": {} }),
+        ..e.clone()
+    };
+    assert!(!e3.supports_jwt_delegation());
 }

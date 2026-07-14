@@ -38,6 +38,32 @@ pub struct EngineCatalog {
     pub created_at: DateTime<Utc>,
 }
 
+impl Engine {
+    /// In-cluster DNS name of this engine's Trino coordinator service
+    /// (`{name}-coordinator.{namespace}.svc`).
+    pub fn coordinator_host(&self) -> String {
+        format!("{}-coordinator.{}.svc", self.name, self.namespace)
+    }
+
+    /// The coordinator's HTTP port (fixed by the orchestrator's manifests).
+    pub fn coordinator_port(&self) -> i32 {
+        8080
+    }
+
+    /// Whether the engine accepts a minted per-user engine JWT — a prerequisite
+    /// for materializing a delegated (read-only) workspace connection. Mirrors
+    /// the orchestrator's `spec.trinoConfig.auth.jwt` object check
+    /// (`egret-engine-mgmt/src/engines.rs::resolve_auth`).
+    pub fn supports_jwt_delegation(&self) -> bool {
+        self.spec
+            .get("trinoConfig")
+            .and_then(|tc| tc.get("auth"))
+            .and_then(|a| a.get("jwt"))
+            .map(|j| j.is_object())
+            .unwrap_or(false)
+    }
+}
+
 /// A workspace an engine is assigned to (join of `engine_mgmt.engine_workspaces`
 /// with `workspaces` for the display name/slug).
 #[derive(Clone, Debug, sqlx::FromRow)]
