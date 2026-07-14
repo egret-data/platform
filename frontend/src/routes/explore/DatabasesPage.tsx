@@ -3,8 +3,11 @@ import { useParams } from "react-router-dom";
 import { toast } from "sonner";
 import {
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Database as DatabaseIcon,
   Loader2,
+  Lock,
   Pencil,
   Plus,
   Trash2,
@@ -21,6 +24,7 @@ import {
   useDeleteDatabase,
   useTestDatabase,
   useUpdateDatabase,
+  useWsEngineView,
 } from "@/api/databases";
 import { ApiError } from "@/api/client";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
@@ -249,36 +253,65 @@ export default function DatabasesPage() {
     },
   ];
 
-  const okCount = rows.filter((c) => c.status === "ok").length;
-  const errorCount = rows.filter((c) => c.status === "error").length;
+  // Provisioned rows (materialized by an engine→workspace assignment) are
+  // read-only — no Add/Edit/Delete/Test. Self-service rows keep the full CRUD.
+  const provisionedRows = rows.filter((c) => c.engine_id);
+  const selfServiceRows = rows.filter((c) => !c.engine_id);
+
+  const okCount = selfServiceRows.filter((c) => c.status === "ok").length;
+  const errorCount = selfServiceRows.filter((c) => c.status === "error").length;
 
   return (
     <section>
       <SectionHeader onAdd={() => setAddOpen(true)} />
 
-      <div className="mt-4">
-        {rows.length === 0 ? (
-          <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
-            <p>No engines connected yet.</p>
-          </div>
-        ) : (
+      <div className="mt-4 space-y-8">
+        {provisionedRows.length > 0 && (
           <div className="space-y-3">
+            <div>
+              <h3 className="text-sm font-semibold">Provisioned by egret</h3>
+              <p className="text-sm text-muted-foreground">
+                Read-only engines assigned to this workspace by a platform admin.
+              </p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {provisionedRows.map((conn) => (
+                <ProvisionedEngineCard key={conn.id} ws={ws} conn={conn} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {selfServiceRows.length > 0 ? (
+          <div className="space-y-3">
+            {provisionedRows.length > 0 && (
+              <div>
+                <h3 className="text-sm font-semibold">Your connections</h3>
+                <p className="text-sm text-muted-foreground">
+                  Self-service engine connections managed by this workspace.
+                </p>
+              </div>
+            )}
             <SummaryStrip
               items={[
-                { label: "connections", value: rows.length },
+                { label: "connections", value: selfServiceRows.length },
                 { label: "ok", value: okCount },
                 { label: "error", value: errorCount },
               ]}
             />
             <FilterableTable
-              rows={rows}
+              rows={selfServiceRows}
               columns={columns}
               getId={(conn) => conn.id}
               searchPlaceholder="Search connections…"
               initialSort={{ key: "name", dir: "asc" }}
             />
           </div>
-        )}
+        ) : provisionedRows.length === 0 ? (
+          <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
+            <p>No engines connected yet.</p>
+          </div>
+        ) : null}
       </div>
 
       {/* Add dialog */}
@@ -334,6 +367,105 @@ function SectionHeader({ onAdd }: { onAdd: () => void }) {
         <Plus className="h-4 w-4" />
         Add connection
       </Button>
+    </div>
+  );
+}
+
+/**
+ * Read-only card for an egret-provisioned engine (materialized via an
+ * engine→workspace assignment). No Add/Edit/Delete/Test affordances. Expands to
+ * show the engine's catalogs, each resolved to the storage/secret name it maps
+ * to (from the ws-member engine view, `GET /ws/{ws}/engines/{engine_id}`).
+ */
+function ProvisionedEngineCard({ ws, conn }: { ws: string; conn: DatabaseConn }) {
+  const [expanded, setExpanded] = useState(false);
+  const view = useWsEngineView(ws, conn.engine_id!);
+  const catalogs = view.data?.catalogs ?? [];
+
+  return (
+    <div className="rounded-lg border p-4">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="truncate font-medium">{conn.name}</span>
+            <Badge variant="secondary">{conn.engine}</Badge>
+            {conn.delegated ? (
+              <Badge
+                className="border-transparent bg-highlight text-highlight-foreground"
+                title="Queries run as the signed-in user (per-user delegation)"
+              >
+                Per-user
+              </Badge>
+            ) : null}
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+            <Badge variant={statusVariant(conn.status)}>{humanizeStatus(conn.status)}</Badge>
+            <Badge
+              variant="outline"
+              className="gap-1 text-muted-foreground"
+              title="Provisioned by egret — read-only"
+            >
+              <Lock className="h-3 w-3" />
+              Provisioned by egret · read-only
+            </Badge>
+          </div>
+        </div>
+      </div>
+
+      <button
+        type="button"
+        className="mt-3 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+        onClick={() => setExpanded((e) => !e)}
+        aria-expanded={expanded}
+        aria-label={`${expanded ? "Hide" : "Show"} catalogs for ${conn.name}`}
+      >
+        {expanded ? (
+          <ChevronDown className="h-3.5 w-3.5" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5" />
+        )}
+        {expanded ? "Hide catalogs" : "Show catalogs"}
+      </button>
+
+      {expanded && (
+        <div className="mt-2 rounded border">
+          {view.isLoading ? (
+            <div className="flex items-center gap-2 p-3 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Loading catalogs…
+            </div>
+          ) : catalogs.length === 0 ? (
+            <p className="p-3 text-xs text-muted-foreground">No catalogs.</p>
+          ) : (
+            <table className="w-full text-left text-xs">
+              <thead className="text-muted-foreground">
+                <tr className="border-b">
+                  <th className="px-3 py-1.5 font-medium">Catalog</th>
+                  <th className="px-3 py-1.5 font-medium">Kind</th>
+                  <th className="px-3 py-1.5 font-medium">Storage</th>
+                  <th className="px-3 py-1.5 font-medium">Secret</th>
+                </tr>
+              </thead>
+              <tbody>
+                {catalogs.map((c) => (
+                  <tr key={c.name} className="border-b last:border-b-0">
+                    <td className="px-3 py-1.5 font-medium">{c.name}</td>
+                    <td className="px-3 py-1.5">
+                      <Badge variant="secondary">{c.kind}</Badge>
+                    </td>
+                    <td className="px-3 py-1.5 font-mono text-muted-foreground">
+                      {c.storage_name ?? "—"}
+                    </td>
+                    <td className="px-3 py-1.5 font-mono text-muted-foreground">
+                      {c.secret_name ?? "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
     </div>
   );
 }

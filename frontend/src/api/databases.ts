@@ -32,6 +32,7 @@ import {
   databasesTestSaved,
   databasesUpdate,
   getDatabasesListQueryKey,
+  useDatabasesEngineDetail,
   useDatabasesList,
 } from "./generated/databases/databases";
 import type {
@@ -40,10 +41,12 @@ import type {
   DatabaseInput,
   Engine,
   TestOutcome,
+  WsEngineCatalogDto,
+  WsEngineDetailDto,
 } from "./generated/model";
 
 // Re-export generated types under the names the app already imports.
-export type { ConnOptions, Engine, TestOutcome };
+export type { ConnOptions, Engine, TestOutcome, WsEngineCatalogDto, WsEngineDetailDto };
 export type DatabaseConn = DatabaseDetailDto;
 export type DatabaseConnInput = DatabaseInput;
 
@@ -60,6 +63,21 @@ export function useDatabases(ws: string) {
       retry: false,
       // Unwrap orval's `{ data, status, headers }` envelope to the list body.
       select: (r) => r.data as DatabaseConn[],
+    },
+  });
+}
+
+/**
+ * Read-only view of an egret-provisioned engine assigned to the workspace:
+ * its catalogs, each resolved to the storage/secret NAME it maps to (P2 B2,
+ * `GET /ws/{ws}/engines/{engine_id}`). Used by the workspace Engines page to
+ * expand a provisioned card. Unwraps orval's `{ data, status }` envelope.
+ */
+export function useWsEngineView(ws: string, engineId: string) {
+  return useDatabasesEngineDetail<WsEngineDetailDto | undefined, ApiError>(ws, engineId, {
+    query: {
+      retry: false,
+      select: (r) => (r.status === 200 ? (r.data as WsEngineDetailDto) : undefined),
     },
   });
 }
