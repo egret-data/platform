@@ -111,6 +111,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 const CONSUMER_TYPES = ["engine", "notebook", "external"] as const;
@@ -139,17 +140,38 @@ export default function WarehouseDetail() {
     retry: false,
   });
 
+  const backLink = (
+    <Link
+      to="/control-plane/warehouses"
+      className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
+    >
+      <ArrowLeft className="h-4 w-4" />
+      Warehouses
+    </Link>
+  );
+
+  if (warehouse.isError) {
+    return (
+      <div className="space-y-5">
+        {backLink}
+        <Alert variant="destructive">
+          <AlertDescription>
+            {warehouse.error?.message ?? "Couldn't load this warehouse."}
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-5">
-      <Link
-        to="/control-plane/warehouses"
-        className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        Warehouses
-      </Link>
+      {backLink}
 
-      <WarehouseSummary warehouseId={id} warehouse={warehouse.data} />
+      <WarehouseSummary
+        warehouseId={id}
+        warehouse={warehouse.data}
+        isLoading={warehouse.isLoading}
+      />
 
       <Tabs defaultValue="roles">
         <TabsList>
@@ -224,9 +246,11 @@ function CopyButton({ value }: { value: string }) {
 function WarehouseSummary({
   warehouseId,
   warehouse,
+  isLoading,
 }: {
   warehouseId: string;
   warehouse: Warehouse | undefined;
+  isLoading?: boolean;
 }) {
   const roles = useQuery({ queryKey: rolesKey(warehouseId), queryFn: () => listRoles(warehouseId), retry: false });
   const clients = useQuery({ queryKey: clientsKey(warehouseId), queryFn: () => listClients(warehouseId), retry: false });
@@ -237,6 +261,33 @@ function WarehouseSummary({
   const wsName = workspaces.data?.find((w) => w.id === warehouse?.workspaceId)?.name;
   const storageName = storage.data?.find((s) => s.id === warehouse?.storageConnId)?.name;
   const provisioned = !!warehouse?.lakekeeperWarehouseId;
+
+  if (isLoading && !warehouse) {
+    return (
+      <Card className="overflow-hidden">
+        <div className="flex flex-col gap-5 p-6 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0 space-y-3">
+            <div className="flex items-center gap-3">
+              <Skeleton className="h-11 w-11 shrink-0 rounded-lg" />
+              <div className="space-y-2">
+                <Skeleton className="h-7 w-48" />
+                <Skeleton className="h-5 w-24" />
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+              <Skeleton className="h-4 w-40" />
+              <Skeleton className="h-4 w-40" />
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-2 sm:gap-3">
+            {[0, 1, 2].map((i) => (
+              <Skeleton key={i} className="h-[70px] w-[76px] rounded-lg" />
+            ))}
+          </div>
+        </div>
+      </Card>
+    );
+  }
 
   const stats = [
     { icon: ShieldCheck, label: "roles", value: roles.data?.length ?? 0 },
@@ -382,7 +433,15 @@ function RolesTab({ warehouseId }: { warehouseId: string }) {
             {items.length === 0 ? (
               <TableRow className="hover:bg-transparent">
                 <TableCell colSpan={5} className="py-10 text-center text-muted-foreground">
-                  {roles.isLoading ? "Loading…" : "No roles yet — add one to grant catalog access."}
+                  {roles.isError ? (
+                    <span className="text-destructive">
+                      {roles.error?.message ?? "Couldn't load roles."}
+                    </span>
+                  ) : roles.isLoading ? (
+                    "Loading…"
+                  ) : (
+                    "No roles yet — add one to grant catalog access."
+                  )}
                 </TableCell>
               </TableRow>
             ) : (
@@ -431,7 +490,11 @@ function RoleRow({
   });
   const revoke = useMutation<void, ApiError, string>({
     mutationFn: revokeGrant,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: grantsKey(role.id) }),
+    onSuccess: () => {
+      onError(null);
+      queryClient.invalidateQueries({ queryKey: grantsKey(role.id) });
+    },
+    onError: (e) => onError(e.message ?? "Failed to revoke grant."),
   });
   const del = useMutation<void, ApiError, void>({
     mutationFn: () => deleteRole(role.id),
@@ -481,9 +544,9 @@ function RoleRow({
                 <span className="font-medium">{g.privilege}</span>
                 <button
                   type="button"
-                  aria-label="Revoke grant"
+                  aria-label={`Revoke ${g.privilege} on ${target(g)} from ${role.name}`}
                   onClick={() => revoke.mutate(g.id)}
-                  className="text-muted-foreground opacity-60 transition-opacity hover:text-destructive"
+                  className="-my-1 flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-60 transition-opacity hover:text-destructive"
                 >
                   <Trash2 className="h-3 w-3" />
                 </button>
@@ -794,9 +857,15 @@ function ClientsTab({ warehouseId }: { warehouseId: string }) {
     queryFn: () => listRoles(warehouseId),
     retry: false,
   });
+  const [error, setError] = useState<string | null>(null);
+  const [revokeTarget, setRevokeTarget] = useState<CatalogClient | null>(null);
   const revoke = useMutation<void, ApiError, string>({
     mutationFn: revokeClient,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: clientsKey(warehouseId) }),
+    onSuccess: () => {
+      setError(null);
+      queryClient.invalidateQueries({ queryKey: clientsKey(warehouseId) });
+    },
+    onError: (e) => setError(e.message ?? "Failed to revoke client."),
   });
   const [addOpen, setAddOpen] = useState(false);
   const rows = clients.data ?? [];
@@ -821,7 +890,12 @@ function ClientsTab({ warehouseId }: { warehouseId: string }) {
           </Button>
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-3">
+        {error && (
+          <Alert variant="destructive">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
         <Table>
           <TableHeader>
             <TableRow>
@@ -838,11 +912,17 @@ function ClientsTab({ warehouseId }: { warehouseId: string }) {
             {rows.length === 0 ? (
               <TableRow className="hover:bg-transparent">
                 <TableCell colSpan={5} className="py-10 text-center text-muted-foreground">
-                  {clients.isLoading
-                    ? "Loading…"
-                    : (roles.data ?? []).length === 0
-                      ? "Add a role first, then create a client for it."
-                      : "No clients yet — add one to issue credentials."}
+                  {clients.isError ? (
+                    <span className="text-destructive">
+                      {clients.error?.message ?? "Couldn't load clients."}
+                    </span>
+                  ) : clients.isLoading ? (
+                    "Loading…"
+                  ) : (roles.data ?? []).length === 0 ? (
+                    "Add a role first, then create a client for it."
+                  ) : (
+                    "No clients yet — add one to issue credentials."
+                  )}
                 </TableCell>
               </TableRow>
             ) : (
@@ -859,7 +939,7 @@ function ClientsTab({ warehouseId }: { warehouseId: string }) {
                       variant="ghost"
                       size="sm"
                       className="text-muted-foreground hover:text-destructive"
-                      onClick={() => revoke.mutate(c.id)}
+                      onClick={() => setRevokeTarget(c)}
                       aria-label={`Revoke ${c.name}`}
                     >
                       <Trash2 className="h-4 w-4" />
@@ -878,6 +958,20 @@ function ClientsTab({ warehouseId }: { warehouseId: string }) {
         roles={roles.data ?? []}
         open={addOpen}
         onOpenChange={setAddOpen}
+      />
+
+      <ConfirmDeleteDialog
+        open={revokeTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) setRevokeTarget(null);
+        }}
+        title={revokeTarget ? `Revoke client «${revokeTarget.name}»?` : "Revoke client?"}
+        description="Any engine or notebook authenticating with this client will immediately lose catalog access. This cannot be undone."
+        confirmText="revoke"
+        onConfirm={() => {
+          if (revokeTarget) revoke.mutate(revokeTarget.id);
+          setRevokeTarget(null);
+        }}
       />
     </Card>
   );
@@ -1031,6 +1125,7 @@ function BrowseTab({ warehouseId }: { warehouseId: string }) {
   const [selectedTabular, setSelectedTabular] = useState<Tabular | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [deletedOpen, setDeletedOpen] = useState(false);
+  const [protectError, setProtectError] = useState<string | null>(null);
 
   const namespaces = useQuery<Namespace[], ApiError>({
     queryKey: ["cp", "browse", warehouseId, "ns"],
@@ -1058,7 +1153,13 @@ function BrowseTab({ warehouseId }: { warehouseId: string }) {
   });
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
+    <div className="space-y-4">
+      {protectError && (
+        <Alert variant="destructive">
+          <AlertDescription>{protectError}</AlertDescription>
+        </Alert>
+      )}
+      <div className="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
       <Card className="overflow-hidden">
         <div className="flex items-center gap-2 border-b bg-muted/30 px-4 py-2.5">
           <Database className="h-4 w-4 text-muted-foreground" />
@@ -1117,6 +1218,12 @@ function BrowseTab({ warehouseId }: { warehouseId: string }) {
                 );
               })
             )
+          ) : namespaces.isError ? (
+            <BrowseEmpty icon={Database}>
+              <span className="text-destructive">
+                {namespaces.error?.message ?? "Couldn't load namespaces."}
+              </span>
+            </BrowseEmpty>
           ) : namespaces.isLoading ? (
             <BrowseEmpty>Loading…</BrowseEmpty>
           ) : list.length === 0 ? (
@@ -1137,6 +1244,7 @@ function BrowseTab({ warehouseId }: { warehouseId: string }) {
                     setSelectedNs(label);
                     setSelectedTabular(t);
                   }}
+                  onProtectError={setProtectError}
                 />
               );
             })
@@ -1146,7 +1254,12 @@ function BrowseTab({ warehouseId }: { warehouseId: string }) {
 
       <Card className="overflow-hidden">
         {selectedNs && selectedTabular ? (
-          <TableDetailView warehouseId={warehouseId} namespace={selectedNs} tabular={selectedTabular} />
+          <TableDetailView
+            warehouseId={warehouseId}
+            namespace={selectedNs}
+            tabular={selectedTabular}
+            onProtectError={setProtectError}
+          />
         ) : (
           <div className="flex min-h-[320px] flex-col items-center justify-center gap-2 p-6 text-sm text-muted-foreground">
             <Table2 className="h-8 w-8 opacity-30" />
@@ -1156,6 +1269,7 @@ function BrowseTab({ warehouseId }: { warehouseId: string }) {
       </Card>
 
       <DeletedTablesDialog warehouseId={warehouseId} open={deletedOpen} onOpenChange={setDeletedOpen} />
+      </div>
     </div>
   );
 }
@@ -1167,17 +1281,23 @@ function ProtectToggle({
   id,
   isProtected,
   className,
+  onError,
 }: {
   warehouseId: string;
   target: "table" | "view" | "namespace";
   id: string | null;
   isProtected: boolean;
   className?: string;
+  onError?: (m: string | null) => void;
 }) {
   const queryClient = useQueryClient();
   const mut = useMutation<{ protected: boolean }, ApiError, boolean>({
     mutationFn: (next) => setProtection(warehouseId, target, id!, next),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["cp", "browse", warehouseId] }),
+    onSuccess: () => {
+      onError?.(null);
+      queryClient.invalidateQueries({ queryKey: ["cp", "browse", warehouseId] });
+    },
+    onError: (e) => onError?.(e.message ?? "Failed to change protection."),
   });
   if (!id) return null;
   return (
@@ -1209,6 +1329,7 @@ function NsNode({
   onToggle,
   selectedTable,
   onSelectTable,
+  onProtectError,
 }: {
   warehouseId: string;
   ns: Namespace;
@@ -1217,6 +1338,7 @@ function NsNode({
   onToggle: () => void;
   selectedTable: string | null;
   onSelectTable: (t: Tabular) => void;
+  onProtectError?: (m: string | null) => void;
 }) {
   const tabulars = useQuery<Tabular[], ApiError>({
     queryKey: ["cp", "browse", warehouseId, "tables", label],
@@ -1240,7 +1362,7 @@ function NsNode({
           <Database className="h-4 w-4 shrink-0 text-muted-foreground" />
           <span className="truncate">{label}</span>
         </button>
-        <ProtectToggle warehouseId={warehouseId} target="namespace" id={ns.id} isProtected={ns.protected} />
+        <ProtectToggle warehouseId={warehouseId} target="namespace" id={ns.id} isProtected={ns.protected} onError={onProtectError} />
       </div>
       {open && (
         <div className="pb-1">
@@ -1284,10 +1406,12 @@ function TableDetailView({
   warehouseId,
   namespace,
   tabular,
+  onProtectError,
 }: {
   warehouseId: string;
   namespace: string;
   tabular: Tabular;
+  onProtectError?: (m: string | null) => void;
 }) {
   const isView = tabular.kind === "view";
   const table = tabular.name;
@@ -1330,6 +1454,7 @@ function TableDetailView({
               id={tabular.id}
               isProtected={tabular.protected}
               className="opacity-100"
+              onError={onProtectError}
             />
           </div>
           {tabular.protected && <span className="text-xs text-amber-600">Protected from drops</span>}
@@ -1699,6 +1824,7 @@ function SettingsTab({ warehouseId }: { warehouseId: string }) {
 
   const [ttlDays, setTtlDays] = useState("");
   const [fmt, setFmt] = useState("1,2");
+  const [hardDeleteOpen, setHardDeleteOpen] = useState(false);
 
   const currentDays =
     c?.deleteProfileSeconds != null ? Math.round(c.deleteProfileSeconds / 86400) : null;
@@ -1789,10 +1915,10 @@ function SettingsTab({ warehouseId }: { warehouseId: string }) {
               Save
             </Button>
             <Button
-              variant="outline"
+              variant="destructive"
               size="sm"
               disabled={ttlMut.isPending}
-              onClick={() => ttlMut.mutate(null)}
+              onClick={() => setHardDeleteOpen(true)}
             >
               Hard delete
             </Button>
@@ -1801,6 +1927,14 @@ function SettingsTab({ warehouseId }: { warehouseId: string }) {
           {ttlMut.isError && (
             <p className="text-xs text-destructive">Retention rejected — try a longer window.</p>
           )}
+          <ConfirmDeleteDialog
+            open={hardDeleteOpen}
+            onOpenChange={setHardDeleteOpen}
+            title="Switch to hard delete?"
+            description="Dropped tables will be purged immediately with no recovery window — the recycle bin will no longer hold them. This cannot be undone."
+            confirmText="hard delete"
+            onConfirm={() => ttlMut.mutate(null)}
+          />
         </CardContent>
       </Card>
 
@@ -1888,7 +2022,11 @@ function WarehouseTasksCard({ warehouseId }: { warehouseId: string }) {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        {tasks.isLoading ? (
+        {tasks.isError ? (
+          <p className="py-4 text-center text-sm text-destructive">
+            {tasks.error?.message ?? "Couldn't load background tasks."}
+          </p>
+        ) : tasks.isLoading ? (
           <p className="py-4 text-center text-sm text-muted-foreground">Loading…</p>
         ) : rows.length === 0 ? (
           <p className="py-4 text-center text-sm text-muted-foreground">No pending tasks.</p>
