@@ -222,7 +222,7 @@ export default function WorkspaceDetail() {
         </TabsContent>
 
         <TabsContent value="resources" className="mt-4">
-          <ResourcesTab />
+          <ResourcesTab workspaceId={id} />
         </TabsContent>
 
         <TabsContent value="requests" className="mt-4">
@@ -326,45 +326,63 @@ function OverviewTab({
   );
 }
 
-const RESOURCE_LINKS = [
-  {
-    to: "/control-plane/warehouses",
-    icon: Boxes,
-    title: "Warehouses",
-    desc: "Iceberg catalogs backing this platform.",
-  },
-  {
-    to: "/control-plane/storage",
-    icon: Database,
-    title: "Storage",
-    desc: "Object-store connections (platform-wide).",
-  },
-  { to: "/control-plane/engines", icon: Cpu, title: "Engines", desc: "Query & compute engines." },
-  {
-    to: "/control-plane/secrets",
-    icon: KeyRound,
-    title: "Secrets",
-    desc: "Named secrets (platform-wide).",
-  },
-];
+function ResourcesTab({ workspaceId }: { workspaceId: string }) {
+  // Warehouses are per-workspace, so we deep-link with a `?workspace=` filter that
+  // scopes the Warehouses page to this workspace. Storage and Engines are
+  // platform-global resources (migrations 0050 / 0056), so those links stay
+  // platform-wide and are labelled as such.
+  const resources = [
+    {
+      to: `/control-plane/warehouses?workspace=${workspaceId}`,
+      icon: Boxes,
+      title: "Warehouses",
+      desc: "Iceberg catalogs for this workspace.",
+      scope: "this workspace",
+    },
+    {
+      to: "/control-plane/storage",
+      icon: Database,
+      title: "Storage",
+      desc: "Object-store connections.",
+      scope: "platform-wide",
+    },
+    {
+      to: "/control-plane/engines",
+      icon: Cpu,
+      title: "Engines",
+      desc: "Query & compute engines.",
+      scope: "platform-wide",
+    },
+    {
+      to: "/control-plane/secrets",
+      icon: KeyRound,
+      title: "Secrets",
+      desc: "Named secrets.",
+      scope: "platform-wide",
+    },
+  ];
 
-function ResourcesTab() {
   return (
     <div className="space-y-3">
       <p className="text-sm text-muted-foreground">
-        Resources are managed on the platform-wide control-plane pages. Storage and secrets are
-        global; warehouses and engines list across all workspaces.
+        Warehouses open filtered to this workspace. Storage, Engines, and Secrets are platform-wide
+        resources and open their full control-plane lists.
       </p>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        {RESOURCE_LINKS.map((r) => {
+        {resources.map((r) => {
           const Icon = r.icon;
           return (
-            <Link key={r.to} to={r.to} aria-label={r.title}>
+            <Link key={r.title} to={r.to} aria-label={r.title}>
               <Card className="transition-colors hover:border-primary/50 hover:bg-accent/40">
                 <CardHeader className="flex flex-row items-center gap-3 space-y-0">
-                  <Icon className="h-5 w-5 text-muted-foreground" />
-                  <div>
-                    <CardTitle className="text-base">{r.title}</CardTitle>
+                  <Icon className="h-5 w-5 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <CardTitle className="text-base">{r.title}</CardTitle>
+                      <Badge variant="outline" className="shrink-0 text-xs font-normal">
+                        {r.scope}
+                      </Badge>
+                    </div>
                     <CardDescription>{r.desc}</CardDescription>
                   </div>
                 </CardHeader>

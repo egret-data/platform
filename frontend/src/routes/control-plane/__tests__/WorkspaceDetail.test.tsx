@@ -120,10 +120,12 @@ describe("WorkspaceDetail cockpit", () => {
     await screen.findByRole("heading", { name: "Engineering" });
 
     await user.click(screen.getByRole("tab", { name: "Resources" }));
+    // Warehouses is per-workspace → deep-links with a ?workspace= filter.
     expect(await screen.findByRole("link", { name: "Warehouses" })).toHaveAttribute(
       "href",
-      "/control-plane/warehouses",
+      `/control-plane/warehouses?workspace=${WS.id}`,
     );
+    // Engines is platform-global → plain link.
     expect(screen.getByRole("link", { name: "Engines" })).toHaveAttribute(
       "href",
       "/control-plane/engines",
