@@ -463,6 +463,16 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
             format!("egret-internal-{}", engine.id),
         );
     }
+    // When the engine is bound to a Ranger profile (its trino profile is named
+    // after the engine), template the apache-ranger access-control config so the
+    // bundled plugin polls egret's Ranger-Admin download API (Access P3.2).
+    let ranger = engine
+        .authz_service_id
+        .map(|_sid| egret_engine_mgmt_api::RangerBinding {
+            service_name: engine.name.clone(),
+            egret_url: st.engine_egret_url.clone(),
+            poll_interval_ms: 30_000,
+        });
     Ok(EngineProvisionReq {
         name: engine.name.clone(),
         namespace: engine.namespace.clone(),
@@ -472,6 +482,7 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
             .into(),
         catalogs,
         config,
+        ranger,
     })
 }
 
