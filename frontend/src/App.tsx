@@ -31,6 +31,7 @@ import Members from "@/routes/explore/settings/Members";
 import RolesPermissions from "@/routes/explore/settings/RolesPermissions";
 import SharedObjects from "@/routes/explore/settings/SharedObjects";
 import AccessRequests from "@/routes/explore/settings/AccessRequests";
+import WorkspaceGeneral from "@/routes/explore/settings/WorkspaceGeneral";
 import { Placeholder } from "@/routes/Placeholder";
 import ControlPlaneEngines from "@/routes/control-plane/ControlPlaneEngines";
 import EngineDetail from "@/routes/control-plane/EngineDetail";
@@ -79,7 +80,9 @@ function ExploreRoutes() {
           <Route path="notebooks" element={<Notebooks />} />
           <Route path="notebooks/:id" element={<NotebookPage />} />
           <Route path="notebook-settings" element={<NotebookSettings />} />
-          <Route path="engines" element={<DatabasesPage />} />
+          {/* Engine connections now live under Workspace settings; keep the old
+              path working by redirecting into that tab. */}
+          <Route path="engines" element={<Navigate to="../settings/engines" replace />} />
           <Route path="data-api" element={<Placeholder title="Data API" />} />
           <Route path="pipelines" element={<Placeholder title="Pipelines" />} />
           <Route path="workflows" element={<Placeholder title="Workflows" />} />
@@ -91,6 +94,8 @@ function ExploreRoutes() {
             <Route path="roles" element={<RolesPermissions />} />
             <Route path="shares" element={<SharedObjects />} />
             <Route path="requests" element={<AccessRequests />} />
+            <Route path="engines" element={<DatabasesPage />} />
+            <Route path="general" element={<WorkspaceGeneral />} />
           </Route>
           <Route path="*" element={<Navigate to="sql-lab" replace />} />
         </Routes>

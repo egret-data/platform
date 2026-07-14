@@ -97,29 +97,31 @@ beforeEach(() => {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-describe("WorkspaceSettings tab navigation", () => {
-  it("renders the three tab links", () => {
+// The shell renders two navs — a grouped vertical one for desktop and a
+// horizontal strip for mobile — and CSS (absent in jsdom) shows only one at a
+// time. So each section link appears twice here; query with getAllByRole and
+// assert across every copy.
+const links = (name: string) => screen.getAllByRole("link", { name });
+const isActive = (el: Element) => el.getAttribute("aria-current") === "page";
+
+describe("WorkspaceSettings section navigation", () => {
+  it("renders every section link", () => {
     renderAt("/explore/demo/settings/members");
 
-    expect(screen.getByRole("link", { name: "Members" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Roles & permissions" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Shared objects" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Requests" })).toBeInTheDocument();
+    for (const name of ["Members", "Roles & permissions", "Shared objects", "Access requests"]) {
+      expect(links(name).length).toBeGreaterThan(0);
+    }
   });
 
   it("marks Roles & permissions active at /roles, and Members not active", () => {
     renderAt("/explore/demo/settings/roles");
 
-    const rolesTab = screen.getByRole("link", { name: "Roles & permissions" });
-    const membersTab = screen.getByRole("link", { name: "Members" });
+    expect(links("Roles & permissions").every(isActive)).toBe(true);
+    expect(links("Members").some(isActive)).toBe(false);
 
-    expect(rolesTab).toHaveAttribute("aria-current", "page");
-    expect(membersTab).not.toHaveAttribute("aria-current", "page");
-
-    // Not color-only: active tab is visually distinguished by more than color
-    // (e.g. an underline/border-weight change), so assert the active class
-    // differs structurally from the inactive one too.
-    expect(rolesTab.className).not.toEqual(membersTab.className);
+    // Not color-only: the active section is distinguished by more than color
+    // (weight/background/border), so its class differs structurally from idle.
+    expect(links("Roles & permissions")[0].className).not.toEqual(links("Members")[0].className);
 
     // The Roles & permissions page itself renders.
     expect(screen.getByText(/what each workspace role can do/i)).toBeInTheDocument();
@@ -128,17 +130,13 @@ describe("WorkspaceSettings tab navigation", () => {
   it("redirects the settings index to members", () => {
     renderAt("/explore/demo/settings");
 
-    const membersTab = screen.getByRole("link", { name: "Members" });
-    expect(membersTab).toHaveAttribute("aria-current", "page");
+    expect(links("Members").some(isActive)).toBe(true);
   });
 
   it("marks Shared objects active at /shares", () => {
     renderAt("/explore/demo/settings/shares");
 
-    expect(screen.getByRole("link", { name: "Shared objects" })).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
+    expect(links("Shared objects").every(isActive)).toBe(true);
     expect(screen.getByText(/everything shared inside/i)).toBeInTheDocument();
   });
 });
