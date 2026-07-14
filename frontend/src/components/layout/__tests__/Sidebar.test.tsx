@@ -47,13 +47,15 @@ beforeEach(() => {
 });
 
 describe("Sidebar – workspace zones", () => {
-  test("renders the five zone headings", () => {
+  test("renders the four zone headings", () => {
     renderSidebar("/explore/eng/sql-lab");
     expect(screen.getByText("Explore")).toBeInTheDocument();
     expect(screen.getByText("Data Engineering")).toBeInTheDocument();
     expect(screen.getByText("Automate")).toBeInTheDocument();
-    expect(screen.getByText("Data Governance")).toBeInTheDocument();
     expect(screen.getByText("Manage")).toBeInTheDocument();
+    // Data Lineage moved to Control Plane → Data governance, so Explore no
+    // longer has a Data Governance group.
+    expect(screen.queryByText("Data Governance")).not.toBeInTheDocument();
   });
 
   test("renders representative items from each zone", () => {
@@ -64,7 +66,6 @@ describe("Sidebar – workspace zones", () => {
       "Pipelines",
       "Workflows",
       "Alerts",
-      "Data Lineage",
       "Workspace settings",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
@@ -101,10 +102,8 @@ describe("Sidebar – workspace zones", () => {
       "href",
       "/explore/eng/workflows",
     );
-    expect(screen.getByRole("link", { name: "Data Lineage" })).toHaveAttribute(
-      "href",
-      "/explore/eng/data-lineage",
-    );
+    // Data Lineage is no longer a workspace item (moved to the Control Plane).
+    expect(screen.queryByRole("link", { name: "Data Lineage" })).not.toBeInTheDocument();
   });
 
   test("a group heading collapses/expands its items", async () => {
@@ -206,6 +205,11 @@ describe("Sidebar – Control Plane Data Governance group", () => {
       "href",
       "/control-plane/audit-log",
     );
+    // Data Lineage now lives here (moved out of the workspace), admin-only.
+    expect(screen.getByRole("link", { name: "Data Lineage" })).toHaveAttribute(
+      "href",
+      "/control-plane/data-lineage",
+    );
   });
 
   test("renders the Classifications item at /control-plane/classifications", () => {
@@ -262,6 +266,7 @@ describe("Sidebar – permission-based filtering", () => {
       "Permissions",
       "Policies",
       "Classifications",
+      "Data Lineage",
       "Audit log",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
