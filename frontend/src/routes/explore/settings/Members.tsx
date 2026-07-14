@@ -17,6 +17,8 @@ import { useAuth } from "@/auth/useAuth";
 import { timeAgo, fullTimestamp } from "@/lib/relativeTime";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { SummaryStrip } from "@/components/explore/SummaryStrip";
+import { SettingsNote } from "@/routes/explore/settings/SettingsNote";
 import { useBulkSelect } from "@/hooks/useBulkSelect";
 import { runBulk } from "@/lib/runBulk";
 import {
@@ -105,10 +107,15 @@ export default function Members() {
     [members],
   );
 
-  const summary = useMemo(() => {
+  const summaryItems = useMemo(() => {
     const people = members.filter((m) => m.principal_type === "user").length;
     const groups = members.filter((m) => m.principal_type === "group").length;
-    return `${members.length} member${members.length === 1 ? "" : "s"} · ${adminCount} admin${adminCount === 1 ? "" : "s"} · ${people} ${people === 1 ? "person" : "people"} · ${groups} group${groups === 1 ? "" : "s"}`;
+    return [
+      { label: "members", value: members.length },
+      { label: "admins", value: adminCount },
+      { label: "people", value: people },
+      { label: "groups", value: groups },
+    ];
   }, [members, adminCount]);
 
   const isSelf = (m: WorkspaceMember) =>
@@ -283,15 +290,12 @@ export default function Members() {
             </div>
           )}
         </div>
-        <div
-          className="rounded-md border border-highlight/40 bg-highlight/5 px-3 py-2 text-xs text-muted-foreground"
-          role="note"
-        >
+        <SettingsNote>
           Workspace roles apply only inside <span className="font-medium">{ws}</span> — see the{" "}
           <span className="font-medium">Roles &amp; permissions</span> tab for what each grants.
           Platform-wide access is granted separately in{" "}
           <span className="font-medium">Control Plane → Access control</span>.
-        </div>
+        </SettingsNote>
       </header>
 
       {membersQ.isLoading ? (
@@ -306,7 +310,7 @@ export default function Members() {
         </p>
       ) : (
         <>
-          <p className="text-sm text-muted-foreground">{summary}</p>
+          <SummaryStrip items={summaryItems} />
 
           {bulk.bulkMode && bulk.someSelected && (
             <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 p-2 text-sm">

@@ -4,6 +4,7 @@ import { Search } from "lucide-react";
 
 import { useWorkspaceRoleCatalog, type WsPerm, type WsRole } from "@/api/workspaceAccess";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import {
   Accordion,
   AccordionContent,
@@ -11,8 +12,10 @@ import {
   AccordionTrigger,
 } from "@/components/ui/accordion";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { errorStatus } from "@/lib/httpStatus";
+import { SettingsNote } from "@/routes/explore/settings/SettingsNote";
 
 /** Built-in role names, seeded on install — mirrors RolesPage's own copy. */
 const SEEDED_ROLE_NAMES = new Set(["ws_admin", "ws_editor", "ws_viewer"]);
@@ -46,41 +49,43 @@ function permMatches(p: WsPerm, q: string): boolean {
 /** A role plus the permissions to show for it under the current search. */
 type FilteredRole = { role: WsRole; perms: WsPerm[] };
 
-/** The compact permission table shown inside an expanded role. */
-function PermTable({ perms }: { perms: WsPerm[] }) {
+/** Permissions inside an expanded role, clustered by their group so large
+ *  roles (ws_admin / ws_editor) stay scannable instead of being one long list. */
+function PermList({ perms }: { perms: WsPerm[] }) {
+  const byGroup = useMemo(() => {
+    const map = new Map<string, WsPerm[]>();
+    for (const p of perms) {
+      const g = p.group || "Other";
+      const bucket = map.get(g);
+      if (bucket) bucket.push(p);
+      else map.set(g, [p]);
+    }
+    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [perms]);
+
   if (perms.length === 0) {
     return <p className="text-sm text-muted-foreground">No permissions.</p>;
   }
+
   return (
-    <div className="overflow-x-auto rounded-md border">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b bg-muted/40 text-left text-xs uppercase tracking-wider text-muted-foreground">
-            <th className="px-3 py-2 font-medium">Permission</th>
-            <th className="px-3 py-2 font-medium">Description</th>
-            <th className="px-3 py-2 font-medium">Group</th>
-          </tr>
-        </thead>
-        <tbody>
-          {perms.map((p) => (
-            <tr key={p.key} className="border-b last:border-0">
-              <td className="px-3 py-2 align-top">
-                <span className="font-mono text-xs">{p.key}</span>
-              </td>
-              <td className="px-3 py-2 align-top text-muted-foreground">{p.description || "—"}</td>
-              <td className="px-3 py-2 align-top">
-                {p.group ? (
-                  <Badge variant="outline" className="font-normal">
-                    {p.group}
-                  </Badge>
-                ) : (
-                  <span className="text-muted-foreground">—</span>
+    <div className="space-y-4">
+      {byGroup.map(([group, ps]) => (
+        <div key={group}>
+          <p className="mb-1.5 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            {group}
+          </p>
+          <ul className="space-y-1">
+            {ps.map((p) => (
+              <li key={p.key} className="flex flex-wrap items-baseline gap-x-2 text-sm">
+                <span className="font-mono text-xs text-foreground">{p.key}</span>
+                {p.description && (
+                  <span className="text-muted-foreground">— {p.description}</span>
                 )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
     </div>
   );
 }
@@ -104,26 +109,42 @@ export default function RolesPermissions() {
 
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState<string[]>([]);
+  const [hideEmpty, setHideEmpty] = useState(false);
 
   const sorted = useMemo(() => [...roles].sort(compareRoles), [roles]);
 
+  const seededCount = useMemo(() => roles.filter(isSeeded).length, [roles]);
+  const summaryItems = [
+    { label: "roles", value: roles.length },
+    { label: "built-in", value: seededCount },
+    { label: "custom", value: roles.length - seededCount },
+  ];
+
   const filtered: FilteredRole[] = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    if (!needle) return sorted.map((role) => ({ role, perms: role.permissions }));
-    const out: FilteredRole[] = [];
-    for (const role of sorted) {
-      const roleHit =
-        role.name.toLowerCase().includes(needle) ||
-        (role.description ?? "").toLowerCase().includes(needle);
-      const perms = roleHit
-        ? role.permissions
-        : role.permissions.filter((p) => permMatches(p, needle));
-      if (roleHit || perms.length > 0) out.push({ role, perms });
+    let out: FilteredRole[];
+    if (!needle) {
+      out = sorted.map((role) => ({ role, perms: role.permissions }));
+    } else {
+      out = [];
+      for (const role of sorted) {
+        const roleHit =
+          role.name.toLowerCase().includes(needle) ||
+          (role.description ?? "").toLowerCase().includes(needle);
+        const perms = roleHit
+          ? role.permissions
+          : role.permissions.filter((p) => permMatches(p, needle));
+        if (roleHit || perms.length > 0) out.push({ role, perms });
+      }
     }
+    // "Hide empty roles" filters on the role's real permission count, not the
+    // search-narrowed list, so the toggle means the same thing while searching.
+    if (hideEmpty) out = out.filter((f) => f.role.permissions.length > 0);
     return out;
-  }, [sorted, query]);
+  }, [sorted, query, hideEmpty]);
 
   const searching = query.trim().length > 0;
+  const filtering = searching || hideEmpty;
   // While searching, every matching role is forced open so hits are visible;
   // otherwise the user controls which rows are expanded.
   const openValue = searching ? filtered.map((f) => f.role.id) : open;
@@ -137,14 +158,11 @@ export default function RolesPermissions() {
             What each workspace role can do in <span className="font-medium">{ws}</span>.
           </p>
         </div>
-        <div
-          className="rounded-md border border-highlight/40 bg-highlight/5 px-3 py-2 text-xs text-muted-foreground"
-          role="note"
-        >
+        <SettingsNote>
           Roles are defined platform-wide in{" "}
           <span className="font-medium">Control Plane → Access control</span> and apply to every
           workspace. This is a read-only view.
-        </div>
+        </SettingsNote>
       </header>
 
       {q.isLoading ? (
@@ -166,7 +184,9 @@ export default function RolesPermissions() {
         </p>
       ) : (
         <>
-          <div className="flex items-center justify-between gap-3">
+          <SummaryStrip items={summaryItems} />
+
+          <div className="flex flex-wrap items-center gap-3">
             <div className="relative w-full max-w-sm">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -177,14 +197,24 @@ export default function RolesPermissions() {
                 aria-label="Search roles or permissions"
               />
             </div>
-            <span className="shrink-0 text-sm text-muted-foreground tabular-nums">
-              {filtered.length} of {roles.length} role{roles.length === 1 ? "" : "s"}
-            </span>
+            <label className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
+              <Checkbox
+                checked={hideEmpty}
+                onCheckedChange={(v) => setHideEmpty(v === true)}
+                aria-label="Hide empty roles"
+              />
+              Hide empty roles
+            </label>
+            {filtering && (
+              <span className="ml-auto shrink-0 text-sm text-muted-foreground tabular-nums">
+                {filtered.length} of {roles.length} role{roles.length === 1 ? "" : "s"}
+              </span>
+            )}
           </div>
 
           {filtered.length === 0 ? (
             <p className="rounded-md border bg-muted/40 px-4 py-6 text-sm text-muted-foreground">
-              No roles or permissions match “{query}”.
+              {searching ? `No roles or permissions match “${query}”.` : "No roles to show."}
             </p>
           ) : (
             <Accordion
@@ -228,7 +258,7 @@ export default function RolesPermissions() {
                       {role.description && (
                         <p className="mb-3 text-sm text-muted-foreground">{role.description}</p>
                       )}
-                      <PermTable perms={perms} />
+                      <PermList perms={perms} />
                     </AccordionContent>
                   </AccordionItem>
                 );
