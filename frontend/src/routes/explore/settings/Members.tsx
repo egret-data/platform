@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ListChecks, Loader2, MoreHorizontal, Trash2, X } from "lucide-react";
+import { ListChecks, Loader2, Lock, MoreHorizontal, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -47,6 +47,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Select,
   SelectContent,
@@ -442,10 +443,7 @@ function BulkSetRoleDialog({
           <Label htmlFor="bulk-set-role">Role</Label>
           <Select value={role} onValueChange={setRole}>
             <SelectTrigger id="bulk-set-role" className="w-full">
-              <span className="flex items-center gap-2">
-                {role && <RoleDot role={role} />}
-                <SelectValue placeholder="Select a role…" />
-              </span>
+              <SelectValue placeholder="Select a role…" />
             </SelectTrigger>
             <SelectContent>
               {roles.map((r) => (
@@ -486,23 +484,28 @@ function RoleCell({
   onChange: (role: string) => void;
 }) {
   if (locked) {
+    // A static pill the same height as the Select trigger so rows stay aligned;
+    // the "why" moves into a tooltip instead of a caption that grows the row.
     return (
-      <div className="flex flex-col gap-0.5">
-        <span className="inline-flex h-8 w-40 items-center gap-2 rounded-md border bg-muted/40 px-3 text-sm text-muted-foreground">
-          <RoleDot role={member.role} />
-          {member.role}
-        </span>
-        <span className="text-xs text-muted-foreground">Last admin — role locked</span>
-      </div>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            tabIndex={0}
+            className="inline-flex h-8 w-40 cursor-default items-center gap-2 rounded-md border bg-muted/40 px-3 text-sm text-muted-foreground"
+          >
+            <RoleDot role={member.role} />
+            <span className="truncate">{member.role}</span>
+            <Lock className="ml-auto h-3 w-3 shrink-0" aria-hidden />
+          </span>
+        </TooltipTrigger>
+        <TooltipContent>Last admin — role can’t be changed</TooltipContent>
+      </Tooltip>
     );
   }
   return (
     <Select value={member.role} onValueChange={onChange}>
       <SelectTrigger className="h-8 w-40" aria-label={`Role for ${member.principal_name ?? member.principal_id}`}>
-        <span className="flex items-center gap-2">
-          <RoleDot role={member.role} />
-          <SelectValue />
-        </span>
+        <SelectValue />
       </SelectTrigger>
       <SelectContent>
         {roles.map((r) => (
@@ -616,10 +619,7 @@ function AddMemberRow({
 
       <Select value={effectiveRole} onValueChange={setRole}>
         <SelectTrigger className="h-9 w-40" aria-label="Role">
-          <span className="flex items-center gap-2">
-            {effectiveRole && <RoleDot role={effectiveRole} />}
-            <SelectValue placeholder="Role…" />
-          </span>
+          <SelectValue placeholder="Role…" />
         </SelectTrigger>
         <SelectContent>
           {roles.map((r) => (

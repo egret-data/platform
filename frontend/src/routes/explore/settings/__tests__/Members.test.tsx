@@ -149,9 +149,9 @@ describe("Members page", () => {
     });
     renderPage();
 
-    // The sole admin shows the lock caption instead of an editable Select.
-    expect(screen.getByText("Last admin — role locked")).toBeInTheDocument();
-    // No inline Role select is rendered for the locked admin.
+    // The sole admin shows a static (locked) role pill — its role text is
+    // present, but no editable Role select is rendered for them.
+    expect(screen.getByText("ws_admin")).toBeInTheDocument();
     expect(
       screen.queryByLabelText("Role for carol@egret.local"),
     ).not.toBeInTheDocument();

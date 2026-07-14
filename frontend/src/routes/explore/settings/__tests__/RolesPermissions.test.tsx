@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -69,20 +69,21 @@ describe("RolesPermissions page", () => {
   it("renders roles, permissions, group, and the resolved parent role name — with no edit controls", () => {
     renderPage();
 
+    // Roles are listed as (collapsed) accordion rows.
     expect(screen.getByText("ws_admin")).toBeInTheDocument();
     expect(screen.getByText("ws_viewer")).toBeInTheDocument();
-    expect(screen.getByText("ws:manage_members")).toBeInTheDocument();
-    expect(screen.getAllByText("Workspace").length).toBeGreaterThan(0);
 
     // "Inherits from" badge on ws_admin resolves to the parent's name (ws_viewer).
     const inheritsBadge = screen.getByText(/inherits from/i);
     expect(inheritsBadge).toHaveTextContent("ws_viewer");
-    expect(screen.getAllByText("ws_viewer").length).toBeGreaterThanOrEqual(1);
+
+    // Expanding a role reveals its permissions + group.
+    fireEvent.click(screen.getByRole("button", { name: /ws_admin/i }));
+    expect(screen.getByText("ws:manage_members")).toBeInTheDocument();
+    expect(screen.getAllByText("Workspace").length).toBeGreaterThan(0);
 
     // Read-only: no edit/save/add controls anywhere on the page.
-    expect(
-      screen.queryByRole("button", { name: /edit|save|add/i }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /edit|save|add/i })).not.toBeInTheDocument();
   });
 
   it("shows a 403-forbidden message for non-admins", () => {
