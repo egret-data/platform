@@ -34,6 +34,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { MaskItemTable } from "@/components/policy/MaskItemTable";
 import { PermissionTable } from "@/components/policy/PermissionTable";
 import { ResourceSelector } from "@/components/policy/ResourceSelector";
@@ -405,15 +406,51 @@ export default function PolicyEditorPage() {
       items: [...f.items.filter((it: AccessItem) => it.effect === "allow"), ...next],
     }));
 
+  const backLink = (
+    <Link
+      to={profileUrl}
+      className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
+    >
+      <ArrowLeft className="h-4 w-4" />
+      {service || "Policies"}
+    </Link>
+  );
+
+  // DATA-SAFETY GUARD: when editing an existing policy, the form is seeded from
+  // `policyQuery.data` only after it resolves. Never render the editor (and its
+  // Save button) over the still-blank form — an early Save would overwrite the
+  // real policy with empty values. Also block on the service-def, which the
+  // resource selector + required-field validation depend on.
+  const loadingDeps = (!!id && policyQuery.isLoading) || def.isLoading;
+  const loadError = (!!id && policyQuery.isError) || (def.isError as boolean);
+  if (loadingDeps) {
+    return (
+      <div className="space-y-5">
+        {backLink}
+        <ListSkeleton rows={6} cols={2} />
+      </div>
+    );
+  }
+  if (loadError) {
+    const msg =
+      (!!id && policyQuery.error?.message) ||
+      "Couldn't load this policy's definition.";
+    return (
+      <div className="space-y-5">
+        {backLink}
+        <Alert variant="destructive">
+          <AlertDescription>
+            {msg} It wasn't loaded, so there's nothing safe to edit here — go back
+            and try again.
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-5">
-      <Link
-        to={profileUrl}
-        className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        {service || "Policies"}
-      </Link>
+      {backLink}
 
       <Card className="overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/30 p-5">
@@ -464,7 +501,13 @@ export default function PolicyEditorPage() {
               type="button"
               size="sm"
               onClick={() => save.mutate()}
-              disabled={save.isPending || !form.name.trim() || missingRequired}
+              disabled={
+                save.isPending ||
+                !form.name.trim() ||
+                missingRequired ||
+                (!!id && !policyQuery.data) ||
+                !def.data
+              }
             >
               {save.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
               Save
