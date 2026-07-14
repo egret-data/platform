@@ -52,7 +52,7 @@ const EXPLORE_GROUPS: NavGroup[] = [
   {
     heading: "Manage",
     items: [
-      { label: "Engines", icon: Database },
+      { label: "Engines", icon: Database, to: "settings/engines" },
       { label: "Workspace settings", icon: Settings, to: "settings/members" },
     ],
   },

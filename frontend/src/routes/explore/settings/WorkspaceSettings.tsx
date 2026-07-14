@@ -5,13 +5,30 @@ const TABS = [
   { to: "roles", label: "Roles & permissions" },
   { to: "shares", label: "Shared objects" },
   { to: "requests", label: "Requests" },
+  { to: "engines", label: "Engines" },
+  { to: "general", label: "General" },
 ];
 
+/**
+ * Workspace settings shell: a page title + a section tab strip, with the active
+ * section rendered in the Outlet. The h1 is a full page title (text-2xl) so it
+ * clearly outranks each section's own heading; each tab's page provides its own
+ * section header + actions.
+ */
 export default function WorkspaceSettings() {
   return (
-    <div className="p-4">
-      <h1 className="mb-4 text-lg font-semibold">Workspace settings</h1>
-      <nav className="mb-6 flex gap-1 border-b border-border" aria-label="Workspace settings sections">
+    <div className="mx-auto max-w-6xl p-6">
+      <div className="space-y-1">
+        <h1 className="text-2xl font-semibold leading-tight">Workspace settings</h1>
+        <p className="text-sm text-muted-foreground">
+          Manage members, access, engine connections, and this workspace&rsquo;s configuration.
+        </p>
+      </div>
+
+      <nav
+        className="mb-6 mt-4 flex flex-wrap gap-1 border-b border-border"
+        aria-label="Workspace settings sections"
+      >
         {TABS.map((t) => (
           <NavLink
             key={t.to}
@@ -29,6 +46,7 @@ export default function WorkspaceSettings() {
           </NavLink>
         ))}
       </nav>
+
       <div className="min-w-0">
         <Outlet />
       </div>
