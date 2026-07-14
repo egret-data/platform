@@ -29,12 +29,12 @@ Who-can-access), with no conceptual scaffolding.
   `CONTROL_PLANE_GROUPS` into Overview / Identity / Access / Data governance /
   Infrastructure. Routes unchanged; only grouping + ordering moved. Sidebar test updated
   (13/13). Branch `feat/access-ux-ia-redesign`.
-- [ ] **I2 — Bidirectional Access Explorer.** Merge `access/AccessExplorer.tsx` +
+- [x] **I2 — Bidirectional Access Explorer.** (commit e78d036) Merge `access/AccessExplorer.tsx` +
   `access/WhoCanAccess.tsx` into one page with a direction toggle. Keep both routes
   (`access-explorer`, `who-can-access`) resolving to the merged page (deep-link preserved)
   or redirect one to the other. Collapse the sidebar's two Access items into one
   "Access Explorer" once merged.
-- [ ] **I3 — Overview posture hub.** Rework `access/AccessOverview.tsx`: add the 4-layer
+- [x] **I3 — Overview posture hub.** (commit ee3a77e) Rework `access/AccessOverview.tsx`: add the 4-layer
   model card (Identity → RBAC → Object grants → Data plane, each with count + deep link),
   keep/refine KPI strip + warnings + recent-changes. Hide KPIs the viewer lacks perms for
   (existing follow-up nit).
