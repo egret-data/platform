@@ -1,31 +1,37 @@
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Search } from "lucide-react";
-import { useState } from "react";
 
 import { type PermissionCatalogGroup, listPermissions } from "@/api/access";
 import { ApiError } from "@/api/client";
+import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
+import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { ConfigSection } from "@/routes/control-plane/config/ConfigSection";
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 
-const COLUMNS = ["Permission", "Description", "Granted to"];
+/** One permission flattened out of its catalog group, carrying its area. */
+type PermRow = {
+  key: string;
+  area: string;
+  description: string;
+  roles: string[];
+};
 
 /**
- * Control Plane → Access control → Permissions (read-only).
+ * Control Plane → Access → Permissions (read-only reference).
  *
- * Lists the platform's full permission catalog, grouped by area, and shows
- * which roles each permission is currently granted to. Roles themselves are
- * managed on the Roles page — this is a reference view.
+ * The platform's full permission catalog. Standardised onto the shared list
+ * scaffold used by Users/Roles/Groups (header → Card → SummaryStrip →
+ * FilterableTable + facet): the catalog's areas become a filterable `Area`
+ * column + facet rather than separate grouped tables. Roles are managed on the
+ * Roles page — this view just shows which roles each permission is granted to.
  */
 export default function PermissionsPage() {
   const permissions = useQuery<PermissionCatalogGroup[], ApiError>({
@@ -34,101 +40,127 @@ export default function PermissionsPage() {
     retry: false,
   });
 
-  const groups = permissions.data ?? [];
+  const groups = useMemo(() => permissions.data ?? [], [permissions.data]);
 
-  const [q, setQ] = useState("");
-  const needle = q.trim().toLowerCase();
-  const filteredGroups = groups
-    .map((g) => ({
-      ...g,
-      permissions: needle
-        ? g.permissions.filter(
-            (p) =>
-              p.key.toLowerCase().includes(needle) ||
-              p.description.toLowerCase().includes(needle),
-          )
-        : g.permissions,
-    }))
-    .filter((g) => g.permissions.length > 0);
+  const rows: PermRow[] = useMemo(
+    () =>
+      groups.flatMap((g) =>
+        g.permissions.map((p) => ({
+          key: p.key,
+          area: g.group,
+          description: p.description,
+          roles: p.roles,
+        })),
+      ),
+    [groups],
+  );
+
+  const [areaFacet, setAreaFacet] = useState(FACET_ALL);
+  const filtered = rows.filter((r) => areaFacet === FACET_ALL || r.area === areaFacet);
+  const grantedCount = rows.filter((r) => r.roles.length > 0).length;
+
+  const columns: Column<PermRow>[] = [
+    {
+      key: "key",
+      label: "Permission",
+      sortable: true,
+      className: "font-mono text-xs",
+      value: (r) => r.key,
+      cell: (r) => <code className="font-mono text-xs">{r.key}</code>,
+    },
+    {
+      key: "area",
+      label: "Area",
+      sortable: true,
+      value: (r) => r.area,
+      cell: (r) => (
+        <Badge variant="outline" className="font-normal">
+          {r.area}
+        </Badge>
+      ),
+    },
+    {
+      key: "description",
+      label: "Description",
+      value: (r) => r.description,
+      cell: (r) => <span className="text-muted-foreground">{r.description || "—"}</span>,
+    },
+    {
+      key: "roles",
+      label: "Granted to",
+      value: (r) => r.roles.join(", "),
+      cell: (r) =>
+        r.roles.length === 0 ? (
+          <span className="text-muted-foreground">—</span>
+        ) : (
+          <div className="flex flex-wrap gap-1">
+            {r.roles.map((role) => (
+              <Badge key={role} variant="secondary">
+                {role}
+              </Badge>
+            ))}
+          </div>
+        ),
+    },
+  ];
+
+  const areaOptions = useMemo(
+    () => groups.map((g) => ({ value: g.group, label: g.group })),
+    [groups],
+  );
 
   return (
     <div className="space-y-5">
       <div>
         <h1 className="text-2xl font-semibold leading-tight">Permissions</h1>
         <p className="text-sm text-muted-foreground">
-          The full catalog of platform permissions, grouped by area, and the
-          roles each one is currently granted to.
+          The full catalog of platform permissions and the roles each one is currently
+          granted to. Change what a role grants on the Roles page.
         </p>
       </div>
 
-      {!permissions.isLoading && !permissions.isError && groups.length > 0 && (
-        <div className="relative max-w-xs">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            className="pl-8"
-            placeholder="Search permissions…"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">All permissions</CardTitle>
+          <CardDescription>
+            A read-only reference — assign permissions by editing a role.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <SummaryStrip
+            items={[
+              { label: "permissions", value: rows.length },
+              { label: "areas", value: groups.length },
+              { label: "granted", value: grantedCount },
+              { label: "ungranted", value: rows.length - grantedCount },
+            ]}
           />
-        </div>
-      )}
-
-      {permissions.isError ? (
-        <Alert variant="destructive">
-          <AlertDescription>
-            {permissions.error?.message ?? "Failed to load permissions."}
-          </AlertDescription>
-        </Alert>
-      ) : permissions.isLoading ? (
-        <ListSkeleton rows={6} cols={3} />
-      ) : groups.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No permissions defined.</p>
-      ) : filteredGroups.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          No permissions match &ldquo;{q}&rdquo;.
-        </p>
-      ) : (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          {filteredGroups.map((g) => (
-            <ConfigSection key={g.group} title={g.group}>
-              <div className="overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      {COLUMNS.map((col) => (
-                        <TableHead key={col}>{col}</TableHead>
-                      ))}
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {g.permissions.map((p) => (
-                      <TableRow key={p.key}>
-                        <TableCell className="font-mono text-xs">{p.key}</TableCell>
-                        <TableCell className="text-muted-foreground">
-                          {p.description}
-                        </TableCell>
-                        <TableCell>
-                          {p.roles.length === 0 ? (
-                            <span className="text-muted-foreground">—</span>
-                          ) : (
-                            <div className="flex flex-wrap gap-1">
-                              {p.roles.map((role) => (
-                                <Badge key={role} variant="secondary">
-                                  {role}
-                                </Badge>
-                              ))}
-                            </div>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            </ConfigSection>
-          ))}
-        </div>
-      )}
+          {permissions.isLoading ? (
+            <ListSkeleton rows={6} cols={4} />
+          ) : (
+            <FilterableTable
+              rows={filtered}
+              columns={columns}
+              getId={(r) => r.key}
+              searchPlaceholder="Search permissions…"
+              initialSort={{ key: "key", dir: "asc" }}
+              emptyText={
+                permissions.isError
+                  ? (permissions.error?.message ?? "Failed to load permissions.")
+                  : "No permissions defined."
+              }
+              filters={
+                <FacetSelect
+                  label="Area"
+                  value={areaFacet}
+                  onChange={setAreaFacet}
+                  options={areaOptions}
+                />
+              }
+            />
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
