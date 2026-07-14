@@ -58,6 +58,20 @@ impl FromRef<DatabaseState> for Authorizer {
 
 const PERM_MANAGE: &str = "workspace:manage_members";
 
+/// Reject a mutation against a provisioned connection. A row with a non-null
+/// `engine_id` was materialized by an engine→workspace assignment: it is
+/// read-only + per-user-delegated and is managed through the assignment API,
+/// never edited/deleted/tested directly in the workspace database router.
+fn ensure_not_provisioned(db: &egret_query_api::Database) -> Result<(), DbApiError> {
+    if db.engine_id.is_some() {
+        return Err(DatabaseError::Conflict(
+            "this connection is provisioned by an engine assignment and is read-only".into(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
 pub fn workspace_database_router() -> Router<DatabaseState> {
     Router::new()
         .route("/ws/{workspace}/databases", post(create).get(list))
@@ -210,6 +224,8 @@ async fn update(
     Json(body): Json<DatabaseInput>,
 ) -> Result<Json<DatabaseDetailDto>, DbApiError> {
     egret_core::authz::require(&*st.pdp, &ctx, PERM_MANAGE).await?;
+    // Provisioned (engine-assigned) rows are read-only (404 if not owned first).
+    ensure_not_provisioned(&st.repo.get_in_workspace(ctx.workspace_id.0, id).await?)?;
     // Keep-current default: the row's existing secret id (404 if not owned).
     let existing = st.repo.current_secret_id(ctx.workspace_id.0, id).await?;
     let secret_id = resolve_secret_id(&st, ctx.workspace_id.0, &body, existing).await?;
@@ -249,6 +265,8 @@ async fn remove(
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, DbApiError> {
     egret_core::authz::require(&*st.pdp, &ctx, PERM_MANAGE).await?;
+    // Provisioned (engine-assigned) rows are read-only (404 if not owned first).
+    ensure_not_provisioned(&st.repo.get_in_workspace(ctx.workspace_id.0, id).await?)?;
     st.repo.delete_in_workspace(ctx.workspace_id.0, id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -277,6 +295,8 @@ async fn test_saved(
     egret_core::authz::require(&*st.pdp, &ctx, PERM_MANAGE).await?;
     // Ownership check first: a foreign or absent row is 404 before any secret read.
     let db = st.repo.get_in_workspace(ctx.workspace_id.0, id).await?;
+    // Provisioned (engine-assigned) rows are read-only — no direct connection test.
+    ensure_not_provisioned(&db)?;
     let secret = st.repo.open_secret(id).await?;
     let outcome = crate::registry::tester::test_connection(
         db.engine,

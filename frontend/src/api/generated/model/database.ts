@@ -27,4 +27,11 @@ export interface Database {
   status: string;
   /** B3a: run BI queries as the caller's per-user engine JWT (delegation). */
   delegated?: boolean;
+  /**
+     * Set when this row was materialized by an engine→workspace assignment.
+     * A non-null `engine_id` marks the connection provisioned (read-only,
+     * per-user-delegated) and links it back to the source engine.
+     * @nullable
+     */
+  engine_id?: string | null;
 }

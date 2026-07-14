@@ -5,12 +5,17 @@ use egret_auth::session::SessionService;
 use egret_engine_mgmt_api::EngineProvisioningPort;
 use std::sync::Arc;
 
-use crate::EngineMgmtStore;
+use crate::{EngineAssignmentService, EngineMgmtStore};
 
 #[derive(Clone)]
 pub struct EngineMgmtState {
     /// Its own data (E1b) — engines/engine_catalogs CRUD.
     pub engine_mgmt: EngineMgmtStore,
+    /// Orchestrates engine↔workspace assignment across the engine-provisioning
+    /// and query seams (materialize/remove the read-only delegated connection).
+    /// Backs the CP `PUT /engines/{id}/workspaces` and workspace-admin
+    /// `/workspaces/{id}/engines` assignment endpoints (P1).
+    pub assignment: EngineAssignmentService,
     /// Catalog RBAC (roles/grants/clients) + warehouse lookups, behind its
     /// contract `CatalogPort` (E3b) — cross-seam: engine-create auto-wiring of a
     /// Catalog Client. The concrete `CatalogStore` is wired in the composition

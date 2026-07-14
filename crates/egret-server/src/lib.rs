@@ -278,8 +278,16 @@ pub fn build_router(state: AppState) -> Router {
                 egret_engine_mgmt::engine_mgmt_router(),
             )
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
-            .with_state(em);
+            .with_state(em.clone());
         router = router.merge(group);
+
+        // Workspace-admin engine-assignment endpoints (P1), nested under
+        // /api/admin so the full paths are /api/admin/workspaces/{id}/engines.
+        let ws_group = Router::new()
+            .nest("/api/admin", egret_engine_mgmt::workspace_engines_router())
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(em);
+        router = router.merge(ws_group);
     }
 
     if let Some(catalog_engine) = state.catalog_engine.clone() {
