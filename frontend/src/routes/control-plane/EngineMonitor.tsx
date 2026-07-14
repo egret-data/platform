@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Ban } from "lucide-react";
 
@@ -136,7 +137,20 @@ export default function EngineMonitor({ engineId }: { engineId: string }) {
   });
 
   // ── The selected query id drives the detail panel (Task 7). ──
-  const [selectedQid, setSelectedQid] = useState<string | null>(null);
+  // Lives in the URL (`?qid=`) so an open query is deep-linkable and survives a
+  // refresh. Merged alongside EngineDetail's `?tab=`. Default preserved: none.
+  const [sp, setSp] = useSearchParams();
+  const selectedQid = sp.get("qid");
+  const setSelectedQid = (qid: string | null) =>
+    setSp(
+      (prev) => {
+        const n = new URLSearchParams(prev);
+        if (qid) n.set("qid", qid);
+        else n.delete("qid");
+        return n;
+      },
+      { replace: true },
+    );
 
   const detail = useQuery<MonitorQueryDetail, ApiError>({
     queryKey: ["query", engineId, selectedQid],

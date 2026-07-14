@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
@@ -75,6 +75,20 @@ export default function ProfileDetailPage() {
   const { service = "" } = useParams();
   const [configOpen, setConfigOpen] = useState(false);
   const queryClient = useQueryClient();
+
+  // Active policy-type tab lives in the URL (`?tab=`) so the view is
+  // deep-linkable and survives a refresh. Default preserved: "access".
+  const [sp, setSp] = useSearchParams();
+  const tab = sp.get("tab") ?? "access";
+  const setTab = (v: string) =>
+    setSp(
+      (prev) => {
+        const n = new URLSearchParams(prev);
+        n.set("tab", v);
+        return n;
+      },
+      { replace: true },
+    );
 
   const profiles = useQuery<Profile[], ApiError>({
     queryKey: ["control-plane", "profiles"],
@@ -183,7 +197,7 @@ export default function ProfileDetailPage() {
         </Alert>
       )}
 
-      <Tabs defaultValue="access" className="space-y-5">
+      <Tabs value={tab} onValueChange={setTab} className="space-y-5">
         <TabsList>
           {TYPES.map((t) => (
             <TabsTrigger key={t.key} value={t.key}>

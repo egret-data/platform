@@ -1,5 +1,4 @@
-import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, ChevronRight, Download, File, Folder, FolderOpen } from "lucide-react";
 
@@ -22,7 +21,19 @@ function fmtSize(n: number): string {
 
 export default function StorageBrowser() {
   const { id = "" } = useParams();
-  const [prefix, setPrefix] = useState("");
+  // Folder prefix lives in the URL (`?prefix=`) so a folder is deep-linkable and
+  // survives a refresh. Default preserved: "" (bucket root). Folder navigation
+  // uses a history PUSH (the default, not { replace: true }) so the browser Back
+  // button walks UP one folder instead of exiting the browser.
+  const [sp, setSp] = useSearchParams();
+  const prefix = sp.get("prefix") ?? "";
+  const setPrefix = (next: string) =>
+    setSp((prev) => {
+      const n = new URLSearchParams(prev);
+      if (next) n.set("prefix", next);
+      else n.delete("prefix");
+      return n;
+    });
 
   const conn = useQuery<Storage, ApiError>({
     queryKey: ["control-plane", "storage", id],
