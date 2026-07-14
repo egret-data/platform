@@ -2781,6 +2781,7 @@ dependencies = [
  "egret-orchestrator",
  "egret-policy",
  "egret-policy-api",
+ "egret-query",
  "egret-secrets",
  "egret-storage",
  "futures-util",

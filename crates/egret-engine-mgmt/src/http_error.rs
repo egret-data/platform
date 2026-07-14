@@ -67,6 +67,8 @@ impl From<crate::EngineMgmtError> for EngineHttpError {
     fn from(e: crate::EngineMgmtError) -> Self {
         match e {
             crate::EngineMgmtError::AlreadyExists(s) => EngineHttpError::AlreadyExists(s),
+            crate::EngineMgmtError::NotFound(_) => EngineHttpError::NotFound,
+            crate::EngineMgmtError::NotAssignable(s) => EngineHttpError::BadRequest(s),
             crate::EngineMgmtError::Db(_) => EngineHttpError::Internal,
         }
     }
