@@ -91,8 +91,29 @@ pub fn router() -> Router<CpState> {
         .route("/engines/{id}/pods/{pod}/logs/follow", get(pod_logs_follow))
         .route("/engines/{id}/pods/{pod}/exec", get(pod_exec))
         .route("/engines/{id}/restart", post(restart_engine))
+        // Engine↔workspace assignment (P1): list + set-full-assignment-set.
+        .route(
+            "/engines/{id}/workspaces",
+            get(list_engine_workspaces).put(set_engine_workspaces),
+        )
         // Native Trino monitor (query list / detail / kill / cluster).
         .merge(crate::monitor::routes())
+}
+
+/// Workspace-admin engine-assignment router (P1). Mounted under `/api/admin` by
+/// `egret-server` (so the full paths are `/api/admin/workspaces/{id}/engines`),
+/// separate from the CP engines router so it can carry the `/api/admin` prefix.
+/// Shares [`CpState`] (which owns the [`crate::EngineAssignmentService`]).
+pub fn workspace_engines_router() -> Router<CpState> {
+    Router::new()
+        .route(
+            "/workspaces/{id}/engines",
+            get(list_workspace_engines).post(assign_workspace_engine),
+        )
+        .route(
+            "/workspaces/{id}/engines/{engine_id}",
+            axum::routing::delete(unassign_workspace_engine),
+        )
 }
 
 // ── DTOs (camelCase on the wire) ───────────────────────────────────────────────
@@ -1755,6 +1776,213 @@ async fn restart_engine(
     Ok(StatusCode::OK)
 }
 
+// ── engine ↔ workspace assignment ────────────────────────────────────────────────
+
+/// A workspace an engine is assigned to (CP `…/workspaces` list payload).
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct EngineWorkspaceDto {
+    workspace_id: Uuid,
+    name: String,
+    slug: String,
+    assigned_at: chrono::DateTime<chrono::Utc>,
+}
+impl From<crate::store::EngineWorkspace> for EngineWorkspaceDto {
+    fn from(w: crate::store::EngineWorkspace) -> Self {
+        EngineWorkspaceDto {
+            workspace_id: w.workspace_id,
+            name: w.name,
+            slug: w.slug,
+            assigned_at: w.assigned_at,
+        }
+    }
+}
+
+/// `PUT /engines/{id}/workspaces` body: the FULL desired set of workspace ids the
+/// engine should be assigned to (the handler diffs it against the current set).
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct SetWorkspacesBody {
+    workspace_ids: Vec<Uuid>,
+}
+
+/// An engine assigned to a workspace (workspace-admin `…/engines` list payload).
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceEngineDto {
+    id: Uuid,
+    name: String,
+    #[serde(rename = "type")]
+    r#type: String,
+    status: String,
+}
+impl From<Engine> for WorkspaceEngineDto {
+    fn from(e: Engine) -> Self {
+        WorkspaceEngineDto {
+            id: e.id,
+            name: e.name,
+            r#type: e.r#type,
+            status: e.status,
+        }
+    }
+}
+
+/// `POST /workspaces/{id}/engines` body: the engine to assign to the workspace.
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+struct AssignEngineBody {
+    engine_id: Uuid,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/control-plane/engines/{id}/workspaces",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    responses(
+        (status = 200, description = "Workspaces this engine is assigned to", body = Vec<EngineWorkspaceDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_engine_workspaces(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<EngineWorkspaceDto>>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
+    st.engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+    let ws = st.engine_mgmt.list_workspaces_for_engine(id).await?;
+    Ok(Json(ws.into_iter().map(Into::into).collect()))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/control-plane/engines/{id}/workspaces",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Engine id")),
+    request_body = SetWorkspacesBody,
+    responses(
+        (status = 200, description = "Assignment set replaced; returns the new workspace set", body = Vec<EngineWorkspaceDto>),
+        (status = 400, description = "An engine that is not assignable (e.g. no JWT auth)", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:update permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn set_engine_workspaces(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(b): Json<SetWorkspacesBody>,
+) -> Result<Json<Vec<EngineWorkspaceDto>>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
+    st.engine_mgmt
+        .get_engine(id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+
+    // Diff the requested set against the current set and apply per-delta. The
+    // assignment service keeps the query-seam materialized connection in sync.
+    let current: std::collections::HashSet<Uuid> = st
+        .engine_mgmt
+        .list_workspaces_for_engine(id)
+        .await?
+        .into_iter()
+        .map(|w| w.workspace_id)
+        .collect();
+    let desired: std::collections::HashSet<Uuid> = b.workspace_ids.into_iter().collect();
+    let actor = p.user_id.0;
+    for ws in desired.difference(&current) {
+        st.assignment.assign(id, *ws, actor).await?;
+    }
+    for ws in current.difference(&desired) {
+        st.assignment.unassign(id, *ws).await?;
+    }
+
+    let ws = st.engine_mgmt.list_workspaces_for_engine(id).await?;
+    Ok(Json(ws.into_iter().map(Into::into).collect()))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/workspaces/{id}/engines",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Engines assigned to this workspace", body = Vec<WorkspaceEngineDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:read permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_workspace_engines(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<WorkspaceEngineDto>>, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
+    let engines = st.engine_mgmt.list_engines_for_workspace(id).await?;
+    Ok(Json(engines.into_iter().map(Into::into).collect()))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/admin/workspaces/{id}/engines",
+    tag = "control-plane-engines",
+    params(("id" = Uuid, Path, description = "Workspace id")),
+    request_body = AssignEngineBody,
+    responses(
+        (status = 204, description = "Engine assigned to the workspace"),
+        (status = 400, description = "Engine is not assignable (e.g. no JWT auth)", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:update permission", body = ErrorBody),
+        (status = 404, description = "No such engine", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn assign_workspace_engine(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+    Json(b): Json<AssignEngineBody>,
+) -> Result<StatusCode, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
+    st.assignment.assign(b.engine_id, id, p.user_id.0).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/admin/workspaces/{id}/engines/{engine_id}",
+    tag = "control-plane-engines",
+    params(
+        ("id" = Uuid, Path, description = "Workspace id"),
+        ("engine_id" = Uuid, Path, description = "Engine id"),
+    ),
+    responses(
+        (status = 204, description = "Engine unassigned from the workspace"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing engine:update permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn unassign_workspace_engine(
+    State(st): State<CpState>,
+    Auth(p): Auth,
+    Path((id, engine_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, CpError> {
+    egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
+    st.assignment.unassign(engine_id, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ── catalog sub-routes ───────────────────────────────────────────────────────────
 
 #[utoipa::path(
@@ -2712,6 +2940,11 @@ async fn bridge_exec(
         update_engine,
         delete_engine,
         restart_engine,
+        list_engine_workspaces,
+        set_engine_workspaces,
+        list_workspace_engines,
+        assign_workspace_engine,
+        unassign_workspace_engine,
         list_catalogs,
         add_catalog,
         get_catalog,
@@ -2735,6 +2968,10 @@ async fn bridge_exec(
         UpdateCatalogBody,
         CatalogTestDto,
         PodLogsDto,
+        EngineWorkspaceDto,
+        SetWorkspacesBody,
+        WorkspaceEngineDto,
+        AssignEngineBody,
         ErrorBody,
     )),
     tags((name = "control-plane-engines", description = "Engine provisioning: Trino-on-Kubernetes clusters, their catalogs, native query monitor, and pod logs/exec")),
@@ -2898,9 +3135,16 @@ mod tests {
         let crypto = egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef")
             .expect("build test crypto");
         let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
-        let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
+        let workspace_secrets =
+            egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
+        let databases =
+            egret_query::DatabaseRepo::new(db.clone(), secrets, workspace_secrets.clone());
         Some(CpState {
             engine_mgmt: crate::EngineMgmtStore::new(db.clone()),
+            assignment: crate::EngineAssignmentService::new(
+                crate::EngineMgmtStore::new(db.clone()),
+                databases,
+            ),
             catalog: std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
             storage_registry: egret_storage::StorageRegistry::new(db.clone()),
             authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),

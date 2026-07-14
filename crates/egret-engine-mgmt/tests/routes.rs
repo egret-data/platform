@@ -63,21 +63,28 @@ fn build_app(
     let crypto =
         egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
     let secrets = egret_secrets::SecretStore::new(db.clone(), Some(crypto));
-    let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets);
+    let workspace_secrets = egret_secrets::WorkspaceSecretStore::new(db.clone(), secrets.clone());
+    let databases = egret_query::DatabaseRepo::new(db.clone(), secrets, workspace_secrets.clone());
 
-    engine_mgmt_router().with_state(EngineMgmtState {
-        engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
-        catalog: std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
-        storage_registry: egret_storage::StorageRegistry::new(db.clone()),
-        authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
-        secrets: workspace_secrets,
-        sessions: sessions.clone(),
-        pdp,
-        engine_provisioner,
-        kube,
-        engine_egret_url: "http://egret:8080".into(),
-        engine_jwks_uri: "https://idp/jwks".into(),
-    })
+    engine_mgmt_router()
+        .merge(egret_engine_mgmt::workspace_engines_router())
+        .with_state(EngineMgmtState {
+            engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
+            assignment: egret_engine_mgmt::EngineAssignmentService::new(
+                egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
+                databases,
+            ),
+            catalog: std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
+            storage_registry: egret_storage::StorageRegistry::new(db.clone()),
+            authz: std::sync::Arc::new(egret_policy::PolicyStore::new(db.clone())),
+            secrets: workspace_secrets,
+            sessions: sessions.clone(),
+            pdp,
+            engine_provisioner,
+            kube,
+            engine_egret_url: "http://egret:8080".into(),
+            engine_jwks_uri: "https://idp/jwks".into(),
+        })
 }
 
 /// Rebuild `f.app` with a REAL `CedarPdp`. The PDP snapshots the
@@ -2172,5 +2179,272 @@ async fn scoped_permission_monitor_queries_and_cluster() {
         status,
         StatusCode::OK,
         "a scoped engine:read principal must fetch cluster state; body={body}"
+    );
+}
+
+// ── engine ↔ workspace assignment (P1) ─────────────────────────────────────────
+
+/// Seed a JWT-capable Trino engine (`spec.trinoConfig.auth.jwt` object) tied to
+/// the given warehouse; returns its id.
+async fn seed_jwt_engine(f: &Fixture, warehouse_id: Uuid) -> Uuid {
+    let store = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone());
+    let spec = serde_json::json!({
+        "trinoConfig": { "auth": { "jwt": { "jwks_uri": "http://kc/jwks" } } }
+    });
+    store
+        .create_engine(
+            &format!("trino-{}", Uuid::new_v4().simple()),
+            "trino",
+            "egret-engines",
+            warehouse_id,
+            &spec,
+        )
+        .await
+        .expect("seed jwt engine")
+        .id
+}
+
+/// Seed a bare active workspace (assignment target); returns its id.
+async fn seed_workspace(f: &Fixture) -> Uuid {
+    let (ws_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO workspaces (slug, name, status) VALUES ($1, $2, 'active') RETURNING id",
+    )
+    .bind(format!("assign-ws-{}", Uuid::new_v4().simple()))
+    .bind("Assignment Target Workspace")
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert workspace");
+    ws_id
+}
+
+/// Count materialized `query.databases` rows for an (workspace, engine) pair.
+async fn materialized_count(f: &Fixture, ws: Uuid, engine_id: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM query.databases WHERE workspace_id = $1 AND engine_id = $2",
+    )
+    .bind(ws)
+    .bind(engine_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("count materialized")
+}
+
+/// CP `PUT /engines/{id}/workspaces {workspaceIds:[ws]}` records the assignment
+/// AND materializes a `query.databases` row; `GET` returns exactly `[ws]`; an
+/// empty `PUT` unassigns and removes the materialized row.
+#[tokio::test]
+async fn cp_set_engine_workspaces_assigns_and_materializes() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_assign_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_id = seed_jwt_engine(&f, wh_id).await;
+    let ws = seed_workspace(&f).await;
+
+    // PUT the full set {ws} → 200.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}/workspaces"),
+            &token,
+            Some(serde_json::json!({ "workspaceIds": [ws] })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "set workspaces; body={j}");
+    assert_eq!(j.as_array().unwrap().len(), 1, "one assigned ws; body={j}");
+    assert_eq!(
+        j[0]["workspaceId"],
+        ws.to_string(),
+        "assigned ws id; body={j}"
+    );
+
+    // GET reflects the assignment.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/workspaces"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list workspaces; body={j}");
+    assert_eq!(
+        j[0]["workspaceId"],
+        ws.to_string(),
+        "listed ws id; body={j}"
+    );
+
+    // The delegated connection was materialized.
+    assert_eq!(
+        materialized_count(&f, ws, engine_id).await,
+        1,
+        "a query.databases row must be materialized for the assignment"
+    );
+
+    // PUT the empty set → unassign; GET is empty; the materialized row is gone.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}/workspaces"),
+            &token,
+            Some(serde_json::json!({ "workspaceIds": [] })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "clear workspaces; body={j}");
+    assert!(
+        j.as_array().unwrap().is_empty(),
+        "no assignments left; body={j}"
+    );
+    assert_eq!(
+        materialized_count(&f, ws, engine_id).await,
+        0,
+        "the materialized row must be removed on unassign"
+    );
+
+    // Unknown engine → 404.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{}/workspaces", Uuid::new_v4()),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "unknown engine must 404"
+    );
+}
+
+/// Workspace-admin `POST /workspaces/{id}/engines {engineId}` assigns; `GET`
+/// shows the engine; `DELETE /workspaces/{id}/engines/{engine_id}` removes it.
+#[tokio::test]
+async fn workspace_admin_assign_list_unassign_engine() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ws_engine_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let engine_id = seed_jwt_engine(&f, wh_id).await;
+    let ws = seed_workspace(&f).await;
+
+    // Initially empty.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/workspaces/{ws}/engines"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list ws engines; body={j}");
+    assert!(j.as_array().unwrap().is_empty(), "no engines yet; body={j}");
+
+    // POST assigns → 204.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/workspaces/{ws}/engines"),
+            &token,
+            Some(serde_json::json!({ "engineId": engine_id })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "assign engine");
+
+    // GET now shows the engine with its DTO fields.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/workspaces/{ws}/engines"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list ws engines; body={j}");
+    assert_eq!(j.as_array().unwrap().len(), 1, "one engine; body={j}");
+    assert_eq!(j[0]["id"], engine_id.to_string(), "engine id; body={j}");
+    assert_eq!(j[0]["type"], "trino", "engine type; body={j}");
+    assert_eq!(
+        materialized_count(&f, ws, engine_id).await,
+        1,
+        "assignment materialized a connection"
+    );
+
+    // DELETE unassigns → 204; GET is empty again.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/workspaces/{ws}/engines/{engine_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "unassign engine");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/workspaces/{ws}/engines"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list ws engines; body={j}");
+    assert!(j.as_array().unwrap().is_empty(), "engine removed; body={j}");
+    assert_eq!(
+        materialized_count(&f, ws, engine_id).await,
+        0,
+        "unassign removed the materialized connection"
     );
 }

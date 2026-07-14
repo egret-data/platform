@@ -10,6 +10,7 @@ pub mod store;
 
 pub use assignment::EngineAssignmentService;
 pub use engines::router as engine_mgmt_router;
+pub use engines::workspace_engines_router;
 pub use error::EngineMgmtError;
 pub use http_error::EngineHttpError;
 pub use state::EngineMgmtState;

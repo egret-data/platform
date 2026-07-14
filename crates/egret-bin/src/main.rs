@@ -1363,6 +1363,13 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // Engine-mgmt seam: owns the engine domain (HTTP router + provisioning).
     let engine_mgmt = Some(egret_engine_mgmt::EngineMgmtState {
         engine_mgmt: egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
+        // Assignment service (P1): materializes/removes the read-only delegated
+        // query connection when an engine is assigned to a workspace. Reuses the
+        // shared `databases` repo built above.
+        assignment: egret_engine_mgmt::EngineAssignmentService::new(
+            egret_engine_mgmt::EngineMgmtStore::new(db.clone()),
+            databases.clone(),
+        ),
         catalog: std::sync::Arc::new(egret_catalog_engine::CatalogStore::new(db.clone())),
         storage_registry: egret_storage::StorageRegistry::new(db.clone()),
         // Policy/Ranger seam behind its `PolicyPort` contract (E2a); the concrete
