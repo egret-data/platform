@@ -60,6 +60,11 @@ pub struct DatabaseDetailDto {
     pub has_secret: bool,
     pub status: String,
     pub delegated: bool,
+    /// Set (as a UUID string) when this connection was materialized by an
+    /// engine→workspace assignment (read-only, provisioned by egret); `None`
+    /// for a self-service connection. The frontend uses it to split the
+    /// workspace Engines page into provisioned vs. self-service groups.
+    pub engine_id: Option<String>,
 }
 
 impl From<Database> for DatabaseDetailDto {
@@ -74,6 +79,7 @@ impl From<Database> for DatabaseDetailDto {
             has_secret: d.has_secret,
             status: d.status,
             delegated: d.delegated,
+            engine_id: d.engine_id.map(|u| u.to_string()),
         }
     }
 }
@@ -85,6 +91,42 @@ pub struct DatabaseListDto {
     pub name: String,
     pub engine: Engine,
     pub delegated: bool,
+}
+
+// ── B2: ws-member read-only view of assigned engines ──────────────────────────
+
+/// One egret-provisioned engine assigned to the workspace (list view).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct WsEngineListDto {
+    pub id: String,
+    pub name: String,
+    /// Engine kind (`trino`/`starrocks`/`risingwave`).
+    #[serde(rename = "type")]
+    pub engine_type: String,
+    pub status: String,
+}
+
+/// One catalog of an assigned engine, with the storage/secret NAME it maps to.
+/// `storage_name`/`secret_name` are best-effort (`null` when unresolvable); the
+/// secret VALUE is never exposed.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct WsEngineCatalogDto {
+    pub name: String,
+    pub kind: String,
+    pub storage_name: Option<String>,
+    pub secret_name: Option<String>,
+}
+
+/// Read-only detail of an assigned engine: its catalogs, each resolved to the
+/// storage connection (via the engine's warehouse) and secret name it uses.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct WsEngineDetailDto {
+    pub name: String,
+    /// Engine kind (`trino`/`starrocks`/`risingwave`).
+    #[serde(rename = "type")]
+    pub engine_type: String,
+    pub status: String,
+    pub catalogs: Vec<WsEngineCatalogDto>,
 }
 
 /// Result of a connection test.

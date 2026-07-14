@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -7,11 +7,15 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import WorkspaceDetail from "@/routes/control-plane/WorkspaceDetail";
 import * as wsApi from "@/api/generated/admin-workspaces/admin-workspaces";
 import * as auditApi from "@/api/generated/control-plane-audit/control-plane-audit";
+import * as engineApi from "@/api/generated/control-plane-engines/control-plane-engines";
 import * as accessReqApi from "@/api/accessRequests";
 import type { WorkspaceDto } from "@/api/generated/model/workspaceDto";
+import type { WorkspaceEngineDto } from "@/api/generated/model/workspaceEngineDto";
+import type { EngineDto } from "@/api/generated/model/engineDto";
 
 vi.mock("@/api/generated/admin-workspaces/admin-workspaces");
 vi.mock("@/api/generated/control-plane-audit/control-plane-audit");
+vi.mock("@/api/generated/control-plane-engines/control-plane-engines");
 vi.mock("@/api/accessRequests");
 vi.mock("@/api/access", () => ({ listUsers: vi.fn(() => Promise.resolve([])) }));
 // Stub the members panel — it has its own API and its own tests.
@@ -31,9 +35,54 @@ const WS: WorkspaceDto = {
   owner_name: "alice",
 };
 
+const ASSIGNED_ENGINE: WorkspaceEngineDto = {
+  id: "engine-1",
+  name: "analytics-trino",
+  type: "trino",
+  status: "running",
+};
+
+const ALL_ENGINES: EngineDto[] = [
+  {
+    id: "engine-1",
+    name: "analytics-trino",
+    type: "trino",
+    namespace: "engines",
+    warehouseId: "w1",
+    status: "running",
+    spec: {
+      coordinatorReplicas: 1,
+      workerReplicas: 2,
+      cpuMin: "1",
+      cpuMax: "2",
+      memory: "4Gi",
+      imageVersion: "latest",
+    },
+  },
+  {
+    id: "engine-2",
+    name: "reporting-trino",
+    type: "trino",
+    namespace: "engines",
+    warehouseId: "w2",
+    status: "running",
+    spec: {
+      coordinatorReplicas: 1,
+      workerReplicas: 2,
+      cpuMin: "1",
+      cpuMax: "2",
+      memory: "4Gi",
+      imageVersion: "latest",
+    },
+  },
+];
+
 function stubMutation() {
   return { mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false };
 }
+
+const assignMutate = vi.fn();
+const unassignMutate = vi.fn();
 
 function query<T>(data: T | undefined) {
   return {
@@ -95,6 +144,26 @@ describe("WorkspaceDetail cockpit", () => {
     vi.mocked(accessReqApi.useDenyRequest).mockReturnValue(
       stubMutation() as unknown as ReturnType<typeof accessReqApi.useDenyRequest>,
     );
+    vi.mocked(engineApi.useControlPlaneEnginesListWorkspaceEngines).mockReturnValue(
+      query([ASSIGNED_ENGINE]) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListWorkspaceEngines
+      >,
+    );
+    vi.mocked(engineApi.useControlPlaneEnginesListEngines).mockReturnValue(
+      query(ALL_ENGINES) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListEngines
+      >,
+    );
+    vi.mocked(engineApi.useControlPlaneEnginesAssignWorkspaceEngine).mockReturnValue({
+      mutate: assignMutate,
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof engineApi.useControlPlaneEnginesAssignWorkspaceEngine>);
+    vi.mocked(engineApi.useControlPlaneEnginesUnassignWorkspaceEngine).mockReturnValue({
+      mutate: unassignMutate,
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof engineApi.useControlPlaneEnginesUnassignWorkspaceEngine>);
   });
 
   test("overview shows owner, status, and member/query stats", async () => {
@@ -130,5 +199,42 @@ describe("WorkspaceDetail cockpit", () => {
       "href",
       "/control-plane/engines",
     );
+  });
+
+  test("Resources tab lists an assigned engine", async () => {
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByRole("heading", { name: "Engineering" });
+
+    await user.click(screen.getByRole("tab", { name: "Resources" }));
+    expect(await screen.findByText("analytics-trino")).toBeInTheDocument();
+  });
+
+  test("Remove calls Unassign with the engine id", async () => {
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByRole("heading", { name: "Engineering" });
+
+    await user.click(screen.getByRole("tab", { name: "Resources" }));
+    await screen.findByText("analytics-trino");
+    await user.click(screen.getByRole("button", { name: /Remove/i }));
+
+    expect(unassignMutate).toHaveBeenCalledWith({ id: WS.id, engineId: "engine-1" });
+  });
+
+  test("Assign dialog assigns an unassigned engine", async () => {
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByRole("heading", { name: "Engineering" });
+
+    await user.click(screen.getByRole("tab", { name: "Resources" }));
+    await user.click(await screen.findByRole("button", { name: /Assign engine/i }));
+
+    // The picker offers only the not-yet-assigned engine (engine-2).
+    fireEvent.click(await screen.findByLabelText("Engine"));
+    fireEvent.click(await screen.findByRole("option", { name: /reporting-trino/i }));
+    await user.click(screen.getByRole("button", { name: "Assign" }));
+
+    expect(assignMutate).toHaveBeenCalledWith({ id: WS.id, data: { engineId: "engine-2" } });
   });
 });

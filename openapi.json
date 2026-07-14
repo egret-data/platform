@@ -14630,6 +14630,159 @@
         }
       }
     },
+    "/api/ws/{workspace}/engines": {
+      "get": {
+        "tags": [
+          "databases"
+        ],
+        "operationId": "list_engines",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Engines provisioned (assigned) to the workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/WsEngineListDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workspace permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/engines/{engine_id}": {
+      "get": {
+        "tags": [
+          "databases"
+        ],
+        "operationId": "engine_detail",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "engine_id",
+            "in": "path",
+            "description": "Engine id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Assigned engine detail with catalogs → storage/secret names",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WsEngineDetailDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workspace permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such engine assigned to this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/folders/{kind}": {
       "get": {
         "tags": [
@@ -21757,6 +21910,13 @@
           },
           "delegated": {
             "type": "boolean"
+          },
+          "engine_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set (as a UUID string) when this connection was materialized by an\nengine→workspace assignment (read-only, provisioned by egret); `None`\nfor a self-service connection. The frontend uses it to split the\nworkspace Engines page into provisioned vs. self-service groups."
           }
         }
       },
@@ -25725,6 +25885,87 @@
           "query_count": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "WsEngineCatalogDto": {
+        "type": "object",
+        "description": "One catalog of an assigned engine, with the storage/secret NAME it maps to.\n`storage_name`/`secret_name` are best-effort (`null` when unresolvable); the\nsecret VALUE is never exposed.",
+        "required": [
+          "name",
+          "kind"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "storage_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "secret_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "WsEngineDetailDto": {
+        "type": "object",
+        "description": "Read-only detail of an assigned engine: its catalogs, each resolved to the\nstorage connection (via the engine's warehouse) and secret name it uses.",
+        "required": [
+          "name",
+          "type",
+          "status",
+          "catalogs"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "description": "Engine kind (`trino`/`starrocks`/`risingwave`)."
+          },
+          "status": {
+            "type": "string"
+          },
+          "catalogs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WsEngineCatalogDto"
+            }
+          }
+        }
+      },
+      "WsEngineListDto": {
+        "type": "object",
+        "description": "One egret-provisioned engine assigned to the workspace (list view).",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "description": "Engine kind (`trino`/`starrocks`/`risingwave`)."
+          },
+          "status": {
+            "type": "string"
           }
         }
       },

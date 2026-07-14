@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { PanelLeftClose } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useCatalogs, useColumns, useDatabases, useSchemas, useTables } from "@/api/sqllab";
@@ -55,7 +56,18 @@ export function DataPanel({ ws, dbId, onDb, onInsert, onWords, onCollapse }: Dat
       <div className="space-y-2 p-2 text-sm">
         <Select value={dbId ?? ""} onValueChange={(v) => { onDb(v); setCatalog(""); setSchema(""); setTable(""); }}>
           <SelectTrigger className="w-full"><SelectValue placeholder="Database" /></SelectTrigger>
-          <SelectContent>{(databases ?? []).map((d) => <SelectItem key={d.id} value={d.id}>{d.name} ({d.engine})</SelectItem>)}</SelectContent>
+          <SelectContent>{(databases ?? []).map((d) => (
+            <SelectItem key={d.id} value={d.id}>
+              <span className="inline-flex items-center gap-1.5">
+                {d.name} ({d.engine})
+                {d.engine_id ? (
+                  <Badge variant="secondary" className="h-4 px-1 text-[10px]" title="Provisioned by egret">
+                    egret
+                  </Badge>
+                ) : null}
+              </span>
+            </SelectItem>
+          ))}</SelectContent>
         </Select>
         {isTrino && (
           <Select value={catalog} onValueChange={(v) => { setCatalog(v); setSchema(""); setTable(""); }}>

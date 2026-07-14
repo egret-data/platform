@@ -13,6 +13,7 @@ const deleteMutate = vi.fn();
 const deleteMutation = vi.fn();
 const testMutateAsync = vi.fn();
 const testMutation = vi.fn();
+const wsEngineViewMock = vi.fn();
 
 vi.mock("@/api/databases", () => ({
   useDatabases: () => databasesMock(),
@@ -20,6 +21,7 @@ vi.mock("@/api/databases", () => ({
   useUpdateDatabase: () => updateMutation(),
   useDeleteDatabase: () => deleteMutation(),
   useTestDatabase: () => testMutation(),
+  useWsEngineView: (ws: string, engineId: string) => wsEngineViewMock(ws, engineId),
 }));
 
 // SecretPicker pulls the named-secrets list; stub it so the Select renders.
@@ -99,6 +101,7 @@ beforeEach(() => {
   updateMutateAsync.mockReset();
   deleteMutate.mockReset();
   testMutateAsync.mockReset();
+  wsEngineViewMock.mockReset();
 
   databasesMock.mockReturnValue({
     data: [mockDb1, mockDb2],
@@ -106,6 +109,9 @@ beforeEach(() => {
     isError: false,
     error: null,
   });
+
+  // Default: no provisioned engine detail (overridden per-test).
+  wsEngineViewMock.mockReturnValue({ data: undefined, isLoading: false });
 
   createMutation.mockReturnValue({
     mutateAsync: createMutateAsync,
@@ -494,5 +500,105 @@ describe("DatabasesPage", () => {
         expect.objectContaining({ delegated: false }),
       );
     });
+  });
+
+  // ── F3: provisioned (read-only) vs self-service groups ─────────────────────
+
+  const provisionedDb = {
+    id: "db-prov",
+    name: "trino-prod",
+    engine: "trino",
+    host: "trino.prod.svc",
+    port: 8080,
+    options: {},
+    has_secret: false,
+    status: "ok",
+    delegated: true,
+    engine_id: "eng-1",
+  };
+
+  it("splits provisioned (read-only) and self-service connections into two sections", () => {
+    databasesMock.mockReturnValue({
+      data: [provisionedDb, mockDb1],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    renderAt();
+
+    // Two section headers.
+    expect(screen.getByText("Provisioned by egret")).toBeInTheDocument();
+    expect(screen.getByText("Your connections")).toBeInTheDocument();
+
+    // Both connections render.
+    expect(screen.getByText("trino-prod")).toBeInTheDocument();
+    expect(screen.getByText("prod-trino")).toBeInTheDocument();
+  });
+
+  it("provisioned card has no Edit/Delete/Test actions; self-service row keeps them", () => {
+    databasesMock.mockReturnValue({
+      data: [provisionedDb, mockDb1],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    renderAt();
+
+    // Provisioned engine → read-only, no per-row actions.
+    expect(screen.queryByRole("button", { name: /edit trino-prod/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /delete trino-prod/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /test connection for trino-prod/i }),
+    ).not.toBeInTheDocument();
+    // A read-only indicator is shown.
+    expect(screen.getByText(/provisioned by egret · read-only/i)).toBeInTheDocument();
+
+    // Self-service row keeps the full CRUD.
+    expect(screen.getByRole("button", { name: /edit prod-trino/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /delete prod-trino/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /test connection for prod-trino/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("expands a provisioned card to show catalogs with storage/secret names", async () => {
+    databasesMock.mockReturnValue({
+      data: [provisionedDb],
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+    wsEngineViewMock.mockReturnValue({
+      data: {
+        name: "trino-prod",
+        type: "trino",
+        status: "ok",
+        catalogs: [
+          { name: "iceberg", kind: "iceberg", storage_name: "prod-minio", secret_name: "prod-key" },
+          { name: "adhoc", kind: "iceberg", storage_name: null, secret_name: null },
+        ],
+      },
+      isLoading: false,
+    });
+    renderAt();
+
+    fireEvent.click(screen.getByRole("button", { name: /show catalogs for trino-prod/i }));
+
+    await waitFor(() => {
+      // "adhoc" is a unique catalog name (kind is "iceberg" on both rows).
+      expect(screen.getByText("adhoc")).toBeInTheDocument();
+    });
+    expect(screen.getByText("prod-minio")).toBeInTheDocument();
+    expect(screen.getByText("prod-key")).toBeInTheDocument();
+    // Unresolvable storage/secret fall back to an em dash.
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("omits the provisioned section entirely when there are no provisioned engines", () => {
+    // Only self-service rows (default fixture) → no provisioned header.
+    renderAt();
+    expect(screen.queryByText("Provisioned by egret")).not.toBeInTheDocument();
+    // The self-service Add affordance is always present.
+    expect(screen.getByRole("button", { name: /add connection/i })).toBeInTheDocument();
   });
 });

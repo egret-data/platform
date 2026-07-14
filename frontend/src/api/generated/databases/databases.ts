@@ -30,7 +30,9 @@ import type {
   DatabaseInput,
   ErrorBody,
   TestInput,
-  TestOutcome
+  TestOutcome,
+  WsEngineDetailDto,
+  WsEngineListDto
 } from '../model';
 
 import { customInstance } from '../../mutator';
@@ -818,3 +820,262 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       > => {
       return useMutation(getDatabasesTestSavedMutationOptions(options), queryClient);
     }
+    export type databasesListEnginesResponse200 = {
+  data: WsEngineListDto[]
+  status: 200
+}
+
+export type databasesListEnginesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type databasesListEnginesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type databasesListEnginesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type databasesListEnginesResponseSuccess = (databasesListEnginesResponse200) & {
+  headers: Headers;
+};
+export type databasesListEnginesResponseError = (databasesListEnginesResponse401 | databasesListEnginesResponse403 | databasesListEnginesResponse500) & {
+  headers: Headers;
+};
+
+export type databasesListEnginesResponse = (databasesListEnginesResponseSuccess | databasesListEnginesResponseError)
+
+export const getDatabasesListEnginesUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/engines`
+}
+
+export const databasesListEngines = async (workspace: string, options?: RequestInit): Promise<databasesListEnginesResponse> => {
+
+  return customInstance<databasesListEnginesResponse>(getDatabasesListEnginesUrl(workspace),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getDatabasesListEnginesQueryKey = (workspace: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/engines`
+    ] as const;
+    }
+
+
+export const getDatabasesListEnginesQueryOptions = <TData = Awaited<ReturnType<typeof databasesListEngines>>, TError = ErrorBody>(workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof databasesListEngines>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getDatabasesListEnginesQueryKey(workspace);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof databasesListEngines>>> = ({ signal }) => databasesListEngines(workspace, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof databasesListEngines>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type DatabasesListEnginesQueryResult = NonNullable<Awaited<ReturnType<typeof databasesListEngines>>>
+export type DatabasesListEnginesQueryError = ErrorBody
+
+
+export function useDatabasesListEngines<TData = Awaited<ReturnType<typeof databasesListEngines>>, TError = ErrorBody>(
+ workspace: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof databasesListEngines>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof databasesListEngines>>,
+          TError,
+          Awaited<ReturnType<typeof databasesListEngines>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useDatabasesListEngines<TData = Awaited<ReturnType<typeof databasesListEngines>>, TError = ErrorBody>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof databasesListEngines>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof databasesListEngines>>,
+          TError,
+          Awaited<ReturnType<typeof databasesListEngines>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useDatabasesListEngines<TData = Awaited<ReturnType<typeof databasesListEngines>>, TError = ErrorBody>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof databasesListEngines>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useDatabasesListEngines<TData = Awaited<ReturnType<typeof databasesListEngines>>, TError = ErrorBody>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof databasesListEngines>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getDatabasesListEnginesQueryOptions(workspace,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type databasesEngineDetailResponse200 = {
+  data: WsEngineDetailDto
+  status: 200
+}
+
+export type databasesEngineDetailResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type databasesEngineDetailResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type databasesEngineDetailResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type databasesEngineDetailResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type databasesEngineDetailResponseSuccess = (databasesEngineDetailResponse200) & {
+  headers: Headers;
+};
+export type databasesEngineDetailResponseError = (databasesEngineDetailResponse401 | databasesEngineDetailResponse403 | databasesEngineDetailResponse404 | databasesEngineDetailResponse500) & {
+  headers: Headers;
+};
+
+export type databasesEngineDetailResponse = (databasesEngineDetailResponseSuccess | databasesEngineDetailResponseError)
+
+export const getDatabasesEngineDetailUrl = (workspace: string,
+    engineId: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/engines/${encodeURIComponent(engineId)}`
+}
+
+export const databasesEngineDetail = async (workspace: string,
+    engineId: string, options?: RequestInit): Promise<databasesEngineDetailResponse> => {
+
+  return customInstance<databasesEngineDetailResponse>(getDatabasesEngineDetailUrl(workspace,engineId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getDatabasesEngineDetailQueryKey = (workspace: string,
+    engineId: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/engines/${encodeURIComponent(engineId)}`
+    ] as const;
+    }
+
+
+export const getDatabasesEngineDetailQueryOptions = <TData = Awaited<ReturnType<typeof databasesEngineDetail>>, TError = ErrorBody>(workspace: string,
+    engineId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof databasesEngineDetail>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getDatabasesEngineDetailQueryKey(workspace,engineId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof databasesEngineDetail>>> = ({ signal }) => databasesEngineDetail(workspace,engineId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && engineId !== null && engineId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof databasesEngineDetail>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type DatabasesEngineDetailQueryResult = NonNullable<Awaited<ReturnType<typeof databasesEngineDetail>>>
+export type DatabasesEngineDetailQueryError = ErrorBody
+
+
+export function useDatabasesEngineDetail<TData = Awaited<ReturnType<typeof databasesEngineDetail>>, TError = ErrorBody>(
+ workspace: string,
+    engineId: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof databasesEngineDetail>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof databasesEngineDetail>>,
+          TError,
+          Awaited<ReturnType<typeof databasesEngineDetail>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useDatabasesEngineDetail<TData = Awaited<ReturnType<typeof databasesEngineDetail>>, TError = ErrorBody>(
+ workspace: string,
+    engineId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof databasesEngineDetail>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof databasesEngineDetail>>,
+          TError,
+          Awaited<ReturnType<typeof databasesEngineDetail>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useDatabasesEngineDetail<TData = Awaited<ReturnType<typeof databasesEngineDetail>>, TError = ErrorBody>(
+ workspace: string,
+    engineId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof databasesEngineDetail>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useDatabasesEngineDetail<TData = Awaited<ReturnType<typeof databasesEngineDetail>>, TError = ErrorBody>(
+ workspace: string,
+    engineId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof databasesEngineDetail>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getDatabasesEngineDetailQueryOptions(workspace,engineId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+

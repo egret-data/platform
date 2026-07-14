@@ -524,6 +524,297 @@ async fn provisioned_databases_are_read_only() {
     );
 }
 
+/// B1: the workspace database list/detail DTO carries `engine_id` so the
+/// frontend can tell a provisioned (read-only) row from a self-service one.
+#[tokio::test]
+async fn ws_database_list_and_detail_expose_engine_id() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, f.ws_a, "admin", "ws_admin").await;
+
+    let engine_id = seed_engine(&f.db, f.ws_a.0).await;
+    let provisioned = f
+        .repo
+        .create_provisioned(
+            f.ws_a.0,
+            engine_id,
+            &format!("prov-{}", Uuid::new_v4().simple()),
+            "trino",
+            "trino-prod-coordinator.egret-engines.svc",
+            8080,
+            &serde_json::json!({}),
+            None,
+        )
+        .await
+        .expect("materialize provisioned connection");
+
+    let base = format!("/ws/{}/databases", f.slug_a);
+
+    // LIST carries engine_id on the provisioned row.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &base, &token, None))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list; body={json}");
+    let row = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"].as_str() == Some(provisioned.id.to_string().as_str()))
+        .expect("provisioned row listed");
+    assert_eq!(
+        row["engine_id"].as_str(),
+        Some(engine_id.to_string().as_str()),
+        "list DTO carries engine_id; body={row}"
+    );
+
+    // DETAIL carries engine_id too.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("{base}/{}", provisioned.id),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "detail; body={json}");
+    assert_eq!(
+        json["engine_id"].as_str(),
+        Some(engine_id.to_string().as_str()),
+        "detail DTO carries engine_id; body={json}"
+    );
+
+    // A self-service connection has engine_id null.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &base, &token, Some(db_body("self-service"))))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "create self-service; body={json}");
+    assert!(
+        json["engine_id"].is_null(),
+        "a self-service connection has engine_id null; body={json}"
+    );
+}
+
+/// Seed an engine assigned to `workspace_id`, with one catalog whose
+/// `secret_ref` points at a named workspace secret. The engine name is
+/// `{prefix}-{uuid}` (engines.name is globally UNIQUE across the shared test
+/// DB). Returns `(engine_id, engine_name, storage_name, secret_name)` for the
+/// ws-member view assertions.
+async fn seed_assigned_engine_with_catalog(
+    db: &Db,
+    workspace_secrets: &egret_secrets::WorkspaceSecretStore,
+    workspace_id: Uuid,
+    owner: UserId,
+    prefix: &str,
+) -> (Uuid, String, String, String) {
+    let engine_name = format!("{prefix}-{}", Uuid::new_v4().simple());
+    // A storage connection + warehouse + engine (known storage name).
+    let store_name = format!("store_{}", Uuid::new_v4().simple());
+    let sc_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections \
+           (name, provider, region, bucket, access_key, path_style) \
+         VALUES ($1, 's3', 'us-east-1', 'warehouse', 'egret', true) RETURNING id",
+    )
+    .bind(&store_name)
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed storage connection");
+    let wh_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(format!("wh_{}", Uuid::new_v4().simple()))
+    .bind(workspace_id)
+    .bind(sc_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed warehouse");
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec, status) \
+         VALUES ($1, 'trino', 'egret-engines', $2, '{}'::jsonb, 'running') RETURNING id",
+    )
+    .bind(&engine_name)
+    .bind(wh_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed engine");
+
+    // A named workspace secret (via the store, which seals the underlying
+    // `secrets` row) to bind as the catalog's secret_ref.
+    let secret_name = format!("cat-creds-{}", Uuid::new_v4().simple());
+    let secret_ref = workspace_secrets
+        .create(Some(workspace_id), &secret_name, None, "catalog-password")
+        .await
+        .expect("seed named catalog secret");
+
+    // A catalog bound to the secret.
+    sqlx::query(
+        "INSERT INTO engine_mgmt.engine_catalogs (engine_id, name, kind, config, secret_ref, is_primary) \
+         VALUES ($1, 'lakehouse', 'egret-warehouse', '{}'::jsonb, $2, true)",
+    )
+    .bind(engine_id)
+    .bind(secret_ref)
+    .execute(&db.pool)
+    .await
+    .expect("seed engine catalog");
+
+    // The assignment row.
+    sqlx::query(
+        "INSERT INTO engine_mgmt.engine_workspaces (engine_id, workspace_id, assigned_by) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(engine_id)
+    .bind(workspace_id)
+    .bind(owner.0)
+    .execute(&db.pool)
+    .await
+    .expect("seed engine_workspaces assignment");
+
+    (engine_id, engine_name, store_name, secret_name)
+}
+
+/// B2: a workspace member sees its assigned engines read-only, with each
+/// catalog resolved to the storage/secret NAME it maps to; an engine that is
+/// not assigned to this workspace is 404 (never leaked).
+#[tokio::test]
+async fn ws_engine_view_lists_assigned_engines_with_catalogs() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, f.ws_a, "admin", "ws_admin").await;
+
+    let (engine_id, engine_name, storage_name, secret_name) = seed_assigned_engine_with_catalog(
+        &f.db,
+        &f.workspace_secrets,
+        f.ws_a.0,
+        f.owner,
+        "trino-prod",
+    )
+    .await;
+
+    // LIST → exactly the one assigned engine.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/ws/{}/engines", f.slug_a),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list engines; body={json}");
+    let arr = json.as_array().expect("array");
+    assert_eq!(arr.len(), 1, "one assigned engine; body={json}");
+    assert_eq!(arr[0]["id"].as_str(), Some(engine_id.to_string().as_str()));
+    assert_eq!(arr[0]["name"].as_str(), Some(engine_name.as_str()));
+    assert_eq!(arr[0]["type"], serde_json::json!("trino"));
+    assert_eq!(arr[0]["status"], serde_json::json!("running"));
+
+    // DETAIL → name/type/status + catalogs with storage/secret names.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/ws/{}/engines/{engine_id}", f.slug_a),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, d) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "engine detail; body={d}");
+    assert_eq!(d["name"].as_str(), Some(engine_name.as_str()));
+    assert_eq!(d["type"], serde_json::json!("trino"));
+    let cats = d["catalogs"].as_array().expect("catalogs array");
+    assert_eq!(cats.len(), 1, "one catalog; body={d}");
+    assert_eq!(cats[0]["name"], serde_json::json!("lakehouse"));
+    assert_eq!(cats[0]["kind"], serde_json::json!("egret-warehouse"));
+    assert_eq!(
+        cats[0]["storage_name"].as_str(),
+        Some(storage_name.as_str()),
+        "storage_name resolved via the engine's warehouse; body={d}"
+    );
+    assert_eq!(
+        cats[0]["secret_name"].as_str(),
+        Some(secret_name.as_str()),
+        "secret_name resolved from secret_ref (name only); body={d}"
+    );
+
+    // An engine NOT assigned to this workspace → 404.
+    let other = seed_engine(&f.db, f.ws_b.0).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/ws/{}/engines/{other}", f.slug_a),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "an unassigned engine must 404 through this workspace"
+    );
+}
+
+/// B2: a non-admin member (ws_viewer holds `catalog:read`) may read the engine
+/// view — it is a member read, not a manage-only action.
+#[tokio::test]
+async fn ws_engine_view_allows_non_admin_member() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, f.ws_a, "viewer", "ws_viewer").await;
+    let (_engine_id, _name, _s, _sec) = seed_assigned_engine_with_catalog(
+        &f.db,
+        &f.workspace_secrets,
+        f.ws_a.0,
+        f.owner,
+        "trino-viewer",
+    )
+    .await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/ws/{}/engines", f.slug_a),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, json) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a viewer holds catalog:read and may see assigned engines; body={json}"
+    );
+    assert_eq!(json.as_array().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn test_unsaved_unreachable_host_is_200_not_ok() {
     let Some(f) = setup().await else {

@@ -18,4 +18,12 @@ export interface DatabaseDetailDto {
   has_secret: boolean;
   status: string;
   delegated: boolean;
+  /**
+     * Set (as a UUID string) when this connection was materialized by an
+     * engine→workspace assignment (read-only, provisioned by egret); `None`
+     * for a self-service connection. The frontend uses it to split the
+     * workspace Engines page into provisioned vs. self-service groups.
+     * @nullable
+     */
+  engine_id?: string | null;
 }

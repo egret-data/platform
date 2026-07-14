@@ -29,6 +29,29 @@ pub(crate) struct Row {
     engine_id: Option<Uuid>,
 }
 
+/// One engine assigned to a workspace, in the ws-member read-only view (B2).
+#[derive(sqlx::FromRow)]
+pub struct AssignedEngineRow {
+    pub id: Uuid,
+    pub name: String,
+    /// Engine kind (`trino`/`starrocks`/`risingwave`); aliased from `type`
+    /// (a reserved word) in the query.
+    pub engine_type: String,
+    pub status: String,
+    /// The engine's warehouse (catalog seam); used to resolve `storage_name`.
+    pub warehouse_id: Uuid,
+}
+
+/// One catalog of an assigned engine, with its storage/secret NAMES resolved
+/// (never the secret value). `storage_name`/`secret_name` are best-effort:
+/// `None` when the reference is absent or unresolvable (LEFT JOINs).
+#[derive(sqlx::FromRow)]
+pub struct EngineCatalogRow {
+    pub name: String,
+    pub kind: String,
+    pub secret_name: Option<String>,
+}
+
 impl Row {
     pub(crate) fn into_database(self) -> Result<Database, DatabaseError> {
         let engine = Engine::parse(&self.engine)
@@ -319,6 +342,87 @@ impl DatabaseRepo {
             .execute(&self.db.pool)
             .await?;
         Ok(())
+    }
+
+    // ── B2: ws-member read-only view of assigned engines ────────────────────
+    //
+    // A workspace member may see the egret-provisioned engines assigned to its
+    // workspace, read-only, with the storage/secret NAME each catalog maps to.
+    // These are cross-seam reads (engine_mgmt / catalog / storage / secrets):
+    // raw sqlx here avoids taking a dependency on those crates from egret-query.
+
+    /// Engines assigned to `workspace_id` (via `engine_mgmt.engine_workspaces`),
+    /// ordered by name. `type` is aliased to `engine_type` (reserved word).
+    pub async fn list_assigned_engines(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<AssignedEngineRow>, DatabaseError> {
+        Ok(sqlx::query_as::<_, AssignedEngineRow>(
+            "SELECT e.id, e.name, e.type AS engine_type, e.status, e.warehouse_id \
+               FROM engine_mgmt.engines e \
+               JOIN engine_mgmt.engine_workspaces ew ON ew.engine_id = e.id \
+              WHERE ew.workspace_id = $1 \
+              ORDER BY e.name",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.db.pool)
+        .await?)
+    }
+
+    /// A single engine, but ONLY if it is assigned to `workspace_id`
+    /// (`Ok(None)` → the route returns 404, never leaking an unassigned engine).
+    pub async fn get_assigned_engine(
+        &self,
+        workspace_id: Uuid,
+        engine_id: Uuid,
+    ) -> Result<Option<AssignedEngineRow>, DatabaseError> {
+        Ok(sqlx::query_as::<_, AssignedEngineRow>(
+            "SELECT e.id, e.name, e.type AS engine_type, e.status, e.warehouse_id \
+               FROM engine_mgmt.engines e \
+               JOIN engine_mgmt.engine_workspaces ew ON ew.engine_id = e.id \
+              WHERE ew.workspace_id = $1 AND e.id = $2",
+        )
+        .bind(workspace_id)
+        .bind(engine_id)
+        .fetch_optional(&self.db.pool)
+        .await?)
+    }
+
+    /// Resolve an engine's warehouse to its storage-connection NAME
+    /// (`catalog.warehouses` → `storage.storage_connections`). Best-effort:
+    /// `Ok(None)` when the warehouse or its storage connection is absent.
+    pub async fn resolve_storage_name(
+        &self,
+        warehouse_id: Uuid,
+    ) -> Result<Option<String>, DatabaseError> {
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT sc.name \
+               FROM catalog.warehouses wh \
+               JOIN storage.storage_connections sc ON sc.id = wh.storage_conn_id \
+              WHERE wh.id = $1",
+        )
+        .bind(warehouse_id)
+        .fetch_optional(&self.db.pool)
+        .await?)
+    }
+
+    /// Catalogs of an engine, each with its secret NAME resolved from
+    /// `secret_ref` → `workspace_secrets.name` (LEFT JOIN → `None` when absent;
+    /// the secret VALUE is never read here). Ordered by name.
+    pub async fn list_engine_catalogs(
+        &self,
+        engine_id: Uuid,
+    ) -> Result<Vec<EngineCatalogRow>, DatabaseError> {
+        Ok(sqlx::query_as::<_, EngineCatalogRow>(
+            "SELECT c.name, c.kind, ws.name AS secret_name \
+               FROM engine_mgmt.engine_catalogs c \
+               LEFT JOIN workspace_secrets ws ON ws.id = c.secret_ref \
+              WHERE c.engine_id = $1 \
+              ORDER BY c.name",
+        )
+        .bind(engine_id)
+        .fetch_all(&self.db.pool)
+        .await?)
     }
 
     /// Record the last connection-test result, scoped to the owning workspace

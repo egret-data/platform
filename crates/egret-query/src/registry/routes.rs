@@ -21,7 +21,8 @@ use egret_core::{Ack, WorkspacePath};
 
 use crate::registry::error::{DatabaseError, DbApiError};
 use crate::registry::model::{
-    DatabaseDetailDto, DatabaseInput, DatabaseListDto, TestInput, TestOutcome,
+    DatabaseDetailDto, DatabaseInput, DatabaseListDto, TestInput, TestOutcome, WsEngineCatalogDto,
+    WsEngineDetailDto, WsEngineListDto,
 };
 use crate::registry::repo::DatabaseRepo;
 
@@ -57,6 +58,10 @@ impl FromRef<DatabaseState> for Authorizer {
 }
 
 const PERM_MANAGE: &str = "workspace:manage_members";
+/// The ws-member read-only engine view (B2) is gated on `catalog:read`, which
+/// every workspace role (ws_admin/ws_editor/ws_viewer) holds — any member may
+/// see the engines provisioned to their workspace, unlike the manage-only CRUD.
+const PERM_READ: &str = "catalog:read";
 
 /// Reject a mutation against a provisioned connection. A row with a non-null
 /// `engine_id` was materialized by an engine→workspace assignment: it is
@@ -81,6 +86,8 @@ pub fn workspace_database_router() -> Router<DatabaseState> {
             get(detail).put(update).delete(remove),
         )
         .route("/ws/{workspace}/databases/{id}/test", post(test_saved))
+        .route("/ws/{workspace}/engines", get(list_engines))
+        .route("/ws/{workspace}/engines/{engine_id}", get(engine_detail))
 }
 
 #[utoipa::path(
@@ -348,19 +355,113 @@ async fn test_unsaved(
     Ok(Json(outcome))
 }
 
+// ── B2: ws-member read-only view of assigned engines ──────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/engines",
+    tag = "databases",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "Engines provisioned (assigned) to the workspace", body = Vec<WsEngineListDto>),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn list_engines(
+    State(st): State<DatabaseState>,
+    WsContext(ctx): WsContext,
+) -> Result<Json<Vec<WsEngineListDto>>, DbApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, PERM_READ).await?;
+    let engines = st.repo.list_assigned_engines(ctx.workspace_id.0).await?;
+    Ok(Json(
+        engines
+            .into_iter()
+            .map(|e| WsEngineListDto {
+                id: e.id.to_string(),
+                name: e.name,
+                engine_type: e.engine_type,
+                status: e.status,
+            })
+            .collect(),
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/engines/{engine_id}",
+    tag = "databases",
+    params(
+        WorkspacePath,
+        ("engine_id" = Uuid, Path, description = "Engine id"),
+    ),
+    responses(
+        (status = 200, description = "Assigned engine detail with catalogs → storage/secret names", body = WsEngineDetailDto),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing workspace permission", body = ErrorBody),
+        (status = 404, description = "No such engine assigned to this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn engine_detail(
+    State(st): State<DatabaseState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, engine_id)): Path<(String, Uuid)>,
+) -> Result<Json<WsEngineDetailDto>, DbApiError> {
+    egret_core::authz::require(&*st.pdp, &ctx, PERM_READ).await?;
+    // 404 (not leaked as an engine that exists) unless it is assigned here.
+    let engine = st
+        .repo
+        .get_assigned_engine(ctx.workspace_id.0, engine_id)
+        .await?
+        .ok_or_else(|| DatabaseError::NotFound(engine_id.to_string()))?;
+    // storage_name is a property of the engine's warehouse; shared by every
+    // catalog. Best-effort — `None` when the warehouse/storage is unresolvable.
+    let storage_name = st.repo.resolve_storage_name(engine.warehouse_id).await?;
+    let catalogs = st.repo.list_engine_catalogs(engine_id).await?;
+    Ok(Json(WsEngineDetailDto {
+        name: engine.name,
+        engine_type: engine.engine_type,
+        status: engine.status,
+        catalogs: catalogs
+            .into_iter()
+            .map(|c| WsEngineCatalogDto {
+                name: c.name,
+                kind: c.kind,
+                storage_name: storage_name.clone(),
+                secret_name: c.secret_name,
+            })
+            .collect(),
+    }))
+}
+
 /// OpenAPI fragment for the workspace database-registry router. Merged into the
 /// Query seam's `egret_query::openapi()`; nested request/response schemas
 /// (`Engine`, `ConnOptions`, `NewSecret`, …) are collected automatically by
 /// utoipa from the listed component + path types.
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(list, create, detail, update, remove, test_saved, test_unsaved),
+    paths(
+        list,
+        create,
+        detail,
+        update,
+        remove,
+        test_saved,
+        test_unsaved,
+        list_engines,
+        engine_detail,
+    ),
     components(schemas(
         DatabaseInput,
         DatabaseDetailDto,
         DatabaseListDto,
         TestInput,
         TestOutcome,
+        WsEngineListDto,
+        WsEngineDetailDto,
+        WsEngineCatalogDto,
         // Exported contract vocabulary (egret-query-api). `Database` is the
         // domain row; not a direct path body but part of the seam's public
         // schema surface, so it's published explicitly.
