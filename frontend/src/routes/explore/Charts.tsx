@@ -7,8 +7,9 @@ import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
+import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
 import { useCharts, useChartMutations, type Chart } from "@/api/charts";
 import { CHART_TYPES } from "@/components/chart/chartTypes";
@@ -38,7 +39,7 @@ export default function Charts() {
 
   const [onlyBookmarked, setOnlyBookmarked] = useState(false);
   const [query, setQuery] = useState("");
-  const [typeFilter, setTypeFilter] = useState("all");
+  const [typeFilter, setTypeFilter] = useState(FACET_ALL);
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "updated_at", dir: "desc" });
   const [pendingDelete, setPendingDelete] = useState<Chart | null>(null);
   const [shareTarget, setShareTarget] = useState<Chart | null>(null);
@@ -49,7 +50,7 @@ export default function Charts() {
     const q = query.trim().toLowerCase();
     let r = (charts ?? []).filter((c) => {
       if (onlyBookmarked && !c.bookmarked) return false;
-      if (typeFilter !== "all" && c.viz_type !== typeFilter) return false;
+      if (typeFilter !== FACET_ALL && c.viz_type !== typeFilter) return false;
       if (!q) return true;
       return [c.name, vizLabel(c.viz_type)].join(" ").toLowerCase().includes(q);
     });
@@ -64,7 +65,7 @@ export default function Charts() {
   }, [charts, onlyBookmarked, query, typeFilter, sort]);
 
   const bulk = useBulkSelect(rows);
-  const filtering = query.trim() !== "" || typeFilter !== "all" || onlyBookmarked;
+  const filtering = query.trim() !== "" || typeFilter !== FACET_ALL || onlyBookmarked;
   const groups = useMemo(() => groupByFolder(rows, folders, filtering), [rows, folders, filtering]);
 
   function onSort(key: SortKey) {
@@ -100,7 +101,7 @@ export default function Charts() {
             {!showTrash && (
               <Button size="sm" variant="ghost" className="h-7 w-7 p-0" aria-label={`${c.bookmarked ? "unbookmark" : "bookmark"} ${c.name}`}
                 onClick={() => guard((c.bookmarked ? removeBookmark : addBookmark).mutateAsync(c.id))}>
-                <Star className={`h-4 w-4 ${c.bookmarked ? "fill-amber-400 text-amber-400" : "text-muted-foreground"}`} />
+                <Star className={`h-4 w-4 ${c.bookmarked ? "fill-highlight text-highlight" : "text-muted-foreground"}`} />
               </Button>
             )}
             <Link className="inline-flex items-center gap-2 font-medium hover:underline" to={`/explore/${ws}/charts/${c.id}`}>
@@ -178,13 +179,12 @@ export default function Charts() {
               <Input className="pl-8" placeholder="Search charts…" value={query} onChange={(e) => setQuery(e.target.value)} />
             </div>
             {!showTrash && (
-              <Select value={typeFilter} onValueChange={setTypeFilter}>
-                <SelectTrigger className="h-9 w-44"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All types</SelectItem>
-                  {presentTypes.map((t) => <SelectItem key={t.key} value={t.key}>{t.name}</SelectItem>)}
-                </SelectContent>
-              </Select>
+              <FacetSelect
+                label="Type"
+                value={typeFilter}
+                onChange={setTypeFilter}
+                options={presentTypes.map((t) => ({ value: t.key, label: t.name }))}
+              />
             )}
             {bulk.bulkMode && bulk.someSelected && !showTrash && (
               <>
@@ -196,6 +196,15 @@ export default function Charts() {
                 </Button>
               </>
             )}
+          </div>
+
+          <div className="mb-3">
+            <SummaryStrip
+              items={[
+                { label: "charts", value: rows.length },
+                ...(folders.length ? [{ label: "folders", value: folders.length }] : []),
+              ]}
+            />
           </div>
 
           {rows.length > 0 ? (

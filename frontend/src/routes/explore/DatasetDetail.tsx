@@ -4,10 +4,8 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
-  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
+import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -116,7 +114,7 @@ export default function DatasetDetail() {
             </div>
           ) : (
             <>
-              <h1 className="text-lg font-semibold">{ds.name} <span className="ml-2 rounded bg-muted px-1.5 py-0.5 text-xs">{ds.kind}</span></h1>
+              <h1 className="text-lg font-semibold">{ds.name} <Badge variant="secondary" className="ml-2">{ds.kind}</Badge></h1>
               {ds.description && <p className="text-sm text-muted-foreground">{ds.description}</p>}
               <pre className="mt-1 max-w-2xl overflow-auto rounded bg-muted p-2 text-xs">{source}</pre>
             </>
@@ -158,24 +156,13 @@ export default function DatasetDetail() {
         </TabsContent>
       </Tabs>
 
-      <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete dataset “{ds.name}”?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This removes the dataset and its column snapshot. The underlying table or query is not affected. This cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={() => del.mutate(id, { onSuccess: () => { toast.success("Deleted"); nav(listHref); }, onError: (e) => toast.error(String((e as Error)?.message ?? e)) })}>
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ConfirmDeleteDialog
+        open={confirmDelete}
+        onOpenChange={setConfirmDelete}
+        title={`Delete dataset “${ds.name}”?`}
+        description="This removes the dataset and its column snapshot. The underlying table or query is not affected. This cannot be undone."
+        onConfirm={() => del.mutate(id, { onSuccess: () => { toast.success("Deleted"); nav(listHref); }, onError: (e) => toast.error(String((e as Error)?.message ?? e)) })}
+      />
     </div>
   );
 }

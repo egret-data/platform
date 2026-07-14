@@ -7,8 +7,10 @@ import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Badge } from "@/components/ui/badge";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
+import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
+import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { FolderNameDialog } from "@/components/explore/FolderNameDialog";
 import { useDatabases } from "@/api/sqllab";
 import { useDatasets, useDataset, useDatasetListMutations, useDeleteDataset, type DatasetSummary } from "@/api/datasets";
@@ -45,8 +47,8 @@ export default function Datasets() {
   const [createOpen, setCreateOpen] = useState(false);
   const [onlyBookmarked, setOnlyBookmarked] = useState(false);
   const [query, setQuery] = useState("");
-  const [typeFilter, setTypeFilter] = useState("all");
-  const [dbFilter, setDbFilter] = useState("all");
+  const [typeFilter, setTypeFilter] = useState(FACET_ALL);
+  const [dbFilter, setDbFilter] = useState(FACET_ALL);
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" }>({ key: "updated_at", dir: "desc" });
   const [pendingDelete, setPendingDelete] = useState<DatasetSummary | null>(null);
   const [shareTarget, setShareTarget] = useState<DatasetSummary | null>(null);
@@ -65,8 +67,8 @@ export default function Datasets() {
     const q = query.trim().toLowerCase();
     let r = (data ?? []).filter((d) => {
       if (onlyBookmarked && !d.bookmarked) return false;
-      if (typeFilter !== "all" && d.kind !== typeFilter) return false;
-      if (dbFilter !== "all" && d.database_id !== dbFilter) return false;
+      if (typeFilter !== FACET_ALL && d.kind !== typeFilter) return false;
+      if (dbFilter !== FACET_ALL && d.database_id !== dbFilter) return false;
       if (!q) return true;
       const hay = [d.name, d.description, d.schema ?? "", d.table ?? "", d.catalog ?? "", dbName(d.database_id)]
         .join(" ").toLowerCase();
@@ -83,7 +85,7 @@ export default function Datasets() {
   }, [data, databases, onlyBookmarked, query, typeFilter, dbFilter, sort]);
 
   const bulk = useBulkSelect(rows);
-  const filtering = query.trim() !== "" || typeFilter !== "all" || dbFilter !== "all" || onlyBookmarked;
+  const filtering = query.trim() !== "" || typeFilter !== FACET_ALL || dbFilter !== FACET_ALL || onlyBookmarked;
   const groups = useMemo(() => groupByFolder(rows, folders, filtering), [rows, folders, filtering]);
 
   const hasData = !!data && data.length > 0;
@@ -115,13 +117,13 @@ export default function Datasets() {
           {!showTrash && (
             <Button size="sm" variant="ghost" className="h-7 w-7 p-0" aria-label={`${d.bookmarked ? "unbookmark" : "bookmark"} ${d.name}`}
               onClick={() => guard((d.bookmarked ? removeBookmark : addBookmark).mutateAsync(d.id))}>
-              <Star className={`h-4 w-4 ${d.bookmarked ? "fill-amber-400 text-amber-400" : "text-muted-foreground"}`} />
+              <Star className={`h-4 w-4 ${d.bookmarked ? "fill-highlight text-highlight" : "text-muted-foreground"}`} />
             </Button>
           )}
           <Link className="font-medium hover:underline" to={d.id}>{d.name}</Link>
         </span>
       </td>
-      <td><span className="rounded bg-muted px-1.5 py-0.5 text-xs">{d.kind}</span></td>
+      <td><Badge variant="secondary">{d.kind}</Badge></td>
       <td className="text-muted-foreground">{dbName(d.database_id)}</td>
       <td className="font-mono text-xs text-muted-foreground">{sourceOf(d)}</td>
       <td className="tabular-nums">{d.column_count}</td>
@@ -192,21 +194,21 @@ export default function Datasets() {
             </div>
             {!showTrash && (
               <>
-                <Select value={typeFilter} onValueChange={setTypeFilter}>
-                  <SelectTrigger className="h-9 w-36"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All types</SelectItem>
-                    <SelectItem value="physical">Physical</SelectItem>
-                    <SelectItem value="virtual">Virtual</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Select value={dbFilter} onValueChange={setDbFilter}>
-                  <SelectTrigger className="h-9 w-48"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All databases</SelectItem>
-                    {(databases ?? []).map((d) => <SelectItem key={d.id} value={d.id}>{d.name} ({d.engine})</SelectItem>)}
-                  </SelectContent>
-                </Select>
+                <FacetSelect
+                  label="Type"
+                  value={typeFilter}
+                  onChange={setTypeFilter}
+                  options={[
+                    { value: "physical", label: "Physical" },
+                    { value: "virtual", label: "Virtual" },
+                  ]}
+                />
+                <FacetSelect
+                  label="Database"
+                  value={dbFilter}
+                  onChange={setDbFilter}
+                  options={(databases ?? []).map((d) => ({ value: d.id, label: `${d.name} (${d.engine})` }))}
+                />
               </>
             )}
             {bulk.bulkMode && bulk.someSelected && !showTrash && (
@@ -219,6 +221,15 @@ export default function Datasets() {
                 </Button>
               </>
             )}
+          </div>
+
+          <div className="mb-3">
+            <SummaryStrip
+              items={[
+                { label: "datasets", value: rows.length },
+                ...(folders.length ? [{ label: "folders", value: folders.length }] : []),
+              ]}
+            />
           </div>
 
           {rows.length > 0 ? (
