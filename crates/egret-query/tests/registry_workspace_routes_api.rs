@@ -33,6 +33,8 @@ use uuid::Uuid;
 
 struct Fixture {
     app: axum::Router,
+    db: Db,
+    repo: DatabaseRepo,
     users: UserRepo,
     members: MemberRepo,
     sessions: SessionService,
@@ -101,8 +103,9 @@ async fn setup() -> Option<Fixture> {
             .await
             .expect("build CedarPdp"),
     );
+    let repo = DatabaseRepo::new(db.clone(), secrets, workspace_secrets.clone());
     let app = workspace_database_router().with_state(DatabaseState {
-        repo: DatabaseRepo::new(db.clone(), secrets, workspace_secrets.clone()),
+        repo: repo.clone(),
         authz: Authorizer::new(db.clone()),
         pdp,
         sessions: sessions.clone(),
@@ -112,6 +115,8 @@ async fn setup() -> Option<Fixture> {
 
     Some(Fixture {
         app,
+        db: db.clone(),
+        repo,
         users,
         members: MemberRepo::new(db.clone()),
         sessions,
@@ -401,6 +406,122 @@ async fn create_with_secret_id_references_existing_named_secret() {
         .await
         .expect("get_meta");
     assert_eq!(meta.used_by, 1, "the connection now references the secret");
+}
+
+/// Seed a storage connection + warehouse (owned by `workspace_id`) + engine and
+/// return the engine id (the FK target that marks a `query.databases` row
+/// provisioned). Raw SQL against the shared schemas — no catalog/engine dep.
+async fn seed_engine(db: &Db, workspace_id: Uuid) -> Uuid {
+    let uniq = |p: &str| format!("{p}_{}", Uuid::new_v4().simple());
+    let sc_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO storage.storage_connections \
+           (name, provider, region, bucket, access_key, path_style) \
+         VALUES ($1, 's3', 'us-east-1', 'warehouse', 'egret', true) RETURNING id",
+    )
+    .bind(uniq("store"))
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed storage connection");
+    let wh_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO catalog.warehouses (name, workspace_id, storage_conn_id) \
+         VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(uniq("wh"))
+    .bind(workspace_id)
+    .bind(sc_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed warehouse");
+    sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec) \
+         VALUES ($1, 'trino', 'egret-engines', $2, '{}'::jsonb) RETURNING id",
+    )
+    .bind(uniq("eng"))
+    .bind(wh_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("seed engine")
+}
+
+#[tokio::test]
+async fn provisioned_databases_are_read_only() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = add_member(&f, f.ws_a, "admin", "ws_admin").await;
+
+    // Materialize a provisioned (engine-assigned) connection in workspace A.
+    let engine_id = seed_engine(&f.db, f.ws_a.0).await;
+    let provisioned = f
+        .repo
+        .create_provisioned(
+            f.ws_a.0,
+            engine_id,
+            &format!("prov-{}", Uuid::new_v4().simple()),
+            "trino",
+            "trino-prod-coordinator.egret-engines.svc",
+            8080,
+            &serde_json::json!({}),
+            None,
+        )
+        .await
+        .expect("materialize provisioned connection");
+
+    let base = format!("/ws/{}/databases", f.slug_a);
+    let path = format!("{base}/{}", provisioned.id);
+
+    // PUT (edit) → 409.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("PUT", &path, &token, Some(db_body("renamed"))))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "editing a provisioned connection must be rejected with 409"
+    );
+
+    // Test-connection → 409.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("POST", &format!("{path}/test"), &token, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "testing a provisioned connection must be rejected with 409"
+    );
+
+    // DELETE → 409.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &path, &token, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "deleting a provisioned connection must be rejected with 409"
+    );
+
+    // The read path still works — the row was not touched.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &path, &token, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a provisioned connection remains readable"
+    );
 }
 
 #[tokio::test]

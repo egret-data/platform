@@ -12,6 +12,8 @@ pub enum DatabaseError {
     NotFound(String),
     #[error("already exists: {0}")]
     AlreadyExists(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("bad request: {0}")]
     BadRequest(String),
     #[error("secrets master_key is not configured")]
@@ -38,6 +40,7 @@ impl IntoResponse for DatabaseError {
         let (status, msg) = match &self {
             DatabaseError::NotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             DatabaseError::AlreadyExists(_) => (StatusCode::CONFLICT, self.to_string()),
+            DatabaseError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
             DatabaseError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             DatabaseError::SecretsNotConfigured => (StatusCode::BAD_REQUEST, self.to_string()),
             DatabaseError::Secrets(_) | DatabaseError::Db(_) => (
