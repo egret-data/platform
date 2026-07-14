@@ -361,6 +361,115 @@ async fn ws_state(db: &Db) -> WorkspaceState {
     }
 }
 
+// ── Control-plane workspace-management helpers (restore/owner/stats/transfer) ──
+
+/// Seed a platform-admin, build a `WorkspaceState`, and return it alongside the
+/// admin id and a login cookie. The returned state is the caller's to clone into
+/// a router (keep the original for direct repo seeding).
+async fn admin_ctx(db: &Db) -> (WorkspaceState, UserId, String) {
+    let admin = seed_user(db).await;
+    let st = ws_state(db).await;
+    st.authz
+        .replace_platform_roles(admin, &["platform_admin".into()])
+        .await
+        .unwrap();
+    let cookie = login_cookie(db, admin, &st.sessions).await;
+    (st, admin, cookie)
+}
+
+/// Send a JSON request through a built app router and return the raw response.
+async fn send(
+    app: &axum::Router,
+    cookie: &str,
+    method: &str,
+    uri: &str,
+    body: Option<serde_json::Value>,
+) -> axum::response::Response {
+    let b = match body {
+        Some(v) => Body::from(serde_json::to_vec(&v).unwrap()),
+        None => Body::empty(),
+    };
+    app.clone()
+        .oneshot(
+            HttpRequest::builder()
+                .method(method)
+                .uri(uri)
+                .header("cookie", cookie)
+                .header("content-type", "application/json")
+                .body(b)
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// Collect a response body into a JSON value.
+async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn restore_reactivates_an_archived_workspace() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let (st, _admin, cookie) = admin_ctx(&db).await;
+    let app = axum::Router::new()
+        .nest("/api/admin", admin_workspace_router())
+        .with_state(st);
+
+    let created = body_json(
+        send(
+            &app,
+            &cookie,
+            "POST",
+            "/api/admin/workspaces",
+            Some(serde_json::json!({"slug": uniq("restore"), "name": "Restore Me"})),
+        )
+        .await,
+    )
+    .await;
+    let ws = created["id"].as_str().unwrap().to_string();
+
+    // archive it
+    let res = send(
+        &app,
+        &cookie,
+        "DELETE",
+        &format!("/api/admin/workspaces/{ws}"),
+        None,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // restore it
+    let res = send(
+        &app,
+        &cookie,
+        "POST",
+        &format!("/api/admin/workspaces/{ws}/restore"),
+        None,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // get: status is active again
+    let body = body_json(
+        send(
+            &app,
+            &cookie,
+            "GET",
+            &format!("/api/admin/workspaces/{ws}"),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(body["status"], "active");
+}
+
 #[tokio::test]
 async fn create_workspace_requires_platform_permission() {
     let Some(db) = connect().await else {

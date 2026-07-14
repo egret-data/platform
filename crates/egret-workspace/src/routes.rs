@@ -92,6 +92,7 @@ pub fn admin_workspace_router() -> Router<WorkspaceState> {
             "/workspaces/{id}",
             get(get_ws).put(update_ws).delete(archive_ws),
         )
+        .route("/workspaces/{id}/restore", post(restore_ws))
 }
 
 #[utoipa::path(
@@ -239,6 +240,33 @@ async fn archive_ws(
         .map_err(AuthError)?;
     st.workspaces
         .archive(WorkspaceId(id))
+        .await
+        .map_err(AuthError)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/admin/workspaces/{id}/restore",
+    tag = "admin-workspaces",
+    params(("id" = Uuid, Path, description = "Workspace id")),
+    responses(
+        (status = 200, description = "Workspace restored", body = Ack),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing platform permission", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn restore_ws(
+    State(st): State<WorkspaceState>,
+    Auth(p): Auth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AuthError> {
+    egret_core::authz::require(&*st.pdp, &p, "workspace:archive")
+        .await
+        .map_err(AuthError)?;
+    st.workspaces
+        .set_status(WorkspaceId(id), "active")
         .await
         .map_err(AuthError)?;
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -1179,7 +1207,7 @@ pub struct AccessRequestApi;
 /// OpenAPI fragment for the platform-admin workspace router (`/api/admin/workspaces`).
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(create_ws, list_ws, get_ws, update_ws, archive_ws),
+    paths(create_ws, list_ws, get_ws, update_ws, archive_ws, restore_ws),
     components(schemas(WorkspaceDto, CreateWorkspace, UpdateWorkspace, Ack, ErrorBody)),
     tags((name = "admin-workspaces", description = "Platform-admin workspace lifecycle")),
 )]

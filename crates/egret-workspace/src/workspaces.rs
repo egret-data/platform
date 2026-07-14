@@ -106,6 +106,18 @@ impl WorkspaceRepo {
         Ok(())
     }
 
+    /// Set a workspace's lifecycle status (`active` | `archived`). Backs the
+    /// control-plane restore (un-archive) route.
+    pub async fn set_status(&self, id: WorkspaceId, status: &str) -> Result<()> {
+        sqlx::query("UPDATE workspaces SET status = $1 WHERE id = $2")
+            .bind(status)
+            .bind(id.0)
+            .execute(&self.db.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     /// Workspaces the principal can access: all active if `include_all` (platform_admin),
     /// else those where the user is a member directly or via a group.
     pub async fn list_for_principal(
