@@ -17,6 +17,20 @@ vi.mock("@/api/accessRequests", () => ({
   useDenyRequest: () => ({ mutate: denyMutate, isPending: false }),
 }));
 
+// Roles are fetched from the workspace-role catalog (shared with Members).
+vi.mock("@/api/members", () => ({
+  useWorkspaceRoles: () => ({
+    data: [
+      { id: "r-viewer", name: "ws_viewer", scope: "workspace" },
+      { id: "r-editor", name: "ws_editor", scope: "workspace" },
+      { id: "r-admin", name: "ws_admin", scope: "workspace" },
+    ],
+    isLoading: false,
+    isError: false,
+    error: null,
+  }),
+}));
+
 import AccessRequests from "@/routes/explore/settings/AccessRequests";
 
 // ── Render helper ─────────────────────────────────────────────────────────────

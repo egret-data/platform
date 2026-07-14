@@ -32,6 +32,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import type { ApiError } from "@/api/client";
+import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 
 // ── Cell with autosave ────────────────────────────────────────────────────────
 
@@ -55,6 +56,9 @@ interface ManagedCellProps {
   initialRunning?: boolean;
   onRunAbove?: () => void;
   onRunBelow?: () => void;
+  /** Report whether this cell has an unflushed debounced save pending (for the page's
+   *  beforeunload guard). Called on edit (true) and on flush/persist (false). */
+  onPendingChange?: (cid: string, pending: boolean) => void;
 }
 
 function ManagedCell({
@@ -69,6 +73,7 @@ function ManagedCell({
   initialRunning,
   onRunAbove,
   onRunBelow,
+  onPendingChange,
 }: ManagedCellProps) {
   const [source, setSource] = useState(cell.source);
   // Restore-on-load: seed outputs from the persisted last_output.
@@ -77,6 +82,8 @@ function ManagedCell({
   );
   const [running, setRunning] = useState(initialRunning ?? false);
   const timerRef = useRef<number | undefined>(undefined);
+  // True while a debounced source save is scheduled but not yet persisted.
+  const pendingRef = useRef(false);
 
   // Sync source if the server data changes (e.g. after refetch)
   const prevCellIdRef = useRef(cell.id);
@@ -91,15 +98,31 @@ function ManagedCell({
     (newSource: string) => {
       setSource(newSource);
       window.clearTimeout(timerRef.current);
+      pendingRef.current = true;
+      onPendingChange?.(cell.id, true);
       timerRef.current = window.setTimeout(() => {
+        pendingRef.current = false;
+        onPendingChange?.(cell.id, false);
         updateCellMutate({ cid: cell.id, source: newSource });
       }, 600);
     },
-    [cell.id, updateCellMutate],
+    [cell.id, updateCellMutate, onPendingChange],
   );
 
+  // Live flush closure, reassigned each render so it captures the latest `source`
+  // and mutate fn. On unmount we RUN the pending save (not just clear the timer),
+  // so a quick navigation away doesn't drop the last debounced edit.
+  const flushRef = useRef<() => void>(() => {});
+  flushRef.current = () => {
+    window.clearTimeout(timerRef.current);
+    if (pendingRef.current) {
+      pendingRef.current = false;
+      onPendingChange?.(cell.id, false);
+      updateCellMutate({ cid: cell.id, source });
+    }
+  };
   useEffect(() => {
-    return () => window.clearTimeout(timerRef.current);
+    return () => flushRef.current();
   }, []);
 
   async function handleRun() {
@@ -173,6 +196,19 @@ export default function NotebookPage() {
   >({});
   const [runningAll, setRunningAll] = useState(false);
 
+  // Cells with an unflushed debounced source save. A cell reports itself in/out of
+  // this set; state (not a ref) so the beforeunload guard re-evaluates on change.
+  const [pendingCells, setPendingCells] = useState<Set<string>>(() => new Set());
+  const setCellPending = useCallback((cid: string, pending: boolean) => {
+    setPendingCells((prev) => {
+      if (pending === prev.has(cid)) return prev; // no transition → same ref, no re-render
+      const next = new Set(prev);
+      if (pending) next.add(cid);
+      else next.delete(cid);
+      return next;
+    });
+  }, []);
+
   // Cells the recorder still lists as in-flight → seed a spinner on load.
   const runningSet = useMemo(
     () => new Set(active.data?.running ?? []),
@@ -198,6 +234,14 @@ export default function NotebookPage() {
   const handlePublicToggle = (checked: boolean) => {
     updateNotebook.mutate({ is_public: checked });
   };
+
+  // Name saves only on blur; a cell save debounces ~600ms. Warn on refresh/close while
+  // either is unpersisted (beforeunload-only; SPA nav flushes cell saves on unmount).
+  const nameDirty =
+    !!notebook.data &&
+    localName.trim() !== "" &&
+    localName.trim() !== notebook.data.name;
+  useUnsavedChangesWarning(pendingCells.size > 0 || nameDirty);
 
   const handleAddCell = (cellType: CellType = "code") => {
     const cells = notebook.data?.cells ?? [];
@@ -394,6 +438,7 @@ export default function NotebookPage() {
             onMoveDown={handleMoveDown}
             updateCellMutate={updateCell.mutate}
             runners={runners}
+            onPendingChange={setCellPending}
             initialRunning={runningSet.has(cell.id)}
             onRunAbove={index > 0 ? () => runSlice(0, index) : undefined}
             onRunBelow={index < sortedCells.length - 1 ? () => runSlice(index + 1, sortedCells.length) : undefined}

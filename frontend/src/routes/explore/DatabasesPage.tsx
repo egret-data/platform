@@ -47,6 +47,7 @@ import {
 } from "@/components/ui/select";
 import { SecretPicker, type SecretSelection } from "@/components/SecretPicker";
 import { Switch } from "@/components/ui/switch";
+import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 
 function statusVariant(status: string): "default" | "destructive" | "secondary" {
   if (status === "ok") return "default";
@@ -334,12 +335,49 @@ function DatabaseConnDialog({
     updateMutation.reset();
   }
 
+  // The form is dirty when any field diverges from its initial (edit-target or
+  // add-blank) value — including having staged a secret change.
+  const dirty =
+    name !== (editConn?.name ?? "") ||
+    engine !== (editConn?.engine ?? "trino") ||
+    host !== (editConn?.host ?? "") ||
+    port !== (editConn?.port?.toString() ?? "") ||
+    user !== (editConn?.options.user ?? "") ||
+    catalog !== (editConn?.options.catalog ?? "") ||
+    schema !== (editConn?.options.database ?? "") ||
+    httpScheme !== (editConn?.options.http_scheme ?? "") ||
+    impersonate !== (editConn?.options.impersonate ?? false) ||
+    delegated !== (editConn?.delegated ?? false) ||
+    Object.keys(secretSel).length > 0;
+
+  // beforeunload guard (refresh / tab-close) while there are unsaved edits.
+  useUnsavedChangesWarning(open && dirty);
+
+  /** Reset + close without prompting — used after a successful save. */
+  function closeAndReset() {
+    resetToConn(null);
+    onOpenChange(false);
+  }
+
   function handleOpenChange(next: boolean) {
-    if (!next) resetToConn(null);
+    if (!next) {
+      // Guard in-app closes (Cancel / Esc / overlay) against silent data loss.
+      if (dirty && !window.confirm("Discard unsaved changes?")) return;
+      closeAndReset();
+      return;
+    }
     onOpenChange(next);
   }
 
   const isPending = createMutation.isPending || updateMutation.isPending;
+
+  // Required fields (mirror the native `required` on name/host/port). Submit is
+  // gated on these being filled, with a muted hint naming what's still missing.
+  const missing: string[] = [];
+  if (!name.trim()) missing.push("name");
+  if (!host.trim()) missing.push("host");
+  if (!port.trim()) missing.push("port");
+  const missingHint = missing.length > 0 ? `Fill in ${missing.join(", ")}` : null;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -372,7 +410,7 @@ function DatabaseConnDialog({
       } else {
         await createMutation.mutateAsync(input);
       }
-      handleOpenChange(false);
+      closeAndReset();
     } catch (err) {
       setError((err as ApiError).message ?? "Failed to save engine connection.");
     }
@@ -546,7 +584,10 @@ function DatabaseConnDialog({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={isPending}>
+            {!isPending && missingHint && (
+              <span className="self-center text-xs text-muted-foreground">{missingHint}</span>
+            )}
+            <Button type="submit" disabled={isPending || missing.length > 0}>
               {isPending && <Loader2 className="h-4 w-4 animate-spin" />}
               {isEdit ? "Save changes" : "Add connection"}
             </Button>

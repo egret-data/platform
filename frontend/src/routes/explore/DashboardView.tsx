@@ -31,6 +31,7 @@ import { PlaceholderCard } from "@/components/chart/dashboard/PlaceholderCard";
 import { slugify, applyParamsToChart, paramFiltersForCard, temporalOverridesForCard, computeLinkedFilters, isBlank } from "@/components/chart/dashboard/params";
 import { useColumnValues } from "@/api/useColumnValues";
 import { useDashboardTabs } from "@/api/useDashboardTabs";
+import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { DashboardTabBar } from "@/components/chart/dashboard/DashboardTabBar";
 import { ChartPickerList } from "@/components/chart/dashboard/ChartPickerList";
 import { startTabsDraft, serializeLayout, addTab, renameTab, reorderTab, deleteTab, duplicateTab, moveCardToTab, type DraftTab, type DraftCard } from "@/components/chart/dashboard/tabs";
@@ -63,6 +64,8 @@ export default function DashboardView() {
   const [draftName, setDraftName] = useState("");
   const serverTabCount = dash?.tabs?.length ?? 0;
   const { activeTabPos, setActiveTabPos } = useDashboardTabs(editing ? (draftTabs?.length ?? 0) : serverTabCount);
+  // beforeunload guard: warn on refresh/close while the dashboard editor is open (unsaved draft).
+  useUnsavedChangesWarning(editing);
   const cardSeqRef = useRef(0);
   const interactingRef = useRef(false);
   const chartById = useMemo(() => new Map((charts ?? []).map((c) => [c.id, c])), [charts]);

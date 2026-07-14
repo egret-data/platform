@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { useDataset, useRefreshDataset, useDeleteDataset, useUpdateDataset } from "@/api/datasets";
+import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { ColumnsTab } from "@/components/dataset/ColumnsTab";
 import { MetricsTab } from "@/components/dataset/MetricsTab";
 import { PreviewTab } from "@/components/dataset/PreviewTab";
@@ -31,6 +32,25 @@ export default function DatasetDetail() {
   const [sql, setSql] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
+
+  // Edit form is dirty when any editable field diverges from the loaded dataset.
+  // (sql is only editable for virtual datasets.) beforeunload-only guard.
+  const dirty = editing && !!ds && (
+    name !== ds.name ||
+    description !== ds.description ||
+    (ds.kind === "virtual" && sql !== (ds.sql ?? ""))
+  );
+  useUnsavedChangesWarning(dirty);
+
+  // Detail tab in the URL (?tab=), default "columns" (preserves prior behavior).
+  const tab = searchParams.get("tab") ?? "columns";
+  const setTab = (v: string) =>
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (v === "columns") next.delete("tab");
+      else next.set("tab", v);
+      return next;
+    }, { replace: true });
 
   // Arriving from the list's "Edit" row action (…?edit=1) opens edit mode directly.
   useEffect(() => {
@@ -106,7 +126,7 @@ export default function DatasetDetail() {
           {editing ? (
             <>
               <Button disabled={update.isPending} onClick={save}>{update.isPending ? "Saving…" : "Save"}</Button>
-              <Button variant="outline" onClick={() => setEditing(false)}>Cancel</Button>
+              <Button variant="outline" onClick={() => { if (dirty && !window.confirm("Discard unsaved changes?")) return; setEditing(false); }}>Cancel</Button>
             </>
           ) : (
             <>
@@ -121,7 +141,7 @@ export default function DatasetDetail() {
         </div>
       </div>
 
-      <Tabs defaultValue="columns" className="mt-4">
+      <Tabs value={tab} onValueChange={setTab} className="mt-4">
         <TabsList>
           <TabsTrigger value="columns">Columns ({ds.columns.length})</TabsTrigger>
           <TabsTrigger value="metrics">Metrics ({ds.metrics.length})</TabsTrigger>
