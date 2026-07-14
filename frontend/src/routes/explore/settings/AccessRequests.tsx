@@ -8,6 +8,8 @@ import {
   useWorkspaceRequests,
   type AccessRequest,
 } from "@/api/accessRequests";
+import { useWorkspaceRoles } from "@/api/members";
+import { type AccessRole } from "@/api/access";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -32,7 +34,23 @@ import { Textarea } from "@/components/ui/textarea";
 import { errorStatus } from "@/lib/httpStatus";
 import { timeAgo, fullTimestamp } from "@/lib/relativeTime";
 
-const WORKSPACE_ROLES = ["ws_viewer", "ws_editor", "ws_admin"];
+/** Small dot colour for a role, using semantic design tokens (mirrors Members). */
+function roleDotColor(role: string): string {
+  if (role.includes("admin")) return "var(--success)";
+  if (role.includes("editor")) return "var(--primary)";
+  return "var(--muted-foreground)";
+}
+
+/** A coloured swatch preceding a role name. */
+function RoleDot({ role }: { role: string }) {
+  return (
+    <span
+      className="inline-block h-2 w-2 shrink-0 rounded-full"
+      style={{ background: roleDotColor(role) }}
+      aria-hidden
+    />
+  );
+}
 
 /** Convert a `yyyy-mm-dd` date-input value to an end-of-local-day RFC3339 timestamp. */
 function toExpiresAt(dateValue: string): string | undefined {
@@ -49,8 +67,14 @@ function toExpiresAt(dateValue: string): string | undefined {
 export default function AccessRequests() {
   const ws = useParams().workspace!;
   const q = useWorkspaceRequests(ws);
+  const rolesQ = useWorkspaceRoles();
   const approveMut = useApproveRequest(ws);
   const denyMut = useDenyRequest(ws);
+
+  // Roles come from the same catalog Members uses. While loading (or if the
+  // fetch fails/returns nothing) we fall back to an empty option list rather
+  // than a hardcoded set that could drift from the real roles.
+  const roles = rolesQ.data ?? [];
 
   const [approveTarget, setApproveTarget] = useState<AccessRequest | null>(null);
   const [denyTarget, setDenyTarget] = useState<AccessRequest | null>(null);
@@ -144,6 +168,7 @@ export default function AccessRequests() {
 
       <ApproveDialog
         request={approveTarget}
+        roles={roles}
         pending={approveMut.isPending}
         onOpenChange={(o) => !o && setApproveTarget(null)}
         onConfirm={confirmApprove}
@@ -162,17 +187,22 @@ export default function AccessRequests() {
 /** Approve confirmation: pick a workspace role (defaults to the requested one) + optional expiry. */
 function ApproveDialog({
   request,
+  roles,
   pending,
   onOpenChange,
   onConfirm,
 }: {
   request: AccessRequest | null;
+  roles: AccessRole[];
   pending: boolean;
   onOpenChange: (open: boolean) => void;
   onConfirm: (role: string, expiresDate: string) => void;
 }) {
   const [role, setRole] = useState("");
   const [expiresDate, setExpiresDate] = useState("");
+
+  // A past expiry makes no sense — floor the date picker at today (local).
+  const today = new Date().toISOString().slice(0, 10);
 
   // Reset local state whenever a new request is targeted.
   const key = request?.id ?? "";
@@ -198,12 +228,18 @@ function ApproveDialog({
             <Label htmlFor="approve-role">Role</Label>
             <Select value={role} onValueChange={setRole}>
               <SelectTrigger id="approve-role" aria-label="Role" className="w-full">
-                <SelectValue placeholder="Select a role…" />
+                <span className="flex items-center gap-2">
+                  {role && <RoleDot role={role} />}
+                  <SelectValue placeholder="Select a role…" />
+                </span>
               </SelectTrigger>
               <SelectContent>
-                {WORKSPACE_ROLES.map((r) => (
-                  <SelectItem key={r} value={r}>
-                    {r}
+                {roles.map((r) => (
+                  <SelectItem key={r.name} value={r.name}>
+                    <span className="flex items-center gap-2">
+                      <RoleDot role={r.name} />
+                      {r.name}
+                    </span>
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -215,6 +251,7 @@ function ApproveDialog({
             <Input
               id="approve-expires"
               type="date"
+              min={today}
               value={expiresDate}
               onChange={(e) => setExpiresDate(e.target.value)}
             />
