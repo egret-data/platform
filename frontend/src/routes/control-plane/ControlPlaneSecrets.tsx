@@ -10,6 +10,7 @@ import {
   listSecrets,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
+import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -87,7 +88,8 @@ export default function ControlPlaneSecrets() {
           </Button>
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-4">
+        <SummaryStrip items={[{ label: "secrets", value: rows.length }]} />
         {secrets.isError ? (
           <Alert variant="destructive">
             <AlertDescription>
