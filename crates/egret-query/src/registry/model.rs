@@ -93,6 +93,42 @@ pub struct DatabaseListDto {
     pub delegated: bool,
 }
 
+// ── B2: ws-member read-only view of assigned engines ──────────────────────────
+
+/// One egret-provisioned engine assigned to the workspace (list view).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct WsEngineListDto {
+    pub id: String,
+    pub name: String,
+    /// Engine kind (`trino`/`starrocks`/`risingwave`).
+    #[serde(rename = "type")]
+    pub engine_type: String,
+    pub status: String,
+}
+
+/// One catalog of an assigned engine, with the storage/secret NAME it maps to.
+/// `storage_name`/`secret_name` are best-effort (`null` when unresolvable); the
+/// secret VALUE is never exposed.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct WsEngineCatalogDto {
+    pub name: String,
+    pub kind: String,
+    pub storage_name: Option<String>,
+    pub secret_name: Option<String>,
+}
+
+/// Read-only detail of an assigned engine: its catalogs, each resolved to the
+/// storage connection (via the engine's warehouse) and secret name it uses.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct WsEngineDetailDto {
+    pub name: String,
+    /// Engine kind (`trino`/`starrocks`/`risingwave`).
+    #[serde(rename = "type")]
+    pub engine_type: String,
+    pub status: String,
+    pub catalogs: Vec<WsEngineCatalogDto>,
+}
+
 /// Result of a connection test.
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct TestOutcome {
