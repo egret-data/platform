@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
@@ -134,6 +134,19 @@ function grantsKey(roleId: string) {
  */
 export default function WarehouseDetail() {
   const { id = "" } = useParams();
+  // Active tab lives in the URL (`?tab=`) so the view is deep-linkable and
+  // survives a refresh. Default preserved: "roles".
+  const [sp, setSp] = useSearchParams();
+  const tab = sp.get("tab") ?? "roles";
+  const setTab = (v: string) =>
+    setSp(
+      (prev) => {
+        const n = new URLSearchParams(prev);
+        n.set("tab", v);
+        return n;
+      },
+      { replace: true },
+    );
   const warehouse = useQuery<Warehouse, ApiError>({
     queryKey: ["control-plane", "warehouses", id],
     queryFn: () => getWarehouse(id),
@@ -173,7 +186,7 @@ export default function WarehouseDetail() {
         isLoading={warehouse.isLoading}
       />
 
-      <Tabs defaultValue="roles">
+      <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="roles">
             <ShieldCheck className="h-4 w-4" />

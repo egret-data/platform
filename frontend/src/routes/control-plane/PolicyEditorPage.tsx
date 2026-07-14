@@ -497,6 +497,17 @@ export default function PolicyEditorPage() {
             >
               Cancel
             </Button>
+            {!save.isPending &&
+              (() => {
+                const reason = !form.name.trim()
+                  ? "Enter a policy name"
+                  : missingRequired
+                    ? "Fill the required resource levels"
+                    : null;
+                return reason ? (
+                  <span className="text-xs text-muted-foreground">{reason}</span>
+                ) : null;
+              })()}
             <Button
               type="button"
               size="sm"

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Loader2, Plus, RotateCw, Server, Trash2 } from "lucide-react";
 
@@ -18,6 +18,7 @@ import {
   testEngineCatalog,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
+import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -172,9 +173,26 @@ function EngineTabs({
   engineId: string;
 }) {
   const cfg = useEngineConfigForm(engine);
+  // Warn before refresh/close while a config or security edit is unsaved — these
+  // saves re-provision the engine, so a lost edit is expensive.
+  useUnsavedChangesWarning(cfg.dirty);
+
+  // Active top-level tab lives in the URL (`?tab=`) so the view is
+  // deep-linkable and survives a refresh. Default preserved: "overview".
+  const [sp, setSp] = useSearchParams();
+  const tab = sp.get("tab") ?? "overview";
+  const setTab = (v: string) =>
+    setSp(
+      (prev) => {
+        const n = new URLSearchParams(prev);
+        n.set("tab", v);
+        return n;
+      },
+      { replace: true },
+    );
 
   return (
-    <Tabs defaultValue="overview" className="space-y-5">
+    <Tabs value={tab} onValueChange={setTab} className="space-y-5">
       <TabsList>
         <TabsTrigger value="overview">Overview</TabsTrigger>
         <TabsTrigger value="catalogs">Catalogs</TabsTrigger>
@@ -479,8 +497,19 @@ function ConfigurationTab({
   // into this one registry — no per-section validity gates.
   const [rawInvalid, setRawInvalid] = useState(false);
 
-  // Active left-nav section.
-  const [section, setSection] = useState("image");
+  // Active left-nav section lives in the URL (`?section=`), merged alongside the
+  // top-level `?tab=`. Default preserved: "image".
+  const [sp, setSp] = useSearchParams();
+  const section = sp.get("section") ?? "image";
+  const setSection = (v: string) =>
+    setSp(
+      (prev) => {
+        const n = new URLSearchParams(prev);
+        n.set("section", v);
+        return n;
+      },
+      { replace: true },
+    );
 
   // Non-default field count per nav item (drives the badges).
   const countFor = (key: string): number => sectionCounts[key] ?? 0;
