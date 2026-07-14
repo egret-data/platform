@@ -33,7 +33,17 @@ import {
 } from "./generated/sqllab/sqllab";
 
 // ── types ──
-export interface DatabaseListItem { id: string; name: string; engine: string }
+export interface DatabaseListItem {
+  id: string;
+  name: string;
+  engine: string;
+  /**
+   * Set when this connection was materialized by an engine→workspace assignment
+   * (egret-provisioned). The SQL-Lab picker tags such entries; behaviour is
+   * unchanged — both provisioned and self-service rows are queryable.
+   */
+  engine_id?: string | null;
+}
 export interface SavedQuery { id: string; database_id: string | null; name: string; sql: string; description: string; created_by: string | null; folder_id: string | null; updated_at: string }
 export interface SchemaColumn { name: string; type: string }
 export type QueryStatus = "queued" | "running" | "finished" | "failed" | "cancelled";
