@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add `delegationMode="jwt"`: a TLS coordinator (egret self-signed cert, pinned by the connector) where each delegated query authenticates with the caller's own JWT (bearer) — identity bound by the token, no delegator/impersonation.
+**Goal:** Provision **TLS** on the coordinator of every delegation-capable engine (impersonate + jwt), and add `delegationMode="jwt"` (JWT-only, bearer). TLS gives real wire encryption + connector cert-pinning for BOTH modes; jwt binds identity to the caller's own token (no delegator).
 
-**Architecture:** A jwt-mode engine is provisioned with `http-server.https` (keystore = an egret-generated self-signed cert+key, mounted from a k8s Secret) and JWT-only auth. Delegated `query.databases` rows carry `options.http_scheme=https` + `options.tls_cert` (the public cert) + the https port; the connector builds a reqwest client that pins that cert. The jwt mint path in `routes.rs` (from #254) is reused unchanged. jwt is per-engine exclusive and seeds NO `egret_delegator`.
+**Architecture:** TLS is orthogonal to the delegation mode. Any delegation engine is provisioned with `http-server.https` (keystore = an egret-generated self-signed cert+key, mounted from a k8s Secret); delegated `query.databases` rows carry `options.http_scheme=https` + `options.tls_cert` (public cert) + port 8443, and the connector pins that cert. **Mode decides auth only:** `impersonate` = delegator PASSWORD (from #254; over TLS the password is encrypted → the `X-Forwarded-Proto` trick from #255 is no longer needed); `jwt` = JWT-only bearer (no delegator, no PASSWORD). The jwt mint path in `routes.rs` (from #254) is reused unchanged.
 
 **Tech Stack:** Rust (axum, sqlx), `rcgen` (self-signed cert), `reqwest` (rustls-tls, `add_root_cert`), Trino https over PEM keystore, Postgres.
 
@@ -268,18 +268,21 @@ async fn ensure_tls_cert(st: &CpState, engine: &Engine) -> Result<(String, Strin
 ```
 (Match the real `st.secrets.create(..)` signature — read how `ensure_delegator_secret` calls it; adjust arg order/names. Handle its `AlreadyExists` the same way `ensure_delegator_secret` does.)
 
-- [ ] **Step 3: Wire into `build_provision_req`.** Where the #254 delegator block sits, make it exclusive per mode:
+- [ ] **Step 3: Wire into `build_provision_req`.** TLS is provisioned for EVERY delegation engine (both modes); the delegator is impersonate-only. Where the #254 delegator block sits:
 ```rust
-if engine.is_impersonate_delegation() {
-    // ... existing delegator gen + inject + seed (unchanged) ...
-} else if engine.is_jwt_delegation() {
+// TLS for ANY delegation-capable engine — encrypts the wire + lets the connector
+// pin the cert. impersonate: encrypts the delegator password (no more
+// X-Forwarded-Proto trick). jwt: binds identity over TLS.
+if engine.supports_delegation() {
     let (keystore_pem, _cert) = ensure_tls_cert(st, engine).await?;
     trino_config.tls = Some(egret_engine_mgmt_api::Tls { keystore_pem, port: 8443 });
-    // jwt mode is JWT-only: ensure no PASSWORD authenticator / delegator is added.
-    // (Do NOT call inject_delegator_user / seed_delegator_policies here.)
 }
+if engine.is_impersonate_delegation() {
+    // ... existing #254 delegator gen + inject_delegator_user + seed_delegator_policies (unchanged) ...
+}
+// jwt mode adds nothing here: JWT-only, no delegator, no PASSWORD user.
 ```
-Ensure the auth `type` for a jwt engine is rendered as JWT (not PASSWORD,JWT): if `auth_type()` is derived from whether `password_users` is non-empty, a jwt engine with empty `password_users` + `jwt: Some` should yield `type=JWT`. Confirm `inject_monitor_user` does NOT force a password user onto a jwt engine — if the monitor injection would add PASSWORD auth to a jwt engine, skip `inject_monitor_user` for jwt mode (the monitor uses basic-auth; over a JWT-only coordinator it can't authenticate — that's acceptable, the monitor degrades). Gate: `if !engine.is_jwt_delegation() { inject_monitor_user(&mut auth, engine.id)?; }`.
+Ensure the rendered auth `type` matches: an impersonate engine has the delegator password user ⇒ `PASSWORD,JWT`; a jwt engine has empty `password_users` + `jwt: Some` ⇒ `JWT` (confirm `auth_type()` derives this from `password_users` being empty). `inject_monitor_user` adds a PASSWORD user (basic-auth monitor) — over a JWT-only coordinator the monitor can't authenticate, so skip it for jwt: `if !engine.is_jwt_delegation() { inject_monitor_user(&mut auth, engine.id)?; }` (the monitor degrades on jwt engines; acceptable).
 
 - [ ] **Step 4: Test.** Add a unit test in engines.rs (or an integration test) asserting: for a jwt engine, `build_provision_req` produces a `TrinoConfig.tls = Some(_)` and `auth.password_users` is empty (no delegator/monitor). If `build_provision_req` needs DB/secret access that's awkward to unit-test, instead test the smaller pieces: `ensure_tls_cert` is covered by Task 3's generator; add a focused test that `is_jwt_delegation()` selects the tls branch (a pure helper `fn tls_for_mode(engine) -> bool` = `is_jwt_delegation()`), OR rely on the live smoke — but PREFER a unit test on the branch selection.
 
@@ -337,6 +340,13 @@ fn build_client(&self, timeout: std::time::Duration) -> Result<reqwest::Client, 
 ```
 Replace the inline `reqwest::Client::builder().timeout(...).build()...` in `execute` with `let client = self.build_client(limits.timeout)?;`. (The `base_url` already uses `http_scheme` = https + port 8443, so the https URL is built; the pinned cert validates it.)
 
+Also make the #255 `X-Forwarded-Proto: https` header **conditional on the http scheme** — over real TLS it is redundant (the connection is genuinely secure). Store `secure: bool` on the connector (`= scheme == "https"`, computed in `new` from `spec.options.http_scheme`), and in `auth()` only add the header when `!self.secure`:
+```rust
+let req = req.header("X-Trino-User", self.x_trino_user());
+let req = if self.secure { req } else { req.header("X-Forwarded-Proto", "https") };
+```
+Update the existing `#255` header tests: `basic_auth_path_sends_forwarded_proto` uses `host:"h"` with default (http) scheme so the header is still present; ADD a test that with `options.http_scheme=Some("https")` the built request does NOT carry `X-Forwarded-Proto` (over TLS it's omitted).
+
 - [ ] **Step 5:** `cargo test -p egret-query --lib` → PASS.
 - [ ] **Step 6: fmt + clippy + commit:**
 ```bash
@@ -353,41 +363,62 @@ git commit -m "feat(query): pin engine TLS cert for jwt-mode (reqwest add_root_c
 
 Context: `delegated_conn_options(engine) -> (serde_json::Value, Option<Uuid>)` (from #254) returns the impersonate options + delegator secret, else `({}, None)`. The jwt branch must set https + the pinned cert + no secret. The materialized `create_provisioned(..)` already takes `options` + `secret_id` + `port`; the jwt port is 8443.
 
-- [ ] **Step 1: Failing test** (assignment.rs tests): extend/add a test for `delegated_conn_options`:
+- [ ] **Step 1: Failing test** (assignment.rs tests): both modes materialize https + pinned cert (repeat the full `Engine` literal in each — including `coordinator_cert: Some("PEMCERT".into())`):
 ```rust
 #[test]
 fn delegated_conn_options_jwt_uses_https_and_pins_cert() {
-    let e = Engine {
-        /* full literal */, coordinator_cert: Some("PEMCERT".into()),
+    let e = Engine { /* full literal */
+        coordinator_cert: Some("PEMCERT".into()),
         spec: serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } }),
-        /* ... */
-    };
+        /* ... */ };
     let (opts, secret) = delegated_conn_options(&e);
     assert_eq!(opts["http_scheme"], "https");
     assert_eq!(opts["tls_cert"], "PEMCERT");
     assert!(opts.get("impersonate").is_none());
     assert_eq!(secret, None);
 }
+
+#[test]
+fn delegated_conn_options_impersonate_uses_https_and_pins_cert() {
+    let e = Engine { /* full literal */
+        coordinator_cert: Some("PEMCERT".into()),
+        delegator_secret_id: Some(Uuid::from_u128(7)),
+        spec: serde_json::json!({ "trinoConfig": {} }), // default = impersonate
+        /* ... */ };
+    let (opts, secret) = delegated_conn_options(&e);
+    assert_eq!(opts["http_scheme"], "https");
+    assert_eq!(opts["tls_cert"], "PEMCERT");
+    assert_eq!(opts["user"], "egret_delegator");
+    assert_eq!(opts["impersonate"], true);
+    assert_eq!(secret, Some(Uuid::from_u128(7)));
+}
 ```
 
 - [ ] **Step 2:** `cargo test -p egret-engine-mgmt --lib delegated_conn_options_jwt` → FAIL.
-- [ ] **Step 3: Implement.** Extend `delegated_conn_options`:
+- [ ] **Step 3: Implement.** Both modes now materialize over https + pinned cert; impersonate keeps its delegator user/secret, jwt has neither:
 ```rust
 fn delegated_conn_options(engine: &Engine) -> (serde_json::Value, Option<Uuid>) {
-    if engine.is_impersonate_delegation() {
-        // ... existing impersonate branch (user + impersonate:true + delegator secret) ...
-    } else if engine.is_jwt_delegation() {
-        let mut opts = serde_json::json!({ "http_scheme": "https" });
+    // TLS (https + pinned public cert) for BOTH delegation modes.
+    let with_tls = |mut opts: serde_json::Value| {
+        opts["http_scheme"] = "https".into();
         if let Some(cert) = &engine.coordinator_cert {
             opts["tls_cert"] = serde_json::Value::String(cert.clone());
         }
-        (opts, None)
+        opts
+    };
+    if engine.is_impersonate_delegation() {
+        let opts = with_tls(serde_json::json!({
+            "user": crate::delegator_policy::DELEGATOR_USERNAME, "impersonate": true,
+        }));
+        (opts, engine.delegator_secret_id)
+    } else if engine.is_jwt_delegation() {
+        (with_tls(serde_json::json!({})), None)
     } else {
         (serde_json::json!({}), None)
     }
 }
 ```
-In the `assign` call site (assignment.rs), the materialized `port` must be **8443** for a jwt engine (https) and the coordinator port otherwise. Where it currently passes `engine.coordinator_port()`, use `let port = if engine.is_jwt_delegation() { 8443 } else { engine.coordinator_port() };` and pass `port`.
+In the `assign` call site (assignment.rs), the materialized `port` is **8443** (https) for any delegation engine: `let port = if engine.supports_delegation() { 8443 } else { engine.coordinator_port() };` and pass `port`.
 
 - [ ] **Step 4:** `cargo test -p egret-engine-mgmt --lib` → PASS.
 - [ ] **Step 5: fmt + clippy + commit:**
@@ -405,10 +436,12 @@ git commit -m "feat(engine): materialize jwt delegated connection (https + pinne
 - [ ] `cargo clippy --workspace --all-targets` (no new warnings in touched crates)
 - [ ] `cargo test -p egret-engine-mgmt -p egret-orchestrator -p egret-query -p egret-query-api`
 - [ ] `cargo build -p egret-bin`
-- [ ] **Live (manual):** provision an engine with `delegationMode="jwt"` (update its spec `trinoConfig.delegationMode="jwt"`); confirm the coordinator boots HTTPS on 8443 with the egret cert, has NO `egret_delegator` in password.db, and NO impersonate policy. Assign to a workspace, and **as an OIDC user** (e.g. member-sso, with a stored refresh token) run a delegated query → runs as that user over TLS (`SELECT current_user` = the caller). A non-OIDC caller (local admin, no refresh token) gets 403. (Dev host-vs-cluster: the cert's SAN includes `localhost`, so a `kubectl port-forward` + repointed DB host validates.)
+- [ ] **Live (manual) — jwt:** provision an engine with `delegationMode="jwt"`; confirm the coordinator boots HTTPS on 8443 with the egret cert, has NO `egret_delegator` in password.db, NO impersonate policy. Assign to a workspace; **as an OIDC user** (member-sso, has a stored refresh token) run a delegated query → runs as that user over TLS (`SELECT current_user` = the caller); a non-OIDC caller (local admin) gets 403. (Dev: cert SAN includes `localhost`, so `kubectl port-forward` + repointed DB host validates the pin.)
+- [ ] **Live (manual) — impersonate over TLS:** re-provision an existing impersonate engine (e.g. rgr2); confirm it now boots HTTPS on 8443, still has `egret_delegator` + impersonate policy, and the materialized DB is `https`+8443+`tls_cert`. Run a delegated query (any logged-in user) → runs as the caller over TLS. Verify the connector no longer sends `X-Forwarded-Proto` on the https connection (it's omitted for secure scheme).
 
 ## Notes for the executor
-- **jwt = per-engine exclusive, JWT-only:** never seed `egret_delegator` / impersonate policy / PASSWORD auth for a jwt engine.
+- **TLS is provisioned for BOTH modes** (gate: `supports_delegation()`); the delegation MODE decides auth only. jwt = JWT-only (never seed `egret_delegator`/impersonate policy/PASSWORD user). impersonate = delegator PASSWORD (unchanged from #254) + now over TLS.
 - **Do not change `routes.rs`** — the `!impersonate ⇒ mint JWT (403 on NoRefreshToken)` branch already IS the jwt path; `tls_cert` flows via `options`.
-- **`http_scheme=https` + `add_root_cert`** is the only connector change; the #255 `X-Forwarded-Proto`/`rebase` behavior is harmless over real TLS.
+- **Connector changes** = pin `options.tls_cert` (`add_root_cert`) + make `X-Forwarded-Proto` http-only. `base_url` uses `http_scheme` (=https) already; the #255 `rebase` is correct over real TLS.
+- **Existing impersonate engines** must be re-provisioned to gain TLS (http→https materialization); until then they keep the #254/#255 HTTP path (still works).
 - **Migration staleness:** touching `egret-metastore/src/lib.rs` (Task 1) is required.

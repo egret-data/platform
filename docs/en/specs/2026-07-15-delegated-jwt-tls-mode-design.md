@@ -29,6 +29,16 @@ short-lived (300s) tokens with no delegator. Trade-off: jwt engines serve **OIDC
 users only** (mint needs the caller's refresh token; non-OIDC ⇒ 403). Mixed /
 non-OIDC users use an impersonate engine.
 
+**TLS is orthogonal to the mode — provisioned for BOTH.** The delegation *mode*
+decides only the auth (impersonate = delegator PASSWORD; jwt = bearer JWT); TLS is
+a separate, shared concern that every delegation-capable engine gets. This means
+**impersonate mode also runs over TLS**: the delegator password is now genuinely
+encrypted on the wire (previously it relied on the HTTP `X-Forwarded-Proto: https`
+trick from #255, which only satisfied Trino's check without real encryption). With
+real TLS the connector omits `X-Forwarded-Proto` (redundant) and pins the cert.
+"Sharing a coordinator" (rejected above) means sharing the two *auth mechanisms* on
+one engine — NOT sharing TLS, which is safe and beneficial for both.
+
 ---
 
 ## Architecture
