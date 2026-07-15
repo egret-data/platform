@@ -135,7 +135,14 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
         if let Some(auth) = &cfg.auth {
             if let Some(t) = auth_type(auth) {
                 out.push_str(&format!("http-server.authentication.type={t}\n"));
-                out.push_str("http-server.authentication.allow-insecure-over-http=true\n");
+                // jwt-mode (TLS + JWT-only) binds query identity to the TLS-validated
+                // JWT — reject auth over plain HTTP:8080 so a spoofed X-Trino-User can't
+                // run as another user. impersonate engines keep insecure-over-http for
+                // their basic-auth monitor; safe because impersonation is delegator-only.
+                let insecure_over_http = !(cfg.tls.is_some() && t == "JWT");
+                out.push_str(&format!(
+                    "http-server.authentication.allow-insecure-over-http={insecure_over_http}\n"
+                ));
                 if let Some(j) = &auth.jwt {
                     out.push_str(&format!(
                         "http-server.authentication.jwt.key-file={}\n",
@@ -654,6 +661,15 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
     if let Some(p) = rc.probes.startup.as_ref() {
         container["startupProbe"] = probe_json(false, Some(p));
     }
+    // The coordinator serves HTTPS on 8443 when TLS is enabled; delegated
+    // in-cluster connections target it. Name both ports (k8s requires names once
+    // a container declares more than one). Runs before the additional-exposed-ports
+    // append below, which just pushes onto the same array.
+    if role.is_coord() && spec.config.tls.is_some() {
+        let ports = container["ports"].as_array_mut().unwrap();
+        ports[0] = json!({ "name": "http", "containerPort": 8080 });
+        ports.push(json!({ "name": "https", "containerPort": 8443 }));
+    }
     // Per-role additional exposed ports: APPEND to the base http port array.
     if !rc.additional_exposed_ports.is_empty() {
         if !container["ports"].is_array() {
@@ -929,12 +945,18 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
 }
 
 pub fn trino_service(spec: &EngineSpec) -> Value {
+    let mut ports = vec![json!({ "port": 8080, "targetPort": 8080, "name": "http" })];
+    // Expose the coordinator's HTTPS listener so delegated in-cluster clients can
+    // reach 8443. Only present when TLS is enabled; otherwise the Service is 8080-only.
+    if spec.config.tls.is_some() {
+        ports.push(json!({ "port": 8443, "targetPort": 8443, "name": "https" }));
+    }
     json!({
         "apiVersion": "v1", "kind": "Service",
         "metadata": { "name": format!("{}-trino", spec.name), "namespace": spec.namespace,
                       "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
         "spec": { "selector": { "app": format!("{}-coordinator", spec.name) },
-                  "ports": [{ "port": 8080, "targetPort": 8080, "name": "http" }] }
+                  "ports": ports }
     })
 }
 
@@ -1704,6 +1726,103 @@ mod tests {
 
         // Absent when tls is unset.
         assert!(trino_tls_secret(&sample_spec()).is_none());
+    }
+
+    // jwt-only auth + TLS on 8443 = a delegation-capable jwt-mode coordinator.
+    fn jwt_tls_spec() -> EngineSpec {
+        let mut s = sample_spec();
+        s.config.auth = Some(Auth {
+            password_users: vec![],
+            jwt: Some(Jwt {
+                jwks_uri: "https://kc/realms/egret/protocol/openid-connect/certs".into(),
+                required_audience: None,
+            }),
+        });
+        s.config.tls = Some(Tls {
+            keystore_pem: "P".into(),
+            port: 8443,
+        });
+        s
+    }
+
+    #[test]
+    fn jwt_engine_rejects_insecure_over_http() {
+        let cc = trino_config_map(&jwt_tls_spec())["data"]["config-coordinator.properties"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(cc.contains("http-server.authentication.allow-insecure-over-http=false"));
+        assert!(!cc.contains("http-server.authentication.allow-insecure-over-http=true"));
+    }
+
+    #[test]
+    fn impersonate_engine_keeps_insecure_over_http() {
+        let mut s = sample_spec();
+        // impersonate engine = PASSWORD monitor user + JWT + TLS.
+        s.config.auth = Some(Auth {
+            password_users: vec![PasswordEntry {
+                username: "egret_delegator".into(),
+                bcrypt_hash: "$2b$10$abc".into(),
+            }],
+            jwt: Some(Jwt {
+                jwks_uri: "https://kc/realms/egret/protocol/openid-connect/certs".into(),
+                required_audience: None,
+            }),
+        });
+        s.config.tls = Some(Tls {
+            keystore_pem: "P".into(),
+            port: 8443,
+        });
+        let cc = trino_config_map(&s)["data"]["config-coordinator.properties"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(cc.contains("http-server.authentication.allow-insecure-over-http=true"));
+    }
+
+    #[test]
+    fn service_exposes_https_port_when_tls() {
+        let svc = trino_service(&jwt_tls_spec());
+        let ports = svc["spec"]["ports"].as_array().unwrap();
+        assert!(ports
+            .iter()
+            .any(|p| p["port"] == 8443 && p["name"] == "https"));
+        assert!(ports
+            .iter()
+            .any(|p| p["port"] == 8080 && p["name"] == "http"));
+
+        // No TLS ⇒ single 8080 http port only.
+        let svc2 = trino_service(&sample_spec());
+        let ports2 = svc2["spec"]["ports"].as_array().unwrap();
+        assert_eq!(ports2.len(), 1);
+        assert_eq!(ports2[0]["port"], 8080);
+        assert!(!ports2.iter().any(|p| p["port"] == 8443));
+    }
+
+    #[test]
+    fn coordinator_pod_exposes_https_container_port_when_tls() {
+        let d = trino_deployment(&jwt_tls_spec(), Role::Coordinator);
+        let ports = d["spec"]["template"]["spec"]["containers"][0]["ports"]
+            .as_array()
+            .unwrap();
+        assert!(ports.iter().any(|p| p["containerPort"] == 8443));
+        assert!(ports.iter().any(|p| p["containerPort"] == 8080));
+
+        // Workers never serve https.
+        let dw = trino_deployment(&jwt_tls_spec(), Role::Worker);
+        assert!(!dw["spec"]["template"]["spec"]["containers"][0]["ports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["containerPort"] == 8443));
+
+        // A non-TLS coordinator does not expose 8443 either.
+        let dn = trino_deployment(&sample_spec(), Role::Coordinator);
+        assert!(!dn["spec"]["template"]["spec"]["containers"][0]["ports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["containerPort"] == 8443));
     }
 
     #[test]
