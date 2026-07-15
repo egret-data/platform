@@ -204,6 +204,26 @@ impl WorkspaceSecretStore {
         self.secrets.get(secret_ref).await
     }
 
+    /// Resolve a secret readable from `workspace_id`: its own workspace secret, or a
+    /// GLOBAL (workspace_id NULL) secret. Used for platform-provisioned secrets (e.g.
+    /// the per-engine delegator credential) that a workspace database references.
+    pub async fn resolve_plaintext_ws_or_global(
+        &self,
+        workspace_id: Uuid,
+        id: Uuid,
+    ) -> Result<String, SecretsError> {
+        let secret_ref: Option<Uuid> = sqlx::query_scalar(
+            "SELECT secret_ref FROM workspace_secrets \
+             WHERE id = $1 AND (workspace_id = $2 OR workspace_id IS NULL)",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .fetch_optional(&self.db.pool)
+        .await?;
+        let secret_ref = secret_ref.ok_or(SecretsError::NotFound)?;
+        self.secrets.get(secret_ref).await
+    }
+
     /// Resolve the vault `secret_ref` for a workspace-scoped named secret (404 if absent).
     async fn secret_ref(&self, workspace_id: Option<Uuid>, id: Uuid) -> Result<Uuid, SecretsError> {
         let row: Option<Uuid> = sqlx::query_scalar(
