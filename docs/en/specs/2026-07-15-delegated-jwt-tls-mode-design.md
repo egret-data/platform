@@ -98,6 +98,21 @@ For a jwt-mode engine (auth block present, jwt selected):
   `jwt.principal-field=preferred_username` + `jwt.key-file=<jwks>`. Do **not**
   inject the `egret_delegator` password user or seed impersonate policies for jwt
   mode (those are impersonate-only, gated on `is_impersonate_delegation()`).
+- **Reject client auth over plain HTTP:** render
+  `http-server.authentication.allow-insecure-over-http=false` for a jwt coordinator
+  (detected as `tls.is_some()` + auth type `JWT` only). The internal HTTP:8080
+  listener stays up for loopback discovery (authenticated by
+  `internal-communication.shared-secret`, exempt from the flag) and for the PUBLIC
+  `/v1/info` readiness probe, but **client** JWT/PASSWORD auth is refused over
+  :8080 — closing the historical `X-Trino-User` spoofing surface (over plain HTTP
+  Trino trusts the client header, not the JWT). All delegated auth must go over
+  TLS:8443, where the JWT binds identity. impersonate engines keep
+  `allow-insecure-over-http=true` (their basic-auth monitor needs it; their
+  impersonate grant is delegator-only, so :8080 is not exploitable).
+- **Expose 8443** on the coordinator pod (`containerPort`) and the `{name}-trino`
+  Service (`https` port) whenever `tls` is set, so in-cluster delegated
+  connections can reach the TLS listener (dev still reaches the pod directly via
+  `kubectl port-forward`, hence the `localhost`/`127.0.0.1` cert SANs).
 
 ## 3. Materialization (`egret-engine-mgmt/src/assignment.rs`)
 
@@ -140,6 +155,9 @@ The jwt DB row (no `impersonate`) takes this branch, and `tls_cert` flows via
   MITM even on the internal network.
 - **No shared credential** — no delegator, no password. Compromise blast-radius =
   one user for the token TTL (~300s).
+- **No plain-HTTP auth path** — the coordinator refuses client authentication over
+  :8080 (`allow-insecure-over-http=false`), so the spoofable-`X-Trino-User`-over-HTTP
+  surface is closed; all auth is JWT-over-TLS where identity is bound.
 - **OIDC-only**: mint requires the caller's stored refresh token; non-OIDC callers
   get 403 (they must use an impersonate engine).
 
