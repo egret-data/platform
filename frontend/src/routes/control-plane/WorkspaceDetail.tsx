@@ -388,22 +388,22 @@ function WarehousesSection({ workspaceId }: { workspaceId: string }) {
             No warehouses in this workspace yet.
           </p>
         ) : (
-          <div className="space-y-2">
+          <div className="divide-y rounded-md border">
             {warehouses.map((w) => (
               <div
                 key={w.id}
-                className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3"
+                className="flex items-center justify-between gap-3 px-3 py-2.5 transition-colors hover:bg-muted/40"
               >
-                <div className="flex min-w-0 items-center gap-2">
+                <div className="flex min-w-0 items-center gap-2.5">
                   <Boxes className="h-4 w-4 shrink-0 text-muted-foreground" />
                   <Link
                     to={`/control-plane/warehouses/${w.id}`}
-                    className="truncate text-sm font-medium text-primary hover:underline"
+                    className="truncate font-mono text-sm font-medium text-primary hover:underline"
                   >
                     {w.name}
                   </Link>
-                  <span className="truncate text-xs text-muted-foreground">
-                    · {storageName(w.storageConnId)}
+                  <span className="hidden truncate text-xs text-muted-foreground sm:inline">
+                    {storageName(w.storageConnId)}
                   </span>
                 </div>
                 <Badge variant={w.lakekeeperWarehouseId ? "secondary" : "outline"}>
@@ -473,22 +473,24 @@ function AssignedEnginesSection({ workspaceId }: { workspaceId: string }) {
             No engines assigned to this workspace yet.
           </p>
         ) : (
-          <div className="space-y-2">
+          <div className="divide-y rounded-md border">
             {assigned.map((e) => (
               <div
                 key={e.id}
-                className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3"
+                className="flex items-center justify-between gap-3 px-3 py-2.5 transition-colors hover:bg-muted/40"
               >
-                <div className="flex min-w-0 items-center gap-2">
+                <div className="flex min-w-0 items-center gap-2.5">
                   <Cpu className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <span className="truncate text-sm font-medium">{e.name}</span>
-                  <Badge variant="secondary">{e.type}</Badge>
+                  <span className="truncate font-mono text-sm font-medium">{e.name}</span>
+                  <Badge variant="secondary" className="hidden sm:inline-flex">
+                    {e.type}
+                  </Badge>
                   <Badge variant="outline">{e.status}</Badge>
                 </div>
                 <Button
                   size="sm"
-                  variant="outline"
-                  className="text-destructive hover:text-destructive"
+                  variant="ghost"
+                  className="shrink-0 text-muted-foreground hover:text-destructive"
                   disabled={unassignMut.isPending}
                   onClick={() => unassignMut.mutate({ id: workspaceId, engineId: e.id })}
                 >
