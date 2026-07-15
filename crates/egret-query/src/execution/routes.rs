@@ -121,24 +121,36 @@ async fn submit(
         .await
         .map_err(|e| EngineApiError::from(crate::execution::EngineError::from(e)))?;
     let (session_user, bearer) = if db.delegated {
-        let token = st
-            .engine_minter
-            .mint(ctx.principal.user_id.0)
-            .await
-            .map_err(|e| match e {
-                egret_analytics_api::engine_token::BrokerError::NoRefreshToken => {
-                    EngineApiError::from(egret_core::Error::Forbidden)
-                }
-                other => EngineApiError::from(egret_core::Error::Internal(anyhow::anyhow!(
-                    other.to_string()
-                ))),
-            })?;
-        let username = st
-            .users
-            .ensure_username(ctx.principal.user_id)
-            .await
-            .map_err(EngineApiError::from)?;
-        (Some(username), Some(token.access_token))
+        if db.options.impersonate == Some(true) {
+            // Impersonate mode: egret authenticates as the service user (basic-auth
+            // from db.secret_id) and runs AS the caller via X-Trino-User. No JWT.
+            let username = st
+                .users
+                .ensure_username(ctx.principal.user_id)
+                .await
+                .map_err(EngineApiError::from)?;
+            (Some(username), None)
+        } else {
+            // jwt mode: mint the caller's short-lived engine JWT (403 if non-OIDC).
+            let token = st
+                .engine_minter
+                .mint(ctx.principal.user_id.0)
+                .await
+                .map_err(|e| match e {
+                    egret_analytics_api::engine_token::BrokerError::NoRefreshToken => {
+                        EngineApiError::from(egret_core::Error::Forbidden)
+                    }
+                    other => EngineApiError::from(egret_core::Error::Internal(anyhow::anyhow!(
+                        other.to_string()
+                    ))),
+                })?;
+            let username = st
+                .users
+                .ensure_username(ctx.principal.user_id)
+                .await
+                .map_err(EngineApiError::from)?;
+            (Some(username), Some(token.access_token))
+        }
     } else {
         (Some(ctx.principal.email.clone()), None)
     };
