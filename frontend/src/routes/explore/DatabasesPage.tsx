@@ -437,32 +437,34 @@ function ProvisionedEngineCard({ ws, conn }: { ws: string; conn: DatabaseConn })
           ) : catalogs.length === 0 ? (
             <p className="p-3 text-xs text-muted-foreground">No catalogs.</p>
           ) : (
-            <table className="w-full text-left text-xs">
-              <thead className="text-muted-foreground">
-                <tr className="border-b">
-                  <th className="px-3 py-1.5 font-medium">Catalog</th>
-                  <th className="px-3 py-1.5 font-medium">Kind</th>
-                  <th className="px-3 py-1.5 font-medium">Storage</th>
-                  <th className="px-3 py-1.5 font-medium">Secret</th>
-                </tr>
-              </thead>
-              <tbody>
-                {catalogs.map((c) => (
-                  <tr key={c.name} className="border-b last:border-b-0">
-                    <td className="px-3 py-1.5 font-medium">{c.name}</td>
-                    <td className="px-3 py-1.5">
-                      <Badge variant="secondary">{c.kind}</Badge>
-                    </td>
-                    <td className="px-3 py-1.5 font-mono text-muted-foreground">
-                      {c.storage_name ?? "—"}
-                    </td>
-                    <td className="px-3 py-1.5 font-mono text-muted-foreground">
-                      {c.secret_name ?? "—"}
-                    </td>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="text-muted-foreground">
+                  <tr className="border-b">
+                    <th className="px-3 py-1.5 font-medium">Catalog</th>
+                    <th className="px-3 py-1.5 font-medium">Kind</th>
+                    <th className="px-3 py-1.5 font-medium">Storage</th>
+                    <th className="px-3 py-1.5 font-medium">Secret</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {catalogs.map((c) => (
+                    <tr key={c.name} className="border-b last:border-b-0">
+                      <td className="px-3 py-1.5 font-medium">{c.name}</td>
+                      <td className="px-3 py-1.5">
+                        <Badge variant="secondary">{c.kind}</Badge>
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-1.5 font-mono text-muted-foreground">
+                        {c.storage_name ?? "—"}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-1.5 font-mono text-muted-foreground">
+                        {c.secret_name ?? "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       )}

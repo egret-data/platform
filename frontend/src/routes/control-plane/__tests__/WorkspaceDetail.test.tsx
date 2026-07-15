@@ -66,6 +66,7 @@ const ALL_ENGINES: EngineDto[] = [
     namespace: "engines",
     warehouseId: "w2",
     status: "running",
+    // JWT-enabled → assignable (the picker only offers these).
     spec: {
       coordinatorReplicas: 1,
       workerReplicas: 2,
@@ -73,6 +74,7 @@ const ALL_ENGINES: EngineDto[] = [
       cpuMax: "2",
       memory: "4Gi",
       imageVersion: "latest",
+      trinoConfig: { auth: { jwt: { jwksUri: "http://kc/jwks" } } },
     },
   },
 ];

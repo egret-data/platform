@@ -40,7 +40,15 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import type { WorkspaceDto } from "@/api/generated/model/workspaceDto";
 import {
   Card,
   CardContent,
@@ -219,7 +227,7 @@ function EngineTabs({
       </TabsContent>
 
       <TabsContent value="workspaces">
-        <WorkspacesCard engineId={engineId} />
+        <WorkspacesCard engine={engine} />
       </TabsContent>
 
       <TabsContent value="configuration">
@@ -967,8 +975,10 @@ function CatalogsCard({ engine }: { engine: EngineWithStatus }) {
 // (the backend 400s otherwise — the error is surfaced as a toast). A checkbox
 // per workspace drives the full desired set, which is PUT wholesale on Save.
 
-function WorkspacesCard({ engineId }: { engineId: string }) {
+function WorkspacesCard({ engine }: { engine: EngineWithStatus }) {
   const queryClient = useQueryClient();
+  const engineId = engine.id;
+  const jwtEnabled = engineHasJwt(engine);
 
   const allWsQ = useAdminWorkspacesListWs(undefined, { query: { retry: false } });
   const allWs = allWsQ.data?.status === 200 ? allWsQ.data.data : [];
@@ -976,25 +986,9 @@ function WorkspacesCard({ engineId }: { engineId: string }) {
   const assignedQ = useControlPlaneEnginesListEngineWorkspaces(engineId, {
     query: { retry: false },
   });
-
-  // Local selection, seeded from the assigned set once it loads. `seeded` guards
-  // against re-seeding (which would clobber unsaved toggles) on later refetches.
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const seededRef = useRef(false);
-  useEffect(() => {
-    if (seededRef.current) return;
-    if (assignedQ.data?.status !== 200) return;
-    seededRef.current = true;
-    setSelected(new Set(assignedQ.data.data.map((w) => w.workspaceId)));
-  }, [assignedQ.data]);
-
-  const toggle = (id: string) =>
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  const assigned = assignedQ.data?.status === 200 ? assignedQ.data.data : [];
+  const assignedIds = new Set(assigned.map((w) => w.workspaceId));
+  const [addOpen, setAddOpen] = useState(false);
 
   const setMut = useControlPlaneEnginesSetEngineWorkspaces({
     mutation: {
@@ -1002,86 +996,175 @@ function WorkspacesCard({ engineId }: { engineId: string }) {
         queryClient.invalidateQueries({
           queryKey: getControlPlaneEnginesListEngineWorkspacesQueryKey(engineId),
         });
-        toast.success("Workspace assignments saved");
       },
       onError: (e) => toast.error(String(e)),
     },
   });
 
-  const save = () =>
-    setMut.mutate({ id: engineId, data: { workspaceIds: [...selected] } });
+  const addWorkspace = (wsId: string) =>
+    setMut.mutate(
+      { id: engineId, data: { workspaceIds: [...assignedIds, wsId] } },
+      { onSuccess: () => toast.success("Workspace assigned") },
+    );
+  const removeWorkspace = (wsId: string) =>
+    setMut.mutate(
+      { id: engineId, data: { workspaceIds: [...assignedIds].filter((x) => x !== wsId) } },
+      { onSuccess: () => toast.success("Workspace removed") },
+    );
 
   return (
     <Card>
       <CardHeader>
         <div className="flex items-start justify-between gap-3">
-          <div className="space-y-1.5">
+          <div className="min-w-0 space-y-1.5">
             <CardTitle className="text-lg">Workspaces</CardTitle>
             <CardDescription>
-              Workspaces this engine is assigned to. Only engines with JWT
-              authentication enabled can be assigned; saving otherwise returns an
-              error.
+              Workspaces assigned to this engine can query it with per-user
+              delegation.{" "}
+              {jwtEnabled
+                ? ""
+                : "Enable JWT authentication on the Security & Exposure tab before assigning."}
             </CardDescription>
           </div>
-          <Button type="button" onClick={save} disabled={setMut.isPending}>
-            {setMut.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-            Save
+          <Button
+            size="sm"
+            disabled={!jwtEnabled}
+            title={jwtEnabled ? undefined : "Engine needs JWT authentication to be assignable"}
+            onClick={() => setAddOpen(true)}
+          >
+            <Plus className="mr-1 h-4 w-4" /> Add workspace
           </Button>
         </div>
       </CardHeader>
       <CardContent>
-        {allWsQ.isError ? (
+        {assignedQ.isError ? (
           <Alert variant="destructive">
-            <AlertDescription>
-              {(allWsQ.error as unknown as ApiError | null)?.message ??
-                "Failed to load workspaces."}
-            </AlertDescription>
+            <AlertDescription>Failed to load workspace assignments.</AlertDescription>
           </Alert>
-        ) : !allWsQ.data || !assignedQ.data ? (
-          <ListSkeleton rows={5} cols={2} />
-        ) : allWs.length === 0 ? (
-          <p className="py-10 text-center text-sm text-muted-foreground">
-            No workspaces yet.
+        ) : !assignedQ.data ? (
+          <ListSkeleton rows={3} cols={2} />
+        ) : assigned.length === 0 ? (
+          <p className="rounded-md border bg-muted/40 px-4 py-6 text-sm text-muted-foreground">
+            No workspaces assigned to this engine yet.
           </p>
         ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-10">
-                  <span className="sr-only">Assigned</span>
-                </TableHead>
-                <TableHead>Workspace</TableHead>
-                <TableHead>Slug</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {allWs.map((ws) => {
-                const checked = selected.has(ws.id);
-                return (
-                  <TableRow
-                    key={ws.id}
-                    className="cursor-pointer"
-                    onClick={() => toggle(ws.id)}
-                  >
-                    <TableCell onClick={(e) => e.stopPropagation()}>
-                      <Checkbox
-                        checked={checked}
-                        onCheckedChange={() => toggle(ws.id)}
-                        aria-label={`Assign to ${ws.name}`}
-                      />
-                    </TableCell>
-                    <TableCell className="font-medium">{ws.name}</TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground">
-                      {ws.slug}
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
+          <div className="space-y-2">
+            {assigned.map((w) => (
+              <div
+                key={w.workspaceId}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3"
+              >
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium">{w.name}</div>
+                  <code className="font-mono text-xs text-muted-foreground">{w.slug}</code>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="text-destructive hover:text-destructive"
+                  disabled={setMut.isPending}
+                  onClick={() => removeWorkspace(w.workspaceId)}
+                >
+                  <Trash2 className="mr-1 h-4 w-4" /> Remove
+                </Button>
+              </div>
+            ))}
+          </div>
         )}
       </CardContent>
+
+      <AddWorkspaceDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        workspaces={allWs}
+        assignedIds={assignedIds}
+        loading={allWsQ.isLoading}
+        onAdd={(id) => {
+          addWorkspace(id);
+          setAddOpen(false);
+        }}
+      />
     </Card>
+  );
+}
+
+/** An engine is assignable only when its Trino spec enables JWT auth (mirrors the
+ * backend guard on `spec.trinoConfig.auth.jwt`). */
+function engineHasJwt(e: EngineWithStatus): boolean {
+  return e.spec.trinoConfig?.auth?.jwt != null;
+}
+
+/** Searchable picker of ACTIVE, not-yet-assigned workspaces — clicking a row
+ * assigns it immediately (mirrors the workspace-side "Assign engine" dialog). */
+function AddWorkspaceDialog({
+  open,
+  onOpenChange,
+  workspaces,
+  assignedIds,
+  loading,
+  onAdd,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  workspaces: WorkspaceDto[];
+  assignedIds: Set<string>;
+  loading: boolean;
+  onAdd: (id: string) => void;
+}) {
+  const [q, setQ] = useState("");
+  useEffect(() => {
+    if (open) setQ("");
+  }, [open]);
+  const candidates = workspaces
+    .filter((ws) => ws.status === "active" && !assignedIds.has(ws.id))
+    .filter((ws) => `${ws.name} ${ws.slug}`.toLowerCase().includes(q.trim().toLowerCase()))
+    .sort((a, b) => a.name.localeCompare(b.name) || a.slug.localeCompare(b.slug));
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Add workspace</DialogTitle>
+          <DialogDescription>Assign this engine to an active workspace.</DialogDescription>
+        </DialogHeader>
+        <Input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search workspaces…"
+          aria-label="Search workspaces"
+          autoFocus
+        />
+        <div className="mt-2 max-h-72 overflow-y-auto rounded-md border">
+          {loading ? (
+            <p className="p-3 text-sm text-muted-foreground">Loading workspaces…</p>
+          ) : candidates.length === 0 ? (
+            <p className="p-4 text-sm text-muted-foreground">
+              {q
+                ? "No workspaces match your search."
+                : "All active workspaces are already assigned."}
+            </p>
+          ) : (
+            <ul className="divide-y">
+              {candidates.map((ws) => (
+                <li key={ws.id}>
+                  <button
+                    type="button"
+                    onClick={() => onAdd(ws.id)}
+                    className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left hover:bg-accent"
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-medium">{ws.name}</span>
+                      <code className="font-mono text-xs text-muted-foreground">{ws.slug}</code>
+                    </span>
+                    <Plus className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
