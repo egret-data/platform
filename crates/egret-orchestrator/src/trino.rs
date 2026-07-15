@@ -159,6 +159,15 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
                 }
             }
         }
+        // jwt-mode (and impersonate-over-TLS) engines serve HTTPS on the coordinator
+        // with an egret-generated keystore mounted from the `{name}-tls` Secret. The
+        // internal http listener on 8080 (used for loopback discovery + workers) is
+        // left untouched.
+        if let Some(tls) = &cfg.tls {
+            out.push_str("http-server.https.enabled=true\n");
+            out.push_str(&format!("http-server.https.port={}\n", tls.port));
+            out.push_str("http-server.https.keystore.path=/etc/trino/tls/keystore.pem\n");
+        }
     }
     // Trino REQUIRES a coordinator<->worker shared secret whenever any client
     // authentication is enabled (it refuses to start otherwise). Both roles must
@@ -396,6 +405,18 @@ pub fn trino_env_secret(spec: &EngineSpec) -> Value {
     })
 }
 
+/// The coordinator's HTTPS keystore Secret (`{name}-tls`), rendered only when the
+/// engine is TLS-enabled. `keystore.pem` holds the cert+key PEM egret generated.
+pub fn trino_tls_secret(spec: &EngineSpec) -> Option<Value> {
+    let tls = spec.config.tls.as_ref()?;
+    Some(json!({
+        "apiVersion": "v1", "kind": "Secret",
+        "metadata": { "name": format!("{}-tls", spec.name), "namespace": spec.namespace,
+                      "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
+        "stringData": { "keystore.pem": tls.keystore_pem }
+    }))
+}
+
 fn config_checksum(spec: &EngineSpec) -> String {
     // Rolls the pods whenever rendered config or catalogs change.
     let mut h = DefaultHasher::new();
@@ -608,6 +629,10 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
         volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/access-control.properties", "subPath": "access-control.properties" }));
         volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/ranger-trino-security.xml", "subPath": "ranger-trino-security.xml" }));
     }
+    // Only the coordinator serves HTTPS, so only it mounts the keystore Secret.
+    if role.is_coord() && spec.config.tls.is_some() {
+        volume_mounts.push(json!({ "name": "tls", "mountPath": "/etc/trino/tls/keystore.pem", "subPath": "keystore.pem" }));
+    }
 
     // probes: readiness always (generous default), liveness/startup only if configured.
     let mut container = json!({
@@ -699,6 +724,12 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
             { "name": "data", "emptyDir": {} }
         ]
     });
+    // Coordinator-only HTTPS keystore volume, sourced from the `{name}-tls` Secret.
+    if role.is_coord() && spec.config.tls.is_some() {
+        pod_spec["volumes"].as_array_mut().unwrap().push(
+            json!({ "name": "tls", "secret": { "secretName": format!("{}-tls", spec.name) } }),
+        );
+    }
     if !role.is_coord() {
         if let Some(gs) = &spec.config.worker.graceful_shutdown {
             if gs.enabled {
@@ -1070,6 +1101,9 @@ impl TrinoProvisioner {
         self.kube.apply(&trino_config_map(spec)).await?;
         self.kube.apply(&trino_catalogs_config_map(spec)).await?;
         self.kube.apply(&trino_env_secret(spec)).await?;
+        if let Some(tls) = trino_tls_secret(spec) {
+            self.kube.apply(&tls).await?;
+        }
         self.kube.apply(&trino_service(spec)).await?;
         self.kube
             .apply(&trino_deployment(spec, Role::Coordinator))
@@ -1601,6 +1635,75 @@ mod tests {
                 "missing mount {path}"
             );
         }
+    }
+
+    #[test]
+    fn jwt_tls_renders_https_secret_and_coordinator_mount() {
+        let mut s = sample_spec();
+        s.config.auth = Some(Auth {
+            password_users: vec![],
+            jwt: Some(Jwt {
+                jwks_uri: "https://kc/realms/egret/protocol/openid-connect/certs".into(),
+                required_audience: None,
+            }),
+        });
+        s.config.tls = Some(Tls {
+            keystore_pem: "PEMDATA".into(),
+            port: 8443,
+        });
+
+        // Coordinator config carries the https listener directives.
+        let cm = trino_config_map(&s);
+        let cc = cm["data"]["config-coordinator.properties"]
+            .as_str()
+            .unwrap();
+        assert!(cc.contains("http-server.https.enabled=true"));
+        assert!(cc.contains("http-server.https.port=8443"));
+        assert!(cc.contains("http-server.https.keystore.path=/etc/trino/tls/keystore.pem"));
+        // The internal http port + discovery URI are untouched.
+        assert!(cc.contains("http-server.http.port=8080"));
+        // Workers do not serve https.
+        assert!(!cm["data"]["config-worker.properties"]
+            .as_str()
+            .unwrap()
+            .contains("http-server.https.enabled"));
+
+        // A `{name}-tls` Secret carries the keystore PEM.
+        let sec = trino_tls_secret(&s).expect("tls secret present");
+        assert_eq!(sec["kind"], "Secret");
+        assert_eq!(sec["metadata"]["name"], format!("{}-tls", s.name));
+        assert_eq!(sec["stringData"]["keystore.pem"], "PEMDATA");
+
+        // The coordinator pod mounts the keystore.
+        let d = trino_deployment(&s, Role::Coordinator);
+        let volumes = d["spec"]["template"]["spec"]["volumes"].as_array().unwrap();
+        assert!(volumes
+            .iter()
+            .any(|v| v["name"] == "tls" && v["secret"]["secretName"] == format!("{}-tls", s.name)));
+        let mounts = d["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap();
+        assert!(mounts.iter().any(|m| m["name"] == "tls"
+            && m["mountPath"] == "/etc/trino/tls/keystore.pem"
+            && m["subPath"] == "keystore.pem"));
+
+        // Workers get neither the volume nor the mount.
+        let dw = trino_deployment(&s, Role::Worker);
+        assert!(!dw["spec"]["template"]["spec"]["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["name"] == "tls"));
+        assert!(
+            !dw["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["name"] == "tls")
+        );
+
+        // Absent when tls is unset.
+        assert!(trino_tls_secret(&sample_spec()).is_none());
     }
 
     #[test]

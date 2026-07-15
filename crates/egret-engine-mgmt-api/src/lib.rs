@@ -239,6 +239,14 @@ pub struct Auth {
     pub jwt: Option<Jwt>,
 }
 
+/// jwt-mode coordinator TLS. `keystore_pem` = cert+key PEM mounted as the Trino
+/// https keystore; `port` = the https listener port.
+#[derive(Clone, Debug, Default)]
+pub struct Tls {
+    pub keystore_pem: String,
+    pub port: u16,
+}
+
 /// A Kubernetes Ingress exposing the coordinator's HTTP endpoint.
 #[derive(Clone, Debug, Default)]
 pub struct Ingress {
@@ -320,6 +328,7 @@ pub struct TrinoConfig {
     pub session_properties: Vec<SessionRule>,
     pub fault_tolerant: Option<FaultTolerant>,
     pub auth: Option<Auth>,
+    pub tls: Option<Tls>,
     pub ingress: Option<Ingress>,
     /// Full container image (registry/repository:tag). When None, the renderer
     /// falls back to `trinodb/trino:{image_version}`.
