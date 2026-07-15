@@ -207,6 +207,14 @@ impl WorkspaceSecretStore {
     /// Resolve a secret readable from `workspace_id`: its own workspace secret, or a
     /// GLOBAL (workspace_id NULL) secret. Used for platform-provisioned secrets (e.g.
     /// the per-engine delegator credential) that a workspace database references.
+    ///
+    /// SECURITY PRECONDITION: `id` must be an egret-SET `secret_id` (e.g. from a
+    /// provisioned `query.databases` row materialized by egret), never a raw
+    /// user-supplied secret id. The GLOBAL fallback would otherwise let a caller
+    /// read any platform secret by id. User-supplied secret ids MUST instead go
+    /// through the workspace-scoped `resolve_plaintext`/`get_meta` (which excludes
+    /// NULL-workspace secrets). Only egret-controlled, read-only, coordinator-hosted
+    /// connection rows may carry a global `secret_id`.
     pub async fn resolve_plaintext_ws_or_global(
         &self,
         workspace_id: Uuid,
