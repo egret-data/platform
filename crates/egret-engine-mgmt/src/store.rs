@@ -217,6 +217,24 @@ impl EngineMgmtStore {
         Ok(())
     }
 
+    /// Persist the generated TLS keystore secret id + public cert PEM for an engine.
+    pub async fn set_tls(
+        &self,
+        engine_id: Uuid,
+        secret_id: Uuid,
+        cert_pem: &str,
+    ) -> Result<(), EngineMgmtError> {
+        sqlx::query(
+            "UPDATE engine_mgmt.engines SET tls_secret_id = $2, coordinator_cert = $3 WHERE id = $1",
+        )
+        .bind(engine_id)
+        .bind(secret_id)
+        .bind(cert_pem)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
     pub async fn delete_engine(&self, id: Uuid) -> Result<(), EngineMgmtError> {
         sqlx::query("DELETE FROM engine_mgmt.engines WHERE id = $1")
             .bind(id)

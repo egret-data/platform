@@ -475,7 +475,24 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
     // When the engine ALREADY has auth on, inject the derived `egret-monitor`
     // system user so the native Trino monitor can authenticate. Guarded on
     // `auth.is_some()` (inside the helper) so a no-auth engine stays auth-free.
-    inject_monitor_user(&mut config.auth, engine.id)?;
+    // Skipped for jwt-delegation engines: their coordinator is JWT-only (no
+    // PASSWORD authenticator), so a basic-auth monitor user can't authenticate —
+    // the monitor degrades on jwt engines (acceptable).
+    if !engine.is_jwt_delegation() {
+        inject_monitor_user(&mut config.auth, engine.id)?;
+    }
+    // TLS for ANY delegation-capable engine (both modes): generate/reuse a
+    // self-signed coordinator cert + mount the keystore so the coordinator serves
+    // https and the connector can pin the cert. impersonate: encrypts the wire so
+    // the delegator password is no longer sent in cleartext. jwt: binds the
+    // caller's identity over TLS.
+    if engine.supports_delegation() {
+        let (keystore_pem, _cert) = ensure_tls_cert(st, engine).await?;
+        config.tls = Some(egret_engine_mgmt_api::Tls {
+            keystore_pem,
+            port: 8443,
+        });
+    }
     // Impersonate-mode delegation: when auth is on, provision the `egret_delegator`
     // service user (generate + store its password once, inject its bcrypt into the
     // auth block so it lands in `password.db`) and seed the impersonate + query-
@@ -1028,6 +1045,9 @@ fn trino_config_from_json(v: &serde_json::Value) -> TrinoConfigReq {
         // Resolved in build_provision_req from the raw {passwordUsers:[{username,
         // secretRef}], jwt} wire body (secret → bcrypt). Ingress has no secrets.
         auth: None,
+        // Resolved in build_provision_req: generated/reused per-engine keystore for
+        // delegation-capable engines (jwt + impersonate).
+        tls: None,
         ingress: parse_ingress(&v["ingress"]),
         autoscaling: parse_autoscaling(&v["autoscaling"]),
         // ── pod & scheduling (cluster-wide) — k8s object names / raw JSON, no
@@ -1326,6 +1346,82 @@ async fn ensure_delegator_secret(st: &CpState, engine: &Engine) -> Result<(Uuid,
     };
     st.engine_mgmt.set_delegator_secret(engine.id, id).await?;
     Ok((id, pw))
+}
+
+/// Extract the leading `-----BEGIN CERTIFICATE-----`…`-----END CERTIFICATE-----`
+/// block (including the trailing newline) from a concatenated cert+key keystore
+/// PEM. Returns `None` when no certificate block is present.
+fn extract_leading_cert(keystore_pem: &str) -> Option<String> {
+    const END: &str = "-----END CERTIFICATE-----";
+    let begin = keystore_pem.find("-----BEGIN CERTIFICATE-----")?;
+    let end = keystore_pem[begin..].find(END)? + begin + END.len();
+    let mut cert = keystore_pem[begin..end].to_string();
+    cert.push('\n');
+    Some(cert)
+}
+
+/// Ensure the engine has a TLS cert; generate a self-signed one (SAN = the
+/// coordinator Service host + localhost) on first call, store the keystore
+/// (cert+key PEM) in a GLOBAL egret secret + the public cert PEM on the engine
+/// row, and reuse both on subsequent calls (idempotent via the `tls_secret_id` /
+/// `coordinator_cert` columns). Returns `(keystore_pem, cert_pem)`.
+async fn ensure_tls_cert(st: &CpState, engine: &Engine) -> Result<(String, String), CpError> {
+    if let (Some(sid), Some(cert)) = (engine.tls_secret_id, engine.coordinator_cert.clone()) {
+        let keystore = st
+            .secrets
+            .resolve_plaintext(None, sid)
+            .await
+            .map_err(|e| CpError::BadRequest(format!("resolve engine tls secret: {e}")))?;
+        return Ok((keystore, cert));
+    }
+    let (cert_pem, key_pem) =
+        crate::tls_cert::generate_self_signed(&[engine.coordinator_host()])
+            .map_err(|e| CpError::BadRequest(format!("generate engine tls cert: {e}")))?;
+    let keystore = format!("{cert_pem}{key_pem}");
+    // Deterministic per-engine name so a partial prior run (secret created but the
+    // engine column not yet set) recovers by name instead of erroring forever.
+    let name = format!("engine-tls-{}", engine.id);
+    let sid = match st
+        .secrets
+        .create(
+            None,
+            &name,
+            Some("jwt-mode coordinator keystore"),
+            &keystore,
+        )
+        .await
+    {
+        Ok(id) => id,
+        Err(egret_secrets::SecretsError::AlreadyExists(_)) => {
+            let meta = st
+                .secrets
+                .list(None)
+                .await
+                .map_err(|e| CpError::BadRequest(format!("list engine tls secret: {e}")))?
+                .into_iter()
+                .find(|m| m.name == name)
+                .ok_or_else(|| {
+                    CpError::BadRequest("engine tls secret vanished after conflict".into())
+                })?;
+            let keystore = st
+                .secrets
+                .resolve_plaintext(None, meta.id)
+                .await
+                .map_err(|e| CpError::BadRequest(format!("resolve engine tls secret: {e}")))?;
+            // The stored keystore (cert+key PEM from the prior run) is the source
+            // of truth — our freshly generated `cert_pem` above is a different key
+            // pair and would not match what the coordinator serves. Recover the
+            // public cert from the stored keystore's leading certificate block.
+            let cert = extract_leading_cert(&keystore).ok_or_else(|| {
+                CpError::BadRequest("stored engine tls keystore has no certificate".into())
+            })?;
+            st.engine_mgmt.set_tls(engine.id, meta.id, &cert).await?;
+            return Ok((keystore, cert));
+        }
+        Err(e) => return Err(CpError::BadRequest(format!("store engine tls secret: {e}"))),
+    };
+    st.engine_mgmt.set_tls(engine.id, sid, &cert_pem).await?;
+    Ok((keystore, cert_pem))
 }
 
 /// Seed the two impersonate-mode Ranger policies (delegator-impersonate +
@@ -3213,6 +3309,50 @@ mod tests {
         let mut auth: Option<AuthReq> = None;
         inject_monitor_user(&mut auth, Uuid::new_v4()).unwrap();
         assert!(auth.is_none());
+    }
+
+    /// An engine whose stored spec selects a given delegation mode (+ jwt auth so
+    /// jwt mode qualifies as delegation-capable).
+    fn engine_with_mode(mode: &str) -> Engine {
+        let mut e = dummy_engine();
+        e.spec = serde_json::json!({
+            "trinoConfig": { "delegationMode": mode, "auth": { "jwt": {} } }
+        });
+        e
+    }
+
+    #[test]
+    fn provision_branch_gates_tls_delegator_and_monitor_by_mode() {
+        // impersonate: delegation-capable, TLS provisioned, delegator injected,
+        // monitor injected.
+        let imp = engine_with_mode("impersonate");
+        assert!(imp.supports_delegation()); // ⇒ TLS provisioned
+        assert!(imp.is_impersonate_delegation()); // ⇒ delegator + delegator policies
+        assert!(!imp.is_jwt_delegation()); // ⇒ monitor NOT skipped
+
+        // jwt: delegation-capable (jwt auth present), TLS provisioned, but NO
+        // delegator (impersonate-only) and monitor SKIPPED (JWT-only coordinator).
+        let jwt = engine_with_mode("jwt");
+        assert!(jwt.supports_delegation()); // ⇒ TLS provisioned
+        assert!(!jwt.is_impersonate_delegation()); // ⇒ no delegator user/policies
+        assert!(jwt.is_jwt_delegation()); // ⇒ monitor skipped
+
+        // a jwt engine with NO jwt auth is NOT delegation-capable ⇒ no TLS.
+        let mut jwt_no_auth = dummy_engine();
+        jwt_no_auth.spec = serde_json::json!({ "trinoConfig": { "delegationMode": "jwt" } });
+        assert!(!jwt_no_auth.supports_delegation());
+    }
+
+    #[test]
+    fn extract_leading_cert_pulls_first_cert_block() {
+        let keystore = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n\
+                        -----BEGIN PRIVATE KEY-----\nBBBB\n-----END PRIVATE KEY-----\n";
+        let cert = extract_leading_cert(keystore).expect("cert extracted");
+        assert!(cert.contains("BEGIN CERTIFICATE"));
+        assert!(cert.trim_end().ends_with("-----END CERTIFICATE-----"));
+        assert!(!cert.contains("PRIVATE KEY"));
+        // No cert block ⇒ None.
+        assert!(extract_leading_cert("-----BEGIN PRIVATE KEY-----\nx\n").is_none());
     }
 
     #[test]
