@@ -14,11 +14,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Switch } from "@/components/ui/switch";
 import { ConfigSection } from "./config/ConfigSection";
 import { FieldLabel } from "./config/FieldLabel";
 import { type Kv, KeyValueEditor } from "./EngineResourceGroups";
-import type { PasswordUserForm } from "./useEngineConfigForm";
+import type { DelegationMode, PasswordUserForm } from "./useEngineConfigForm";
 
 /**
  * "Exposure & auth" security config: password users (backed by egret secrets),
@@ -30,6 +31,8 @@ export function EngineSecurity(props: {
   setPasswordUsers: React.Dispatch<React.SetStateAction<PasswordUserForm[]>>;
   jwtEnabled: boolean;
   setJwtEnabled: (v: boolean) => void;
+  delegationMode: DelegationMode;
+  setDelegationMode: (v: DelegationMode) => void;
   jwksUri: string;
   setJwksUri: (v: string) => void;
   requiredAudience: string;
@@ -50,6 +53,8 @@ export function EngineSecurity(props: {
     setPasswordUsers,
     jwtEnabled,
     setJwtEnabled,
+    delegationMode,
+    setDelegationMode,
     jwksUri,
     setJwksUri,
     requiredAudience,
@@ -214,6 +219,72 @@ export function EngineSecurity(props: {
               />
             </div>
           </div>
+        )}
+      </ConfigSection>
+
+      {/* Per-user delegation mode */}
+      <ConfigSection
+        title="Per-user delegation"
+        description="How delegated BI queries run AS the calling user. Applies to databases with per-user delegation enabled."
+        docsUrl="https://trino.io/docs/current/security/user-mapping.html"
+      >
+        <RadioGroup
+          value={delegationMode}
+          onValueChange={(v) => setDelegationMode(v as DelegationMode)}
+          aria-label="Delegation mode"
+          className="gap-2"
+        >
+          {(
+            [
+              {
+                value: "impersonate",
+                title: "Impersonate (default)",
+                desc: "egret connects as a trusted service account and runs the query as the caller. Works for any signed-in user; runs over TLS.",
+              },
+              {
+                value: "jwt",
+                title: "JWT over TLS",
+                desc: "Each query uses the caller's own short-lived JWT, bound to their identity over TLS. No shared credential. OIDC users only.",
+              },
+            ] as const
+          ).map((opt) => {
+            const selected = delegationMode === opt.value;
+            return (
+              <Label
+                key={opt.value}
+                htmlFor={`deleg-${opt.value}`}
+                className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 font-normal transition-colors ${
+                  selected
+                    ? "border-primary bg-primary/5"
+                    : "border-border hover:bg-muted/50"
+                }`}
+              >
+                <RadioGroupItem
+                  id={`deleg-${opt.value}`}
+                  value={opt.value}
+                  className="mt-0.5"
+                />
+                <span className="space-y-1">
+                  <span className="block text-sm font-medium text-foreground">
+                    {opt.title}
+                  </span>
+                  <span className="block text-xs text-muted-foreground">
+                    {opt.desc}
+                  </span>
+                </span>
+              </Label>
+            );
+          })}
+        </RadioGroup>
+        {delegationMode === "jwt" && !jwtEnabled && (
+          <p
+            role="alert"
+            className="mt-2 text-xs text-destructive"
+          >
+            JWT delegation needs “Accept egret JWT” enabled above (and a TLS
+            coordinator, provisioned automatically). Without it, delegated queries
+            will fail to authenticate.
+          </p>
         )}
       </ConfigSection>
 

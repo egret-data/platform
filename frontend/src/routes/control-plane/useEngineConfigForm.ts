@@ -353,6 +353,14 @@ function emptyDeploymentStrategy(): DeploymentStrategy {
 /** A password-user row: a username + the egret secret holding its password. */
 export type PasswordUserForm = { username: string; secretRef: string };
 
+/**
+ * Per-user delegation mode for delegated BI queries (spec 2026-07-15). Both run
+ * the query AS the caller: `impersonate` authenticates to Trino as a trusted
+ * `egret_delegator` service account (works for any user); `jwt` uses the caller's
+ * own short-lived JWT over TLS (OIDC users only). Absent = `impersonate` (default).
+ */
+export type DelegationMode = "impersonate" | "jwt";
+
 // ── autoscaling form models ──────────────────────────────────────────────────
 
 /** Autoscaling mode: "" is off (autoscaling dropped from the payload). */
@@ -663,6 +671,8 @@ export interface EngineConfigForm {
   setPasswordUsers: Dispatch<SetStateAction<PasswordUserForm[]>>;
   jwtEnabled: boolean;
   setJwtEnabled: (v: boolean) => void;
+  delegationMode: DelegationMode;
+  setDelegationMode: (v: DelegationMode) => void;
   jwksUri: string;
   setJwksUri: (v: string) => void;
   requiredAudience: string;
@@ -797,6 +807,9 @@ export function useEngineConfigForm(
     tc?.auth?.passwordUsers?.map((u) => ({ ...u })) ?? [],
   );
   const [jwtEnabled, setJwtEnabled] = useState(tc?.auth?.jwt != null);
+  const [delegationMode, setDelegationMode] = useState<DelegationMode>(
+    tc?.delegationMode === "jwt" ? "jwt" : "impersonate",
+  );
   const [jwksUri, setJwksUri] = useState(tc?.auth?.jwt?.jwksUri ?? "");
   const [requiredAudience, setRequiredAudience] = useState(
     tc?.auth?.jwt?.requiredAudience ?? "",
@@ -925,6 +938,7 @@ export function useEngineConfigForm(
     setSessionRules(sessionRulesToForm(next?.sessionProperties));
     setPasswordUsers(next?.auth?.passwordUsers?.map((u) => ({ ...u })) ?? []);
     setJwtEnabled(next?.auth?.jwt != null);
+    setDelegationMode(next?.delegationMode === "jwt" ? "jwt" : "impersonate");
     setJwksUri(next?.auth?.jwt?.jwksUri ?? "");
     setRequiredAudience(next?.auth?.jwt?.requiredAudience ?? "");
     setIngressEnabled(next?.ingress?.enabled ?? false);
@@ -1047,6 +1061,12 @@ export function useEngineConfigForm(
       };
     }
 
+    // Per-user delegation mode. Emit only for `jwt` (the non-default); absent ⇒
+    // the backend defaults to `impersonate`, keeping untouched engines' payloads
+    // unchanged. Emitting it here also PRESERVES the mode across a UI save (the
+    // key is otherwise not a form field and would be dropped on round-trip).
+    if (delegationMode === "jwt") trinoConfig.delegationMode = "jwt";
+
     if (ingressEnabled && ingressHost.trim()) {
       const anns = kvToRecord(ingressAnnotations);
       trinoConfig.ingress = {
@@ -1152,6 +1172,7 @@ export function useEngineConfigForm(
     gracePeriod,
     passwordUsers,
     jwtEnabled,
+    delegationMode,
     jwksUri,
     requiredAudience,
     ingressEnabled,
@@ -1286,6 +1307,8 @@ export function useEngineConfigForm(
     setPasswordUsers,
     jwtEnabled,
     setJwtEnabled,
+    delegationMode,
+    setDelegationMode,
     jwksUri,
     setJwksUri,
     requiredAudience,
