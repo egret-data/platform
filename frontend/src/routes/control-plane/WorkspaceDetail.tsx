@@ -33,6 +33,7 @@ import {
   useControlPlaneEnginesListWorkspaceEngines,
   useControlPlaneEnginesUnassignWorkspaceEngine,
 } from "@/api/generated/control-plane-engines/control-plane-engines";
+import type { EngineDto } from "@/api/generated/model/engineDto";
 import { listUsers } from "@/api/access";
 import { useApproveRequest, useDenyRequest, useWorkspaceRequests } from "@/api/accessRequests";
 import { MembersPanel } from "@/components/access/MembersPanel";
@@ -502,6 +503,15 @@ function AssignedEnginesSection({ workspaceId }: { workspaceId: string }) {
   );
 }
 
+/** An engine is assignable only when its Trino spec enables JWT auth (mirrors the
+ * backend guard on `spec.trinoConfig.auth.jwt`). */
+function engineHasJwt(e: EngineDto): boolean {
+  const auth = (e.spec.trinoConfig as Record<string, unknown> | undefined)?.["auth"] as
+    | Record<string, unknown>
+    | undefined;
+  return typeof auth?.["jwt"] === "object" && auth?.["jwt"] !== null;
+}
+
 function AssignEngineDialog({
   open,
   onOpenChange,
@@ -518,7 +528,10 @@ function AssignEngineDialog({
   const [engineId, setEngineId] = useState("");
   const enginesQ = useControlPlaneEnginesListEngines({ query: { retry: false } });
   const allEngines = enginesQ.data?.status === 200 ? enginesQ.data.data : [];
-  const candidates = allEngines.filter((e) => !assignedIds.includes(e.id));
+  // Only offer JWT-enabled engines — the backend rejects the rest with a 400, so
+  // showing them here would just lead to a guaranteed error.
+  const unassigned = allEngines.filter((e) => !assignedIds.includes(e.id));
+  const candidates = unassigned.filter(engineHasJwt);
 
   useEffect(() => {
     if (open) setEngineId("");
@@ -561,7 +574,9 @@ function AssignEngineDialog({
           </Select>
           {candidates.length === 0 && (
             <p className="text-xs text-muted-foreground">
-              All engines are already assigned.
+              {unassigned.length === 0
+                ? "All engines are already assigned."
+                : "No JWT-enabled engines available — enable JWT auth on an engine first."}
             </p>
           )}
         </div>

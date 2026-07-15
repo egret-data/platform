@@ -982,7 +982,19 @@ function WorkspacesCard({ engineId }: { engineId: string }) {
   // against re-seeding (which would clobber unsaved toggles) on later refetches.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [q, setQ] = useState("");
-  const filtered = allWs.filter((ws) =>
+  // The server truth for what's assigned — stable across local toggles, so an
+  // already-assigned (even archived) workspace never disappears from the list.
+  const assignedIds =
+    assignedQ.data?.status === 200
+      ? new Set(assignedQ.data.data.map((w) => w.workspaceId))
+      : new Set<string>();
+  // Only offer ACTIVE workspaces for assignment (never archived ones), but always
+  // keep currently-assigned rows visible. Sort by name (then slug) so duplicates
+  // group and the list is scannable instead of creation-ordered.
+  const visible = allWs
+    .filter((ws) => ws.status === "active" || assignedIds.has(ws.id))
+    .sort((a, b) => a.name.localeCompare(b.name) || a.slug.localeCompare(b.slug));
+  const filtered = visible.filter((ws) =>
     `${ws.name} ${ws.slug}`.toLowerCase().includes(q.trim().toLowerCase()),
   );
   const seededRef = useRef(false);
@@ -1044,9 +1056,9 @@ function WorkspacesCard({ engineId }: { engineId: string }) {
           </Alert>
         ) : !allWsQ.data || !assignedQ.data ? (
           <ListSkeleton rows={5} cols={2} />
-        ) : allWs.length === 0 ? (
+        ) : visible.length === 0 ? (
           <p className="py-10 text-center text-sm text-muted-foreground">
-            No workspaces yet.
+            No active workspaces to assign.
           </p>
         ) : (
           <div className="space-y-3">
