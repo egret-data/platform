@@ -38,4 +38,22 @@ pub trait PolicyPort: Send + Sync {
         type_: &str,
         config: &Value,
     ) -> Result<PolicyService, PolicyError>;
+
+    /// Look up a policy profile by name; `None` when it doesn't exist (unlike a
+    /// hard-error lookup). Used by engine provisioning to seed delegator policies
+    /// onto a bound Ranger service without failing when the engine is unbound.
+    async fn get_service_opt(&self, name: &str) -> Result<Option<PolicyService>, PolicyError>;
+
+    /// Whether a policy of this name already exists under the service (idempotent
+    /// seeding: skip re-creating a policy that's already there).
+    async fn policy_exists(&self, service_id: i64, name: &str) -> Result<bool, PolicyError>;
+
+    /// Create a policy under a service (stores the raw Ranger policy body). Used
+    /// by engine provisioning to seed the impersonate/query-timeout policies.
+    async fn create_policy(
+        &self,
+        service_id: i64,
+        name: &str,
+        policy: &Value,
+    ) -> Result<(), PolicyError>;
 }

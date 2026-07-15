@@ -133,8 +133,10 @@ impl DatabaseRepo {
 
     /// Materialize a read-only, per-user-delegated connection for a provisioned
     /// engine assigned to a workspace. `delegated = true` so the query path mints
-    /// the caller's engine JWT; `engine_id` marks the row read-only + links the
-    /// source engine. No secret is bound (`secret_id = NULL`).
+    /// the caller's engine JWT (jwt mode) or impersonates via the delegator secret
+    /// (impersonate mode); `engine_id` marks the row read-only + links the source
+    /// engine. `secret_id` binds the (global) delegator credential for impersonate
+    /// mode, or `None` for jwt mode.
     #[allow(clippy::too_many_arguments)]
     pub async fn create_provisioned(
         &self,
@@ -145,12 +147,13 @@ impl DatabaseRepo {
         host: &str,
         port: i32,
         options: &serde_json::Value,
+        secret_id: Option<Uuid>,
         created_by: Option<UserId>,
     ) -> Result<Database, DatabaseError> {
         sqlx::query_as::<_, Row>(
             "INSERT INTO query.databases \
                (name, engine, host, port, options, secret_id, created_by, workspace_id, delegated, engine_id) \
-             VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, true, $8) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, $9) \
              RETURNING id, name, engine, host, port, options, secret_id, status, delegated, engine_id",
         )
         .bind(name)
@@ -158,6 +161,7 @@ impl DatabaseRepo {
         .bind(host)
         .bind(port)
         .bind(options)
+        .bind(secret_id)
         .bind(created_by.map(|u| u.0))
         .bind(workspace_id)
         .bind(engine_id)
@@ -219,10 +223,11 @@ impl DatabaseRepo {
     }
 
     /// Open the stored plaintext secret for a database (used by the connection
-    /// tester). The named secret (Epic B) is resolved workspace-scoped: the
-    /// owning `workspace_id` is read from the row itself, so the engine job and
-    /// the test route keep the same `open_secret(id)` signature. NULL `secret_id`
-    /// (or no row) → `Ok(None)`.
+    /// tester and the delegated impersonate query path). The named secret (Epic B)
+    /// is resolved from the row's owning `workspace_id`, accepting either a
+    /// workspace-scoped secret OR a GLOBAL (`workspace_id NULL`) one — the delegator
+    /// credential is provisioned globally but referenced by a workspace database.
+    /// NULL `secret_id` (or no row) → `Ok(None)`.
     pub async fn open_secret(&self, id: Uuid) -> Result<Option<String>, DatabaseError> {
         let row: Option<(Option<Uuid>, Uuid)> =
             sqlx::query_as("SELECT secret_id, workspace_id FROM query.databases WHERE id = $1")
@@ -232,7 +237,7 @@ impl DatabaseRepo {
         match row {
             Some((Some(secret_id), workspace_id)) => Ok(Some(
                 self.workspace_secrets
-                    .resolve_plaintext(Some(workspace_id), secret_id)
+                    .resolve_plaintext_ws_or_global(workspace_id, secret_id)
                     .await?,
             )),
             _ => Ok(None),

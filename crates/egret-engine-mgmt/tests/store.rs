@@ -311,6 +311,7 @@ fn coordinator_host_and_jwt_check() {
         spec: serde_json::json!({ "trinoConfig": { "auth": { "jwt": { "jwksUri": "http://kc/jwks" } } } }),
         status: "running".into(),
         authz_service_id: None,
+        delegator_secret_id: None,
         created_at: chrono::Utc::now(),
     };
     assert_eq!(e.coordinator_host(), "trino-prod-coordinator.engines.svc");

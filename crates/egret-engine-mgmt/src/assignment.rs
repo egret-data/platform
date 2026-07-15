@@ -15,7 +15,7 @@ use egret_query::{Database, DatabaseError, DatabaseRepo};
 use uuid::Uuid;
 
 use crate::error::EngineMgmtError;
-use crate::store::EngineMgmtStore;
+use crate::store::{Engine, EngineMgmtStore};
 
 /// Orchestrates engine↔workspace assignment across the engine-provisioning and
 /// query seams. Cheap to clone (both stores are `Clone` handles over a pool).
@@ -47,9 +47,9 @@ impl EngineAssignmentService {
             .get_engine(engine_id)
             .await?
             .ok_or_else(|| EngineMgmtError::NotFound(engine_id.to_string()))?;
-        if !engine.supports_jwt_delegation() {
+        if !engine.supports_delegation() {
             return Err(EngineMgmtError::NotAssignable(
-                "engine must have JWT auth enabled before it can be assigned".into(),
+                "engine must support delegation before it can be assigned".into(),
             ));
         }
         // Idempotent: `assign_workspace` is `ON CONFLICT DO NOTHING`.
@@ -67,7 +67,7 @@ impl EngineAssignmentService {
             return Ok(());
         }
         let name = dedup_name(&engine.name, &existing);
-        let opts = serde_json::json!({});
+        let (opts, secret_id) = delegated_conn_options(&engine);
         self.databases
             .create_provisioned(
                 workspace_id,
@@ -77,6 +77,7 @@ impl EngineAssignmentService {
                 &engine.coordinator_host(),
                 engine.coordinator_port(),
                 &opts,
+                secret_id,
                 Some(egret_core::UserId(by)),
             )
             .await
@@ -115,6 +116,26 @@ fn dedup_name(base: &str, existing: &[Database]) -> String {
         .expect("infinite range always yields a free name")
 }
 
+/// Select the connection `options` JSONB and bound `secret_id` for the
+/// materialized delegated connection, by delegation mode:
+///   - impersonate → `{ "user": <delegator>, "impersonate": true }` + the engine's
+///     global delegator secret, so the query path opens a basic-auth service-user
+///     connection and impersonates the caller;
+///   - jwt → `{}` + no secret, so the query path mints the caller's engine JWT.
+fn delegated_conn_options(engine: &Engine) -> (serde_json::Value, Option<Uuid>) {
+    if engine.is_impersonate_delegation() {
+        (
+            serde_json::json!({
+                "user": crate::delegator_policy::DELEGATOR_USERNAME,
+                "impersonate": true,
+            }),
+            engine.delegator_secret_id,
+        )
+    } else {
+        (serde_json::json!({}), None)
+    }
+}
+
 /// Map a query-seam [`DatabaseError`] into an [`EngineMgmtError`]. The common
 /// arms of the materialization flow (transport, unique-name, missing row) carry
 /// over directly; the remaining domain arms cannot arise here (no secret is
@@ -125,5 +146,50 @@ fn to_mgmt_err(e: DatabaseError) -> EngineMgmtError {
         DatabaseError::AlreadyExists(s) => EngineMgmtError::AlreadyExists(s),
         DatabaseError::NotFound(s) => EngineMgmtError::NotFound(s),
         other => EngineMgmtError::NotAssignable(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Engine;
+
+    fn engine(spec: serde_json::Value, delegator_secret_id: Option<Uuid>) -> Engine {
+        Engine {
+            id: Uuid::nil(),
+            name: "e".into(),
+            r#type: "trino".into(),
+            namespace: "ns".into(),
+            warehouse_id: Uuid::nil(),
+            spec,
+            status: "provisioning".into(),
+            authz_service_id: None,
+            delegator_secret_id,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn impersonate_engine_binds_delegator_secret_and_impersonate_opts() {
+        let s = Uuid::new_v4();
+        // Default (no delegationMode) is impersonate.
+        let e = engine(serde_json::json!({ "trinoConfig": {} }), Some(s));
+        let (opts, secret_id) = delegated_conn_options(&e);
+        assert_eq!(
+            opts,
+            serde_json::json!({ "user": "egret_delegator", "impersonate": true })
+        );
+        assert_eq!(secret_id, Some(s));
+    }
+
+    #[test]
+    fn jwt_engine_binds_no_secret_and_empty_opts() {
+        let e = engine(
+            serde_json::json!({ "trinoConfig": { "delegationMode": "jwt", "auth": { "jwt": {} } } }),
+            Some(Uuid::new_v4()),
+        );
+        let (opts, secret_id) = delegated_conn_options(&e);
+        assert_eq!(opts, serde_json::json!({}));
+        assert_eq!(secret_id, None);
     }
 }

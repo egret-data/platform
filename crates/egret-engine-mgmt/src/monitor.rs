@@ -421,6 +421,7 @@ mod tests {
             spec,
             status: "running".into(),
             authz_service_id: None,
+            delegator_secret_id: None,
             created_at: chrono::Utc::now(),
         }
     }

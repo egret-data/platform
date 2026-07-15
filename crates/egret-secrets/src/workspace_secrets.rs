@@ -204,6 +204,34 @@ impl WorkspaceSecretStore {
         self.secrets.get(secret_ref).await
     }
 
+    /// Resolve a secret readable from `workspace_id`: its own workspace secret, or a
+    /// GLOBAL (workspace_id NULL) secret. Used for platform-provisioned secrets (e.g.
+    /// the per-engine delegator credential) that a workspace database references.
+    ///
+    /// SECURITY PRECONDITION: `id` must be an egret-SET `secret_id` (e.g. from a
+    /// provisioned `query.databases` row materialized by egret), never a raw
+    /// user-supplied secret id. The GLOBAL fallback would otherwise let a caller
+    /// read any platform secret by id. User-supplied secret ids MUST instead go
+    /// through the workspace-scoped `resolve_plaintext`/`get_meta` (which excludes
+    /// NULL-workspace secrets). Only egret-controlled, read-only, coordinator-hosted
+    /// connection rows may carry a global `secret_id`.
+    pub async fn resolve_plaintext_ws_or_global(
+        &self,
+        workspace_id: Uuid,
+        id: Uuid,
+    ) -> Result<String, SecretsError> {
+        let secret_ref: Option<Uuid> = sqlx::query_scalar(
+            "SELECT secret_ref FROM workspace_secrets \
+             WHERE id = $1 AND (workspace_id = $2 OR workspace_id IS NULL)",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .fetch_optional(&self.db.pool)
+        .await?;
+        let secret_ref = secret_ref.ok_or(SecretsError::NotFound)?;
+        self.secrets.get(secret_ref).await
+    }
+
     /// Resolve the vault `secret_ref` for a workspace-scoped named secret (404 if absent).
     async fn secret_ref(&self, workspace_id: Option<Uuid>, id: Uuid) -> Result<Uuid, SecretsError> {
         let row: Option<Uuid> = sqlx::query_scalar(

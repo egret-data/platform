@@ -141,6 +141,14 @@ impl egret_query::execution::connector::ConnectorFactory for CapturingFactory {
     }
 }
 
+/// Fixed AES key so `build_state`'s secret store can seal/open credentials in
+/// tests (the delegated impersonate row binds a real, decryptable delegator
+/// secret). Existing tests bind no `secret_id`, so their `open_secret` returns
+/// `Ok(None)` regardless of whether crypto is configured — no behavior change.
+fn test_crypto() -> egret_secrets::Crypto {
+    egret_secrets::Crypto::new(&[7u8; 32]).expect("test crypto")
+}
+
 fn build_state(
     db: egret_metastore::Db,
     pdp: Arc<dyn egret_core::authz::Pdp>,
@@ -150,10 +158,10 @@ fn build_state(
     let store = QueryStore::new(db.clone());
     let databases = DatabaseRepo::new(
         db.clone(),
-        egret_secrets::SecretStore::new(db.clone(), None),
+        egret_secrets::SecretStore::new(db.clone(), Some(test_crypto())),
         egret_secrets::WorkspaceSecretStore::new(
             db.clone(),
-            egret_secrets::SecretStore::new(db.clone(), None),
+            egret_secrets::SecretStore::new(db.clone(), Some(test_crypto())),
         ),
     );
     let storage: Arc<dyn ObjectStore> = Arc::new(MemStore::default());
@@ -567,4 +575,140 @@ async fn submit_delegation_branches() {
         "non-delegated: session_user stays the caller email"
     );
     assert_eq!(bearer, None, "non-delegated: NO bearer is attached");
+}
+
+/// Impersonate mode: a DELEGATED connection whose `options.impersonate = true`
+/// (bound to the global delegator secret) must run AS the caller via the
+/// basic-auth + `X-Trino-User` connector path — NOT mint a per-user JWT. So the
+/// submit path resolves `session_user = the caller's username` and `bearer =
+/// None`, even though a working minter is wired (proving no mint happens).
+#[tokio::test]
+async fn submit_impersonate_runs_as_caller_no_mint() {
+    let Some(url) = std::env::var("DATABASE_URL").ok() else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = egret_metastore::Db::connect(&url, 5)
+        .await
+        .expect("connect");
+    db.migrate().await.expect("migrate");
+
+    // A workspace + a member holding query:run (ws_editor, migration 0009 grants it).
+    let email = format!("imp_{}@egret.local", Uuid::new_v4().simple());
+    let uid: Uuid =
+        sqlx::query_scalar("INSERT INTO users (provider, email) VALUES ('local', $1) RETURNING id")
+            .bind(&email)
+            .fetch_one(&db.pool)
+            .await
+            .expect("insert user");
+    let slug = format!("imp-{}", Uuid::new_v4().simple());
+    let ws: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (slug, name, created_by, status) \
+         VALUES ($1, 'Impersonate Test', $2, 'active') RETURNING id",
+    )
+    .bind(&slug)
+    .bind(uid)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert workspace");
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         SELECT 'user', $2, r.id, 'workspace', $1 FROM roles r \
+         WHERE r.scope = 'workspace' AND r.name = 'ws_editor' ON CONFLICT DO NOTHING",
+    )
+    .bind(ws)
+    .bind(uid)
+    .execute(&db.pool)
+    .await
+    .expect("add workspace member");
+
+    let pdp: Arc<dyn egret_core::authz::Pdp> = Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+
+    // A working minter is wired on purpose: if the impersonate branch is correct,
+    // it is NEVER called (bearer must stay None).
+    let cap = Arc::new(CapturingFactory::default());
+    let st = build_state(
+        db.clone(),
+        pdp,
+        Arc::new(FakeMinter {
+            token: Some("should-not-be-minted".into()),
+        }),
+        cap.clone(),
+    );
+
+    // The global (workspace_id NULL) delegator credential the impersonate row binds,
+    // sealed with the same crypto `build_state`'s store uses so `open_secret` resolves.
+    let secret_name = format!("egret-delegator-{}", Uuid::new_v4().simple());
+    let secret_id = st
+        .databases
+        .workspace_secrets()
+        .create(None, &secret_name, None, "egret_delegator:pw")
+        .await
+        .expect("create delegator secret");
+
+    // An impersonate-mode delegated connection: delegated = true,
+    // options.impersonate = true, bound to the delegator secret.
+    let imp_db: Uuid = sqlx::query_scalar(
+        "INSERT INTO query.databases (name, engine, host, port, workspace_id, delegated, options, secret_id) \
+         VALUES ($1,'trino','localhost',8080,$2,true,$3,$4) RETURNING id",
+    )
+    .bind(format!("imp-{}", Uuid::new_v4().simple()))
+    .bind(ws)
+    .bind(serde_json::json!({"user": "egret_delegator", "impersonate": true}))
+    .bind(secret_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert impersonate db");
+
+    let expected_username = egret_auth::users::UserRepo::new(db.clone())
+        .ensure_username(egret_core::ids::UserId(uid))
+        .await
+        .expect("ensure_username");
+    assert_ne!(
+        expected_username, email,
+        "sanity: username must differ from email so the assertion is meaningful"
+    );
+
+    let token = st
+        .sessions
+        .create(egret_core::ids::UserId(uid), "test", "127.0.0.1")
+        .await
+        .expect("create session")
+        .token;
+
+    let resp = engine_router()
+        .with_state(st)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/ws/{slug}/queries"))
+                .header("content-type", "application/json")
+                .header("Cookie", format!("egret_session={token}"))
+                .body(Body::from(format!(
+                    r#"{{"database_id":"{imp_db}","sql":"SELECT 1"}}"#
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::ACCEPTED,
+        "impersonate-mode delegated query must be accepted"
+    );
+
+    let (session_user, bearer) = wait_capture(&cap.captured).await;
+    assert_eq!(
+        session_user,
+        Some(expected_username.clone()),
+        "impersonate: session_user MUST be the caller's username (runs AS the caller)"
+    );
+    assert_eq!(
+        bearer, None,
+        "impersonate: NO JWT is minted — the connector uses basic-auth + X-Trino-User"
+    );
 }

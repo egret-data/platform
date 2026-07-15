@@ -1500,10 +1500,16 @@ mod tests {
     fn auth_config_password_and_jwt() {
         let mut s = sample_spec();
         s.config.auth = Some(Auth {
-            password_users: vec![PasswordEntry {
-                username: "bob".into(),
-                bcrypt_hash: "$2b$10$abc".into(),
-            }],
+            password_users: vec![
+                PasswordEntry {
+                    username: "bob".into(),
+                    bcrypt_hash: "$2b$10$abc".into(),
+                },
+                PasswordEntry {
+                    username: "egret_delegator".into(),
+                    bcrypt_hash: "$2y$10$delegator".into(),
+                },
+            ],
             jwt: Some(Jwt {
                 jwks_uri: "https://kc/realms/egret/protocol/openid-connect/certs".into(),
                 required_audience: Some("trino".into()),
@@ -1532,6 +1538,11 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("bob:$2b$10$abc"));
+        // The delegator service user is rendered like any other password entry.
+        assert!(cm["data"]["password.db"]
+            .as_str()
+            .unwrap()
+            .contains("egret_delegator:$2y$"));
         assert!(cm["data"]["password-authenticator.properties"]
             .as_str()
             .unwrap()

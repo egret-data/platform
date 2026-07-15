@@ -20,6 +20,7 @@ pub struct Engine {
     pub spec: serde_json::Value,
     pub status: String,
     pub authz_service_id: Option<i64>,
+    pub delegator_secret_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -62,6 +63,27 @@ impl Engine {
             .map(|j| j.is_object())
             .unwrap_or(false)
     }
+
+    /// Delegation mode from the stored spec (`trinoConfig.delegationMode`).
+    /// Defaults to `impersonate` when absent.
+    pub fn delegation_mode(&self) -> &str {
+        self.spec
+            .get("trinoConfig")
+            .and_then(|t| t.get("delegationMode"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("impersonate")
+    }
+
+    /// True when delegated queries run via basic-auth service-user impersonation.
+    pub fn is_impersonate_delegation(&self) -> bool {
+        self.delegation_mode() == "impersonate"
+    }
+
+    /// True when the engine can back a delegated (per-user) connection at all.
+    /// Impersonate mode always can; jwt mode requires JWT auth enabled.
+    pub fn supports_delegation(&self) -> bool {
+        self.is_impersonate_delegation() || self.supports_jwt_delegation()
+    }
 }
 
 /// A workspace an engine is assigned to (join of `engine_mgmt.engine_workspaces`
@@ -100,7 +122,7 @@ impl EngineMgmtStore {
     ) -> Result<Engine, EngineMgmtError> {
         sqlx::query_as::<_, Engine>(
             "INSERT INTO engine_mgmt.engines (name, type, namespace, warehouse_id, spec) VALUES ($1,$2,$3,$4,$5) \
-             RETURNING id, name, type, namespace, warehouse_id, spec, status, authz_service_id, created_at",
+             RETURNING id, name, type, namespace, warehouse_id, spec, status, authz_service_id, delegator_secret_id, created_at",
         )
         .bind(name)
         .bind(r#type)
@@ -119,7 +141,7 @@ impl EngineMgmtStore {
 
     pub async fn list_engines(&self) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, warehouse_id, spec, status, authz_service_id, created_at \
+            "SELECT id, name, type, namespace, warehouse_id, spec, status, authz_service_id, delegator_secret_id, created_at \
              FROM engine_mgmt.engines ORDER BY created_at",
         )
         .fetch_all(self.pool())
@@ -128,7 +150,7 @@ impl EngineMgmtStore {
 
     pub async fn get_engine(&self, id: Uuid) -> Result<Option<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT id, name, type, namespace, warehouse_id, spec, status, authz_service_id, created_at \
+            "SELECT id, name, type, namespace, warehouse_id, spec, status, authz_service_id, delegator_secret_id, created_at \
              FROM engine_mgmt.engines WHERE id = $1",
         )
         .bind(id)
@@ -169,6 +191,20 @@ impl EngineMgmtStore {
         sqlx::query("UPDATE engine_mgmt.engines SET authz_service_id = $2 WHERE id = $1")
             .bind(id)
             .bind(authz_service_id)
+            .execute(self.pool())
+            .await?;
+        Ok(())
+    }
+
+    /// Persist the generated delegator secret id for an engine (idempotent bookkeeping).
+    pub async fn set_delegator_secret(
+        &self,
+        engine_id: Uuid,
+        secret_id: Uuid,
+    ) -> Result<(), EngineMgmtError> {
+        sqlx::query("UPDATE engine_mgmt.engines SET delegator_secret_id = $2 WHERE id = $1")
+            .bind(engine_id)
+            .bind(secret_id)
             .execute(self.pool())
             .await?;
         Ok(())
@@ -325,12 +361,55 @@ impl EngineMgmtStore {
         workspace_id: Uuid,
     ) -> Result<Vec<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
-            "SELECT e.id, e.name, e.type, e.namespace, e.warehouse_id, e.spec, e.status, e.authz_service_id, e.created_at \
+            "SELECT e.id, e.name, e.type, e.namespace, e.warehouse_id, e.spec, e.status, e.authz_service_id, e.delegator_secret_id, e.created_at \
              FROM engine_mgmt.engines e JOIN engine_mgmt.engine_workspaces ew ON ew.engine_id = e.id \
              WHERE ew.workspace_id = $1 ORDER BY e.name",
         )
         .bind(workspace_id)
         .fetch_all(self.pool())
         .await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delegation_mode_defaults_to_impersonate() {
+        let e = Engine {
+            id: Uuid::nil(),
+            name: "e".into(),
+            r#type: "trino".into(),
+            namespace: "ns".into(),
+            warehouse_id: Uuid::nil(),
+            spec: serde_json::json!({ "trinoConfig": {} }),
+            status: "provisioning".into(),
+            authz_service_id: None,
+            delegator_secret_id: None,
+            created_at: chrono::Utc::now(),
+        };
+        assert_eq!(e.delegation_mode(), "impersonate");
+        assert!(e.is_impersonate_delegation());
+        assert!(e.supports_delegation());
+    }
+
+    #[test]
+    fn delegation_mode_jwt_is_not_impersonate() {
+        let e = Engine {
+            id: Uuid::nil(),
+            name: "e".into(),
+            r#type: "trino".into(),
+            namespace: "ns".into(),
+            warehouse_id: Uuid::nil(),
+            spec: serde_json::json!({ "trinoConfig": { "delegationMode": "jwt", "auth": { "jwt": {} } } }),
+            status: "provisioning".into(),
+            authz_service_id: None,
+            delegator_secret_id: None,
+            created_at: chrono::Utc::now(),
+        };
+        assert_eq!(e.delegation_mode(), "jwt");
+        assert!(!e.is_impersonate_delegation());
+        assert!(e.supports_delegation()); // jwt engine with JWT auth also supports delegation
     }
 }

@@ -464,6 +464,7 @@ async fn provisioned_databases_are_read_only() {
             8080,
             &serde_json::json!({}),
             None,
+            None,
         )
         .await
         .expect("materialize provisioned connection");
@@ -545,6 +546,7 @@ async fn ws_database_list_and_detail_expose_engine_id() {
             "trino-prod-coordinator.egret-engines.svc",
             8080,
             &serde_json::json!({}),
+            None,
             None,
         )
         .await

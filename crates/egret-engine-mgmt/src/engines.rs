@@ -476,6 +476,20 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
     // system user so the native Trino monitor can authenticate. Guarded on
     // `auth.is_some()` (inside the helper) so a no-auth engine stays auth-free.
     inject_monitor_user(&mut config.auth, engine.id)?;
+    // Impersonate-mode delegation: when auth is on, provision the `egret_delegator`
+    // service user (generate + store its password once, inject its bcrypt into the
+    // auth block so it lands in `password.db`) and seed the impersonate + query-
+    // timeout Ranger policies onto the bound Trino service. Guarded on auth being
+    // enabled — without a `password.db` the delegator can't basic-auth, so
+    // impersonate delegation is meaningless (and `inject_delegator_user` no-ops).
+    let ranger_service_name = engine.authz_service_id.map(|_| engine.name.clone());
+    if config.auth.is_some() && engine.is_impersonate_delegation() {
+        let (_secret_id, pw) = ensure_delegator_secret(st, engine).await?;
+        inject_delegator_user(&mut config.auth, &pw)?;
+        if let Some(service_name) = ranger_service_name.as_deref() {
+            seed_delegator_policies(st, service_name).await?;
+        }
+    }
     // Trino requires a coordinator<->worker shared secret whenever auth is enabled.
     // Derive a stable per-engine value (both roles read it from the env Secret).
     if config.auth.is_some() {
@@ -487,13 +501,14 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
     // When the engine is bound to a Ranger profile (its trino profile is named
     // after the engine), template the apache-ranger access-control config so the
     // bundled plugin polls egret's Ranger-Admin download API (Access P3.2).
-    let ranger = engine
-        .authz_service_id
-        .map(|_sid| egret_engine_mgmt_api::RangerBinding {
-            service_name: engine.name.clone(),
-            egret_url: st.engine_egret_url.clone(),
-            poll_interval_ms: 30_000,
-        });
+    let ranger =
+        ranger_service_name
+            .clone()
+            .map(|service_name| egret_engine_mgmt_api::RangerBinding {
+                service_name,
+                egret_url: st.engine_egret_url.clone(),
+                poll_interval_ms: 30_000,
+            });
     Ok(EngineProvisionReq {
         name: engine.name.clone(),
         namespace: engine.namespace.clone(),
@@ -1228,6 +1243,128 @@ fn inject_monitor_user(auth: &mut Option<AuthReq>, engine_id: Uuid) -> Result<()
         username: "egret-monitor".into(),
         bcrypt_hash,
     });
+    Ok(())
+}
+
+/// Inject the `egret_delegator` PASSWORD user (bcrypt of `password`) into an
+/// engine's auth block so egret can basic-auth as it for impersonate-mode
+/// delegated queries. No-op when auth is `None` (must not turn auth on). Uses the
+/// same `$2b$`→`$2y$` relabel as the human users so Trino's jBCrypt file
+/// authenticator accepts the hash.
+fn inject_delegator_user(auth: &mut Option<AuthReq>, password: &str) -> Result<(), CpError> {
+    let Some(auth) = auth.as_mut() else {
+        return Ok(());
+    };
+    let bcrypt_hash = bcrypt::hash(password, bcrypt::DEFAULT_COST)
+        .map_err(|e| CpError::BadRequest(format!("bcrypt delegator password: {e}")))?
+        .replacen("$2b$", "$2y$", 1);
+    auth.password_users.push(PasswordEntryReq {
+        username: crate::delegator_policy::DELEGATOR_USERNAME.into(),
+        bcrypt_hash,
+    });
+    Ok(())
+}
+
+/// Ensure the engine has a stored `egret_delegator` password secret; generate one
+/// on first call and persist its named-secret id on the engine row (idempotent via
+/// the `delegator_secret_id` column). The secret is a GLOBAL (workspace `None`)
+/// named [`egret_secrets::WorkspaceSecretStore`] entry so `resolve_plaintext`
+/// (which keys off the named id, like every other auth secret) can read it back at
+/// materialize time. Returns `(secret_id, plaintext)`.
+async fn ensure_delegator_secret(st: &CpState, engine: &Engine) -> Result<(Uuid, String), CpError> {
+    if let Some(id) = engine.delegator_secret_id {
+        let pw = st
+            .secrets
+            .resolve_plaintext(None, id)
+            .await
+            .map_err(|e| CpError::BadRequest(format!("resolve delegator secret: {e}")))?;
+        return Ok((id, pw));
+    }
+    let pw: String = {
+        use rand::RngCore;
+        let mut b = [0u8; 24];
+        rand::thread_rng().fill_bytes(&mut b);
+        use base64::Engine as _;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+    };
+    // Deterministic per-engine name so a partial prior run (secret created but the
+    // engine column not yet set) recovers by name instead of erroring forever.
+    let name = format!("egret-delegator-{}", engine.id);
+    let id = match st
+        .secrets
+        .create(
+            None,
+            &name,
+            Some("impersonate-mode Trino delegator password"),
+            &pw,
+        )
+        .await
+    {
+        Ok(id) => id,
+        Err(egret_secrets::SecretsError::AlreadyExists(_)) => {
+            let meta = st
+                .secrets
+                .list(None)
+                .await
+                .map_err(|e| CpError::BadRequest(format!("list delegator secret: {e}")))?
+                .into_iter()
+                .find(|m| m.name == name)
+                .ok_or_else(|| {
+                    CpError::BadRequest("delegator secret vanished after conflict".into())
+                })?;
+            let pw = st
+                .secrets
+                .resolve_plaintext(None, meta.id)
+                .await
+                .map_err(|e| CpError::BadRequest(format!("resolve delegator secret: {e}")))?;
+            st.engine_mgmt
+                .set_delegator_secret(engine.id, meta.id)
+                .await?;
+            return Ok((meta.id, pw));
+        }
+        Err(e) => return Err(CpError::BadRequest(format!("store delegator secret: {e}"))),
+    };
+    st.engine_mgmt.set_delegator_secret(engine.id, id).await?;
+    Ok((id, pw))
+}
+
+/// Seed the two impersonate-mode Ranger policies (delegator-impersonate +
+/// query-timeout) onto the engine's bound Trino service. No-op when the engine
+/// has no bound Ranger service, or when a policy of the same name already exists
+/// (idempotent across re-provisioning).
+async fn seed_delegator_policies(st: &CpState, service_name: &str) -> Result<(), CpError> {
+    use crate::delegator_policy as dp;
+    let Some(svc) = st
+        .authz
+        .get_service_opt(service_name)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("resolve ranger service: {e}")))?
+    else {
+        return Ok(());
+    };
+    for (name, body) in [
+        (
+            dp::IMPERSONATE_POLICY_NAME,
+            dp::delegator_impersonate_policy(service_name),
+        ),
+        (
+            dp::QUERY_TIMEOUT_POLICY_NAME,
+            dp::query_timeout_policy(service_name),
+        ),
+    ] {
+        if st
+            .authz
+            .policy_exists(svc.id, name)
+            .await
+            .map_err(|e| CpError::BadRequest(format!("check policy: {e}")))?
+        {
+            continue;
+        }
+        st.authz
+            .create_policy(svc.id, name, &body)
+            .await
+            .map_err(|e| CpError::BadRequest(format!("seed policy: {e}")))?;
+    }
     Ok(())
 }
 
@@ -3118,6 +3255,7 @@ mod tests {
             spec: serde_json::json!({}),
             status: "pending".into(),
             authz_service_id: None,
+            delegator_secret_id: None,
             created_at: chrono::Utc::now(),
         }
     }
