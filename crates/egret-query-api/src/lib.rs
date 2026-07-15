@@ -61,6 +61,10 @@ pub struct ConnOptions {
     /// Requires Trino impersonation + Ranger. Default false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impersonate: Option<bool>,
+    /// Trino jwt-mode/TLS only: PEM of the coordinator's self-signed cert to pin as a
+    /// trusted root (server-auth over TLS). Set on egret-provisioned TLS connections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_cert: Option<String>,
 }
 
 /// A full database registration row (no secret material).
