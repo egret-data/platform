@@ -70,4 +70,3 @@ mod tests {
 // migration registry: 0078_access_grant_expires_at (time-bound grants: access_grants.expires_at + partial index)
 // migration registry: 0079 access_requests (join-request → approval workflow: access_requests table)
 // migration registry: 0080 tags (classification model: tags + tag_assignments + tag:* perms)
-
