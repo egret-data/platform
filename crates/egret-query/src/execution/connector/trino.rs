@@ -72,8 +72,20 @@ impl TrinoConnector {
     /// is that same username, so sending it as `X-Trino-User` is a self-
     /// impersonation (principal == user) that Ranger allows by default. Without a
     /// bearer, send `X-Trino-User` (+ basic-auth when a secret is set).
+    ///
+    /// `X-Forwarded-Proto: https` is required for the basic-auth (impersonate)
+    /// path: egret-provisioned coordinators run with `http-server.process-forwarded
+    /// =true` and reject a PASSWORD credential unless the request is (or is
+    /// forwarded as) secure — "Password not allowed for insecure authentication".
+    /// egret reaches the coordinator directly (Service/port-forward, no
+    /// TLS-terminating proxy), so it must present the header itself. Harmless on
+    /// the bearer path (JWT is already allowed over insecure HTTP) and on real
+    /// HTTPS/non-forwarded targets (only honored when the peer trusts forwarded
+    /// headers, which is the operator's opt-in).
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        let req = req.header("X-Trino-User", self.x_trino_user());
+        let req = req
+            .header("X-Trino-User", self.x_trino_user())
+            .header("X-Forwarded-Proto", "https");
         if let Some(jwt) = &self.bearer {
             req.bearer_auth(jwt)
         } else {
@@ -82,6 +94,19 @@ impl TrinoConnector {
                 None => req,
             }
         }
+    }
+
+    /// Rewrite an absolute Trino `nextUri` onto this connection's `base_url`,
+    /// keeping only its path + query. The coordinator builds the nextUri from the
+    /// (forwarded) request scheme/host, which need not match how egret reaches it.
+    fn rebase(&self, uri: &str) -> String {
+        let path = match uri.split_once("://") {
+            Some((_scheme, authority_and_path)) => authority_and_path
+                .find('/')
+                .map_or("/", |i| &authority_and_path[i..]),
+            None => uri, // already a relative path
+        };
+        format!("{}{}", self.base_url, path)
     }
 }
 
@@ -171,7 +196,11 @@ impl Connector for TrinoConnector {
                     }
                 }
             }
-            let next = resp.next_uri.take();
+            // Follow the paginated `nextUri` at OUR base scheme+host, not the
+            // absolute URL Trino returns. Because we send `X-Forwarded-Proto: https`
+            // the coordinator echoes `https://…` into the nextUri, but we reach it
+            // directly (e.g. plain-HTTP Service), so honor only its path+query.
+            let next = resp.next_uri.take().map(|u| self.rebase(&u));
             if cancel.is_cancelled() {
                 if let Some(uri) = &next {
                     let _ = self.auth(client.delete(uri)).send().await;
@@ -323,5 +352,65 @@ mod tests {
         let h = req.headers();
         assert_eq!(h.get("X-Trino-User").unwrap(), "alice");
         assert_eq!(h.get("authorization").unwrap(), "Bearer eyJ.jwt.sig");
+        // Present the connection as forwarded-https so a process-forwarded
+        // coordinator accepts auth (required for the basic-auth impersonate path).
+        assert_eq!(h.get("X-Forwarded-Proto").unwrap(), "https");
+    }
+
+    // The basic-auth (impersonate) path must also carry X-Forwarded-Proto so the
+    // coordinator does not reject the PASSWORD credential as insecure.
+    #[test]
+    fn basic_auth_path_sends_forwarded_proto() {
+        let c = TrinoConnector::new(&ConnSpec {
+            engine: Engine::Trino,
+            host: "h".into(),
+            port: 8080,
+            options: ConnOptions {
+                user: Some("egret_delegator".into()),
+                impersonate: Some(true),
+                ..Default::default()
+            },
+            secret: Some("delegator-pw".into()),
+            session_user: Some("alice".into()),
+            bearer_token: None,
+        });
+        let client = reqwest::Client::new();
+        let req = c
+            .auth(client.post("http://h:8080/v1/statement"))
+            .build()
+            .unwrap();
+        let h = req.headers();
+        assert_eq!(h.get("X-Forwarded-Proto").unwrap(), "https");
+        assert_eq!(h.get("X-Trino-User").unwrap(), "alice");
+        assert!(h
+            .get("authorization")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("Basic "));
+    }
+
+    #[test]
+    fn rebase_follows_nexturi_on_our_base_scheme_and_host() {
+        let c = TrinoConnector::new(&ConnSpec {
+            engine: Engine::Trino,
+            host: "coord.svc".into(),
+            port: 8080,
+            options: ConnOptions::default(),
+            secret: None,
+            session_user: None,
+            bearer_token: None,
+        });
+        // Trino echoes https (from X-Forwarded-Proto) + a different host; keep only
+        // the path+query and use our own base (http://coord.svc:8080).
+        assert_eq!(
+            c.rebase("https://elsewhere:443/v1/statement/queued/abc/token/1?x=y"),
+            "http://coord.svc:8080/v1/statement/queued/abc/token/1?x=y"
+        );
+        // A relative next path is just appended.
+        assert_eq!(
+            c.rebase("/v1/statement/executing/def/2"),
+            "http://coord.svc:8080/v1/statement/executing/def/2"
+        );
     }
 }
