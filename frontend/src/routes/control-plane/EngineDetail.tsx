@@ -651,6 +651,8 @@ function SecurityTab({ cfg }: { cfg: EngineConfigForm }) {
     setPasswordUsers,
     jwtEnabled,
     setJwtEnabled,
+    delegationMode,
+    setDelegationMode,
     jwksUri,
     setJwksUri,
     requiredAudience,
@@ -683,6 +685,8 @@ function SecurityTab({ cfg }: { cfg: EngineConfigForm }) {
             setPasswordUsers={setPasswordUsers}
             jwtEnabled={jwtEnabled}
             setJwtEnabled={setJwtEnabled}
+            delegationMode={delegationMode}
+            setDelegationMode={setDelegationMode}
             jwksUri={jwksUri}
             setJwksUri={setJwksUri}
             requiredAudience={requiredAudience}

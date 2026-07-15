@@ -75,3 +75,44 @@ describe("useEngineConfigForm dirty tracking", () => {
     expect(result.current.logLevel).toBe("DEBUG");
   });
 });
+
+describe("useEngineConfigForm delegation mode", () => {
+  function withDelegation(mode?: "impersonate" | "jwt") {
+    const e = makeEngine();
+    (e.spec as { trinoConfig: Record<string, unknown> }).trinoConfig.delegationMode =
+      mode;
+    return e;
+  }
+
+  it("defaults to impersonate and omits the key from the built payload", () => {
+    const { result } = renderHook(({ e }) => useEngineConfigForm(e), {
+      initialProps: { e: withDelegation(undefined) },
+      wrapper,
+    });
+    expect(result.current.delegationMode).toBe("impersonate");
+    // Back-compat: an impersonate (default) engine must not emit delegationMode.
+    expect(result.current.builtTrinoConfig.delegationMode).toBeUndefined();
+  });
+
+  it("loads a jwt engine and PRESERVES the mode on round-trip (the save-drop fix)", () => {
+    const { result } = renderHook(({ e }) => useEngineConfigForm(e), {
+      initialProps: { e: withDelegation("jwt") },
+      wrapper,
+    });
+    expect(result.current.delegationMode).toBe("jwt");
+    // The built payload keeps delegationMode:"jwt" — without this the UI save
+    // would silently strip it and revert the engine to impersonate.
+    expect(result.current.builtTrinoConfig.delegationMode).toBe("jwt");
+    expect(result.current.dirty).toBe(false);
+  });
+
+  it("switching impersonate → jwt marks dirty and emits the key", () => {
+    const { result } = renderHook(({ e }) => useEngineConfigForm(e), {
+      initialProps: { e: withDelegation(undefined) },
+      wrapper,
+    });
+    act(() => result.current.setDelegationMode("jwt"));
+    expect(result.current.dirty).toBe(true);
+    expect(result.current.builtTrinoConfig.delegationMode).toBe("jwt");
+  });
+});
