@@ -41,6 +41,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import {
   Card,
   CardContent,
@@ -980,6 +981,10 @@ function WorkspacesCard({ engineId }: { engineId: string }) {
   // Local selection, seeded from the assigned set once it loads. `seeded` guards
   // against re-seeding (which would clobber unsaved toggles) on later refetches.
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [q, setQ] = useState("");
+  const filtered = allWs.filter((ws) =>
+    `${ws.name} ${ws.slug}`.toLowerCase().includes(q.trim().toLowerCase()),
+  );
   const seededRef = useRef(false);
   useEffect(() => {
     if (seededRef.current) return;
@@ -1044,20 +1049,41 @@ function WorkspacesCard({ engineId }: { engineId: string }) {
             No workspaces yet.
           </p>
         ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-10">
-                  <span className="sr-only">Assigned</span>
-                </TableHead>
-                <TableHead>Workspace</TableHead>
-                <TableHead>Slug</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {allWs.map((ws) => {
-                const checked = selected.has(ws.id);
-                return (
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <Input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="Search workspaces…"
+                aria-label="Search workspaces"
+                className="max-w-xs"
+              />
+              <span className="text-sm text-muted-foreground">{selected.size} assigned</span>
+            </div>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-10">
+                    <span className="sr-only">Assigned</span>
+                  </TableHead>
+                  <TableHead>Workspace</TableHead>
+                  <TableHead>Slug</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filtered.length === 0 ? (
+                  <TableRow className="hover:bg-transparent">
+                    <TableCell
+                      colSpan={3}
+                      className="py-6 text-center text-sm text-muted-foreground"
+                    >
+                      No workspaces match “{q}”.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  filtered.map((ws) => {
+                    const checked = selected.has(ws.id);
+                    return (
                   <TableRow
                     key={ws.id}
                     className="cursor-pointer"
@@ -1075,10 +1101,12 @@ function WorkspacesCard({ engineId }: { engineId: string }) {
                       {ws.slug}
                     </TableCell>
                   </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
+                    );
+                  })
+                )}
+              </TableBody>
+            </Table>
+          </div>
         )}
       </CardContent>
     </Card>
