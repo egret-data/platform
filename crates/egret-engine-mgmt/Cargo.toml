@@ -46,6 +46,7 @@ reqwest.workspace = true
 bcrypt = "0.15"
 tracing.workspace = true
 kube.workspace = true
+rcgen.workspace = true
 
 [dev-dependencies]
 # Concrete Policy/Ranger store — only test state construction builds it directly
@@ -72,3 +73,6 @@ http-body-util = "0.1"
 # panics; egret-bin/egret-orchestrator pick the same version for the real
 # binary via workspace feature unification.
 k8s-openapi.workspace = true
+# Parse the generated self-signed cert back to verify SANs in tls_cert's test.
+pem = "3"
+x509-parser = "0.16"
