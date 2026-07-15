@@ -135,7 +135,14 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
         if let Some(auth) = &cfg.auth {
             if let Some(t) = auth_type(auth) {
                 out.push_str(&format!("http-server.authentication.type={t}\n"));
-                out.push_str("http-server.authentication.allow-insecure-over-http=true\n");
+                // jwt-mode (TLS + JWT-only) binds query identity to the TLS-validated
+                // JWT — reject auth over plain HTTP:8080 so a spoofed X-Trino-User can't
+                // run as another user. impersonate engines keep insecure-over-http for
+                // their basic-auth monitor; safe because impersonation is delegator-only.
+                let insecure_over_http = !(cfg.tls.is_some() && t == "JWT");
+                out.push_str(&format!(
+                    "http-server.authentication.allow-insecure-over-http={insecure_over_http}\n"
+                ));
                 if let Some(j) = &auth.jwt {
                     out.push_str(&format!(
                         "http-server.authentication.jwt.key-file={}\n",
@@ -158,6 +165,15 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
                     }
                 }
             }
+        }
+        // jwt-mode (and impersonate-over-TLS) engines serve HTTPS on the coordinator
+        // with an egret-generated keystore mounted from the `{name}-tls` Secret. The
+        // internal http listener on 8080 (used for loopback discovery + workers) is
+        // left untouched.
+        if let Some(tls) = &cfg.tls {
+            out.push_str("http-server.https.enabled=true\n");
+            out.push_str(&format!("http-server.https.port={}\n", tls.port));
+            out.push_str("http-server.https.keystore.path=/etc/trino/tls/keystore.pem\n");
         }
     }
     // Trino REQUIRES a coordinator<->worker shared secret whenever any client
@@ -396,6 +412,18 @@ pub fn trino_env_secret(spec: &EngineSpec) -> Value {
     })
 }
 
+/// The coordinator's HTTPS keystore Secret (`{name}-tls`), rendered only when the
+/// engine is TLS-enabled. `keystore.pem` holds the cert+key PEM egret generated.
+pub fn trino_tls_secret(spec: &EngineSpec) -> Option<Value> {
+    let tls = spec.config.tls.as_ref()?;
+    Some(json!({
+        "apiVersion": "v1", "kind": "Secret",
+        "metadata": { "name": format!("{}-tls", spec.name), "namespace": spec.namespace,
+                      "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
+        "stringData": { "keystore.pem": tls.keystore_pem }
+    }))
+}
+
 fn config_checksum(spec: &EngineSpec) -> String {
     // Rolls the pods whenever rendered config or catalogs change.
     let mut h = DefaultHasher::new();
@@ -608,6 +636,10 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
         volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/access-control.properties", "subPath": "access-control.properties" }));
         volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/ranger-trino-security.xml", "subPath": "ranger-trino-security.xml" }));
     }
+    // Only the coordinator serves HTTPS, so only it mounts the keystore Secret.
+    if role.is_coord() && spec.config.tls.is_some() {
+        volume_mounts.push(json!({ "name": "tls", "mountPath": "/etc/trino/tls/keystore.pem", "subPath": "keystore.pem" }));
+    }
 
     // probes: readiness always (generous default), liveness/startup only if configured.
     let mut container = json!({
@@ -628,6 +660,15 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
     }
     if let Some(p) = rc.probes.startup.as_ref() {
         container["startupProbe"] = probe_json(false, Some(p));
+    }
+    // The coordinator serves HTTPS on 8443 when TLS is enabled; delegated
+    // in-cluster connections target it. Name both ports (k8s requires names once
+    // a container declares more than one). Runs before the additional-exposed-ports
+    // append below, which just pushes onto the same array.
+    if role.is_coord() && spec.config.tls.is_some() {
+        let ports = container["ports"].as_array_mut().unwrap();
+        ports[0] = json!({ "name": "http", "containerPort": 8080 });
+        ports.push(json!({ "name": "https", "containerPort": 8443 }));
     }
     // Per-role additional exposed ports: APPEND to the base http port array.
     if !rc.additional_exposed_ports.is_empty() {
@@ -699,6 +740,12 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
             { "name": "data", "emptyDir": {} }
         ]
     });
+    // Coordinator-only HTTPS keystore volume, sourced from the `{name}-tls` Secret.
+    if role.is_coord() && spec.config.tls.is_some() {
+        pod_spec["volumes"].as_array_mut().unwrap().push(
+            json!({ "name": "tls", "secret": { "secretName": format!("{}-tls", spec.name) } }),
+        );
+    }
     if !role.is_coord() {
         if let Some(gs) = &spec.config.worker.graceful_shutdown {
             if gs.enabled {
@@ -898,12 +945,18 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
 }
 
 pub fn trino_service(spec: &EngineSpec) -> Value {
+    let mut ports = vec![json!({ "port": 8080, "targetPort": 8080, "name": "http" })];
+    // Expose the coordinator's HTTPS listener so delegated in-cluster clients can
+    // reach 8443. Only present when TLS is enabled; otherwise the Service is 8080-only.
+    if spec.config.tls.is_some() {
+        ports.push(json!({ "port": 8443, "targetPort": 8443, "name": "https" }));
+    }
     json!({
         "apiVersion": "v1", "kind": "Service",
         "metadata": { "name": format!("{}-trino", spec.name), "namespace": spec.namespace,
                       "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
         "spec": { "selector": { "app": format!("{}-coordinator", spec.name) },
-                  "ports": [{ "port": 8080, "targetPort": 8080, "name": "http" }] }
+                  "ports": ports }
     })
 }
 
@@ -1070,6 +1123,9 @@ impl TrinoProvisioner {
         self.kube.apply(&trino_config_map(spec)).await?;
         self.kube.apply(&trino_catalogs_config_map(spec)).await?;
         self.kube.apply(&trino_env_secret(spec)).await?;
+        if let Some(tls) = trino_tls_secret(spec) {
+            self.kube.apply(&tls).await?;
+        }
         self.kube.apply(&trino_service(spec)).await?;
         self.kube
             .apply(&trino_deployment(spec, Role::Coordinator))
@@ -1601,6 +1657,172 @@ mod tests {
                 "missing mount {path}"
             );
         }
+    }
+
+    #[test]
+    fn jwt_tls_renders_https_secret_and_coordinator_mount() {
+        let mut s = sample_spec();
+        s.config.auth = Some(Auth {
+            password_users: vec![],
+            jwt: Some(Jwt {
+                jwks_uri: "https://kc/realms/egret/protocol/openid-connect/certs".into(),
+                required_audience: None,
+            }),
+        });
+        s.config.tls = Some(Tls {
+            keystore_pem: "PEMDATA".into(),
+            port: 8443,
+        });
+
+        // Coordinator config carries the https listener directives.
+        let cm = trino_config_map(&s);
+        let cc = cm["data"]["config-coordinator.properties"]
+            .as_str()
+            .unwrap();
+        assert!(cc.contains("http-server.https.enabled=true"));
+        assert!(cc.contains("http-server.https.port=8443"));
+        assert!(cc.contains("http-server.https.keystore.path=/etc/trino/tls/keystore.pem"));
+        // The internal http port + discovery URI are untouched.
+        assert!(cc.contains("http-server.http.port=8080"));
+        // Workers do not serve https.
+        assert!(!cm["data"]["config-worker.properties"]
+            .as_str()
+            .unwrap()
+            .contains("http-server.https.enabled"));
+
+        // A `{name}-tls` Secret carries the keystore PEM.
+        let sec = trino_tls_secret(&s).expect("tls secret present");
+        assert_eq!(sec["kind"], "Secret");
+        assert_eq!(sec["metadata"]["name"], format!("{}-tls", s.name));
+        assert_eq!(sec["stringData"]["keystore.pem"], "PEMDATA");
+
+        // The coordinator pod mounts the keystore.
+        let d = trino_deployment(&s, Role::Coordinator);
+        let volumes = d["spec"]["template"]["spec"]["volumes"].as_array().unwrap();
+        assert!(volumes
+            .iter()
+            .any(|v| v["name"] == "tls" && v["secret"]["secretName"] == format!("{}-tls", s.name)));
+        let mounts = d["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap();
+        assert!(mounts.iter().any(|m| m["name"] == "tls"
+            && m["mountPath"] == "/etc/trino/tls/keystore.pem"
+            && m["subPath"] == "keystore.pem"));
+
+        // Workers get neither the volume nor the mount.
+        let dw = trino_deployment(&s, Role::Worker);
+        assert!(!dw["spec"]["template"]["spec"]["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["name"] == "tls"));
+        assert!(
+            !dw["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["name"] == "tls")
+        );
+
+        // Absent when tls is unset.
+        assert!(trino_tls_secret(&sample_spec()).is_none());
+    }
+
+    // jwt-only auth + TLS on 8443 = a delegation-capable jwt-mode coordinator.
+    fn jwt_tls_spec() -> EngineSpec {
+        let mut s = sample_spec();
+        s.config.auth = Some(Auth {
+            password_users: vec![],
+            jwt: Some(Jwt {
+                jwks_uri: "https://kc/realms/egret/protocol/openid-connect/certs".into(),
+                required_audience: None,
+            }),
+        });
+        s.config.tls = Some(Tls {
+            keystore_pem: "P".into(),
+            port: 8443,
+        });
+        s
+    }
+
+    #[test]
+    fn jwt_engine_rejects_insecure_over_http() {
+        let cc = trino_config_map(&jwt_tls_spec())["data"]["config-coordinator.properties"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(cc.contains("http-server.authentication.allow-insecure-over-http=false"));
+        assert!(!cc.contains("http-server.authentication.allow-insecure-over-http=true"));
+    }
+
+    #[test]
+    fn impersonate_engine_keeps_insecure_over_http() {
+        let mut s = sample_spec();
+        // impersonate engine = PASSWORD monitor user + JWT + TLS.
+        s.config.auth = Some(Auth {
+            password_users: vec![PasswordEntry {
+                username: "egret_delegator".into(),
+                bcrypt_hash: "$2b$10$abc".into(),
+            }],
+            jwt: Some(Jwt {
+                jwks_uri: "https://kc/realms/egret/protocol/openid-connect/certs".into(),
+                required_audience: None,
+            }),
+        });
+        s.config.tls = Some(Tls {
+            keystore_pem: "P".into(),
+            port: 8443,
+        });
+        let cc = trino_config_map(&s)["data"]["config-coordinator.properties"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(cc.contains("http-server.authentication.allow-insecure-over-http=true"));
+    }
+
+    #[test]
+    fn service_exposes_https_port_when_tls() {
+        let svc = trino_service(&jwt_tls_spec());
+        let ports = svc["spec"]["ports"].as_array().unwrap();
+        assert!(ports
+            .iter()
+            .any(|p| p["port"] == 8443 && p["name"] == "https"));
+        assert!(ports
+            .iter()
+            .any(|p| p["port"] == 8080 && p["name"] == "http"));
+
+        // No TLS ⇒ single 8080 http port only.
+        let svc2 = trino_service(&sample_spec());
+        let ports2 = svc2["spec"]["ports"].as_array().unwrap();
+        assert_eq!(ports2.len(), 1);
+        assert_eq!(ports2[0]["port"], 8080);
+        assert!(!ports2.iter().any(|p| p["port"] == 8443));
+    }
+
+    #[test]
+    fn coordinator_pod_exposes_https_container_port_when_tls() {
+        let d = trino_deployment(&jwt_tls_spec(), Role::Coordinator);
+        let ports = d["spec"]["template"]["spec"]["containers"][0]["ports"]
+            .as_array()
+            .unwrap();
+        assert!(ports.iter().any(|p| p["containerPort"] == 8443));
+        assert!(ports.iter().any(|p| p["containerPort"] == 8080));
+
+        // Workers never serve https.
+        let dw = trino_deployment(&jwt_tls_spec(), Role::Worker);
+        assert!(!dw["spec"]["template"]["spec"]["containers"][0]["ports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["containerPort"] == 8443));
+
+        // A non-TLS coordinator does not expose 8443 either.
+        let dn = trino_deployment(&sample_spec(), Role::Coordinator);
+        assert!(!dn["spec"]["template"]["spec"]["containers"][0]["ports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["containerPort"] == 8443));
     }
 
     #[test]

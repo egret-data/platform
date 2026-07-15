@@ -42,3 +42,4 @@ egret-events.workspace = true
 egret-workspace.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+rcgen = { workspace = true }

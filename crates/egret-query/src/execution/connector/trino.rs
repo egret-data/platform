@@ -21,6 +21,12 @@ pub struct TrinoConnector {
     /// Per-user OIDC engine JWT. When set, sent as `Authorization: Bearer` and
     /// takes precedence over `secret` (basic-auth).
     bearer: Option<String>,
+    /// True when the base URL is `https` — the connection is genuinely TLS.
+    /// Gates the `X-Forwarded-Proto` insecure-HTTP workaround off.
+    secure: bool,
+    /// PEM of the coordinator's self-signed cert to pin as a trusted root when
+    /// connecting over TLS (jwt-mode). `None` = system roots / plain HTTP.
+    tls_cert: Option<String>,
 }
 
 impl TrinoConnector {
@@ -44,7 +50,23 @@ impl TrinoConnector {
             session_user,
             secret: spec.secret.clone(),
             bearer: spec.bearer_token.clone(),
+            secure: scheme == "https",
+            tls_cert: spec.options.tls_cert.clone(),
         }
+    }
+
+    /// Build the reqwest client, pinning the coordinator's self-signed cert as a
+    /// trusted root when `tls_cert` is set (jwt-mode/TLS). Pinning supersedes
+    /// `danger_accept_invalid_certs`; without a pinned cert the client falls back
+    /// to system roots (unchanged for plain-HTTP engines).
+    fn build_client(&self, timeout: std::time::Duration) -> Result<reqwest::Client, EngineError> {
+        let mut b = reqwest::Client::builder().timeout(timeout);
+        if let Some(pem) = &self.tls_cert {
+            let cert = reqwest::Certificate::from_pem(pem.as_bytes())
+                .map_err(|e| EngineError::Connect(format!("engine cert: {e}")))?;
+            b = b.add_root_certificate(cert);
+        }
+        b.build().map_err(|e| EngineError::Connect(e.to_string()))
     }
 
     /// The `X-Trino-User` identity (impersonated end-user, or the service user).
@@ -73,19 +95,25 @@ impl TrinoConnector {
     /// impersonation (principal == user) that Ranger allows by default. Without a
     /// bearer, send `X-Trino-User` (+ basic-auth when a secret is set).
     ///
-    /// `X-Forwarded-Proto: https` is required for the basic-auth (impersonate)
-    /// path: egret-provisioned coordinators run with `http-server.process-forwarded
-    /// =true` and reject a PASSWORD credential unless the request is (or is
-    /// forwarded as) secure — "Password not allowed for insecure authentication".
-    /// egret reaches the coordinator directly (Service/port-forward, no
-    /// TLS-terminating proxy), so it must present the header itself. Harmless on
-    /// the bearer path (JWT is already allowed over insecure HTTP) and on real
-    /// HTTPS/non-forwarded targets (only honored when the peer trusts forwarded
-    /// headers, which is the operator's opt-in).
+    /// `X-Forwarded-Proto: https` is the insecure-HTTP workaround for the
+    /// basic-auth (impersonate) path: egret-provisioned plain-HTTP coordinators run
+    /// with `http-server.process-forwarded=true` and reject a PASSWORD credential
+    /// unless the request is (or is forwarded as) secure — "Password not allowed
+    /// for insecure authentication". egret reaches such a coordinator directly
+    /// (Service/port-forward, no TLS-terminating proxy), so it presents the header
+    /// itself. It is sent ONLY over plain HTTP: over genuine TLS (`secure`, e.g.
+    /// jwt-mode with a pinned cert) the request is already secure, so the header is
+    /// redundant and is omitted.
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        let req = req
-            .header("X-Trino-User", self.x_trino_user())
-            .header("X-Forwarded-Proto", "https");
+        let req = req.header("X-Trino-User", self.x_trino_user());
+        // Only spoof forwarded-https over plain HTTP: it's the insecure-auth
+        // workaround. Over genuine TLS the request already is secure, so the
+        // header is redundant (and misleading on a non-forwarding target).
+        let req = if self.secure {
+            req
+        } else {
+            req.header("X-Forwarded-Proto", "https")
+        };
         if let Some(jwt) = &self.bearer {
             req.bearer_auth(jwt)
         } else {
@@ -147,10 +175,7 @@ impl Connector for TrinoConnector {
         limits: &Limits,
         cancel: CancellationToken,
     ) -> Result<TabularResult, EngineError> {
-        let client = reqwest::Client::builder()
-            .timeout(limits.timeout)
-            .build()
-            .map_err(|e| EngineError::Connect(e.to_string()))?;
+        let client = self.build_client(limits.timeout)?;
 
         let session = format!("query_max_run_time={}s", limits.timeout.as_secs().max(1));
         let req = self.auth(
@@ -388,6 +413,55 @@ mod tests {
             .to_str()
             .unwrap()
             .starts_with("Basic "));
+    }
+
+    /// A pinned self-signed cert (jwt-mode/TLS) must build a working client.
+    #[test]
+    fn build_client_pins_tls_cert() {
+        let params = rcgen::CertificateParams::new(vec!["coord.svc".to_string()]).unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let pem = params.self_signed(&key).unwrap().pem();
+        let c = TrinoConnector::new(&ConnSpec {
+            engine: Engine::Trino,
+            host: "coord.svc".into(),
+            port: 8443,
+            options: ConnOptions {
+                http_scheme: Some("https".into()),
+                tls_cert: Some(pem),
+                ..Default::default()
+            },
+            secret: None,
+            session_user: Some("alice".into()),
+            bearer_token: Some("eyJ.jwt.sig".into()),
+        });
+        assert!(c.secure);
+        assert!(c.build_client(std::time::Duration::from_secs(5)).is_ok());
+    }
+
+    /// Over genuine TLS the redundant `X-Forwarded-Proto` header is omitted.
+    #[test]
+    fn https_scheme_omits_forwarded_proto() {
+        let c = TrinoConnector::new(&ConnSpec {
+            engine: Engine::Trino,
+            host: "coord.svc".into(),
+            port: 8443,
+            options: ConnOptions {
+                http_scheme: Some("https".into()),
+                ..Default::default()
+            },
+            secret: None,
+            session_user: Some("alice".into()),
+            bearer_token: Some("eyJ.jwt.sig".into()),
+        });
+        let client = reqwest::Client::new();
+        let req = c
+            .auth(client.post("https://coord.svc:8443/v1/statement"))
+            .build()
+            .unwrap();
+        let h = req.headers();
+        assert_eq!(h.get("X-Trino-User").unwrap(), "alice");
+        assert_eq!(h.get("authorization").unwrap(), "Bearer eyJ.jwt.sig");
+        assert!(h.get("X-Forwarded-Proto").is_none());
     }
 
     #[test]

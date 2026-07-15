@@ -68,6 +68,13 @@ impl EngineAssignmentService {
         }
         let name = dedup_name(&engine.name, &existing);
         let (opts, secret_id) = delegated_conn_options(&engine);
+        // Delegated connections materialize over the coordinator's https listener
+        // (8443); non-delegation engines keep the plain coordinator port.
+        let port = if engine.supports_delegation() {
+            8443
+        } else {
+            engine.coordinator_port()
+        };
         self.databases
             .create_provisioned(
                 workspace_id,
@@ -75,7 +82,7 @@ impl EngineAssignmentService {
                 &name,
                 &engine.r#type,
                 &engine.coordinator_host(),
-                engine.coordinator_port(),
+                port,
                 &opts,
                 secret_id,
                 Some(egret_core::UserId(by)),
@@ -123,14 +130,23 @@ fn dedup_name(base: &str, existing: &[Database]) -> String {
 ///     connection and impersonates the caller;
 ///   - jwt → `{}` + no secret, so the query path mints the caller's engine JWT.
 fn delegated_conn_options(engine: &Engine) -> (serde_json::Value, Option<Uuid>) {
+    // TLS (https + pinned public cert) for BOTH delegation modes. The query path
+    // talks to the coordinator's https listener (8443) and pins this public cert.
+    let with_tls = |mut opts: serde_json::Value| {
+        opts["http_scheme"] = serde_json::Value::String("https".into());
+        if let Some(cert) = &engine.coordinator_cert {
+            opts["tls_cert"] = serde_json::Value::String(cert.clone());
+        }
+        opts
+    };
     if engine.is_impersonate_delegation() {
-        (
-            serde_json::json!({
-                "user": crate::delegator_policy::DELEGATOR_USERNAME,
-                "impersonate": true,
-            }),
-            engine.delegator_secret_id,
-        )
+        let opts = with_tls(serde_json::json!({
+            "user": crate::delegator_policy::DELEGATOR_USERNAME,
+            "impersonate": true,
+        }));
+        (opts, engine.delegator_secret_id)
+    } else if engine.is_jwt_delegation() {
+        (with_tls(serde_json::json!({})), None)
     } else {
         (serde_json::json!({}), None)
     }
@@ -165,6 +181,8 @@ mod tests {
             status: "provisioning".into(),
             authz_service_id: None,
             delegator_secret_id,
+            tls_secret_id: None,
+            coordinator_cert: None,
             created_at: chrono::Utc::now(),
         }
     }
@@ -177,7 +195,7 @@ mod tests {
         let (opts, secret_id) = delegated_conn_options(&e);
         assert_eq!(
             opts,
-            serde_json::json!({ "user": "egret_delegator", "impersonate": true })
+            serde_json::json!({ "user": "egret_delegator", "impersonate": true, "http_scheme": "https" })
         );
         assert_eq!(secret_id, Some(s));
     }
@@ -189,7 +207,56 @@ mod tests {
             Some(Uuid::new_v4()),
         );
         let (opts, secret_id) = delegated_conn_options(&e);
-        assert_eq!(opts, serde_json::json!({}));
         assert_eq!(secret_id, None);
+        assert!(opts.get("impersonate").is_none());
+        assert!(opts.get("user").is_none());
+    }
+
+    #[test]
+    fn delegated_conn_options_jwt_uses_https_and_pins_cert() {
+        let e = Engine {
+            id: Uuid::nil(),
+            name: "e".into(),
+            r#type: "trino".into(),
+            namespace: "ns".into(),
+            warehouse_id: Uuid::nil(),
+            spec: serde_json::json!({ "trinoConfig": { "delegationMode": "jwt", "auth": { "jwt": {} } } }),
+            status: "provisioning".into(),
+            authz_service_id: None,
+            delegator_secret_id: None,
+            tls_secret_id: None,
+            coordinator_cert: Some("PEMCERT".into()),
+            created_at: chrono::Utc::now(),
+        };
+        let (opts, secret) = delegated_conn_options(&e);
+        assert_eq!(opts["http_scheme"], "https");
+        assert_eq!(opts["tls_cert"], "PEMCERT");
+        assert!(opts.get("impersonate").is_none());
+        assert!(opts.get("user").is_none());
+        assert_eq!(secret, None);
+    }
+
+    #[test]
+    fn delegated_conn_options_impersonate_uses_https_and_pins_cert() {
+        let e = Engine {
+            id: Uuid::nil(),
+            name: "e".into(),
+            r#type: "trino".into(),
+            namespace: "ns".into(),
+            warehouse_id: Uuid::nil(),
+            spec: serde_json::json!({ "trinoConfig": {} }), // default = impersonate
+            status: "provisioning".into(),
+            authz_service_id: None,
+            delegator_secret_id: Some(Uuid::from_u128(7)),
+            tls_secret_id: None,
+            coordinator_cert: Some("PEMCERT".into()),
+            created_at: chrono::Utc::now(),
+        };
+        let (opts, secret) = delegated_conn_options(&e);
+        assert_eq!(opts["http_scheme"], "https");
+        assert_eq!(opts["tls_cert"], "PEMCERT");
+        assert_eq!(opts["user"], "egret_delegator");
+        assert_eq!(opts["impersonate"], true);
+        assert_eq!(secret, Some(Uuid::from_u128(7)));
     }
 }

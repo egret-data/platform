@@ -8,6 +8,7 @@ pub mod http_error;
 pub mod monitor;
 pub mod state;
 pub mod store;
+pub mod tls_cert;
 
 pub use assignment::EngineAssignmentService;
 pub use engines::router as engine_mgmt_router;
