@@ -58,6 +58,14 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -388,29 +396,41 @@ function WarehousesSection({ workspaceId }: { workspaceId: string }) {
             No warehouses in this workspace yet.
           </p>
         ) : (
-          <div className="divide-y rounded-md border">
-            {warehouses.map((w) => (
-              <div
-                key={w.id}
-                className="flex items-center justify-between gap-3 px-3 py-2.5 transition-colors hover:bg-muted/40"
-              >
-                <div className="flex min-w-0 items-center gap-2.5">
-                  <Boxes className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <Link
-                    to={`/control-plane/warehouses/${w.id}`}
-                    className="truncate font-mono text-sm font-medium text-primary hover:underline"
-                  >
-                    {w.name}
-                  </Link>
-                  <span className="hidden truncate text-xs text-muted-foreground sm:inline">
-                    {storageName(w.storageConnId)}
-                  </span>
-                </div>
-                <Badge variant={w.lakekeeperWarehouseId ? "secondary" : "outline"}>
-                  {w.lakekeeperWarehouseId ? "Provisioned" : "Pending"}
-                </Badge>
-              </div>
-            ))}
+          <div className="rounded-md border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Storage</TableHead>
+                  <TableHead className="text-right">Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {warehouses.map((w) => (
+                  <TableRow key={w.id}>
+                    <TableCell>
+                      <div className="flex min-w-0 items-center gap-2.5">
+                        <Boxes className="h-4 w-4 shrink-0 text-muted-foreground" />
+                        <Link
+                          to={`/control-plane/warehouses/${w.id}`}
+                          className="truncate font-mono font-medium text-primary hover:underline"
+                        >
+                          {w.name}
+                        </Link>
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {storageName(w.storageConnId)}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Badge variant={w.lakekeeperWarehouseId ? "secondary" : "outline"}>
+                        {w.lakekeeperWarehouseId ? "Provisioned" : "Pending"}
+                      </Badge>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           </div>
         )}
       </CardContent>
@@ -473,31 +493,46 @@ function AssignedEnginesSection({ workspaceId }: { workspaceId: string }) {
             No engines assigned to this workspace yet.
           </p>
         ) : (
-          <div className="divide-y rounded-md border">
-            {assigned.map((e) => (
-              <div
-                key={e.id}
-                className="flex items-center justify-between gap-3 px-3 py-2.5 transition-colors hover:bg-muted/40"
-              >
-                <div className="flex min-w-0 items-center gap-2.5">
-                  <Cpu className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <span className="truncate font-mono text-sm font-medium">{e.name}</span>
-                  <Badge variant="secondary" className="hidden sm:inline-flex">
-                    {e.type}
-                  </Badge>
-                  <Badge variant="outline">{e.status}</Badge>
-                </div>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="shrink-0 text-muted-foreground hover:text-destructive"
-                  disabled={unassignMut.isPending}
-                  onClick={() => unassignMut.mutate({ id: workspaceId, engineId: e.id })}
-                >
-                  <Trash2 className="mr-1 h-4 w-4" /> Remove
-                </Button>
-              </div>
-            ))}
+          <div className="rounded-md border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {assigned.map((e) => (
+                  <TableRow key={e.id}>
+                    <TableCell>
+                      <div className="flex min-w-0 items-center gap-2.5">
+                        <Cpu className="h-4 w-4 shrink-0 text-muted-foreground" />
+                        <span className="truncate font-mono font-medium">{e.name}</span>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="secondary">{e.type}</Badge>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="outline">{e.status}</Badge>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-muted-foreground hover:text-destructive"
+                        disabled={unassignMut.isPending}
+                        onClick={() => unassignMut.mutate({ id: workspaceId, engineId: e.id })}
+                      >
+                        <Trash2 className="mr-1 h-4 w-4" /> Remove
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           </div>
         )}
       </CardContent>
