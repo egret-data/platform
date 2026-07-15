@@ -9,6 +9,7 @@ import * as wsApi from "@/api/generated/admin-workspaces/admin-workspaces";
 import * as auditApi from "@/api/generated/control-plane-audit/control-plane-audit";
 import * as engineApi from "@/api/generated/control-plane-engines/control-plane-engines";
 import * as accessReqApi from "@/api/accessRequests";
+import * as cpApi from "@/api/controlPlane";
 import type { WorkspaceDto } from "@/api/generated/model/workspaceDto";
 import type { WorkspaceEngineDto } from "@/api/generated/model/workspaceEngineDto";
 import type { EngineDto } from "@/api/generated/model/engineDto";
@@ -18,6 +19,7 @@ vi.mock("@/api/generated/control-plane-audit/control-plane-audit");
 vi.mock("@/api/generated/control-plane-engines/control-plane-engines");
 vi.mock("@/api/accessRequests");
 vi.mock("@/api/access", () => ({ listUsers: vi.fn(() => Promise.resolve([])) }));
+vi.mock("@/api/controlPlane", () => ({ listWarehouses: vi.fn(), listStorage: vi.fn() }));
 // Stub the members panel — it has its own API and its own tests.
 vi.mock("@/components/access/MembersPanel", () => ({
   MembersPanel: ({ workspaceId }: { workspaceId: string }) => (
@@ -166,6 +168,13 @@ describe("WorkspaceDetail cockpit", () => {
       mutateAsync: vi.fn(),
       isPending: false,
     } as unknown as ReturnType<typeof engineApi.useControlPlaneEnginesUnassignWorkspaceEngine>);
+    vi.mocked(cpApi.listWarehouses).mockResolvedValue([
+      { id: "wh1", name: "wh-eng", workspaceId: WS.id, storageConnId: "s1", lakekeeperWarehouseId: "lk1" },
+      { id: "wh2", name: "wh-other", workspaceId: "other-ws", storageConnId: "s1", lakekeeperWarehouseId: null },
+    ]);
+    vi.mocked(cpApi.listStorage).mockResolvedValue([
+      { id: "s1", name: "minio-main" },
+    ] as unknown as Awaited<ReturnType<typeof cpApi.listStorage>>);
   });
 
   test("overview shows owner, status, and member/query stats", async () => {
@@ -185,21 +194,22 @@ describe("WorkspaceDetail cockpit", () => {
     expect(await screen.findByTestId("members-panel")).toHaveTextContent("members of eng");
   });
 
-  test("Resources tab shows deep-link cards to CP resource pages", async () => {
+  test("Resources tab lists this workspace's warehouses (not other workspaces')", async () => {
     const user = userEvent.setup();
     renderDetail();
     await screen.findByRole("heading", { name: "Engineering" });
 
     await user.click(screen.getByRole("tab", { name: "Resources" }));
-    // Warehouses is per-workspace → deep-links with a ?workspace= filter.
-    expect(await screen.findByRole("link", { name: "Warehouses" })).toHaveAttribute(
+    // This workspace's warehouse links to its detail; another workspace's is excluded.
+    expect(await screen.findByRole("link", { name: "wh-eng" })).toHaveAttribute(
+      "href",
+      "/control-plane/warehouses/wh1",
+    );
+    expect(screen.queryByText("wh-other")).not.toBeInTheDocument();
+    // "Manage" opens the Warehouses page scoped to this workspace.
+    expect(screen.getByRole("link", { name: "Manage" })).toHaveAttribute(
       "href",
       `/control-plane/warehouses?workspace=${WS.id}`,
-    );
-    // Engines is platform-global → plain link.
-    expect(screen.getByRole("link", { name: "Engines" })).toHaveAttribute(
-      "href",
-      "/control-plane/engines",
     );
   });
 

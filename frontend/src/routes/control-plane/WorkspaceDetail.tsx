@@ -6,8 +6,6 @@ import {
   ArrowLeft,
   Boxes,
   Cpu,
-  Database,
-  KeyRound,
   Pencil,
   Trash2,
   UserCog,
@@ -35,6 +33,7 @@ import {
 } from "@/api/generated/control-plane-engines/control-plane-engines";
 import type { EngineDto } from "@/api/generated/model/engineDto";
 import { listUsers } from "@/api/access";
+import { listStorage, listWarehouses } from "@/api/controlPlane";
 import { useApproveRequest, useDenyRequest, useWorkspaceRequests } from "@/api/accessRequests";
 import { MembersPanel } from "@/components/access/MembersPanel";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
@@ -58,6 +57,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import {
   Dialog,
   DialogContent,
@@ -338,75 +345,96 @@ function OverviewTab({
 }
 
 function ResourcesTab({ workspaceId }: { workspaceId: string }) {
-  // Warehouses are per-workspace, so we deep-link with a `?workspace=` filter that
-  // scopes the Warehouses page to this workspace. Storage and Engines are
-  // platform-global resources (migrations 0050 / 0056), so those links stay
-  // platform-wide and are labelled as such.
-  const resources = [
-    {
-      to: `/control-plane/warehouses?workspace=${workspaceId}`,
-      icon: Boxes,
-      title: "Warehouses",
-      desc: "Iceberg catalogs for this workspace.",
-      scope: "this workspace",
-    },
-    {
-      to: "/control-plane/storage",
-      icon: Database,
-      title: "Storage",
-      desc: "Object-store connections.",
-      scope: "platform-wide",
-    },
-    {
-      to: "/control-plane/engines",
-      icon: Cpu,
-      title: "Engines",
-      desc: "Query & compute engines.",
-      scope: "platform-wide",
-    },
-    {
-      to: "/control-plane/secrets",
-      icon: KeyRound,
-      title: "Secrets",
-      desc: "Named secrets.",
-      scope: "platform-wide",
-    },
-  ];
-
+  // The resources that actually belong to this workspace: its warehouses and the
+  // engines assigned to it. Storage connections and secrets are platform-global
+  // (migrations 0050 / 0064), so they are not listed per-workspace here.
   return (
     <div className="space-y-6">
+      <WarehousesSection workspaceId={workspaceId} />
       <AssignedEnginesSection workspaceId={workspaceId} />
-
-      <div className="space-y-3">
-        <p className="text-sm text-muted-foreground">
-          Warehouses open filtered to this workspace. Storage, Engines, and Secrets are platform-wide
-          resources and open their full control-plane lists.
-        </p>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {resources.map((r) => {
-            const Icon = r.icon;
-            return (
-              <Link key={r.title} to={r.to} aria-label={r.title}>
-                <Card className="transition-colors hover:border-primary/50 hover:bg-accent/40">
-                  <CardHeader className="flex flex-row items-center gap-3 space-y-0">
-                    <Icon className="h-5 w-5 shrink-0 text-muted-foreground" />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between gap-2">
-                        <CardTitle className="text-base">{r.title}</CardTitle>
-                        <Badge variant="outline" className="shrink-0 text-xs font-normal">
-                          {r.scope}
-                        </Badge>
-                      </div>
-                      <CardDescription>{r.desc}</CardDescription>
-                    </div>
-                  </CardHeader>
-                </Card>
-              </Link>
-            );
-          })}
-        </div>
-      </div>
+      <p className="text-xs text-muted-foreground">
+        Storage connections and secrets are managed platform-wide in the Infrastructure section.
+      </p>
     </div>
+  );
+}
+
+/** Iceberg warehouses owned by this workspace (read-only list; management lives on
+ * the Warehouses page). */
+function WarehousesSection({ workspaceId }: { workspaceId: string }) {
+  const whQ = useQuery({
+    queryKey: ["control-plane", "warehouses"],
+    queryFn: listWarehouses,
+    retry: false,
+  });
+  const storageQ = useQuery({
+    queryKey: ["control-plane", "storage"],
+    queryFn: listStorage,
+    retry: false,
+  });
+  const warehouses = (whQ.data ?? []).filter((w) => w.workspaceId === workspaceId);
+  const storageName = (id: string) => storageQ.data?.find((s) => s.id === id)?.name ?? "—";
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 space-y-1.5">
+            <CardTitle className="text-lg">Warehouses</CardTitle>
+            <CardDescription>Iceberg catalogs owned by this workspace.</CardDescription>
+          </div>
+          <Button asChild size="sm" variant="outline">
+            <Link to={`/control-plane/warehouses?workspace=${workspaceId}`}>Manage</Link>
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {whQ.isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading warehouses…</p>
+        ) : warehouses.length === 0 ? (
+          <p className="rounded-md border bg-muted/40 px-4 py-6 text-sm text-muted-foreground">
+            No warehouses in this workspace yet.
+          </p>
+        ) : (
+          <div className="rounded-md border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Storage</TableHead>
+                  <TableHead className="text-right">Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {warehouses.map((w) => (
+                  <TableRow key={w.id}>
+                    <TableCell>
+                      <div className="flex min-w-0 items-center gap-2.5">
+                        <Boxes className="h-4 w-4 shrink-0 text-muted-foreground" />
+                        <Link
+                          to={`/control-plane/warehouses/${w.id}`}
+                          className="truncate font-mono font-medium text-primary hover:underline"
+                        >
+                          {w.name}
+                        </Link>
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {storageName(w.storageConnId)}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Badge variant={w.lakekeeperWarehouseId ? "secondary" : "outline"}>
+                        {w.lakekeeperWarehouseId ? "Provisioned" : "Pending"}
+                      </Badge>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -465,29 +493,46 @@ function AssignedEnginesSection({ workspaceId }: { workspaceId: string }) {
             No engines assigned to this workspace yet.
           </p>
         ) : (
-          <div className="space-y-2">
-            {assigned.map((e) => (
-              <div
-                key={e.id}
-                className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3"
-              >
-                <div className="flex min-w-0 items-center gap-2">
-                  <Cpu className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <span className="truncate text-sm font-medium">{e.name}</span>
-                  <Badge variant="secondary">{e.type}</Badge>
-                  <Badge variant="outline">{e.status}</Badge>
-                </div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="text-destructive hover:text-destructive"
-                  disabled={unassignMut.isPending}
-                  onClick={() => unassignMut.mutate({ id: workspaceId, engineId: e.id })}
-                >
-                  <Trash2 className="mr-1 h-4 w-4" /> Remove
-                </Button>
-              </div>
-            ))}
+          <div className="rounded-md border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {assigned.map((e) => (
+                  <TableRow key={e.id}>
+                    <TableCell>
+                      <div className="flex min-w-0 items-center gap-2.5">
+                        <Cpu className="h-4 w-4 shrink-0 text-muted-foreground" />
+                        <span className="truncate font-mono font-medium">{e.name}</span>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="secondary">{e.type}</Badge>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="outline">{e.status}</Badge>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-muted-foreground hover:text-destructive"
+                        disabled={unassignMut.isPending}
+                        onClick={() => unassignMut.mutate({ id: workspaceId, engineId: e.id })}
+                      >
+                        <Trash2 className="mr-1 h-4 w-4" /> Remove
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           </div>
         )}
       </CardContent>
