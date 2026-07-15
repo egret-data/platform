@@ -141,6 +141,16 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
                         "http-server.authentication.jwt.key-file={}\n",
                         j.jwks_uri
                     ));
+                    // Authenticate the caller as their username, not the raw OIDC
+                    // subject. The engine JWT carries `preferred_username` (= egret's
+                    // derived username), and the delegated query path sends that same
+                    // value as `X-Trino-User` — so principal == user is a self-
+                    // impersonation Ranger allows by default. Leaving the Trino default
+                    // (`sub`) makes principal (a UUID) != user, which Ranger denies.
+                    // Mirrors the StarRocks `authentication_jwt` principal handling.
+                    out.push_str(
+                        "http-server.authentication.jwt.principal-field=preferred_username\n",
+                    );
                     if let Some(a) = &j.required_audience {
                         out.push_str(&format!(
                             "http-server.authentication.jwt.required-audience={a}\n"
@@ -1510,6 +1520,9 @@ mod tests {
             "http-server.authentication.jwt.key-file=https://kc/realms/egret/protocol/openid-connect/certs"
         ));
         assert!(cc.contains("http-server.authentication.jwt.required-audience=trino"));
+        // Delegated queries run as the caller's username; authenticate the JWT as
+        // `preferred_username` so principal == the sent X-Trino-User (self-impersonation).
+        assert!(cc.contains("http-server.authentication.jwt.principal-field=preferred_username"));
         // workers don't authenticate clients
         assert!(!cm["data"]["config-worker.properties"]
             .as_str()
