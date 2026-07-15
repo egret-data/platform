@@ -165,6 +165,8 @@ mod tests {
             status: "provisioning".into(),
             authz_service_id: None,
             delegator_secret_id,
+            tls_secret_id: None,
+            coordinator_cert: None,
             created_at: chrono::Utc::now(),
         }
     }
