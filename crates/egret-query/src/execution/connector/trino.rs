@@ -65,15 +65,18 @@ impl TrinoConnector {
     }
 
     /// Attach auth + identity to a Trino request.
-    /// With a bearer JWT the identity comes from the token (Trino
-    /// `principal-field`), so `X-Trino-User` is NOT sent — sending it would be
-    /// treated as impersonation and denied (verified live in F2-P5). Without a
+    /// Trino ALWAYS requires the session user (`X-Trino-User`) to be sent, even on
+    /// an authenticated request — omitting it fails with "X-Trino-User must be
+    /// sent". With a bearer JWT the engine authenticates the caller's
+    /// `principal-field` (provisioned as `preferred_username`), and `session_user`
+    /// is that same username, so sending it as `X-Trino-User` is a self-
+    /// impersonation (principal == user) that Ranger allows by default. Without a
     /// bearer, send `X-Trino-User` (+ basic-auth when a secret is set).
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let req = req.header("X-Trino-User", self.x_trino_user());
         if let Some(jwt) = &self.bearer {
             req.bearer_auth(jwt)
         } else {
-            let req = req.header("X-Trino-User", self.x_trino_user());
             match &self.secret {
                 Some(s) => req.basic_auth(self.auth_user(), Some(s)),
                 None => req,
@@ -294,5 +297,31 @@ mod tests {
             bearer_token: None,
         };
         assert_eq!(TrinoConnector::new(&s).bearer(), None);
+    }
+
+    // The emitted headers — not just the accessors — are what Trino sees. Trino
+    // rejects an authenticated request that omits X-Trino-User ("X-Trino-User must
+    // be sent"), so the bearer path MUST send BOTH Authorization: Bearer and
+    // X-Trino-User (= the caller's username, a self-impersonation). Regression
+    // guard for the delegated-query 401.
+    #[test]
+    fn bearer_path_sends_authorization_and_xtrino_user() {
+        let c = TrinoConnector::new(&ConnSpec {
+            engine: Engine::Trino,
+            host: "h".into(),
+            port: 8080,
+            options: ConnOptions::default(),
+            secret: Some("basic-pw".into()),
+            session_user: Some("alice".into()),
+            bearer_token: Some("eyJ.jwt.sig".into()),
+        });
+        let client = reqwest::Client::new();
+        let req = c
+            .auth(client.post("http://h:8080/v1/statement"))
+            .build()
+            .unwrap();
+        let h = req.headers();
+        assert_eq!(h.get("X-Trino-User").unwrap(), "alice");
+        assert_eq!(h.get("authorization").unwrap(), "Bearer eyJ.jwt.sig");
     }
 }
