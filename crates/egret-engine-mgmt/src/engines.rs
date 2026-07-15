@@ -3118,6 +3118,7 @@ mod tests {
             spec: serde_json::json!({}),
             status: "pending".into(),
             authz_service_id: None,
+            delegator_secret_id: None,
             created_at: chrono::Utc::now(),
         }
     }
