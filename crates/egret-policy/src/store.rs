@@ -115,6 +115,36 @@ impl PolicyStore {
         .ok_or_else(|| PolicyStoreError::NotFound(format!("service {name}")))
     }
 
+    /// Like [`get_service`], but returns `None` instead of `NotFound` when the
+    /// named service is absent (used by seed paths that no-op when unbound).
+    pub async fn get_service_opt(
+        &self,
+        name: &str,
+    ) -> Result<Option<ServiceRow>, PolicyStoreError> {
+        Ok(sqlx::query_as::<_, ServiceRow>(
+            r#"SELECT id, name, type, config_jsonb, policy_version, tag_version FROM policy.authz_services WHERE name = $1"#,
+        )
+        .bind(name)
+        .fetch_optional(&self.db.pool)
+        .await?)
+    }
+
+    /// Whether a policy of the given name already exists under a service (used to
+    /// make policy seeding idempotent).
+    pub async fn policy_exists(
+        &self,
+        service_id: i64,
+        name: &str,
+    ) -> Result<bool, PolicyStoreError> {
+        Ok(sqlx::query_scalar::<_, bool>(
+            r#"SELECT EXISTS(SELECT 1 FROM policy.authz_policies WHERE service_id = $1 AND name = $2)"#,
+        )
+        .bind(service_id)
+        .bind(name)
+        .fetch_one(&self.db.pool)
+        .await?)
+    }
+
     pub async fn list_services(&self) -> Result<Vec<ServiceRow>, PolicyStoreError> {
         Ok(sqlx::query_as::<_, ServiceRow>(
             r#"SELECT id, name, type, config_jsonb, policy_version, tag_version FROM policy.authz_services ORDER BY name"#,

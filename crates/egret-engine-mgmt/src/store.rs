@@ -196,6 +196,20 @@ impl EngineMgmtStore {
         Ok(())
     }
 
+    /// Persist the generated delegator secret id for an engine (idempotent bookkeeping).
+    pub async fn set_delegator_secret(
+        &self,
+        engine_id: Uuid,
+        secret_id: Uuid,
+    ) -> Result<(), EngineMgmtError> {
+        sqlx::query("UPDATE engine_mgmt.engines SET delegator_secret_id = $2 WHERE id = $1")
+            .bind(engine_id)
+            .bind(secret_id)
+            .execute(self.pool())
+            .await?;
+        Ok(())
+    }
+
     pub async fn delete_engine(&self, id: Uuid) -> Result<(), EngineMgmtError> {
         sqlx::query("DELETE FROM engine_mgmt.engines WHERE id = $1")
             .bind(id)

@@ -56,4 +56,22 @@ impl PolicyPort for PolicyStore {
     ) -> Result<PolicyService, PolicyError> {
         Ok(self.create_service(name, type_, config).await?.into())
     }
+
+    async fn get_service_opt(&self, name: &str) -> Result<Option<PolicyService>, PolicyError> {
+        Ok(self.get_service_opt(name).await?.map(Into::into))
+    }
+
+    async fn policy_exists(&self, service_id: i64, name: &str) -> Result<bool, PolicyError> {
+        Ok(self.policy_exists(service_id, name).await?)
+    }
+
+    async fn create_policy(
+        &self,
+        service_id: i64,
+        name: &str,
+        policy: &Value,
+    ) -> Result<(), PolicyError> {
+        self.create_policy(service_id, name, policy).await?;
+        Ok(())
+    }
 }
