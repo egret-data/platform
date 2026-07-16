@@ -13,6 +13,8 @@ use crate::execution::model::Limits;
 
 pub struct StarRocksConnector {
     opts: mysql_async::Opts,
+    /// Set on the impersonate path (service-user login + run AS this user).
+    execute_as: Option<String>,
 }
 
 impl StarRocksConnector {
@@ -46,12 +48,36 @@ impl StarRocksConnector {
         if let Some(db) = &spec.options.database {
             b = b.db_name(Some(db.clone()));
         }
-        StarRocksConnector { opts: b.into() }
+        // Impersonate mode (Trino parity): no bearer, connection opts in, end-user resolved.
+        // Log in as the service user (above) and switch identity per-query in `execute`
+        // via `EXECUTE AS <session_user> WITH NO REVERT`.
+        let execute_as = if spec.bearer_token.is_none() && spec.options.impersonate == Some(true) {
+            spec.session_user.clone()
+        } else {
+            None
+        };
+        // TLS: pin the FE cert. mysql_clear_password sends the JWT in cleartext, so a
+        // bearer connection MUST be TLS in production.
+        if let Some(pem) = &spec.options.tls_cert {
+            let ssl = mysql_async::SslOpts::default()
+                .with_root_certs(vec![mysql_async::PathOrBuf::from(pem.clone().into_bytes())])
+                .with_danger_skip_domain_validation(true);
+            b = b.ssl_opts(Some(ssl));
+        }
+        StarRocksConnector {
+            opts: b.into(),
+            execute_as,
+        }
     }
 
     #[cfg(test)]
     pub fn opts(&self) -> &mysql_async::Opts {
         &self.opts
+    }
+
+    #[cfg(test)]
+    pub fn execute_as(&self) -> Option<&str> {
+        self.execute_as.as_deref()
     }
 }
 
@@ -66,6 +92,13 @@ impl Connector for StarRocksConnector {
         let mut conn = mysql_async::Conn::new(self.opts.clone())
             .await
             .map_err(|e| EngineError::Connect(e.to_string()))?;
+
+        if let Some(u) = &self.execute_as {
+            let esc = u.replace('`', "``");
+            conn.query_drop(format!("EXECUTE AS `{esc}` WITH NO REVERT"))
+                .await
+                .map_err(|e| EngineError::Engine(e.to_string()))?;
+        }
 
         let mut result = conn
             .query_iter(sql)
@@ -301,5 +334,54 @@ mod tests {
     fn no_bearer_login_user_is_service_user() {
         let c = StarRocksConnector::new(&spec_distinct(None));
         assert_eq!(c.opts().user(), Some("svc"));
+    }
+
+    fn base_spec() -> ConnSpec {
+        ConnSpec {
+            engine: Engine::StarRocks,
+            host: "fe".into(),
+            port: 9030,
+            options: ConnOptions::default(),
+            secret: Some("svc-pw".into()),
+            session_user: None,
+            bearer_token: None,
+        }
+    }
+
+    #[test]
+    fn impersonate_sets_execute_as_and_service_login() {
+        let mut s = base_spec();
+        s.options.impersonate = Some(true);
+        s.options.user = Some("svc".into());
+        s.session_user = Some("alice".into());
+        let c = StarRocksConnector::new(&s);
+        assert_eq!(c.execute_as(), Some("alice"));
+        assert_eq!(c.opts().user(), Some("svc"));
+    }
+
+    #[test]
+    fn jwt_mode_logs_in_as_user_no_execute_as() {
+        let mut s = base_spec();
+        s.bearer_token = Some("jwt".into());
+        s.session_user = Some("alice".into());
+        let c = StarRocksConnector::new(&s);
+        assert_eq!(c.execute_as(), None);
+        assert_eq!(c.opts().user(), Some("alice"));
+    }
+
+    #[test]
+    fn tls_cert_enables_ssl() {
+        let mut s = base_spec();
+        s.options.tls_cert =
+            Some("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n".into());
+        assert!(StarRocksConnector::new(&s).opts().ssl_opts().is_some());
+    }
+
+    #[test]
+    fn no_tls_cert_no_ssl() {
+        assert!(StarRocksConnector::new(&base_spec())
+            .opts()
+            .ssl_opts()
+            .is_none());
     }
 }
