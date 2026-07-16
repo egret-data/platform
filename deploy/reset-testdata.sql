@@ -14,58 +14,61 @@
 -- catalog schema on its next start. MinIO objects are cleared separately by
 -- deploy/reset-testdata.sh.
 --
+-- Tables are SCHEMA-QUALIFIED for the service-ready owned-schema layout (E-series
+-- split: catalog / engine_mgmt / analytics / query / storage / audit / public).
+-- Keep this file in sync if a table moves schemas or is renamed.
+--
 -- Run via `just reset-testdata` (which also stops serve + clears MinIO), or
 -- directly: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f deploy/reset-testdata.sql
 
 BEGIN;
 
 -- Embedded-catalog control-plane rows (all test-created).
-DELETE FROM catalog_grants;
-DELETE FROM catalog_clients;
-DELETE FROM catalog_roles;
+DELETE FROM catalog.catalog_grants;
+DELETE FROM catalog.catalog_clients;
+DELETE FROM catalog.catalog_roles;
 -- Engines FK-reference warehouses, so they must go first.
-DELETE FROM engines;
-DELETE FROM warehouses;
+DELETE FROM engine_mgmt.engines;
+DELETE FROM catalog.warehouses;
 
 -- Every workspace except the two seeded ones; FKs cascade the rest
 -- (notebooks, dashboards, database/storage connections, secrets, …).
-DELETE FROM workspaces WHERE slug NOT IN ('demo', 'eng');
+DELETE FROM public.workspaces WHERE slug NOT IN ('demo', 'eng');
 
 -- Prune orphan/test users. Keep set = the break-glass admin + seeded SSO users,
 -- plus everyone still referenced by surviving rows (they own kept content, and
 -- the NO-ACTION FKs below would block their deletion anyway). This runs AFTER
 -- the workspace wipe so test users' content is already gone.
 CREATE TEMP TABLE _keep_users ON COMMIT DROP AS
-      SELECT id FROM users
+      SELECT id FROM public.users
         WHERE email IN ('admin@egret.local', 'admin-sso@egret.local', 'member-sso@egret.local')
-  UNION SELECT owner_user_id FROM notebooks        WHERE owner_user_id IS NOT NULL
-  UNION SELECT created_by    FROM workspaces        WHERE created_by IS NOT NULL
-  UNION SELECT created_by    FROM charts            WHERE created_by IS NOT NULL
-  UNION SELECT created_by    FROM dashboards        WHERE created_by IS NOT NULL
-  UNION SELECT created_by    FROM databases         WHERE created_by IS NOT NULL
-  UNION SELECT created_by    FROM datasets          WHERE created_by IS NOT NULL
-  UNION SELECT created_by    FROM folders           WHERE created_by IS NOT NULL
-  UNION SELECT created_by    FROM saved_queries     WHERE created_by IS NOT NULL
-  UNION SELECT user_id       FROM queries           WHERE user_id IS NOT NULL
-  UNION SELECT added_by      FROM workspace_members WHERE added_by IS NOT NULL;
+  UNION SELECT owner_user_id FROM analytics.notebooks     WHERE owner_user_id IS NOT NULL
+  UNION SELECT created_by    FROM public.workspaces        WHERE created_by IS NOT NULL
+  UNION SELECT created_by    FROM analytics.charts         WHERE created_by IS NOT NULL
+  UNION SELECT created_by    FROM analytics.dashboards     WHERE created_by IS NOT NULL
+  UNION SELECT created_by    FROM query.databases          WHERE created_by IS NOT NULL
+  UNION SELECT created_by    FROM analytics.datasets       WHERE created_by IS NOT NULL
+  UNION SELECT created_by    FROM analytics.folders        WHERE created_by IS NOT NULL
+  UNION SELECT created_by    FROM analytics.saved_queries  WHERE created_by IS NOT NULL
+  UNION SELECT user_id       FROM query.queries            WHERE user_id IS NOT NULL;
 
--- policy_audit.actor is NO-ACTION and would block; drop audit rows for pruned users.
-DELETE FROM policy_audit WHERE actor IS NOT NULL AND actor NOT IN (SELECT id FROM _keep_users);
-DELETE FROM users WHERE id NOT IN (SELECT id FROM _keep_users);
+-- audit_log.actor_user_id is NO-ACTION and would block; drop audit rows for pruned users.
+DELETE FROM audit.audit_log WHERE actor_user_id IS NOT NULL AND actor_user_id NOT IN (SELECT id FROM _keep_users);
+DELETE FROM public.users WHERE id NOT IN (SELECT id FROM _keep_users);
 
 -- Storage connections are global test config; the just-deleted warehouses were
 -- their only references. Drop them all, then drop every secret no longer
 -- referenced by surviving rows (viz database connections, workspace secrets,
 -- active refresh tokens) — this clears the pile of test/OIDC secrets.
-DELETE FROM storage_connections;
+DELETE FROM storage.storage_connections;
 -- Global (control-plane) named secrets — storage-connection creds + test
 -- secrets — carry workspace_id NULL. Drop those; keep workspace-scoped ones
 -- (demo/eng). Then drop every secret blob no longer referenced by anything.
-DELETE FROM workspace_secrets WHERE workspace_id IS NULL;
-DELETE FROM secrets WHERE id NOT IN (
-        SELECT secret_id  FROM databases           WHERE secret_id IS NOT NULL
-  UNION SELECT secret_ref FROM workspace_secrets    WHERE secret_ref IS NOT NULL
-  UNION SELECT secret_id  FROM oidc_refresh_tokens  WHERE secret_id IS NOT NULL
+DELETE FROM public.workspace_secrets WHERE workspace_id IS NULL;
+DELETE FROM public.secrets WHERE id NOT IN (
+        SELECT secret_id  FROM query.databases            WHERE secret_id IS NOT NULL
+  UNION SELECT secret_ref FROM public.workspace_secrets   WHERE secret_ref IS NOT NULL
+  UNION SELECT secret_id  FROM public.oidc_refresh_tokens WHERE secret_id IS NOT NULL
 );
 
 -- Drop lakekeeper's catalog metadata wholesale; serve re-creates it on boot.
@@ -74,4 +77,4 @@ DROP SCHEMA IF EXISTS lakekeeper CASCADE;
 COMMIT;
 
 \echo 'Postgres reset complete. Remaining workspaces:'
-SELECT slug, name FROM workspaces ORDER BY slug;
+SELECT slug, name FROM public.workspaces ORDER BY slug;
