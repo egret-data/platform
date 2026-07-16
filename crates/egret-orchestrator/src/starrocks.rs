@@ -174,7 +174,6 @@ pub fn starrocks_ssl_secret(spec: &EngineSpec) -> Option<Value> {
 /// container reads `ssl_keystore_location` from.
 const SSL_KEYSTORE_VOLUME_NAME: &str = "ssl-keystore";
 const SSL_KEYSTORE_MOUNT_PATH: &str = "/etc/starrocks/ssl";
-const SSL_SRC_MOUNT_PATH: &str = "/etc/starrocks/ssl-src";
 
 /// The `starrocks.com/v1 StarRocksCluster` CR: FE + CN roles only (shared-data
 /// mode has no BE). FE mounts `fe.conf` via `configMapInfo`, plus the Ranger
@@ -255,13 +254,10 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
     let tls_enabled = starrocks_ssl_secret(spec).is_some();
     if tls_enabled {
         let ssl_secret_name = format!("{}-ssl-secret", spec.name);
-        // RO Secret projection of the cert+key at the SOURCE path — the
-        // init-container reads `fe.pem` from here. `/etc/starrocks/ssl`
-        // (SSL_KEYSTORE_MOUNT_PATH) is the writable keystore volume below.
-        fe_spec["secrets"] = json!([{
-            "name": ssl_secret_name,
-            "mountPath": SSL_SRC_MOUNT_PATH,
-        }]);
+        // Writable volume the init-container builds `keystore` into and the FE
+        // main container reads via `ssl_keystore_location`. `storageVolumes`
+        // names are deterministic (the operator does NOT hash them), so the
+        // init-container can reference `ssl-keystore` reliably.
         fe_spec["storageVolumes"] = json!([{
             "name": SSL_KEYSTORE_VOLUME_NAME,
             "mountPath": SSL_KEYSTORE_MOUNT_PATH,
@@ -270,23 +266,35 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
                 "type": "DirectoryOrCreate",
             },
         }]);
-        // LIVE-ONLY / best-guess (flagged per T2c scope): the exact command,
-        // keystore FORMAT (PKCS12 vs JKS), and whether this init image even
-        // has openssl are all things the live smoke must tune. PKCS12 is
-        // used here because it's the format `openssl pkcs12 -export` builds
-        // directly from a PEM cert+key with no intermediate JKS conversion;
-        // whether StarRocks' `ssl_keystore_location` accepts PKCS12 (vs
-        // requiring JKS, which would need `keytool` instead) is unverified.
+        // The cert+key SOURCE is delivered to the init-container via a
+        // `secretKeyRef` ENV var (referencing the `{name}-ssl-secret` Secret by
+        // OBJECT NAME) rather than a mounted volume — the kube-starrocks
+        // operator renames `secrets`/`configMaps` pod volumes to
+        // `<name>-<fnv32a(mountInfo)[:4]>` (`getVolumeName`, VolumeNameWithHash),
+        // a nondeterministic suffix an `initContainers[].volumeMounts` entry
+        // can't reference. `secretKeyRef` sidesteps the volume-name hashing
+        // entirely. The FE main container doesn't need the PEM (it reads the
+        // built keystore), so no `secrets` mount is templated.
+        //
+        // LIVE-ONLY (flagged per T2c scope): the keystore FORMAT (PKCS12 here,
+        // built by `openssl pkcs12 -export` straight from the PEM cert+key) and
+        // whether StarRocks' `ssl_keystore_location` accepts PKCS12 vs requiring
+        // JKS (`keytool`) is verified/tuned at the live smoke.
         fe_spec["initContainers"] = json!([{
             "name": "build-keystore",
             "image": "alpine/openssl:latest",
             "command": ["sh", "-c"],
             "args": [format!(
-                "openssl pkcs12 -export -in {src}/fe.pem -inkey {src}/fe.pem -out {dst}/keystore -passout pass:changeit -name fe && echo keystore built",
-                src = SSL_SRC_MOUNT_PATH, dst = SSL_KEYSTORE_MOUNT_PATH,
+                "printf '%s' \"$FE_PEM\" > /tmp/fe.pem && \
+                 openssl pkcs12 -export -in /tmp/fe.pem -inkey /tmp/fe.pem -out {dst}/keystore -passout pass:changeit -name fe && \
+                 echo keystore built",
+                dst = SSL_KEYSTORE_MOUNT_PATH,
             )],
+            "env": [{
+                "name": "FE_PEM",
+                "valueFrom": { "secretKeyRef": { "name": ssl_secret_name, "key": "fe.pem" } },
+            }],
             "volumeMounts": [
-                { "name": ssl_secret_name, "mountPath": SSL_SRC_MOUNT_PATH, "readOnly": true },
                 { "name": SSL_KEYSTORE_VOLUME_NAME, "mountPath": SSL_KEYSTORE_MOUNT_PATH },
             ],
         }]);
@@ -622,14 +630,16 @@ mod tests {
         assert!(fe_pem.contains("BEGIN PRIVATE KEY"));
 
         let cr = starrocks_cluster_cr(&spec);
-        // The cert+key Secret is mounted (via `secrets`) at the SOURCE path,
-        // not `/etc/starrocks/ssl` — that path is the init-container-built
-        // keystore volume (see `keystore_volume_and_init_container_present`).
-        let secret_mounts = cr["spec"]["starRocksFeSpec"]["secrets"].as_array().unwrap();
-        assert!(secret_mounts
-            .iter()
-            .any(|m| m["name"] == ssl_secret["metadata"]["name"]
-                && m["mountPath"] == "/etc/starrocks/ssl-src"));
+        // The cert+key Secret is delivered to the init-container via a
+        // `secretKeyRef` ENV (by object name), NOT a `secrets` volume mount —
+        // the operator hashes secret/configmap volume names, which an
+        // init-container can't reference. So no `secrets` field is templated.
+        assert!(cr["spec"]["starRocksFeSpec"].get("secrets").is_none());
+        let init = &cr["spec"]["starRocksFeSpec"]["initContainers"][0];
+        let env = init["env"].as_array().unwrap();
+        assert!(env.iter().any(|e| e["name"] == "FE_PEM"
+            && e["valueFrom"]["secretKeyRef"]["name"] == ssl_secret["metadata"]["name"]
+            && e["valueFrom"]["secretKeyRef"]["key"] == "fe.pem"));
         // And the cert-only ConfigMap is NOT mounted into the FE (it's not
         // needed for the keystore build), so no `configMaps` entry references
         // it when Ranger is absent.
@@ -661,27 +671,28 @@ mod tests {
         assert!(init["command"].is_array());
         let args = init["args"].as_array().unwrap();
         assert!(args[0].as_str().unwrap().contains("openssl"));
-        assert!(args[0]
-            .as_str()
-            .unwrap()
-            .contains("/etc/starrocks/ssl-src/fe.pem"));
+        assert!(args[0].as_str().unwrap().contains("/tmp/fe.pem"));
         assert!(args[0]
             .as_str()
             .unwrap()
             .contains("/etc/starrocks/ssl/keystore"));
 
-        // The init-container reads the cert+key from the SECRET-derived source
-        // mount (`sr1-ssl-secret`), NOT a ConfigMap.
+        // The init-container reads the cert+key from the Secret via a
+        // `secretKeyRef` env (FE_PEM) — NOT a mounted volume (the operator
+        // hashes secret volume names). It mounts ONLY the writable keystore vol.
+        let env = init["env"].as_array().unwrap();
+        assert!(env.iter().any(|e| e["name"] == "FE_PEM"
+            && e["valueFrom"]["secretKeyRef"]["name"] == "sr1-ssl-secret"
+            && e["valueFrom"]["secretKeyRef"]["key"] == "fe.pem"));
         let init_mounts = init["volumeMounts"].as_array().unwrap();
-        assert!(init_mounts
-            .iter()
-            .any(|m| m["name"] == "sr1-ssl-secret" && m["mountPath"] == "/etc/starrocks/ssl-src"));
         assert!(init_mounts
             .iter()
             .any(|m| m["name"] == "ssl-keystore" && m["mountPath"] == "/etc/starrocks/ssl"));
         assert!(
-            !init_mounts.iter().any(|m| m["name"] == "sr1-ssl-cm"),
-            "init-container must not source the key from the ConfigMap"
+            !init_mounts
+                .iter()
+                .any(|m| m["name"] == "sr1-ssl-secret" || m["name"] == "sr1-ssl-cm"),
+            "init-container sources the key via secretKeyRef env, not a volume"
         );
     }
 
@@ -769,9 +780,10 @@ mod tests {
     }
 
     /// Both Ranger AND TLS bound: the FE mounts the Ranger XML via
-    /// `configMaps` and the cert+key source via `secrets` (the ssl-cm is
-    /// applied but not mounted). The two mounts live on different fields, so
-    /// `configMaps` carries only the Ranger entry.
+    /// `configMaps`, and the cert+key source reaches the keystore init-container
+    /// via a `secretKeyRef` env (no `secrets` volume mount — the operator hashes
+    /// those names). So `configMaps` carries only the Ranger entry, and no
+    /// `secrets` field is templated.
     #[test]
     fn ranger_and_tls_mount_on_their_respective_fields() {
         let mut spec = sample_sr_spec_with_tls();
@@ -791,7 +803,14 @@ mod tests {
             "cert-only ssl-cm is not mounted into the FE"
         );
 
-        let secret_mounts = cr["spec"]["starRocksFeSpec"]["secrets"].as_array().unwrap();
-        assert!(secret_mounts.iter().any(|m| m["name"] == "sr1-ssl-secret"));
+        // No `secrets` volume mount; the key reaches the init-container via env.
+        assert!(cr["spec"]["starRocksFeSpec"].get("secrets").is_none());
+        let init = &cr["spec"]["starRocksFeSpec"]["initContainers"][0];
+        assert!(init["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["name"] == "FE_PEM"
+                && e["valueFrom"]["secretKeyRef"]["name"] == "sr1-ssl-secret"));
     }
 }
