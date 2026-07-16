@@ -206,3 +206,24 @@
 - **Type consistency:** `StarRocksConnector { opts, execute_as }`; `execute_as` computed from `bearer.is_none() && impersonate` in T1 and consumed in `execute`; `StarRocksDelegation`/`StarRocksConfig.delegation` (T2) drive both the FE `ssl_*` template and the runtime integration SQL; `options.impersonate`/`options.tls_cert` (existing `ConnOptions`) are the seam between T2 (writes) and T1 (reads).
 - **No placeholders:** the connector code, `SslOpts` API, `EXECUTE AS` escaping, the integration/grant SQL, and the config seam are concrete. LIVE-ONLY values (FE `ssl_*` keys, keystore format) are explicitly deferred to the T4 smoke with fallbacks — mirroring slices 1–2.
 - **Ambiguity:** impersonate is `EXECUTE AS … WITH NO REVERT` (not a proxy scheme); TLS is `mysql_async` root-cert pinning; jwt mode is unchanged (login-as-user, no EXECUTE AS).
+
+---
+
+## Live Verification (2026-07-16, dev cluster)
+
+Provisioned a delegation-enabled StarRocks (`starrocks/fe-ubuntu:3.3-latest`, kube-starrocks operator, FE+CN shared-data, `delegationMode=jwt`, `tlsEnabled=true`) and drove the smoke. What was proven vs. what is blocked by the dev image:
+
+**Proven on real StarRocks 3.3:**
+- **Delegation-enabled provisioning** — the `StarRocksCluster` CR applies; the FE ConfigMap carries the `ssl_*` keys + the built keystore; the stored engine connection records `starrocksConfig.delegation = {mode, tlsEnabled}`. The delegation bootstrap fires (JWT-integration + impersonation SQL).
+- **Keystore init-container (T2c fix)** — the FE pod schedules and the `build-keystore` init-container runs to completion, producing `/etc/starrocks/ssl/keystore` (a valid PKCS12, 1 `PrivateKeyEntry`). This validated the `secretKeyRef`-ENV fix for the operator's volume-name hashing (`getVolumeName`); the prior `secrets`-volume form failed to schedule (`volumeMounts[].name: Not found`).
+- **Impersonate primitive (`EXECUTE AS`)** — `GRANT IMPERSONATE ON ALL USERS` + `EXECUTE AS <user> WITH NO REVERT` switch the session identity end-to-end: connected as `egret_svc`, `current_user()` flipped `'egret_svc'@'%'` → `'alice'@'%'`. This is exactly the connector's impersonate path (T1) + the provisioner's impersonation-grant SQL (T2), proven on a real FE.
+
+**Blocked by the community image — FE MySQL-port TLS is enterprise-only:**
+- With a valid keystore + `ssl_keystore_location`/`ssl_keystore_password`/`ssl_key_password` present, the FE still refuses TLS (`SSL is required but the server doesn't support it`). The FE boot log shows the root cause:
+  `ERROR [SSLChannelImpClassLoader.loadSSLChannelImpClazz] can not found jar file at /opt/starrocks/fe/lib/starrocks-ssl-1.0.jar`.
+  The community `fe-ubuntu` image does **not** bundle `starrocks-ssl-1.0.jar` (only netty/ranger/wildfly SSL libs), so the MySQL-protocol SSL channel is unavailable regardless of keystore format (PKCS12 and JKS both tested). `ssl_force_secure_transport` is not even a recognized FE config key on this build. The FE degrades gracefully (logs the error, boots without SSL) — the `ssl_*` block and keystore init-container do not break provisioning.
+- **Consequence for `tlsEnabled`:** the connector requires TLS when `tls_cert` is set (`mysql_async` `SslOpts`), so `tlsEnabled=true` against a community FE yields a failed handshake. **On community images use `tlsEnabled=false`**; the TLS parity path (keystore + cert-pin) is correct and unit-tested but can only be exercised end-to-end against a TLS-capable (enterprise) StarRocks. jwt mode over a non-TLS FE sends the JWT via `mysql_clear_password` in cleartext — the connector already logs a loud warning for this; prefer impersonate mode on community images.
+
+**Other dev blockers (unchanged from slice 2):** egret runs on the host and cannot resolve in-cluster FE DNS (`<name>-fe-service.<ns>.svc`) without a port-forward/in-cluster deploy; a full jwt-over-the-wire proof additionally needs Keycloak realm users with the `starrocks` audience + Ranger policies + pod-reachable JWKS.
+
+**Disposition:** the connector, provisioning, de-Trino-gate, and FE surfacing are complete and unit-tested; the impersonate delegation primitive and delegation-enabled provisioning are live-proven. FE-TLS end-to-end and the cross-mode over-the-wire query proof are deferred to a TLS-capable StarRocks + an in-cluster egret — documented follow-ups, not code gaps.
