@@ -816,13 +816,14 @@ async fn create_policy(
         return Ok(Json(json!({ "id": id })));
     }
 
-    let pol = editor_to_ranger_json(&v).map_err(PolicyHttpError::BadRequest)?;
+    let service_name = v.get("service").and_then(Value::as_str).unwrap_or("");
+    let svc = st.store.get_service(service_name).await?;
+    let pol = editor_to_ranger_json(&v, &svc.r#type).map_err(PolicyHttpError::BadRequest)?;
     if pol.name.trim().is_empty() {
         return Err(PolicyHttpError::BadRequest(
             "policy name is required".into(),
         ));
     }
-    let svc = st.store.get_service(&pol.service).await?;
     let id = st.store.create_policy(svc.id, &pol.name, &pol.body).await?;
     if !pol.is_enabled {
         // create_policy inserts with enabled=true (DB default); reflect the form's toggle.
@@ -856,7 +857,9 @@ async fn update_policy(
     Json(v): Json<Value>,
 ) -> Result<Json<Value>, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
-    let pol = editor_to_ranger_json(&v).map_err(PolicyHttpError::BadRequest)?;
+    let service_name = v.get("service").and_then(Value::as_str).unwrap_or("");
+    let svc = st.store.get_service(service_name).await?;
+    let pol = editor_to_ranger_json(&v, &svc.r#type).map_err(PolicyHttpError::BadRequest)?;
     if pol.name.trim().is_empty() {
         return Err(PolicyHttpError::BadRequest(
             "policy name is required".into(),
