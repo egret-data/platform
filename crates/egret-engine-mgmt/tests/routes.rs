@@ -789,9 +789,12 @@ async fn create_and_get_engine() {
 }
 
 /// `POST /engines` with `kind: "starrocks"` persists a `"starrocks"`-type
-/// engine row (not the back-compat-default `"trino"`), skips the Trino-only
-/// Catalog-Client auto-wire, and still calls through to the fake provisioning
-/// port (the create path selects the StarRocks spec-building branch).
+/// engine row (not the back-compat-default `"trino"`), auto-wires a PRIMARY
+/// `egret-warehouse` catalog row the same way the Trino path does (T6 — the
+/// runtime `CREATE EXTERNAL CATALOG` DDL itself is smoke-only, exercised by a
+/// spawned best-effort background task this test does not wait on), and still
+/// calls through to the fake provisioning port (the create path selects the
+/// StarRocks spec-building branch).
 #[tokio::test]
 async fn create_engine_starrocks_persists_starrocks_type() {
     let Some(f) = setup_full(
@@ -854,8 +857,8 @@ async fn create_engine_starrocks_persists_starrocks_type() {
             .expect("fetch engine row");
     assert_eq!(db_type, "starrocks", "stored engine type");
 
-    // No Catalog Client / primary catalog row is auto-wired for StarRocks
-    // (that's a separate Iceberg-catalog auto-wire increment).
+    // A Catalog Client IS minted + a PRIMARY `egret-warehouse` catalog row
+    // recorded for StarRocks now (T6), mirroring the Trino auto-wire exactly.
     let resp = f
         .app
         .clone()
@@ -869,11 +872,27 @@ async fn create_engine_starrocks_persists_starrocks_type() {
         .unwrap();
     let (status, j) = into_json(resp).await;
     assert_eq!(status, StatusCode::OK, "list catalogs; body={j}");
+    let cats = j.as_array().expect("catalogs array");
     assert_eq!(
-        j.as_array().map(|a| a.len()),
-        Some(0),
-        "no auto-wired catalog for starrocks; body={j}"
+        cats.len(),
+        1,
+        "one auto-wired catalog for starrocks; body={j}"
     );
+    assert_eq!(cats[0]["kind"], "egret-warehouse", "catalog kind; body={j}");
+    assert_eq!(cats[0]["isPrimary"], true, "catalog is primary; body={j}");
+    assert_eq!(cats[0]["name"], "egret", "catalog name; body={j}");
+
+    // The client's credential lives on the primary catalog row and is revoked
+    // when the engine is deleted, same as Trino's; confirm it was minted.
+    let (client_count,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM catalog.catalog_clients WHERE warehouse_id = $1 AND name = $2",
+    )
+    .bind(wh_id)
+    .bind(format!("engine-{name}"))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("count catalog_clients");
+    assert_eq!(client_count, 1, "catalog client minted for starrocks");
 
     // PUT (update) on a StarRocks engine is guarded: `build_provision_req` only
     // builds a Trino spec, so it fails fast with 400 rather than corrupting the

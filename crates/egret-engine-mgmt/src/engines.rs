@@ -1847,10 +1847,23 @@ async fn create_engine(
 
 /// StarRocks create path (shared-data): builds a `StarRocksConfig` from the
 /// body + the warehouse's storage connection (the FE/CN builtin storage-volume
-/// object store — separate from the Iceberg EXTERNAL CATALOG auto-wire, which
-/// is a later increment), persists the engine row with type `"starrocks"`, and
-/// provisions it. Unlike the Trino path, no Catalog Client is minted here —
-/// StarRocks doesn't need one until an Iceberg catalog is wired onto it.
+/// object store — separate from the Iceberg EXTERNAL CATALOG auto-wire below),
+/// persists the engine row with type `"starrocks"`, and provisions it.
+///
+/// Iceberg external-catalog auto-wire (T6): mirrors the Trino path's Catalog
+/// Client minting EXACTLY (`ensure_engine_role` + `catalog.create_client`) and
+/// records the same-shaped PRIMARY `egret-warehouse` catalog row, so the
+/// client is visible/cleaned-up identically across engine kinds. Unlike
+/// Trino — whose bundled Iceberg-REST connector does the OAuth2
+/// client-credentials exchange itself, driven by the `client_id:client_secret`
+/// credential in the catalog file — StarRocks' external catalog wants a
+/// static bearer in `iceberg.catalog.token`, so a background step (spawned
+/// after `provision` succeeds, see [`spawn_starrocks_catalog_wire`]) exchanges
+/// that same credential for a bearer token via egret's own `/oauth/token` and
+/// runs [`starrocks_external_catalog_sql`] against the FE once it's Ready.
+/// Any failure up to and including `provision` rolls back (revoke the client +
+/// delete the engine row) exactly like the Trino path; the post-provision wire
+/// step is best-effort and never fails the create (see its own docs).
 ///
 /// Ranger: if the body links an EXISTING profile (`authzServiceId`) it's
 /// validated and bound before the first provision, so the engine can come up
@@ -1906,6 +1919,23 @@ async fn create_starrocks_engine(
     let fe_resources = sr_body.fe_resources.as_ref().map(parse_resources);
     let cn_resources = sr_body.cn_resources.as_ref().map(parse_resources);
 
+    // ── Iceberg external-catalog auto-wire (T6), step 1: mint a Catalog Client
+    // for the warehouse — the EXACT same call the Trino path uses
+    // (`ensure_engine_role` + `catalog.create_client`). Minted BEFORE the
+    // engine row exists, so a mint failure here needs no rollback (nothing to
+    // roll back yet), matching the Trino path's ordering.
+    let role_id = ensure_engine_role(&st, wh.id).await?;
+    let client = st
+        .catalog
+        .create_client(NewClient {
+            name: format!("engine-{}", b.name),
+            consumer_type: "engine".into(),
+            workspace_id: wh.workspace_id,
+            warehouse_id: wh.id,
+            catalog_role_id: role_id,
+        })
+        .await?;
+
     let namespace = DEFAULT_NAMESPACE.to_string();
     let spec = serde_json::json!({
         "imageVersion": fe_image,
@@ -1919,10 +1949,46 @@ async fn create_starrocks_engine(
         },
     });
 
-    let engine = st
+    let engine = match st
         .engine_mgmt
         .create_engine(&b.name, "starrocks", &namespace, wh.id, &spec)
-        .await?;
+        .await
+    {
+        Ok(e) => e,
+        Err(e) => {
+            let _ = st.catalog.revoke_client(client.id).await;
+            return Err(e.into());
+        }
+    };
+
+    // Step 2: record the PRIMARY catalog row — same shape/kind Trino's
+    // auto-wire uses (`egret-warehouse`), so `delete_engine`/list/detail/
+    // `redact_catalog_config` treat a StarRocks engine's auto-wired catalog
+    // identically to a Trino one. No `s3_endpoint` key: unlike Trino's
+    // Iceberg-REST *connector config*, the StarRocks side never reads this
+    // row back into a rendered config file (the CN/FE never see `cat_config`)
+    // — it only carries the credential the background wire step consumes.
+    let cat_config = serde_json::json!({
+        "warehouse": wh.name,
+        "credential": format!("{}:{}", client.client_id, client.client_secret),
+        "clientRowId": client.id,
+    });
+    if let Err(e) = st
+        .engine_mgmt
+        .create_engine_catalog(
+            engine.id,
+            "egret",
+            "egret-warehouse",
+            &cat_config,
+            None,
+            true,
+        )
+        .await
+    {
+        let _ = st.engine_mgmt.delete_engine(engine.id).await; // CASCADE removes the catalog
+        let _ = st.catalog.revoke_client(client.id).await;
+        return Err(e.into());
+    }
 
     // Optional Ranger bind to an EXISTING profile (validated the same way the
     // Trino auto-bind step validates `authzServiceId`).
@@ -1950,10 +2016,12 @@ async fn create_starrocks_engine(
         Ok(Some(e)) => e,
         Ok(None) => {
             let _ = st.engine_mgmt.delete_engine(engine.id).await;
+            let _ = st.catalog.revoke_client(client.id).await;
             return Err(CpError::NotFound);
         }
         Err(e) => {
             let _ = st.engine_mgmt.delete_engine(engine.id).await;
+            let _ = st.catalog.revoke_client(client.id).await;
             return Err(e.into());
         }
     };
@@ -1992,16 +2060,190 @@ async fn create_starrocks_engine(
 
     let Some(prov) = st.engine_provisioner.as_ref() else {
         let _ = st.engine_mgmt.delete_engine(engine.id).await;
+        let _ = st.catalog.revoke_client(client.id).await;
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
     if let Err(msg) = prov.provision(&req).await {
         let _ = st.engine_mgmt.delete_engine(engine.id).await;
+        let _ = st.catalog.revoke_client(client.id).await;
         return Err(CpError::BadRequest(format!(
             "engine provisioning failed: {msg}"
         )));
     }
 
+    // Step 3: best-effort, non-blocking post-provision wire. The FE takes
+    // ~1-2 min to become Ready and (in dev) egret→FE reachability is a live
+    // concern, so this is spawned rather than awaited — the create response
+    // below returns as soon as `provision` above has kicked off, not after the
+    // FE is actually queryable. A failure is logged, never surfaced to the
+    // caller: the admin can retry by re-provisioning or (future) an explicit
+    // "rewire catalog" action.
+    spawn_starrocks_catalog_wire(
+        prov.clone(),
+        engine.namespace.clone(),
+        engine.name.clone(),
+        st.engine_egret_url.clone(),
+        wh.name.clone(),
+        client.client_id.clone(),
+        client.client_secret.clone(),
+    );
+
     Ok((StatusCode::CREATED, Json(engine.into())))
+}
+
+/// Build the StarRocks `CREATE EXTERNAL CATALOG` DDL that points a provisioned
+/// StarRocks at egret's embedded Iceberg REST catalog. Property keys mirror
+/// the Trino Iceberg-REST catalog properties this crate already renders in
+/// [`build_catalog_req`] (`iceberg.catalog.type` = `rest`, a `…uri`, a
+/// `…warehouse`), except the token is a STATIC bearer
+/// (`iceberg.catalog.token`) rather than Trino's OAuth2 client-credential
+/// exchange — StarRocks' REST catalog implementation authenticates with a
+/// bearer it is simply handed, so the caller must mint one first (see
+/// [`spawn_starrocks_catalog_wire`]).
+fn starrocks_external_catalog_sql(
+    catalog_name: &str,
+    egret_url: &str,
+    warehouse: &str,
+    token: &str,
+) -> String {
+    format!(
+        "CREATE EXTERNAL CATALOG IF NOT EXISTS `{catalog_name}` \
+         PROPERTIES (\"type\"=\"iceberg\", \"iceberg.catalog.type\"=\"rest\", \
+         \"iceberg.catalog.uri\"=\"{egret_url}/catalog\", \
+         \"iceberg.catalog.warehouse\"=\"{warehouse}\", \
+         \"iceberg.catalog.token\"=\"{token}\")"
+    )
+}
+
+/// Exchange a minted Catalog Client's `client_id`/`client_secret` for a bearer
+/// access token via egret's own machine-IdP `client_credentials` grant
+/// (`POST {egret_url}/oauth/token`, see `egret-machine-idp`). This is the
+/// bearer embedded in `iceberg.catalog.token` — StarRocks' external catalog
+/// takes a static token, unlike Trino's Iceberg-REST connector, which holds
+/// the client credential itself and re-exchanges it as it expires.
+async fn mint_bearer_token(
+    egret_url: &str,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    struct TokenResp {
+        access_token: String,
+    }
+    let url = format!("{}/oauth/token", egret_url.trim_end_matches('/'));
+    let resp = reqwest::Client::new()
+        .post(url)
+        .form(&[
+            ("grant_type", "client_credentials"),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+        ])
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("token endpoint returned {}", resp.status()));
+    }
+    resp.json::<TokenResp>()
+        .await
+        .map(|t| t.access_token)
+        .map_err(|e| e.to_string())
+}
+
+/// Run one DDL statement against a StarRocks FE over the raw MySQL protocol,
+/// as `root` with no password (dev-cluster default — matches how the FE
+/// ConfigMap ships with no auth hardening yet). Direct `mysql_async` (not
+/// `egret_query`'s interactive `StarRocksConnector`): this is a one-shot admin
+/// statement with no caller-facing row cap/cancellation/result shape to
+/// thread through.
+async fn run_starrocks_ddl(host: &str, port: u16, sql: &str) -> Result<(), String> {
+    use mysql_async::prelude::Queryable;
+    let opts = mysql_async::OptsBuilder::default()
+        .ip_or_hostname(host)
+        .tcp_port(port)
+        .user(Some("root"))
+        // StarRocks' `mysql_service_nio_enabled` handshake rejects the
+        // `prefer_socket` capability with "unknown variable 'socket'" —
+        // matches `StarRocksConnector::new`'s own workaround.
+        .prefer_socket(false);
+    let mut conn = mysql_async::Conn::new(opts)
+        .await
+        .map_err(|e| e.to_string())?;
+    conn.query_drop(sql).await.map_err(|e| e.to_string())?;
+    let _ = conn.disconnect().await;
+    Ok(())
+}
+
+/// Best-effort, non-blocking post-provision step (T6 step 3): poll the
+/// provisioner's `status` until a StarRocks FE pod reports ready (bounded to
+/// ~5 minutes), mint a bearer token from the already-minted client credential,
+/// and run [`starrocks_external_catalog_sql`] against the FE's in-cluster
+/// MySQL-protocol service. Spawned via `tokio::spawn` so `create_starrocks_engine`
+/// returns its HTTP response without waiting on any of this — the FE takes
+/// ~1-2 min to come up, and neither the poll budget nor FE/egret reachability
+/// in a given cluster is something the create request should block on. Every
+/// failure path only logs (`tracing::warn!`); it never has a channel back to
+/// the original HTTP response, by construction. The FE service DNS name
+/// (`<name>-fe-service.<namespace>.svc`) is the kube-starrocks operator's
+/// documented convention; UNVERIFIED against a live operator install as of
+/// this change (flagged for the Task 8 live smoke — see plan doc).
+fn spawn_starrocks_catalog_wire(
+    prov: Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>,
+    namespace: String,
+    engine_name: String,
+    egret_url: String,
+    warehouse_name: String,
+    client_id: String,
+    client_secret: String,
+) {
+    tokio::spawn(async move {
+        const MAX_POLLS: u32 = 30;
+        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+        let mut fe_ready = false;
+        for _ in 0..MAX_POLLS {
+            match prov.status("starrocks", &namespace, &engine_name).await {
+                Ok(s) => {
+                    if s.pods.iter().any(|p| p.name.contains("-fe-") && p.ready) {
+                        fe_ready = true;
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(engine = %engine_name, error = %e,
+                        "starrocks catalog auto-wire: status poll failed");
+                }
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        if !fe_ready {
+            tracing::warn!(engine = %engine_name,
+                "starrocks catalog auto-wire: FE never reported ready within the poll budget; \
+                 skipping — the admin can retry (e.g. re-provision) once it is");
+            return;
+        }
+
+        let token = match mint_bearer_token(&egret_url, &client_id, &client_secret).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(engine = %engine_name, error = %e,
+                    "starrocks catalog auto-wire: minting a bearer token failed");
+                return;
+            }
+        };
+
+        let sql = starrocks_external_catalog_sql("egret", &egret_url, &warehouse_name, &token);
+        let fe_host = format!("{engine_name}-fe-service.{namespace}.svc");
+        match run_starrocks_ddl(&fe_host, 9030, &sql).await {
+            Ok(()) => {
+                tracing::info!(engine = %engine_name,
+                    "starrocks catalog auto-wire: external Iceberg catalog wired");
+            }
+            Err(e) => {
+                tracing::warn!(engine = %engine_name, %fe_host, error = %e,
+                    "starrocks catalog auto-wire: CREATE EXTERNAL CATALOG failed; admin can retry");
+            }
+        }
+    });
 }
 
 #[utoipa::path(
@@ -3954,5 +4196,31 @@ mod tests {
         assert_eq!(req.properties["connection-user"], "svc");
         assert_eq!(req.properties["connection-password"], "${ENV:CAT_P4_0}");
         assert_eq!(req.env["CAT_P4_0"], "pgpw");
+    }
+
+    /// [`starrocks_external_catalog_sql`] (T6) renders a `CREATE EXTERNAL
+    /// CATALOG` DDL carrying the REST-catalog uri/warehouse/token properties
+    /// StarRocks expects — pure/unit-testable; the live connection + execution
+    /// is smoke-only (Task 8).
+    #[test]
+    fn starrocks_external_catalog_sql_renders_rest_properties() {
+        let sql = starrocks_external_catalog_sql(
+            "demo",
+            "http://host.docker.internal:8080",
+            "lakehouse",
+            "tok",
+        );
+        assert!(sql.contains("CREATE EXTERNAL CATALOG"), "sql={sql}");
+        assert!(sql.contains(r#"iceberg.catalog.type"="rest"#), "sql={sql}");
+        assert!(
+            sql.contains(r#"iceberg.catalog.uri"="http://host.docker.internal:8080/catalog"#),
+            "sql={sql}"
+        );
+        assert!(
+            sql.contains(r#"iceberg.catalog.warehouse"="lakehouse"#),
+            "sql={sql}"
+        );
+        assert!(sql.contains(r#"iceberg.catalog.token"="tok"#), "sql={sql}");
+        assert!(sql.contains("`demo`"), "catalog name; sql={sql}");
     }
 }
