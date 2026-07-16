@@ -260,7 +260,10 @@ pub fn router() -> Router<PolicyAdminState> {
             "/policies/{id}/enabled",
             axum::routing::put(set_policy_enabled),
         )
-        .route("/policies/services", get(list_profiles))
+        .route(
+            "/policies/services",
+            get(list_profiles).post(create_profile),
+        )
         .route(
             "/policies/services/{service}/trino-config",
             get(trino_config),
@@ -501,6 +504,70 @@ async fn list_profiles(
         })
         .collect();
     Ok(Json(profiles))
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateProfileBody {
+    /// Ranger service (profile) name.
+    pub name: String,
+    /// Ranger service type: `"trino"` or `"starrocks"`.
+    pub r#type: String,
+    /// Optional service config (e.g. StarRocks JDBC coordinates). Stored verbatim.
+    #[serde(default)]
+    pub config: serde_json::Value,
+}
+
+/// Doc-only mirror of the body `create_profile` returns.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CreatedProfile {
+    pub id: i64,
+    pub name: String,
+    pub r#type: String,
+}
+
+/// POST /policies/services — create a policy profile (a Ranger service
+/// instance) of the given type. The manual analogue of Trino provisioning's
+/// auto-bind, so a StarRocks profile can exist without an egret-provisioned
+/// engine.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/policies/services",
+    tag = "policy-admin",
+    request_body = CreateProfileBody,
+    responses(
+        (status = 200, description = "Profile created", body = CreatedProfile),
+        (status = 400, description = "Invalid type or missing name", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing policy:create permission", body = ErrorBody),
+        (status = 409, description = "A profile with this name already exists", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn create_profile(
+    State(st): State<PolicyAdminState>,
+    Auth(p): Auth,
+    Json(b): Json<CreateProfileBody>,
+) -> Result<Json<Value>, PolicyHttpError> {
+    egret_core::authz::require(&*st.pdp, &p, "policy:create").await?;
+    if b.name.trim().is_empty() {
+        return Err(PolicyHttpError::BadRequest(
+            "profile name is required".into(),
+        ));
+    }
+    if b.r#type != "trino" && b.r#type != "starrocks" {
+        return Err(PolicyHttpError::BadRequest(
+            "type must be \"trino\" or \"starrocks\"".into(),
+        ));
+    }
+    let cfg = if b.config.is_null() {
+        json!({})
+    } else {
+        b.config.clone()
+    };
+    let svc = st.store.create_service(&b.name, &b.r#type, &cfg).await?;
+    Ok(Json(
+        json!({ "id": svc.id, "name": svc.name, "type": svc.r#type }),
+    ))
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -765,6 +832,14 @@ async fn resolve_tag_service_and_body(
     Ok((tag_svc, pol))
 }
 
+/// Read the required `service` name from an editor policy body, or 400.
+fn require_service(v: &Value) -> Result<&str, PolicyHttpError> {
+    v.get("service")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| PolicyHttpError::BadRequest("policy requires a `service`".into()))
+}
+
 /// POST /policies — create an Access/Masking/Row-filter policy (by `kind`).
 ///
 /// Missing `kind` defaults to "access" (see `editor_to_ranger_json`), so the
@@ -816,13 +891,14 @@ async fn create_policy(
         return Ok(Json(json!({ "id": id })));
     }
 
-    let pol = editor_to_ranger_json(&v).map_err(PolicyHttpError::BadRequest)?;
+    let service_name = require_service(&v)?;
+    let svc = st.store.get_service(service_name).await?;
+    let pol = editor_to_ranger_json(&v, &svc.r#type).map_err(PolicyHttpError::BadRequest)?;
     if pol.name.trim().is_empty() {
         return Err(PolicyHttpError::BadRequest(
             "policy name is required".into(),
         ));
     }
-    let svc = st.store.get_service(&pol.service).await?;
     let id = st.store.create_policy(svc.id, &pol.name, &pol.body).await?;
     if !pol.is_enabled {
         // create_policy inserts with enabled=true (DB default); reflect the form's toggle.
@@ -856,7 +932,11 @@ async fn update_policy(
     Json(v): Json<Value>,
 ) -> Result<Json<Value>, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
-    let pol = editor_to_ranger_json(&v).map_err(PolicyHttpError::BadRequest)?;
+    let service_name = require_service(&v)?;
+    // Resolve the target service's Ranger type (and validate it exists) so the
+    // serialized body carries the correct `serviceType` (trino|starrocks).
+    let svc = st.store.get_service(service_name).await?;
+    let pol = editor_to_ranger_json(&v, &svc.r#type).map_err(PolicyHttpError::BadRequest)?;
     if pol.name.trim().is_empty() {
         return Err(PolicyHttpError::BadRequest(
             "policy name is required".into(),
@@ -939,6 +1019,7 @@ async fn set_policy_enabled(
         delete_policy_handler,
         set_policy_enabled,
         list_profiles,
+        create_profile,
         trino_config,
         seed_defaults,
         get_service_def,
@@ -949,6 +1030,8 @@ async fn set_policy_enabled(
         PolicySummary,
         ProfileDto,
         ProfileEngine,
+        CreateProfileBody,
+        CreatedProfile,
         ConfigFile,
         Principal,
         EnabledBody,

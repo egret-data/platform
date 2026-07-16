@@ -19,6 +19,13 @@ pub const TAG_SERVICE_DEF_JSON: &str = include_str!("service-defs/tag.json");
 /// Service-def name as declared in the embedded tag JSON.
 pub const TAG_DEF_NAME: &str = "tag";
 
+/// The StarRocks Ranger service-def, embedded at compile time. Resource-based
+/// only — StarRocks' Ranger plugin does not support tag policies (upstream
+/// starrocks#67458), so there is no StarRocks tag service.
+pub const STARROCKS_SERVICE_DEF_JSON: &str = include_str!("service-defs/starrocks.json");
+/// Service-def name as declared in the embedded JSON.
+pub const STARROCKS_DEF_NAME: &str = "starrocks";
+
 /// Parse the embedded Trino service-def.
 pub fn trino_service_def() -> Result<Value, PolicyStoreError> {
     Ok(serde_json::from_str(TRINO_SERVICE_DEF_JSON)?)
@@ -48,6 +55,22 @@ pub async fn seed_tag(store: &PolicyStore) -> Result<(), PolicyStoreError> {
         .as_i64()
         .ok_or_else(|| PolicyStoreError::BadRequest("tag def missing numeric id".into()))?;
     let name = def["name"].as_str().unwrap_or(TAG_DEF_NAME);
+    store.upsert_service_def(id, name, &def).await
+}
+
+/// Parse the embedded StarRocks service-def.
+pub fn starrocks_service_def() -> Result<Value, PolicyStoreError> {
+    Ok(serde_json::from_str(STARROCKS_SERVICE_DEF_JSON)?)
+}
+
+/// Idempotently seed the StarRocks service-def into the store. Call at startup
+/// when ranger is enabled (alongside `seed_trino`/`seed_tag`).
+pub async fn seed_starrocks(store: &PolicyStore) -> Result<(), PolicyStoreError> {
+    let def = starrocks_service_def()?;
+    let id = def["id"]
+        .as_i64()
+        .ok_or_else(|| PolicyStoreError::BadRequest("starrocks def missing numeric id".into()))?;
+    let name = def["name"].as_str().unwrap_or(STARROCKS_DEF_NAME);
     store.upsert_service_def(id, name, &def).await
 }
 
@@ -91,6 +114,39 @@ mod tests {
         assert!(access.contains(&"all"));
         // Masking + row-filter surface present (tag-based masking is the point).
         assert!(def["dataMaskDef"]["maskTypes"].is_array());
+        assert!(def["rowFilterDef"].is_object());
+    }
+
+    #[test]
+    fn embedded_starrocks_def_parses_with_id_and_surfaces() {
+        let def = starrocks_service_def().unwrap();
+        assert_eq!(def["name"], "starrocks");
+        assert_eq!(def["id"].as_i64(), Some(205));
+        // Autocomplete disabled — egret has no StarRocks resource-lookup endpoint.
+        assert_eq!(def["implClass"].as_str(), Some(""));
+        let res: Vec<&str> = def["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["name"].as_str())
+            .collect();
+        for want in ["catalog", "database", "table", "column"] {
+            assert!(res.contains(&want), "missing resource {want}");
+        }
+        let access: Vec<&str> = def["accessTypes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a["name"].as_str())
+            .collect();
+        assert!(access.contains(&"select"));
+        let masks: Vec<&str> = def["dataMaskDef"]["maskTypes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["name"].as_str())
+            .collect();
+        assert!(masks.contains(&"MASK_HASH"));
         assert!(def["rowFilterDef"].is_object());
     }
 }

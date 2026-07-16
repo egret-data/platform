@@ -23,6 +23,7 @@
  */
 import {
   policyAdminCreatePolicy,
+  policyAdminCreateProfile,
   policyAdminDeletePolicyHandler,
   policyAdminGetPolicy,
   policyAdminGetServiceDef,
@@ -36,6 +37,7 @@ import {
   policyAdminUpdatePolicy,
 } from "./generated/policy-admin/policy-admin";
 import type {
+  CreatedProfile,
   PolicyAdminCreatePolicyBody,
   PolicyAdminUpdatePolicyBody,
   ProfileDto,
@@ -59,7 +61,7 @@ export interface PolicySummary {
 }
 
 // Re-export generated DTOs under the app's existing names.
-export type { ProfileEngine };
+export type { CreatedProfile, ProfileEngine };
 export type Profile = ProfileDto;
 
 export async function listProfiles(): Promise<Profile[]> {
@@ -68,6 +70,11 @@ export async function listProfiles(): Promise<Profile[]> {
 
 export async function listPolicies(service: string, type?: string): Promise<PolicySummary[]> {
   return (await policyAdminListPolicies({ service, type: type || undefined })).data as PolicySummary[];
+}
+
+/** Create a new Ranger service (policy profile) — the manual analogue of Trino's auto-bind. */
+export async function createProfile(name: string, type: "trino" | "starrocks"): Promise<CreatedProfile> {
+  return (await policyAdminCreateProfile({ name, type })).data as CreatedProfile;
 }
 
 // ── Policy editor (Task 4) ────────────────────────────────────────────────

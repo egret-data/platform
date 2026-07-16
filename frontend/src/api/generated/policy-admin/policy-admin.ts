@@ -26,7 +26,9 @@ import type {
 
 import type {
   ConfigFile,
+  CreateProfileBody,
   CreatedPolicyId,
+  CreatedProfile,
   EnabledBody,
   ErrorBody,
   PolicyAdminCreatePolicyBody,
@@ -742,7 +744,122 @@ export function usePolicyAdminListProfiles<TData = Awaited<ReturnType<typeof pol
 
 
 
-export type policyAdminSeedDefaultsResponse200 = {
+export type policyAdminCreateProfileResponse200 = {
+  data: CreatedProfile
+  status: 200
+}
+
+export type policyAdminCreateProfileResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type policyAdminCreateProfileResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type policyAdminCreateProfileResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type policyAdminCreateProfileResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type policyAdminCreateProfileResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type policyAdminCreateProfileResponseSuccess = (policyAdminCreateProfileResponse200) & {
+  headers: Headers;
+};
+export type policyAdminCreateProfileResponseError = (policyAdminCreateProfileResponse400 | policyAdminCreateProfileResponse401 | policyAdminCreateProfileResponse403 | policyAdminCreateProfileResponse409 | policyAdminCreateProfileResponse500) & {
+  headers: Headers;
+};
+
+export type policyAdminCreateProfileResponse = (policyAdminCreateProfileResponseSuccess | policyAdminCreateProfileResponseError)
+
+export const getPolicyAdminCreateProfileUrl = () => {
+
+
+
+
+  return `/api/control-plane/policies/services`
+}
+
+/**
+ * @summary POST /policies/services — create a policy profile (a Ranger service
+instance) of the given type. The manual analogue of Trino provisioning's
+auto-bind, so a StarRocks profile can exist without an egret-provisioned
+engine.
+ */
+export const policyAdminCreateProfile = async (createProfileBody: CreateProfileBody, options?: RequestInit): Promise<policyAdminCreateProfileResponse> => {
+
+  return customInstance<policyAdminCreateProfileResponse>(getPolicyAdminCreateProfileUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(createProfileBody)
+  }
+);}
+
+
+
+
+
+export const getPolicyAdminCreateProfileMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof policyAdminCreateProfile>>, TError,{data: CreateProfileBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof policyAdminCreateProfile>>, TError,{data: CreateProfileBody}, TContext> => {
+
+const mutationKey = ['policyAdminCreateProfile'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof policyAdminCreateProfile>>, {data: CreateProfileBody}> = (props) => {
+          const {data} = props ?? {};
+
+          return  policyAdminCreateProfile(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type PolicyAdminCreateProfileMutationResult = NonNullable<Awaited<ReturnType<typeof policyAdminCreateProfile>>>
+    export type PolicyAdminCreateProfileMutationBody = CreateProfileBody
+    export type PolicyAdminCreateProfileMutationError = ErrorBody
+
+    /**
+ * @summary POST /policies/services — create a policy profile (a Ranger service
+instance) of the given type. The manual analogue of Trino provisioning's
+auto-bind, so a StarRocks profile can exist without an egret-provisioned
+engine.
+ */
+export const usePolicyAdminCreateProfile = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof policyAdminCreateProfile>>, TError,{data: CreateProfileBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof policyAdminCreateProfile>>,
+        TError,
+        {data: CreateProfileBody},
+        TContext
+      > => {
+      return useMutation(getPolicyAdminCreateProfileMutationOptions(options), queryClient);
+    }
+    export type policyAdminSeedDefaultsResponse200 = {
   data: SeedResult
   status: 200
 }

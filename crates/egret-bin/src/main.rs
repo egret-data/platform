@@ -981,6 +981,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         egret_policy::seed_tag(&store)
             .await
             .map_err(anyhow::Error::from)?;
+        // Seed the StarRocks service-def too, so StarRocks policy profiles +
+        // /service downloads have a def. Resource-based only (no tag service —
+        // StarRocks' Ranger plugin does not evaluate tags).
+        egret_policy::seed_starrocks(&store)
+            .await
+            .map_err(anyhow::Error::from)?;
         Some(egret_policy::RangerState {
             store,
             auth_token: config.ranger.auth_token.clone().into(),

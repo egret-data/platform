@@ -697,6 +697,38 @@ async fn list_profiles_shows_bound_engines_from_reader() {
     f.store.delete_service(svc_id).await.expect("cleanup");
 }
 
+/// POST /policies/services — the manual create-profile endpoint (StarRocks has
+/// no provisioner auto-bind, so an admin creates its profile directly).
+#[tokio::test]
+async fn create_profile_makes_a_starrocks_service() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "create_profile", true).await;
+    egret_policy::seed_starrocks(&f.store)
+        .await
+        .expect("seed starrocks def");
+
+    let (status, body) = into_json(
+        f.app_empty()
+            .oneshot(req(
+                "POST",
+                "/policies/services",
+                &token,
+                Some(serde_json::json!({ "name": "sr1", "type": "starrocks" })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create profile; body={body}");
+
+    let svc = f.store.get_service("sr1").await.expect("service created");
+    assert_eq!(svc.r#type, "starrocks");
+    f.store.delete_service(svc.id).await.expect("cleanup");
+}
+
 /// Policies: `policy:read` gates `GET /policies`, `policy:create` gates
 /// `POST /policies`. Proves the NEW `resource:action` gate: a scoped,
 /// non-admin principal holding the wrong (or no) permission is Forbidden, and

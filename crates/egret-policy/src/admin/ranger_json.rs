@@ -6,11 +6,13 @@
 //! Called by the create/update handlers in `policies/mod.rs`.
 //!
 //! NOTE: this serializer is lossy for policies NOT authored by egret's editor.
-//! It always emits `delegateAdmin: false`, `isAllowed: true` per access, and
-//! `serviceType: "trino"`. Editing a foreign/Ranger-native policy through the
-//! UI therefore drops those fields. P2 is trino-only + egret-authored by
-//! design; revisit if importing external Ranger policies becomes a
-//! requirement.
+//! It always emits `delegateAdmin: false` and `isAllowed: true` per access.
+//! The individual builders default `serviceType` to `"trino"`, but
+//! `editor_to_ranger_json` stamps the target service's actual Ranger type
+//! (`trino` | `starrocks`) onto the body. Editing a foreign/Ranger-native
+//! policy through the UI therefore drops the omitted fields; egret-authored
+//! policies are the design target — revisit if importing external Ranger
+//! policies becomes a requirement.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -269,43 +271,50 @@ pub struct RangerPolicy {
     pub body: Value,
 }
 
-/// Dispatch an editor form (`{kind, ...}`) to the right serializer. Missing
-/// `kind` defaults to "access" so P2 clients stay wire-compatible.
-pub fn editor_to_ranger_json(v: &Value) -> Result<RangerPolicy, String> {
+/// Dispatch an editor form (`{kind, ...}`) to the right serializer and stamp the
+/// target service's type onto the body. Missing `kind` defaults to "access" so
+/// P2 clients stay wire-compatible. `service_type` is the profile's Ranger
+/// service type (`"trino"` | `"starrocks"`) — the builders default to `"trino"`,
+/// this overrides it for the actual target service.
+pub fn editor_to_ranger_json(v: &Value, service_type: &str) -> Result<RangerPolicy, String> {
     let kind = v.get("kind").and_then(Value::as_str).unwrap_or("access");
-    match kind {
+    let mut pol: RangerPolicy = match kind {
         "access" => {
             let inp: AccessPolicyInput =
                 serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
-            Ok(RangerPolicy {
+            RangerPolicy {
                 name: inp.name.clone(),
                 service: inp.service.clone(),
                 is_enabled: inp.is_enabled,
                 body: access_to_ranger_json(&inp),
-            })
+            }
         }
         "masking" => {
             let inp: MaskingPolicyInput =
                 serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
-            Ok(RangerPolicy {
+            RangerPolicy {
                 name: inp.name.clone(),
                 service: inp.service.clone(),
                 is_enabled: inp.is_enabled,
                 body: masking_to_ranger_json(&inp),
-            })
+            }
         }
         "rowfilter" => {
             let inp: RowFilterPolicyInput =
                 serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
-            Ok(RangerPolicy {
+            RangerPolicy {
                 name: inp.name.clone(),
                 service: inp.service.clone(),
                 is_enabled: inp.is_enabled,
                 body: rowfilter_to_ranger_json(&inp),
-            })
+            }
         }
-        other => Err(format!("unknown policy kind: {other}")),
+        other => return Err(format!("unknown policy kind: {other}")),
+    };
+    if let Value::Object(m) = &mut pol.body {
+        m.insert("serviceType".into(), Value::from(service_type));
     }
+    Ok(pol)
 }
 
 // ── Tag-based policies (Access P3.2) ────────────────────────────────────────
@@ -665,17 +674,46 @@ mod tests {
 
     #[test]
     fn dispatcher_routes_by_kind() {
-        let acc = editor_to_ranger_json(&json!({"kind":"access","name":"a","service":"trino",
-            "resources":{"catalog":{"values":["c"]}},"items":[]}))
+        let acc = editor_to_ranger_json(
+            &json!({"kind":"access","name":"a","service":"trino",
+            "resources":{"catalog":{"values":["c"]}},"items":[]}),
+            "trino",
+        )
         .unwrap();
         assert_eq!(acc.body["policyType"], 0);
         assert_eq!(acc.name, "a");
-        let m = editor_to_ranger_json(&serde_json::to_value(masking_sample()).unwrap()).unwrap();
+        let m = editor_to_ranger_json(&serde_json::to_value(masking_sample()).unwrap(), "trino")
+            .unwrap();
         assert_eq!(m.body["policyType"], 1);
-        let d =
-            editor_to_ranger_json(&json!({"name":"x","service":"trino","resources":{},"items":[]}))
-                .unwrap();
+        let d = editor_to_ranger_json(
+            &json!({"name":"x","service":"trino","resources":{},"items":[]}),
+            "trino",
+        )
+        .unwrap();
         assert_eq!(d.body["policyType"], 0);
+    }
+
+    #[test]
+    fn editor_stamps_starrocks_service_type() {
+        let pol = editor_to_ranger_json(
+            &json!({
+                "kind": "masking", "name": "m", "service": "sr1", "isEnabled": true,
+                "resources": { "catalog": { "values": ["ice"] },
+                               "database": { "values": ["sales"] },
+                               "table": { "values": ["orders"] },
+                               "column": { "values": ["phone"] } },
+                "items": [{ "users": ["u"], "groups": [], "maskType": "MASK_HASH" }]
+            }),
+            "starrocks",
+        )
+        .unwrap();
+        assert_eq!(pol.body["serviceType"], "starrocks");
+        // StarRocks uses `database`, not Trino's `schema`.
+        assert!(pol.body["resources"]["database"].is_object());
+        assert_eq!(
+            pol.body["dataMaskPolicyItems"][0]["dataMaskInfo"]["dataMaskType"],
+            "MASK_HASH"
+        );
     }
 
     // ── Tag-based policies (Access P3.2) ─────────────────────────────────────

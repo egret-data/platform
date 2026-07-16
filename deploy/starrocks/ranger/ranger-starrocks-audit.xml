@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  StarRocks Ranger plugin — audit config (dev). Audit-to-Ranger is off; egret
+  has its own audit_log (Effort B / B4) and dev has no separate Ranger Admin
+  UI to receive audit events.
+-->
+<configuration>
+  <property><name>xasecure.audit.is.enabled</name><value>false</value></property>
+</configuration>

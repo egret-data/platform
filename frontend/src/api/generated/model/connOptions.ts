@@ -33,4 +33,10 @@ export interface ConnOptions {
      * @nullable
      */
   impersonate?: boolean | null;
+  /**
+     * Trino jwt-mode/TLS only: PEM of the coordinator's self-signed cert to pin as a
+     * trusted root (server-auth over TLS). Set on egret-provisioned TLS connections.
+     * @nullable
+     */
+  tls_cert?: string | null;
 }

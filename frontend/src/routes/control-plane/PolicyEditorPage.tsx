@@ -82,6 +82,39 @@ const emptyColumnResources = () => ({
   column: wildcardLevel(),
 });
 
+// Build a default resource chain (root empty, deeper levels wildcard) from the
+// service-def hierarchy so a fresh StarRocks policy uses catalog/database/…
+// and a Trino one uses catalog/schema/…. Access and masking chains extend to
+// `column`; row-filter stops at `table` (matching the previous Trino
+// defaults: `emptyColumnResources` vs `emptyTableResources`).
+// Exported for unit testing (pure helper).
+export function defaultResourcesFromDef(
+  resDefs: ServiceDefResource[],
+  kind: PolicyKind,
+): Record<string, ResourceLevel> {
+  const byName = new Map(resDefs.map((r) => [r.name, r]));
+  const childrenOf = (n: string) => resDefs.filter((r) => r.parent === n);
+  const stopAt = kind === "rowfilter" ? "table" : "column";
+  let node = resDefs.find((r) => r.name === "catalog" && !r.parent)
+    ?? resDefs.find((r) => !r.parent && childrenOf(r.name).length > 0);
+  const out: Record<string, ResourceLevel> = {};
+  let first = true;
+  while (node) {
+    out[node.name] = first ? emptyLevel() : wildcardLevel();
+    first = false;
+    if (node.name === stopAt) break;
+    const kids = childrenOf(node.name);
+    // Follow the linear data hierarchy: prefer database/schema, then table, then column.
+    const next =
+      kids.find((k) => k.name === "database" || k.name === "schema") ??
+      kids.find((k) => k.name === "table") ??
+      kids.find((k) => k.name === "column");
+    if (!next) break;
+    node = byName.get(next.name);
+  }
+  return out;
+}
+
 /**
  * Builds a fresh form for a brand-new policy of the given kind. Mirrors the
  * three dialogs' `blankInput` helpers (`AccessPolicyDialog`,
@@ -279,6 +312,22 @@ export default function PolicyEditorPage() {
         : (def.data?.resources ?? []);
   const resDefByName = (name: string): ServiceDefResource | undefined =>
     resDefs.find((r) => r.name === name);
+
+  // On create, once the def is known, seed the resource chain from the def so
+  // the blank form matches the profile's engine (StarRocks: catalog/database/…;
+  // Trino: catalog/schema/…) instead of the hardcoded Trino skeleton. Seed from
+  // the top-level `resources` (which carry parent/level) rather than `resDefs`:
+  // the masking/row-filter subsets (`dataMaskDef.resources`/`rowFilterDef.
+  // resources`) are flat name-only refs with no parent links, so walking them
+  // would stop at the root — the full hierarchy, capped per kind, is the chain.
+  useEffect(() => {
+    if (!id && def.data) {
+      const seeded = defaultResourcesFromDef(def.data.resources ?? [], kind);
+      if (Object.keys(seeded).length) {
+        setForm((f: any) => ({ ...f, resources: seeded }));
+      }
+    }
+  }, [id, def.data, kind]);
 
   // The selected chain's leaf resource type (reported by ResourceSelector),
   // used to restrict which access types are offered — e.g. a `trinouser`
@@ -777,6 +826,7 @@ export default function PolicyEditorPage() {
                     <ConfigSection title={kindTitle}>
                       <MaskItemTable
                         items={form.items}
+                        maskTypes={def.data?.dataMaskDef?.maskTypes}
                         onChange={(items) => setForm((f: any) => ({ ...f, items }))}
                       />
                     </ConfigSection>
