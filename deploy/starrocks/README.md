@@ -137,6 +137,17 @@ keeping in sync the entire default file (ports, JVM opts, etc.) rather than
 just the one line, which is more fragile than a documented manual step for a
 dev compose. Task 6 (live smoke) drives this same sequence.
 
+> ⚠️ **Re-apply after any container recreation.** The line above is appended
+> to the container's own `fe/conf/fe.conf` (not to a host-mounted file), so it
+> only survives an in-place FE restart (`docker compose restart starrocks`). A
+> **fresh container regenerates `fe.conf` from scratch**, which means the
+> activation is **silently lost** on `docker compose down && up`,
+> `docker compose up --force-recreate`, `docker rm`, or any stack reset such
+> as `just reset-testdata`. After any of those, `access_control` is back to
+> `native` — Ranger enforcement is off **with no error or warning** — and you
+> must re-run the two commands above. If a query that should be denied/masked
+> suddenly returns clear data, check this first.
+
 ⚠️ **XML comment gotcha found live**: a literal doubled-hyphen anywhere inside
 an XML comment in `ranger-starrocks-security.xml` (e.g. from pasting a `--
 flag` example) fails Ranger's Hadoop-`Configuration` XML parser and **crashes
