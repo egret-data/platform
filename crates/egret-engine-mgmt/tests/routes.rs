@@ -332,6 +332,7 @@ impl EngineProvisioningPort for FakeEnginePort {
     }
     async fn status(
         &self,
+        _kind: &str,
         _ns: &str,
         _name: &str,
     ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
@@ -348,10 +349,10 @@ impl EngineProvisioningPort for FakeEnginePort {
     async fn update(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
         Ok(())
     }
-    async fn delete(&self, _ns: &str, _name: &str) -> Result<(), String> {
+    async fn delete(&self, _kind: &str, _ns: &str, _name: &str) -> Result<(), String> {
         Ok(())
     }
-    async fn restart(&self, ns: &str, name: &str) -> Result<(), String> {
+    async fn restart(&self, _kind: &str, ns: &str, name: &str) -> Result<(), String> {
         self.restarted
             .lock()
             .unwrap()
@@ -727,6 +728,94 @@ async fn create_and_get_engine() {
     assert_eq!(
         j["spec"]["trinoConfig"]["coordinator"]["resources"]["cpuLimit"], "2",
         "seeded coordinator cpu limit; body={j}"
+    );
+}
+
+/// `POST /engines` with `kind: "starrocks"` persists a `"starrocks"`-type
+/// engine row (not the back-compat-default `"trino"`), skips the Trino-only
+/// Catalog-Client auto-wire, and still calls through to the fake provisioning
+/// port (the create path selects the StarRocks spec-building branch).
+#[tokio::test]
+async fn create_engine_starrocks_persists_starrocks_type() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_admin_sr", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("sr-{}", Uuid::new_v4().simple());
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name,
+                "warehouseId": wh_id,
+                "kind": "starrocks",
+                "coordinatorReplicas": 1,
+                "workerReplicas": 1,
+                "cpuMin": "1",
+                "cpuMax": "2",
+                "memory": "4Gi",
+                "starrocks": {
+                    "feReplicas": 1,
+                    "cnReplicas": 2,
+                },
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "create starrocks engine; body={j}"
+    );
+    assert_eq!(j["name"], serde_json::json!(name), "engine name; body={j}");
+    assert_eq!(j["type"], "starrocks", "engine type; body={j}");
+    assert_eq!(j["status"], "provisioning", "engine status; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // The persisted row's type is "starrocks" (not the default "trino"),
+    // confirmed straight off the store (not just the DTO projection).
+    let (db_type,): (String,) =
+        sqlx::query_as("SELECT type FROM engine_mgmt.engines WHERE id = $1")
+            .bind(Uuid::parse_str(&engine_id).unwrap())
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("fetch engine row");
+    assert_eq!(db_type, "starrocks", "stored engine type");
+
+    // No Catalog Client / primary catalog row is auto-wired for StarRocks
+    // (that's a separate Iceberg-catalog auto-wire increment).
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/catalogs"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list catalogs; body={j}");
+    assert_eq!(
+        j.as_array().map(|a| a.len()),
+        Some(0),
+        "no auto-wired catalog for starrocks; body={j}"
     );
 }
 

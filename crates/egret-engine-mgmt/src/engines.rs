@@ -46,6 +46,9 @@ const DEFAULT_IMAGE_VERSION: &str = "470";
 const DEFAULT_NAMESPACE: &str = "egret-engines";
 /// Shared per-warehouse role that engine Catalog Clients are bound to.
 const ENGINE_ROLE_NAME: &str = "engine";
+/// Default StarRocks FE/CN images when the body omits them.
+const DEFAULT_SR_FE_IMAGE: &str = "starrocks/fe-ubuntu:3.3-latest";
+const DEFAULT_SR_CN_IMAGE: &str = "starrocks/cn-ubuntu:3.3-latest";
 
 // Canonical engine-spec DTOs now live in the dependency-free `egret-engine-mgmt-api`
 // contract crate (shared with `egret-orchestrator`); aliased here to the old
@@ -142,6 +145,37 @@ struct CreateEngineBody {
     /// When omitted, provisioning creates a fresh profile named after the engine.
     #[serde(default)]
     authz_service_id: Option<i64>,
+    /// Which engine to provision: `"trino"` (default, back-compat) or
+    /// `"starrocks"`. Selects between the Trino spec-building path and
+    /// [`create_starrocks_engine`].
+    #[serde(default = "default_engine_kind")]
+    kind: String,
+    /// StarRocks-specific config surface (FE/CN image + replicas + optional
+    /// resources); only read when `kind == "starrocks"`. Storage (endpoint/
+    /// path/keys) is NOT accepted here — it's derived from the warehouse's
+    /// storage connection, same as the Trino S3 connector.
+    #[serde(default)]
+    starrocks: Option<StarRocksConfigBody>,
+}
+
+fn default_engine_kind() -> String {
+    "trino".to_string()
+}
+
+/// Wire shape for `CreateEngineBody.starrocks`: FE/CN image + replicas +
+/// optional per-role resources. Mirrors the `resources{cpuRequest,cpuLimit,
+/// memRequest,memLimit}` shape [`parse_resources`] already understands.
+#[derive(Deserialize, Clone, Default, ToSchema)]
+#[serde(rename_all = "camelCase", default)]
+struct StarRocksConfigBody {
+    fe_image: Option<String>,
+    cn_image: Option<String>,
+    fe_replicas: Option<u32>,
+    cn_replicas: Option<u32>,
+    #[schema(value_type = Object)]
+    fe_resources: Option<serde_json::Value>,
+    #[schema(value_type = Object)]
+    cn_resources: Option<serde_json::Value>,
 }
 
 /// The provisioning parameters surfaced back to clients (subset of the stored
@@ -1580,6 +1614,10 @@ async fn create_engine(
         ));
     }
 
+    if b.kind == "starrocks" {
+        return create_starrocks_engine(st, b, wh).await;
+    }
+
     // 2. Resolve the storage endpoint for the Trino S3 connector.
     let sc = st
         .storage_registry
@@ -1798,6 +1836,158 @@ async fn create_engine(
     Ok((StatusCode::CREATED, Json(engine.into())))
 }
 
+/// StarRocks create path (shared-data): builds a `StarRocksConfig` from the
+/// body + the warehouse's storage connection (the FE/CN builtin storage-volume
+/// object store — separate from the Iceberg EXTERNAL CATALOG auto-wire, which
+/// is a later increment), persists the engine row with type `"starrocks"`, and
+/// provisions it. Unlike the Trino path, no Catalog Client is minted here —
+/// StarRocks doesn't need one until an Iceberg catalog is wired onto it.
+///
+/// Ranger: if the body links an EXISTING profile (`authzServiceId`) it's
+/// validated and bound before the first provision, so the engine can come up
+/// enforced; an omitted/invalid id just leaves it unbound (`ranger: None`).
+/// Unlike the Trino path, this does NOT auto-create a fresh profile — that
+/// needs its own StarRocks service-def wiring, which isn't plumbed through
+/// `PolicyPort` yet.
+async fn create_starrocks_engine(
+    st: CpState,
+    b: CreateEngineBody,
+    wh: egret_catalog_api::Warehouse,
+) -> Result<(StatusCode, Json<EngineDto>), CpError> {
+    // Storage backing for the FE/CN builtin storage volume: same storage
+    // connection the Trino S3 connector would use for this warehouse. The
+    // stored `endpoint` is assumed pod-reachable already (that's how the Trino
+    // path uses it verbatim for `s3.endpoint`, e.g. `http://host.docker.internal:9000`
+    // in dev), so no host rewriting is needed here either.
+    let sc = st
+        .storage_registry
+        .get_storage_conn(wh.storage_conn_id)
+        .await?
+        .ok_or_else(|| CpError::BadRequest("unknown storage connection".into()))?;
+    let storage_endpoint = sc.endpoint.clone().unwrap_or_default();
+    let storage_secret_key = match sc.secret_ref {
+        Some(secret_ref) => st
+            .secrets
+            .resolve_plaintext(None, secret_ref)
+            .await
+            .map_err(|e| CpError::BadRequest(format!("resolve storage secret: {e}")))?,
+        None => String::new(),
+    };
+    let storage_path = format!("{}/starrocks", sc.bucket);
+
+    let sr_body = b.starrocks.as_ref().cloned().unwrap_or_default();
+    let fe_image = sr_body
+        .fe_image
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_SR_FE_IMAGE.into());
+    let cn_image = sr_body
+        .cn_image
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_SR_CN_IMAGE.into());
+    let fe_replicas = sr_body.fe_replicas.unwrap_or(1);
+    let cn_replicas = sr_body.cn_replicas.unwrap_or(1);
+    let fe_resources = sr_body.fe_resources.as_ref().map(parse_resources);
+    let cn_resources = sr_body.cn_resources.as_ref().map(parse_resources);
+
+    let namespace = DEFAULT_NAMESPACE.to_string();
+    let spec = serde_json::json!({
+        "imageVersion": fe_image,
+        "starrocksConfig": {
+            "feImage": fe_image,
+            "cnImage": cn_image,
+            "feReplicas": fe_replicas,
+            "cnReplicas": cn_replicas,
+            "feResources": sr_body.fe_resources,
+            "cnResources": sr_body.cn_resources,
+        },
+    });
+
+    let engine = st
+        .engine_mgmt
+        .create_engine(&b.name, "starrocks", &namespace, wh.id, &spec)
+        .await?;
+
+    // Optional Ranger bind to an EXISTING profile (validated the same way the
+    // Trino auto-bind step validates `authzServiceId`).
+    if let Some(sid) = b.authz_service_id {
+        match st.authz.list_services().await {
+            Ok(svcs) if svcs.iter().any(|s| s.id == sid) => {
+                if let Err(e) = st
+                    .engine_mgmt
+                    .set_engine_authz_service(engine.id, Some(sid))
+                    .await
+                {
+                    tracing::warn!(error = %e, "set_engine_authz_service failed for starrocks create");
+                }
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    sid,
+                    "authz_service_id not found; leaving starrocks engine unlinked"
+                );
+            }
+            Err(e) => tracing::warn!(error = %e, "list_services failed during starrocks create"),
+        }
+    }
+    let engine = match st.engine_mgmt.get_engine(engine.id).await {
+        Ok(Some(e)) => e,
+        Ok(None) => {
+            return Err(CpError::NotFound);
+        }
+        Err(e) => {
+            let _ = st.engine_mgmt.delete_engine(engine.id).await;
+            return Err(e.into());
+        }
+    };
+
+    // Ranger resolution — the SAME snippet `build_provision_req` uses for
+    // Trino: bound profile (authz_service_id set) → RangerBinding named after
+    // the engine; unbound → None.
+    let ranger_service_name = engine.authz_service_id.map(|_| engine.name.clone());
+    let ranger = ranger_service_name.map(|service_name| egret_engine_mgmt_api::RangerBinding {
+        service_name,
+        egret_url: st.engine_egret_url.clone(),
+        poll_interval_ms: 30_000,
+    });
+
+    let req = egret_engine_mgmt_api::EngineSpec {
+        name: engine.name.clone(),
+        namespace: engine.namespace.clone(),
+        image_version: fe_image.clone(),
+        config: TrinoConfigReq::default(),
+        catalogs: vec![],
+        ranger,
+        kind: egret_engine_mgmt_api::EngineKind::StarRocks,
+        starrocks: Some(egret_engine_mgmt_api::StarRocksConfig {
+            fe_image,
+            cn_image,
+            fe_replicas,
+            cn_replicas,
+            storage_endpoint,
+            storage_path,
+            storage_access_key: sc.access_key.clone(),
+            storage_secret_key,
+            fe_resources,
+            cn_resources,
+        }),
+    };
+
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        let _ = st.engine_mgmt.delete_engine(engine.id).await;
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    if let Err(msg) = prov.provision(&req).await {
+        let _ = st.engine_mgmt.delete_engine(engine.id).await;
+        return Err(CpError::BadRequest(format!(
+            "engine provisioning failed: {msg}"
+        )));
+    }
+
+    Ok((StatusCode::CREATED, Json(engine.into())))
+}
+
 #[utoipa::path(
     get,
     path = "/api/control-plane/engines/{id}",
@@ -1823,7 +2013,10 @@ async fn get_engine(
         .await?
         .ok_or(CpError::NotFound)?;
     let status = match st.engine_provisioner.as_ref() {
-        Some(prov) => match prov.status(&engine.namespace, &engine.name).await {
+        Some(prov) => match prov
+            .status(&engine.r#type, &engine.namespace, &engine.name)
+            .await
+        {
             Ok(s) => EngineStatusDto {
                 phase: s.phase,
                 message: s.message,
@@ -1959,7 +2152,7 @@ async fn delete_engine(
         .await
         .unwrap_or_default();
     if let Some(prov) = st.engine_provisioner.as_ref() {
-        prov.delete(&engine.namespace, &engine.name)
+        prov.delete(&engine.r#type, &engine.namespace, &engine.name)
             .await
             .map_err(|e| CpError::BadRequest(format!("engine delete failed: {e}")))?;
     }
@@ -2005,7 +2198,7 @@ async fn restart_engine(
     let Some(prov) = st.engine_provisioner.as_ref() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };
-    prov.restart(&engine.namespace, &engine.name)
+    prov.restart(&engine.r#type, &engine.namespace, &engine.name)
         .await
         .map_err(|e| CpError::BadRequest(format!("engine restart failed: {e}")))?;
     Ok(StatusCode::OK)
@@ -2832,7 +3025,7 @@ async fn pod_logs(
     };
     // Ownership: the pod must be one of this engine's live pods.
     let status = prov
-        .status(&engine.namespace, &engine.name)
+        .status(&engine.r#type, &engine.namespace, &engine.name)
         .await
         .map_err(CpError::BadRequest)?;
     if !status.pods.iter().any(|pp| pp.name == pod) {
@@ -2912,7 +3105,7 @@ async fn pod_logs_follow(
     // as pod_logs/pod_exec), so one platform admin can't follow an arbitrary
     // pod's logs by guessing a name.
     let status = prov
-        .status(&engine.namespace, &engine.name)
+        .status(&engine.r#type, &engine.namespace, &engine.name)
         .await
         .map_err(CpError::BadRequest)?;
     if !status.pods.iter().any(|pp| pp.name == pod) {
@@ -3043,7 +3236,7 @@ async fn pod_exec(
     // pod_logs), so one platform admin can't exec into an arbitrary pod by
     // guessing a name.
     let status = prov
-        .status(&engine.namespace, &engine.name)
+        .status(&engine.r#type, &engine.namespace, &engine.name)
         .await
         .map_err(CpError::BadRequest)?;
     if !status.pods.iter().any(|pp| pp.name == pod) {
