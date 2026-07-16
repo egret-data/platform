@@ -165,12 +165,21 @@ impl Connector for StarRocksConnector {
     async fn describe(&self, sql: &str, timeout: Duration) -> Result<Vec<ColumnMeta>, EngineError> {
         let wrapped = format!("SELECT * FROM (\n{sql}\n) AS _egret_ds LIMIT 0");
         let opts = self.opts.clone();
+        let execute_as = self.execute_as.clone();
         // Bound the whole connect+query under `timeout` — unlike `execute`, `describe`
         // is called directly (no JobManager outer timeout), so a hung query would block.
         let fut = async move {
             let mut conn = mysql_async::Conn::new(opts)
                 .await
                 .map_err(|e| EngineError::Connect(e.to_string()))?;
+            // Impersonate (Trino parity): switch to the end-user before introspecting so
+            // dataset preview/describe honors per-user Ranger, matching `execute`.
+            if let Some(u) = &execute_as {
+                let esc = u.replace('`', "``");
+                conn.query_drop(format!("EXECUTE AS `{esc}` WITH NO REVERT"))
+                    .await
+                    .map_err(|e| EngineError::Engine(e.to_string()))?;
+            }
             let result = conn
                 .query_iter(wrapped)
                 .await
