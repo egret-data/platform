@@ -181,11 +181,11 @@ impl StarRocksProvisioner {
     pub fn new(kube: Arc<dyn KubeClient>) -> Self {
         Self { kube }
     }
-}
 
-#[async_trait::async_trait]
-impl EngineProvisioner for StarRocksProvisioner {
-    async fn provision(&self, spec: &EngineSpec) -> anyhow::Result<()> {
+    /// Apply the fe.conf ConfigMap, the Ranger XML ConfigMap (when bound), and
+    /// the CR in order. On the happy path these are the three objects a
+    /// StarRocks engine needs; `provision` best-effort rolls them back on error.
+    async fn apply_all(&self, spec: &EngineSpec) -> anyhow::Result<()> {
         self.kube.apply(&starrocks_fe_configmap(spec)).await?;
         if let Some(cm) = starrocks_ranger_configmap(spec) {
             self.kube.apply(&cm).await?;
@@ -193,8 +193,38 @@ impl EngineProvisioner for StarRocksProvisioner {
         self.kube.apply(&starrocks_cluster_cr(spec)).await?;
         Ok(())
     }
+}
+
+#[async_trait::async_trait]
+impl EngineProvisioner for StarRocksProvisioner {
+    async fn provision(&self, spec: &EngineSpec) -> anyhow::Result<()> {
+        // Mirror `TrinoProvisioner::provision`: if any apply fails partway, the
+        // earlier objects (e.g. the ConfigMaps) would be orphaned, so best-effort
+        // delete everything before returning the error.
+        if let Err(e) = self.apply_all(spec).await {
+            let _ = self.delete(&spec.namespace, &spec.name).await;
+            return Err(e);
+        }
+        Ok(())
+    }
     async fn update(&self, spec: &EngineSpec) -> anyhow::Result<()> {
-        self.provision(spec).await
+        self.provision(spec).await?;
+        // `apply_all` only applies the Ranger ConfigMap when bound, so toggling a
+        // RangerBinding OFF would otherwise leave `{name}-ranger-cm` orphaned (the
+        // CR's `configMaps` mount is dropped, but the ConfigMap lingers).
+        // Best-effort delete it when Ranger is absent.
+        if spec.ranger.is_none() {
+            let _ = self
+                .kube
+                .delete(
+                    "v1",
+                    "ConfigMap",
+                    &spec.namespace,
+                    &format!("{}-ranger-cm", spec.name),
+                )
+                .await;
+        }
+        Ok(())
     }
     async fn status(&self, namespace: &str, name: &str) -> anyhow::Result<EngineStatus> {
         // Mirrors `TrinoProvisioner::status`: list pods via the same
