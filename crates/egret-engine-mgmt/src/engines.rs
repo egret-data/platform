@@ -179,6 +179,19 @@ struct StarRocksConfigBody {
     fe_resources: Option<serde_json::Value>,
     #[schema(value_type = Object)]
     cn_resources: Option<serde_json::Value>,
+    /// Opt into per-user delegation (Access parity slice 3): `"jwt"` |
+    /// `"impersonate"` | omitted/`None` (no delegation — the slice-2 open
+    /// engine default). The OIDC coordinates (jwks/issuer) and the
+    /// impersonation service-user credential are NOT accepted here — they're
+    /// derived from egret's own OIDC config / minted server-side (see
+    /// [`create_starrocks_engine`]), same posture as Trino's
+    /// `trinoConfig.auth.jwt` vs the delegator secret.
+    delegation_mode: Option<String>,
+    /// Enable FE SSL on the MySQL-protocol port (:9030) when delegation is
+    /// configured. Defaults to `true` when `delegation_mode` is set; ignored
+    /// otherwise. `false` opts out of TLS while still enabling delegation
+    /// (e.g. a dev cluster where the extra listener setup isn't wanted).
+    tls_enabled: Option<bool>,
 }
 
 /// The provisioning parameters surfaced back to clients (subset of the stored
@@ -1922,6 +1935,25 @@ async fn create_starrocks_engine(
     let fe_resources = sr_body.fe_resources.as_ref().map(parse_resources);
     let cn_resources = sr_body.cn_resources.as_ref().map(parse_resources);
 
+    // Delegation opt-in (Access parity slice 3, S3-T2b): validate the mode up
+    // front, before any engine row exists, so a bad value 400s with nothing to
+    // roll back. `None`/omitted = no delegation (slice-2 default, open engine).
+    let delegation_mode = sr_body.delegation_mode.as_deref().filter(|s| !s.is_empty());
+    if let Some(m) = delegation_mode {
+        if m != "jwt" && m != "impersonate" {
+            return Err(CpError::BadRequest(format!(
+                "invalid starrocks delegationMode: {m} (expected \"jwt\" or \"impersonate\")"
+            )));
+        }
+    }
+    // Defaults to true (TLS-on) when delegation is configured; irrelevant
+    // otherwise. Mirrors the Trino path, which provisions TLS for BOTH
+    // delegation modes unconditionally (`build_provision_req`'s
+    // `engine.supports_delegation()` gate) — a StarRocks jwt login sends the
+    // caller's JWT in cleartext via the mysql_clear_password plugin, so TLS is
+    // just as important here, and disabling it must be an explicit opt-out.
+    let tls_enabled = delegation_mode.is_some() && sr_body.tls_enabled.unwrap_or(true);
+
     // ── Iceberg external-catalog auto-wire (T6), step 1: mint a Catalog Client
     // for the warehouse — the EXACT same call the Trino path uses
     // (`ensure_engine_role` + `catalog.create_client`). Minted BEFORE the
@@ -1940,6 +1972,19 @@ async fn create_starrocks_engine(
         .await?;
 
     let namespace = DEFAULT_NAMESPACE.to_string();
+    // Persisted so `store::Engine::delegation_mode`/`supports_jwt_delegation`/
+    // `supports_delegation` (read back on every subsequent load, including at
+    // `EngineAssignmentService::assign` time) see the SAME mode this create
+    // call configured. `None` here serializes to a JSON `null`, which
+    // `store::Engine::delegation_mode`'s `.get("mode")` chain treats exactly
+    // like a wholly-absent key — it must NOT default to impersonate the way
+    // Trino's `trinoConfig.delegationMode` does.
+    let delegation_spec = delegation_mode.map(|m| {
+        serde_json::json!({
+            "mode": m,
+            "tlsEnabled": tls_enabled,
+        })
+    });
     let spec = serde_json::json!({
         "imageVersion": fe_image,
         "starrocksConfig": {
@@ -1949,6 +1994,7 @@ async fn create_starrocks_engine(
             "cnReplicas": cn_replicas,
             "feResources": sr_body.fe_resources,
             "cnResources": sr_body.cn_resources,
+            "delegation": delegation_spec,
         },
     });
 
@@ -2039,6 +2085,83 @@ async fn create_starrocks_engine(
         poll_interval_ms: 30_000,
     });
 
+    // Delegation wiring (Access parity slice 3, S3-T2b): when the admin opted
+    // in via `delegation_mode`, provision the two artifacts the runtime
+    // `StarRocksDelegation` + the post-Ready bootstrap need — reusing the
+    // SAME generic helpers the Trino path already uses (both key off nothing
+    // Trino-specific, just `&Engine`):
+    //   - `ensure_tls_cert`: self-signed cert keyed off `coordinator_host()`,
+    //     which now resolves to the FE service host for a "starrocks" engine
+    //     (see `store::Engine::coordinator_host`), so the cert's SAN is
+    //     correct for the FE this engine actually provisions.
+    //   - `ensure_delegator_secret`: the SAME `egret_delegator` password
+    //     secret slot Trino's impersonate mode uses (`delegator_secret_id`).
+    //     Minted for EITHER delegation mode (not just impersonate): the
+    //     post-Ready bootstrap below unconditionally creates this service
+    //     user + `GRANT IMPERSONATE` alongside the JWT security integration
+    //     (see `spawn_starrocks_catalog_wire`'s doc — that shape predates
+    //     this wiring and isn't mode-gated), so jwt mode needs the password
+    //     too even though `assign()`'s materialized connection won't
+    //     reference it.
+    // A failure rolls back the same way every other provisioning step above
+    // does (delete the engine row, revoke the catalog client).
+    let mut delegation_cert_pem: Option<String> = None;
+    if tls_enabled {
+        match ensure_tls_cert(&st, &engine).await {
+            Ok((_keystore_pem, cert_pem)) => delegation_cert_pem = Some(cert_pem),
+            Err(e) => {
+                let _ = st.engine_mgmt.delete_engine(engine.id).await;
+                let _ = st.catalog.revoke_client(client.id).await;
+                return Err(e);
+            }
+        }
+    }
+    let mut delegation_service_password: Option<String> = None;
+    if delegation_mode.is_some() {
+        match ensure_delegator_secret(&st, &engine).await {
+            Ok((_secret_id, pw)) => delegation_service_password = Some(pw),
+            Err(e) => {
+                let _ = st.engine_mgmt.delete_engine(engine.id).await;
+                let _ = st.catalog.revoke_client(client.id).await;
+                return Err(e);
+            }
+        }
+    }
+    // OIDC coordinates are DERIVED from egret's own config (`st.engine_jwks_uri`/
+    // `st.engine_oidc_issuer`, populated in egret-bin from `config.oidc`), NOT
+    // accepted on the body — StarRocks has no per-engine override surface like
+    // Trino's `trinoConfig.auth.jwt.jwksUri`. `audience` is fixed to
+    // `"starrocks"` (mirrors the connector's own assumption — S3-T1/T2's
+    // `starrocks_jwt_integration_sql` docs). Soft-fails (warns, doesn't block
+    // create) when OIDC isn't configured, matching the Trino path's
+    // `engine_jwks_uri` philosophy — the admin has no per-engine override to
+    // fall back on here, so this can leave a jwt-mode integration that never
+    // validates real tokens until OIDC is configured platform-wide.
+    if delegation_mode.is_some()
+        && (st.engine_jwks_uri.is_empty() || st.engine_oidc_issuer.is_empty())
+    {
+        tracing::warn!(
+            engine = %b.name,
+            "starrocks delegation requested but OIDC is not configured on this deployment; \
+             the JWT security integration will be templated with an empty issuer/jwks"
+        );
+    }
+    let delegation = delegation_mode.map(|_| egret_engine_mgmt_api::StarRocksDelegation {
+        jwks_url: st.engine_jwks_uri.clone(),
+        issuer: st.engine_oidc_issuer.clone(),
+        audience: "starrocks".into(),
+        tls_cert_pem: delegation_cert_pem.clone().unwrap_or_default(),
+        tls_enabled,
+    });
+    let delegation_bootstrap = delegation_mode.map(|_| StarRocksDelegationBootstrap {
+        jwks_url: st.engine_jwks_uri.clone(),
+        issuer: st.engine_oidc_issuer.clone(),
+        audience: "starrocks".into(),
+        tls_cert_pem: delegation_cert_pem.clone(),
+        service_user: crate::delegator_policy::DELEGATOR_USERNAME.into(),
+        service_password: delegation_service_password.clone().unwrap_or_default(),
+    });
+
     let req = egret_engine_mgmt_api::EngineSpec {
         name: engine.name.clone(),
         namespace: engine.namespace.clone(),
@@ -2058,24 +2181,7 @@ async fn create_starrocks_engine(
             storage_secret_key,
             fe_resources,
             cn_resources,
-            // Delegation (Access parity slice 3, S3-T2): NOT wired here yet.
-            // `create_starrocks_engine` has no opt-in surface for the OIDC
-            // issuer/audience a `StarRocksDelegation` needs (unlike Trino's
-            // `trinoConfig.auth.jwt`, `CreateEngineBody`/`StarRocksConfigBody`
-            // carry no such field today), and the connection this would need
-            // to stamp `options.impersonate`/`options.tls_cert` onto is not
-            // created here either — it's materialized later, generically, by
-            // `EngineAssignmentService::assign` off `store::Engine` helpers
-            // that are themselves hardcoded to Trino's DNS/port/spec-key
-            // shape (see that module's doc for the gap). The runtime JWT-
-            // integration + impersonation-user bootstrap SQL below
-            // (`starrocks_jwt_integration_sql` /
-            // `starrocks_create_service_user_sql` /
-            // `starrocks_impersonation_grant_sql`, wired into
-            // `spawn_starrocks_catalog_wire`'s `delegation` param) is built
-            // and unit-tested so a future caller can pass `Some(..)` here
-            // once those seams exist.
-            delegation: None,
+            delegation,
         }),
     };
 
@@ -2107,9 +2213,7 @@ async fn create_starrocks_engine(
         wh.name.clone(),
         client.client_id.clone(),
         client.client_secret.clone(),
-        // Delegation bootstrap: see the doc note on `delegation: None` above —
-        // no caller constructs `Some(..)` yet.
-        None,
+        delegation_bootstrap,
     );
 
     Ok((StatusCode::CREATED, Json(engine.into())))
@@ -2274,13 +2378,14 @@ fn starrocks_impersonation_grant_sql(service_user: &str) -> String {
     format!("GRANT IMPERSONATE ON ALL USERS TO `{esc}`")
 }
 
-/// Runtime bundle for the post-Ready delegation bootstrap (S3-T2 step 3): the
-/// JWT security integration + the impersonation service user. `None` on
-/// [`spawn_starrocks_catalog_wire`]'s `delegation` param skips the bootstrap
-/// entirely — today no caller constructs `Some(..)` (see
-/// `create_starrocks_engine`'s doc note on the missing issuer/audience +
-/// connection-storage seams); this exists so the SQL-execution wiring is
-/// ready the moment those seams land.
+/// Runtime bundle for the post-Ready delegation bootstrap (S3-T2 step 3,
+/// wired up in S3-T2b): the JWT security integration + the impersonation
+/// service user. `None` on [`spawn_starrocks_catalog_wire`]'s `delegation`
+/// param skips the bootstrap entirely — [`create_starrocks_engine`] passes
+/// `None` when the body's `delegationMode` is omitted (no delegation opted
+/// into) and `Some(..)` for either delegation mode, built from
+/// `st.engine_jwks_uri`/`engine_oidc_issuer` plus a minted
+/// [`crate::delegator_policy::DELEGATOR_USERNAME`] secret.
 struct StarRocksDelegationBootstrap {
     jwks_url: String,
     issuer: String,
@@ -4060,6 +4165,7 @@ mod tests {
             kube: None,
             engine_egret_url: "http://egret:8080".into(),
             engine_jwks_uri: "https://idp/jwks".into(),
+            engine_oidc_issuer: "https://idp/realms/egret".into(),
         })
     }
 

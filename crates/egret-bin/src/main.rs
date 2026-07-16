@@ -1424,6 +1424,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         } else {
             String::new()
         },
+        // Raw issuer, for StarRocks' `CREATE SECURITY INTEGRATION
+        // ... required_issuer=<issuer>` (Trino instead reads its own
+        // `trinoConfig.auth.jwt.requiredAudience`/JWKS default per-engine, so
+        // it has no equivalent need for the raw issuer here).
+        engine_oidc_issuer: if config.oidc.enabled {
+            config.oidc.issuer_url.clone()
+        } else {
+            String::new()
+        },
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).

@@ -51,6 +51,15 @@ pub struct EngineMgmtState {
     /// block omits one; populated from config in egret-bin. Tests set a
     /// dummy value.
     pub engine_jwks_uri: String,
+    /// The raw OIDC issuer URL (e.g. a Keycloak realm URL), populated from
+    /// config in egret-bin. Used to derive the `required_issuer` /
+    /// `jwks_url` a StarRocks `CREATE SECURITY INTEGRATION` needs (StarRocks
+    /// has no per-engine JWT-auth override surface like Trino's
+    /// `trinoConfig.auth.jwt.jwksUri`, so its OIDC coordinates are always
+    /// derived from this platform-wide default). Empty when OIDC is
+    /// unconfigured — not hard-failed; a StarRocks jwt-delegation engine
+    /// simply gets an empty issuer/jwks in that case. Tests set a dummy value.
+    pub engine_oidc_issuer: String,
 }
 
 impl FromRef<EngineMgmtState> for SessionService {
