@@ -6,7 +6,8 @@
 //!      ([`EngineMgmtStore::assign_workspace`]), and
 //!   2. materialize a read-only, per-user-delegated connection in the query seam
 //!      ([`DatabaseRepo::create_provisioned`]) so the workspace's BI/query tools
-//!      can reach the engine's Trino coordinator.
+//!      can reach the engine's query endpoint (a Trino coordinator or a
+//!      StarRocks FE, depending on the engine kind).
 //!
 //! This service is the single place that keeps those two seams consistent; the
 //! CP endpoints (Task 7) call it rather than touching either store directly.
@@ -75,7 +76,7 @@ impl EngineAssignmentService {
         // (9030) — so it always uses `coordinator_port()` regardless of
         // delegation mode; TLS (when configured) is negotiated in-band via
         // `options.tls_cert`, not a different port.
-        let port = if engine.r#type == "starrocks" {
+        let port = if engine.is_starrocks() {
             engine.coordinator_port()
         } else if engine.supports_delegation() {
             8443
@@ -135,7 +136,7 @@ fn dedup_name(base: &str, existing: &[Database]) -> String {
 /// Branches cleanly on `engine.r#type`: the Trino shape (below) is completely
 /// unchanged from before StarRocks support existed.
 fn delegated_conn_options(engine: &Engine) -> (serde_json::Value, Option<Uuid>) {
-    if engine.r#type == "starrocks" {
+    if engine.is_starrocks() {
         return starrocks_delegated_conn_options(engine);
     }
     trino_delegated_conn_options(engine)
@@ -392,7 +393,7 @@ mod tests {
         assert_eq!(e.coordinator_port(), 9030);
         // The `assign()` port-selection logic (mirrored): starrocks always
         // uses coordinator_port(), trino uses 8443 when delegation-capable.
-        let port = if e.r#type == "starrocks" {
+        let port = if e.is_starrocks() {
             e.coordinator_port()
         } else if e.supports_delegation() {
             8443

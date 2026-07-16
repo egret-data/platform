@@ -42,12 +42,21 @@ pub struct EngineCatalog {
 }
 
 impl Engine {
+    /// True when this is a StarRocks engine. The single source of truth for the
+    /// kind check every de-Trino-gated helper below branches on — a helper (not
+    /// a repeated `self.r#type == "starrocks"` literal) so a typo can't silently
+    /// send a StarRocks engine down the Trino path (which defaults to
+    /// impersonate-capable), reintroducing the exact bug class this seam fixes.
+    pub fn is_starrocks(&self) -> bool {
+        self.r#type == "starrocks"
+    }
+
     /// In-cluster DNS name of this engine's coordinator/FE service. Trino's
     /// kube-trino operator names it `{name}-coordinator.{namespace}.svc`;
     /// StarRocks' kube-starrocks operator instead exposes the FE (the
     /// MySQL-protocol query endpoint) as `{name}-fe-service.{namespace}.svc`.
     pub fn coordinator_host(&self) -> String {
-        if self.r#type == "starrocks" {
+        if self.is_starrocks() {
             format!("{}-fe-service.{}.svc", self.name, self.namespace)
         } else {
             format!("{}-coordinator.{}.svc", self.name, self.namespace)
@@ -58,7 +67,7 @@ impl Engine {
     /// Trino's HTTP listener is `8080`; StarRocks' FE MySQL-protocol
     /// (`query_port`) listener is `9030`.
     pub fn coordinator_port(&self) -> i32 {
-        if self.r#type == "starrocks" {
+        if self.is_starrocks() {
             9030
         } else {
             8080
@@ -73,7 +82,7 @@ impl Engine {
     /// StarRocks: has no `trinoConfig.auth.jwt` concept — jwt-capability is
     /// simply "the stored delegation mode is `jwt`" (see [`Self::delegation_mode`]).
     pub fn supports_jwt_delegation(&self) -> bool {
-        if self.r#type == "starrocks" {
+        if self.is_starrocks() {
             self.is_jwt_delegation()
         } else {
             self.spec
@@ -100,7 +109,7 @@ impl Engine {
     /// Absent/unset delegation on a StarRocks engine reports `"none"`, which
     /// none of `is_impersonate_delegation`/`is_jwt_delegation` match.
     pub fn delegation_mode(&self) -> &str {
-        if self.r#type == "starrocks" {
+        if self.is_starrocks() {
             self.spec
                 .get("starrocksConfig")
                 .and_then(|c| c.get("delegation"))
