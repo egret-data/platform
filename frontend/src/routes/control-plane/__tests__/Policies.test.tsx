@@ -1,8 +1,13 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, it, expect, vi } from "vitest";
 import Policies from "../Policies";
+
+const createProfile = vi.fn((_name: string, _type: string) =>
+  Promise.resolve({ id: 3, name: "sr", type: "starrocks" }),
+);
 
 vi.mock("@/api/policies", () => ({
   listProfiles: () =>
@@ -24,6 +29,7 @@ vi.mock("@/api/policies", () => ({
         engines: [],
       },
     ]),
+  createProfile: (name: string, type: string) => createProfile(name, type),
 }));
 
 function wrap(ui: React.ReactNode) {
@@ -76,5 +82,18 @@ describe("Policies page (profiles landing)", () => {
     expect(trinoRow?.textContent).toContain("3");
     const starrocksRow = screen.getByRole("link", { name: "starrocks" }).closest("tr");
     expect(starrocksRow?.textContent).toContain("0");
+  });
+
+  it("opens the New profile dialog with a name field and a type select", async () => {
+    const user = userEvent.setup();
+    wrap(<Policies />);
+    await screen.findByRole("link", { name: "trino" });
+    await user.click(screen.getByRole("button", { name: /New profile/i }));
+    const dialog = await screen.findByRole("dialog");
+    // Scope to the dialog — the list page also renders a "Type" facet filter.
+    expect(within(dialog).getByRole("heading", { name: /New profile/i })).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Name")).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Type")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: /Create profile/i })).toBeInTheDocument();
   });
 });

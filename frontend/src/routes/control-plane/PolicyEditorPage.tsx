@@ -87,7 +87,8 @@ const emptyColumnResources = () => ({
 // and a Trino one uses catalog/schema/…. Access and masking chains extend to
 // `column`; row-filter stops at `table` (matching the previous Trino
 // defaults: `emptyColumnResources` vs `emptyTableResources`).
-function defaultResourcesFromDef(
+// Exported for unit testing (pure helper).
+export function defaultResourcesFromDef(
   resDefs: ServiceDefResource[],
   kind: PolicyKind,
 ): Record<string, ResourceLevel> {
