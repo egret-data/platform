@@ -80,15 +80,15 @@ const PROVISIONABLE = new Set(["trino", "starrocks"]);
 // falls back to when the body omits them. Pinned to 3.4.x: FE MySQL-protocol
 // TLS (the delegation "Enable TLS" path) needs StarRocks open-source >= 3.4.1;
 // a 3.3 image can't serve the SSL listener.
-const DEFAULT_SR_FE_IMAGE = "starrocks/fe-ubuntu:3.4-latest";
-const DEFAULT_SR_CN_IMAGE = "starrocks/cn-ubuntu:3.4-latest";
+export const DEFAULT_SR_FE_IMAGE = "starrocks/fe-ubuntu:3.4-latest";
+export const DEFAULT_SR_CN_IMAGE = "starrocks/cn-ubuntu:3.4-latest";
 
 // Harmless defaults for the still-required Trino-only body fields
 // (coordinatorReplicas/workerReplicas/cpuMin/cpuMax/memory) when creating a
 // StarRocks engine — the backend ignores them for `kind: "starrocks"` but the
 // body validates them as required regardless of kind. Mirrors the Trino
 // form's own defaults below.
-const TRINO_FIELD_DEFAULTS = {
+export const TRINO_FIELD_DEFAULTS = {
   coordinatorReplicas: 1,
   workerReplicas: 2,
   cpuMin: "1",

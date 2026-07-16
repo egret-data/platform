@@ -187,11 +187,14 @@ describe("EngineDetail — StarRocks engine", () => {
     } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
   });
 
-  test("hides Configuration/Security tabs and disables Restart", async () => {
+  test("shows the Configuration tab, hides Security, and disables Restart", async () => {
+    const user = userEvent.setup();
     renderDetail();
     await screen.findByRole("heading", { name: "analytics-trino" });
 
-    expect(screen.queryByRole("tab", { name: "Configuration" })).not.toBeInTheDocument();
+    // Configuration is now StarRocks-shaped (Task 5) and available; the
+    // Trino-only Security & Exposure tab is still hidden (later task).
+    expect(screen.getByRole("tab", { name: "Configuration" })).toBeInTheDocument();
     expect(
       screen.queryByRole("tab", { name: "Security & Exposure" }),
     ).not.toBeInTheDocument();
@@ -199,6 +202,11 @@ describe("EngineDetail — StarRocks engine", () => {
     expect(screen.getByRole("tab", { name: "Catalogs" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Monitor" })).toBeInTheDocument();
 
+    // Restart is still disabled (Overview tab, before switching away).
     expect(screen.getByRole("button", { name: /restart/i })).toBeDisabled();
+
+    // The StarRocks Configuration tab renders its FE/CN image fields.
+    await user.click(screen.getByRole("tab", { name: "Configuration" }));
+    expect(await screen.findByLabelText("FE image")).toBeInTheDocument();
   });
 });
