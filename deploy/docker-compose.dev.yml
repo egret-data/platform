@@ -56,6 +56,13 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
+    volumes:
+      # Ranger authorization plugin config (dev). FE conf-dir path confirmed
+      # against a real `starrocks/allin1-ubuntu:latest` container (`find / -name
+      # fe.conf` -> /data/deploy/starrocks/fe/conf/fe.conf, which is on the FE's
+      # CLASSPATH per fe/bin/start_fe.sh) — see deploy/starrocks/README.md.
+      - ./starrocks/ranger/ranger-starrocks-security.xml:/data/deploy/starrocks/fe/conf/ranger-starrocks-security.xml:ro
+      - ./starrocks/ranger/ranger-starrocks-audit.xml:/data/deploy/starrocks/fe/conf/ranger-starrocks-audit.xml:ro
 
   keycloak:
     image: quay.io/keycloak/keycloak:26.0

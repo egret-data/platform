@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  StarRocks Ranger plugin — security config (dev).
+
+  StarRocks' Ranger support is built into the FE (the ranger-plugins-* jars ship
+  in fe/lib/, no separate jar install). This file is loaded from the FE
+  classpath (fe/conf/ is on CLASSPATH — see fe/bin/start_fe.sh) using the
+  standard Ranger resource-name convention `ranger-<serviceType>-security.xml`.
+
+  `ranger.plugin.starrocks.service.name` must match the name of a StarRocks
+  policy profile created via egret's Policies UI (Task 3/4 of this plan) — the
+  FE downloads policies from
+  `<policy.rest.url>/service/plugins/policies/download/<service.name>`.
+
+  `policy.rest.url` points at egret. In this dev compose the egret backend
+  itself is NOT containerized (see the `frontend` service comment in
+  docker-compose.dev.yml: it runs on the host via `cargo run -p egret-bin
+  serve`), so the StarRocks container reaches it via `host.docker.internal`,
+  the same convention already used for Trino/engine -> egret catalog
+  reachability (see deploy/embedded-catalog/engine-wiring.md).
+
+  NOTE: keep this comment free of a doubled hyphen character. Ranger's
+  Hadoop Configuration XML parser hard-fails on that sequence inside a
+  comment, which crashes the whole FE boot when access_control=ranger; see
+  the Ranger authorization section of ../README.md.
+-->
+<configuration>
+  <property><name>ranger.plugin.starrocks.service.name</name><value>sr1</value></property>
+  <property><name>ranger.plugin.starrocks.policy.rest.url</name><value>http://host.docker.internal:8080</value></property>
+  <property><name>ranger.plugin.starrocks.policy.source.impl</name><value>org.apache.ranger.admin.client.RangerAdminRESTClient</value></property>
+  <property><name>ranger.plugin.starrocks.policy.cache.dir</name><value>/tmp/ranger/sr1/policycache</value></property>
+  <property><name>ranger.plugin.starrocks.policy.pollIntervalMs</name><value>30000</value></property>
+  <property><name>ranger.plugin.starrocks.policy.rest.client.connection.timeoutMs</name><value>120000</value></property>
+  <property><name>ranger.plugin.starrocks.policy.rest.client.read.timeoutMs</name><value>30000</value></property>
+</configuration>
