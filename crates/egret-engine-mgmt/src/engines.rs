@@ -1614,8 +1614,17 @@ async fn create_engine(
         ));
     }
 
-    if b.kind == "starrocks" {
-        return create_starrocks_engine(st, b, wh).await;
+    match egret_engine_mgmt_api::EngineKind::parse(&b.kind) {
+        Some(egret_engine_mgmt_api::EngineKind::StarRocks) => {
+            return create_starrocks_engine(st, b, wh).await;
+        }
+        Some(egret_engine_mgmt_api::EngineKind::Trino) => {}
+        None => {
+            return Err(CpError::BadRequest(format!(
+                "unknown engine kind: {}",
+                b.kind
+            )));
+        }
     }
 
     // 2. Resolve the storage endpoint for the Trino S3 connector.
@@ -1865,15 +1874,21 @@ async fn create_starrocks_engine(
         .await?
         .ok_or_else(|| CpError::BadRequest("unknown storage connection".into()))?;
     let storage_endpoint = sc.endpoint.clone().unwrap_or_default();
-    let storage_secret_key = match sc.secret_ref {
-        Some(secret_ref) => st
-            .secrets
-            .resolve_plaintext(None, secret_ref)
-            .await
-            .map_err(|e| CpError::BadRequest(format!("resolve storage secret: {e}")))?,
-        None => String::new(),
-    };
-    let storage_path = format!("{}/starrocks", sc.bucket);
+    // Match the Trino fault-tolerant path: a storage connection with no secret
+    // is a hard error, not a silent empty key.
+    let secret_ref = sc.secret_ref.ok_or_else(|| {
+        CpError::BadRequest(
+            "warehouse storage connection has no secret; cannot provision StarRocks".into(),
+        )
+    })?;
+    let storage_secret_key = st
+        .secrets
+        .resolve_plaintext(None, secret_ref)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("resolve storage secret: {e}")))?;
+    // Namespace per engine so two StarRocks engines sharing a bucket don't
+    // collide their shared-data storage roots.
+    let storage_path = format!("{}/starrocks/{}", sc.bucket, b.name);
 
     let sr_body = b.starrocks.as_ref().cloned().unwrap_or_default();
     let fe_image = sr_body
@@ -1934,6 +1949,7 @@ async fn create_starrocks_engine(
     let engine = match st.engine_mgmt.get_engine(engine.id).await {
         Ok(Some(e)) => e,
         Ok(None) => {
+            let _ = st.engine_mgmt.delete_engine(engine.id).await;
             return Err(CpError::NotFound);
         }
         Err(e) => {
@@ -2077,6 +2093,15 @@ async fn update_engine(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    // FAIL-FAST: `build_provision_req` only builds a Trino `EngineSpec`, so a
+    // PUT on a non-Trino engine would corrupt the stored spec AND dispatch to
+    // the Trino provisioner (orphan Trino objects in the StarRocks namespace).
+    // Real StarRocks update is a documented follow-up.
+    if engine.r#type != "trino" {
+        return Err(CpError::BadRequest(
+            "update not yet supported for starrocks engines; delete and recreate".into(),
+        ));
+    }
 
     // Rebuild the spec from the body + config. The primary Catalog Client is NOT
     // re-minted (its credential lives on the primary catalog row), so nothing is
@@ -2195,6 +2220,13 @@ async fn restart_engine(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
+    // FAIL-FAST: a StarRocks restart currently no-ops through the Trino-shaped
+    // path (misleading 200). Real StarRocks restart is a documented follow-up.
+    if engine.r#type != "trino" {
+        return Err(CpError::BadRequest(
+            "restart not yet supported for starrocks engines".into(),
+        ));
+    }
     let Some(prov) = st.engine_provisioner.as_ref() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
     };

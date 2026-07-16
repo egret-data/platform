@@ -276,6 +276,63 @@ async fn seed_provisioned_warehouse(f: &Fixture) -> Uuid {
     wh.id
 }
 
+/// Like [`seed_provisioned_warehouse`], but the storage connection carries a
+/// (global) named secret so its `secret_ref` is set. The StarRocks create path
+/// treats a missing secret as a hard error, so its tests need this variant.
+async fn seed_provisioned_warehouse_with_secret(f: &Fixture) -> Uuid {
+    let (ws_id,): (Uuid,) =
+        sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
+            .bind(format!("engine-ws-sec-{}", Uuid::new_v4().simple()))
+            .bind("Engine Test Workspace (secret)")
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("insert workspace");
+
+    // Seal a global named secret with the SAME crypto key `build_app` uses, so
+    // the app's `resolve_plaintext(None, secret_ref)` can decrypt it.
+    let crypto =
+        egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
+    let secrets = egret_secrets::SecretStore::new(f.db.clone(), Some(crypto));
+    let ws_secrets = egret_secrets::WorkspaceSecretStore::new(f.db.clone(), secrets);
+    let secret_id = ws_secrets
+        .create(
+            None,
+            &format!("engine-sec-{}", Uuid::new_v4().simple()),
+            None,
+            "STORAGESECRETKEY",
+        )
+        .await
+        .expect("create global storage secret");
+
+    let (storage_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key, secret_ref) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+    )
+    .bind(format!("engine-sc-sec-{}", Uuid::new_v4().simple()))
+    .bind("us-east-1")
+    .bind("egret-engine-test")
+    .bind("AKIATEST")
+    .bind(secret_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert storage connection");
+
+    let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
+    let wh = catalog_store
+        .create_warehouse(
+            &format!("engine-wh-sec-{}", Uuid::new_v4().simple()),
+            ws_id,
+            storage_id,
+        )
+        .await
+        .expect("create warehouse");
+    catalog_store
+        .set_lakekeeper_warehouse_id(wh.id, "wh-123")
+        .await
+        .expect("set lakekeeper id");
+    wh.id
+}
+
 /// Seed a workspace + storage_connection + warehouse WITHOUT lakekeeper_warehouse_id.
 async fn seed_unprovisioned_warehouse(f: &Fixture) -> Uuid {
     let (ws_id,): (Uuid,) =
@@ -749,7 +806,7 @@ async fn create_engine_starrocks_persists_starrocks_type() {
         return;
     };
     let token = session_for(&f, "engine_admin_sr", true).await;
-    let wh_id = seed_provisioned_warehouse(&f).await;
+    let wh_id = seed_provisioned_warehouse_with_secret(&f).await;
     let name = format!("sr-{}", Uuid::new_v4().simple());
 
     let resp = f
@@ -816,6 +873,96 @@ async fn create_engine_starrocks_persists_starrocks_type() {
         j.as_array().map(|a| a.len()),
         Some(0),
         "no auto-wired catalog for starrocks; body={j}"
+    );
+
+    // PUT (update) on a StarRocks engine is guarded: `build_provision_req` only
+    // builds a Trino spec, so it fails fast with 400 rather than corrupting the
+    // spec / dispatching to the Trino provisioner.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(serde_json::json!({
+                "name": name,
+                "warehouseId": wh_id,
+                "coordinatorReplicas": 2,
+                "workerReplicas": 2,
+                "cpuMin": "1",
+                "cpuMax": "2",
+                "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "PUT on a starrocks engine must 400"
+    );
+
+    // POST /restart on a StarRocks engine is guarded the same way.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/restart"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "restart on a starrocks engine must 400"
+    );
+}
+
+/// An unrecognized `kind` on create is rejected with 400 (rather than silently
+/// falling through to the Trino path).
+#[tokio::test]
+async fn create_engine_unknown_kind_400() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_admin_badkind", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": format!("x-{}", Uuid::new_v4().simple()),
+                "warehouseId": wh_id,
+                "kind": "presto",
+                "coordinatorReplicas": 1,
+                "workerReplicas": 1,
+                "cpuMin": "1",
+                "cpuMax": "2",
+                "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "unknown engine kind must 400"
     );
 }
 
