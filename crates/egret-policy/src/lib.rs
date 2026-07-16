@@ -16,7 +16,8 @@ pub use admin::{
 pub use error::PolicyStoreError;
 pub use ranger::{ranger_router, RangerState};
 pub use service_def::{
-    seed_tag, seed_trino, tag_service_def, trino_service_def, TAG_DEF_NAME, TRINO_DEF_NAME,
+    seed_starrocks, seed_tag, seed_trino, starrocks_service_def, tag_service_def,
+    trino_service_def, STARROCKS_DEF_NAME, TAG_DEF_NAME, TRINO_DEF_NAME,
 };
 pub use store::{PolicyRow, PolicyStore, ServiceRow, TagAssignmentRow};
 
