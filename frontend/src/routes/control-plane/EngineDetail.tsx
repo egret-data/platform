@@ -73,6 +73,7 @@ import {
 } from "./useEngineConfigForm";
 import { useStarRocksConfigForm } from "./useStarRocksConfigForm";
 import { StarRocksConfigTab } from "./StarRocksConfigTab";
+import { StarRocksSecurityTab } from "./StarRocksSecurityTab";
 import { ImageSection } from "./config/ImageSection";
 import { ServerSection } from "./config/ServerSection";
 import { CoordinatorSection } from "./config/CoordinatorSection";
@@ -196,7 +197,8 @@ function EngineTabs({
   const srCfg = useStarRocksConfigForm(engine);
 
   // StarRocks engines have a StarRocks-shaped Configuration tab (image/compute/
-  // resources); the Trino-shaped Security & Exposure tab is still Trino-only.
+  // resources) and a StarRocks-shaped Security & Exposure tab (delegation + TLS);
+  // both branch off the same `srCfg` instance so one Save covers both.
   const isStarRocks = engine.type === "starrocks";
 
   // Warn before refresh/close while a config or security edit is unsaved — these
@@ -224,25 +226,12 @@ function EngineTabs({
         <TabsTrigger value="catalogs">Catalogs</TabsTrigger>
         <TabsTrigger value="workspaces">Workspaces</TabsTrigger>
         <TabsTrigger value="configuration">Configuration</TabsTrigger>
-        {!isStarRocks && (
-          <TabsTrigger value="security">Security &amp; Exposure</TabsTrigger>
-        )}
+        <TabsTrigger value="security">Security &amp; Exposure</TabsTrigger>
         <TabsTrigger value="monitor">Monitor</TabsTrigger>
       </TabsList>
 
       <TabsContent value="overview" className="space-y-5">
-        <StatusCard
-          status={engine.status}
-          engineId={engineId}
-          restartDisabled={isStarRocks}
-        />
-        {isStarRocks && (
-          <Alert>
-            <AlertDescription>
-              Restart isn&apos;t yet supported for StarRocks engines.
-            </AlertDescription>
-          </Alert>
-        )}
+        <StatusCard status={engine.status} engineId={engineId} />
         <DangerCard engine={engine} />
       </TabsContent>
 
@@ -262,11 +251,13 @@ function EngineTabs({
         )}
       </TabsContent>
 
-      {!isStarRocks && (
-        <TabsContent value="security">
+      <TabsContent value="security">
+        {isStarRocks ? (
+          <StarRocksSecurityTab cfg={srCfg} />
+        ) : (
           <SecurityTab cfg={cfg} />
-        </TabsContent>
-      )}
+        )}
+      </TabsContent>
 
       <TabsContent value="monitor">
         <EngineMonitor engineId={engineId} />
@@ -353,12 +344,9 @@ export function SaveBar({
 function StatusCard({
   status,
   engineId,
-  restartDisabled = false,
 }: {
   status: EngineStatus;
   engineId: string;
-  /** StarRocks engines don't support restart yet (backend 400s). */
-  restartDisabled?: boolean;
 }) {
   const queryClient = useQueryClient();
   const [logsPod, setLogsPod] = useState<string | null>(null);
@@ -388,12 +376,7 @@ function StatusCard({
             variant="outline"
             size="sm"
             onClick={() => setRestartOpen(true)}
-            disabled={restartMutation.isPending || restartDisabled}
-            title={
-              restartDisabled
-                ? "Restart not yet supported for StarRocks engines"
-                : undefined
-            }
+            disabled={restartMutation.isPending}
           >
             {restartMutation.isPending ? (
               <Loader2 className="h-4 w-4 animate-spin" />

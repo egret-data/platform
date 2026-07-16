@@ -105,7 +105,7 @@ const COLUMNS = ["Name", "Type", "Endpoint", "Status", "Actions"];
 // / service user the backend provisions (`create_starrocks_engine`).
 type StarRocksDelegationOption = "none" | "jwt" | "impersonate";
 
-const DELEGATION_HELP: Record<StarRocksDelegationOption, string> = {
+export const DELEGATION_HELP: Record<StarRocksDelegationOption, string> = {
   none: "Queries run without per-user delegation — the connection's own configured credential is used for every query.",
   impersonate:
     "egret connects as a trusted service account and runs the query as the caller. Works for any signed-in user; runs over TLS.",
