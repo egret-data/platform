@@ -399,8 +399,11 @@ impl EngineKind {
 }
 
 /// StarRocks shared-data engine config (FE + CN). Storage params drive the
-/// FE builtin storage volume (object store); resources default when None.
-#[derive(Clone, Debug)]
+/// FE builtin storage volume (object store); FE/CN resources default when None.
+///
+/// `Debug` is hand-written to redact the object-store credentials so `{:?}`
+/// on this (or an enclosing `EngineSpec`) never leaks the access/secret keys.
+#[derive(Clone)]
 pub struct StarRocksConfig {
     pub fe_image: String, // starrocks/fe-ubuntu:<ver>
     pub cn_image: String, // starrocks/cn-ubuntu:<ver>
@@ -410,10 +413,30 @@ pub struct StarRocksConfig {
     pub storage_path: String,     // aws_s3_path = bucket/prefix
     pub storage_access_key: String,
     pub storage_secret_key: String,
-    pub resources: Option<RoleResources>,
+    /// FE (metadata) role sizing; defaults when None.
+    pub fe_resources: Option<RoleResources>,
+    /// CN (compute) role sizing; defaults when None.
+    pub cn_resources: Option<RoleResources>,
 }
 
-/// Desired state of a Trino engine.
+impl std::fmt::Debug for StarRocksConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StarRocksConfig")
+            .field("fe_image", &self.fe_image)
+            .field("cn_image", &self.cn_image)
+            .field("fe_replicas", &self.fe_replicas)
+            .field("cn_replicas", &self.cn_replicas)
+            .field("storage_endpoint", &self.storage_endpoint)
+            .field("storage_path", &self.storage_path)
+            .field("storage_access_key", &"<redacted>")
+            .field("storage_secret_key", &"<redacted>")
+            .field("fe_resources", &self.fe_resources)
+            .field("cn_resources", &self.cn_resources)
+            .finish()
+    }
+}
+
+/// Desired state of a query engine (`kind` selects Trino vs StarRocks).
 #[derive(Clone, Debug)]
 pub struct EngineSpec {
     pub name: String, // DNS-1123 k8s name
@@ -482,7 +505,8 @@ mod tests {
             storage_path: "warehouse/starrocks".into(),
             storage_access_key: "egret".into(),
             storage_secret_key: "egretsecret".into(),
-            resources: None,
+            fe_resources: None,
+            cn_resources: None,
         };
         assert_eq!(s.fe_replicas, 1);
     }
