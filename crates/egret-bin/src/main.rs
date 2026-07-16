@@ -523,9 +523,20 @@ impl egret_engine_mgmt_api::EngineProvisioningPort for EgretEngineProvisioningPo
 
     async fn restart(&self, kind: &str, namespace: &str, name: &str) -> Result<(), String> {
         if kind == "starrocks" {
-            // Not a first-class op in the operator MVP: restart via
-            // update/re-provision instead of rolling Deployments directly.
-            return Ok(());
+            // StarRocks pods are owned by the kube-starrocks operator (not plain
+            // Deployments), so we roll them THROUGH the CR: merge-patch a fresh
+            // restart-stamp annotation onto the FE + CN specs and let the operator
+            // propagate it to the pod templates. The stamp is minted here because
+            // egret-bin has `std::time` (the orchestrator stays deterministic).
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis().to_string())
+                .unwrap_or_else(|_| "0".to_string());
+            return self
+                .starrocks
+                .restart(namespace, name, &stamp)
+                .await
+                .map_err(|e| e.to_string());
         }
         // Roll BOTH Deployments directly via KubeClient (bypassing the
         // TrinoProvisioner render/apply path entirely) so this never touches

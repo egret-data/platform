@@ -19,6 +19,20 @@ pub type PodLogStream = Pin<Box<dyn Stream<Item = anyhow::Result<Bytes>> + Send>
 #[async_trait::async_trait]
 pub trait KubeClient: Send + Sync {
     async fn apply(&self, obj: &Value) -> anyhow::Result<()>;
+    /// JSON merge-patch (RFC 7386) an existing object identified by
+    /// (apiVersion, kind, namespace, name). Only the fields present in `patch`
+    /// are changed; unlike [`apply`](Self::apply) this needs no full object and
+    /// won't clear omitted fields. Used to stamp a restart annotation onto a CR
+    /// the operator owns (e.g. rolling StarRocks FE/CN pods) without re-sending
+    /// — and risking clobbering — the whole spec.
+    async fn merge_patch(
+        &self,
+        api_version: &str,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        patch: &Value,
+    ) -> anyhow::Result<()>;
     async fn delete(
         &self,
         api_version: &str,
@@ -113,6 +127,8 @@ pub struct FakeKube {
     pub coordinator_response: Mutex<(u16, Vec<u8>)>,
     /// `(namespace, name)` per `restart_deployment` call.
     pub restarted: Mutex<Vec<(String, String)>>,
+    /// `("kind/name", patch)` per `merge_patch` call.
+    pub patched: Mutex<Vec<(String, Value)>>,
 }
 
 impl Default for FakeKube {
@@ -123,6 +139,7 @@ impl Default for FakeKube {
             coordinator_calls: Mutex::new(Vec::new()),
             coordinator_response: Mutex::new((200, Vec::new())),
             restarted: Mutex::new(Vec::new()),
+            patched: Mutex::new(Vec::new()),
         }
     }
 }
@@ -143,6 +160,20 @@ impl KubeClient for FakeKube {
             obj["metadata"]["name"].as_str().unwrap_or("")
         );
         self.applied.lock().unwrap().insert(key, obj.clone());
+        Ok(())
+    }
+    async fn merge_patch(
+        &self,
+        _av: &str,
+        kind: &str,
+        _ns: &str,
+        name: &str,
+        patch: &Value,
+    ) -> anyhow::Result<()> {
+        self.patched
+            .lock()
+            .unwrap()
+            .push((format!("{kind}/{name}"), patch.clone()));
         Ok(())
     }
     async fn delete(&self, _av: &str, kind: &str, _ns: &str, name: &str) -> anyhow::Result<()> {
@@ -287,6 +318,27 @@ impl KubeClient for LiveKube {
         let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
         let pp = PatchParams::apply("egret").force();
         api.patch(name, &pp, &Patch::Apply(obj)).await?;
+        Ok(())
+    }
+
+    async fn merge_patch(
+        &self,
+        api_version: &str,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        patch: &Value,
+    ) -> anyhow::Result<()> {
+        use kube::api::{Api, Patch, PatchParams};
+        use kube::core::DynamicObject;
+
+        let ar = Self::api_resource(api_version, kind);
+        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+        // RFC-7386 merge patch: sets only the keys present in `patch`, leaving
+        // every other (operator-managed) CR field intact — no `force`/apply
+        // field-ownership dance needed.
+        api.patch(name, &PatchParams::default(), &Patch::Merge(patch))
+            .await?;
         Ok(())
     }
 

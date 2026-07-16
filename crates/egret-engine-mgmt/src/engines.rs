@@ -3019,11 +3019,13 @@ async fn delete_engine(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /engines/{id}/restart` — roll the coordinator + worker pods without
-/// changing config (like `kubectl rollout restart`). Unlike `update`, this
-/// always forces a roll: `prov.restart` patches a fresh timestamp annotation
-/// onto both Deployments' pod templates regardless of whether the rendered
-/// config changed.
+/// `POST /engines/{id}/restart` — roll the engine's pods without changing config
+/// (like `kubectl rollout restart`). Unlike `update`, this always forces a roll:
+/// `prov.restart` patches a fresh timestamp annotation onto the pod templates
+/// regardless of whether the rendered config changed. For Trino this rolls the
+/// coordinator + worker Deployments directly; for StarRocks it merge-patches the
+/// restart stamp onto the `StarRocksCluster` CR's FE + CN specs and the operator
+/// propagates it to the pod templates.
 #[utoipa::path(
     post,
     path = "/api/control-plane/engines/{id}/restart",
@@ -3049,12 +3051,15 @@ async fn restart_engine(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
-    // FAIL-FAST: a StarRocks restart currently no-ops through the Trino-shaped
-    // path (misleading 200). Real StarRocks restart is a documented follow-up.
-    if engine.r#type != "trino" {
-        return Err(CpError::BadRequest(
-            "restart not yet supported for starrocks engines".into(),
-        ));
+    // FAIL-FAST on unsupported kinds. Trino rolls its Deployments directly;
+    // StarRocks rolls the operator-owned FE/CN pods via a CR annotation merge
+    // patch (see `StarRocksProvisioner::restart`). Any other kind has no restart
+    // path wired, so reject it rather than silently no-op.
+    if engine.r#type != "trino" && engine.r#type != "starrocks" {
+        return Err(CpError::BadRequest(format!(
+            "restart not supported for {} engines",
+            engine.r#type
+        )));
     }
     let Some(prov) = st.engine_provisioner.as_ref() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));

@@ -924,7 +924,8 @@ async fn create_engine_starrocks_persists_starrocks_type() {
         "PUT on a starrocks engine re-provisions and succeeds"
     );
 
-    // POST /restart on a StarRocks engine is guarded the same way.
+    // POST /restart on a StarRocks engine now rolls the FE/CN pods via the CR
+    // annotation merge-patch (the fake port records the call), so it succeeds.
     let resp = f
         .app
         .clone()
@@ -938,8 +939,8 @@ async fn create_engine_starrocks_persists_starrocks_type() {
         .unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::BAD_REQUEST,
-        "restart on a starrocks engine must 400"
+        StatusCode::OK,
+        "restart on a starrocks engine now rolls FE/CN pods"
     );
 }
 
