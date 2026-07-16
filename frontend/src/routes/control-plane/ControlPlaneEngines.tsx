@@ -77,9 +77,11 @@ const ENGINE_TYPES: EngineType[] = [
 const PROVISIONABLE = new Set(["trino", "starrocks"]);
 
 // StarRocks image defaults (shared-data FE/CN), same versions the backend
-// falls back to when the body omits them.
-const DEFAULT_SR_FE_IMAGE = "starrocks/fe-ubuntu:3.3-latest";
-const DEFAULT_SR_CN_IMAGE = "starrocks/cn-ubuntu:3.3-latest";
+// falls back to when the body omits them. Pinned to 3.4.x: FE MySQL-protocol
+// TLS (the delegation "Enable TLS" path) needs StarRocks open-source >= 3.4.1;
+// a 3.3 image can't serve the SSL listener.
+const DEFAULT_SR_FE_IMAGE = "starrocks/fe-ubuntu:3.4-latest";
+const DEFAULT_SR_CN_IMAGE = "starrocks/cn-ubuntu:3.4-latest";
 
 // Harmless defaults for the still-required Trino-only body fields
 // (coordinatorReplicas/workerReplicas/cpuMin/cpuMax/memory) when creating a
@@ -561,9 +563,10 @@ function AddEngineDialog({
                       />
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      Enables FE SSL on the MySQL-protocol port. Recommended for
-                      both delegation modes; disable only for a dev cluster
-                      without the extra listener set up.
+                      Enables FE SSL on the MySQL-protocol port. Requires a
+                      StarRocks image &ge; 3.4.1 (the default 3.4 line works);
+                      an older FE can&apos;t serve the SSL listener. Recommended
+                      for both delegation modes.
                     </p>
                   </div>
                 )}

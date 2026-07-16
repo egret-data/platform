@@ -46,9 +46,12 @@ const DEFAULT_IMAGE_VERSION: &str = "470";
 const DEFAULT_NAMESPACE: &str = "egret-engines";
 /// Shared per-warehouse role that engine Catalog Clients are bound to.
 const ENGINE_ROLE_NAME: &str = "engine";
-/// Default StarRocks FE/CN images when the body omits them.
-const DEFAULT_SR_FE_IMAGE: &str = "starrocks/fe-ubuntu:3.3-latest";
-const DEFAULT_SR_CN_IMAGE: &str = "starrocks/cn-ubuntu:3.3-latest";
+/// Default StarRocks FE/CN images when the body omits them. Pinned to a 3.4.x
+/// line because FE MySQL-protocol TLS (the delegation `tlsEnabled` path) is only
+/// available in StarRocks open-source from v3.4.1 onwards — a 3.3 image can't
+/// serve the SSL listener, so `tlsEnabled=true` would fail the handshake.
+const DEFAULT_SR_FE_IMAGE: &str = "starrocks/fe-ubuntu:3.4-latest";
+const DEFAULT_SR_CN_IMAGE: &str = "starrocks/cn-ubuntu:3.4-latest";
 /// StarRocks FE MySQL-protocol (query) port — where the Iceberg external-catalog
 /// auto-wire runs its `CREATE EXTERNAL CATALOG` DDL (`query_port` in `fe.conf`).
 const STARROCKS_FE_MYSQL_PORT: u16 = 9030;
