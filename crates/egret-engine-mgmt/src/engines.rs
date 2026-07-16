@@ -512,6 +512,21 @@ fn catalog_props_and_secrets(cat: &EngineCatalog) -> CatalogPropsAndSecrets {
 
 /// Build the full provisioning request from the engine + its stored catalogs + config.
 async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProvisionReq, CpError> {
+    // StarRocks engines assemble an entirely different `EngineSpec` (FE/CN roles
+    // + builtin storage volume, no Trino catalogs/auth). Dispatch to the shared
+    // StarRocks assembler so ANY generic caller of `build_provision_req` is
+    // correct for a StarRocks engine. (`update_starrocks_engine` calls
+    // `build_starrocks_provision_req` directly instead, so it can also capture
+    // the delegation bootstrap a later task will consume.)
+    if engine.r#type == "starrocks" {
+        let wh = st
+            .catalog
+            .get_warehouse(engine.warehouse_id)
+            .await?
+            .ok_or_else(|| CpError::BadRequest("unknown warehouse".into()))?;
+        let (req, _bootstrap) = build_starrocks_provision_req(st, engine, &wh).await?;
+        return Ok(req);
+    }
     let cats = st.engine_mgmt.list_engine_catalogs(engine.id).await?;
     let mut catalogs = Vec::new();
     for (i, c) in cats.iter().enumerate() {
@@ -2043,6 +2058,123 @@ async fn build_starrocks_provision_req(
     Ok((req, delegation_bootstrap))
 }
 
+/// Validate a StarRocks body's `delegationMode` (the SAME rule create and update
+/// both apply, up front, before any spec is persisted): an omitted/blank mode is
+/// fine (no delegation), otherwise it MUST be `"jwt"` or `"impersonate"`.
+fn validate_sr_delegation_mode(sr_body: &StarRocksConfigBody) -> Result<(), CpError> {
+    if let Some(m) = sr_body.delegation_mode.as_deref().filter(|s| !s.is_empty()) {
+        if m != "jwt" && m != "impersonate" {
+            return Err(CpError::BadRequest(format!(
+                "invalid starrocks delegationMode: {m} (expected \"jwt\" or \"impersonate\")"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Build the stored engine `spec` JSON from a StarRocks body. On UPDATE,
+/// `existing` is the current `engine.spec` so a PUT that omits a field preserves
+/// it; on CREATE, pass `None` (every omitted field falls back to its create-time
+/// default). No storage coords are ever written here — the FE/CN builtin storage
+/// volume is re-resolved from the warehouse at provision-req assembly time, so
+/// nothing storage-related leaks into the persisted spec.
+///
+/// Per-field rule: use the body value when present (non-blank for strings), else
+/// the corresponding `existing.starrocksConfig.<field>`, else the create-time
+/// default (`DEFAULT_SR_FE_IMAGE`/`DEFAULT_SR_CN_IMAGE`, replicas `1`, resources
+/// `null`).
+///
+/// Delegation-preserve rule: the delegation block is ONLY rewritten when the
+/// body carries a non-blank `delegationMode` (that's the Security tab editing
+/// delegation). When `delegationMode` is absent/blank — the Config tab editing
+/// image/replicas/resources — the EXISTING delegation block is preserved
+/// verbatim, so an unrelated config edit never silently drops delegation. On
+/// create (`existing` is `None`) an absent mode preserves "nothing" ⇒ `null`,
+/// exactly matching create's prior behaviour.
+fn build_starrocks_spec(
+    sr_body: &StarRocksConfigBody,
+    existing: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let existing_cfg = existing.and_then(|e| e.get("starrocksConfig"));
+    let existing_str = |k: &str| {
+        existing_cfg
+            .and_then(|c| c.get(k))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .filter(|s| !s.trim().is_empty())
+    };
+
+    let fe_image = sr_body
+        .fe_image
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| existing_str("feImage"))
+        .unwrap_or_else(|| DEFAULT_SR_FE_IMAGE.into());
+    let cn_image = sr_body
+        .cn_image
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| existing_str("cnImage"))
+        .unwrap_or_else(|| DEFAULT_SR_CN_IMAGE.into());
+    let fe_replicas = sr_body
+        .fe_replicas
+        .or_else(|| {
+            existing_cfg
+                .and_then(|c| c.get("feReplicas"))
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32)
+        })
+        .unwrap_or(1);
+    let cn_replicas = sr_body
+        .cn_replicas
+        .or_else(|| {
+            existing_cfg
+                .and_then(|c| c.get("cnReplicas"))
+                .and_then(|v| v.as_u64())
+                .map(|n| n as u32)
+        })
+        .unwrap_or(1);
+    // Resources are stored verbatim (an object or `null`). A body value wins;
+    // else preserve the existing value; else `null` (= default sizing).
+    let fe_resources = sr_body
+        .fe_resources
+        .clone()
+        .or_else(|| existing_cfg.and_then(|c| c.get("feResources")).cloned())
+        .unwrap_or(serde_json::Value::Null);
+    let cn_resources = sr_body
+        .cn_resources
+        .clone()
+        .or_else(|| existing_cfg.and_then(|c| c.get("cnResources")).cloned())
+        .unwrap_or(serde_json::Value::Null);
+
+    // Delegation: rewrite ONLY when the body carries a mode; otherwise preserve
+    // the existing block (see the delegation-preserve rule above). `tls_enabled`
+    // mirrors create: on when a mode is set, defaulting to true unless opted out.
+    let delegation = match sr_body.delegation_mode.as_deref().filter(|s| !s.is_empty()) {
+        Some(m) => {
+            let tls_enabled = sr_body.tls_enabled.unwrap_or(true);
+            serde_json::json!({ "mode": m, "tlsEnabled": tls_enabled })
+        }
+        None => existing_cfg
+            .and_then(|c| c.get("delegation"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    };
+
+    serde_json::json!({
+        "imageVersion": fe_image,
+        "starrocksConfig": {
+            "feImage": fe_image,
+            "cnImage": cn_image,
+            "feReplicas": fe_replicas,
+            "cnReplicas": cn_replicas,
+            "feResources": fe_resources,
+            "cnResources": cn_resources,
+            "delegation": delegation,
+        },
+    })
+}
+
 /// StarRocks create path (shared-data): builds a `StarRocksConfig` from the
 /// body + the warehouse's storage connection (the FE/CN builtin storage-volume
 /// object store — separate from the Iceberg EXTERNAL CATALOG auto-wire below),
@@ -2096,37 +2228,16 @@ async fn create_starrocks_engine(
     }
 
     let sr_body = b.starrocks.as_ref().cloned().unwrap_or_default();
-    let fe_image = sr_body
-        .fe_image
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_SR_FE_IMAGE.into());
-    let cn_image = sr_body
-        .cn_image
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_SR_CN_IMAGE.into());
-    let fe_replicas = sr_body.fe_replicas.unwrap_or(1);
-    let cn_replicas = sr_body.cn_replicas.unwrap_or(1);
 
     // Delegation opt-in (Access parity slice 3, S3-T2b): validate the mode up
     // front, before any engine row exists, so a bad value 400s with nothing to
     // roll back. `None`/omitted = no delegation (slice-2 default, open engine).
-    let delegation_mode = sr_body.delegation_mode.as_deref().filter(|s| !s.is_empty());
-    if let Some(m) = delegation_mode {
-        if m != "jwt" && m != "impersonate" {
-            return Err(CpError::BadRequest(format!(
-                "invalid starrocks delegationMode: {m} (expected \"jwt\" or \"impersonate\")"
-            )));
-        }
-    }
-    // Defaults to true (TLS-on) when delegation is configured; irrelevant
-    // otherwise. Mirrors the Trino path, which provisions TLS for BOTH
-    // delegation modes unconditionally (`build_provision_req`'s
-    // `engine.supports_delegation()` gate) — a StarRocks jwt login sends the
-    // caller's JWT in cleartext via the mysql_clear_password plugin, so TLS is
-    // just as important here, and disabling it must be an explicit opt-out.
-    let tls_enabled = delegation_mode.is_some() && sr_body.tls_enabled.unwrap_or(true);
+    // TLS-on defaulting when delegation is configured is applied inside
+    // `build_starrocks_spec` (mirrors the Trino path, which provisions TLS for
+    // BOTH delegation modes — a StarRocks jwt login sends the caller's JWT in
+    // cleartext via the mysql_clear_password plugin, so TLS matters here too and
+    // disabling it must be an explicit opt-out).
+    validate_sr_delegation_mode(&sr_body)?;
 
     // ── Iceberg external-catalog auto-wire (T6), step 1: mint a Catalog Client
     // for the warehouse — the EXACT same call the Trino path uses
@@ -2146,31 +2257,15 @@ async fn create_starrocks_engine(
         .await?;
 
     let namespace = DEFAULT_NAMESPACE.to_string();
-    // Persisted so `store::Engine::delegation_mode`/`supports_jwt_delegation`/
-    // `supports_delegation` (read back on every subsequent load, including at
-    // `EngineAssignmentService::assign` time) see the SAME mode this create
-    // call configured. `None` here serializes to a JSON `null`, which
-    // `store::Engine::delegation_mode`'s `.get("mode")` chain treats exactly
-    // like a wholly-absent key — it must NOT default to impersonate the way
-    // Trino's `trinoConfig.delegationMode` does.
-    let delegation_spec = delegation_mode.map(|m| {
-        serde_json::json!({
-            "mode": m,
-            "tlsEnabled": tls_enabled,
-        })
-    });
-    let spec = serde_json::json!({
-        "imageVersion": fe_image,
-        "starrocksConfig": {
-            "feImage": fe_image,
-            "cnImage": cn_image,
-            "feReplicas": fe_replicas,
-            "cnReplicas": cn_replicas,
-            "feResources": sr_body.fe_resources,
-            "cnResources": sr_body.cn_resources,
-            "delegation": delegation_spec,
-        },
-    });
+    // Stored spec (identical builder create and update share). The delegation
+    // block is persisted so `store::Engine::delegation_mode`/
+    // `supports_jwt_delegation`/`supports_delegation` (read back on every
+    // subsequent load, including at `EngineAssignmentService::assign` time) see
+    // the SAME mode this create call configured. An omitted mode serializes to a
+    // JSON `null`, which `store::Engine::delegation_mode`'s `.get("mode")` chain
+    // treats exactly like a wholly-absent key — it must NOT default to
+    // impersonate the way Trino's `trinoConfig.delegationMode` does.
+    let spec = build_starrocks_spec(&sr_body, None);
 
     let engine = match st
         .engine_mgmt
@@ -2672,13 +2767,15 @@ async fn update_engine(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
-    // FAIL-FAST: `build_provision_req` only builds a Trino `EngineSpec`, so a
-    // PUT on a non-Trino engine would corrupt the stored spec AND dispatch to
-    // the Trino provisioner (orphan Trino objects in the StarRocks namespace).
-    // Real StarRocks update is a documented follow-up.
+    // StarRocks has its own spec builder + provision-req assembler (FE/CN roles,
+    // builtin storage volume) — dispatch to it rather than running the Trino
+    // spec/assembly below.
+    if engine.r#type == "starrocks" {
+        return update_starrocks_engine(st, engine, b).await;
+    }
     if engine.r#type != "trino" {
         return Err(CpError::BadRequest(
-            "update not yet supported for starrocks engines; delete and recreate".into(),
+            "update not supported for this engine kind".into(),
         ));
     }
 
@@ -2720,6 +2817,61 @@ async fn update_engine(
     if let Err(msg) = prov.update(&req).await {
         return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
     }
+    Ok(Json(engine.into()))
+}
+
+/// StarRocks update path: re-persist the FE/CN spec (image/replicas/resources)
+/// from the PUT body — omitted fields preserved via [`build_starrocks_spec`] —
+/// then re-provision. The primary Catalog Client is NOT re-minted (its
+/// credential lives on the primary catalog row), so nothing is revoked here.
+///
+/// Delegation is intentionally NOT re-materialized here: [`build_starrocks_spec`]
+/// preserves the existing delegation block on a config-only PUT, and a
+/// delegation *change* (re-bootstrap the JWT integration + service user, roll
+/// TLS) is a later task — see the SEAM marked below. Enforcement of the authz
+/// `engine:update` permission already happened in the [`update_engine`] entry
+/// point before this dispatch.
+async fn update_starrocks_engine(
+    st: CpState,
+    engine: Engine,
+    b: CreateEngineBody,
+) -> Result<Json<EngineDto>, CpError> {
+    let sr_body = b.starrocks.clone().unwrap_or_default();
+    // Validate delegationMode exactly like create (jwt|impersonate|blank) BEFORE
+    // persisting anything, so a bad value 400s without corrupting the stored spec.
+    validate_sr_delegation_mode(&sr_body)?;
+
+    // Merge the body over the CURRENT spec so a PUT that omits image/replicas/
+    // resources (or delegation) preserves what's already stored.
+    let spec = build_starrocks_spec(&sr_body, Some(&engine.spec));
+    st.engine_mgmt
+        .update_engine(engine.id, &spec, &engine.status)
+        .await?;
+    let engine = st
+        .engine_mgmt
+        .get_engine(engine.id)
+        .await?
+        .ok_or(CpError::NotFound)?;
+
+    // Re-resolve the warehouse (same resolver create uses) so the FE/CN builtin
+    // storage volume is fed the SAME S3 coords, and grab the delegation bootstrap
+    // (unused today, consumed by the later delegation-change task).
+    let wh = st
+        .catalog
+        .get_warehouse(engine.warehouse_id)
+        .await?
+        .ok_or_else(|| CpError::BadRequest("unknown warehouse".into()))?;
+    let (req, _bootstrap) = build_starrocks_provision_req(&st, &engine, &wh).await?;
+
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+    if let Err(msg) = prov.update(&req).await {
+        return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
+    }
+    // SEAM for a later task: when the delegation mode/tls actually CHANGES,
+    // re-bootstrap the JWT security integration + service user (GRANT IMPERSONATE)
+    // and re-materialize against the now-Ready FE using `_bootstrap`.
     Ok(Json(engine.into()))
 }
 
@@ -4176,6 +4328,72 @@ mod tests {
         assert_eq!(redact_catalog_config("postgresql", pg.clone()), pg);
     }
 
+    // ── build_starrocks_spec: omitted-field-preserves + delegation rule ─────
+    #[test]
+    fn build_starrocks_spec_preserves_omitted_fields_on_update() {
+        // A fully-populated existing spec (delegation on, custom sizing).
+        let existing = serde_json::json!({
+            "imageVersion": "starrocks/fe-ubuntu:v1",
+            "starrocksConfig": {
+                "feImage": "starrocks/fe-ubuntu:v1",
+                "cnImage": "starrocks/cn-ubuntu:v1",
+                "feReplicas": 3,
+                "cnReplicas": 5,
+                "feResources": { "memRequest": "4Gi" },
+                "cnResources": { "memRequest": "8Gi" },
+                "delegation": { "mode": "jwt", "tlsEnabled": true },
+            },
+        });
+
+        // Config-tab PUT: only feReplicas changes; every other field (incl. the
+        // delegation block, which the Config tab does NOT edit) is preserved.
+        let body = StarRocksConfigBody {
+            fe_replicas: Some(2),
+            ..Default::default()
+        };
+        let spec = build_starrocks_spec(&body, Some(&existing));
+        let cfg = &spec["starrocksConfig"];
+        assert_eq!(cfg["feReplicas"], 2);
+        assert_eq!(cfg["cnReplicas"], 5);
+        assert_eq!(cfg["feImage"], "starrocks/fe-ubuntu:v1");
+        assert_eq!(cfg["cnImage"], "starrocks/cn-ubuntu:v1");
+        assert_eq!(cfg["feResources"]["memRequest"], "4Gi");
+        assert_eq!(cfg["cnResources"]["memRequest"], "8Gi");
+        assert_eq!(spec["imageVersion"], "starrocks/fe-ubuntu:v1");
+        // Delegation NOT dropped by an unrelated config edit.
+        assert_eq!(cfg["delegation"]["mode"], "jwt");
+        assert_eq!(cfg["delegation"]["tlsEnabled"], true);
+
+        // Create-shaped call (existing = None), empty body ⇒ all create defaults,
+        // delegation null.
+        let created = build_starrocks_spec(&StarRocksConfigBody::default(), None);
+        let ccfg = &created["starrocksConfig"];
+        assert_eq!(ccfg["feImage"], DEFAULT_SR_FE_IMAGE);
+        assert_eq!(ccfg["cnImage"], DEFAULT_SR_CN_IMAGE);
+        assert_eq!(ccfg["feReplicas"], 1);
+        assert_eq!(ccfg["cnReplicas"], 1);
+        assert!(ccfg["feResources"].is_null());
+        assert!(ccfg["cnResources"].is_null());
+        assert!(ccfg["delegation"].is_null());
+
+        // Security-tab PUT: a non-blank delegationMode REWRITES the block
+        // (tlsEnabled honoured, here opting out).
+        let sec = StarRocksConfigBody {
+            delegation_mode: Some("impersonate".into()),
+            tls_enabled: Some(false),
+            ..Default::default()
+        };
+        let updated = build_starrocks_spec(&sec, Some(&existing));
+        assert_eq!(
+            updated["starrocksConfig"]["delegation"]["mode"],
+            "impersonate"
+        );
+        assert_eq!(
+            updated["starrocksConfig"]["delegation"]["tlsEnabled"],
+            false
+        );
+    }
+
     // ── build_catalog_req: generic connector + secret sourcing ──────────────
 
     fn generic_catalog(config: serde_json::Value, secret_ref: Option<Uuid>) -> EngineCatalog {
@@ -4408,6 +4626,170 @@ mod tests {
         assert_eq!(sr2.cn_replicas, 1);
         assert!(sr2.delegation.is_none());
         assert!(boot2.is_none());
+    }
+
+    /// A minimal StarRocks-shaped `CreateEngineBody` for update tests (only
+    /// `kind` + `starrocks` are read by `update_starrocks_engine`; the Trino
+    /// wizard fields are ignored).
+    fn sr_update_body(starrocks: Option<StarRocksConfigBody>) -> CreateEngineBody {
+        CreateEngineBody {
+            name: "ignored".into(),
+            warehouse_id: Uuid::nil(),
+            image_version: None,
+            coordinator_replicas: 0,
+            worker_replicas: 0,
+            cpu_min: String::new(),
+            cpu_max: String::new(),
+            memory: String::new(),
+            trino_config: None,
+            authz_service_id: None,
+            kind: "starrocks".into(),
+            starrocks,
+        }
+    }
+
+    /// Seed a stored StarRocks engine (1 FE / 1 CN, no delegation) for the
+    /// update-path tests.
+    async fn seed_sr_engine(st: &CpState, wh_id: Uuid) -> Engine {
+        let spec = serde_json::json!({
+            "imageVersion": DEFAULT_SR_FE_IMAGE,
+            "starrocksConfig": {
+                "feImage": DEFAULT_SR_FE_IMAGE,
+                "cnImage": DEFAULT_SR_CN_IMAGE,
+                "feReplicas": 1,
+                "cnReplicas": 1,
+                "feResources": null,
+                "cnResources": null,
+                "delegation": null,
+            },
+        });
+        st.engine_mgmt
+            .create_engine(
+                &format!("sr-{}", Uuid::new_v4().simple()),
+                "starrocks",
+                "egret-engines",
+                wh_id,
+                &spec,
+            )
+            .await
+            .expect("create engine row")
+    }
+
+    /// A PUT that bumps `feReplicas` + sets `feResources` re-persists those into
+    /// the stored spec while preserving the untouched `cnReplicas`/`feImage`.
+    /// `test_state` has no k8s provisioner, so the update persists the spec then
+    /// fails at the provision step — the DB-visible spec change is what matters.
+    #[tokio::test]
+    async fn update_starrocks_engine_rescales() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping update_starrocks_engine_rescales: DATABASE_URL not set");
+            return;
+        };
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+
+        let body = sr_update_body(Some(StarRocksConfigBody {
+            fe_replicas: Some(2),
+            fe_resources: Some(serde_json::json!({ "memRequest": "2Gi", "memLimit": "4Gi" })),
+            ..Default::default()
+        }));
+        // Ok(Json<EngineDto>) isn't Debug, so map to the error message first.
+        let err = update_starrocks_engine(st.clone(), engine.clone(), body)
+            .await
+            .err()
+            .map(|e| e.to_string());
+        assert!(
+            matches!(&err, Some(m) if m.contains("kubernetes not configured")),
+            "expected k8s-not-configured after persist, got {err:?}"
+        );
+
+        let reloaded = st
+            .engine_mgmt
+            .get_engine(engine.id)
+            .await
+            .expect("reload")
+            .expect("present");
+        let cfg = &reloaded.spec["starrocksConfig"];
+        assert_eq!(cfg["feReplicas"], 2);
+        assert_eq!(cfg["cnReplicas"], 1); // untouched ⇒ preserved
+        assert_eq!(cfg["feResources"]["memRequest"], "2Gi");
+        assert_eq!(cfg["feResources"]["memLimit"], "4Gi");
+        assert_eq!(cfg["feImage"], DEFAULT_SR_FE_IMAGE); // untouched ⇒ preserved
+    }
+
+    /// An update must never leak storage coords into the stored spec, and the
+    /// re-assembled provision request must still derive `storage_path` from the
+    /// warehouse (`<bucket>/starrocks/<engine>`), unchanged by the config edit.
+    #[tokio::test]
+    async fn update_starrocks_engine_preserves_storage() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping update_starrocks_engine_preserves_storage: DATABASE_URL not set");
+            return;
+        };
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+
+        let body = sr_update_body(Some(StarRocksConfigBody {
+            cn_replicas: Some(4),
+            ..Default::default()
+        }));
+        let _ = update_starrocks_engine(st.clone(), engine.clone(), body).await; // fails at prov; spec persisted
+
+        let reloaded = st
+            .engine_mgmt
+            .get_engine(engine.id)
+            .await
+            .expect("reload")
+            .expect("present");
+        // No storage keys leaked into the persisted spec.
+        let cfg = &reloaded.spec["starrocksConfig"];
+        assert!(cfg.get("storageEndpoint").is_none());
+        assert!(cfg.get("storagePath").is_none());
+        assert!(cfg.get("storageSecretKey").is_none());
+        assert!(cfg.get("storageAccessKey").is_none());
+
+        // The provision req still resolves storage from the warehouse formula.
+        let (req, _) = build_starrocks_provision_req(&st, &reloaded, &wh)
+            .await
+            .expect("build_starrocks_provision_req");
+        let sr = req.starrocks.as_ref().expect("starrocks config present");
+        assert_eq!(
+            sr.storage_path,
+            format!("warehouse/starrocks/{}", reloaded.name)
+        );
+        assert_eq!(sr.cn_replicas, 4);
+    }
+
+    /// The generic `build_provision_req` must dispatch a stored StarRocks engine
+    /// to the StarRocks assembler (kind StarRocks, `starrocks` populated), not
+    /// build a Trino spec.
+    #[tokio::test]
+    async fn build_provision_req_dispatches_starrocks() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping build_provision_req_dispatches_starrocks: DATABASE_URL not set");
+            return;
+        };
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = seed_sr_engine(&st, wh.id).await;
+
+        let req = build_provision_req(&st, &engine)
+            .await
+            .expect("build_provision_req");
+        assert_eq!(req.kind, egret_engine_mgmt_api::EngineKind::StarRocks);
+        assert!(req.starrocks.is_some());
+        assert!(req.catalogs.is_empty());
     }
 
     /// WITHOUT a `secret_ref` the generic arm must render exactly as before:
