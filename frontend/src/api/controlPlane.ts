@@ -775,6 +775,11 @@ export interface StarRocksCreateConfig {
   cnImage?: string;
   feReplicas?: number;
   cnReplicas?: number;
+  // Per-user delegation (Access parity slice 3). Omitted = no delegation (the
+  // slice-2 open-engine default). `tlsEnabled` is only meaningful alongside a
+  // delegation mode — the backend ignores it otherwise.
+  delegationMode?: "jwt" | "impersonate";
+  tlsEnabled?: boolean;
 }
 
 export interface CreateEngineInput {

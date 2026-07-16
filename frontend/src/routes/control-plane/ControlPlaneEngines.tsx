@@ -41,6 +41,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -94,6 +95,20 @@ const TRINO_FIELD_DEFAULTS = {
 };
 
 const COLUMNS = ["Name", "Type", "Endpoint", "Status", "Actions"];
+
+// StarRocks per-user delegation mode (Access parity slice 3). `"none"` is the
+// slice-2 open-engine default (no delegation, omitted from the body); `"jwt"`
+// and `"impersonate"` mirror Trino's two delegation modes (see
+// `EngineSecurity.tsx`'s `DelegationMode`), applied to the FE JWT integration
+// / service user the backend provisions (`create_starrocks_engine`).
+type StarRocksDelegationOption = "none" | "jwt" | "impersonate";
+
+const DELEGATION_HELP: Record<StarRocksDelegationOption, string> = {
+  none: "Queries run without per-user delegation — the connection's own configured credential is used for every query.",
+  impersonate:
+    "egret connects as a trusted service account and runs the query as the caller. Works for any signed-in user; runs over TLS.",
+  jwt: "Each query uses the caller's own short-lived JWT, bound to their identity over TLS. No shared credential. OIDC users only.",
+};
 
 export const enginesQueryKey = ["cp", "engines"] as const;
 const warehousesQueryKey = ["cp", "warehouses"] as const;
@@ -333,6 +348,9 @@ function AddEngineDialog({
   const [cnImage, setCnImage] = useState(DEFAULT_SR_CN_IMAGE);
   const [feReplicas, setFeReplicas] = useState(1);
   const [cnReplicas, setCnReplicas] = useState(1);
+  const [delegationMode, setDelegationMode] =
+    useState<StarRocksDelegationOption>("none");
+  const [tlsEnabled, setTlsEnabled] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const isStarRocks = engineType === "starrocks";
@@ -353,6 +371,8 @@ function AddEngineDialog({
     setCnImage(DEFAULT_SR_CN_IMAGE);
     setFeReplicas(1);
     setCnReplicas(1);
+    setDelegationMode("none");
+    setTlsEnabled(true);
     setError(null);
     createMutation.reset();
   }
@@ -381,6 +401,11 @@ function AddEngineDialog({
             cnImage: cnImage.trim(),
             feReplicas,
             cnReplicas,
+            // Omit entirely when "None" — the backend treats an absent
+            // delegationMode as the slice-2 open-engine default.
+            ...(delegationMode !== "none"
+              ? { delegationMode, tlsEnabled }
+              : {}),
           },
           // Required by the body but ignored server-side for StarRocks —
           // send the same defaults the Trino wizard uses.
@@ -499,6 +524,49 @@ function AddEngineDialog({
                     />
                   </div>
                 </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="cpe-sr-delegation">Per-user delegation</Label>
+                  <Select
+                    value={delegationMode}
+                    onValueChange={(v) =>
+                      setDelegationMode(v as StarRocksDelegationOption)
+                    }
+                  >
+                    <SelectTrigger id="cpe-sr-delegation" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">None (default)</SelectItem>
+                      <SelectItem value="jwt">JWT over TLS</SelectItem>
+                      <SelectItem value="impersonate">Impersonate</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {DELEGATION_HELP[delegationMode]}
+                  </p>
+                </div>
+
+                {delegationMode !== "none" && (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-4">
+                      <Label htmlFor="cpe-sr-tls" className="font-normal">
+                        Enable TLS
+                      </Label>
+                      <Switch
+                        id="cpe-sr-tls"
+                        checked={tlsEnabled}
+                        onCheckedChange={setTlsEnabled}
+                        aria-label="Enable TLS"
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Enables FE SSL on the MySQL-protocol port. Recommended for
+                      both delegation modes; disable only for a dev cluster
+                      without the extra listener set up.
+                    </p>
+                  </div>
+                )}
               </>
             ) : (
               <>

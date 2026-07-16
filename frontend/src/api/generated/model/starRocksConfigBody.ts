@@ -30,4 +30,23 @@ export interface StarRocksConfigBody {
   cnReplicas?: number | null;
   feResources?: StarRocksConfigBodyFeResources;
   cnResources?: StarRocksConfigBodyCnResources;
+  /**
+     * Opt into per-user delegation (Access parity slice 3): `"jwt"` |
+     * `"impersonate"` | omitted/`None` (no delegation — the slice-2 open
+     * engine default). The OIDC coordinates (jwks/issuer) and the
+     * impersonation service-user credential are NOT accepted here — they're
+     * derived from egret's own OIDC config / minted server-side (see
+     * [`create_starrocks_engine`]), same posture as Trino's
+     * `trinoConfig.auth.jwt` vs the delegator secret.
+     * @nullable
+     */
+  delegationMode?: string | null;
+  /**
+     * Enable FE SSL on the MySQL-protocol port (:9030) when delegation is
+     * configured. Defaults to `true` when `delegation_mode` is set; ignored
+     * otherwise. `false` opts out of TLS while still enabling delegation
+     * (e.g. a dev cluster where the extra listener setup isn't wanted).
+     * @nullable
+     */
+  tlsEnabled?: boolean | null;
 }
