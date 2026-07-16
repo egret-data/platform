@@ -2058,6 +2058,24 @@ async fn create_starrocks_engine(
             storage_secret_key,
             fe_resources,
             cn_resources,
+            // Delegation (Access parity slice 3, S3-T2): NOT wired here yet.
+            // `create_starrocks_engine` has no opt-in surface for the OIDC
+            // issuer/audience a `StarRocksDelegation` needs (unlike Trino's
+            // `trinoConfig.auth.jwt`, `CreateEngineBody`/`StarRocksConfigBody`
+            // carry no such field today), and the connection this would need
+            // to stamp `options.impersonate`/`options.tls_cert` onto is not
+            // created here either — it's materialized later, generically, by
+            // `EngineAssignmentService::assign` off `store::Engine` helpers
+            // that are themselves hardcoded to Trino's DNS/port/spec-key
+            // shape (see that module's doc for the gap). The runtime JWT-
+            // integration + impersonation-user bootstrap SQL below
+            // (`starrocks_jwt_integration_sql` /
+            // `starrocks_create_service_user_sql` /
+            // `starrocks_impersonation_grant_sql`, wired into
+            // `spawn_starrocks_catalog_wire`'s `delegation` param) is built
+            // and unit-tested so a future caller can pass `Some(..)` here
+            // once those seams exist.
+            delegation: None,
         }),
     };
 
@@ -2089,6 +2107,9 @@ async fn create_starrocks_engine(
         wh.name.clone(),
         client.client_id.clone(),
         client.client_secret.clone(),
+        // Delegation bootstrap: see the doc note on `delegation: None` above —
+        // no caller constructs `Some(..)` yet.
+        None,
     );
 
     Ok((StatusCode::CREATED, Json(engine.into())))
@@ -2166,10 +2187,19 @@ fn starrocks_external_catalog_sql(
 /// ConfigMap ships with no auth hardening yet). Direct `mysql_async` (not
 /// `egret_query`'s interactive `StarRocksConnector`): this is a one-shot admin
 /// statement with no caller-facing row cap/cancellation/result shape to
-/// thread through.
-async fn run_starrocks_ddl(host: &str, port: u16, sql: &str) -> Result<(), String> {
+/// thread through. `tls_cert_pem` mirrors the connector's (S3-T1) TLS pinning
+/// — `Some(pem)` pins the FE's egret-generated self-signed cert as the trust
+/// root (domain validation skipped, same rationale as
+/// `StarRocksConnector::new`: the cert's CN won't match the in-cluster
+/// Service DNS we dial) and runs the DDL over TLS; `None` stays plain TCP.
+async fn run_starrocks_ddl(
+    host: &str,
+    port: u16,
+    sql: &str,
+    tls_cert_pem: Option<&str>,
+) -> Result<(), String> {
     use mysql_async::prelude::Queryable;
-    let opts = mysql_async::OptsBuilder::default()
+    let mut opts = mysql_async::OptsBuilder::default()
         .ip_or_hostname(host)
         .tcp_port(port)
         .user(Some("root"))
@@ -2177,6 +2207,12 @@ async fn run_starrocks_ddl(host: &str, port: u16, sql: &str) -> Result<(), Strin
         // `prefer_socket` capability with "unknown variable 'socket'" —
         // matches `StarRocksConnector::new`'s own workaround.
         .prefer_socket(false);
+    if let Some(pem) = tls_cert_pem {
+        let ssl = mysql_async::SslOpts::default()
+            .with_root_certs(vec![mysql_async::PathOrBuf::from(pem.as_bytes().to_vec())])
+            .with_danger_skip_domain_validation(true);
+        opts = opts.ssl_opts(Some(ssl));
+    }
     let mut conn = mysql_async::Conn::new(opts)
         .await
         .map_err(|e| e.to_string())?;
@@ -2185,21 +2221,98 @@ async fn run_starrocks_ddl(host: &str, port: u16, sql: &str) -> Result<(), Strin
     Ok(())
 }
 
-/// Best-effort, non-blocking post-provision step (T6 step 3): poll the
-/// provisioner's `status` until a StarRocks FE pod reports ready (bounded to
-/// ~5 minutes), then run [`starrocks_external_catalog_sql`] against the FE's
-/// in-cluster MySQL-protocol service. The DDL embeds the OAuth2
-/// `client_id:client_secret` credential directly (StarRocks self-refreshes its
-/// access token from it, so there is no short-lived bearer to mint here and no
-/// token-expiry to recover from). Spawned via `tokio::spawn` so
-/// `create_starrocks_engine` returns its HTTP response without waiting on any of
-/// this — the FE takes ~1-2 min to come up, and neither the poll budget nor
-/// FE/egret reachability in a given cluster is something the create request
-/// should block on. Every failure path only logs (`tracing::warn!`); it never
-/// has a channel back to the original HTTP response, by construction. The FE
-/// service DNS name (`<name>-fe-service.<namespace>.svc`) is the kube-starrocks
-/// operator's documented convention; UNVERIFIED against a live operator install
-/// as of this change (flagged for the Task 8 live smoke — see plan doc).
+/// Build the `CREATE SECURITY INTEGRATION` + `authentication_chain` DDL that
+/// registers egret's OIDC/Keycloak JWKS with a StarRocks FE, mirroring
+/// slice-1's manual `deploy/starrocks/init/security-integration.sql` (now
+/// templated with the engine's own OIDC coordinates instead of a hand-edited
+/// file). `principal_field=preferred_username` matches the Trino jwt-mode
+/// config (`build_provision_req`'s
+/// `http-server.authentication.jwt.principal-field`) and the connector's own
+/// assumption (S3-T1's `StarRocksConnector::new` logs in as `session_user`,
+/// which `submit_query` resolves from the same OIDC claim). `native,egret_oidc`
+/// keeps the existing native/password chain working alongside JWT logins
+/// (impersonate mode still needs the native chain for the service user).
+///
+/// All interpolated values are escaped ([`sr_escape_dq`]) — same DDL-injection
+/// posture as [`starrocks_external_catalog_sql`]: this runs as `root` on the
+/// FE, and `jwks_url`/`issuer`/`audience` are admin-controlled config, not
+/// charset-validated anywhere upstream.
+fn starrocks_jwt_integration_sql(jwks_url: &str, issuer: &str, audience: &str) -> Vec<String> {
+    let jwks_url = sr_escape_dq(jwks_url);
+    let issuer = sr_escape_dq(issuer);
+    let audience = sr_escape_dq(audience);
+    vec![
+        format!(
+            "CREATE SECURITY INTEGRATION egret_oidc PROPERTIES(\"type\"=\"authentication_jwt\", \
+             \"jwks_url\"=\"{jwks_url}\", \"principal_field\"=\"preferred_username\", \
+             \"required_issuer\"=\"{issuer}\", \"required_audience\"=\"{audience}\")"
+        ),
+        "ADMIN SET FRONTEND CONFIG (\"authentication_chain\"=\"native,egret_oidc\")".into(),
+    ]
+}
+
+/// Build the `CREATE USER IF NOT EXISTS` DDL for the impersonation service
+/// user (the connection's basic-auth login on the impersonate path — S3-T1's
+/// `StarRocksConnector` logs in as this user, then runs `EXECUTE AS
+/// <session_user>`). `IDENTIFIED BY` takes a single-quoted string literal
+/// (StarRocks/MySQL `CREATE USER` grammar), so both the username and password
+/// are single-quote-escaped — a username/password containing `'` must not be
+/// able to close the literal early and inject DDL (this runs as `root`).
+fn starrocks_create_service_user_sql(service_user: &str, password: &str) -> String {
+    let esc_user = service_user.replace('\'', "''");
+    let esc_pw = password.replace('\'', "''");
+    format!("CREATE USER IF NOT EXISTS '{esc_user}'@'%' IDENTIFIED BY '{esc_pw}'")
+}
+
+/// Build the `GRANT IMPERSONATE` DDL authorizing the service user to run
+/// `EXECUTE AS <any user> WITH NO REVERT` (the impersonate-mode primitive —
+/// see `crate::execution::connector::starrocks::StarRocksConnector::switch_identity`
+/// in `egret-query`). Backticks in the identifier are doubled (MySQL/StarRocks
+/// identifier-escaping rule), matching [`sr_escape_ident`]'s convention.
+fn starrocks_impersonation_grant_sql(service_user: &str) -> String {
+    let esc = service_user.replace('`', "``");
+    format!("GRANT IMPERSONATE ON ALL USERS TO `{esc}`")
+}
+
+/// Runtime bundle for the post-Ready delegation bootstrap (S3-T2 step 3): the
+/// JWT security integration + the impersonation service user. `None` on
+/// [`spawn_starrocks_catalog_wire`]'s `delegation` param skips the bootstrap
+/// entirely — today no caller constructs `Some(..)` (see
+/// `create_starrocks_engine`'s doc note on the missing issuer/audience +
+/// connection-storage seams); this exists so the SQL-execution wiring is
+/// ready the moment those seams land.
+struct StarRocksDelegationBootstrap {
+    jwks_url: String,
+    issuer: String,
+    audience: String,
+    /// `Some(pem)` runs the bootstrap DDL over TLS, pinning this cert (mirrors
+    /// the connector's `options.tls_cert`); `None` stays plain TCP.
+    tls_cert_pem: Option<String>,
+    service_user: String,
+    service_password: String,
+}
+
+/// Best-effort, non-blocking post-provision step (T6 step 3, extended by
+/// S3-T2 step 3): poll the provisioner's `status` until a StarRocks FE pod
+/// reports ready (bounded to ~5 minutes), then run
+/// [`starrocks_external_catalog_sql`] against the FE's in-cluster
+/// MySQL-protocol service, and — when `delegation` is `Some` — the JWT
+/// security integration + impersonation service-user bootstrap
+/// ([`starrocks_jwt_integration_sql`] / [`starrocks_create_service_user_sql`] /
+/// [`starrocks_impersonation_grant_sql`]), over TLS when the bundle carries a
+/// cert. The DDL embeds the OAuth2 `client_id:client_secret` credential
+/// directly (StarRocks self-refreshes its access token from it, so there is
+/// no short-lived bearer to mint here and no token-expiry to recover from).
+/// Spawned via `tokio::spawn` so `create_starrocks_engine` returns its HTTP
+/// response without waiting on any of this — the FE takes ~1-2 min to come
+/// up, and neither the poll budget nor FE/egret reachability in a given
+/// cluster is something the create request should block on. Every failure
+/// path only logs (`tracing::warn!`); it never has a channel back to the
+/// original HTTP response, by construction. The FE service DNS name
+/// (`<name>-fe-service.<namespace>.svc`) is the kube-starrocks operator's
+/// documented convention; UNVERIFIED against a live operator install as of
+/// this change (flagged for the Task 8 / S3-T4 live smoke — see plan doc).
+#[allow(clippy::too_many_arguments)]
 fn spawn_starrocks_catalog_wire(
     prov: Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>,
     namespace: String,
@@ -2208,6 +2321,7 @@ fn spawn_starrocks_catalog_wire(
     warehouse_name: String,
     client_id: String,
     client_secret: String,
+    delegation: Option<StarRocksDelegationBootstrap>,
 ) {
     tokio::spawn(async move {
         const MAX_POLLS: u32 = 30;
@@ -2241,7 +2355,7 @@ fn spawn_starrocks_catalog_wire(
         let credential = format!("{client_id}:{client_secret}");
         let sql = starrocks_external_catalog_sql("egret", &egret_url, &warehouse_name, &credential);
         let fe_host = format!("{engine_name}-fe-service.{namespace}.svc");
-        match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, &sql).await {
+        match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, &sql, None).await {
             Ok(()) => {
                 tracing::info!(engine = %engine_name,
                     "starrocks catalog auto-wire: external Iceberg catalog wired");
@@ -2249,6 +2363,36 @@ fn spawn_starrocks_catalog_wire(
             Err(e) => {
                 tracing::warn!(engine = %engine_name, %fe_host, error = %e,
                     "starrocks catalog auto-wire: CREATE EXTERNAL CATALOG failed; admin can retry");
+            }
+        }
+
+        // Delegation bootstrap (S3-T2 step 3): JWT integration + impersonation
+        // service user, best-effort + logged like the catalog wire above.
+        if let Some(d) = delegation {
+            let mut stmts = starrocks_jwt_integration_sql(&d.jwks_url, &d.issuer, &d.audience);
+            stmts.push(starrocks_create_service_user_sql(
+                &d.service_user,
+                &d.service_password,
+            ));
+            stmts.push(starrocks_impersonation_grant_sql(&d.service_user));
+            let mut all_ok = true;
+            for stmt in &stmts {
+                if let Err(e) = run_starrocks_ddl(
+                    &fe_host,
+                    STARROCKS_FE_MYSQL_PORT,
+                    stmt,
+                    d.tls_cert_pem.as_deref(),
+                )
+                .await
+                {
+                    all_ok = false;
+                    tracing::warn!(engine = %engine_name, %fe_host, error = %e,
+                        "starrocks delegation bootstrap: statement failed; admin can retry");
+                }
+            }
+            if all_ok {
+                tracing::info!(engine = %engine_name,
+                    "starrocks delegation bootstrap: JWT integration + impersonation user wired");
             }
         }
     });
@@ -4282,5 +4426,84 @@ mod tests {
             sql2.contains(r#"warehouse"="a\\b"#),
             "backslash not escaped; sql={sql2}"
         );
+    }
+
+    /// [`starrocks_jwt_integration_sql`] (S3-T2) renders the
+    /// `authentication_jwt` integration + activates it via the
+    /// `authentication_chain` frontend config — mirrors slice-1's manual
+    /// `security-integration.sql`, now templated with the engine's own OIDC
+    /// coordinates.
+    #[test]
+    fn starrocks_jwt_integration_sql_renders_integration_and_activation() {
+        let stmts = starrocks_jwt_integration_sql(
+            "https://kc/realms/egret/protocol/openid-connect/certs",
+            "https://kc/realms/egret",
+            "egret",
+        );
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].contains("CREATE SECURITY INTEGRATION egret_oidc"));
+        assert!(stmts[0].contains(r#""type"="authentication_jwt""#));
+        assert!(stmts[0]
+            .contains(r#""jwks_url"="https://kc/realms/egret/protocol/openid-connect/certs""#));
+        assert!(stmts[0].contains(r#""principal_field"="preferred_username""#));
+        assert!(stmts[0].contains(r#""required_issuer"="https://kc/realms/egret""#));
+        assert!(stmts[0].contains(r#""required_audience"="egret""#));
+        assert_eq!(
+            stmts[1],
+            r#"ADMIN SET FRONTEND CONFIG ("authentication_chain"="native,egret_oidc")"#
+        );
+    }
+
+    /// A malicious/free-form issuer/audience/jwks_url must not break out of
+    /// the double-quoted property value — same DDL-injection posture as
+    /// `starrocks_external_catalog_sql`.
+    #[test]
+    fn starrocks_jwt_integration_sql_escapes_ddl_injection() {
+        let evil = r#"kc" ) ; DROP DATABASE x ; -- "#;
+        let stmts = starrocks_jwt_integration_sql("https://kc/jwks", evil, "aud");
+        assert!(
+            !stmts[0].contains(r#"kc" ) ; DROP DATABASE x"#),
+            "unescaped issuer breakout present; stmt={}",
+            stmts[0]
+        );
+        assert!(
+            stmts[0].contains(r#"required_issuer"="kc\" ) ; DROP DATABASE x ; -- ""#),
+            "issuer not escaped; stmt={}",
+            stmts[0]
+        );
+    }
+
+    /// [`starrocks_create_service_user_sql`] (S3-T2) renders a `CREATE USER`
+    /// statement with a single-quoted `IDENTIFIED BY` password; a `'` in
+    /// either the username or password must be escaped (doubled), not close
+    /// the literal early.
+    #[test]
+    fn starrocks_create_service_user_sql_renders_and_escapes() {
+        let sql = starrocks_create_service_user_sql("egret_delegator", "s3cr3t");
+        assert_eq!(
+            sql,
+            "CREATE USER IF NOT EXISTS 'egret_delegator'@'%' IDENTIFIED BY 's3cr3t'"
+        );
+        let evil_sql = starrocks_create_service_user_sql("a'; DROP USER root; --", "p'w");
+        assert!(
+            !evil_sql.contains("a'; DROP USER root"),
+            "unescaped username breakout present; sql={evil_sql}"
+        );
+        assert!(evil_sql.contains("a''; DROP USER root; --"));
+        assert!(evil_sql.contains("p''w"));
+    }
+
+    /// [`starrocks_impersonation_grant_sql`] (S3-T2) renders `GRANT
+    /// IMPERSONATE ON ALL USERS` for the backtick-quoted service user; a
+    /// backtick in the identifier must be doubled, not close the identifier
+    /// quoting early (this DDL runs as `root`).
+    #[test]
+    fn starrocks_impersonation_grant_sql_renders_and_escapes() {
+        assert_eq!(
+            starrocks_impersonation_grant_sql("egret_delegator"),
+            "GRANT IMPERSONATE ON ALL USERS TO `egret_delegator`"
+        );
+        let evil = starrocks_impersonation_grant_sql("a`.evil");
+        assert_eq!(evil, "GRANT IMPERSONATE ON ALL USERS TO `a``.evil`");
     }
 }

@@ -69,6 +69,18 @@ pub fn starrocks_fe_configmap(spec: &EngineSpec) -> Value {
     if spec.ranger.is_some() {
         conf.push_str("access_control = ranger\n");
     }
+    // FE TLS on :9030 (Access delegation parity, slice 3): the exact `ssl_*`
+    // keys are LIVE-ONLY (the T4 smoke tunes them against the `fe-ubuntu`
+    // image); this documented set is the starting point. `ssl_force_secure_transport
+    // = false` allows plaintext to keep working alongside TLS in dev — the
+    // connector (S3-T1) opts into TLS per-connection via `options.tls_cert`.
+    if let Some(d) = sr.delegation.as_ref().filter(|d| d.tls_enabled) {
+        let _ = d;
+        conf.push_str("ssl_keystore_location = /etc/starrocks/ssl/keystore\n");
+        conf.push_str("ssl_keystore_password = changeit\n");
+        conf.push_str("ssl_key_password = changeit\n");
+        conf.push_str("ssl_force_secure_transport = false\n");
+    }
 
     json!({
         "apiVersion": "v1", "kind": "ConfigMap",
@@ -113,6 +125,32 @@ pub fn starrocks_ranger_configmap(spec: &EngineSpec) -> Option<Value> {
     }))
 }
 
+/// The FE TLS cert ConfigMap (`{name}-ssl-cm`). `None` unless the engine's
+/// delegation config has `tls_enabled`. Carries the public cert PEM egret
+/// generated (`fe.crt`) — mounted at `/etc/starrocks/ssl` alongside
+/// `starrocks_fe_configmap`'s `ssl_keystore_location`.
+///
+/// KNOWN GAP (live-only): `fe.conf`'s `ssl_keystore_location` expects a Java
+/// keystore (JKS/PKCS12), not a raw PEM. Converting the PEM egret generates
+/// into that keystore format (`keytool`/`openssl pkcs12`) is NOT done here —
+/// it's a live-provisioning step the T4 smoke must add (e.g. an init
+/// container, or minting the keystore directly). This fn only wires the
+/// config + mounts the cert so the templating is unit-testable; the FE won't
+/// actually start serving TLS until the keystore file exists at that path.
+pub fn starrocks_ssl_configmap(spec: &EngineSpec) -> Option<Value> {
+    let d = spec
+        .starrocks
+        .as_ref()
+        .and_then(|sr| sr.delegation.as_ref())
+        .filter(|d| d.tls_enabled)?;
+    Some(json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": { "name": format!("{}-ssl-cm", spec.name), "namespace": spec.namespace,
+                      "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
+        "data": { "fe.crt": d.tls_cert_pem }
+    }))
+}
+
 /// The `starrocks.com/v1 StarRocksCluster` CR: FE + CN roles only (shared-data
 /// mode has no BE). FE mounts `fe.conf` via `configMapInfo`, plus the Ranger
 /// XML ConfigMap under `configMaps` when a binding is present.
@@ -139,11 +177,24 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
             fe_spec["requests"] = requests;
         }
     }
+    // Extra ConfigMaps the FE mounts: the Ranger XML (when bound) and the TLS
+    // cert (when the delegation config has TLS enabled). Both are independent
+    // and additive, so collect whichever apply into one `configMaps` array.
+    let mut extra_config_maps: Vec<Value> = Vec::new();
     if spec.ranger.is_some() {
-        fe_spec["configMaps"] = json!([{
+        extra_config_maps.push(json!({
             "name": format!("{}-ranger-cm", spec.name),
             "mountPath": "/opt/starrocks/fe/conf",
-        }]);
+        }));
+    }
+    if starrocks_ssl_configmap(spec).is_some() {
+        extra_config_maps.push(json!({
+            "name": format!("{}-ssl-cm", spec.name),
+            "mountPath": "/etc/starrocks/ssl",
+        }));
+    }
+    if !extra_config_maps.is_empty() {
+        fe_spec["configMaps"] = json!(extra_config_maps);
     }
 
     let mut cn_spec = json!({
@@ -182,12 +233,16 @@ impl StarRocksProvisioner {
         Self { kube }
     }
 
-    /// Apply the fe.conf ConfigMap, the Ranger XML ConfigMap (when bound), and
-    /// the CR in order. On the happy path these are the three objects a
-    /// StarRocks engine needs; `provision` best-effort rolls them back on error.
+    /// Apply the fe.conf ConfigMap, the Ranger XML ConfigMap (when bound), the
+    /// TLS cert ConfigMap (when delegation TLS is enabled), and the CR in
+    /// order. On the happy path these are the objects a StarRocks engine
+    /// needs; `provision` best-effort rolls them back on error.
     async fn apply_all(&self, spec: &EngineSpec) -> anyhow::Result<()> {
         self.kube.apply(&starrocks_fe_configmap(spec)).await?;
         if let Some(cm) = starrocks_ranger_configmap(spec) {
+            self.kube.apply(&cm).await?;
+        }
+        if let Some(cm) = starrocks_ssl_configmap(spec) {
             self.kube.apply(&cm).await?;
         }
         self.kube.apply(&starrocks_cluster_cr(spec)).await?;
@@ -221,6 +276,19 @@ impl EngineProvisioner for StarRocksProvisioner {
                     "ConfigMap",
                     &spec.namespace,
                     &format!("{}-ranger-cm", spec.name),
+                )
+                .await;
+        }
+        // Mirror the same orphan-cleanup for the TLS ConfigMap when delegation
+        // TLS is toggled off.
+        if starrocks_ssl_configmap(spec).is_none() {
+            let _ = self
+                .kube
+                .delete(
+                    "v1",
+                    "ConfigMap",
+                    &spec.namespace,
+                    &format!("{}-ssl-cm", spec.name),
                 )
                 .await;
         }
@@ -278,6 +346,10 @@ impl EngineProvisioner for StarRocksProvisioner {
             .kube
             .delete("v1", "ConfigMap", namespace, &format!("{name}-ranger-cm"))
             .await;
+        let _ = self
+            .kube
+            .delete("v1", "ConfigMap", namespace, &format!("{name}-ssl-cm"))
+            .await;
         Ok(())
     }
 }
@@ -307,8 +379,23 @@ mod tests {
                 storage_secret_key: "egretsecret".into(),
                 fe_resources: None,
                 cn_resources: None,
+                delegation: None,
             }),
         }
+    }
+
+    /// `sample_sr_spec` plus a delegation block with TLS enabled — the fixture
+    /// for the ssl-config / ssl-cm tests below.
+    fn sample_sr_spec_with_tls() -> EngineSpec {
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().delegation = Some(StarRocksDelegation {
+            jwks_url: "https://kc/realms/egret/protocol/openid-connect/certs".into(),
+            issuer: "https://kc/realms/egret".into(),
+            audience: "egret".into(),
+            tls_cert_pem: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n".into(),
+            tls_enabled: true,
+        });
+        spec
     }
 
     #[test]
@@ -343,6 +430,7 @@ mod tests {
         assert!(conf.contains("aws_s3_enable_path_style_access = true"));
         assert!(conf.contains("enable_load_volume_from_conf = true"));
         assert!(!conf.contains("access_control = ranger")); // not unless bound
+        assert!(!conf.contains("ssl_")); // not unless delegation.tls_enabled
     }
 
     #[test]
@@ -377,5 +465,80 @@ mod tests {
     #[test]
     fn no_ranger_binding_omits_xml_configmap() {
         assert!(starrocks_ranger_configmap(&sample_sr_spec()).is_none());
+    }
+
+    /// TDD (T2 step 2): `ssl_*` keys appear ONLY when `delegation.tls_enabled`.
+    #[test]
+    fn delegation_tls_enabled_adds_ssl_config_and_configmap() {
+        let spec = sample_sr_spec_with_tls();
+        let conf = starrocks_fe_configmap(&spec)["data"]["fe.conf"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(conf.contains("ssl_keystore_location = /etc/starrocks/ssl/keystore"));
+        assert!(conf.contains("ssl_keystore_password = changeit"));
+        assert!(conf.contains("ssl_key_password = changeit"));
+        assert!(conf.contains("ssl_force_secure_transport = false"));
+
+        let ssl_cm = starrocks_ssl_configmap(&spec).expect("ssl-cm present when tls_enabled");
+        assert_eq!(ssl_cm["metadata"]["name"], "sr1-ssl-cm");
+        assert!(ssl_cm["data"]["fe.crt"]
+            .as_str()
+            .unwrap()
+            .contains("BEGIN CERTIFICATE"));
+
+        let cr = starrocks_cluster_cr(&spec);
+        let mounts = cr["spec"]["starRocksFeSpec"]["configMaps"]
+            .as_array()
+            .unwrap();
+        assert!(mounts
+            .iter()
+            .any(|m| m["name"] == ssl_cm["metadata"]["name"]
+                && m["mountPath"] == "/etc/starrocks/ssl"));
+    }
+
+    /// No delegation block at all → no ssl config/configmap (slice-2 default).
+    #[test]
+    fn no_delegation_omits_ssl_config_and_configmap() {
+        assert!(starrocks_ssl_configmap(&sample_sr_spec()).is_none());
+    }
+
+    /// Delegation present but `tls_enabled = false` → also no ssl config/configmap.
+    #[test]
+    fn delegation_without_tls_enabled_omits_ssl_config_and_configmap() {
+        let mut spec = sample_sr_spec_with_tls();
+        spec.starrocks
+            .as_mut()
+            .unwrap()
+            .delegation
+            .as_mut()
+            .unwrap()
+            .tls_enabled = false;
+        let conf = starrocks_fe_configmap(&spec)["data"]["fe.conf"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!conf.contains("ssl_"));
+        assert!(starrocks_ssl_configmap(&spec).is_none());
+        let cr = starrocks_cluster_cr(&spec);
+        assert!(cr["spec"]["starRocksFeSpec"].get("configMaps").is_none());
+    }
+
+    /// Both Ranger AND TLS bound: the FE mounts both ConfigMaps.
+    #[test]
+    fn ranger_and_tls_both_mount_their_configmaps() {
+        let mut spec = sample_sr_spec_with_tls();
+        spec.ranger = Some(RangerBinding {
+            service_name: "sr1".into(),
+            egret_url: "http://host.docker.internal:8080".into(),
+            poll_interval_ms: 30_000,
+        });
+        let cr = starrocks_cluster_cr(&spec);
+        let mounts = cr["spec"]["starRocksFeSpec"]["configMaps"]
+            .as_array()
+            .unwrap();
+        assert_eq!(mounts.len(), 2);
+        assert!(mounts.iter().any(|m| m["name"] == "sr1-ranger-cm"));
+        assert!(mounts.iter().any(|m| m["name"] == "sr1-ssl-cm"));
     }
 }

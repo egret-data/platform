@@ -417,6 +417,23 @@ pub struct StarRocksConfig {
     pub fe_resources: Option<RoleResources>,
     /// CN (compute) role sizing; defaults when None.
     pub cn_resources: Option<RoleResources>,
+    /// Delegation/security wiring (JWT integration + FE TLS); `None` = neither
+    /// templated (slice-2 behavior, open engine).
+    pub delegation: Option<StarRocksDelegation>,
+}
+
+/// Delegation/security wiring for a provisioned StarRocks. `None` on
+/// [`StarRocksConfig::delegation`] = no JWT/TLS templated.
+#[derive(Clone, Debug)]
+pub struct StarRocksDelegation {
+    /// Keycloak JWKS URL reachable from the FE pod.
+    pub jwks_url: String,
+    pub issuer: String,
+    pub audience: String,
+    /// PEM of the FE TLS cert egret generated (also pinned on the connection).
+    pub tls_cert_pem: String,
+    /// Enable FE SSL on :9030.
+    pub tls_enabled: bool,
 }
 
 impl std::fmt::Debug for StarRocksConfig {
@@ -432,6 +449,7 @@ impl std::fmt::Debug for StarRocksConfig {
             .field("storage_secret_key", &"<redacted>")
             .field("fe_resources", &self.fe_resources)
             .field("cn_resources", &self.cn_resources)
+            .field("delegation", &self.delegation)
             .finish()
     }
 }
@@ -507,6 +525,7 @@ mod tests {
             storage_secret_key: "egretsecret".into(),
             fe_resources: None,
             cn_resources: None,
+            delegation: None,
         };
         assert_eq!(s.fe_replicas, 1);
     }
