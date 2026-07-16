@@ -185,3 +185,36 @@ row-filter policies — which egret's Trino integration already enforces — are
 (`apache/starrocks#67458` is still open). Don't expect a StarRocks-side
 column mask or row filter to do anything even if a matching tag policy exists
 for the same data in Trino; only Trino gets tag-based enforcement today.
+
+## Provisioning (Kubernetes operator)
+
+egret provisions StarRocks clusters onto Kubernetes via the upstream
+[kube-starrocks operator](https://github.com/StarRocks/starrocks-kubernetes-operator)
+and a `StarRocksCluster` custom resource. The operator's install manifests are
+vendored **verbatim** (unmodified, straight `cp` from the upstream repo) into
+`deploy/starrocks-operator/`:
+
+| File | Purpose |
+|---|---|
+| `deploy/starrocks-operator/crd.yaml` | The `starrocksclusters.starrocks.com` CustomResourceDefinition. |
+| `deploy/starrocks-operator/operator.yaml` | Namespace `starrocks`, ServiceAccount, ClusterRole/ClusterRoleBinding, and the `kube-starrocks-operator` Deployment. |
+
+### Install (one-time)
+
+```bash
+kubectl apply -f deploy/starrocks-operator/crd.yaml
+kubectl apply -f deploy/starrocks-operator/operator.yaml   # installs into ns `starrocks`
+kubectl -n starrocks rollout status deploy/kube-starrocks-operator
+```
+
+This is a **one-time, pre-installed** step — the same posture egret already
+takes toward Kubernetes operators for its engines (e.g. the Stackable Trino
+operator used in earlier Trino provisioning phases): egret does **not**
+manage the operator's own lifecycle (install, upgrade, uninstall). The
+StarRocks provisioner only assumes the `starrocksclusters.starrocks.com` CRD
+is already present in the cluster and creates/deletes `StarRocksCluster`
+custom resources against it — it never touches the operator Deployment
+itself.
+
+Provisioned clusters run in **FE + CN shared-data mode** (object-storage
+backed, no local-disk BE nodes).
