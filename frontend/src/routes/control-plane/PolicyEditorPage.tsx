@@ -115,6 +115,22 @@ export function defaultResourcesFromDef(
   return out;
 }
 
+// The masking/row-filter resource subsets (`dataMaskDef.resources`/
+// `rowFilterDef.resources`) are flat name-only refs with no parent/level, so
+// ResourceSelector — which cascades by walking `parent` links — would render
+// only the root. Map each subset entry onto its full `resources` counterpart
+// (by name) so the subset regains parent/level/flags and cascades correctly,
+// while still limiting the selectable types to the kind's allowed subset. A
+// name with no full match is kept as-is (no invented hierarchy). Exported for
+// unit testing (pure helper).
+export function enrichResourceDefs(
+  subset: ServiceDefResource[],
+  full: ServiceDefResource[],
+): ServiceDefResource[] {
+  const byName = new Map(full.map((r) => [r.name, r]));
+  return subset.map((r) => byName.get(r.name) ?? r);
+}
+
 /**
  * Builds a fresh form for a brand-new policy of the given kind. Mirrors the
  * three dialogs' `blankInput` helpers (`AccessPolicyDialog`,
@@ -304,12 +320,13 @@ export default function PolicyEditorPage() {
   // the top-level hierarchy, masking/rowfilter use their own (Ranger keeps
   // separate resource defs per policy kind — e.g. masking's may omit levels
   // access allows, or vice versa).
+  const fullResDefs = def.data?.resources ?? [];
   const resDefs: ServiceDefResource[] =
     kind === "masking"
-      ? (def.data?.dataMaskDef?.resources ?? [])
+      ? enrichResourceDefs(def.data?.dataMaskDef?.resources ?? [], fullResDefs)
       : kind === "rowfilter"
-        ? (def.data?.rowFilterDef?.resources ?? [])
-        : (def.data?.resources ?? []);
+        ? enrichResourceDefs(def.data?.rowFilterDef?.resources ?? [], fullResDefs)
+        : fullResDefs;
   const resDefByName = (name: string): ServiceDefResource | undefined =>
     resDefs.find((r) => r.name === name);
 
