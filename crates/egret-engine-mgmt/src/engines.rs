@@ -2825,12 +2825,14 @@ async fn update_engine(
 /// then re-provision. The primary Catalog Client is NOT re-minted (its
 /// credential lives on the primary catalog row), so nothing is revoked here.
 ///
-/// Delegation is intentionally NOT re-materialized here: [`build_starrocks_spec`]
-/// preserves the existing delegation block on a config-only PUT, and a
-/// delegation *change* (re-bootstrap the JWT integration + service user, roll
-/// TLS) is a later task — see the SEAM marked below. Enforcement of the authz
-/// `engine:update` permission already happened in the [`update_engine`] entry
-/// point before this dispatch.
+/// A config-only PUT (no delegation change) just re-provisions the CR:
+/// [`build_starrocks_spec`] preserves the existing delegation block. When the
+/// delegation mode / TLS actually CHANGES, it additionally re-runs the post-Ready
+/// FE bootstrap (JWT integration + impersonation service user) and
+/// re-materializes every assigned workspace's connection so the connector picks
+/// up the new mode — see the `deleg_changed` branch below. Enforcement of the
+/// authz `engine:update` permission already happened in the [`update_engine`]
+/// entry point before this dispatch.
 async fn update_starrocks_engine(
     st: CpState,
     engine: Engine,
@@ -2841,9 +2843,20 @@ async fn update_starrocks_engine(
     // persisting anything, so a bad value 400s without corrupting the stored spec.
     validate_sr_delegation_mode(&sr_body)?;
 
+    // Capture the OLD delegation block ({mode, tlsEnabled} or null) from the
+    // pre-update engine before we overwrite the spec, so we can detect a
+    // delegation/TLS change below.
+    let old_delegation = sr_delegation_block(&engine.spec);
+
     // Merge the body over the CURRENT spec so a PUT that omits image/replicas/
     // resources (or delegation) preserves what's already stored.
     let spec = build_starrocks_spec(&sr_body, Some(&engine.spec));
+    // A delegation change flips the connector's auth mode (impersonate ⇄ jwt) or
+    // its in-band TLS, so it must re-bootstrap the FE. Compare the full stored
+    // `delegation` block before vs. after (see `sr_delegation_block`); a spurious
+    // match-miss only costs an idempotent no-op re-bootstrap. This gates ONLY the
+    // FE re-bootstrap — re-materialization runs unconditionally below.
+    let deleg_changed = old_delegation != sr_delegation_block(&spec);
     st.engine_mgmt
         .update_engine(engine.id, &spec, &engine.status)
         .await?;
@@ -2861,7 +2874,7 @@ async fn update_starrocks_engine(
         .get_warehouse(engine.warehouse_id)
         .await?
         .ok_or_else(|| CpError::BadRequest("unknown warehouse".into()))?;
-    let (req, _bootstrap) = build_starrocks_provision_req(&st, &engine, &wh).await?;
+    let (req, bootstrap) = build_starrocks_provision_req(&st, &engine, &wh).await?;
 
     let Some(prov) = st.engine_provisioner.as_ref() else {
         return Err(CpError::BadRequest("kubernetes not configured".into()));
@@ -2869,10 +2882,95 @@ async fn update_starrocks_engine(
     if let Err(msg) = prov.update(&req).await {
         return Err(CpError::BadRequest(format!("engine update failed: {msg}")));
     }
-    // SEAM for a later task: when the delegation mode/tls actually CHANGES,
-    // re-bootstrap the JWT security integration + service user (GRANT IMPERSONATE)
-    // and re-materialize against the now-Ready FE using `_bootstrap`.
+
+    // Two follow-up steps, deliberately DECOUPLED so a partial failure converges
+    // on a retry:
+    //
+    //   (a) FE re-bootstrap — gated on `deleg_changed`. Only a delegation/TLS
+    //       change needs the heavier JWT-integration + impersonation-service-user
+    //       DDL re-run; an image/replica-only edit must not pay for it.
+    //   (b) Re-materialize the per-workspace connections — ALWAYS run, never
+    //       gated. It's idempotent + cheap (a no-op when the options are
+    //       unchanged), and running it unconditionally is what lets a retried PUT
+    //       heal a prior partial re-materialization: `deleg_changed` diffs the
+    //       *stored* old spec against the new one, and the new spec is persisted
+    //       above BEFORE this runs, so a retry with the same body would see
+    //       `old == new` (`deleg_changed = false`). Gating (b) on that flag would
+    //       strand any workspaces the first attempt missed on stale creds with no
+    //       recovery path — hence: always re-materialize.
+    //
+    // Eventual-consistency window (mirrors create's posture): (b) updates each
+    // workspace's stored connection options synchronously so they advertise the
+    // new mode immediately, while (a) is spawned detached and runs against the FE
+    // only once it reports Ready (~1-2 min) — so briefly the connections announce
+    // a mode the FE has not finished (re)bootstrapping.
+    if deleg_changed {
+        // (a) Re-bootstrap, mirroring create's non-blocking post-Ready wire.
+        // Needs the primary catalog's OAuth2 credential (create embedded it in
+        // the primary `engine_catalogs` row); best-effort like create, so a
+        // missing credential warns rather than failing the update.
+        if let Some(boot) = bootstrap {
+            match sr_primary_catalog_credential(&st, engine.id).await {
+                Some((client_id, client_secret)) => {
+                    spawn_starrocks_catalog_wire(
+                        prov.clone(),
+                        engine.namespace.clone(),
+                        engine.name.clone(),
+                        st.engine_egret_url.clone(),
+                        wh.name.clone(),
+                        client_id,
+                        client_secret,
+                        Some(boot),
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        engine = %engine.name,
+                        "delegation changed but no primary catalog credential found; \
+                         skipping FE re-bootstrap (re-materialization still runs)"
+                    );
+                }
+            }
+        }
+    }
+    // (b) Re-materialize the per-workspace connections unconditionally. The CR
+    // was already updated, so a failure here must surface loudly (400) rather
+    // than silently leave stale connection options behind.
+    st.assignment
+        .rematerialize_for_engine(engine.id)
+        .await
+        .map_err(|e| {
+            CpError::BadRequest(format!(
+                "engine updated but re-materializing workspace connections failed: {e}"
+            ))
+        })?;
     Ok(Json(engine.into()))
+}
+
+/// The full `delegation` sub-object of a StarRocks engine spec (today
+/// `{mode, tlsEnabled}`), or `Null` when absent. Used to detect a delegation/TLS
+/// change across an update: an inequality between the pre- and post-update blocks
+/// means the connector's auth mode or in-band TLS flipped. Comparing the WHOLE
+/// block (not just `mode`/`tlsEnabled`) is the safe side — at worst a future
+/// extra key triggers a spurious FE re-bootstrap, which is an idempotent no-op.
+fn sr_delegation_block(spec: &serde_json::Value) -> serde_json::Value {
+    spec.get("starrocksConfig")
+        .and_then(|c| c.get("delegation"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// Recover the OAuth2 `(client_id, client_secret)` create embedded in the
+/// engine's PRIMARY `engine_catalogs` row (`config.credential` =
+/// `"<client_id>:<client_secret>"`). Returns `None` when there is no primary
+/// catalog or the credential is absent/malformed — the re-bootstrap then skips
+/// the catalog-wire step (best-effort, like create).
+async fn sr_primary_catalog_credential(st: &CpState, engine_id: Uuid) -> Option<(String, String)> {
+    let cats = st.engine_mgmt.list_engine_catalogs(engine_id).await.ok()?;
+    let primary = cats.iter().find(|c| c.is_primary)?;
+    let credential = primary.config.get("credential")?.as_str()?;
+    let (client_id, client_secret) = credential.split_once(':')?;
+    Some((client_id.to_string(), client_secret.to_string()))
 }
 
 #[utoipa::path(
@@ -4391,6 +4489,41 @@ mod tests {
         assert_eq!(
             updated["starrocksConfig"]["delegation"]["tlsEnabled"],
             false
+        );
+    }
+
+    // ── sr_delegation_block: the delegation-change detector ─────────────────
+
+    #[test]
+    fn sr_delegation_block_detects_mode_and_tls_changes() {
+        let impersonate = serde_json::json!({
+            "starrocksConfig": { "delegation": { "mode": "impersonate", "tlsEnabled": true } }
+        });
+        let jwt = serde_json::json!({
+            "starrocksConfig": { "delegation": { "mode": "jwt", "tlsEnabled": true } }
+        });
+        let impersonate_no_tls = serde_json::json!({
+            "starrocksConfig": { "delegation": { "mode": "impersonate", "tlsEnabled": false } }
+        });
+        let none = serde_json::json!({ "starrocksConfig": {} });
+
+        // Absent delegation ⇒ Null; a config-only edit that preserves the block
+        // is NOT a change.
+        assert_eq!(sr_delegation_block(&none), serde_json::Value::Null);
+        assert_eq!(
+            sr_delegation_block(&impersonate),
+            sr_delegation_block(&impersonate)
+        );
+
+        // Mode flip, TLS flip, and opting delegation on/off are all changes.
+        assert_ne!(sr_delegation_block(&impersonate), sr_delegation_block(&jwt));
+        assert_ne!(
+            sr_delegation_block(&impersonate),
+            sr_delegation_block(&impersonate_no_tls)
+        );
+        assert_ne!(
+            sr_delegation_block(&none),
+            sr_delegation_block(&impersonate)
         );
     }
 

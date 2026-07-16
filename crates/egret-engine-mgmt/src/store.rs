@@ -432,6 +432,22 @@ impl EngineMgmtStore {
         .await?)
     }
 
+    /// The workspace ids this engine is assigned to. Thin variant of
+    /// [`Self::list_workspaces_for_engine`] used by re-materialization (a
+    /// delegation/TLS change re-runs the per-workspace connection upsert for
+    /// every assigned workspace), which needs only the ids.
+    pub async fn list_engine_workspace_ids(
+        &self,
+        engine_id: Uuid,
+    ) -> Result<Vec<Uuid>, EngineMgmtError> {
+        Ok(sqlx::query_scalar(
+            "SELECT workspace_id FROM engine_mgmt.engine_workspaces WHERE engine_id = $1",
+        )
+        .bind(engine_id)
+        .fetch_all(self.pool())
+        .await?)
+    }
+
     /// Engines assigned to a workspace.
     pub async fn list_engines_for_workspace(
         &self,
