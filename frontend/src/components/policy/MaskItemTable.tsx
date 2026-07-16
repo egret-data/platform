@@ -9,6 +9,8 @@ import { TagCombobox } from "@/components/ui/tag-combobox";
 export interface MaskItemTableProps {
   items: MaskItem[];
   onChange: (items: MaskItem[]) => void;
+  /** Mask types from the profile's service-def; falls back to the Trino set. */
+  maskTypes?: readonly { name: string; label?: string }[];
 }
 
 const blankItem = (): MaskItem => ({ users: [], groups: [], maskType: "MASK_HASH", valueExpr: undefined });
@@ -18,7 +20,8 @@ const blankItem = (): MaskItem => ({ users: [], groups: [], maskType: "MASK_HASH
  * mirroring `PermissionTable`'s row shape so masking reads consistently with
  * the access editor instead of the old one-card-per-item layout.
  */
-export function MaskItemTable({ items, onChange }: MaskItemTableProps) {
+export function MaskItemTable({ items, onChange, maskTypes }: MaskItemTableProps) {
+  const types = maskTypes && maskTypes.length ? maskTypes : MASK_TYPES;
   const setItem = (i: number, next: Partial<MaskItem>) =>
     onChange(items.map((it, j) => (j === i ? { ...it, ...next } : it)));
   const addRow = () => onChange([...items, blankItem()]);
@@ -70,7 +73,7 @@ export function MaskItemTable({ items, onChange }: MaskItemTableProps) {
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {MASK_TYPES.map((m) => (
+                        {types.map((m) => (
                           <SelectItem key={m.name} value={m.name}>
                             {m.label}
                           </SelectItem>

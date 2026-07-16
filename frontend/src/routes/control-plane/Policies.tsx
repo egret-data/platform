@@ -1,14 +1,15 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { Download, Server } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Download, Loader2, Plus, Server } from "lucide-react";
 
-import { type Profile, listProfiles } from "@/api/policies";
+import { type CreatedProfile, type Profile, createProfile, listProfiles } from "@/api/policies";
 import { ApiError } from "@/api/client";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { SummaryStrip } from "@/components/explore/SummaryStrip";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,7 +19,26 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { TrinoConfigDialog } from "@/components/policy/TrinoConfigDialog";
+
+export const profilesQueryKey = ["control-plane", "profiles"] as const;
 
 /**
  * Control Plane → Data governance → Policies (drill-down L1: profiles landing).
@@ -31,9 +51,10 @@ import { TrinoConfigDialog } from "@/components/policy/TrinoConfigDialog";
 export default function Policies() {
   const [configTarget, setConfigTarget] = useState<string | null>(null);
   const [typeFacet, setTypeFacet] = useState(FACET_ALL);
+  const [addOpen, setAddOpen] = useState(false);
 
   const profiles = useQuery<Profile[], ApiError>({
-    queryKey: ["control-plane", "profiles"],
+    queryKey: profilesQueryKey,
     queryFn: listProfiles,
     retry: false,
   });
@@ -144,16 +165,23 @@ export default function Policies() {
               <CardTitle className="text-lg">Policy profiles</CardTitle>
               <CardDescription>
                 Each engine enforces one profile; tag profiles carry classification-based
-                masking &amp; row-filters. Profiles are created automatically when you
-                provision an engine — there is no separate &ldquo;new profile&rdquo; step.
+                masking &amp; row-filters. Provisioning an engine creates its profile
+                automatically — use &ldquo;New profile&rdquo; for an engine egret doesn&apos;t
+                provision itself (e.g. an existing StarRocks cluster).
               </CardDescription>
             </div>
-            <Button asChild variant="outline" size="sm" className="shrink-0">
-              <Link to="/control-plane/engines">
-                <Server className="mr-1.5 h-4 w-4" />
-                Provision an engine
-              </Link>
-            </Button>
+            <div className="flex shrink-0 items-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => setAddOpen(true)}>
+                <Plus className="mr-1.5 h-4 w-4" />
+                New profile
+              </Button>
+              <Button asChild variant="outline" size="sm">
+                <Link to="/control-plane/engines">
+                  <Server className="mr-1.5 h-4 w-4" />
+                  Provision an engine
+                </Link>
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -200,6 +228,116 @@ export default function Policies() {
           onOpenChange={(o) => !o && setConfigTarget(null)}
         />
       )}
+
+      <AddProfileDialog open={addOpen} onOpenChange={setAddOpen} />
     </div>
+  );
+}
+
+/**
+ * "New profile" dialog — the manual analogue of Trino provisioning's
+ * auto-bind, for engines egret doesn't provision itself (e.g. an existing
+ * StarRocks cluster). Mirrors `Warehouses.tsx`'s `AddWarehouseDialog`.
+ */
+function AddProfileDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const queryClient = useQueryClient();
+  const createMutation = useMutation<
+    CreatedProfile,
+    ApiError,
+    { name: string; type: "trino" | "starrocks" }
+  >({
+    mutationFn: ({ name, type }) => createProfile(name, type),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: profilesQueryKey }),
+  });
+
+  const [name, setName] = useState("");
+  const [type, setType] = useState<"trino" | "starrocks">("trino");
+  const [error, setError] = useState<string | null>(null);
+
+  function reset() {
+    setName("");
+    setType("trino");
+    setError(null);
+    createMutation.reset();
+  }
+
+  function handleOpenChange(next: boolean) {
+    if (!next) reset();
+    onOpenChange(next);
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    try {
+      await createMutation.mutateAsync({ name: name.trim(), type });
+      handleOpenChange(false);
+    } catch (err) {
+      setError((err as ApiError).message ?? "Failed to create profile.");
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogContent>
+        <form onSubmit={handleSubmit}>
+          <DialogHeader>
+            <DialogTitle>New profile</DialogTitle>
+            <DialogDescription>
+              Creates a Ranger service instance of the given engine type.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="my-4 space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="np-name">Name</Label>
+              <Input
+                id="np-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. starrocks-prod"
+                required
+                autoFocus
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="np-type">Type</Label>
+              <Select value={type} onValueChange={(v) => setType(v as "trino" | "starrocks")}>
+                <SelectTrigger id="np-type" className="w-full">
+                  <SelectValue placeholder="Select a type" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="trino">trino</SelectItem>
+                  <SelectItem value="starrocks">starrocks</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {error && (
+              <Alert variant="destructive">
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={createMutation.isPending || !name.trim() || !type}>
+              {createMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
+              Create profile
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
