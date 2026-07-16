@@ -6,6 +6,11 @@ import { defaultResourcesFromDef } from "../PolicyEditorPage";
 const EMPTY = { values: [], isExcludes: false, isRecursive: false };
 const WILD = { values: ["*"], isExcludes: false, isRecursive: false };
 
+// These mirror the def's TOP-LEVEL `resources` (parent/level present) — the
+// exact input PolicyEditorPage now feeds the helper for every kind. The
+// masking/row-filter subsets (`dataMaskDef.resources`/`rowFilterDef.resources`)
+// are flat parentless name-refs, so seeding must use this full hierarchy.
+
 // StarRocks-shaped hierarchy: catalog → database → table → column.
 const STARROCKS: ServiceDefResource[] = [
   { name: "catalog", parent: "", level: 10 },

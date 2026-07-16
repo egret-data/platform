@@ -315,10 +315,14 @@ export default function PolicyEditorPage() {
 
   // On create, once the def is known, seed the resource chain from the def so
   // the blank form matches the profile's engine (StarRocks: catalog/database/…;
-  // Trino: catalog/schema/…) instead of the hardcoded Trino skeleton.
+  // Trino: catalog/schema/…) instead of the hardcoded Trino skeleton. Seed from
+  // the top-level `resources` (which carry parent/level) rather than `resDefs`:
+  // the masking/row-filter subsets (`dataMaskDef.resources`/`rowFilterDef.
+  // resources`) are flat name-only refs with no parent links, so walking them
+  // would stop at the root — the full hierarchy, capped per kind, is the chain.
   useEffect(() => {
     if (!id && def.data) {
-      const seeded = defaultResourcesFromDef(resDefs, kind);
+      const seeded = defaultResourcesFromDef(def.data.resources ?? [], kind);
       if (Object.keys(seeded).length) {
         setForm((f: any) => ({ ...f, resources: seeded }));
       }
