@@ -6,6 +6,7 @@
 pub mod kube_client;
 pub mod provisioner;
 pub mod spec;
+pub mod starrocks;
 pub mod trino;
 
 pub use kube_client::{KubeClient, LiveKube};
@@ -18,4 +19,5 @@ pub use spec::{
     ResourceGroups, ResourceSelector, RoleConfig, RoleResources, SecurityContext, SessionRule,
     Toleration, TopologySpreadConstraint, TrinoConfig, VolumeMount, WorkerRoleConfig,
 };
+pub use starrocks::StarRocksProvisioner;
 pub use trino::TrinoProvisioner;
