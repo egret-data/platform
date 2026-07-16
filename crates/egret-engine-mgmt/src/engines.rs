@@ -2106,9 +2106,13 @@ async fn create_starrocks_engine(
     // A failure rolls back the same way every other provisioning step above
     // does (delete the engine row, revoke the catalog client).
     let mut delegation_cert_pem: Option<String> = None;
+    let mut delegation_keystore_pem: Option<String> = None;
     if tls_enabled {
         match ensure_tls_cert(&st, &engine).await {
-            Ok((_keystore_pem, cert_pem)) => delegation_cert_pem = Some(cert_pem),
+            Ok((keystore_pem, cert_pem)) => {
+                delegation_cert_pem = Some(cert_pem);
+                delegation_keystore_pem = Some(keystore_pem);
+            }
             Err(e) => {
                 let _ = st.engine_mgmt.delete_engine(engine.id).await;
                 let _ = st.catalog.revoke_client(client.id).await;
@@ -2151,6 +2155,7 @@ async fn create_starrocks_engine(
         issuer: st.engine_oidc_issuer.clone(),
         audience: "starrocks".into(),
         tls_cert_pem: delegation_cert_pem.clone().unwrap_or_default(),
+        tls_keystore_pem: delegation_keystore_pem.clone().unwrap_or_default(),
         tls_enabled,
     });
     let delegation_bootstrap = delegation_mode.map(|_| StarRocksDelegationBootstrap {

@@ -424,7 +424,11 @@ pub struct StarRocksConfig {
 
 /// Delegation/security wiring for a provisioned StarRocks. `None` on
 /// [`StarRocksConfig::delegation`] = no JWT/TLS templated.
-#[derive(Clone, Debug)]
+///
+/// `Debug` is hand-written (see below) to redact `tls_keystore_pem`, which
+/// carries the FE's private key alongside the cert — `tls_cert_pem` is the
+/// public cert alone and prints fine.
+#[derive(Clone)]
 pub struct StarRocksDelegation {
     /// Keycloak JWKS URL reachable from the FE pod.
     pub jwks_url: String,
@@ -432,8 +436,25 @@ pub struct StarRocksDelegation {
     pub audience: String,
     /// PEM of the FE TLS cert egret generated (also pinned on the connection).
     pub tls_cert_pem: String,
+    /// Cert+key PEM bundle (`ensure_tls_cert`'s `keystore_pem`) — the source
+    /// material the orchestrator's init-container converts into the Java
+    /// keystore `ssl_keystore_location` points at. Contains the private key.
+    pub tls_keystore_pem: String,
     /// Enable FE SSL on :9030.
     pub tls_enabled: bool,
+}
+
+impl std::fmt::Debug for StarRocksDelegation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StarRocksDelegation")
+            .field("jwks_url", &self.jwks_url)
+            .field("issuer", &self.issuer)
+            .field("audience", &self.audience)
+            .field("tls_cert_pem", &self.tls_cert_pem)
+            .field("tls_keystore_pem", &"<redacted>")
+            .field("tls_enabled", &self.tls_enabled)
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for StarRocksConfig {

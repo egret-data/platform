@@ -125,18 +125,15 @@ pub fn starrocks_ranger_configmap(spec: &EngineSpec) -> Option<Value> {
     }))
 }
 
-/// The FE TLS cert ConfigMap (`{name}-ssl-cm`). `None` unless the engine's
-/// delegation config has `tls_enabled`. Carries the public cert PEM egret
-/// generated (`fe.crt`) — mounted at `/etc/starrocks/ssl` alongside
-/// `starrocks_fe_configmap`'s `ssl_keystore_location`.
-///
-/// KNOWN GAP (live-only): `fe.conf`'s `ssl_keystore_location` expects a Java
-/// keystore (JKS/PKCS12), not a raw PEM. Converting the PEM egret generates
-/// into that keystore format (`keytool`/`openssl pkcs12`) is NOT done here —
-/// it's a live-provisioning step the T4 smoke must add (e.g. an init
-/// container, or minting the keystore directly). This fn only wires the
-/// config + mounts the cert so the templating is unit-testable; the FE won't
-/// actually start serving TLS until the keystore file exists at that path.
+/// The FE TLS source ConfigMap (`{name}-ssl-cm`). `None` unless the engine's
+/// delegation config has `tls_enabled`. Carries the public cert alone
+/// (`fe.crt`, informational/debugging) AND the cert+key PEM bundle
+/// (`fe.pem` — `StarRocksDelegation::tls_keystore_pem`, i.e.
+/// `ensure_tls_cert`'s `keystore_pem`) the T2c init-container (see
+/// `starrocks_cluster_cr`) reads to build the Java keystore
+/// `ssl_keystore_location` points at. This ConfigMap is mounted at a SOURCE
+/// path (`/etc/starrocks/ssl-src`), NOT `/etc/starrocks/ssl` — that path is
+/// now the init-container-built keystore volume.
 pub fn starrocks_ssl_configmap(spec: &EngineSpec) -> Option<Value> {
     let d = spec
         .starrocks
@@ -147,13 +144,23 @@ pub fn starrocks_ssl_configmap(spec: &EngineSpec) -> Option<Value> {
         "apiVersion": "v1", "kind": "ConfigMap",
         "metadata": { "name": format!("{}-ssl-cm", spec.name), "namespace": spec.namespace,
                       "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
-        "data": { "fe.crt": d.tls_cert_pem }
+        "data": { "fe.crt": d.tls_cert_pem, "fe.pem": d.tls_keystore_pem }
     }))
 }
 
+/// Name of the writable `storageVolumes` entry (see `starrocks_cluster_cr`)
+/// the build-keystore init-container writes `keystore` into and the FE main
+/// container reads `ssl_keystore_location` from.
+const SSL_KEYSTORE_VOLUME_NAME: &str = "ssl-keystore";
+const SSL_KEYSTORE_MOUNT_PATH: &str = "/etc/starrocks/ssl";
+const SSL_SRC_MOUNT_PATH: &str = "/etc/starrocks/ssl-src";
+
 /// The `starrocks.com/v1 StarRocksCluster` CR: FE + CN roles only (shared-data
 /// mode has no BE). FE mounts `fe.conf` via `configMapInfo`, plus the Ranger
-/// XML ConfigMap under `configMaps` when a binding is present.
+/// XML ConfigMap under `configMaps` when a binding is present, and — when
+/// delegation TLS is enabled — the TLS source ConfigMap + a build-keystore
+/// `initContainers` entry + a writable `storageVolumes` keystore volume (see
+/// the T2c comment block below for the CRD constraints that shape this).
 pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
     let sr = spec
         .starrocks
@@ -178,8 +185,10 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
         }
     }
     // Extra ConfigMaps the FE mounts: the Ranger XML (when bound) and the TLS
-    // cert (when the delegation config has TLS enabled). Both are independent
-    // and additive, so collect whichever apply into one `configMaps` array.
+    // cert+key source (when the delegation config has TLS enabled). Both are
+    // independent and additive, so collect whichever apply into one
+    // `configMaps` array.
+    let ssl_cm_name = format!("{}-ssl-cm", spec.name);
     let mut extra_config_maps: Vec<Value> = Vec::new();
     if spec.ranger.is_some() {
         extra_config_maps.push(json!({
@@ -187,14 +196,75 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
             "mountPath": "/opt/starrocks/fe/conf",
         }));
     }
-    if starrocks_ssl_configmap(spec).is_some() {
+    let tls_enabled = starrocks_ssl_configmap(spec).is_some();
+    if tls_enabled {
+        // SOURCE mount only — `/etc/starrocks/ssl` (SSL_KEYSTORE_MOUNT_PATH)
+        // is now the init-container-built keystore volume below, not this
+        // read-only ConfigMap.
         extra_config_maps.push(json!({
-            "name": format!("{}-ssl-cm", spec.name),
-            "mountPath": "/etc/starrocks/ssl",
+            "name": ssl_cm_name,
+            "mountPath": SSL_SRC_MOUNT_PATH,
         }));
     }
     if !extra_config_maps.is_empty() {
         fe_spec["configMaps"] = json!(extra_config_maps);
+    }
+    // T2c: build the Java keystore `ssl_keystore_location` needs, from the
+    // cert+key PEM the `{name}-ssl-cm` ConfigMap carries (`fe.pem`).
+    //
+    // CRD CONSTRAINT (checked against `deploy/starrocks-operator/crd.yaml`):
+    // `starRocksFeSpec` has NO generic top-level `volumes` field — only
+    // `configMaps`/`secrets` (name+mountPath+subPath, always read-only
+    // ConfigMap/Secret projections), `storageVolumes` (hostPath OR PVC,
+    // name+mountPath — the only WRITABLE volume type the CRD exposes), and
+    // `initContainers` (a full container spec, including its own
+    // `volumeMounts`). So the writable share between the init-container and
+    // the main FE container has to be a `storageVolumes` entry (hostPath
+    // here, as the closest available substitute for `emptyDir`), not a plain
+    // `volumes: [{emptyDir: {}}]` — that field doesn't exist on this CRD.
+    //
+    // ASSUMPTION (UNVERIFIED, live-only): the init-container's `volumeMounts`
+    // reference pod-level volume NAMES. For `storageVolumes` the name is
+    // exactly what we set below (`SSL_KEYSTORE_VOLUME_NAME`), so that half is
+    // solid. For the `configMaps` entry there is no separate "volume name"
+    // field in the CRD schema — only the ConfigMap's own `name` — so this
+    // assumes the operator names the generated pod volume identically to the
+    // ConfigMap object's name (`{ssl_cm_name}`) and that this volume is
+    // reachable from `initContainers[].volumeMounts` (not just the main
+    // container). If the live smoke finds the operator uses a different
+    // internal volume name, or doesn't expose ConfigMap-derived volumes to
+    // init containers, this mount needs a live-tuned fix (candidate: an
+    // initContainer image that reads the cert+key via a k8s API/downward
+    // mechanism instead of a shared volume).
+    if tls_enabled {
+        fe_spec["storageVolumes"] = json!([{
+            "name": SSL_KEYSTORE_VOLUME_NAME,
+            "mountPath": SSL_KEYSTORE_MOUNT_PATH,
+            "hostPath": {
+                "path": format!("/var/lib/egret/starrocks/{}/ssl-keystore", spec.name),
+                "type": "DirectoryOrCreate",
+            },
+        }]);
+        // LIVE-ONLY / best-guess (flagged per T2c scope): the exact command,
+        // keystore FORMAT (PKCS12 vs JKS), and whether this init image even
+        // has openssl are all things the live smoke must tune. PKCS12 is
+        // used here because it's the format `openssl pkcs12 -export` builds
+        // directly from a PEM cert+key with no intermediate JKS conversion;
+        // whether StarRocks' `ssl_keystore_location` accepts PKCS12 (vs
+        // requiring JKS, which would need `keytool` instead) is unverified.
+        fe_spec["initContainers"] = json!([{
+            "name": "build-keystore",
+            "image": "alpine/openssl:latest",
+            "command": ["sh", "-c"],
+            "args": [format!(
+                "openssl pkcs12 -export -in {src}/fe.pem -inkey {src}/fe.pem -out {dst}/keystore -passout pass:changeit -name fe && echo keystore built",
+                src = SSL_SRC_MOUNT_PATH, dst = SSL_KEYSTORE_MOUNT_PATH,
+            )],
+            "volumeMounts": [
+                { "name": ssl_cm_name, "mountPath": SSL_SRC_MOUNT_PATH, "readOnly": true },
+                { "name": SSL_KEYSTORE_VOLUME_NAME, "mountPath": SSL_KEYSTORE_MOUNT_PATH },
+            ],
+        }]);
     }
 
     let mut cn_spec = json!({
@@ -393,6 +463,9 @@ mod tests {
             issuer: "https://kc/realms/egret".into(),
             audience: "egret".into(),
             tls_cert_pem: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n".into(),
+            tls_keystore_pem: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n\
+                                -----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n"
+                .into(),
             tls_enabled: true,
         });
         spec
@@ -486,15 +559,74 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("BEGIN CERTIFICATE"));
+        // T2c: the ssl-cm also carries the cert+key bundle the init-container
+        // builds the keystore from.
+        let fe_pem = ssl_cm["data"]["fe.pem"].as_str().unwrap();
+        assert!(fe_pem.contains("BEGIN CERTIFICATE"));
+        assert!(fe_pem.contains("BEGIN PRIVATE KEY"));
 
         let cr = starrocks_cluster_cr(&spec);
+        // The ssl-cm is now mounted at the SOURCE path, not
+        // `/etc/starrocks/ssl` — that path is the init-container-built
+        // keystore volume (see `keystore_volume_and_init_container_present`).
         let mounts = cr["spec"]["starRocksFeSpec"]["configMaps"]
             .as_array()
             .unwrap();
         assert!(mounts
             .iter()
             .any(|m| m["name"] == ssl_cm["metadata"]["name"]
-                && m["mountPath"] == "/etc/starrocks/ssl"));
+                && m["mountPath"] == "/etc/starrocks/ssl-src"));
+    }
+
+    /// T2c TDD: when delegation TLS is enabled, the FE spec gets a
+    /// build-keystore `initContainers` entry (mounting the ssl-cm source +
+    /// the writable keystore volume) and a `storageVolumes` entry providing
+    /// that writable keystore volume at `/etc/starrocks/ssl` — matching
+    /// `ssl_keystore_location = /etc/starrocks/ssl/keystore`.
+    #[test]
+    fn keystore_volume_and_init_container_present() {
+        let spec = sample_sr_spec_with_tls();
+        let cr = starrocks_cluster_cr(&spec);
+        let fe_spec = &cr["spec"]["starRocksFeSpec"];
+
+        let volumes = fe_spec["storageVolumes"].as_array().unwrap();
+        assert_eq!(volumes.len(), 1);
+        assert_eq!(volumes[0]["name"], "ssl-keystore");
+        assert_eq!(volumes[0]["mountPath"], "/etc/starrocks/ssl");
+        assert!(volumes[0]["hostPath"]["path"].is_string());
+
+        let init_containers = fe_spec["initContainers"].as_array().unwrap();
+        assert_eq!(init_containers.len(), 1);
+        let init = &init_containers[0];
+        assert_eq!(init["name"], "build-keystore");
+        assert!(init["command"].is_array());
+        let args = init["args"].as_array().unwrap();
+        assert!(args[0].as_str().unwrap().contains("openssl"));
+        assert!(args[0]
+            .as_str()
+            .unwrap()
+            .contains("/etc/starrocks/ssl-src/fe.pem"));
+        assert!(args[0]
+            .as_str()
+            .unwrap()
+            .contains("/etc/starrocks/ssl/keystore"));
+
+        let init_mounts = init["volumeMounts"].as_array().unwrap();
+        assert!(init_mounts
+            .iter()
+            .any(|m| m["name"] == "sr1-ssl-cm" && m["mountPath"] == "/etc/starrocks/ssl-src"));
+        assert!(init_mounts
+            .iter()
+            .any(|m| m["name"] == "ssl-keystore" && m["mountPath"] == "/etc/starrocks/ssl"));
+    }
+
+    /// No delegation TLS → no init-container/storageVolumes noise on the FE spec.
+    #[test]
+    fn no_delegation_tls_omits_keystore_init_container() {
+        let cr = starrocks_cluster_cr(&sample_sr_spec());
+        let fe_spec = &cr["spec"]["starRocksFeSpec"];
+        assert!(fe_spec.get("initContainers").is_none());
+        assert!(fe_spec.get("storageVolumes").is_none());
     }
 
     /// No delegation block at all → no ssl config/configmap (slice-2 default).
