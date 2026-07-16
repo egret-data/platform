@@ -765,6 +765,14 @@ async fn resolve_tag_service_and_body(
     Ok((tag_svc, pol))
 }
 
+/// Read the required `service` name from an editor policy body, or 400.
+fn require_service(v: &Value) -> Result<&str, PolicyHttpError> {
+    v.get("service")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| PolicyHttpError::BadRequest("policy requires a `service`".into()))
+}
+
 /// POST /policies — create an Access/Masking/Row-filter policy (by `kind`).
 ///
 /// Missing `kind` defaults to "access" (see `editor_to_ranger_json`), so the
@@ -816,7 +824,7 @@ async fn create_policy(
         return Ok(Json(json!({ "id": id })));
     }
 
-    let service_name = v.get("service").and_then(Value::as_str).unwrap_or("");
+    let service_name = require_service(&v)?;
     let svc = st.store.get_service(service_name).await?;
     let pol = editor_to_ranger_json(&v, &svc.r#type).map_err(PolicyHttpError::BadRequest)?;
     if pol.name.trim().is_empty() {
@@ -857,7 +865,9 @@ async fn update_policy(
     Json(v): Json<Value>,
 ) -> Result<Json<Value>, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
-    let service_name = v.get("service").and_then(Value::as_str).unwrap_or("");
+    let service_name = require_service(&v)?;
+    // Resolve the target service's Ranger type (and validate it exists) so the
+    // serialized body carries the correct `serviceType` (trino|starrocks).
     let svc = st.store.get_service(service_name).await?;
     let pol = editor_to_ranger_json(&v, &svc.r#type).map_err(PolicyHttpError::BadRequest)?;
     if pol.name.trim().is_empty() {

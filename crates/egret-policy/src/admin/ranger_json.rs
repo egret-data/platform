@@ -6,11 +6,13 @@
 //! Called by the create/update handlers in `policies/mod.rs`.
 //!
 //! NOTE: this serializer is lossy for policies NOT authored by egret's editor.
-//! It always emits `delegateAdmin: false`, `isAllowed: true` per access, and
-//! `serviceType: "trino"`. Editing a foreign/Ranger-native policy through the
-//! UI therefore drops those fields. P2 is trino-only + egret-authored by
-//! design; revisit if importing external Ranger policies becomes a
-//! requirement.
+//! It always emits `delegateAdmin: false` and `isAllowed: true` per access.
+//! The individual builders default `serviceType` to `"trino"`, but
+//! `editor_to_ranger_json` stamps the target service's actual Ranger type
+//! (`trino` | `starrocks`) onto the body. Editing a foreign/Ranger-native
+//! policy through the UI therefore drops the omitted fields; egret-authored
+//! policies are the design target — revisit if importing external Ranger
+//! policies becomes a requirement.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
