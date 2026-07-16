@@ -608,7 +608,7 @@
         "name": "MASK_HASH",
         "label": "Hash",
         "description": "Hash the value of a varchar with sha256",
-        "transformer": "cast((hex(sha2(from_binary(to_binary({COL}, 'utf8'), 'utf8'), 256))) AS {type})"
+        "transformer": "cast((hex(sha2(from_binary(to_binary({col}, 'utf8'), 'utf8'), 256))) AS {type})"
       },
       {
         "itemId": 3,
