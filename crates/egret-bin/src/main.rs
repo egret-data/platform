@@ -528,9 +528,12 @@ impl egret_engine_mgmt_api::EngineProvisioningPort for EgretEngineProvisioningPo
             // restart-stamp annotation onto the FE + CN specs and let the operator
             // propagate it to the pod templates. The stamp is minted here because
             // egret-bin has `std::time` (the orchestrator stays deterministic).
+            // Use nanos (not millis) so two back-to-back restarts within the same
+            // millisecond still produce a distinct value — an identical stamp would
+            // leave the annotation unchanged and the operator wouldn't roll.
             let stamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis().to_string())
+                .map(|d| d.as_nanos().to_string())
                 .unwrap_or_else(|_| "0".to_string());
             return self
                 .starrocks
