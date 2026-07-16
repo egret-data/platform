@@ -1864,6 +1864,185 @@ async fn create_engine(
     Ok((StatusCode::CREATED, Json(engine.into())))
 }
 
+/// Assemble the StarRocks provisioning request from a STORED engine row (its
+/// `spec.starrocksConfig`) + the warehouse's storage. Shared by create and
+/// update so both feed the provisioner an identical `EngineSpec`. Resolves
+/// storage creds, the optional Ranger binding, and (when the stored spec has a
+/// delegation block) re-mints/reuses the TLS cert + delegator secret
+/// idempotently, returning the `StarRocksDelegation` for the CR + the
+/// `StarRocksDelegationBootstrap` the post-Ready wire step consumes.
+///
+/// Every read here comes from the persisted `spec.starrocksConfig` (NOT a create
+/// body): `feImage`/`cnImage` (defaulting to [`DEFAULT_SR_FE_IMAGE`]/
+/// [`DEFAULT_SR_CN_IMAGE`] when absent or blank), `feReplicas`/`cnReplicas`
+/// (default 1), `feResources`/`cnResources` (parsed when a non-null value is
+/// present), and the `delegation` `{mode, tlsEnabled}` block — matching what
+/// `create_starrocks_engine` persisted so create and update produce an identical
+/// [`EngineProvisionReq`]. The idempotent [`ensure_tls_cert`]/
+/// [`ensure_delegator_secret`] calls reuse the engine's existing cert/secret
+/// (keyed off `tls_secret_id`/`delegator_secret_id`) when present.
+async fn build_starrocks_provision_req(
+    st: &CpState,
+    engine: &Engine,
+    wh: &egret_catalog_api::Warehouse,
+) -> Result<(EngineProvisionReq, Option<StarRocksDelegationBootstrap>), CpError> {
+    // Storage backing for the FE/CN builtin storage volume — re-resolved from
+    // the warehouse's storage connection so update (which has no create body)
+    // feeds the provisioner the SAME S3 coords create did. Same resolution +
+    // hard-fail-on-missing-secret posture as the Trino fault-tolerant path.
+    let sc = st
+        .storage_registry
+        .get_storage_conn(wh.storage_conn_id)
+        .await?
+        .ok_or_else(|| CpError::BadRequest("unknown storage connection".into()))?;
+    let storage_endpoint = sc.endpoint.clone().unwrap_or_default();
+    let secret_ref = sc.secret_ref.ok_or_else(|| {
+        CpError::BadRequest(
+            "warehouse storage connection has no secret; cannot provision StarRocks".into(),
+        )
+    })?;
+    let storage_secret_key = st
+        .secrets
+        .resolve_plaintext(None, secret_ref)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("resolve storage secret: {e}")))?;
+    // Namespace per engine so two StarRocks engines sharing a bucket don't
+    // collide their shared-data storage roots (create used the same formula off
+    // the engine name).
+    let storage_path = format!("{}/starrocks/{}", sc.bucket, engine.name);
+
+    // Desired FE/CN shape read back from the persisted spec (create wrote these).
+    let cfg = engine.spec.get("starrocksConfig");
+    let fe_image = cfg
+        .and_then(|c| c.get("feImage"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_SR_FE_IMAGE.into());
+    let cn_image = cfg
+        .and_then(|c| c.get("cnImage"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_SR_CN_IMAGE.into());
+    let fe_replicas = cfg
+        .and_then(|c| c.get("feReplicas"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32)
+        .unwrap_or(1);
+    let cn_replicas = cfg
+        .and_then(|c| c.get("cnReplicas"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32)
+        .unwrap_or(1);
+    // `feResources`/`cnResources` are persisted verbatim (a JSON object or
+    // `null`); a null/absent value means "default sizing" (None), matching
+    // create's `sr_body.fe_resources.as_ref().map(parse_resources)`.
+    let fe_resources = cfg
+        .and_then(|c| c.get("feResources"))
+        .filter(|v| !v.is_null())
+        .map(parse_resources);
+    let cn_resources = cfg
+        .and_then(|c| c.get("cnResources"))
+        .filter(|v| !v.is_null())
+        .map(parse_resources);
+
+    // Delegation opt-in read back from the stored `{mode, tlsEnabled}` block.
+    // `tls_enabled` mirrors create: on only when delegation is configured,
+    // defaulting to true (TLS-on) unless the stored block opted out.
+    let delegation_cfg = cfg.and_then(|c| c.get("delegation"));
+    let delegation_mode = delegation_cfg
+        .and_then(|d| d.get("mode"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let tls_enabled = delegation_mode.is_some()
+        && delegation_cfg
+            .and_then(|d| d.get("tlsEnabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+    // Ranger resolution — the SAME snippet `build_provision_req` uses for Trino:
+    // bound profile (authz_service_id set) → RangerBinding named after the
+    // engine; unbound → None.
+    let ranger_service_name = engine.authz_service_id.map(|_| engine.name.clone());
+    let ranger = ranger_service_name.map(|service_name| egret_engine_mgmt_api::RangerBinding {
+        service_name,
+        egret_url: st.engine_egret_url.clone(),
+        poll_interval_ms: 30_000,
+    });
+
+    // Delegation wiring: provision (idempotently reuse) the TLS cert + delegator
+    // secret the runtime `StarRocksDelegation` + post-Ready bootstrap need,
+    // reusing the SAME generic helpers the Trino path uses (both key off just
+    // `&Engine`). Minted for EITHER delegation mode (the bootstrap creates the
+    // service user + GRANT IMPERSONATE alongside the JWT integration regardless
+    // of mode).
+    let mut delegation_cert_pem: Option<String> = None;
+    let mut delegation_keystore_pem: Option<String> = None;
+    if tls_enabled {
+        let (keystore_pem, cert_pem) = ensure_tls_cert(st, engine).await?;
+        delegation_cert_pem = Some(cert_pem);
+        delegation_keystore_pem = Some(keystore_pem);
+    }
+    let mut delegation_service_password: Option<String> = None;
+    if delegation_mode.is_some() {
+        let (_secret_id, pw) = ensure_delegator_secret(st, engine).await?;
+        delegation_service_password = Some(pw);
+    }
+    // OIDC coordinates are DERIVED from egret's own config (StarRocks has no
+    // per-engine override surface). Soft-fails (warns, doesn't block) when OIDC
+    // isn't configured — mirrors create.
+    if delegation_mode.is_some()
+        && (st.engine_jwks_uri.is_empty() || st.engine_oidc_issuer.is_empty())
+    {
+        tracing::warn!(
+            engine = %engine.name,
+            "starrocks delegation requested but OIDC is not configured on this deployment; \
+             the JWT security integration will be templated with an empty issuer/jwks"
+        );
+    }
+    let delegation = delegation_mode.map(|_| egret_engine_mgmt_api::StarRocksDelegation {
+        jwks_url: st.engine_jwks_uri.clone(),
+        issuer: st.engine_oidc_issuer.clone(),
+        audience: "starrocks".into(),
+        tls_cert_pem: delegation_cert_pem.clone().unwrap_or_default(),
+        tls_keystore_pem: delegation_keystore_pem.clone().unwrap_or_default(),
+        tls_enabled,
+    });
+    let delegation_bootstrap = delegation_mode.map(|_| StarRocksDelegationBootstrap {
+        jwks_url: st.engine_jwks_uri.clone(),
+        issuer: st.engine_oidc_issuer.clone(),
+        audience: "starrocks".into(),
+        tls_cert_pem: delegation_cert_pem.clone(),
+        service_user: crate::delegator_policy::DELEGATOR_USERNAME.into(),
+        service_password: delegation_service_password.clone().unwrap_or_default(),
+    });
+
+    let req = EngineProvisionReq {
+        name: engine.name.clone(),
+        namespace: engine.namespace.clone(),
+        image_version: fe_image.clone(),
+        config: TrinoConfigReq::default(),
+        catalogs: vec![],
+        ranger,
+        kind: egret_engine_mgmt_api::EngineKind::StarRocks,
+        starrocks: Some(egret_engine_mgmt_api::StarRocksConfig {
+            fe_image,
+            cn_image,
+            fe_replicas,
+            cn_replicas,
+            storage_endpoint,
+            storage_path,
+            storage_access_key: sc.access_key.clone(),
+            storage_secret_key,
+            fe_resources,
+            cn_resources,
+            delegation,
+        }),
+    };
+    Ok((req, delegation_bootstrap))
+}
+
 /// StarRocks create path (shared-data): builds a `StarRocksConfig` from the
 /// body + the warehouse's storage connection (the FE/CN builtin storage-volume
 /// object store — separate from the Iceberg EXTERNAL CATALOG auto-wire below),
@@ -1900,27 +2079,21 @@ async fn create_starrocks_engine(
     // stored `endpoint` is assumed pod-reachable already (that's how the Trino
     // path uses it verbatim for `s3.endpoint`, e.g. `http://host.docker.internal:9000`
     // in dev), so no host rewriting is needed here either.
+    // Storage sanity checks BEFORE any engine row exists (nothing to roll back
+    // yet): the connection must exist and — matching the Trino fault-tolerant
+    // path — carry a secret, else a hard 400. The actual S3 coords + secret are
+    // re-resolved from the warehouse inside `build_starrocks_provision_req` at
+    // provision-req assembly time (below), so no bindings are threaded through.
     let sc = st
         .storage_registry
         .get_storage_conn(wh.storage_conn_id)
         .await?
         .ok_or_else(|| CpError::BadRequest("unknown storage connection".into()))?;
-    let storage_endpoint = sc.endpoint.clone().unwrap_or_default();
-    // Match the Trino fault-tolerant path: a storage connection with no secret
-    // is a hard error, not a silent empty key.
-    let secret_ref = sc.secret_ref.ok_or_else(|| {
-        CpError::BadRequest(
+    if sc.secret_ref.is_none() {
+        return Err(CpError::BadRequest(
             "warehouse storage connection has no secret; cannot provision StarRocks".into(),
-        )
-    })?;
-    let storage_secret_key = st
-        .secrets
-        .resolve_plaintext(None, secret_ref)
-        .await
-        .map_err(|e| CpError::BadRequest(format!("resolve storage secret: {e}")))?;
-    // Namespace per engine so two StarRocks engines sharing a bucket don't
-    // collide their shared-data storage roots.
-    let storage_path = format!("{}/starrocks/{}", sc.bucket, b.name);
+        ));
+    }
 
     let sr_body = b.starrocks.as_ref().cloned().unwrap_or_default();
     let fe_image = sr_body
@@ -1935,8 +2108,6 @@ async fn create_starrocks_engine(
         .unwrap_or_else(|| DEFAULT_SR_CN_IMAGE.into());
     let fe_replicas = sr_body.fe_replicas.unwrap_or(1);
     let cn_replicas = sr_body.cn_replicas.unwrap_or(1);
-    let fe_resources = sr_body.fe_resources.as_ref().map(parse_resources);
-    let cn_resources = sr_body.cn_resources.as_ref().map(parse_resources);
 
     // Delegation opt-in (Access parity slice 3, S3-T2b): validate the mode up
     // front, before any engine row exists, so a bad value 400s with nothing to
@@ -2078,119 +2249,20 @@ async fn create_starrocks_engine(
         }
     };
 
-    // Ranger resolution — the SAME snippet `build_provision_req` uses for
-    // Trino: bound profile (authz_service_id set) → RangerBinding named after
-    // the engine; unbound → None.
-    let ranger_service_name = engine.authz_service_id.map(|_| engine.name.clone());
-    let ranger = ranger_service_name.map(|service_name| egret_engine_mgmt_api::RangerBinding {
-        service_name,
-        egret_url: st.engine_egret_url.clone(),
-        poll_interval_ms: 30_000,
-    });
-
-    // Delegation wiring (Access parity slice 3, S3-T2b): when the admin opted
-    // in via `delegation_mode`, provision the two artifacts the runtime
-    // `StarRocksDelegation` + the post-Ready bootstrap need — reusing the
-    // SAME generic helpers the Trino path already uses (both key off nothing
-    // Trino-specific, just `&Engine`):
-    //   - `ensure_tls_cert`: self-signed cert keyed off `coordinator_host()`,
-    //     which now resolves to the FE service host for a "starrocks" engine
-    //     (see `store::Engine::coordinator_host`), so the cert's SAN is
-    //     correct for the FE this engine actually provisions.
-    //   - `ensure_delegator_secret`: the SAME `egret_delegator` password
-    //     secret slot Trino's impersonate mode uses (`delegator_secret_id`).
-    //     Minted for EITHER delegation mode (not just impersonate): the
-    //     post-Ready bootstrap below unconditionally creates this service
-    //     user + `GRANT IMPERSONATE` alongside the JWT security integration
-    //     (see `spawn_starrocks_catalog_wire`'s doc — that shape predates
-    //     this wiring and isn't mode-gated), so jwt mode needs the password
-    //     too even though `assign()`'s materialized connection won't
-    //     reference it.
-    // A failure rolls back the same way every other provisioning step above
-    // does (delete the engine row, revoke the catalog client).
-    let mut delegation_cert_pem: Option<String> = None;
-    let mut delegation_keystore_pem: Option<String> = None;
-    if tls_enabled {
-        match ensure_tls_cert(&st, &engine).await {
-            Ok((keystore_pem, cert_pem)) => {
-                delegation_cert_pem = Some(cert_pem);
-                delegation_keystore_pem = Some(keystore_pem);
-            }
-            Err(e) => {
-                let _ = st.engine_mgmt.delete_engine(engine.id).await;
-                let _ = st.catalog.revoke_client(client.id).await;
-                return Err(e);
-            }
+    // Assemble the provisioning request from the STORED engine row — the SAME
+    // shared helper a later update will call, so create and update feed the
+    // provisioner an identical `EngineSpec`. Resolves storage creds + the
+    // optional Ranger binding and (for a delegation-enabled spec) idempotently
+    // mints/reuses the TLS cert + delegator secret. A failure here rolls back
+    // exactly like every other provisioning step above (delete the engine row,
+    // revoke the catalog client).
+    let (req, delegation_bootstrap) = match build_starrocks_provision_req(&st, &engine, &wh).await {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = st.engine_mgmt.delete_engine(engine.id).await;
+            let _ = st.catalog.revoke_client(client.id).await;
+            return Err(e);
         }
-    }
-    let mut delegation_service_password: Option<String> = None;
-    if delegation_mode.is_some() {
-        match ensure_delegator_secret(&st, &engine).await {
-            Ok((_secret_id, pw)) => delegation_service_password = Some(pw),
-            Err(e) => {
-                let _ = st.engine_mgmt.delete_engine(engine.id).await;
-                let _ = st.catalog.revoke_client(client.id).await;
-                return Err(e);
-            }
-        }
-    }
-    // OIDC coordinates are DERIVED from egret's own config (`st.engine_jwks_uri`/
-    // `st.engine_oidc_issuer`, populated in egret-bin from `config.oidc`), NOT
-    // accepted on the body — StarRocks has no per-engine override surface like
-    // Trino's `trinoConfig.auth.jwt.jwksUri`. `audience` is fixed to
-    // `"starrocks"` (mirrors the connector's own assumption — S3-T1/T2's
-    // `starrocks_jwt_integration_sql` docs). Soft-fails (warns, doesn't block
-    // create) when OIDC isn't configured, matching the Trino path's
-    // `engine_jwks_uri` philosophy — the admin has no per-engine override to
-    // fall back on here, so this can leave a jwt-mode integration that never
-    // validates real tokens until OIDC is configured platform-wide.
-    if delegation_mode.is_some()
-        && (st.engine_jwks_uri.is_empty() || st.engine_oidc_issuer.is_empty())
-    {
-        tracing::warn!(
-            engine = %b.name,
-            "starrocks delegation requested but OIDC is not configured on this deployment; \
-             the JWT security integration will be templated with an empty issuer/jwks"
-        );
-    }
-    let delegation = delegation_mode.map(|_| egret_engine_mgmt_api::StarRocksDelegation {
-        jwks_url: st.engine_jwks_uri.clone(),
-        issuer: st.engine_oidc_issuer.clone(),
-        audience: "starrocks".into(),
-        tls_cert_pem: delegation_cert_pem.clone().unwrap_or_default(),
-        tls_keystore_pem: delegation_keystore_pem.clone().unwrap_or_default(),
-        tls_enabled,
-    });
-    let delegation_bootstrap = delegation_mode.map(|_| StarRocksDelegationBootstrap {
-        jwks_url: st.engine_jwks_uri.clone(),
-        issuer: st.engine_oidc_issuer.clone(),
-        audience: "starrocks".into(),
-        tls_cert_pem: delegation_cert_pem.clone(),
-        service_user: crate::delegator_policy::DELEGATOR_USERNAME.into(),
-        service_password: delegation_service_password.clone().unwrap_or_default(),
-    });
-
-    let req = egret_engine_mgmt_api::EngineSpec {
-        name: engine.name.clone(),
-        namespace: engine.namespace.clone(),
-        image_version: fe_image.clone(),
-        config: TrinoConfigReq::default(),
-        catalogs: vec![],
-        ranger,
-        kind: egret_engine_mgmt_api::EngineKind::StarRocks,
-        starrocks: Some(egret_engine_mgmt_api::StarRocksConfig {
-            fe_image,
-            cn_image,
-            fe_replicas,
-            cn_replicas,
-            storage_endpoint,
-            storage_path,
-            storage_access_key: sc.access_key.clone(),
-            storage_secret_key,
-            fe_resources,
-            cn_resources,
-            delegation,
-        }),
     };
 
     let Some(prov) = st.engine_provisioner.as_ref() else {
@@ -4175,6 +4247,167 @@ mod tests {
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),
         })
+    }
+
+    /// Seed a workspace + storage-conn (with a resolvable secret) + warehouse,
+    /// returning the `(Warehouse, storage_secret_plaintext)` so a test can drive
+    /// `build_starrocks_provision_req`. Mirrors `tests/store.rs::seed_warehouse`
+    /// but resolves the concrete `CatalogStore` for the warehouse insert and
+    /// backs the storage secret with a real `secrets` row so the helper's
+    /// `resolve_plaintext` succeeds.
+    async fn seed_sr_warehouse(
+        st: &CpState,
+        db: &egret_metastore::Db,
+    ) -> (egret_catalog_api::Warehouse, String) {
+        let catalog = egret_catalog_engine::CatalogStore::new(db.clone());
+        let secret_plain = format!("s3-{}", Uuid::new_v4().simple());
+        let secret_id = st
+            .secrets
+            .create(
+                None,
+                &format!("sr_store_{}", Uuid::new_v4().simple()),
+                None,
+                &secret_plain,
+            )
+            .await
+            .expect("create storage secret");
+        let sc = st
+            .storage_registry
+            .create_storage_conn(&egret_storage::StorageConnInput {
+                name: format!("sr-store-{}", Uuid::new_v4().simple()),
+                purpose: None,
+                provider: "s3".into(),
+                endpoint: Some("http://minio:9000".into()),
+                region: "us-east-1".into(),
+                bucket: "warehouse".into(),
+                key_prefix: None,
+                access_key: "egret-ak".into(),
+                secret_ref: Some(secret_id),
+                path_style: true,
+            })
+            .await
+            .expect("create storage conn");
+
+        let ws_id = Uuid::new_v4();
+        let ws_slug = format!("ws_{}", ws_id.simple());
+        sqlx::query(
+            "INSERT INTO workspaces (id, slug, name, status) VALUES ($1, $2, $3, 'active')",
+        )
+        .bind(ws_id)
+        .bind(&ws_slug)
+        .bind(&ws_slug)
+        .execute(&db.pool)
+        .await
+        .expect("seed workspace");
+        let wh_name = format!("sr-wh-{}", Uuid::new_v4().simple());
+        let wh_row = catalog
+            .create_warehouse(&wh_name, ws_id, sc.id)
+            .await
+            .expect("create warehouse");
+        let wh = st
+            .catalog
+            .get_warehouse(wh_row.id)
+            .await
+            .expect("get_warehouse")
+            .expect("warehouse present");
+        (wh, secret_plain)
+    }
+
+    /// `build_starrocks_provision_req` (Task 1) rebuilds the provisioner
+    /// `EngineSpec` from a STORED engine row's `spec.starrocksConfig` + the
+    /// warehouse storage — the shared assembly create and (later) update both
+    /// feed the provisioner. Asserts the images/replicas/storage flow through,
+    /// `storage_path` follows the `<bucket>/starrocks/<engine>` formula, and the
+    /// delegation bundle is present iff the stored spec carries a delegation
+    /// block.
+    #[tokio::test]
+    async fn build_starrocks_provision_req_assembles_from_stored_spec() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping build_starrocks_provision_req_assembles_from_stored_spec: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, secret_plain) = seed_sr_warehouse(&st, &db).await;
+
+        // (a) A DELEGATION-enabled StarRocks engine row.
+        let spec = serde_json::json!({
+            "imageVersion": "starrocks/fe-ubuntu:custom",
+            "starrocksConfig": {
+                "feImage": "starrocks/fe-ubuntu:custom",
+                "cnImage": "starrocks/cn-ubuntu:custom",
+                "feReplicas": 3,
+                "cnReplicas": 5,
+                "feResources": null,
+                "cnResources": null,
+                "delegation": { "mode": "jwt", "tlsEnabled": true },
+            },
+        });
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("sr-{}", Uuid::new_v4().simple()),
+                "starrocks",
+                "egret-engines",
+                wh.id,
+                &spec,
+            )
+            .await
+            .expect("create engine row");
+
+        let (req, boot) = build_starrocks_provision_req(&st, &engine, &wh)
+            .await
+            .expect("build_starrocks_provision_req");
+
+        assert_eq!(req.kind, egret_engine_mgmt_api::EngineKind::StarRocks);
+        assert_eq!(req.name, engine.name);
+        let sr = req.starrocks.as_ref().expect("starrocks config present");
+        assert_eq!(sr.fe_image, "starrocks/fe-ubuntu:custom");
+        assert_eq!(sr.cn_image, "starrocks/cn-ubuntu:custom");
+        assert_eq!(sr.fe_replicas, 3);
+        assert_eq!(sr.cn_replicas, 5);
+        assert_eq!(sr.storage_endpoint, "http://minio:9000");
+        assert_eq!(sr.storage_access_key, "egret-ak");
+        assert_eq!(sr.storage_secret_key, secret_plain);
+        assert_eq!(
+            sr.storage_path,
+            format!("warehouse/starrocks/{}", engine.name)
+        );
+        // Delegation block present in the stored spec ⇒ delegation + bootstrap.
+        assert!(sr.delegation.is_some());
+        assert!(boot.is_some());
+
+        // (b) A NO-DELEGATION engine row: images default, delegation absent.
+        let spec2 = serde_json::json!({
+            "starrocksConfig": {
+                "feReplicas": 2,
+            },
+        });
+        let engine2 = st
+            .engine_mgmt
+            .create_engine(
+                &format!("sr-{}", Uuid::new_v4().simple()),
+                "starrocks",
+                "egret-engines",
+                wh.id,
+                &spec2,
+            )
+            .await
+            .expect("create engine row 2");
+        let (req2, boot2) = build_starrocks_provision_req(&st, &engine2, &wh)
+            .await
+            .expect("build_starrocks_provision_req (no delegation)");
+        let sr2 = req2.starrocks.as_ref().expect("starrocks config present");
+        assert_eq!(sr2.fe_image, DEFAULT_SR_FE_IMAGE);
+        assert_eq!(sr2.cn_image, DEFAULT_SR_CN_IMAGE);
+        assert_eq!(sr2.fe_replicas, 2);
+        assert_eq!(sr2.cn_replicas, 1);
+        assert!(sr2.delegation.is_none());
+        assert!(boot2.is_none());
     }
 
     /// WITHOUT a `secret_ref` the generic arm must render exactly as before:
