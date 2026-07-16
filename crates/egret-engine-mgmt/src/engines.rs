@@ -49,6 +49,9 @@ const ENGINE_ROLE_NAME: &str = "engine";
 /// Default StarRocks FE/CN images when the body omits them.
 const DEFAULT_SR_FE_IMAGE: &str = "starrocks/fe-ubuntu:3.3-latest";
 const DEFAULT_SR_CN_IMAGE: &str = "starrocks/cn-ubuntu:3.3-latest";
+/// StarRocks FE MySQL-protocol (query) port — where the Iceberg external-catalog
+/// auto-wire runs its `CREATE EXTERNAL CATALOG` DDL (`query_port` in `fe.conf`).
+const STARROCKS_FE_MYSQL_PORT: u16 = 9030;
 
 // Canonical engine-spec DTOs now live in the dependency-free `egret-engine-mgmt-api`
 // contract crate (shared with `egret-orchestrator`); aliased here to the old
@@ -1853,14 +1856,14 @@ async fn create_engine(
 /// Iceberg external-catalog auto-wire (T6): mirrors the Trino path's Catalog
 /// Client minting EXACTLY (`ensure_engine_role` + `catalog.create_client`) and
 /// records the same-shaped PRIMARY `egret-warehouse` catalog row, so the
-/// client is visible/cleaned-up identically across engine kinds. Unlike
+/// client is visible/cleaned-up identically across engine kinds. Just like
 /// Trino — whose bundled Iceberg-REST connector does the OAuth2
 /// client-credentials exchange itself, driven by the `client_id:client_secret`
-/// credential in the catalog file — StarRocks' external catalog wants a
-/// static bearer in `iceberg.catalog.token`, so a background step (spawned
-/// after `provision` succeeds, see [`spawn_starrocks_catalog_wire`]) exchanges
-/// that same credential for a bearer token via egret's own `/oauth/token` and
-/// runs [`starrocks_external_catalog_sql`] against the FE once it's Ready.
+/// credential — StarRocks' external catalog is handed that SAME credential +
+/// egret's token endpoint and self-refreshes its access token (no static
+/// bearer to expire). A background step (spawned after `provision` succeeds,
+/// see [`spawn_starrocks_catalog_wire`]) runs
+/// [`starrocks_external_catalog_sql`] against the FE once it's Ready.
 /// Any failure up to and including `provision` rolls back (revoke the client +
 /// delete the engine row) exactly like the Trino path; the post-provision wire
 /// step is best-effort and never fails the create (see its own docs).
@@ -2091,63 +2094,66 @@ async fn create_starrocks_engine(
     Ok((StatusCode::CREATED, Json(engine.into())))
 }
 
+/// Escape a value for embedding inside a double-quoted StarRocks property
+/// string (`"…"`). Backslash and double-quote are the only two metacharacters
+/// that can break out of a `"…"` value, so a `wh.name` (free-form, NOT
+/// charset-validated anywhere) containing a `"` can't inject arbitrary DDL that
+/// then runs as `root` on the FE. Backslash is escaped first so the escape
+/// character it introduces isn't itself re-escaped.
+fn sr_escape_dq(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Escape an identifier for a backtick-quoted StarRocks/MySQL identifier
+/// (`` `…` ``). A literal backtick is escaped by doubling it — the same rule
+/// MySQL/StarRocks use — so an identifier containing a backtick can't close the
+/// quoting early and inject DDL.
+fn sr_escape_ident(s: &str) -> String {
+    s.replace('`', "``")
+}
+
 /// Build the StarRocks `CREATE EXTERNAL CATALOG` DDL that points a provisioned
-/// StarRocks at egret's embedded Iceberg REST catalog. Property keys mirror
-/// the Trino Iceberg-REST catalog properties this crate already renders in
-/// [`build_catalog_req`] (`iceberg.catalog.type` = `rest`, a `…uri`, a
-/// `…warehouse`), except the token is a STATIC bearer
-/// (`iceberg.catalog.token`) rather than Trino's OAuth2 client-credential
-/// exchange — StarRocks' REST catalog implementation authenticates with a
-/// bearer it is simply handed, so the caller must mint one first (see
-/// [`spawn_starrocks_catalog_wire`]).
+/// StarRocks at egret's embedded Iceberg REST catalog, authenticating with
+/// OAuth2 client-credentials — the EXACT same egret token endpoint +
+/// `client_id:client_secret` credential the Trino path renders in
+/// [`build_catalog_req`] (`iceberg.rest-catalog.security=OAUTH2` /
+/// `…oauth2.server-uri` / `…oauth2.credential`). StarRocks' REST catalog client
+/// self-refreshes its access token from these props, so — unlike a static
+/// `iceberg.catalog.token` — the catalog does NOT die when a token expires.
+///
+/// StarRocks Iceberg-REST OAuth2 property keys (per the StarRocks docs):
+/// `iceberg.catalog.security=oauth2`, `iceberg.catalog.oauth2.credential`,
+/// `iceberg.catalog.oauth2.server-uri`. NOTE: StarRocks issue #57766 reports a
+/// docs-vs-implementation discrepancy where some versions parsed the UNPREFIXED
+/// keys (`oauth2.credential` / `oauth2.server-uri`). The documented prefixed
+/// keys are used here; if the Task 8 live smoke on the `fe-ubuntu` image fails
+/// to auth, dropping the `iceberg.catalog.` prefix on the two `oauth2.*` keys is
+/// the first thing to try (same class of live-only property tuning as the
+/// Ranger XML keys / FE service name).
+///
+/// All interpolated values are escaped ([`sr_escape_dq`] / [`sr_escape_ident`])
+/// so a warehouse/catalog name is never a DDL-injection vector (this DDL runs as
+/// `root` on the FE).
 fn starrocks_external_catalog_sql(
     catalog_name: &str,
     egret_url: &str,
     warehouse: &str,
-    token: &str,
+    credential: &str,
 ) -> String {
+    let name = sr_escape_ident(catalog_name);
+    let uri = sr_escape_dq(&format!("{egret_url}/catalog"));
+    let warehouse = sr_escape_dq(warehouse);
+    let server_uri = sr_escape_dq(&format!("{egret_url}/oauth/token"));
+    let credential = sr_escape_dq(credential);
     format!(
-        "CREATE EXTERNAL CATALOG IF NOT EXISTS `{catalog_name}` \
+        "CREATE EXTERNAL CATALOG IF NOT EXISTS `{name}` \
          PROPERTIES (\"type\"=\"iceberg\", \"iceberg.catalog.type\"=\"rest\", \
-         \"iceberg.catalog.uri\"=\"{egret_url}/catalog\", \
+         \"iceberg.catalog.uri\"=\"{uri}\", \
          \"iceberg.catalog.warehouse\"=\"{warehouse}\", \
-         \"iceberg.catalog.token\"=\"{token}\")"
+         \"iceberg.catalog.security\"=\"oauth2\", \
+         \"iceberg.catalog.oauth2.server-uri\"=\"{server_uri}\", \
+         \"iceberg.catalog.oauth2.credential\"=\"{credential}\")"
     )
-}
-
-/// Exchange a minted Catalog Client's `client_id`/`client_secret` for a bearer
-/// access token via egret's own machine-IdP `client_credentials` grant
-/// (`POST {egret_url}/oauth/token`, see `egret-machine-idp`). This is the
-/// bearer embedded in `iceberg.catalog.token` — StarRocks' external catalog
-/// takes a static token, unlike Trino's Iceberg-REST connector, which holds
-/// the client credential itself and re-exchanges it as it expires.
-async fn mint_bearer_token(
-    egret_url: &str,
-    client_id: &str,
-    client_secret: &str,
-) -> Result<String, String> {
-    #[derive(serde::Deserialize)]
-    struct TokenResp {
-        access_token: String,
-    }
-    let url = format!("{}/oauth/token", egret_url.trim_end_matches('/'));
-    let resp = reqwest::Client::new()
-        .post(url)
-        .form(&[
-            ("grant_type", "client_credentials"),
-            ("client_id", client_id),
-            ("client_secret", client_secret),
-        ])
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("token endpoint returned {}", resp.status()));
-    }
-    resp.json::<TokenResp>()
-        .await
-        .map(|t| t.access_token)
-        .map_err(|e| e.to_string())
 }
 
 /// Run one DDL statement against a StarRocks FE over the raw MySQL protocol,
@@ -2176,17 +2182,19 @@ async fn run_starrocks_ddl(host: &str, port: u16, sql: &str) -> Result<(), Strin
 
 /// Best-effort, non-blocking post-provision step (T6 step 3): poll the
 /// provisioner's `status` until a StarRocks FE pod reports ready (bounded to
-/// ~5 minutes), mint a bearer token from the already-minted client credential,
-/// and run [`starrocks_external_catalog_sql`] against the FE's in-cluster
-/// MySQL-protocol service. Spawned via `tokio::spawn` so `create_starrocks_engine`
-/// returns its HTTP response without waiting on any of this — the FE takes
-/// ~1-2 min to come up, and neither the poll budget nor FE/egret reachability
-/// in a given cluster is something the create request should block on. Every
-/// failure path only logs (`tracing::warn!`); it never has a channel back to
-/// the original HTTP response, by construction. The FE service DNS name
-/// (`<name>-fe-service.<namespace>.svc`) is the kube-starrocks operator's
-/// documented convention; UNVERIFIED against a live operator install as of
-/// this change (flagged for the Task 8 live smoke — see plan doc).
+/// ~5 minutes), then run [`starrocks_external_catalog_sql`] against the FE's
+/// in-cluster MySQL-protocol service. The DDL embeds the OAuth2
+/// `client_id:client_secret` credential directly (StarRocks self-refreshes its
+/// access token from it, so there is no short-lived bearer to mint here and no
+/// token-expiry to recover from). Spawned via `tokio::spawn` so
+/// `create_starrocks_engine` returns its HTTP response without waiting on any of
+/// this — the FE takes ~1-2 min to come up, and neither the poll budget nor
+/// FE/egret reachability in a given cluster is something the create request
+/// should block on. Every failure path only logs (`tracing::warn!`); it never
+/// has a channel back to the original HTTP response, by construction. The FE
+/// service DNS name (`<name>-fe-service.<namespace>.svc`) is the kube-starrocks
+/// operator's documented convention; UNVERIFIED against a live operator install
+/// as of this change (flagged for the Task 8 live smoke — see plan doc).
 fn spawn_starrocks_catalog_wire(
     prov: Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>,
     namespace: String,
@@ -2222,18 +2230,13 @@ fn spawn_starrocks_catalog_wire(
             return;
         }
 
-        let token = match mint_bearer_token(&egret_url, &client_id, &client_secret).await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(engine = %engine_name, error = %e,
-                    "starrocks catalog auto-wire: minting a bearer token failed");
-                return;
-            }
-        };
-
-        let sql = starrocks_external_catalog_sql("egret", &egret_url, &warehouse_name, &token);
+        // The OAuth2 credential is the SAME `client_id:client_secret` the Trino
+        // path stores (see `build_catalog_req`'s egret-warehouse arm); StarRocks
+        // exchanges it for an access token itself and refreshes on expiry.
+        let credential = format!("{client_id}:{client_secret}");
+        let sql = starrocks_external_catalog_sql("egret", &egret_url, &warehouse_name, &credential);
         let fe_host = format!("{engine_name}-fe-service.{namespace}.svc");
-        match run_starrocks_ddl(&fe_host, 9030, &sql).await {
+        match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, &sql).await {
             Ok(()) => {
                 tracing::info!(engine = %engine_name,
                     "starrocks catalog auto-wire: external Iceberg catalog wired");
@@ -4199,16 +4202,17 @@ mod tests {
     }
 
     /// [`starrocks_external_catalog_sql`] (T6) renders a `CREATE EXTERNAL
-    /// CATALOG` DDL carrying the REST-catalog uri/warehouse/token properties
+    /// CATALOG` DDL carrying the REST-catalog uri/warehouse properties + the
+    /// OAuth2 client-credentials block (self-refreshing, no static bearer)
     /// StarRocks expects — pure/unit-testable; the live connection + execution
     /// is smoke-only (Task 8).
     #[test]
-    fn starrocks_external_catalog_sql_renders_rest_properties() {
+    fn starrocks_external_catalog_sql_renders_oauth2_rest_properties() {
         let sql = starrocks_external_catalog_sql(
             "demo",
             "http://host.docker.internal:8080",
             "lakehouse",
-            "tok",
+            "cid:secret",
         );
         assert!(sql.contains("CREATE EXTERNAL CATALOG"), "sql={sql}");
         assert!(sql.contains(r#"iceberg.catalog.type"="rest"#), "sql={sql}");
@@ -4220,7 +4224,60 @@ mod tests {
             sql.contains(r#"iceberg.catalog.warehouse"="lakehouse"#),
             "sql={sql}"
         );
-        assert!(sql.contains(r#"iceberg.catalog.token"="tok"#), "sql={sql}");
+        // OAuth2 self-refreshing credentials (mirrors the Trino path), NOT a
+        // static bearer — so the catalog doesn't die when a token expires.
+        assert!(
+            sql.contains(r#"iceberg.catalog.security"="oauth2"#),
+            "sql={sql}"
+        );
+        assert!(
+            sql.contains(
+                r#"iceberg.catalog.oauth2.server-uri"="http://host.docker.internal:8080/oauth/token"#
+            ),
+            "sql={sql}"
+        );
+        assert!(
+            sql.contains(r#"iceberg.catalog.oauth2.credential"="cid:secret"#),
+            "sql={sql}"
+        );
+        // No static token property remains.
+        assert!(!sql.contains("iceberg.catalog.token"), "sql={sql}");
         assert!(sql.contains("`demo`"), "catalog name; sql={sql}");
+    }
+
+    /// A warehouse name (free-form, un-validated) containing a `"` must be
+    /// escaped so it can't break out of the double-quoted property value and
+    /// inject arbitrary DDL that then runs as `root` on the FE. Likewise a
+    /// backtick in the catalog identifier must be doubled, not close the
+    /// identifier quoting early.
+    #[test]
+    fn starrocks_external_catalog_sql_escapes_ddl_injection() {
+        // Warehouse name tries to close the value and append a DROP.
+        let evil_wh = r#"wh" ) ; DROP DATABASE x ; -- "#;
+        let sql =
+            starrocks_external_catalog_sql("cat`evil", "http://egret:8080", evil_wh, "cid:secret");
+        // The raw (unescaped) injection payload must NOT appear verbatim.
+        assert!(
+            !sql.contains(r#"wh" ) ; DROP DATABASE x"#),
+            "unescaped warehouse breakout present; sql={sql}"
+        );
+        // The `"` inside the warehouse is backslash-escaped in place, so the
+        // value stays a single quoted string (the trailing `"` is the property's
+        // own closing quote, unescaped).
+        assert!(
+            sql.contains(r#"iceberg.catalog.warehouse"="wh\" ) ; DROP DATABASE x ; -- ""#),
+            "warehouse not escaped; sql={sql}"
+        );
+        // The backtick in the identifier is doubled, not left to close early.
+        assert!(
+            sql.contains("`cat``evil`"),
+            "identifier not escaped; sql={sql}"
+        );
+        // Backslash is escaped before the quote so it isn't double-processed.
+        let sql2 = starrocks_external_catalog_sql("c", "http://egret:8080", r#"a\b"#, "x:y");
+        assert!(
+            sql2.contains(r#"warehouse"="a\\b"#),
+            "backslash not escaped; sql={sql2}"
+        );
     }
 }
