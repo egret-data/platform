@@ -536,6 +536,8 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
         catalogs,
         config,
         ranger,
+        kind: egret_engine_mgmt_api::EngineKind::Trino,
+        starrocks: None,
     })
 }
 

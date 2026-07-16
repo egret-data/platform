@@ -1351,6 +1351,8 @@ mod tests {
                 env: cat_env,
             }],
             ranger: None,
+            kind: EngineKind::Trino,
+            starrocks: None,
         }
     }
 
