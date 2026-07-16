@@ -21455,6 +21455,21 @@
             ],
             "format": "int64",
             "description": "Link the new engine to an EXISTING Ranger profile (authz_services id).\nWhen omitted, provisioning creates a fresh profile named after the engine."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Which engine to provision: `\"trino\"` (default, back-compat) or\n`\"starrocks\"`. Selects between the Trino spec-building path and\n[`create_starrocks_engine`]."
+          },
+          "starrocks": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StarRocksConfigBody",
+                "description": "StarRocks-specific config surface (FE/CN image + replicas + optional\nresources); only read when `kind == \"starrocks\"`. Storage (endpoint/\npath/keys) is NOT accepted here — it's derived from the warehouse's\nstorage connection, same as the Trino S3 connector."
+              }
+            ]
           }
         }
       },
@@ -25097,6 +25112,50 @@
           },
           "nullOrder": {
             "type": "string"
+          }
+        }
+      },
+      "StarRocksConfigBody": {
+        "type": "object",
+        "description": "Wire shape for `CreateEngineBody.starrocks`: FE/CN image + replicas +\noptional per-role resources. Mirrors the `resources{cpuRequest,cpuLimit,\nmemRequest,memLimit}` shape [`parse_resources`] already understands.",
+        "properties": {
+          "feImage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "cnImage": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "feReplicas": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "default": null,
+            "minimum": 0
+          },
+          "cnReplicas": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "default": null,
+            "minimum": 0
+          },
+          "feResources": {
+            "type": "object"
+          },
+          "cnResources": {
+            "type": "object"
           }
         }
       },

@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { CreateEngineBodyTrinoConfig } from './createEngineBodyTrinoConfig';
+import type { StarRocksConfigBody } from './starRocksConfigBody';
 
 export interface CreateEngineBody {
   name: string;
@@ -33,4 +34,11 @@ export interface CreateEngineBody {
      * @nullable
      */
   authzServiceId?: number | null;
+  /**
+     * Which engine to provision: `"trino"` (default, back-compat) or
+     * `"starrocks"`. Selects between the Trino spec-building path and
+     * [`create_starrocks_engine`].
+     */
+  kind?: string;
+  starrocks?: null | StarRocksConfigBody;
 }

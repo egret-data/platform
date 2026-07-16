@@ -54,10 +54,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 /**
  * Control Plane → Engines
  *
- * Platform-admin registry of query engines. Phase 1 provisions Trino clusters
- * on Kubernetes; StarRocks / RisingWave tabs are placeholders for later phases.
- * Lists engines per type, shows a live health badge (per-row status poll), and
- * provisions a new Trino engine against a catalog warehouse.
+ * Platform-admin registry of query engines. Trino and StarRocks clusters can
+ * both be provisioned on Kubernetes; RisingWave is a placeholder for a later
+ * phase. Lists engines per type, shows a live health badge (per-row status
+ * poll), and provisions a new engine against a catalog warehouse — the active
+ * tab picks the engine kind for the Add dialog.
  */
 
 type EngineType = {
@@ -71,8 +72,26 @@ const ENGINE_TYPES: EngineType[] = [
   { value: "risingwave", label: "RisingWave" },
 ];
 
-// Only Trino provisioning is wired up in Phase 1.
-const PROVISIONABLE = new Set(["trino"]);
+// Trino and StarRocks provisioning are wired up; RisingWave is not yet.
+const PROVISIONABLE = new Set(["trino", "starrocks"]);
+
+// StarRocks image defaults (shared-data FE/CN), same versions the backend
+// falls back to when the body omits them.
+const DEFAULT_SR_FE_IMAGE = "starrocks/fe-ubuntu:3.3-latest";
+const DEFAULT_SR_CN_IMAGE = "starrocks/cn-ubuntu:3.3-latest";
+
+// Harmless defaults for the still-required Trino-only body fields
+// (coordinatorReplicas/workerReplicas/cpuMin/cpuMax/memory) when creating a
+// StarRocks engine — the backend ignores them for `kind: "starrocks"` but the
+// body validates them as required regardless of kind. Mirrors the Trino
+// form's own defaults below.
+const TRINO_FIELD_DEFAULTS = {
+  coordinatorReplicas: 1,
+  workerReplicas: 2,
+  cpuMin: "1",
+  cpuMax: "2",
+  memory: "4Gi",
+};
 
 const COLUMNS = ["Name", "Type", "Endpoint", "Status", "Actions"];
 
@@ -103,9 +122,9 @@ export default function ControlPlaneEngines() {
               Engines
             </CardTitle>
             <CardDescription>
-              Platform query engines. Provision a Trino cluster against a catalog
-              warehouse and monitor its health. StarRocks / RisingWave arrive in
-              a later phase.
+              Platform query engines. Provision a Trino or StarRocks cluster
+              against a catalog warehouse and monitor its health. RisingWave
+              arrives in a later phase.
             </CardDescription>
           </div>
           <Button
@@ -220,7 +239,9 @@ function EngineTable({
                 <Badge variant="secondary">{engine.type}</Badge>
               </TableCell>
               <TableCell className="font-mono text-xs text-muted-foreground">
-                {engine.name}-coordinator.{engine.namespace}
+                {engine.name}
+                {engine.type === "starrocks" ? "-fe-service" : "-coordinator"}.
+                {engine.namespace}
               </TableCell>
               <TableCell>
                 <EngineStatusBadge id={engine.id} fallback={engine.status} />
@@ -307,7 +328,14 @@ function AddEngineDialog({
   const [cpuMin, setCpuMin] = useState("1");
   const [cpuMax, setCpuMax] = useState("2");
   const [memory, setMemory] = useState("4Gi");
+  // StarRocks-only fields (shown instead of the Trino resource fields above).
+  const [feImage, setFeImage] = useState(DEFAULT_SR_FE_IMAGE);
+  const [cnImage, setCnImage] = useState(DEFAULT_SR_CN_IMAGE);
+  const [feReplicas, setFeReplicas] = useState(1);
+  const [cnReplicas, setCnReplicas] = useState(1);
   const [error, setError] = useState<string | null>(null);
+
+  const isStarRocks = engineType === "starrocks";
 
   useEffect(() => {
     if (open) reset();
@@ -321,6 +349,10 @@ function AddEngineDialog({
     setCpuMin("1");
     setCpuMax("2");
     setMemory("4Gi");
+    setFeImage(DEFAULT_SR_FE_IMAGE);
+    setCnImage(DEFAULT_SR_CN_IMAGE);
+    setFeReplicas(1);
+    setCnReplicas(1);
     setError(null);
     createMutation.reset();
   }
@@ -339,15 +371,30 @@ function AddEngineDialog({
     e.preventDefault();
     setError(null);
 
-    const input: CreateEngineInput = {
-      name: name.trim(),
-      warehouseId,
-      coordinatorReplicas,
-      workerReplicas,
-      cpuMin: cpuMin.trim(),
-      cpuMax: cpuMax.trim(),
-      memory: memory.trim(),
-    };
+    const input: CreateEngineInput = isStarRocks
+      ? {
+          name: name.trim(),
+          warehouseId,
+          kind: "starrocks",
+          starrocks: {
+            feImage: feImage.trim(),
+            cnImage: cnImage.trim(),
+            feReplicas,
+            cnReplicas,
+          },
+          // Required by the body but ignored server-side for StarRocks —
+          // send the same defaults the Trino wizard uses.
+          ...TRINO_FIELD_DEFAULTS,
+        }
+      : {
+          name: name.trim(),
+          warehouseId,
+          coordinatorReplicas,
+          workerReplicas,
+          cpuMin: cpuMin.trim(),
+          cpuMax: cpuMax.trim(),
+          memory: memory.trim(),
+        };
 
     try {
       await createMutation.mutateAsync(input);
@@ -403,63 +450,117 @@ function AddEngineDialog({
               </Select>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1.5">
-                <Label htmlFor="cpe-coordinators">Coordinator replicas</Label>
-                <Input
-                  id="cpe-coordinators"
-                  type="number"
-                  min={1}
-                  value={coordinatorReplicas}
-                  onChange={(e) => setCoordinatorReplicas(Number(e.target.value))}
-                  required
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="cpe-workers">Worker replicas</Label>
-                <Input
-                  id="cpe-workers"
-                  type="number"
-                  min={0}
-                  value={workerReplicas}
-                  onChange={(e) => setWorkerReplicas(Number(e.target.value))}
-                  required
-                />
-              </div>
-            </div>
+            {isStarRocks ? (
+              <>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="cpe-sr-fe-image">FE image</Label>
+                    <Input
+                      id="cpe-sr-fe-image"
+                      value={feImage}
+                      onChange={(e) => setFeImage(e.target.value)}
+                      placeholder={DEFAULT_SR_FE_IMAGE}
+                      required
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="cpe-sr-cn-image">CN image</Label>
+                    <Input
+                      id="cpe-sr-cn-image"
+                      value={cnImage}
+                      onChange={(e) => setCnImage(e.target.value)}
+                      placeholder={DEFAULT_SR_CN_IMAGE}
+                      required
+                    />
+                  </div>
+                </div>
 
-            <div className="grid grid-cols-3 gap-4">
-              <div className="space-y-1.5">
-                <Label htmlFor="cpe-cpu-min">CPU min</Label>
-                <Input
-                  id="cpe-cpu-min"
-                  value={cpuMin}
-                  onChange={(e) => setCpuMin(e.target.value)}
-                  placeholder="1"
-                  required
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="cpe-cpu-max">CPU max</Label>
-                <Input
-                  id="cpe-cpu-max"
-                  value={cpuMax}
-                  onChange={(e) => setCpuMax(e.target.value)}
-                  placeholder="2"
-                  required
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="cpe-memory">Memory</Label>
-                <Input
-                  id="cpe-memory"
-                  value={memory}
-                  onChange={(e) => setMemory(e.target.value)}
-                  placeholder="4Gi"
-                  required
-                />
-              </div>
-            </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="cpe-sr-fe-replicas">FE replicas</Label>
+                    <Input
+                      id="cpe-sr-fe-replicas"
+                      type="number"
+                      min={1}
+                      value={feReplicas}
+                      onChange={(e) => setFeReplicas(Number(e.target.value))}
+                      required
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="cpe-sr-cn-replicas">CN replicas</Label>
+                    <Input
+                      id="cpe-sr-cn-replicas"
+                      type="number"
+                      min={1}
+                      value={cnReplicas}
+                      onChange={(e) => setCnReplicas(Number(e.target.value))}
+                      required
+                    />
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="cpe-coordinators">Coordinator replicas</Label>
+                    <Input
+                      id="cpe-coordinators"
+                      type="number"
+                      min={1}
+                      value={coordinatorReplicas}
+                      onChange={(e) => setCoordinatorReplicas(Number(e.target.value))}
+                      required
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="cpe-workers">Worker replicas</Label>
+                    <Input
+                      id="cpe-workers"
+                      type="number"
+                      min={0}
+                      value={workerReplicas}
+                      onChange={(e) => setWorkerReplicas(Number(e.target.value))}
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="cpe-cpu-min">CPU min</Label>
+                    <Input
+                      id="cpe-cpu-min"
+                      value={cpuMin}
+                      onChange={(e) => setCpuMin(e.target.value)}
+                      placeholder="1"
+                      required
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="cpe-cpu-max">CPU max</Label>
+                    <Input
+                      id="cpe-cpu-max"
+                      value={cpuMax}
+                      onChange={(e) => setCpuMax(e.target.value)}
+                      placeholder="2"
+                      required
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="cpe-memory">Memory</Label>
+                    <Input
+                      id="cpe-memory"
+                      value={memory}
+                      onChange={(e) => setMemory(e.target.value)}
+                      placeholder="4Gi"
+                      required
+                    />
+                  </div>
+                </div>
+              </>
+            )}
 
             {error && (
               <Alert variant="destructive">
@@ -482,7 +583,7 @@ function AddEngineDialog({
                 createMutation.isPending ||
                 !name.trim() ||
                 !warehouseId ||
-                engineType !== "trino"
+                !PROVISIONABLE.has(engineType)
               }
             >
               {createMutation.isPending && (

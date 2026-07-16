@@ -192,6 +192,13 @@ function EngineTabs({
   // saves re-provision the engine, so a lost edit is expensive.
   useUnsavedChangesWarning(cfg.dirty);
 
+  // StarRocks engines don't support update/restart yet (backend returns 400 —
+  // see `create_starrocks_engine`/`update_engine` guards). The Configuration
+  // and Security tabs are entirely Trino-shaped (coordinator/worker config,
+  // JVM heap, Trino auth), so hide them outright rather than render a form
+  // whose Save is a guaranteed 400.
+  const isStarRocks = engine.type === "starrocks";
+
   // Active top-level tab lives in the URL (`?tab=`) so the view is
   // deep-linkable and survives a refresh. Default preserved: "overview".
   const [sp, setSp] = useSearchParams();
@@ -212,13 +219,29 @@ function EngineTabs({
         <TabsTrigger value="overview">Overview</TabsTrigger>
         <TabsTrigger value="catalogs">Catalogs</TabsTrigger>
         <TabsTrigger value="workspaces">Workspaces</TabsTrigger>
-        <TabsTrigger value="configuration">Configuration</TabsTrigger>
-        <TabsTrigger value="security">Security &amp; Exposure</TabsTrigger>
+        {!isStarRocks && (
+          <>
+            <TabsTrigger value="configuration">Configuration</TabsTrigger>
+            <TabsTrigger value="security">Security &amp; Exposure</TabsTrigger>
+          </>
+        )}
         <TabsTrigger value="monitor">Monitor</TabsTrigger>
       </TabsList>
 
       <TabsContent value="overview" className="space-y-5">
-        <StatusCard status={engine.status} engineId={engineId} />
+        <StatusCard
+          status={engine.status}
+          engineId={engineId}
+          restartDisabled={isStarRocks}
+        />
+        {isStarRocks && (
+          <Alert>
+            <AlertDescription>
+              Configuration editing and restart aren&apos;t yet supported for
+              StarRocks engines.
+            </AlertDescription>
+          </Alert>
+        )}
         <DangerCard engine={engine} />
       </TabsContent>
 
@@ -230,13 +253,17 @@ function EngineTabs({
         <WorkspacesCard engine={engine} />
       </TabsContent>
 
-      <TabsContent value="configuration">
-        <ConfigurationTab cfg={cfg} imageVersion={engine.spec.imageVersion} />
-      </TabsContent>
+      {!isStarRocks && (
+        <>
+          <TabsContent value="configuration">
+            <ConfigurationTab cfg={cfg} imageVersion={engine.spec.imageVersion} />
+          </TabsContent>
 
-      <TabsContent value="security">
-        <SecurityTab cfg={cfg} />
-      </TabsContent>
+          <TabsContent value="security">
+            <SecurityTab cfg={cfg} />
+          </TabsContent>
+        </>
+      )}
 
       <TabsContent value="monitor">
         <EngineMonitor engineId={engineId} />
@@ -307,9 +334,12 @@ function SaveBar({
 function StatusCard({
   status,
   engineId,
+  restartDisabled = false,
 }: {
   status: EngineStatus;
   engineId: string;
+  /** StarRocks engines don't support restart yet (backend 400s). */
+  restartDisabled?: boolean;
 }) {
   const queryClient = useQueryClient();
   const [logsPod, setLogsPod] = useState<string | null>(null);
@@ -339,7 +369,12 @@ function StatusCard({
             variant="outline"
             size="sm"
             onClick={() => setRestartOpen(true)}
-            disabled={restartMutation.isPending}
+            disabled={restartMutation.isPending || restartDisabled}
+            title={
+              restartDisabled
+                ? "Restart not yet supported for StarRocks engines"
+                : undefined
+            }
           >
             {restartMutation.isPending ? (
               <Loader2 className="h-4 w-4 animate-spin" />
