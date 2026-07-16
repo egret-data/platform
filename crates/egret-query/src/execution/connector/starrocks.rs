@@ -61,6 +61,10 @@ impl StarRocksConnector {
         if let Some(pem) = &spec.options.tls_cert {
             let ssl = mysql_async::SslOpts::default()
                 .with_root_certs(vec![mysql_async::PathOrBuf::from(pem.clone().into_bytes())])
+                // Safe: we pin the exact self-signed FE leaf cert as the trust root, so the
+                // chain/signature are still validated (via `with_root_certs`) — only
+                // hostname/SAN matching is skipped, needed because the FE's self-signed cert
+                // CN won't match the in-cluster Service DNS we dial.
                 .with_danger_skip_domain_validation(true);
             b = b.ssl_opts(Some(ssl));
         }
@@ -68,6 +72,15 @@ impl StarRocksConnector {
             opts: b.into(),
             execute_as,
         }
+    }
+
+    /// Switch the connection's session identity to `user` (impersonate mode).
+    /// Backticks in the identifier are doubled per the MySQL identifier grammar.
+    async fn switch_identity(conn: &mut mysql_async::Conn, user: &str) -> Result<(), EngineError> {
+        let esc = user.replace('`', "``");
+        conn.query_drop(format!("EXECUTE AS `{esc}` WITH NO REVERT"))
+            .await
+            .map_err(|e| EngineError::Engine(e.to_string()))
     }
 
     #[cfg(test)]
@@ -94,10 +107,7 @@ impl Connector for StarRocksConnector {
             .map_err(|e| EngineError::Connect(e.to_string()))?;
 
         if let Some(u) = &self.execute_as {
-            let esc = u.replace('`', "``");
-            conn.query_drop(format!("EXECUTE AS `{esc}` WITH NO REVERT"))
-                .await
-                .map_err(|e| EngineError::Engine(e.to_string()))?;
+            Self::switch_identity(&mut conn, u).await?;
         }
 
         let mut result = conn
@@ -175,10 +185,7 @@ impl Connector for StarRocksConnector {
             // Impersonate (Trino parity): switch to the end-user before introspecting so
             // dataset preview/describe honors per-user Ranger, matching `execute`.
             if let Some(u) = &execute_as {
-                let esc = u.replace('`', "``");
-                conn.query_drop(format!("EXECUTE AS `{esc}` WITH NO REVERT"))
-                    .await
-                    .map_err(|e| EngineError::Engine(e.to_string()))?;
+                StarRocksConnector::switch_identity(&mut conn, u).await?;
             }
             let result = conn
                 .query_iter(wrapped)
