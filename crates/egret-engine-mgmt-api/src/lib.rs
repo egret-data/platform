@@ -375,7 +375,68 @@ pub struct RangerBinding {
     pub poll_interval_ms: u32,
 }
 
-/// Desired state of a Trino engine.
+/// Which query engine an `EngineSpec` describes. Selects the provisioner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EngineKind {
+    #[default]
+    Trino,
+    StarRocks,
+}
+impl EngineKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EngineKind::Trino => "trino",
+            EngineKind::StarRocks => "starrocks",
+        }
+    }
+    pub fn parse(s: &str) -> Option<EngineKind> {
+        match s {
+            "trino" => Some(EngineKind::Trino),
+            "starrocks" => Some(EngineKind::StarRocks),
+            _ => None,
+        }
+    }
+}
+
+/// StarRocks shared-data engine config (FE + CN). Storage params drive the
+/// FE builtin storage volume (object store); FE/CN resources default when None.
+///
+/// `Debug` is hand-written to redact the object-store credentials so `{:?}`
+/// on this (or an enclosing `EngineSpec`) never leaks the access/secret keys.
+#[derive(Clone)]
+pub struct StarRocksConfig {
+    pub fe_image: String, // starrocks/fe-ubuntu:<ver>
+    pub cn_image: String, // starrocks/cn-ubuntu:<ver>
+    pub fe_replicas: u32,
+    pub cn_replicas: u32,
+    pub storage_endpoint: String, // aws_s3_endpoint
+    pub storage_path: String,     // aws_s3_path = bucket/prefix
+    pub storage_access_key: String,
+    pub storage_secret_key: String,
+    /// FE (metadata) role sizing; defaults when None.
+    pub fe_resources: Option<RoleResources>,
+    /// CN (compute) role sizing; defaults when None.
+    pub cn_resources: Option<RoleResources>,
+}
+
+impl std::fmt::Debug for StarRocksConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StarRocksConfig")
+            .field("fe_image", &self.fe_image)
+            .field("cn_image", &self.cn_image)
+            .field("fe_replicas", &self.fe_replicas)
+            .field("cn_replicas", &self.cn_replicas)
+            .field("storage_endpoint", &self.storage_endpoint)
+            .field("storage_path", &self.storage_path)
+            .field("storage_access_key", &"<redacted>")
+            .field("storage_secret_key", &"<redacted>")
+            .field("fe_resources", &self.fe_resources)
+            .field("cn_resources", &self.cn_resources)
+            .finish()
+    }
+}
+
+/// Desired state of a query engine (`kind` selects Trino vs StarRocks).
 #[derive(Clone, Debug)]
 pub struct EngineSpec {
     pub name: String, // DNS-1123 k8s name
@@ -385,6 +446,10 @@ pub struct EngineSpec {
     pub catalogs: Vec<CatalogSpec>,
     /// Ranger enforcement wiring; `None` = no access control templated (open engine).
     pub ranger: Option<RangerBinding>,
+    /// Engine type — selects the provisioner. Defaults to Trino.
+    pub kind: EngineKind,
+    /// Present when `kind == StarRocks`; the Trino `config`/`catalogs` are unused then.
+    pub starrocks: Option<StarRocksConfig>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -410,8 +475,39 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait EngineProvisioningPort: Send + Sync {
     async fn provision(&self, req: &EngineSpec) -> Result<(), String>;
-    async fn status(&self, namespace: &str, name: &str) -> Result<EngineStatus, String>;
+    async fn status(&self, kind: &str, namespace: &str, name: &str)
+        -> Result<EngineStatus, String>;
     async fn update(&self, req: &EngineSpec) -> Result<(), String>;
-    async fn delete(&self, namespace: &str, name: &str) -> Result<(), String>;
-    async fn restart(&self, namespace: &str, name: &str) -> Result<(), String>;
+    async fn delete(&self, kind: &str, namespace: &str, name: &str) -> Result<(), String>;
+    async fn restart(&self, kind: &str, namespace: &str, name: &str) -> Result<(), String>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_kind_parses_and_defaults_trino() {
+        assert_eq!(EngineKind::default(), EngineKind::Trino);
+        assert_eq!(EngineKind::parse("starrocks"), Some(EngineKind::StarRocks));
+        assert_eq!(EngineKind::parse("trino"), Some(EngineKind::Trino));
+        assert_eq!(EngineKind::StarRocks.as_str(), "starrocks");
+    }
+
+    #[test]
+    fn engine_spec_carries_starrocks_config() {
+        let s = StarRocksConfig {
+            fe_image: "starrocks/fe-ubuntu:3.3-latest".into(),
+            cn_image: "starrocks/cn-ubuntu:3.3-latest".into(),
+            fe_replicas: 1,
+            cn_replicas: 1,
+            storage_endpoint: "http://host.docker.internal:9000".into(),
+            storage_path: "warehouse/starrocks".into(),
+            storage_access_key: "egret".into(),
+            storage_secret_key: "egretsecret".into(),
+            fe_resources: None,
+            cn_resources: None,
+        };
+        assert_eq!(s.fe_replicas, 1);
+    }
 }

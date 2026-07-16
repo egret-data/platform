@@ -768,16 +768,32 @@ export interface TrinoConfig {
   worker: WorkerRoleConfig;
 }
 
+/** StarRocks-specific create config: FE/CN image + replicas (resources omitted
+ * from the wizard for now — the backend accepts them but defaults suffice). */
+export interface StarRocksCreateConfig {
+  feImage?: string;
+  cnImage?: string;
+  feReplicas?: number;
+  cnReplicas?: number;
+}
+
 export interface CreateEngineInput {
   name: string;
   warehouseId: string;
   imageVersion?: string;
+  // Required by the body regardless of `kind` (a known backend wart) — the
+  // StarRocks create path sends the same harmless defaults the Trino wizard
+  // uses and ignores them server-side.
   coordinatorReplicas: number;
   workerReplicas: number;
   cpuMin: string;
   cpuMax: string;
   memory: string;
   trinoConfig?: TrinoConfig;
+  /** `"trino"` (default, omit) or `"starrocks"`. */
+  kind?: "trino" | "starrocks";
+  /** Only read by the backend when `kind === "starrocks"`. */
+  starrocks?: StarRocksCreateConfig;
 }
 
 export async function listEngines(): Promise<Engine[]> {

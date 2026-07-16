@@ -276,6 +276,63 @@ async fn seed_provisioned_warehouse(f: &Fixture) -> Uuid {
     wh.id
 }
 
+/// Like [`seed_provisioned_warehouse`], but the storage connection carries a
+/// (global) named secret so its `secret_ref` is set. The StarRocks create path
+/// treats a missing secret as a hard error, so its tests need this variant.
+async fn seed_provisioned_warehouse_with_secret(f: &Fixture) -> Uuid {
+    let (ws_id,): (Uuid,) =
+        sqlx::query_as("INSERT INTO workspaces (slug, name) VALUES ($1, $2) RETURNING id")
+            .bind(format!("engine-ws-sec-{}", Uuid::new_v4().simple()))
+            .bind("Engine Test Workspace (secret)")
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("insert workspace");
+
+    // Seal a global named secret with the SAME crypto key `build_app` uses, so
+    // the app's `resolve_plaintext(None, secret_ref)` can decrypt it.
+    let crypto =
+        egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
+    let secrets = egret_secrets::SecretStore::new(f.db.clone(), Some(crypto));
+    let ws_secrets = egret_secrets::WorkspaceSecretStore::new(f.db.clone(), secrets);
+    let secret_id = ws_secrets
+        .create(
+            None,
+            &format!("engine-sec-{}", Uuid::new_v4().simple()),
+            None,
+            "STORAGESECRETKEY",
+        )
+        .await
+        .expect("create global storage secret");
+
+    let (storage_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO storage.storage_connections (name, region, bucket, access_key, secret_ref) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+    )
+    .bind(format!("engine-sc-sec-{}", Uuid::new_v4().simple()))
+    .bind("us-east-1")
+    .bind("egret-engine-test")
+    .bind("AKIATEST")
+    .bind(secret_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("insert storage connection");
+
+    let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
+    let wh = catalog_store
+        .create_warehouse(
+            &format!("engine-wh-sec-{}", Uuid::new_v4().simple()),
+            ws_id,
+            storage_id,
+        )
+        .await
+        .expect("create warehouse");
+    catalog_store
+        .set_lakekeeper_warehouse_id(wh.id, "wh-123")
+        .await
+        .expect("set lakekeeper id");
+    wh.id
+}
+
 /// Seed a workspace + storage_connection + warehouse WITHOUT lakekeeper_warehouse_id.
 async fn seed_unprovisioned_warehouse(f: &Fixture) -> Uuid {
     let (ws_id,): (Uuid,) =
@@ -332,6 +389,7 @@ impl EngineProvisioningPort for FakeEnginePort {
     }
     async fn status(
         &self,
+        _kind: &str,
         _ns: &str,
         _name: &str,
     ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
@@ -348,10 +406,10 @@ impl EngineProvisioningPort for FakeEnginePort {
     async fn update(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
         Ok(())
     }
-    async fn delete(&self, _ns: &str, _name: &str) -> Result<(), String> {
+    async fn delete(&self, _kind: &str, _ns: &str, _name: &str) -> Result<(), String> {
         Ok(())
     }
-    async fn restart(&self, ns: &str, name: &str) -> Result<(), String> {
+    async fn restart(&self, _kind: &str, ns: &str, name: &str) -> Result<(), String> {
         self.restarted
             .lock()
             .unwrap()
@@ -727,6 +785,203 @@ async fn create_and_get_engine() {
     assert_eq!(
         j["spec"]["trinoConfig"]["coordinator"]["resources"]["cpuLimit"], "2",
         "seeded coordinator cpu limit; body={j}"
+    );
+}
+
+/// `POST /engines` with `kind: "starrocks"` persists a `"starrocks"`-type
+/// engine row (not the back-compat-default `"trino"`), auto-wires a PRIMARY
+/// `egret-warehouse` catalog row the same way the Trino path does (T6 — the
+/// runtime `CREATE EXTERNAL CATALOG` DDL itself is smoke-only, exercised by a
+/// spawned best-effort background task this test does not wait on), and still
+/// calls through to the fake provisioning port (the create path selects the
+/// StarRocks spec-building branch).
+#[tokio::test]
+async fn create_engine_starrocks_persists_starrocks_type() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_admin_sr", true).await;
+    let wh_id = seed_provisioned_warehouse_with_secret(&f).await;
+    let name = format!("sr-{}", Uuid::new_v4().simple());
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name,
+                "warehouseId": wh_id,
+                "kind": "starrocks",
+                "coordinatorReplicas": 1,
+                "workerReplicas": 1,
+                "cpuMin": "1",
+                "cpuMax": "2",
+                "memory": "4Gi",
+                "starrocks": {
+                    "feReplicas": 1,
+                    "cnReplicas": 2,
+                },
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "create starrocks engine; body={j}"
+    );
+    assert_eq!(j["name"], serde_json::json!(name), "engine name; body={j}");
+    assert_eq!(j["type"], "starrocks", "engine type; body={j}");
+    assert_eq!(j["status"], "provisioning", "engine status; body={j}");
+    let engine_id = j["id"].as_str().expect("engine id").to_string();
+
+    // The persisted row's type is "starrocks" (not the default "trino"),
+    // confirmed straight off the store (not just the DTO projection).
+    let (db_type,): (String,) =
+        sqlx::query_as("SELECT type FROM engine_mgmt.engines WHERE id = $1")
+            .bind(Uuid::parse_str(&engine_id).unwrap())
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("fetch engine row");
+    assert_eq!(db_type, "starrocks", "stored engine type");
+
+    // A Catalog Client IS minted + a PRIMARY `egret-warehouse` catalog row
+    // recorded for StarRocks now (T6), mirroring the Trino auto-wire exactly.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "GET",
+            &format!("/engines/{engine_id}/catalogs"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list catalogs; body={j}");
+    let cats = j.as_array().expect("catalogs array");
+    assert_eq!(
+        cats.len(),
+        1,
+        "one auto-wired catalog for starrocks; body={j}"
+    );
+    assert_eq!(cats[0]["kind"], "egret-warehouse", "catalog kind; body={j}");
+    assert_eq!(cats[0]["isPrimary"], true, "catalog is primary; body={j}");
+    assert_eq!(cats[0]["name"], "egret", "catalog name; body={j}");
+
+    // The client's credential lives on the primary catalog row and is revoked
+    // when the engine is deleted, same as Trino's; confirm it was minted.
+    let (client_count,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM catalog.catalog_clients WHERE warehouse_id = $1 AND name = $2",
+    )
+    .bind(wh_id)
+    .bind(format!("engine-{name}"))
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("count catalog_clients");
+    assert_eq!(client_count, 1, "catalog client minted for starrocks");
+
+    // PUT (update) on a StarRocks engine is guarded: `build_provision_req` only
+    // builds a Trino spec, so it fails fast with 400 rather than corrupting the
+    // spec / dispatching to the Trino provisioner.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(serde_json::json!({
+                "name": name,
+                "warehouseId": wh_id,
+                "coordinatorReplicas": 2,
+                "workerReplicas": 2,
+                "cpuMin": "1",
+                "cpuMax": "2",
+                "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "PUT on a starrocks engine must 400"
+    );
+
+    // POST /restart on a StarRocks engine is guarded the same way.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/engines/{engine_id}/restart"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "restart on a starrocks engine must 400"
+    );
+}
+
+/// An unrecognized `kind` on create is rejected with 400 (rather than silently
+/// falling through to the Trino path).
+#[tokio::test]
+async fn create_engine_unknown_kind_400() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(
+            egret_orchestrator::kube_client::FakeKube::default(),
+        )),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_admin_badkind", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": format!("x-{}", Uuid::new_v4().simple()),
+                "warehouseId": wh_id,
+                "kind": "presto",
+                "coordinatorReplicas": 1,
+                "workerReplicas": 1,
+                "cpuMin": "1",
+                "cpuMax": "2",
+                "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "unknown engine kind must 400"
     );
 }
 

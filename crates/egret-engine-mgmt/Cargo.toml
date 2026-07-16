@@ -47,6 +47,14 @@ bcrypt = "0.15"
 tracing.workspace = true
 kube.workspace = true
 rcgen.workspace = true
+# StarRocks Iceberg external-catalog auto-wire (T6): a one-shot `CREATE EXTERNAL
+# CATALOG` DDL run against the provisioned FE over the raw MySQL protocol, once
+# it's Ready. The vendored/patched `mysql_async` (see the workspace `[patch.crates-io]`)
+# is the same library `egret-query`'s `StarRocksConnector` wraps; used directly
+# here (root, no password, one statement) rather than through the interactive
+# `Connector`/`Limits`/`CancellationToken` machinery, which is shaped for
+# user-facing query execution, not a fire-and-forget admin DDL.
+mysql_async.workspace = true
 
 [dev-dependencies]
 # Concrete Policy/Ranger store — only test state construction builds it directly

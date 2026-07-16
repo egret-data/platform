@@ -164,3 +164,41 @@ describe("EngineDetail — Workspaces tab", () => {
     expect(screen.getByRole("button", { name: /add workspace/i })).toBeDisabled();
   });
 });
+
+describe("EngineDetail — StarRocks engine", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      type: "starrocks",
+      spec: {
+        coordinatorReplicas: 0,
+        workerReplicas: 0,
+        cpuMin: "",
+        cpuMax: "",
+        memory: "",
+        imageVersion: "starrocks/fe-ubuntu:3.3-latest",
+      },
+      status: {
+        phase: "running",
+        message: null,
+        pods: [{ name: "sr1-fe-0", phase: "Running", ready: true }],
+      },
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+  });
+
+  test("hides Configuration/Security tabs and disables Restart", async () => {
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    expect(screen.queryByRole("tab", { name: "Configuration" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: "Security & Exposure" }),
+    ).not.toBeInTheDocument();
+    // Other tabs stay available.
+    expect(screen.getByRole("tab", { name: "Catalogs" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Monitor" })).toBeInTheDocument();
+
+    expect(screen.getByRole("button", { name: /restart/i })).toBeDisabled();
+  });
+});

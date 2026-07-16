@@ -443,17 +443,19 @@ impl egret_catalog_engine::WarehouseProvisioner for LakekeeperProvisioner {
     }
 }
 
-/// Provisions query engines (Phase 1: Trino) onto Kubernetes for the
-/// engine-mgmt seam. Adapts the kube-free `egret_engine_mgmt_api::EngineProvisioningPort`
-/// trait onto the `egret-orchestrator` `TrinoProvisioner`. Since E1a both traits'
-/// spec/status types are the SAME `egret-engine-mgmt-api` DTOs (aliased under
-/// different names on each side), so this is a pure pass-through — no
-/// translation between the two. The 4 kube-shaped ops (exec/pod-logs/
-/// coordinator-request) are NOT on the Port — the seam calls
+/// Provisions query engines (Phase 1: Trino, Phase 2: StarRocks) onto
+/// Kubernetes for the engine-mgmt seam. Adapts the kube-free
+/// `egret_engine_mgmt_api::EngineProvisioningPort` trait onto the
+/// `egret-orchestrator` provisioners, dispatching by engine kind. Since E1a
+/// both traits' spec/status types are the SAME `egret-engine-mgmt-api` DTOs
+/// (aliased under different names on each side), so this is a pure
+/// pass-through — no translation between the two. The 4 kube-shaped ops
+/// (exec/pod-logs/coordinator-request) are NOT on the Port — the seam calls
 /// `egret_orchestrator::KubeClient` directly via `EngineMgmtState.kube`.
 struct EgretEngineProvisioningPort {
-    inner: std::sync::Arc<egret_orchestrator::TrinoProvisioner>,
-    /// The same KubeClient the `TrinoProvisioner` holds, kept here so
+    trino: std::sync::Arc<egret_orchestrator::TrinoProvisioner>,
+    starrocks: std::sync::Arc<egret_orchestrator::StarRocksProvisioner>,
+    /// The same KubeClient both provisioners hold, kept here so Trino's
     /// `restart` (which bypasses TrinoProvisioner's render/apply path) can
     /// reach it directly.
     kube: std::sync::Arc<dyn egret_orchestrator::KubeClient>,
@@ -461,47 +463,70 @@ struct EgretEngineProvisioningPort {
 
 impl EgretEngineProvisioningPort {
     fn new(
-        inner: std::sync::Arc<egret_orchestrator::TrinoProvisioner>,
+        trino: std::sync::Arc<egret_orchestrator::TrinoProvisioner>,
+        starrocks: std::sync::Arc<egret_orchestrator::StarRocksProvisioner>,
         kube: std::sync::Arc<dyn egret_orchestrator::KubeClient>,
     ) -> Self {
-        Self { inner, kube }
+        Self {
+            trino,
+            starrocks,
+            kube,
+        }
+    }
+
+    /// Picks the provisioner for a given `EngineKind::as_str()` value.
+    fn for_kind(&self, kind: &str) -> &dyn egret_orchestrator::EngineProvisioner {
+        match kind {
+            "starrocks" => &*self.starrocks,
+            _ => &*self.trino,
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl egret_engine_mgmt_api::EngineProvisioningPort for EgretEngineProvisioningPort {
     async fn provision(&self, req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
-        egret_orchestrator::EngineProvisioner::provision(self.inner.as_ref(), req)
+        self.for_kind(req.kind.as_str())
+            .provision(req)
             .await
             .map_err(|e| e.to_string())
     }
 
     async fn status(
         &self,
+        kind: &str,
         namespace: &str,
         name: &str,
     ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
         // `egret_engine_mgmt_api::EngineStatus` and `egret_orchestrator::EngineStatus`
         // are now the SAME type (both alias `egret_engine_mgmt_api::EngineStatus`), so
         // the orchestrator's status passes straight through — no reverse mapping.
-        egret_orchestrator::EngineProvisioner::status(self.inner.as_ref(), namespace, name)
+        self.for_kind(kind)
+            .status(namespace, name)
             .await
             .map_err(|e| e.to_string())
     }
 
     async fn update(&self, req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
-        egret_orchestrator::EngineProvisioner::update(self.inner.as_ref(), req)
+        self.for_kind(req.kind.as_str())
+            .update(req)
             .await
             .map_err(|e| e.to_string())
     }
 
-    async fn delete(&self, namespace: &str, name: &str) -> Result<(), String> {
-        egret_orchestrator::EngineProvisioner::delete(self.inner.as_ref(), namespace, name)
+    async fn delete(&self, kind: &str, namespace: &str, name: &str) -> Result<(), String> {
+        self.for_kind(kind)
+            .delete(namespace, name)
             .await
             .map_err(|e| e.to_string())
     }
 
-    async fn restart(&self, namespace: &str, name: &str) -> Result<(), String> {
+    async fn restart(&self, kind: &str, namespace: &str, name: &str) -> Result<(), String> {
+        if kind == "starrocks" {
+            // Not a first-class op in the operator MVP: restart via
+            // update/re-provision instead of rolling Deployments directly.
+            return Ok(());
+        }
         // Roll BOTH Deployments directly via KubeClient (bypassing the
         // TrinoProvisioner render/apply path entirely) so this never touches
         // config.
@@ -1297,11 +1322,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let engine_provisioner: Option<
         std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>,
     > = kube.clone().map(|kube| {
-        let trino = egret_orchestrator::TrinoProvisioner::new(kube.clone());
-        std::sync::Arc::new(EgretEngineProvisioningPort::new(
-            std::sync::Arc::new(trino),
-            kube,
-        )) as std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>
+        let trino = std::sync::Arc::new(egret_orchestrator::TrinoProvisioner::new(kube.clone()));
+        let starrocks =
+            std::sync::Arc::new(egret_orchestrator::StarRocksProvisioner::new(kube.clone()));
+        std::sync::Arc::new(EgretEngineProvisioningPort::new(trino, starrocks, kube))
+            as std::sync::Arc<dyn egret_engine_mgmt_api::EngineProvisioningPort>
     });
 
     // In-cluster URL Trino pods use to reach egret's REST catalog + token
