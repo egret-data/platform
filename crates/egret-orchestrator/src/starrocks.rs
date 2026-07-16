@@ -227,18 +227,26 @@ impl EngineProvisioner for StarRocksProvisioner {
         Ok(())
     }
     async fn status(&self, namespace: &str, name: &str) -> anyhow::Result<EngineStatus> {
-        // Mirrors `TrinoProvisioner::status`: list pods via the same
-        // `KubeClient::list_pods` (labeled `app.kubernetes.io/instance=<name>`)
-        // and derive phase from readiness. NOTE: the kube-starrocks operator's
-        // own FE/CN pod labels are not yet verified against this selector — the
-        // Trino path controls that label itself (sets it on its Deployment pod
-        // template), but the operator controls the StarRocksCluster's pods, so
-        // whether it also stamps `app.kubernetes.io/instance=<cluster-name>` is
-        // unconfirmed. Verify at the Task 8 live smoke; if the operator uses a
-        // different label (e.g. its own `app.kubernetes.io/instance` value or a
-        // starrocks-specific key), `KubeClient::list_pods`'s selector will need
-        // a StarRocks-specific variant.
-        let pods = self.kube.list_pods(namespace, name).await?;
+        // The kube-starrocks operator owns the FE/CN pods and stamps
+        // `app.starrocks.ownerreference/name=<cluster>-fe` / `-cn` (NOT the
+        // `app.kubernetes.io/instance=<name>` the Trino path sets on its own
+        // Deployment pods — verified at the T8 live smoke). Query both owner
+        // labels and merge so the control-plane health UI sees FE + CN pods.
+        let mut pods = self
+            .kube
+            .list_pods_selector(
+                namespace,
+                &format!("app.starrocks.ownerreference/name={name}-fe"),
+            )
+            .await?;
+        pods.extend(
+            self.kube
+                .list_pods_selector(
+                    namespace,
+                    &format!("app.starrocks.ownerreference/name={name}-cn"),
+                )
+                .await?,
+        );
         let pod_status: Vec<PodStatus> = pods
             .into_iter()
             .map(|(name, phase, ready)| PodStatus { name, phase, ready })

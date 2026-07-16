@@ -2121,15 +2121,15 @@ fn sr_escape_ident(s: &str) -> String {
 /// self-refreshes its access token from these props, so — unlike a static
 /// `iceberg.catalog.token` — the catalog does NOT die when a token expires.
 ///
-/// StarRocks Iceberg-REST OAuth2 property keys (per the StarRocks docs):
-/// `iceberg.catalog.security=oauth2`, `iceberg.catalog.oauth2.credential`,
-/// `iceberg.catalog.oauth2.server-uri`. NOTE: StarRocks issue #57766 reports a
-/// docs-vs-implementation discrepancy where some versions parsed the UNPREFIXED
-/// keys (`oauth2.credential` / `oauth2.server-uri`). The documented prefixed
-/// keys are used here; if the Task 8 live smoke on the `fe-ubuntu` image fails
-/// to auth, dropping the `iceberg.catalog.` prefix on the two `oauth2.*` keys is
-/// the first thing to try (same class of live-only property tuning as the
-/// Ranger XML keys / FE service name).
+/// StarRocks Iceberg-REST OAuth2 property keys — the Iceberg-STANDARD names
+/// `iceberg.catalog.credential` (`client_id:client_secret`) +
+/// `iceberg.catalog.oauth2-server-uri`. VERIFIED LIVE on StarRocks 3.3 (T8
+/// smoke): the `iceberg.catalog.oauth2.credential`/`.server-uri` dot-form the
+/// docs suggest (and StarRocks issue #57766 flags) is silently IGNORED — no
+/// bearer is exchanged and catalog reads fail with "missing bearer token". The
+/// standard names make StarRocks' Iceberg REST client self-exchange + refresh
+/// the token, so — unlike a static `iceberg.catalog.token` — the catalog does
+/// NOT die on expiry.
 ///
 /// All interpolated values are escaped ([`sr_escape_dq`] / [`sr_escape_ident`])
 /// so a warehouse/catalog name is never a DDL-injection vector (this DDL runs as
@@ -2145,14 +2145,19 @@ fn starrocks_external_catalog_sql(
     let warehouse = sr_escape_dq(warehouse);
     let server_uri = sr_escape_dq(&format!("{egret_url}/oauth/token"));
     let credential = sr_escape_dq(credential);
+    // OAuth2 uses the Iceberg-standard REST property NAMES (`credential` +
+    // `oauth2-server-uri`), NOT the `iceberg.catalog.oauth2.*` dot-form —
+    // verified live on StarRocks 3.3: the dot-form is silently ignored (no
+    // bearer sent -> catalog reads fail with "missing bearer token"), while
+    // these names make StarRocks' Iceberg REST client self-exchange + refresh
+    // the token (mirrors the Trino path's OAuth2 config, no static token).
     format!(
         "CREATE EXTERNAL CATALOG IF NOT EXISTS `{name}` \
          PROPERTIES (\"type\"=\"iceberg\", \"iceberg.catalog.type\"=\"rest\", \
          \"iceberg.catalog.uri\"=\"{uri}\", \
          \"iceberg.catalog.warehouse\"=\"{warehouse}\", \
-         \"iceberg.catalog.security\"=\"oauth2\", \
-         \"iceberg.catalog.oauth2.server-uri\"=\"{server_uri}\", \
-         \"iceberg.catalog.oauth2.credential\"=\"{credential}\")"
+         \"iceberg.catalog.credential\"=\"{credential}\", \
+         \"iceberg.catalog.oauth2-server-uri\"=\"{server_uri}\")"
     )
 }
 
@@ -4225,19 +4230,17 @@ mod tests {
             "sql={sql}"
         );
         // OAuth2 self-refreshing credentials (mirrors the Trino path), NOT a
-        // static bearer — so the catalog doesn't die when a token expires.
+        // static bearer — using the Iceberg-standard REST property NAMES
+        // (`credential` + `oauth2-server-uri`), verified live on StarRocks 3.3
+        // (the `iceberg.catalog.oauth2.*` dot-form is silently ignored).
         assert!(
-            sql.contains(r#"iceberg.catalog.security"="oauth2"#),
+            sql.contains(r#"iceberg.catalog.credential"="cid:secret"#),
             "sql={sql}"
         );
         assert!(
             sql.contains(
-                r#"iceberg.catalog.oauth2.server-uri"="http://host.docker.internal:8080/oauth/token"#
+                r#"iceberg.catalog.oauth2-server-uri"="http://host.docker.internal:8080/oauth/token"#
             ),
-            "sql={sql}"
-        );
-        assert!(
-            sql.contains(r#"iceberg.catalog.oauth2.credential"="cid:secret"#),
             "sql={sql}"
         );
         // No static token property remains.

@@ -34,6 +34,15 @@ pub trait KubeClient: Send + Sync {
         instance: &str,
     ) -> anyhow::Result<Vec<(String, String, bool)>>;
 
+    /// Pods matching a raw label selector in the namespace. Returns
+    /// `(name, phase, ready)` per pod. Used for engines (e.g. StarRocks) whose
+    /// operator stamps its own pod labels rather than `app.kubernetes.io/instance`.
+    async fn list_pods_selector(
+        &self,
+        namespace: &str,
+        label_selector: &str,
+    ) -> anyhow::Result<Vec<(String, String, bool)>>;
+
     /// Issue a raw HTTP request to a Trino coordinator `Service` (port 8080) and
     /// return `(status, body)`. In-cluster this hits the Service DNS directly; in
     /// dev it goes through the kube API-server proxy subresource. Non-2xx statuses
@@ -146,6 +155,13 @@ impl KubeClient for FakeKube {
         _instance: &str,
     ) -> anyhow::Result<Vec<(String, String, bool)>> {
         Ok(vec![("demo-coordinator-0".into(), "Running".into(), true)])
+    }
+    async fn list_pods_selector(
+        &self,
+        _ns: &str,
+        _label_selector: &str,
+    ) -> anyhow::Result<Vec<(String, String, bool)>> {
+        Ok(vec![("demo-fe-0".into(), "Running".into(), true)])
     }
 
     async fn coordinator_request(
@@ -295,11 +311,20 @@ impl KubeClient for LiveKube {
         namespace: &str,
         instance: &str,
     ) -> anyhow::Result<Vec<(String, String, bool)>> {
+        self.list_pods_selector(namespace, &format!("app.kubernetes.io/instance={instance}"))
+            .await
+    }
+
+    async fn list_pods_selector(
+        &self,
+        namespace: &str,
+        label_selector: &str,
+    ) -> anyhow::Result<Vec<(String, String, bool)>> {
         use k8s_openapi::api::core::v1::Pod;
         use kube::api::{Api, ListParams};
 
         let api: Api<Pod> = Api::namespaced(self.client.clone(), namespace);
-        let lp = ListParams::default().labels(&format!("app.kubernetes.io/instance={instance}"));
+        let lp = ListParams::default().labels(label_selector);
         let pods = api.list(&lp).await?;
         let out = pods
             .into_iter()
