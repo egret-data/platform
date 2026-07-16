@@ -38,20 +38,19 @@ vi.mock("@/api/policies", async (orig) => ({
         { name: "trinouser", accessTypeRestrictions: ["impersonate"] },
         { name: "role" },
       ],
+      // Real Ranger defs (trino.json/starrocks.json) ship these subsets as flat
+      // NAME-ONLY refs (no parent/level) — the editor enriches them from the
+      // top-level `resources` above so ResourceSelector can still cascade.
       dataMaskDef: {
         resources: [
-          { name: "catalog", excludesSupported: true, mandatory: true },
-          { name: "schema", parent: "catalog", excludesSupported: true, mandatory: false },
-          { name: "table", parent: "schema", excludesSupported: true, mandatory: false },
-          { name: "column", parent: "table", excludesSupported: true, mandatory: false },
+          { name: "catalog" },
+          { name: "schema" },
+          { name: "table" },
+          { name: "column" },
         ],
       },
       rowFilterDef: {
-        resources: [
-          { name: "catalog", excludesSupported: true, mandatory: true },
-          { name: "schema", parent: "catalog", excludesSupported: true, mandatory: false },
-          { name: "table", parent: "schema", excludesSupported: true, mandatory: false },
-        ],
+        resources: [{ name: "catalog" }, { name: "schema" }, { name: "table" }],
       },
     }),
   // Serves both the PrincipalPicker and the resource-value autocomplete.
@@ -194,6 +193,19 @@ describe("PolicyEditorPage", () => {
     // button, unmounted by default — Resource is the default section).
     fireEvent.click(screen.getByRole("button", { name: /masking/i }));
     expect(screen.getByLabelText("mask type 0")).toBeInTheDocument();
+  });
+
+  it("renders the full resource cascade for masking even though the mask subset is parentless", async () => {
+    // Regression for the parentless-subset bug: dataMaskDef.resources is flat
+    // name-only, so without enriching it from the top-level hierarchy the
+    // ResourceSelector would render only the catalog level. Enriched, it
+    // cascades to catalog/schema/table/column — four resource-value inputs.
+    routeParams = { service: "trino", kind: "masking" };
+    wrap(<PolicyEditorPage />);
+    await screen.findByLabelText("Policy name");
+    await waitFor(() =>
+      expect(screen.getAllByPlaceholderText("value or * (Enter to add)")).toHaveLength(4),
+    );
   });
 
   it("renders a row-filter editor with a filter-expr input for kind=rowfilter", async () => {
