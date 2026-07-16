@@ -209,9 +209,10 @@ function ResourcesSection({ cfg }: { cfg: StarRocksConfigForm }) {
         onChange={cfg.setCnResources}
       />
       <p className="text-xs text-muted-foreground">
-        Leave a field blank to use the default sizing. Kubernetes resource
+        Set CPU / memory requests and limits per role as Kubernetes resource
         strings (e.g. <code className="font-mono">500m</code>,{" "}
-        <code className="font-mono">4Gi</code>).
+        <code className="font-mono">4Gi</code>). Leaving a field blank keeps the
+        engine&apos;s current sizing unchanged.
       </p>
     </div>
   );

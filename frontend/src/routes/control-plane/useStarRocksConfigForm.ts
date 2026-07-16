@@ -51,12 +51,95 @@ function formToResources(f: RoleResourcesForm): RoleResources | undefined {
   return Object.keys(out).length ? out : undefined;
 }
 
-/** Parse a text field to a positive integer, or undefined when blank/invalid. */
+/** Parse a text field to a positive integer, or undefined when blank/invalid
+ * (rejects non-integers, zero, and negatives — replica counts must be >= 1). */
 function numOrUndef(s: string): number | undefined {
   const t = s.trim();
   if (t === "") return undefined;
   const n = Number(t);
-  return Number.isFinite(n) ? n : undefined;
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+/** Canonical (comparison-stable) `RoleResources`, or `null` when it carries no
+ * set field. Both the form-built and server-stored shapes normalise through this
+ * so a content diff is order- and blank-insensitive. */
+function normResources(r: RoleResources | null | undefined): RoleResources | null {
+  if (!r) return null;
+  const pick = (v: string | undefined) =>
+    v && v.trim() ? v.trim() : undefined;
+  const out: RoleResources = {};
+  const cpuRequest = pick(r.cpuRequest);
+  const cpuLimit = pick(r.cpuLimit);
+  const memRequest = pick(r.memRequest);
+  const memLimit = pick(r.memLimit);
+  if (cpuRequest) out.cpuRequest = cpuRequest;
+  if (cpuLimit) out.cpuLimit = cpuLimit;
+  if (memRequest) out.memRequest = memRequest;
+  if (memLimit) out.memLimit = memLimit;
+  return Object.keys(out).length ? out : null;
+}
+
+/** Canonical delegation block, or `null` when no mode. `tlsEnabled` defaults to
+ * true (matching the backend), so an absent flag compares equal to an explicit
+ * `true`. */
+function normDelegation(
+  d: { mode?: string; tlsEnabled?: boolean } | null | undefined,
+): { mode: string; tlsEnabled: boolean } | null {
+  if (!d || !d.mode) return null;
+  return { mode: d.mode, tlsEnabled: d.tlsEnabled ?? true };
+}
+
+/**
+ * The `starrocks` body a save would PUT, in the omit-when-blank shape `save()`
+ * sends: blank image/replicas/resources are OMITTED (an absent field means
+ * "preserve the stored value" server-side), and delegation rides along only for
+ * a real mode.
+ */
+interface SrBody {
+  feImage: string;
+  cnImage: string;
+  feReplicas?: number;
+  cnReplicas?: number;
+  feResources?: RoleResources;
+  cnResources?: RoleResources;
+  delegationMode?: "jwt" | "impersonate";
+  tlsEnabled?: boolean;
+}
+
+/** An empty body (every field omitted) — resolves purely to the stored spec. */
+const EMPTY_BODY: SrBody = { feImage: "", cnImage: "" };
+
+/**
+ * The config the backend would END UP with after PUTting `body` over `stored`,
+ * canonicalised to a stable string. Mirrors `build_starrocks_spec`'s per-field
+ * merge EXACTLY: a non-blank body value wins, else the stored value, else the
+ * create-time default (image defaults / replicas 1 / resources null / delegation
+ * null). Because `dirty` compares the resolved result of the ACTUAL body against
+ * the resolved result of an empty body, blanking a field that was set resolves to
+ * "no change" (the PUT omits it → the server preserves it) instead of a phantom
+ * diff.
+ */
+function resolveConfig(body: SrBody, stored: StarRocksSpecConfig | undefined): string {
+  const feImage =
+    body.feImage.trim() || stored?.feImage?.trim() || DEFAULT_SR_FE_IMAGE;
+  const cnImage =
+    body.cnImage.trim() || stored?.cnImage?.trim() || DEFAULT_SR_CN_IMAGE;
+  const feReplicas = body.feReplicas ?? stored?.feReplicas ?? 1;
+  const cnReplicas = body.cnReplicas ?? stored?.cnReplicas ?? 1;
+  const feResources = normResources(body.feResources ?? stored?.feResources);
+  const cnResources = normResources(body.cnResources ?? stored?.cnResources);
+  const delegation = body.delegationMode
+    ? normDelegation({ mode: body.delegationMode, tlsEnabled: body.tlsEnabled })
+    : normDelegation(stored?.delegation);
+  return JSON.stringify({
+    feImage,
+    cnImage,
+    feReplicas,
+    cnReplicas,
+    feResources,
+    cnResources,
+    delegation,
+  });
 }
 
 export interface StarRocksConfigForm {
@@ -85,31 +168,6 @@ export interface StarRocksConfigForm {
   saving: boolean;
   saved: boolean;
   save: () => void;
-}
-
-/** A canonical, comparison-friendly snapshot of the editable StarRocks fields.
- * Built identically from the form and from the stored spec so `dirty` is a pure
- * content diff (robust to the 5s status poll handing back new object refs). */
-function canonical(
-  feImage: string,
-  cnImage: string,
-  feReplicas: string,
-  cnReplicas: string,
-  feResources: RoleResources | undefined,
-  cnResources: RoleResources | undefined,
-  delegationMode: StarRocksDelegationOption,
-  tlsEnabled: boolean,
-): string {
-  return JSON.stringify({
-    feImage: feImage.trim(),
-    cnImage: cnImage.trim(),
-    feReplicas: numOrUndef(feReplicas) ?? null,
-    cnReplicas: numOrUndef(cnReplicas) ?? null,
-    feResources: feResources ?? null,
-    cnResources: cnResources ?? null,
-    delegationMode,
-    tlsEnabled: delegationMode === "none" ? false : tlsEnabled,
-  });
 }
 
 /**
@@ -146,20 +204,20 @@ export function useStarRocksConfigForm(
   const [tlsEnabled, setTlsEnabled] = useState(sc?.delegation?.tlsEnabled ?? true);
   const [error, setError] = useState<string | null>(null);
 
-  // Re-sync from the polled spec on external change, but never clobber unsaved
-  // edits: track the canonical snapshot the form was last loaded from, and the
-  // form's current snapshot — a mismatch means the user has edited (skip re-sync).
-  const builtRef = useRef<string | undefined>(undefined);
-  const loadedRef = useRef<string | undefined>(undefined);
+  // `seed` is the config the stored spec resolves to (an empty body over `sc`).
+  // Re-sync the form from the spec whenever this GENUINELY changes — i.e. the
+  // server-derived seed differs from the last one we applied. That covers a
+  // save-triggered refetch (the submitted values land in `sc`, so the seed moves
+  // and the form re-syncs → dirty settles false) and external edits, while the
+  // 5s status poll returning an identical spec (same seed) is a no-op that never
+  // clobbers an in-progress edit. Basing the decision on the seed — not a ref
+  // frozen at first load — is what lets the baseline recover after any edit.
+  const seed = resolveConfig(EMPTY_BODY, sc);
+  const lastSeedRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
-    if (
-      loadedRef.current !== undefined &&
-      builtRef.current !== undefined &&
-      loadedRef.current !== builtRef.current
-    ) {
-      return; // unsaved edits in progress — don't overwrite them
-    }
+    if (lastSeedRef.current === seed) return; // spec unchanged — preserve edits
+    lastSeedRef.current = seed;
     const next = engine.spec.starrocksConfig;
     setFeImage(next?.feImage ?? "");
     setCnImage(next?.cnImage ?? "");
@@ -169,17 +227,7 @@ export function useStarRocksConfigForm(
     setCnResources(resourcesToForm(next?.cnResources));
     setDelegationMode((next?.delegation?.mode as StarRocksDelegationOption) || "none");
     setTlsEnabled(next?.delegation?.tlsEnabled ?? true);
-    loadedRef.current = canonical(
-      next?.feImage ?? "",
-      next?.cnImage ?? "",
-      next?.feReplicas?.toString() ?? "",
-      next?.cnReplicas?.toString() ?? "",
-      formToResources(resourcesToForm(next?.feResources)),
-      formToResources(resourcesToForm(next?.cnResources)),
-      (next?.delegation?.mode as StarRocksDelegationOption) || "none",
-      next?.delegation?.tlsEnabled ?? true,
-    );
-  }, [engine.spec]);
+  }, [seed, engine.spec.starrocksConfig]);
 
   const builtFeResources = useMemo(
     () => formToResources(feResources),
@@ -190,30 +238,24 @@ export function useStarRocksConfigForm(
     [cnResources],
   );
 
-  const built = canonical(
-    feImage,
-    cnImage,
-    feReplicas,
-    cnReplicas,
-    builtFeResources,
-    builtCnResources,
-    delegationMode,
-    tlsEnabled,
-  );
-  builtRef.current = built;
+  // The exact `starrocks` body a save would PUT (omit-when-blank), so `dirty`
+  // reflects what the request would ACTUALLY change — and `save()` reuses it, so
+  // the two can never drift apart.
+  const body: SrBody = {
+    feImage: feImage.trim(),
+    cnImage: cnImage.trim(),
+    feReplicas: numOrUndef(feReplicas),
+    cnReplicas: numOrUndef(cnReplicas),
+    ...(builtFeResources ? { feResources: builtFeResources } : {}),
+    ...(builtCnResources ? { cnResources: builtCnResources } : {}),
+    ...(delegationMode !== "none" ? { delegationMode, tlsEnabled } : {}),
+  };
 
-  // Content diff vs the stored spec — false right after a save+refetch matches.
-  const seed = canonical(
-    sc?.feImage ?? "",
-    sc?.cnImage ?? "",
-    sc?.feReplicas?.toString() ?? "",
-    sc?.cnReplicas?.toString() ?? "",
-    formToResources(resourcesToForm(sc?.feResources)),
-    formToResources(resourcesToForm(sc?.cnResources)),
-    (sc?.delegation?.mode as StarRocksDelegationOption) || "none",
-    sc?.delegation?.tlsEnabled ?? true,
-  );
-  const dirty = built !== seed;
+  // dirty ⇔ the resolved result of the real body differs from the resolved
+  // result of an empty body (= the stored config). Blanking a field that was set
+  // therefore reads as "no change" (the PUT omits it → the server preserves it),
+  // so Save always settles instead of stranding a phantom diff.
+  const dirty = resolveConfig(body, sc) !== seed;
 
   const saveMutation = useMutation<Engine, ApiError, CreateEngineInput>({
     mutationFn: (input) => updateEngine(engine.id, input),
@@ -229,18 +271,10 @@ export function useStarRocksConfigForm(
       name: engine.name,
       warehouseId: engine.warehouseId ?? "",
       kind: "starrocks",
-      starrocks: {
-        feImage: feImage.trim(),
-        cnImage: cnImage.trim(),
-        feReplicas: numOrUndef(feReplicas),
-        cnReplicas: numOrUndef(cnReplicas),
-        // Omit when empty: an absent value preserves the stored resources.
-        ...(builtFeResources ? { feResources: builtFeResources } : {}),
-        ...(builtCnResources ? { cnResources: builtCnResources } : {}),
-        // Emit delegation only for a real mode — absent preserves the existing
-        // delegation block server-side (this tab never edits delegation).
-        ...(delegationMode !== "none" ? { delegationMode, tlsEnabled } : {}),
-      },
+      // The SAME body `dirty` is computed from — blank image/replicas/resources
+      // are omitted (preserve stored) and delegation rides along only for a real
+      // mode (so a config-only save never drops the stored delegation block).
+      starrocks: body,
       // Required by the body regardless of kind; ignored server-side for StarRocks.
       ...TRINO_FIELD_DEFAULTS,
     };
