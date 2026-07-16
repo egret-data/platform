@@ -118,8 +118,8 @@ describe("ControlPlaneEngines", () => {
     expect(body.kind).toBe("starrocks");
     expect(body.warehouseId).toBe(warehouse.id);
     expect(body.starrocks).toEqual({
-      feImage: "starrocks/fe-ubuntu:3.3-latest",
-      cnImage: "starrocks/cn-ubuntu:3.3-latest",
+      feImage: "starrocks/fe-ubuntu:3.4-latest",
+      cnImage: "starrocks/cn-ubuntu:3.4-latest",
       feReplicas: 1,
       cnReplicas: 1,
     });
@@ -180,8 +180,8 @@ describe("ControlPlaneEngines", () => {
     await waitFor(() => expect(api.createEngine).toHaveBeenCalledTimes(1));
     const body = vi.mocked(api.createEngine).mock.calls[0][0];
     expect(body.starrocks).toEqual({
-      feImage: "starrocks/fe-ubuntu:3.3-latest",
-      cnImage: "starrocks/cn-ubuntu:3.3-latest",
+      feImage: "starrocks/fe-ubuntu:3.4-latest",
+      cnImage: "starrocks/cn-ubuntu:3.4-latest",
       feReplicas: 1,
       cnReplicas: 1,
       delegationMode: "jwt",
