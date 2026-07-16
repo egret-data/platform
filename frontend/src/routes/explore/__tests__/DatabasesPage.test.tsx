@@ -337,7 +337,7 @@ describe("DatabasesPage", () => {
     });
   });
 
-  // ── Impersonate toggle (Trino only) ───────────────────────────────────────
+  // ── Impersonate toggle (Trino + StarRocks; #257 de-Trino-gated) ───────────
 
   it("shows the impersonate toggle when engine is trino in the Add dialog", async () => {
     renderAt();
@@ -351,7 +351,7 @@ describe("DatabasesPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("hides the impersonate toggle when engine is starrocks in the Add dialog", async () => {
+  it("also shows the impersonate toggle when engine is starrocks in the Add dialog", async () => {
     renderAt();
     fireEvent.click(screen.getByRole("button", { name: /add connection/i }));
 
@@ -365,11 +365,16 @@ describe("DatabasesPage", () => {
       fireEvent.change(nativeSelect, { target: { value: "starrocks" } });
     }
 
+    // StarRocks now supports impersonation (EXECUTE AS) too — the toggle
+    // stays visible, just with StarRocks-specific help text.
     await waitFor(() => {
       expect(
-        screen.queryByRole("switch", { name: /run queries as the logged-in user/i }),
-      ).not.toBeInTheDocument();
+        screen.getByRole("switch", { name: /run queries as the logged-in user/i }),
+      ).toBeInTheDocument();
     });
+    expect(
+      screen.getByText(/requires a starrocks service user/i),
+    ).toBeInTheDocument();
   });
 
   it("toggling the impersonate switch and submitting includes options.impersonate: true in the create payload", async () => {

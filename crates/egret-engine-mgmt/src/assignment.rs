@@ -6,7 +6,8 @@
 //!      ([`EngineMgmtStore::assign_workspace`]), and
 //!   2. materialize a read-only, per-user-delegated connection in the query seam
 //!      ([`DatabaseRepo::create_provisioned`]) so the workspace's BI/query tools
-//!      can reach the engine's Trino coordinator.
+//!      can reach the engine's query endpoint (a Trino coordinator or a
+//!      StarRocks FE, depending on the engine kind).
 //!
 //! This service is the single place that keeps those two seams consistent; the
 //! CP endpoints (Task 7) call it rather than touching either store directly.
@@ -68,9 +69,16 @@ impl EngineAssignmentService {
         }
         let name = dedup_name(&engine.name, &existing);
         let (opts, secret_id) = delegated_conn_options(&engine);
-        // Delegated connections materialize over the coordinator's https listener
-        // (8443); non-delegation engines keep the plain coordinator port.
-        let port = if engine.supports_delegation() {
+        // Trino delegated connections materialize over the coordinator's
+        // separate https listener (8443); non-delegation Trino engines keep
+        // the plain coordinator port. StarRocks has no such separate TLS
+        // listener — it does in-band TLS on its single MySQL-protocol port
+        // (9030) — so it always uses `coordinator_port()` regardless of
+        // delegation mode; TLS (when configured) is negotiated in-band via
+        // `options.tls_cert`, not a different port.
+        let port = if engine.is_starrocks() {
+            engine.coordinator_port()
+        } else if engine.supports_delegation() {
             8443
         } else {
             engine.coordinator_port()
@@ -124,14 +132,26 @@ fn dedup_name(base: &str, existing: &[Database]) -> String {
 }
 
 /// Select the connection `options` JSONB and bound `secret_id` for the
-/// materialized delegated connection, by delegation mode:
+/// materialized delegated connection, by engine kind + delegation mode.
+/// Branches cleanly on `engine.r#type`: the Trino shape (below) is completely
+/// unchanged from before StarRocks support existed.
+fn delegated_conn_options(engine: &Engine) -> (serde_json::Value, Option<Uuid>) {
+    if engine.is_starrocks() {
+        return starrocks_delegated_conn_options(engine);
+    }
+    trino_delegated_conn_options(engine)
+}
+
+/// Trino delegated connection options, by delegation mode:
 ///   - impersonate → `{ "user": <delegator>, "impersonate": true }` + the engine's
 ///     global delegator secret, so the query path opens a basic-auth service-user
 ///     connection and impersonates the caller;
 ///   - jwt → `{}` + no secret, so the query path mints the caller's engine JWT.
-fn delegated_conn_options(engine: &Engine) -> (serde_json::Value, Option<Uuid>) {
-    // TLS (https + pinned public cert) for BOTH delegation modes. The query path
-    // talks to the coordinator's https listener (8443) and pins this public cert.
+///
+/// TLS (https + pinned public cert) for BOTH delegation modes: the query path
+/// talks to the coordinator's separate https listener (8443, see `assign`)
+/// and pins this public cert.
+fn trino_delegated_conn_options(engine: &Engine) -> (serde_json::Value, Option<Uuid>) {
     let with_tls = |mut opts: serde_json::Value| {
         opts["http_scheme"] = serde_json::Value::String("https".into());
         if let Some(cert) = &engine.coordinator_cert {
@@ -147,6 +167,40 @@ fn delegated_conn_options(engine: &Engine) -> (serde_json::Value, Option<Uuid>) 
         (opts, engine.delegator_secret_id)
     } else if engine.is_jwt_delegation() {
         (with_tls(serde_json::json!({})), None)
+    } else {
+        (serde_json::json!({}), None)
+    }
+}
+
+/// StarRocks delegated connection options, by delegation mode:
+///   - impersonate → `{ "user": <delegator>, "impersonate": true }` + the engine's
+///     global delegator secret (the same generic delegator-secret slot Trino
+///     uses), so [`egret_query`'s `StarRocksConnector`] logs in as that service
+///     user and runs `EXECUTE AS <caller>`;
+///   - jwt → `{}` + no secret, so the query path mints the caller's engine JWT
+///     and `StarRocksConnector` presents it as the login "password" (StarRocks
+///     `authentication_jwt`).
+///
+/// Unlike Trino, NO `http_scheme` key is set — that option is Trino-only
+/// (`https` vs a separate port). StarRocks does in-band TLS on its single
+/// MySQL-protocol port (9030, see `assign`'s port selection), so
+/// `options.tls_cert` alone (when the engine has a stored FE cert) is enough
+/// for the connector to negotiate TLS on that same port.
+fn starrocks_delegated_conn_options(engine: &Engine) -> (serde_json::Value, Option<Uuid>) {
+    let with_tls_cert = |mut opts: serde_json::Value| {
+        if let Some(cert) = &engine.coordinator_cert {
+            opts["tls_cert"] = serde_json::Value::String(cert.clone());
+        }
+        opts
+    };
+    if engine.is_impersonate_delegation() {
+        let opts = with_tls_cert(serde_json::json!({
+            "user": crate::delegator_policy::DELEGATOR_USERNAME,
+            "impersonate": true,
+        }));
+        (opts, engine.delegator_secret_id)
+    } else if engine.is_jwt_delegation() {
+        (with_tls_cert(serde_json::json!({})), None)
     } else {
         (serde_json::json!({}), None)
     }
@@ -258,5 +312,94 @@ mod tests {
         assert_eq!(opts["user"], "egret_delegator");
         assert_eq!(opts["impersonate"], true);
         assert_eq!(secret, Some(Uuid::from_u128(7)));
+    }
+
+    // ── starrocks ───────────────────────────────────────────────────────────
+
+    fn starrocks_engine(delegation: Option<&str>, delegator_secret_id: Option<Uuid>) -> Engine {
+        let spec = match delegation {
+            Some(mode) => {
+                serde_json::json!({ "starrocksConfig": { "delegation": { "mode": mode } } })
+            }
+            None => serde_json::json!({ "starrocksConfig": {} }),
+        };
+        Engine {
+            id: Uuid::nil(),
+            name: "sr1".into(),
+            r#type: "starrocks".into(),
+            namespace: "engines".into(),
+            warehouse_id: Uuid::nil(),
+            spec,
+            status: "provisioning".into(),
+            authz_service_id: None,
+            delegator_secret_id,
+            tls_secret_id: None,
+            coordinator_cert: Some("SRPEMCERT".into()),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// impersonate: user + impersonate flag + bound delegator secret, tls_cert
+    /// set, but NO `http_scheme` (that option is Trino-only).
+    #[test]
+    fn starrocks_delegated_conn_options_impersonate() {
+        let s = Uuid::new_v4();
+        let e = starrocks_engine(Some("impersonate"), Some(s));
+        let (opts, secret_id) = delegated_conn_options(&e);
+        assert_eq!(opts["user"], "egret_delegator");
+        assert_eq!(opts["impersonate"], true);
+        assert_eq!(opts["tls_cert"], "SRPEMCERT");
+        assert!(opts.get("http_scheme").is_none());
+        assert_eq!(secret_id, Some(s));
+    }
+
+    /// jwt: no user/impersonate/secret, tls_cert still set, no http_scheme.
+    #[test]
+    fn starrocks_delegated_conn_options_jwt() {
+        let e = starrocks_engine(Some("jwt"), Some(Uuid::new_v4()));
+        let (opts, secret_id) = delegated_conn_options(&e);
+        assert!(opts.get("user").is_none());
+        assert!(opts.get("impersonate").is_none());
+        assert_eq!(opts["tls_cert"], "SRPEMCERT");
+        assert!(opts.get("http_scheme").is_none());
+        assert_eq!(secret_id, None);
+    }
+
+    /// CRITICAL guard: a StarRocks engine with no delegation config at all
+    /// must not be treated as impersonate-delegated by `assign()` — it must
+    /// be rejected as not-assignable rather than materializing a broken
+    /// connection. This exercises the full `assign()` gate via
+    /// `supports_delegation()`, the same predicate `assign()` checks.
+    #[test]
+    fn starrocks_without_delegation_is_not_impersonate_delegated() {
+        let e = starrocks_engine(None, Some(Uuid::new_v4()));
+        assert!(!e.supports_delegation());
+        assert!(!e.is_impersonate_delegation());
+        // Even if something called delegated_conn_options directly despite the
+        // gate, it must NOT come back looking like an impersonate connection.
+        let (opts, secret_id) = delegated_conn_options(&e);
+        assert!(opts.get("impersonate").is_none());
+        assert!(opts.get("user").is_none());
+        assert_eq!(secret_id, None);
+    }
+
+    /// StarRocks never gets the Trino-only 8443/https treatment: port
+    /// selection in `assign()` always uses `coordinator_port()` (9030) for
+    /// starrocks, delegated or not — mirrored here since `assign()` itself
+    /// needs a live DB (`DatabaseRepo`) to exercise end-to-end.
+    #[test]
+    fn starrocks_port_selection_never_forces_8443() {
+        let e = starrocks_engine(Some("jwt"), None);
+        assert_eq!(e.coordinator_port(), 9030);
+        // The `assign()` port-selection logic (mirrored): starrocks always
+        // uses coordinator_port(), trino uses 8443 when delegation-capable.
+        let port = if e.is_starrocks() {
+            e.coordinator_port()
+        } else if e.supports_delegation() {
+            8443
+        } else {
+            e.coordinator_port()
+        };
+        assert_eq!(port, 9030);
     }
 }

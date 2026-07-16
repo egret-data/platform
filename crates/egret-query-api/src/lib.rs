@@ -57,12 +57,14 @@ pub struct ConnOptions {
     /// StarRocks default database (optional).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database: Option<String>,
-    /// Trino only: run each query as the logged-in user (X-Trino-User).
-    /// Requires Trino impersonation + Ranger. Default false.
+    /// Run each query as the logged-in user (impersonate delegation mode).
+    /// Trino → `X-Trino-User`; StarRocks → `EXECUTE AS <user> WITH NO REVERT`.
+    /// Requires engine impersonation + Ranger. Default false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impersonate: Option<bool>,
-    /// Trino jwt-mode/TLS only: PEM of the coordinator's self-signed cert to pin as a
-    /// trusted root (server-auth over TLS). Set on egret-provisioned TLS connections.
+    /// PEM of the engine's self-signed cert to pin as a trusted root (server-auth
+    /// over TLS). Set on egret-provisioned TLS connections — Trino jwt/TLS mode
+    /// (https) and StarRocks delegation (in-band TLS on :9030).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_cert: Option<String>,
 }

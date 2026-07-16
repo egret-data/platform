@@ -570,7 +570,10 @@ function DatabaseConnDialog({
       http_scheme: httpScheme.trim().length > 0 ? httpScheme.trim() : undefined,
       catalog: catalog.trim().length > 0 ? catalog.trim() : undefined,
       database: schema.trim().length > 0 ? schema.trim() : undefined,
-      impersonate: engine === "trino" && impersonate ? true : undefined,
+      impersonate:
+        (engine === "trino" || engine === "starrocks") && impersonate
+          ? true
+          : undefined,
     };
 
     const input: DatabaseConnInput = {
@@ -708,7 +711,7 @@ function DatabaseConnDialog({
               </div>
             </div>
 
-            {engine === "trino" && (
+            {(engine === "trino" || engine === "starrocks") && (
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
                   <Label htmlFor="db-impersonate" className="font-normal">
@@ -722,7 +725,9 @@ function DatabaseConnDialog({
                   />
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Requires Trino impersonation + Ranger
+                  {engine === "trino"
+                    ? "Requires Trino impersonation + Ranger"
+                    : "Requires a StarRocks service user configured for EXECUTE AS + Ranger"}
                 </p>
               </div>
             )}

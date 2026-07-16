@@ -130,4 +130,62 @@ describe("ControlPlaneEngines", () => {
     expect(body.cpuMax).toBe("2");
     expect(body.memory).toBe("4Gi");
   });
+
+  test("StarRocks tab: selecting a delegation mode puts delegationMode + tlsEnabled in the POST body", async () => {
+    const user = userEvent.setup();
+    const warehouse: api.Warehouse = {
+      id: "w1",
+      name: "demo-wh",
+      workspaceId: "ws1",
+      storageConnId: "sc1",
+      lakekeeperWarehouseId: "lk1",
+    };
+    vi.mocked(api.listWarehouses).mockResolvedValue([warehouse]);
+    const created: api.Engine = {
+      id: "e2",
+      name: "sr1",
+      type: "starrocks",
+      namespace: "engines",
+      warehouseId: warehouse.id,
+      status: "provisioning",
+      spec: { coordinatorReplicas: 1, workerReplicas: 2, cpuMin: "1", cpuMax: "2", memory: "4Gi", imageVersion: "latest" },
+    };
+    // Reset call history — a prior test in this file also calls createEngine,
+    // and vitest's automock doesn't clear call counts between tests.
+    vi.mocked(api.createEngine).mockClear();
+    vi.mocked(api.createEngine).mockResolvedValue(created);
+
+    renderPage();
+
+    await user.click(screen.getByRole("tab", { name: "StarRocks" }));
+    await user.click(screen.getByRole("button", { name: /Add engine/i }));
+    await screen.findByRole("heading", { name: /Add StarRocks engine/i });
+
+    await user.type(screen.getByLabelText("Name"), "sr1");
+    await user.click(screen.getByLabelText("Warehouse"));
+    await user.click(await screen.findByRole("option", { name: "demo-wh" }));
+
+    // Delegation mode defaults to "None" — TLS toggle hidden.
+    expect(screen.queryByLabelText("Enable TLS")).not.toBeInTheDocument();
+
+    await user.click(screen.getByLabelText("Per-user delegation"));
+    await user.click(await screen.findByRole("option", { name: "JWT over TLS" }));
+
+    // TLS toggle appears once a mode is selected, defaulting to on.
+    const tlsSwitch = screen.getByLabelText("Enable TLS");
+    expect(tlsSwitch).toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "Add engine" }));
+
+    await waitFor(() => expect(api.createEngine).toHaveBeenCalledTimes(1));
+    const body = vi.mocked(api.createEngine).mock.calls[0][0];
+    expect(body.starrocks).toEqual({
+      feImage: "starrocks/fe-ubuntu:3.3-latest",
+      cnImage: "starrocks/cn-ubuntu:3.3-latest",
+      feReplicas: 1,
+      cnReplicas: 1,
+      delegationMode: "jwt",
+      tlsEnabled: true,
+    });
+  });
 });

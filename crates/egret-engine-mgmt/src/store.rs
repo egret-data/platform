@@ -42,38 +42,87 @@ pub struct EngineCatalog {
 }
 
 impl Engine {
-    /// In-cluster DNS name of this engine's Trino coordinator service
-    /// (`{name}-coordinator.{namespace}.svc`).
-    pub fn coordinator_host(&self) -> String {
-        format!("{}-coordinator.{}.svc", self.name, self.namespace)
+    /// True when this is a StarRocks engine. The single source of truth for the
+    /// kind check every de-Trino-gated helper below branches on — a helper (not
+    /// a repeated `self.r#type == "starrocks"` literal) so a typo can't silently
+    /// send a StarRocks engine down the Trino path (which defaults to
+    /// impersonate-capable), reintroducing the exact bug class this seam fixes.
+    pub fn is_starrocks(&self) -> bool {
+        self.r#type == "starrocks"
     }
 
-    /// The coordinator's HTTP port (fixed by the orchestrator's manifests).
+    /// In-cluster DNS name of this engine's coordinator/FE service. Trino's
+    /// kube-trino operator names it `{name}-coordinator.{namespace}.svc`;
+    /// StarRocks' kube-starrocks operator instead exposes the FE (the
+    /// MySQL-protocol query endpoint) as `{name}-fe-service.{namespace}.svc`.
+    pub fn coordinator_host(&self) -> String {
+        if self.is_starrocks() {
+            format!("{}-fe-service.{}.svc", self.name, self.namespace)
+        } else {
+            format!("{}-coordinator.{}.svc", self.name, self.namespace)
+        }
+    }
+
+    /// The coordinator/FE's query port (fixed by each operator's manifests):
+    /// Trino's HTTP listener is `8080`; StarRocks' FE MySQL-protocol
+    /// (`query_port`) listener is `9030`.
     pub fn coordinator_port(&self) -> i32 {
-        8080
+        if self.is_starrocks() {
+            9030
+        } else {
+            8080
+        }
     }
 
     /// Whether the engine accepts a minted per-user engine JWT — a prerequisite
-    /// for materializing a delegated (read-only) workspace connection. Mirrors
-    /// the orchestrator's `spec.trinoConfig.auth.jwt` object check
-    /// (`egret-engine-mgmt/src/engines.rs::resolve_auth`).
+    /// for materializing a delegated (read-only) workspace connection.
+    ///
+    /// Trino: mirrors the orchestrator's `spec.trinoConfig.auth.jwt` object
+    /// check (`egret-engine-mgmt/src/engines.rs::resolve_auth`).
+    /// StarRocks: has no `trinoConfig.auth.jwt` concept — jwt-capability is
+    /// simply "the stored delegation mode is `jwt`" (see [`Self::delegation_mode`]).
     pub fn supports_jwt_delegation(&self) -> bool {
-        self.spec
-            .get("trinoConfig")
-            .and_then(|tc| tc.get("auth"))
-            .and_then(|a| a.get("jwt"))
-            .map(|j| j.is_object())
-            .unwrap_or(false)
+        if self.is_starrocks() {
+            self.is_jwt_delegation()
+        } else {
+            self.spec
+                .get("trinoConfig")
+                .and_then(|tc| tc.get("auth"))
+                .and_then(|a| a.get("jwt"))
+                .map(|j| j.is_object())
+                .unwrap_or(false)
+        }
     }
 
-    /// Delegation mode from the stored spec (`trinoConfig.delegationMode`).
-    /// Defaults to `impersonate` when absent.
+    /// Delegation mode from the stored spec.
+    ///
+    /// Trino: `trinoConfig.delegationMode`, defaulting to `impersonate` when
+    /// absent (back-compat: pre-delegation Trino engines default to the
+    /// impersonate path).
+    ///
+    /// StarRocks: `starrocksConfig.delegation.mode`. CRITICAL: unlike Trino,
+    /// this does NOT default to `impersonate` when absent — a StarRocks
+    /// engine's spec has no `trinoConfig` at all, so falling through to
+    /// Trino's `impersonate` default would make every un-configured StarRocks
+    /// engine silently report itself delegation-capable and cause `assign()`
+    /// to materialize a broken connection (wrong delegator user, no secret).
+    /// Absent/unset delegation on a StarRocks engine reports `"none"`, which
+    /// none of `is_impersonate_delegation`/`is_jwt_delegation` match.
     pub fn delegation_mode(&self) -> &str {
-        self.spec
-            .get("trinoConfig")
-            .and_then(|t| t.get("delegationMode"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("impersonate")
+        if self.is_starrocks() {
+            self.spec
+                .get("starrocksConfig")
+                .and_then(|c| c.get("delegation"))
+                .and_then(|d| d.get("mode"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("none")
+        } else {
+            self.spec
+                .get("trinoConfig")
+                .and_then(|t| t.get("delegationMode"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("impersonate")
+        }
     }
 
     /// True when delegated queries run via basic-auth service-user impersonation.
@@ -87,7 +136,10 @@ impl Engine {
     }
 
     /// True when the engine can back a delegated (per-user) connection at all.
-    /// Impersonate mode always can; jwt mode requires JWT auth enabled.
+    /// Impersonate mode always can; jwt mode requires JWT auth enabled. A
+    /// StarRocks engine with no `starrocksConfig.delegation` at all reports
+    /// `false` (see [`Self::delegation_mode`]'s doc) rather than silently
+    /// defaulting to impersonate.
     pub fn supports_delegation(&self) -> bool {
         self.is_impersonate_delegation() || self.supports_jwt_delegation()
     }
@@ -463,5 +515,103 @@ mod tests {
 
         e.spec = serde_json::json!({ "trinoConfig": {} }); // default = impersonate
         assert!(!e.is_jwt_delegation());
+    }
+
+    /// Fixture builder for the starrocks tests below.
+    fn starrocks_engine(spec: serde_json::Value) -> Engine {
+        Engine {
+            id: Uuid::nil(),
+            name: "sr1".into(),
+            r#type: "starrocks".into(),
+            namespace: "engines".into(),
+            warehouse_id: Uuid::nil(),
+            spec,
+            status: "provisioning".into(),
+            authz_service_id: None,
+            delegator_secret_id: None,
+            tls_secret_id: None,
+            coordinator_cert: None,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn starrocks_coordinator_host_is_fe_service_not_coordinator() {
+        let e = starrocks_engine(serde_json::json!({}));
+        assert_eq!(e.coordinator_host(), "sr1-fe-service.engines.svc");
+    }
+
+    #[test]
+    fn starrocks_coordinator_port_is_9030_not_8080() {
+        let e = starrocks_engine(serde_json::json!({}));
+        assert_eq!(e.coordinator_port(), 9030);
+    }
+
+    /// Trino's helpers must be completely unaffected by the starrocks branch.
+    #[test]
+    fn trino_coordinator_host_and_port_unchanged() {
+        let e = Engine {
+            id: Uuid::nil(),
+            name: "trino1".into(),
+            r#type: "trino".into(),
+            namespace: "engines".into(),
+            warehouse_id: Uuid::nil(),
+            spec: serde_json::json!({}),
+            status: "provisioning".into(),
+            authz_service_id: None,
+            delegator_secret_id: None,
+            tls_secret_id: None,
+            coordinator_cert: None,
+            created_at: chrono::Utc::now(),
+        };
+        assert_eq!(e.coordinator_host(), "trino1-coordinator.engines.svc");
+        assert_eq!(e.coordinator_port(), 8080);
+    }
+
+    /// CRITICAL (the latent bug this task fixes): a StarRocks engine with NO
+    /// `starrocksConfig.delegation` at all — the state every StarRocks engine
+    /// is in immediately after `create_starrocks_engine` unless the admin
+    /// opted into delegation — must NOT be reported as delegation-capable.
+    /// Before this fix `delegation_mode()` unconditionally defaulted to
+    /// `"impersonate"`, so `assign()` would have materialized a broken
+    /// impersonate connection (wrong delegator user, no bound secret).
+    #[test]
+    fn starrocks_no_delegation_config_is_not_delegation_capable() {
+        // No starrocksConfig key at all.
+        let e = starrocks_engine(serde_json::json!({}));
+        assert_eq!(e.delegation_mode(), "none");
+        assert!(!e.is_impersonate_delegation());
+        assert!(!e.is_jwt_delegation());
+        assert!(!e.supports_jwt_delegation());
+        assert!(!e.supports_delegation());
+
+        // starrocksConfig present but no delegation sub-object (the shape
+        // `create_starrocks_engine` persists when the body omits delegation).
+        let e2 = starrocks_engine(serde_json::json!({ "starrocksConfig": { "feReplicas": 1 } }));
+        assert!(!e2.supports_delegation());
+    }
+
+    #[test]
+    fn starrocks_delegation_mode_impersonate() {
+        let e = starrocks_engine(serde_json::json!({
+            "starrocksConfig": { "delegation": { "mode": "impersonate" } }
+        }));
+        assert_eq!(e.delegation_mode(), "impersonate");
+        assert!(e.is_impersonate_delegation());
+        assert!(!e.is_jwt_delegation());
+        assert!(!e.supports_jwt_delegation());
+        assert!(e.supports_delegation());
+    }
+
+    #[test]
+    fn starrocks_delegation_mode_jwt() {
+        let e = starrocks_engine(serde_json::json!({
+            "starrocksConfig": { "delegation": { "mode": "jwt" } }
+        }));
+        assert_eq!(e.delegation_mode(), "jwt");
+        assert!(!e.is_impersonate_delegation());
+        assert!(e.is_jwt_delegation());
+        assert!(e.supports_jwt_delegation());
+        assert!(e.supports_delegation());
     }
 }

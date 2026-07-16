@@ -25156,6 +25156,22 @@
           },
           "cnResources": {
             "type": "object"
+          },
+          "delegationMode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opt into per-user delegation (Access parity slice 3): `\"jwt\"` |\n`\"impersonate\"` | omitted/`None` (no delegation — the slice-2 open\nengine default). The OIDC coordinates (jwks/issuer) and the\nimpersonation service-user credential are NOT accepted here — they're\nderived from egret's own OIDC config / minted server-side (see\n[`create_starrocks_engine`]), same posture as Trino's\n`trinoConfig.auth.jwt` vs the delegator secret.",
+            "default": null
+          },
+          "tlsEnabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Enable FE SSL on the MySQL-protocol port (:9030) when delegation is\nconfigured. Defaults to `true` when `delegation_mode` is set; ignored\notherwise. `false` opts out of TLS while still enabling delegation\n(e.g. a dev cluster where the extra listener setup isn't wanted).",
+            "default": null
           }
         }
       },
