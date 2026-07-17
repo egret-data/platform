@@ -68,3 +68,18 @@ just k8s-down        # delete the whole kind cluster
 
 OIDC / Keycloak login is **Milestone B** — see the deployment plan/spec. This
 milestone (A) ships local-admin auth only.
+
+## Troubleshooting
+
+- **`http://localhost:30080` refused / SPA unreachable.** kind `extraPortMappings`
+  (the `30080` host map in `deploy/k8s/kind.yaml`) only take effect when the
+  cluster is **created**. On a cluster that predates that mapping, either recreate
+  it (`just k8s-down && just k8s-up`) or port-forward the frontend instead:
+  `kubectl port-forward -n egret-system svc/egret-frontend 8090:80` → browse
+  `http://localhost:8090`.
+- **"Invalid email or password" on a fresh install.** The `egret-init` post-install
+  hook Job bootstraps the admin; if it hasn't finished, wait for it
+  (`kubectl get job -n egret-system egret-init -w`) or run it manually:
+  `kubectl exec -n egret-system deploy/egret -- egret init`.
+- **Backend restarts once on first boot.** Expected — it races Postgres becoming
+  ready, times out once, then reconnects (`restartPolicy: Always`).
