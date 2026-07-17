@@ -35,7 +35,19 @@ import {
  * `authz_service_id` from the PUT body, so it's fixed at creation. Surfacing an
  * editable control would fake a change the backend silently ignores.
  */
-export function StarRocksSecurityTab({ cfg }: { cfg: StarRocksConfigForm }) {
+/**
+ * The StarRocks Security & Delegation content (per-user delegation + transport
+ * TLS + the read-only Ranger note), with NO Card or SaveBar of its own. Rendered
+ * both as the last section of the merged StarRocks Settings left-nav
+ * (`StarRocksConfigTab`) and inside the standalone {@link StarRocksSecurityTab}
+ * wrapper. Driven by the same `useStarRocksConfigForm` instance, so the shared
+ * SaveBar covers delegation edits together with any pending config edits.
+ */
+export function StarRocksSecuritySection({
+  cfg,
+}: {
+  cfg: StarRocksConfigForm;
+}) {
   // Read the CURRENTLY-STORED mode (not the live `cfg.delegationMode`, which
   // moves as the user picks) so the "can't be disabled" note reflects the
   // engine's persisted state regardless of the in-progress selection. Delegation
@@ -48,6 +60,69 @@ export function StarRocksSecurityTab({ cfg }: { cfg: StarRocksConfigForm }) {
     cfg.storedConfig?.delegation?.mode === "impersonate";
 
   return (
+    <div className="space-y-4">
+      <div className="space-y-1.5">
+        <Label htmlFor="sr-sec-delegation">Per-user delegation</Label>
+        <Select
+          value={cfg.delegationMode}
+          onValueChange={(v) =>
+            cfg.setDelegationMode(v as StarRocksDelegationOption)
+          }
+        >
+          <SelectTrigger id="sr-sec-delegation" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="none" disabled={hasDelegation}>
+              None (default)
+            </SelectItem>
+            <SelectItem value="jwt">JWT over TLS</SelectItem>
+            <SelectItem value="impersonate">Impersonate</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          {DELEGATION_HELP[cfg.delegationMode]}
+        </p>
+        {hasDelegation && (
+          <p className="text-xs text-muted-foreground">
+            Delegation can&apos;t be disabled after creation — you can switch
+            between JWT and Impersonate, but removing it requires recreating the
+            engine.
+          </p>
+        )}
+      </div>
+
+      {cfg.delegationMode !== "none" && (
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-4">
+            <Label htmlFor="sr-sec-tls" className="font-normal">
+              Enable TLS
+            </Label>
+            <Switch
+              id="sr-sec-tls"
+              checked={cfg.tlsEnabled}
+              onCheckedChange={cfg.setTlsEnabled}
+              aria-label="Enable TLS"
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Enables FE SSL on the MySQL-protocol port. Requires a StarRocks image
+            &ge; 3.4.1 (the default 3.4 line works); an older FE can&apos;t serve
+            the SSL listener. Recommended for both delegation modes.
+          </p>
+        </div>
+      )}
+
+      <p className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+        The Ranger authorization binding is configured when the engine is created
+        and isn&apos;t editable here.
+      </p>
+    </div>
+  );
+}
+
+export function StarRocksSecurityTab({ cfg }: { cfg: StarRocksConfigForm }) {
+  return (
     <Card>
       <CardHeader>
         <CardTitle className="text-lg">Security &amp; Exposure</CardTitle>
@@ -58,64 +133,7 @@ export function StarRocksSecurityTab({ cfg }: { cfg: StarRocksConfigForm }) {
       </CardHeader>
       <CardContent>
         <div className="space-y-4">
-          <div className="space-y-1.5">
-            <Label htmlFor="sr-sec-delegation">Per-user delegation</Label>
-            <Select
-              value={cfg.delegationMode}
-              onValueChange={(v) =>
-                cfg.setDelegationMode(v as StarRocksDelegationOption)
-              }
-            >
-              <SelectTrigger id="sr-sec-delegation" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="none" disabled={hasDelegation}>
-                  None (default)
-                </SelectItem>
-                <SelectItem value="jwt">JWT over TLS</SelectItem>
-                <SelectItem value="impersonate">Impersonate</SelectItem>
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              {DELEGATION_HELP[cfg.delegationMode]}
-            </p>
-            {hasDelegation && (
-              <p className="text-xs text-muted-foreground">
-                Delegation can&apos;t be disabled after creation — you can switch
-                between JWT and Impersonate, but removing it requires recreating
-                the engine.
-              </p>
-            )}
-          </div>
-
-          {cfg.delegationMode !== "none" && (
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between gap-4">
-                <Label htmlFor="sr-sec-tls" className="font-normal">
-                  Enable TLS
-                </Label>
-                <Switch
-                  id="sr-sec-tls"
-                  checked={cfg.tlsEnabled}
-                  onCheckedChange={cfg.setTlsEnabled}
-                  aria-label="Enable TLS"
-                />
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Enables FE SSL on the MySQL-protocol port. Requires a StarRocks
-                image &ge; 3.4.1 (the default 3.4 line works); an older FE
-                can&apos;t serve the SSL listener. Recommended for both
-                delegation modes.
-              </p>
-            </div>
-          )}
-
-          <p className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-            The Ranger authorization binding is configured when the engine is
-            created and isn&apos;t editable here.
-          </p>
-
+          <StarRocksSecuritySection cfg={cfg} />
           <SaveBar cfg={cfg} />
         </div>
       </CardContent>

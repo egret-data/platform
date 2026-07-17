@@ -1,10 +1,11 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import EngineDetail from "@/routes/control-plane/EngineDetail";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import * as api from "@/api/controlPlane";
 import * as engineApi from "@/api/generated/control-plane-engines/control-plane-engines";
 import * as wsApi from "@/api/generated/admin-workspaces/admin-workspaces";
@@ -84,15 +85,17 @@ function mockGetEngine(spec: api.Engine["spec"]) {
   } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
 }
 
-function renderDetail() {
+function renderDetail(entry = `/control-plane/engines/${ENGINE.id}`) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={[`/control-plane/engines/${ENGINE.id}`]}>
-        <Routes>
-          <Route path="/control-plane/engines/:id" element={<EngineDetail />} />
-        </Routes>
-      </MemoryRouter>
+      <TooltipProvider>
+        <MemoryRouter initialEntries={[entry]}>
+          <Routes>
+            <Route path="/control-plane/engines/:id" element={<EngineDetail />} />
+          </Routes>
+        </MemoryRouter>
+      </TooltipProvider>
     </QueryClientProvider>,
   );
 }
@@ -194,33 +197,138 @@ describe("EngineDetail — StarRocks engine", () => {
     } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
   });
 
-  test("shows both Configuration and Security tabs, and enables Restart", async () => {
+  test("exposes exactly 5 tabs with a merged Settings (no Configuration/Security tabs)", async () => {
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    // Configuration + Security are merged into ONE Settings tab (Task IA-T4).
+    const tabs = screen.getAllByRole("tab");
+    expect(tabs.map((t) => t.textContent)).toEqual([
+      "Overview",
+      "Catalogs",
+      "Workspaces",
+      "Settings",
+      "Monitor",
+    ]);
+    expect(
+      screen.queryByRole("tab", { name: "Configuration" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: "Security & Exposure" }),
+    ).not.toBeInTheDocument();
+
+    // Restart is now enabled for StarRocks (backend supports it — Task 4).
+    expect(screen.getByRole("button", { name: /restart/i })).toBeEnabled();
+  });
+
+  test("Settings tab folds Security & Delegation in as the LAST config-nav item, with one Save", async () => {
     const user = userEvent.setup();
     renderDetail();
     await screen.findByRole("heading", { name: "analytics-trino" });
 
-    // Configuration is StarRocks-shaped (Task 5); the Security & Exposure tab is
-    // now available for StarRocks too (Task 6 — delegation + TLS).
-    expect(screen.getByRole("tab", { name: "Configuration" })).toBeInTheDocument();
-    expect(
-      screen.getByRole("tab", { name: "Security & Exposure" }),
-    ).toBeInTheDocument();
-    // Other tabs stay available.
-    expect(screen.getByRole("tab", { name: "Catalogs" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Monitor" })).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
 
-    // Restart is now enabled for StarRocks (backend supports it — Task 4).
-    expect(screen.getByRole("button", { name: /restart/i })).toBeEnabled();
-
-    // The StarRocks Configuration tab renders its FE/CN image fields.
-    await user.click(screen.getByRole("tab", { name: "Configuration" }));
+    // The StarRocks config sections render (FE/CN image is the default section).
     expect(await screen.findByLabelText("FE image")).toBeInTheDocument();
 
-    // The StarRocks Security tab renders its delegation control.
-    await user.click(screen.getByRole("tab", { name: "Security & Exposure" }));
+    // Security is folded into the left-nav as the LAST item.
+    const nav = screen.getByRole("navigation");
+    const navButtons = within(nav).getAllByRole("button");
+    expect(navButtons[navButtons.length - 1]).toHaveTextContent(
+      "Security & Delegation",
+    );
+
+    // Selecting it reveals the delegation control in the SAME pane.
+    await user.click(
+      within(nav).getByRole("button", { name: /Security & Delegation/ }),
+    );
     expect(
       await screen.findByLabelText("Per-user delegation"),
     ).toBeInTheDocument();
+
+    // ONE Save button covers config + security (single shared SaveBar).
+    expect(
+      screen.getAllByRole("button", { name: "Save changes" }),
+    ).toHaveLength(1);
+  });
+
+  test("?section=security deep-links straight to the Security & Delegation pane", async () => {
+    renderDetail(
+      `/control-plane/engines/${ENGINE.id}?tab=settings&section=security`,
+    );
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    expect(
+      await screen.findByLabelText("Per-user delegation"),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("EngineDetail — Trino Settings tab (merged Configuration + Security)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetEngine(ENGINE.spec);
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
+      >,
+    );
+  });
+
+  test("exposes exactly 5 tabs with a merged Settings (no Configuration/Security tabs)", async () => {
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    const tabs = screen.getAllByRole("tab");
+    expect(tabs.map((t) => t.textContent)).toEqual([
+      "Overview",
+      "Catalogs",
+      "Workspaces",
+      "Settings",
+      "Monitor",
+    ]);
+    expect(
+      screen.queryByRole("tab", { name: "Configuration" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: /Security & Exposure/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  test("Settings tab folds Security & Exposure in as the LAST config-nav item, with one Save", async () => {
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
+
+    // Config sections render (Image is the default section).
+    const nav = await screen.findByRole("navigation");
+    const navButtons = within(nav).getAllByRole("button");
+    expect(navButtons[navButtons.length - 1]).toHaveTextContent(
+      "Security & Exposure",
+    );
+
+    // Selecting Security reveals its controls in the same pane (password users).
+    await user.click(
+      within(nav).getByRole("button", { name: /Security & Exposure/ }),
+    );
+    expect(await screen.findByText("Password users")).toBeInTheDocument();
+
+    // ONE Save button covers config + security.
+    expect(
+      screen.getAllByRole("button", { name: "Save changes" }),
+    ).toHaveLength(1);
+  });
+
+  test("?section=security deep-links straight to the Security pane", async () => {
+    renderDetail(
+      `/control-plane/engines/${ENGINE.id}?tab=settings&section=security`,
+    );
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    expect(await screen.findByText("Password users")).toBeInTheDocument();
   });
 });
 

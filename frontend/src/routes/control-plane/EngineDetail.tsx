@@ -88,7 +88,6 @@ import {
 } from "./useEngineConfigForm";
 import { useStarRocksConfigForm } from "./useStarRocksConfigForm";
 import { StarRocksConfigTab } from "./StarRocksConfigTab";
-import { StarRocksSecurityTab } from "./StarRocksSecurityTab";
 import { ImageSection } from "./config/ImageSection";
 import { ServerSection } from "./config/ServerSection";
 import { CoordinatorSection } from "./config/CoordinatorSection";
@@ -370,9 +369,10 @@ export default function EngineDetail() {
 }
 
 /**
- * Top-level engine tabs: Overview / Configuration / Security & Exposure /
- * Monitor. The config form hook is instantiated here so the Configuration and
- * Security tabs share a single form state (and a single Save action).
+ * Top-level engine tabs: Overview / Catalogs / Workspaces / Settings / Monitor.
+ * The config form hook is instantiated here so the merged Settings tab — which
+ * folds the former Configuration and Security & Exposure views under one
+ * left-nav — shares a single form state (and a single Save action).
  */
 function EngineTabs({
   engine,
@@ -387,9 +387,11 @@ function EngineTabs({
   // inert. Shared with the future StarRocks Security tab off this one instance.
   const srCfg = useStarRocksConfigForm(engine);
 
-  // StarRocks engines have a StarRocks-shaped Configuration tab (image/compute/
-  // resources) and a StarRocks-shaped Security & Exposure tab (delegation + TLS);
-  // both branch off the same `srCfg` instance so one Save covers both.
+  // StarRocks engines get a StarRocks-shaped Settings tab (image/compute/
+  // resources + a Security & Delegation section for delegation + TLS); Trino gets
+  // the Trino-shaped one (image/server/roles + a Security & Exposure section).
+  // Each branch folds config + security under one left-nav off a single form
+  // instance (`srCfg` / `cfg`) so one Save covers both.
   const isStarRocks = engine.type === "starrocks";
 
   // Warn before refresh/close while a config or security edit is unsaved — these
@@ -416,8 +418,7 @@ function EngineTabs({
         <TabsTrigger value="overview">Overview</TabsTrigger>
         <TabsTrigger value="catalogs">Catalogs</TabsTrigger>
         <TabsTrigger value="workspaces">Workspaces</TabsTrigger>
-        <TabsTrigger value="configuration">Configuration</TabsTrigger>
-        <TabsTrigger value="security">Security &amp; Exposure</TabsTrigger>
+        <TabsTrigger value="settings">Settings</TabsTrigger>
         <TabsTrigger value="monitor">Monitor</TabsTrigger>
       </TabsList>
 
@@ -434,19 +435,11 @@ function EngineTabs({
         <WorkspacesCard engine={engine} />
       </TabsContent>
 
-      <TabsContent value="configuration">
+      <TabsContent value="settings">
         {isStarRocks ? (
           <StarRocksConfigTab cfg={srCfg} />
         ) : (
           <ConfigurationTab cfg={cfg} imageVersion={engine.spec.imageVersion} />
-        )}
-      </TabsContent>
-
-      <TabsContent value="security">
-        {isStarRocks ? (
-          <StarRocksSecurityTab cfg={srCfg} />
-        ) : (
-          <SecurityTab cfg={cfg} />
         )}
       </TabsContent>
 
@@ -758,6 +751,9 @@ const NAV_ITEMS: { key: string; label: string }[] = [
   { key: "workload", label: "Workload" },
   { key: "pod", label: "Pod & Containers" },
   { key: "autoscaling", label: "Autoscaling" },
+  // Security & Exposure was its own tab; now the LAST config-nav item, sharing
+  // the single form + Save below.
+  { key: "security", label: "Security & Exposure" },
 ];
 
 function ConfigurationTab({
@@ -803,10 +799,10 @@ function ConfigurationTab({
     <Card>
       <CardHeader>
         <div className="space-y-1.5">
-          <CardTitle className="text-lg">Configuration</CardTitle>
+          <CardTitle className="text-lg">Settings</CardTitle>
           <CardDescription>
-            Cluster-wide, coordinator, and worker Trino config. Saving
-            re-provisions the engine.
+            Cluster-wide, coordinator, and worker Trino config plus security and
+            exposure. Saving re-provisions the engine.
           </CardDescription>
         </div>
       </CardHeader>
@@ -899,6 +895,7 @@ function ConfigurationTab({
                     setKeda={setAutoscaleKeda}
                   />
                 )}
+                {section === "security" && <SecuritySection cfg={cfg} />}
               </div>
             </ValidityProvider>
           </div>
@@ -910,7 +907,13 @@ function ConfigurationTab({
   );
 }
 
-function SecurityTab({ cfg }: { cfg: EngineConfigForm }) {
+/**
+ * The Security & Exposure content (client auth + coordinator ingress), extracted
+ * from the former standalone Security tab so it can render as the last section of
+ * the merged Settings left-nav. It carries NO Card or SaveBar of its own — the
+ * single {@link ConfigurationTab} `SaveBar` (same `cfg`) covers security edits too.
+ */
+function SecuritySection({ cfg }: { cfg: EngineConfigForm }) {
   const {
     passwordUsers,
     setPasswordUsers,
@@ -935,43 +938,28 @@ function SecurityTab({ cfg }: { cfg: EngineConfigForm }) {
   } = cfg;
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-lg">Security &amp; Exposure</CardTitle>
-        <CardDescription>
-          Client authentication and coordinator exposure. Saving re-provisions
-          the engine.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div className="space-y-4">
-          <EngineSecurity
-            passwordUsers={passwordUsers}
-            setPasswordUsers={setPasswordUsers}
-            jwtEnabled={jwtEnabled}
-            setJwtEnabled={setJwtEnabled}
-            delegationMode={delegationMode}
-            setDelegationMode={setDelegationMode}
-            jwksUri={jwksUri}
-            setJwksUri={setJwksUri}
-            requiredAudience={requiredAudience}
-            setRequiredAudience={setRequiredAudience}
-            ingressEnabled={ingressEnabled}
-            setIngressEnabled={setIngressEnabled}
-            ingressHost={ingressHost}
-            setIngressHost={setIngressHost}
-            ingressClassName={ingressClassName}
-            setIngressClassName={setIngressClassName}
-            ingressTlsSecret={ingressTlsSecret}
-            setIngressTlsSecret={setIngressTlsSecret}
-            ingressAnnotations={ingressAnnotations}
-            setIngressAnnotations={setIngressAnnotations}
-          />
-
-          <SaveBar cfg={cfg} />
-        </div>
-      </CardContent>
-    </Card>
+    <EngineSecurity
+      passwordUsers={passwordUsers}
+      setPasswordUsers={setPasswordUsers}
+      jwtEnabled={jwtEnabled}
+      setJwtEnabled={setJwtEnabled}
+      delegationMode={delegationMode}
+      setDelegationMode={setDelegationMode}
+      jwksUri={jwksUri}
+      setJwksUri={setJwksUri}
+      requiredAudience={requiredAudience}
+      setRequiredAudience={setRequiredAudience}
+      ingressEnabled={ingressEnabled}
+      setIngressEnabled={setIngressEnabled}
+      ingressHost={ingressHost}
+      setIngressHost={setIngressHost}
+      ingressClassName={ingressClassName}
+      setIngressClassName={setIngressClassName}
+      ingressTlsSecret={ingressTlsSecret}
+      setIngressTlsSecret={setIngressTlsSecret}
+      ingressAnnotations={ingressAnnotations}
+      setIngressAnnotations={setIngressAnnotations}
+    />
   );
 }
 

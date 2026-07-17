@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
@@ -187,7 +187,8 @@ describe("StarRocksConfigTab", () => {
     const user = userEvent.setup();
     renderTab(ENGINE_WITH_RES);
 
-    await user.click(screen.getByRole("button", { name: "Resources" }));
+    // The nav button carries a non-default-count badge, so match by prefix.
+    await user.click(screen.getByRole("button", { name: /^Resources/ }));
     const memReq = screen.getByLabelText("FE memory request");
     expect(memReq).toHaveValue("4Gi");
 
@@ -295,7 +296,8 @@ describe("StarRocksConfigTab", () => {
     const user = userEvent.setup();
     renderTab(ENGINE_WITH_AUTOSCALING);
 
-    await user.click(screen.getByRole("button", { name: "Autoscaling" }));
+    // The nav button carries a non-default-count badge, so match by prefix.
+    await user.click(screen.getByRole("button", { name: /^Autoscaling/ }));
     const toggle = screen.getByLabelText("Enable CN autoscaling");
     expect(toggle).toBeChecked();
     await user.click(toggle); // turn OFF
@@ -349,6 +351,51 @@ describe("StarRocksConfigTab", () => {
       serviceAccount: "sr-sa",
       nodeSelector: { disktype: "ssd" },
     });
+  });
+
+  test("folds Security & Delegation in as the LAST nav item, with one shared Save", async () => {
+    const user = userEvent.setup();
+    renderTab();
+
+    // Security is the last left-nav item (config sections + Security last).
+    const nav = screen.getByRole("navigation");
+    const navButtons = within(nav).getAllByRole("button");
+    expect(navButtons[navButtons.length - 1]).toHaveTextContent(
+      "Security & Delegation",
+    );
+
+    // Selecting it reveals the delegation control in the same pane.
+    await user.click(
+      within(nav).getByRole("button", { name: /Security & Delegation/ }),
+    );
+    expect(screen.getByLabelText("Per-user delegation")).toBeInTheDocument();
+
+    // ONE Save button covers config + security (single shared SaveBar).
+    expect(
+      screen.getAllByRole("button", { name: "Save changes" }),
+    ).toHaveLength(1);
+  });
+
+  test("editing delegation in the Security section drives the shared Save", async () => {
+    const user = userEvent.setup();
+    renderTab();
+
+    await user.click(
+      within(screen.getByRole("navigation")).getByRole("button", {
+        name: /Security & Delegation/,
+      }),
+    );
+
+    // Switch None → Impersonate and Save via the single shared SaveBar.
+    await user.click(screen.getByLabelText("Per-user delegation"));
+    await user.click(await screen.findByRole("option", { name: "Impersonate" }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(api.updateEngine).toHaveBeenCalledTimes(1));
+    const [, body] = vi.mocked(api.updateEngine).mock.calls[0];
+    expect(body.starrocks).toEqual(
+      expect.objectContaining({ delegationMode: "impersonate" }),
+    );
   });
 
   test("invalid affinity JSON in Pod & Containers disables Save until valid/blank", async () => {
