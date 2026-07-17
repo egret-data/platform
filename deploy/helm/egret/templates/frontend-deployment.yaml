@@ -1,0 +1,15 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: egret-frontend, namespace: {{ .Release.Namespace }} }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: egret-frontend } }
+  template:
+    metadata: { labels: { app: egret-frontend } }
+    spec:
+      containers:
+        - name: frontend
+          image: "{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag }}"
+          imagePullPolicy: {{ .Values.frontend.image.pullPolicy }}
+          ports: [{ containerPort: 80 }]
+          readinessProbe: { httpGet: { path: /health, port: 80 }, initialDelaySeconds: 3, periodSeconds: 5 }
