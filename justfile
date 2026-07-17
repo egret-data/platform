@@ -42,3 +42,18 @@ k8s-up:
 # Tear down the kind e2e cluster
 k8s-down:
     kind delete cluster --name egret
+
+# Build both egret images (backend + frontend).
+images-build:
+    docker build -f deploy/docker/backend.Dockerfile -t egret-backend:dev .
+    docker build -f frontend/Dockerfile -t egret-frontend:dev frontend
+
+# Build images, load them into the kind `egret` cluster, and (re)install the chart.
+deploy-kind: images-build
+    kind load docker-image egret-backend:dev egret-frontend:dev --name egret
+    helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m
+    @echo "egret SPA: http://localhost:30080  (login admin@egret.local / Admin12345!)"
+
+# Uninstall the egret release (leaves the kind cluster + operators up).
+kind-undeploy:
+    helm uninstall egret -n egret-system || true
