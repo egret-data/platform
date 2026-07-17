@@ -35,6 +35,7 @@ import { useAdminWorkspacesListWs } from "@/api/generated/admin-workspaces/admin
 import { ApiError } from "@/api/client";
 import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
+import { SummaryStrip } from "@/components/explore/SummaryStrip";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -421,6 +422,7 @@ function EngineTabs({
       </TabsList>
 
       <TabsContent value="overview" className="space-y-5">
+        <EngineSummaryStrip engine={engine} />
         <StatusCard status={engine.status} engineId={engineId} />
       </TabsContent>
 
@@ -528,6 +530,50 @@ export function SaveBar({
       </div>
     </div>
   );
+}
+
+/**
+ * At-a-glance KPI strip for the Overview tab — engine phase, pod readiness,
+ * role replicas, catalog + workspace counts, and the auth/delegation mode.
+ * Reuses the control-plane {@link SummaryStrip}; the replica item adapts to the
+ * engine kind (StarRocks FE/CN vs Trino coordinator/worker). The two counts
+ * reuse the existing Catalogs- and Workspaces-tab list queries (shared cache)
+ * and fall back to `—` while those queries load.
+ */
+function EngineSummaryStrip({ engine }: { engine: EngineWithStatus }) {
+  // Same query key as CatalogsCard → shares the cache; we read the count only.
+  const catalogsQ = useQuery<EngineCatalog[], ApiError>({
+    queryKey: ["cp", "engine-catalogs", engine.id],
+    queryFn: () => listEngineCatalogs(engine.id),
+    retry: false,
+  });
+  // Same hook as WorkspacesCard → shares the assignment query; count only.
+  const workspacesQ = useControlPlaneEnginesListEngineWorkspaces(engine.id, {
+    query: { retry: false },
+  });
+
+  const { pods } = engine.status;
+  const readyPods = pods.filter((p) => p.ready).length;
+
+  const sr = engine.spec.starrocksConfig;
+  const replicas = isStarRocksType(engine.type)
+    ? `FE ${sr?.feReplicas ?? 1} · CN ${sr?.cnReplicas ?? 1}`
+    : `Coord ${engine.spec.coordinatorReplicas} · Worker ${engine.spec.workerReplicas}`;
+
+  const catalogCount = catalogsQ.data?.length ?? "—";
+  const workspaceCount =
+    workspacesQ.data?.status === 200 ? workspacesQ.data.data.length : "—";
+
+  const items: { label: string; value: string | number }[] = [
+    { label: "phase", value: engine.status.phase },
+    { label: "pods", value: `${readyPods}/${pods.length}` },
+    { label: "replicas", value: replicas },
+    { label: "catalogs", value: catalogCount },
+    { label: "workspaces", value: workspaceCount },
+    { label: "auth", value: engineAuthLabel(engine) },
+  ];
+
+  return <SummaryStrip items={items} />;
 }
 
 function StatusCard({

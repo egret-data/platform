@@ -101,6 +101,7 @@ describe("EngineDetail — Workspaces tab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetEngine(ENGINE.spec);
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
     vi.mocked(wsApi.useAdminWorkspacesListWs).mockReturnValue(
       query([WS_A, WS_B, WS_C]) as unknown as ReturnType<typeof wsApi.useAdminWorkspacesListWs>,
     );
@@ -168,6 +169,12 @@ describe("EngineDetail — Workspaces tab", () => {
 describe("EngineDetail — StarRocks engine", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
+      >,
+    );
     vi.mocked(api.getEngine).mockResolvedValue({
       ...ENGINE,
       type: "starrocks",
@@ -220,6 +227,12 @@ describe("EngineDetail — StarRocks engine", () => {
 describe("EngineDetail — header metadata + page-level actions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
+      >,
+    );
     vi.mocked(api.getEngine).mockResolvedValue({
       ...ENGINE,
       type: "starrocks",
@@ -251,8 +264,9 @@ describe("EngineDetail — header metadata + page-level actions", () => {
     expect(
       screen.getByText("analytics-trino-fe-service.engines:9030"),
     ).toBeInTheDocument();
-    // delegation mode — none configured
-    expect(screen.getByText(/no delegation/i)).toBeInTheDocument();
+    // delegation mode — none configured (shown in the header meta and the
+    // Overview KPI strip's Auth item, so match at least one instance).
+    expect(screen.getAllByText(/no delegation/i).length).toBeGreaterThan(0);
   });
 
   test("Restart lives in the header (single instance) and Delete is in the ⋯ menu", async () => {
@@ -278,5 +292,70 @@ describe("EngineDetail — header metadata + page-level actions", () => {
     expect(
       await screen.findByRole("menuitem", { name: /delete engine/i }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("EngineDetail — Overview KPI strip", () => {
+  // Two catalogs → the strip's catalog count resolves to 2.
+  const CATALOGS = [
+    { id: "c1", name: "iceberg", kind: "iceberg", isPrimary: true },
+    { id: "c2", name: "pg", kind: "postgresql", isPrimary: false },
+  ] as unknown as Awaited<ReturnType<typeof api.listEngineCatalogs>>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue(CATALOGS);
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
+      >,
+    );
+  });
+
+  test("StarRocks Overview shows phase, pods, FE/CN replicas, counts, and auth", async () => {
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      type: "starrocks",
+      spec: {
+        coordinatorReplicas: 0,
+        workerReplicas: 0,
+        cpuMin: "",
+        cpuMax: "",
+        memory: "",
+        imageVersion: "starrocks/fe-ubuntu:3.3-latest",
+        starrocksConfig: { feReplicas: 1, cnReplicas: 1 },
+      },
+      status: {
+        phase: "running",
+        message: null,
+        pods: [{ name: "sr1-fe-0", phase: "Running", ready: true }],
+      },
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    // Overview is the default tab — the KPI strip renders above the Status card.
+    expect(screen.getByText("phase")).toBeInTheDocument();
+    expect(screen.getByText("1/1")).toBeInTheDocument(); // ready/total pods
+    expect(screen.getByText("FE 1 · CN 1")).toBeInTheDocument(); // StarRocks replicas
+    expect(screen.getByText("catalogs")).toBeInTheDocument();
+    expect(screen.getByText("workspaces")).toBeInTheDocument();
+    // Catalog count resolves from listEngineCatalogs → 2.
+    expect(await screen.findByText("2")).toBeInTheDocument();
+    // Auth item (StarRocks with no delegation → "No delegation").
+    expect(screen.getByText("auth")).toBeInTheDocument();
+    expect(screen.getAllByText("No delegation").length).toBeGreaterThan(0);
+  });
+
+  test("Trino Overview shows Coord/Worker replicas and JWT auth", async () => {
+    mockGetEngine(ENGINE.spec); // Trino: coord 1 / worker 2, JWT enabled
+
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    expect(screen.getByText("Coord 1 · Worker 2")).toBeInTheDocument();
+    // engineAuthLabel → "JWT auth" (rendered in the strip and the header meta).
+    expect(screen.getAllByText("JWT auth").length).toBeGreaterThan(0);
   });
 });
