@@ -312,6 +312,7 @@ fn coordinator_host_and_jwt_check() {
         status: "running".into(),
         authz_service_id: None,
         delegator_secret_id: None,
+        root_secret_id: None,
         tls_secret_id: None,
         coordinator_cert: None,
         created_at: chrono::Utc::now(),

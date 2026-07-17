@@ -72,3 +72,4 @@ mod tests {
 // migration registry: 0080 tags (classification model: tags + tag_assignments + tag:* perms)
 // migration registry: 0085 engine_delegator_secret (impersonate-mode delegator secret ref)
 // migration registry: 0086 engine_tls (jwt-mode coordinator TLS: tls_secret_id + coordinator_cert)
+// migration registry: 0087 engine_root_secret (secure-by-default StarRocks FE root password ref)
