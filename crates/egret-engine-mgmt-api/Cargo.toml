@@ -8,5 +8,9 @@ license.workspace = true
 # The DTOs carry a few `serde_json::Value` "raw override" escape-hatch fields
 # (e.g. `Affinity::raw_override`); serde_json is the one unavoidable dependency
 # — no kube/k8s-openapi or anything heavier leaks in.
+# `serde` (derive) is needed for the StarRocks deep-config DTOs (`CnAutoscaling`,
+# `StarRocksPod`) that are read back from the persisted spec via
+# `serde_json::from_value`. Still no kube/k8s-openapi — nothing heavier leaks in.
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 async-trait.workspace = true

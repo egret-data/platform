@@ -7,7 +7,7 @@
 
 use crate::kube_client::KubeClient;
 use crate::provisioner::EngineProvisioner;
-use crate::spec::{EngineSpec, EngineStatus, PodStatus, RoleResources};
+use crate::spec::{EngineSpec, EngineStatus, PodStatus, RoleResources, StarRocksPod};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -31,6 +31,54 @@ fn resources_json(r: &RoleResources) -> (Value, Value) {
         requests.insert("memory".into(), json!(v));
     }
     (Value::Object(limits), Value::Object(requests))
+}
+
+/// Merge admin `fe.conf` overrides into the egret-generated base. Each base line
+/// of the form `key = value` (or `key=value`) whose key appears in `overrides`
+/// is REPLACED in place (preserving position); overrides whose key isn't in the
+/// base are appended. Keys in `protected` are SKIPPED (egret's value wins) —
+/// belt-and-suspenders behind the API-layer 400 guard. Comment/blank lines are
+/// preserved verbatim.
+fn merge_fe_conf(
+    base: &str,
+    overrides: &std::collections::BTreeMap<String, String>,
+    protected: &[&str],
+) -> String {
+    let mut consumed: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    // Preserve a trailing newline: `split('\n')` on "a\n" yields ["a", ""], so
+    // the empty final element is re-joined with the same '\n' separator.
+    let mut out_lines: Vec<String> = Vec::new();
+    for line in base.split('\n') {
+        // Only `key = value` lines are candidates; comments/blanks pass through.
+        let is_kv =
+            !line.trim_start().starts_with('#') && line.contains('=') && !line.trim().is_empty();
+        if is_kv {
+            let (raw_key, _) = line.split_once('=').expect("contains('=') checked above");
+            let key = raw_key.trim();
+            if !protected.contains(&key) {
+                if let Some((k, v)) = overrides.get_key_value(key) {
+                    out_lines.push(format!("{k} = {v}"));
+                    consumed.insert(k.as_str());
+                    continue;
+                }
+            }
+        }
+        out_lines.push(line.to_string());
+    }
+    let mut out = out_lines.join("\n");
+    // Append any override key not present in the base (and not protected), in
+    // sorted BTreeMap order for determinism. Ensure the appended block starts on
+    // its own line.
+    for (k, v) in overrides {
+        if consumed.contains(k.as_str()) || protected.contains(&k.as_str()) {
+            continue;
+        }
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("{k} = {v}\n"));
+    }
+    out
 }
 
 /// The FE role's `fe.conf` ConfigMap (`{name}-fe-cm`). Templates the base
@@ -82,12 +130,42 @@ pub fn starrocks_fe_configmap(spec: &EngineSpec) -> Value {
         conf.push_str("ssl_force_secure_transport = false\n");
     }
 
+    // Merge admin `fe.conf` overrides over the egret-generated base. Protected
+    // keys are guarded here too (defense in depth behind the API-layer 400).
+    let merged = merge_fe_conf(&conf, &sr.fe_config, crate::spec::SR_PROTECTED_FE_KEYS);
+
     json!({
         "apiVersion": "v1", "kind": "ConfigMap",
         "metadata": { "name": format!("{}-fe-cm", spec.name), "namespace": spec.namespace,
                       "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
-        "data": { "fe.conf": conf }
+        "data": { "fe.conf": merged }
     })
+}
+
+/// The CN role's `cn.conf` ConfigMap (`{name}-cn-cm`). Unlike the FE, there is
+/// NO egret-mandated CN base — `cn.conf` is JUST the admin `cn_config`
+/// overrides, so this returns `None` when `cn_config` is empty (CN then uses
+/// the operator defaults, unchanged from today). Lines are rendered `key =
+/// value`, sorted by the `BTreeMap`'s key order for determinism.
+pub fn starrocks_cn_configmap(spec: &EngineSpec) -> Option<Value> {
+    let sr = spec
+        .starrocks
+        .as_ref()
+        .expect("starrocks_cn_configmap requires spec.starrocks");
+    if sr.cn_config.is_empty() {
+        return None;
+    }
+    let conf: String = sr
+        .cn_config
+        .iter()
+        .map(|(k, v)| format!("{k} = {v}\n"))
+        .collect();
+    Some(json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": { "name": format!("{}-cn-cm", spec.name), "namespace": spec.namespace,
+                      "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
+        "data": { "cn.conf": conf }
+    }))
 }
 
 /// The Ranger plugin's `ranger-starrocks-security.xml` + audit ConfigMap
@@ -199,6 +277,95 @@ pub fn starrocks_restart_patch(stamp: &str) -> Value {
             "starRocksCnSpec": { "annotations": { RESTART_STAMP_KEY: stamp } },
         }
     })
+}
+
+/// Apply the admin pod/scheduling fields onto a role spec (FE or CN). Simple
+/// scalars/maps overwrite; `init_containers`/`sidecars` are APPENDED to any
+/// existing array (so the FE SSL keystore init-container is preserved).
+/// `env_key` is the role-specific env field name ("feEnvVars" | "cnEnvVars").
+///
+/// Operator CR keys (kube-starrocks `StarRocksLoadSpec`/`StarRocksComponentSpec`,
+/// `pkg/apis/starrocks/v1/{load_type,component_type,starrockscluster_types}.go`):
+/// `serviceAccount`, `nodeSelector`, `annotations`, `podLabels`, `feEnvVars`/
+/// `cnEnvVars`, `tolerations`, `affinity`, `imagePullSecrets`
+/// (`[]LocalObjectReference` → `[{name}]`), `initContainers`, `sidecars`.
+///
+/// NOTE: `pod.security_context` is intentionally NOT rendered. The operator's
+/// FE/CN role spec has no role-level `securityContext` field, and the
+/// StarRocksCluster CRD is a structural schema (no
+/// `x-kubernetes-preserve-unknown-fields`), so an emitted `securityContext`
+/// key would be silently PRUNED by the API server — a misleading no-op. Pod
+/// security lives per-container inside `initContainers`/`sidecars` instead.
+fn apply_pod_fields(spec: &mut Value, pod: &StarRocksPod, env_key: &str) {
+    if let Some(sa) = &pod.service_account {
+        spec["serviceAccount"] = json!(sa);
+    }
+    if !pod.node_selector.is_empty() {
+        spec["nodeSelector"] = json!(pod.node_selector);
+    }
+    if !pod.annotations.is_empty() {
+        // MERGE into any existing `annotations` map — never clobber (there are
+        // none here today, but the restart flow stamps this field separately).
+        let entry = spec
+            .as_object_mut()
+            .expect("role spec is a JSON object")
+            .entry("annotations")
+            .or_insert_with(|| json!({}));
+        if let Some(map) = entry.as_object_mut() {
+            for (k, v) in &pod.annotations {
+                map.insert(k.clone(), json!(v));
+            }
+        }
+    }
+    if !pod.pod_labels.is_empty() {
+        spec["podLabels"] = json!(pod.pod_labels);
+    }
+    if !pod.env.is_empty() {
+        spec[env_key] = json!(pod.env);
+    }
+    if let Some(t) = &pod.tolerations {
+        spec["tolerations"] = t.clone();
+    }
+    if let Some(a) = &pod.affinity {
+        spec["affinity"] = a.clone();
+    }
+    // `pod.security_context` is intentionally NOT rendered — see the doc comment.
+    if !pod.image_pull_secrets.is_empty() {
+        // k8s `LocalObjectReference`: a list of `{name: "..."}` objects.
+        spec["imagePullSecrets"] = json!(pod
+            .image_pull_secrets
+            .iter()
+            .map(|n| json!({ "name": n }))
+            .collect::<Vec<_>>());
+    }
+    // APPEND (never overwrite): the FE SSL block may already have populated
+    // `initContainers` with the build-keystore container.
+    append_array(spec, "initContainers", pod.init_containers.as_ref());
+    append_array(spec, "sidecars", pod.sidecars.as_ref());
+}
+
+/// Append the elements of `add` (expected a JSON array) onto `spec[key]`,
+/// creating the array if absent — preserving any existing entries (e.g. the
+/// FE SSL keystore init-container already on `initContainers`).
+fn append_array(spec: &mut Value, key: &str, add: Option<&Value>) {
+    // A present-but-non-array passthrough is malformed (the field is typed
+    // `Option<Value>` so we can't rely on serde to reject it) — drop it, but
+    // surface the drop so it isn't silently invisible.
+    if let Some(v) = add {
+        if !v.is_null() && !v.is_array() {
+            tracing::warn!(field = key, "ignoring non-array StarRocks pod field");
+        }
+    }
+    let Some(add_items) = add.and_then(Value::as_array).filter(|a| !a.is_empty()) else {
+        return;
+    };
+    let obj = spec.as_object_mut().expect("role spec is a JSON object");
+    match obj.get_mut(key).and_then(Value::as_array_mut) {
+        Some(existing) => existing.extend(add_items.iter().cloned()),
+        None => {
+            obj.insert(key.to_string(), Value::Array(add_items.clone()));
+        }
+    }
 }
 
 /// The `starrocks.com/v1 StarRocksCluster` CR: FE + CN roles only (shared-data
@@ -330,6 +497,15 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
         "image": sr.cn_image,
         "replicas": sr.cn_replicas,
     });
+    // Mount the admin `cn.conf` ConfigMap (only emitted when `cn_config` is
+    // non-empty — see `starrocks_cn_configmap`). When empty, CN keeps the
+    // operator defaults and gets no `configMapInfo` (unchanged from today).
+    if !sr.cn_config.is_empty() {
+        cn_spec["configMapInfo"] = json!({
+            "configMapName": format!("{}-cn-cm", spec.name),
+            "resolveKey": "cn.conf",
+        });
+    }
     if let Some(r) = &sr.cn_resources {
         let (limits, requests) = resources_json(r);
         if limits.as_object().is_some_and(|m| !m.is_empty()) {
@@ -338,6 +514,49 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
         if requests.as_object().is_some_and(|m| !m.is_empty()) {
             cn_spec["requests"] = requests;
         }
+    }
+    // CN horizontal autoscaling → the operator's `autoScalingPolicy` on the CN
+    // spec (it provisions an HPA that scales the CN StatefulSet). `version: "v2"`
+    // is the operator's `AutoScalerV2` enum value (see
+    // `pkg/apis/starrocks/v1/auto_scale.go`: `AutoScalerV2 = "v2"`); `metrics` is
+    // the standard k8s `autoscaling/v2` Resource-CPU-Utilization MetricSpec,
+    // matching the operator's `HPAPolicy.Metrics []autoscalingv2beta2.MetricSpec`.
+    //
+    // PRECEDENCE: `cn_spec.replicas` (set from `cn_replicas` above) stays in the
+    // CR, but once `autoScalingPolicy` is present the operator hands replica count
+    // to the HPA and stops reconciling `replicas` — so emitting both is
+    // intentional and harmless (the static value is just the pre-HPA baseline).
+    //
+    // DISABLED SENTINEL: `max_replicas == 0` means "autoscaling disabled" → we
+    // emit NO `autoScalingPolicy` (CN falls back to the static `cn_replicas`).
+    // This is the FE's post-enable OFF switch: the omit=preserve config store
+    // can't clear a `Some(cn_autoscaling)`, so the FE sends `{maxReplicas: 0}` to
+    // turn autoscaling off. `None` (never enabled) likewise renders no policy.
+    if let Some(a) = &sr.cn_autoscaling {
+        if a.max_replicas > 0 {
+            let mut pol = json!({ "version": "v2", "maxReplicas": a.max_replicas });
+            if let Some(m) = a.min_replicas {
+                pol["minReplicas"] = json!(m);
+            }
+            if let Some(cpu) = a.target_cpu_percent {
+                pol["hpaPolicy"] = json!({ "metrics": [{
+                    "type": "Resource",
+                    "resource": {
+                        "name": "cpu",
+                        "target": { "type": "Utilization", "averageUtilization": cpu }
+                    }
+                }]});
+            }
+            cn_spec["autoScalingPolicy"] = pol;
+        }
+    }
+
+    // Admin pod/scheduling fields on BOTH roles, applied LAST so the FE SSL
+    // block's `initContainers` (build-keystore) is already in place and gets
+    // APPENDED to — not clobbered — by any admin `init_containers`.
+    if let Some(pod) = &sr.pod {
+        apply_pod_fields(&mut fe_spec, pod, "feEnvVars");
+        apply_pod_fields(&mut cn_spec, pod, "cnEnvVars");
     }
 
     json!({
@@ -369,6 +588,9 @@ impl StarRocksProvisioner {
     /// error.
     async fn apply_all(&self, spec: &EngineSpec) -> anyhow::Result<()> {
         self.kube.apply(&starrocks_fe_configmap(spec)).await?;
+        if let Some(cm) = starrocks_cn_configmap(spec) {
+            self.kube.apply(&cm).await?;
+        }
         if let Some(cm) = starrocks_ranger_configmap(spec) {
             self.kube.apply(&cm).await?;
         }
@@ -432,6 +654,25 @@ impl EngineProvisioner for StarRocksProvisioner {
                     "ConfigMap",
                     &spec.namespace,
                     &format!("{}-ranger-cm", spec.name),
+                )
+                .await;
+        }
+        // `apply_all` only applies the CN ConfigMap when `cn_config` is
+        // non-empty, so clearing all CN overrides would otherwise orphan
+        // `{name}-cn-cm` (the CR's `configMapInfo` is dropped, but the
+        // ConfigMap lingers). Best-effort delete it when there are no overrides.
+        if spec
+            .starrocks
+            .as_ref()
+            .is_none_or(|sr| sr.cn_config.is_empty())
+        {
+            let _ = self
+                .kube
+                .delete(
+                    "v1",
+                    "ConfigMap",
+                    &spec.namespace,
+                    &format!("{}-cn-cm", spec.name),
                 )
                 .await;
         }
@@ -509,6 +750,10 @@ impl EngineProvisioner for StarRocksProvisioner {
             .await;
         let _ = self
             .kube
+            .delete("v1", "ConfigMap", namespace, &format!("{name}-cn-cm"))
+            .await;
+        let _ = self
+            .kube
             .delete("v1", "ConfigMap", namespace, &format!("{name}-ranger-cm"))
             .await;
         let _ = self
@@ -527,6 +772,7 @@ impl EngineProvisioner for StarRocksProvisioner {
 mod tests {
     use super::*;
     use crate::spec::*;
+    use std::collections::BTreeMap;
 
     fn sample_sr_spec() -> EngineSpec {
         EngineSpec {
@@ -549,6 +795,10 @@ mod tests {
                 fe_resources: None,
                 cn_resources: None,
                 delegation: None,
+                fe_config: Default::default(),
+                cn_config: Default::default(),
+                cn_autoscaling: None,
+                pod: None,
             }),
         }
     }
@@ -589,6 +839,66 @@ mod tests {
             "starrocks/cn-ubuntu:3.3-latest"
         );
         assert!(spec.get("starRocksBeSpec").is_none()); // no BE in shared-data
+    }
+
+    fn sr_spec_with_autoscaling(a: CnAutoscaling) -> EngineSpec {
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().cn_autoscaling = Some(a);
+        spec
+    }
+
+    #[test]
+    fn cr_renders_cn_autoscaling() {
+        let spec = sr_spec_with_autoscaling(CnAutoscaling {
+            min_replicas: Some(1),
+            max_replicas: 3,
+            target_cpu_percent: Some(70),
+        });
+        let cr = starrocks_cluster_cr(&spec);
+        let pol = &cr["spec"]["starRocksCnSpec"]["autoScalingPolicy"];
+        assert_eq!(pol["version"], "v2");
+        assert_eq!(pol["minReplicas"], 1);
+        assert_eq!(pol["maxReplicas"], 3);
+        let metric = &pol["hpaPolicy"]["metrics"][0];
+        assert_eq!(metric["type"], "Resource");
+        assert_eq!(metric["resource"]["name"], "cpu");
+        assert_eq!(metric["resource"]["target"]["type"], "Utilization");
+        assert_eq!(metric["resource"]["target"]["averageUtilization"], 70);
+    }
+
+    #[test]
+    fn cr_autoscaling_no_min_no_cpu() {
+        let spec = sr_spec_with_autoscaling(CnAutoscaling {
+            min_replicas: None,
+            max_replicas: 2,
+            target_cpu_percent: None,
+        });
+        let cr = starrocks_cluster_cr(&spec);
+        let pol = &cr["spec"]["starRocksCnSpec"]["autoScalingPolicy"];
+        assert_eq!(pol["maxReplicas"], 2);
+        assert!(pol.get("minReplicas").is_none());
+        assert!(pol.get("hpaPolicy").is_none());
+    }
+
+    #[test]
+    fn cr_autoscaling_disabled_sentinel() {
+        let spec = sr_spec_with_autoscaling(CnAutoscaling {
+            min_replicas: None,
+            max_replicas: 0,
+            target_cpu_percent: None,
+        });
+        let cr = starrocks_cluster_cr(&spec);
+        assert!(cr["spec"]["starRocksCnSpec"]
+            .get("autoScalingPolicy")
+            .is_none());
+    }
+
+    #[test]
+    fn cr_no_autoscaling_when_none() {
+        let cr = starrocks_cluster_cr(&sample_sr_spec());
+        assert!(cr["spec"]["starRocksCnSpec"]
+            .get("autoScalingPolicy")
+            .is_none());
     }
 
     #[test]
@@ -863,6 +1173,147 @@ mod tests {
                 && e["valueFrom"]["secretKeyRef"]["name"] == "sr1-ssl-secret"));
     }
 
+    /// Task 2 TDD: an existing base key whose name is in the overrides map is
+    /// REPLACED in place, exactly once, dropping the old value line.
+    #[test]
+    fn merge_fe_conf_replaces_existing_key() {
+        let base = "# header\nsys_log_level = INFO\nquery_port = 9030\n";
+        let overrides = BTreeMap::from([("sys_log_level".to_string(), "WARN".to_string())]);
+        let out = merge_fe_conf(base, &overrides, &[]);
+        assert!(out.contains("sys_log_level = WARN"));
+        assert!(!out.contains("sys_log_level = INFO"));
+        assert_eq!(out.matches("sys_log_level =").count(), 1);
+        // Unrelated lines are preserved verbatim.
+        assert!(out.contains("# header"));
+        assert!(out.contains("query_port = 9030"));
+    }
+
+    /// An override key absent from the base is appended as `key = value`.
+    #[test]
+    fn merge_fe_conf_appends_new_key() {
+        let base = "sys_log_level = INFO\n";
+        let overrides = BTreeMap::from([("query_timeout".to_string(), "600".to_string())]);
+        let out = merge_fe_conf(base, &overrides, &[]);
+        assert!(out.contains("sys_log_level = INFO"));
+        assert!(out.contains("query_timeout = 600"));
+    }
+
+    /// A protected override key is SKIPPED — egret's base line wins, the admin
+    /// value never appears (belt-and-suspenders behind the API 400 guard).
+    #[test]
+    fn merge_fe_conf_skips_protected() {
+        let base = "run_mode = shared_data\n";
+        let overrides = BTreeMap::from([("run_mode".to_string(), "shared_nothing".to_string())]);
+        let out = merge_fe_conf(base, &overrides, &["run_mode"]);
+        assert!(out.contains("run_mode = shared_data"));
+        assert!(!out.contains("shared_nothing"));
+    }
+
+    /// Empty overrides → output is byte-identical to the base.
+    #[test]
+    fn merge_fe_conf_empty_is_identity() {
+        let base = "# header\nsys_log_level = INFO\nrun_mode = shared_data\n";
+        let overrides = BTreeMap::new();
+        assert_eq!(merge_fe_conf(base, &overrides, SR_PROTECTED_FE_KEYS), base);
+    }
+
+    /// Integration through `starrocks_fe_configmap`: an admin `feConfig`
+    /// override for a non-protected key lands in the rendered `fe.conf` once.
+    #[test]
+    fn fe_configmap_applies_override() {
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().fe_config =
+            BTreeMap::from([("sys_log_level".to_string(), "WARN".to_string())]);
+        let conf = starrocks_fe_configmap(&spec)["data"]["fe.conf"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(conf.contains("sys_log_level = WARN"));
+        assert!(!conf.contains("sys_log_level = INFO"));
+        assert_eq!(conf.matches("sys_log_level =").count(), 1);
+    }
+
+    /// Task 3 TDD: no CN `cn.conf` ConfigMap is emitted when `cn_config` is
+    /// empty — CN uses the operator defaults (behavior-preserving).
+    #[test]
+    fn cn_configmap_none_when_empty() {
+        assert!(starrocks_cn_configmap(&sample_sr_spec()).is_none());
+    }
+
+    /// A non-empty `cn_config` renders a `{name}-cn-cm` ConfigMap whose
+    /// `cn.conf` carries the admin override lines.
+    #[test]
+    fn cn_configmap_some_when_nonempty() {
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().cn_config =
+            BTreeMap::from([("sys_log_level".to_string(), "WARN".to_string())]);
+        let cm = starrocks_cn_configmap(&spec).expect("cn-cm present when cn_config non-empty");
+        assert_eq!(cm["kind"], "ConfigMap");
+        assert_eq!(cm["metadata"]["name"], "sr1-cn-cm");
+        let conf = cm["data"]["cn.conf"].as_str().unwrap();
+        assert!(conf.contains("sys_log_level = WARN"));
+    }
+
+    /// A non-empty `cn_config` wires `starRocksCnSpec.configMapInfo` pointing at
+    /// the `{name}-cn-cm` ConfigMap with `resolveKey: cn.conf`.
+    #[test]
+    fn cr_wires_cn_configmapinfo_when_nonempty() {
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().cn_config =
+            BTreeMap::from([("sys_log_level".to_string(), "WARN".to_string())]);
+        let cr = starrocks_cluster_cr(&spec);
+        let info = &cr["spec"]["starRocksCnSpec"]["configMapInfo"];
+        assert_eq!(info["configMapName"], "sr1-cn-cm");
+        assert_eq!(info["resolveKey"], "cn.conf");
+    }
+
+    /// Empty `cn_config` → CN spec has no `configMapInfo` (unchanged from today).
+    #[test]
+    fn cr_no_cn_configmapinfo_when_empty() {
+        let cr = starrocks_cluster_cr(&sample_sr_spec());
+        assert!(cr["spec"]["starRocksCnSpec"].get("configMapInfo").is_none());
+    }
+
+    /// The provisioner applies the CN ConfigMap (alongside the FE one) when
+    /// `cn_config` is non-empty, and omits it when empty.
+    #[tokio::test]
+    async fn provisioner_applies_cn_configmap() {
+        use crate::kube_client::FakeKube;
+
+        // Non-empty → CN ConfigMap is among the applied objects.
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().cn_config =
+            BTreeMap::from([("sys_log_level".to_string(), "WARN".to_string())]);
+        let kube = Arc::new(FakeKube::default());
+        StarRocksProvisioner::new(kube.clone())
+            .provision(&spec)
+            .await
+            .unwrap();
+        {
+            let applied = kube.applied.lock().unwrap();
+            let cn = applied
+                .get("ConfigMap/sr1-cn-cm")
+                .expect("CN ConfigMap applied");
+            assert!(cn["data"]["cn.conf"]
+                .as_str()
+                .unwrap()
+                .contains("sys_log_level = WARN"));
+        }
+
+        // Empty → no CN ConfigMap applied (behavior-preserving).
+        let kube = Arc::new(FakeKube::default());
+        StarRocksProvisioner::new(kube.clone())
+            .provision(&sample_sr_spec())
+            .await
+            .unwrap();
+        assert!(kube
+            .applied
+            .lock()
+            .unwrap()
+            .get("ConfigMap/sr1-cn-cm")
+            .is_none());
+    }
+
     /// T4 TDD: the restart merge-patch body stamps the restart annotation on
     /// BOTH the FE and CN pod-annotation field (`annotations`, which the
     /// operator propagates to each role's pod template), and the base CR carries
@@ -883,6 +1334,104 @@ mod tests {
         let cr = starrocks_cluster_cr(&sample_sr_spec());
         assert!(cr["spec"]["starRocksFeSpec"].get("annotations").is_none());
         assert!(cr["spec"]["starRocksCnSpec"].get("annotations").is_none());
+    }
+
+    /// Task 5 TDD: the admin pod/scheduling fields render onto BOTH the FE and
+    /// CN role specs, using each role's operator keys.
+    #[test]
+    fn pod_fields_on_both_roles() {
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().pod = Some(StarRocksPod {
+            service_account: Some("sa".into()),
+            node_selector: BTreeMap::from([("disktype".to_string(), "ssd".to_string())]),
+            tolerations: Some(json!([{ "key": "dedicated", "operator": "Exists" }])),
+            ..Default::default()
+        });
+        let cr = starrocks_cluster_cr(&spec);
+        for role in ["starRocksFeSpec", "starRocksCnSpec"] {
+            let rs = &cr["spec"][role];
+            assert_eq!(rs["serviceAccount"], "sa", "{role}");
+            assert_eq!(rs["nodeSelector"]["disktype"], "ssd", "{role}");
+            assert_eq!(rs["tolerations"][0]["key"], "dedicated", "{role}");
+        }
+    }
+
+    /// Env vars use the role-SPECIFIC operator key (`feEnvVars` on FE,
+    /// `cnEnvVars` on CN) — never a generic `env`.
+    #[test]
+    fn pod_env_uses_role_specific_key() {
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().pod = Some(StarRocksPod {
+            env: vec![json!({ "name": "FOO", "value": "bar" })],
+            ..Default::default()
+        });
+        let cr = starrocks_cluster_cr(&spec);
+        let fe = &cr["spec"]["starRocksFeSpec"];
+        assert_eq!(fe["feEnvVars"][0]["name"], "FOO");
+        assert_eq!(fe["feEnvVars"][0]["value"], "bar");
+        assert!(fe.get("env").is_none());
+        assert!(fe.get("cnEnvVars").is_none());
+        let cn = &cr["spec"]["starRocksCnSpec"];
+        assert_eq!(cn["cnEnvVars"][0]["name"], "FOO");
+        assert!(cn.get("env").is_none());
+        assert!(cn.get("feEnvVars").is_none());
+    }
+
+    /// Admin `init_containers` are APPENDED to the FE spec — the SSL
+    /// build-keystore init-container the TLS block already set MUST survive.
+    #[test]
+    fn pod_initcontainers_preserve_ssl() {
+        let mut spec = sample_sr_spec_with_tls();
+        spec.starrocks.as_mut().unwrap().pod = Some(StarRocksPod {
+            init_containers: Some(json!([{ "name": "admin-init", "image": "busybox" }])),
+            ..Default::default()
+        });
+        let cr = starrocks_cluster_cr(&spec);
+        let inits = cr["spec"]["starRocksFeSpec"]["initContainers"]
+            .as_array()
+            .unwrap();
+        let names: Vec<&str> = inits.iter().filter_map(|c| c["name"].as_str()).collect();
+        assert!(
+            names.contains(&"build-keystore"),
+            "SSL keystore init survives: {names:?}"
+        );
+        assert!(
+            names.contains(&"admin-init"),
+            "admin init appended: {names:?}"
+        );
+        assert_eq!(inits.len(), 2);
+    }
+
+    /// `pod = None` is a no-op: no pod/scheduling keys appear on either role,
+    /// and a TLS engine's SSL init-container is still present and alone.
+    #[test]
+    fn pod_none_is_noop() {
+        let cr = starrocks_cluster_cr(&sample_sr_spec());
+        for role in ["starRocksFeSpec", "starRocksCnSpec"] {
+            let rs = &cr["spec"][role];
+            for k in [
+                "serviceAccount",
+                "nodeSelector",
+                "annotations",
+                "podLabels",
+                "tolerations",
+                "affinity",
+                "securityContext",
+                "imagePullSecrets",
+                "sidecars",
+                "feEnvVars",
+                "cnEnvVars",
+            ] {
+                assert!(rs.get(k).is_none(), "{role} unexpectedly has {k}");
+            }
+        }
+        // TLS engine, pod = None: the SSL init-container is present and alone.
+        let cr = starrocks_cluster_cr(&sample_sr_spec_with_tls());
+        let inits = cr["spec"]["starRocksFeSpec"]["initContainers"]
+            .as_array()
+            .unwrap();
+        assert_eq!(inits.len(), 1);
+        assert_eq!(inits[0]["name"], "build-keystore");
     }
 
     /// `StarRocksProvisioner::restart` JSON-merge-patches the existing
