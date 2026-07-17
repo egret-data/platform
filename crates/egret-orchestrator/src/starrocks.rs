@@ -433,6 +433,11 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
     // the standard k8s `autoscaling/v2` Resource-CPU-Utilization MetricSpec,
     // matching the operator's `HPAPolicy.Metrics []autoscalingv2beta2.MetricSpec`.
     //
+    // PRECEDENCE: `cn_spec.replicas` (set from `cn_replicas` above) stays in the
+    // CR, but once `autoScalingPolicy` is present the operator hands replica count
+    // to the HPA and stops reconciling `replicas` — so emitting both is
+    // intentional and harmless (the static value is just the pre-HPA baseline).
+    //
     // DISABLED SENTINEL: `max_replicas == 0` means "autoscaling disabled" → we
     // emit NO `autoScalingPolicy` (CN falls back to the static `cn_replicas`).
     // This is the FE's post-enable OFF switch: the omit=preserve config store

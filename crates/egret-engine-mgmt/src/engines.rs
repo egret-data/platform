@@ -2140,6 +2140,51 @@ fn validate_sr_fe_config(sr_body: &StarRocksConfigBody) -> Result<(), CpError> {
     Ok(())
 }
 
+/// Reject a StarRocks body whose `cnAutoscaling` block describes an autoscaler
+/// that k8s / the operator would only fail on LATER (a deferred, hard-to-trace
+/// error). Runs up front on both create and update, like the other SR guards.
+///
+/// `maxReplicas == 0` is the disabled sentinel (autoscaling OFF — the CR omits
+/// `autoScalingPolicy` entirely, see the orchestrator), so validation is SKIPPED
+/// for it; it's a valid "off". Only an ENABLED policy (`maxReplicas > 0`) is
+/// checked:
+/// - `targetCpuPercent` absent or `0`: in our CPU-only model an enabled policy
+///   with no metric is a no-op autoscaler; k8s also rejects utilization `<= 0` at
+///   HPA-create time. (`> 100` is VALID in k8s, so it's allowed.)
+/// - `minReplicas == 0`: HPA requires `minReplicas >= 1`.
+/// - `minReplicas > maxReplicas`: the operator/HPA rejects this.
+fn validate_sr_autoscaling(sr_body: &StarRocksConfigBody) -> Result<(), CpError> {
+    let Some(a) = sr_body.cn_autoscaling.as_ref() else {
+        return Ok(());
+    };
+    let max = a.get("maxReplicas").and_then(|v| v.as_u64());
+    // Disabled sentinel (or no maxReplicas at all) ⇒ nothing to validate.
+    if max.unwrap_or(0) == 0 {
+        return Ok(());
+    }
+    let max = max.unwrap();
+    let cpu = a.get("targetCpuPercent").and_then(|v| v.as_u64());
+    if cpu.unwrap_or(0) == 0 {
+        return Err(CpError::BadRequest(
+            "autoscaling requires a target CPU percent > 0".into(),
+        ));
+    }
+    let min = a.get("minReplicas").and_then(|v| v.as_u64());
+    if min == Some(0) {
+        return Err(CpError::BadRequest(
+            "autoscaling minReplicas must be >= 1".into(),
+        ));
+    }
+    if let Some(m) = min {
+        if m > max {
+            return Err(CpError::BadRequest(
+                "autoscaling minReplicas cannot exceed maxReplicas".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Build the stored engine `spec` JSON from a StarRocks body. On UPDATE,
 /// `existing` is the current `engine.spec` so a PUT that omits a field preserves
 /// it; on CREATE, pass `None` (every omitted field falls back to its create-time
@@ -2339,6 +2384,9 @@ async fn create_starrocks_engine(
     validate_sr_delegation_mode(&sr_body)?;
     // Reject any `feConfig` override of an egret-managed fe.conf key up front.
     validate_sr_fe_config(&sr_body)?;
+    // Reject an enabled autoscaling policy with out-of-range bounds up front, so
+    // the admin gets a clean 400 instead of a deferred HPA-create failure.
+    validate_sr_autoscaling(&sr_body)?;
 
     // ── Iceberg external-catalog auto-wire (T6), step 1: mint a Catalog Client
     // for the warehouse — the EXACT same call the Trino path uses
@@ -4654,6 +4702,47 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_sr_fe_config(&ok_body).is_ok());
+    }
+
+    // ── validate_sr_autoscaling: enabled-policy bounds are rejected ──────────
+    #[test]
+    fn autoscaling_bounds_rejected() {
+        let body = |a: serde_json::Value| StarRocksConfigBody {
+            cn_autoscaling: Some(a),
+            ..Default::default()
+        };
+        let is_bad = |b: StarRocksConfigBody| {
+            matches!(validate_sr_autoscaling(&b), Err(CpError::BadRequest(_)))
+        };
+
+        // Enabled but no/zero target CPU ⇒ 400.
+        assert!(is_bad(body(
+            serde_json::json!({ "maxReplicas": 3, "targetCpuPercent": 0 })
+        )));
+        assert!(is_bad(body(serde_json::json!({ "maxReplicas": 3 })))); // cpu absent
+                                                                        // min > max ⇒ 400.
+        assert!(is_bad(body(serde_json::json!({
+            "maxReplicas": 3, "minReplicas": 5, "targetCpuPercent": 70
+        }))));
+        // min == 0 ⇒ 400.
+        assert!(is_bad(body(serde_json::json!({
+            "maxReplicas": 3, "minReplicas": 0, "targetCpuPercent": 70
+        }))));
+
+        // Disabled sentinel (max == 0) ⇒ OK (skipped).
+        assert!(validate_sr_autoscaling(&body(serde_json::json!({ "maxReplicas": 0 }))).is_ok());
+        // Fully valid enabled policy ⇒ OK.
+        assert!(validate_sr_autoscaling(&body(serde_json::json!({
+            "maxReplicas": 3, "minReplicas": 1, "targetCpuPercent": 70
+        })))
+        .is_ok());
+        // cpu > 100 is valid in k8s ⇒ OK.
+        assert!(validate_sr_autoscaling(&body(serde_json::json!({
+            "maxReplicas": 3, "targetCpuPercent": 150
+        })))
+        .is_ok());
+        // No autoscaling block at all ⇒ OK.
+        assert!(validate_sr_autoscaling(&StarRocksConfigBody::default()).is_ok());
     }
 
     // ── sr_delegation_block: the delegation-change detector ─────────────────
