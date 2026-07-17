@@ -426,6 +426,36 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
             cn_spec["requests"] = requests;
         }
     }
+    // CN horizontal autoscaling → the operator's `autoScalingPolicy` on the CN
+    // spec (it provisions an HPA that scales the CN StatefulSet). `version: "v2"`
+    // is the operator's `AutoScalerV2` enum value (see
+    // `pkg/apis/starrocks/v1/auto_scale.go`: `AutoScalerV2 = "v2"`); `metrics` is
+    // the standard k8s `autoscaling/v2` Resource-CPU-Utilization MetricSpec,
+    // matching the operator's `HPAPolicy.Metrics []autoscalingv2beta2.MetricSpec`.
+    //
+    // DISABLED SENTINEL: `max_replicas == 0` means "autoscaling disabled" → we
+    // emit NO `autoScalingPolicy` (CN falls back to the static `cn_replicas`).
+    // This is the FE's post-enable OFF switch: the omit=preserve config store
+    // can't clear a `Some(cn_autoscaling)`, so the FE sends `{maxReplicas: 0}` to
+    // turn autoscaling off. `None` (never enabled) likewise renders no policy.
+    if let Some(a) = &sr.cn_autoscaling {
+        if a.max_replicas > 0 {
+            let mut pol = json!({ "version": "v2", "maxReplicas": a.max_replicas });
+            if let Some(m) = a.min_replicas {
+                pol["minReplicas"] = json!(m);
+            }
+            if let Some(cpu) = a.target_cpu_percent {
+                pol["hpaPolicy"] = json!({ "metrics": [{
+                    "type": "Resource",
+                    "resource": {
+                        "name": "cpu",
+                        "target": { "type": "Utilization", "averageUtilization": cpu }
+                    }
+                }]});
+            }
+            cn_spec["autoScalingPolicy"] = pol;
+        }
+    }
 
     json!({
         "apiVersion": "starrocks.com/v1", "kind": "StarRocksCluster",
@@ -707,6 +737,66 @@ mod tests {
             "starrocks/cn-ubuntu:3.3-latest"
         );
         assert!(spec.get("starRocksBeSpec").is_none()); // no BE in shared-data
+    }
+
+    fn sr_spec_with_autoscaling(a: CnAutoscaling) -> EngineSpec {
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().cn_autoscaling = Some(a);
+        spec
+    }
+
+    #[test]
+    fn cr_renders_cn_autoscaling() {
+        let spec = sr_spec_with_autoscaling(CnAutoscaling {
+            min_replicas: Some(1),
+            max_replicas: 3,
+            target_cpu_percent: Some(70),
+        });
+        let cr = starrocks_cluster_cr(&spec);
+        let pol = &cr["spec"]["starRocksCnSpec"]["autoScalingPolicy"];
+        assert_eq!(pol["version"], "v2");
+        assert_eq!(pol["minReplicas"], 1);
+        assert_eq!(pol["maxReplicas"], 3);
+        let metric = &pol["hpaPolicy"]["metrics"][0];
+        assert_eq!(metric["type"], "Resource");
+        assert_eq!(metric["resource"]["name"], "cpu");
+        assert_eq!(metric["resource"]["target"]["type"], "Utilization");
+        assert_eq!(metric["resource"]["target"]["averageUtilization"], 70);
+    }
+
+    #[test]
+    fn cr_autoscaling_no_min_no_cpu() {
+        let spec = sr_spec_with_autoscaling(CnAutoscaling {
+            min_replicas: None,
+            max_replicas: 2,
+            target_cpu_percent: None,
+        });
+        let cr = starrocks_cluster_cr(&spec);
+        let pol = &cr["spec"]["starRocksCnSpec"]["autoScalingPolicy"];
+        assert_eq!(pol["maxReplicas"], 2);
+        assert!(pol.get("minReplicas").is_none());
+        assert!(pol.get("hpaPolicy").is_none());
+    }
+
+    #[test]
+    fn cr_autoscaling_disabled_sentinel() {
+        let spec = sr_spec_with_autoscaling(CnAutoscaling {
+            min_replicas: None,
+            max_replicas: 0,
+            target_cpu_percent: None,
+        });
+        let cr = starrocks_cluster_cr(&spec);
+        assert!(cr["spec"]["starRocksCnSpec"]
+            .get("autoScalingPolicy")
+            .is_none());
+    }
+
+    #[test]
+    fn cr_no_autoscaling_when_none() {
+        let cr = starrocks_cluster_cr(&sample_sr_spec());
+        assert!(cr["spec"]["starRocksCnSpec"]
+            .get("autoScalingPolicy")
+            .is_none());
     }
 
     #[test]
