@@ -40,6 +40,18 @@ async fn seed_engine_and_ws(
     prefix: &str,
     spec: serde_json::Value,
 ) -> (Uuid, Uuid, Uuid) {
+    seed_typed_engine_and_ws(catalog, engine_mgmt, prefix, "trino", spec).await
+}
+
+/// Like [`seed_engine_and_ws`] but with an explicit engine `type`
+/// (`trino`/`starrocks`) so tests can seed a StarRocks engine.
+async fn seed_typed_engine_and_ws(
+    catalog: &CatalogStore,
+    engine_mgmt: &EngineMgmtStore,
+    prefix: &str,
+    engine_type: &str,
+    spec: serde_json::Value,
+) -> (Uuid, Uuid, Uuid) {
     let ws_id = Uuid::new_v4();
     let ws_slug = format!("ws_{}", ws_id.simple());
     sqlx::query("INSERT INTO workspaces (id, slug, name, status) VALUES ($1, $2, $3, 'active')")
@@ -68,7 +80,7 @@ async fn seed_engine_and_ws(
 
     let eng_name = format!("{prefix}-eng-{}", Uuid::new_v4().simple());
     let engine = engine_mgmt
-        .create_engine(&eng_name, "trino", "egret-engines", wh.id, &spec)
+        .create_engine(&eng_name, engine_type, "egret-engines", wh.id, &spec)
         .await
         .expect("create engine");
 
@@ -155,6 +167,88 @@ async fn assign_rejects_non_jwt_engine() {
         .await
         .unwrap()
         .is_empty());
+}
+
+/// A delegation-mode change re-points every assigned workspace's materialized
+/// connection *in place*: assign a StarRocks engine in `impersonate` mode, flip
+/// the stored spec to `jwt`, call `rematerialize_for_engine`, and the same
+/// `databases` row's options must switch (impersonate/user cleared).
+#[tokio::test]
+async fn rematerialize_updates_conn_opts() {
+    let Some((catalog, engine_mgmt, svc)) = harness().await else {
+        eprintln!("DATABASE_URL unset — skipping");
+        return;
+    };
+    // StarRocks engine, impersonate delegation → materialized opts carry
+    // impersonate=true + the delegator user.
+    let impersonate_spec = serde_json::json!({
+        "starrocksConfig": { "delegation": { "mode": "impersonate", "tlsEnabled": true } }
+    });
+    let (engine_id, ws, admin) = seed_typed_engine_and_ws(
+        &catalog,
+        &engine_mgmt,
+        "remat",
+        "starrocks",
+        impersonate_spec,
+    )
+    .await;
+
+    svc.assign(engine_id, ws, admin).await.unwrap();
+    let dbs = svc_databases(&ws).await.unwrap();
+    let mat = dbs
+        .iter()
+        .find(|d| d.engine_id == Some(engine_id))
+        .expect("materialized row");
+    assert_eq!(mat.options.impersonate, Some(true));
+    assert!(mat.options.user.is_some());
+    let row_id = mat.id;
+
+    // Flip the stored delegation to jwt, then re-materialize.
+    let jwt_spec = serde_json::json!({
+        "starrocksConfig": { "delegation": { "mode": "jwt", "tlsEnabled": true } }
+    });
+    engine_mgmt
+        .update_engine(engine_id, &jwt_spec, "provisioning")
+        .await
+        .unwrap();
+    svc.rematerialize_for_engine(engine_id).await.unwrap();
+
+    // SAME row (references preserved), options now reflect jwt mode.
+    let dbs = svc_databases(&ws).await.unwrap();
+    let mat = dbs
+        .iter()
+        .find(|d| d.engine_id == Some(engine_id))
+        .expect("still materialized");
+    assert_eq!(mat.id, row_id, "updated in place, not recreated");
+    assert!(mat.options.impersonate.is_none());
+    assert!(mat.options.user.is_none());
+    // Still exactly one materialized row for this engine.
+    assert_eq!(
+        dbs.iter()
+            .filter(|d| d.engine_id == Some(engine_id))
+            .count(),
+        1
+    );
+
+    // Re-materializing AGAIN with the spec unchanged is an idempotent no-op —
+    // this is what makes the update path safe to call re-materialize
+    // unconditionally (so a retried PUT heals a prior partial failure): same
+    // row, same jwt options, still exactly one row.
+    svc.rematerialize_for_engine(engine_id).await.unwrap();
+    let dbs = svc_databases(&ws).await.unwrap();
+    let mat = dbs
+        .iter()
+        .find(|d| d.engine_id == Some(engine_id))
+        .expect("still materialized after no-op re-materialize");
+    assert_eq!(mat.id, row_id, "no-op re-materialize keeps the same row");
+    assert!(mat.options.impersonate.is_none());
+    assert!(mat.options.user.is_none());
+    assert_eq!(
+        dbs.iter()
+            .filter(|d| d.engine_id == Some(engine_id))
+            .count(),
+        1
+    );
 }
 
 /// Fresh `DatabaseRepo` over the same DB, listing a workspace's databases.

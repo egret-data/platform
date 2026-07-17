@@ -57,18 +57,31 @@ impl EngineAssignmentService {
         self.engines
             .assign_workspace(engine_id, workspace_id, by)
             .await?;
-        // Materialize the read-only connection — skip if one already exists for
-        // this engine (keeps `assign` idempotent end-to-end).
+        // Materialize (or refresh) the read-only connection for this workspace.
+        self.materialize_conn(&engine, workspace_id, Some(egret_core::UserId(by)))
+            .await
+    }
+
+    /// Materialize (or refresh in place) the read-only, per-user-delegated
+    /// connection for `engine` in workspace `ws`: build the delegated
+    /// `options`/`secret_id` for the engine's CURRENT delegation mode and
+    /// upsert the workspace's `databases` row. When a row for this engine
+    /// already exists it is updated in place (so `assign` stays idempotent and
+    /// a later delegation change keeps the same row id — chart/query references
+    /// survive); otherwise a fresh, name-deduped row is inserted with
+    /// `created_by`.
+    async fn materialize_conn(
+        &self,
+        engine: &Engine,
+        ws: Uuid,
+        created_by: Option<egret_core::UserId>,
+    ) -> Result<(), EngineMgmtError> {
         let existing = self
             .databases
-            .list_for_workspace(workspace_id)
+            .list_for_workspace(ws)
             .await
             .map_err(to_mgmt_err)?;
-        if existing.iter().any(|d| d.engine_id == Some(engine_id)) {
-            return Ok(());
-        }
-        let name = dedup_name(&engine.name, &existing);
-        let (opts, secret_id) = delegated_conn_options(&engine);
+        let (opts, secret_id) = delegated_conn_options(engine);
         // Trino delegated connections materialize over the coordinator's
         // separate https listener (8443); non-delegation Trino engines keep
         // the plain coordinator port. StarRocks has no such separate TLS
@@ -83,20 +96,47 @@ impl EngineAssignmentService {
         } else {
             engine.coordinator_port()
         };
+        let host = engine.coordinator_host();
+        // Refresh in place when a connection for this engine already exists —
+        // keeps `assign` idempotent and lets a delegation/TLS change re-point
+        // the existing row's options without breaking references to it.
+        if existing.iter().any(|d| d.engine_id == Some(engine.id)) {
+            self.databases
+                .update_provisioned_by_engine(ws, engine.id, &host, port, &opts, secret_id)
+                .await
+                .map_err(to_mgmt_err)?;
+            return Ok(());
+        }
+        let name = dedup_name(&engine.name, &existing);
         self.databases
             .create_provisioned(
-                workspace_id,
-                engine_id,
+                ws,
+                engine.id,
                 &name,
                 &engine.r#type,
-                &engine.coordinator_host(),
+                &host,
                 port,
                 &opts,
                 secret_id,
-                Some(egret_core::UserId(by)),
+                created_by,
             )
             .await
             .map_err(to_mgmt_err)?;
+        Ok(())
+    }
+
+    /// Re-run connection materialization for every workspace this engine is
+    /// assigned to — called after a delegation/TLS change so each workspace's
+    /// stored `databases` options (impersonate/tls_cert) match the new mode.
+    pub async fn rematerialize_for_engine(&self, engine_id: Uuid) -> Result<(), EngineMgmtError> {
+        let engine = self
+            .engines
+            .get_engine(engine_id)
+            .await?
+            .ok_or_else(|| EngineMgmtError::NotFound(engine_id.to_string()))?;
+        for ws in self.engines.list_engine_workspace_ids(engine_id).await? {
+            self.materialize_conn(&engine, ws, None).await?;
+        }
         Ok(())
     }
 

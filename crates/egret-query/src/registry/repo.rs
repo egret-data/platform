@@ -176,6 +176,43 @@ impl DatabaseRepo {
         .into_database()
     }
 
+    /// Refresh the materialized delegated connection(s) for an engine
+    /// assignment in a workspace *in place* — used when the engine's delegation
+    /// mode / TLS changes, so each workspace's stored `host`/`port`/`options`/
+    /// `secret_id` match the new mode. Updating the existing row (rather than
+    /// delete + recreate) preserves the row id, so chart/saved-query references
+    /// to the connection survive the change. Idempotent; a no-op when no such
+    /// row exists.
+    ///
+    /// The whole `options` JSONB is REPLACED (not merged) by design: these rows
+    /// are system-owned (delegated, `engine_id` set) and their options are fully
+    /// derived from the engine's delegation mode, so there is no user-set option
+    /// to preserve.
+    pub async fn update_provisioned_by_engine(
+        &self,
+        workspace_id: Uuid,
+        engine_id: Uuid,
+        host: &str,
+        port: i32,
+        options: &serde_json::Value,
+        secret_id: Option<Uuid>,
+    ) -> Result<(), DatabaseError> {
+        sqlx::query(
+            "UPDATE query.databases \
+             SET host = $3, port = $4, options = $5, secret_id = $6 \
+             WHERE workspace_id = $1 AND engine_id = $2",
+        )
+        .bind(workspace_id)
+        .bind(engine_id)
+        .bind(host)
+        .bind(port)
+        .bind(options)
+        .bind(secret_id)
+        .execute(&self.db.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Remove the materialized connection(s) for an engine assignment in a
     /// workspace (used when unassigning the engine). Idempotent.
     pub async fn delete_by_engine(

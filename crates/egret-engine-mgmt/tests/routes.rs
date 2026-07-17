@@ -895,9 +895,10 @@ async fn create_engine_starrocks_persists_starrocks_type() {
     .expect("count catalog_clients");
     assert_eq!(client_count, 1, "catalog client minted for starrocks");
 
-    // PUT (update) on a StarRocks engine is guarded: `build_provision_req` only
-    // builds a Trino spec, so it fails fast with 400 rather than corrupting the
-    // spec / dispatching to the Trino provisioner.
+    // PUT (update) on a StarRocks engine is now functional: it merges the body
+    // over the stored spec (`build_starrocks_spec`) and re-provisions via the
+    // fake port. A config-only PUT that leaves the delegation block untouched
+    // succeeds without re-bootstrapping/re-materializing.
     let resp = f
         .app
         .clone()
@@ -919,11 +920,12 @@ async fn create_engine_starrocks_persists_starrocks_type() {
         .unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::BAD_REQUEST,
-        "PUT on a starrocks engine must 400"
+        StatusCode::OK,
+        "PUT on a starrocks engine re-provisions and succeeds"
     );
 
-    // POST /restart on a StarRocks engine is guarded the same way.
+    // POST /restart on a StarRocks engine now rolls the FE/CN pods via the CR
+    // annotation merge-patch (the fake port records the call), so it succeeds.
     let resp = f
         .app
         .clone()
@@ -937,8 +939,8 @@ async fn create_engine_starrocks_persists_starrocks_type() {
         .unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::BAD_REQUEST,
-        "restart on a starrocks engine must 400"
+        StatusCode::OK,
+        "restart on a starrocks engine now rolls FE/CN pods"
     );
 }
 

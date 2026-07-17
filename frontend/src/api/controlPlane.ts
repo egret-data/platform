@@ -487,6 +487,34 @@ export interface EngineSpec {
   // Fuller Trino config surface, stored under `spec.trinoConfig` (camelCase keys).
   // Only present if the engine DTO exposes it — guard for undefined on read.
   trinoConfig?: TrinoConfig;
+  // StarRocks config surface, stored under `spec.starrocksConfig` (camelCase).
+  // Only present on StarRocks engines — guard for undefined on read.
+  starrocksConfig?: StarRocksSpecConfig;
+}
+
+/**
+ * Stored StarRocks spec config (read back from GET `spec.starrocksConfig`). This
+ * is the read shape the engine-detail Configuration form seeds from — the PUT
+ * RESPONSE (EngineDto) only echoes Trino fields, so always seed from the GET.
+ *
+ * Storage coords are NOT persisted here: the FE/CN builtin storage volume is
+ * re-resolved from the warehouse at provision time, so `spec.starrocksConfig`
+ * never carries `storageEndpoint`/`storagePath` (declared optional purely so a
+ * read-only Storage panel can render them defensively if a future spec adds them).
+ */
+export interface StarRocksSpecConfig {
+  feImage?: string;
+  cnImage?: string;
+  feReplicas?: number;
+  cnReplicas?: number;
+  // Persisted verbatim: a `RoleResources` object or `null` (= default sizing).
+  feResources?: RoleResources | null;
+  cnResources?: RoleResources | null;
+  // Delegation opt-in `{ mode, tlsEnabled }` (or `null` when no delegation).
+  delegation?: { mode?: string; tlsEnabled?: boolean } | null;
+  // Never persisted today (see doc above); read defensively.
+  storageEndpoint?: string;
+  storagePath?: string;
 }
 
 /** A provisioned query engine (Phase 1: Trino on Kubernetes). */
@@ -775,6 +803,11 @@ export interface StarRocksCreateConfig {
   cnImage?: string;
   feReplicas?: number;
   cnReplicas?: number;
+  // FE (metadata) / CN (compute) role sizing. Parsed by the backend as a
+  // `RoleResources` (cpuRequest/cpuLimit/memRequest/memLimit); omit for default
+  // sizing. On UPDATE an omitted value preserves the stored resources.
+  feResources?: RoleResources;
+  cnResources?: RoleResources;
   // Per-user delegation (Access parity slice 3). Omitted = no delegation (the
   // slice-2 open-engine default). `tlsEnabled` is only meaningful alongside a
   // delegation mode — the backend ignores it otherwise.
