@@ -512,9 +512,26 @@ export interface StarRocksSpecConfig {
   cnResources?: RoleResources | null;
   // Delegation opt-in `{ mode, tlsEnabled }` (or `null` when no delegation).
   delegation?: { mode?: string; tlsEnabled?: boolean } | null;
+  // Deep-config surface (Phase 1.5). fe.conf / cn.conf key-value overrides
+  // merged into the generated config (protected keys rejected server-side);
+  // stored as `{}` when empty.
+  feConfig?: Record<string, string>;
+  cnConfig?: Record<string, string>;
+  // CN horizontal autoscaling, or `null` when off. `{ maxReplicas: 0 }` is the
+  // stored disabled sentinel.
+  cnAutoscaling?: StarRocksAutoscaling | null;
+  // Pod & scheduling overrides (edited by a separate Pod tab); carried verbatim.
+  pod?: Record<string, unknown> | null;
   // Never persisted today (see doc above); read defensively.
   storageEndpoint?: string;
   storagePath?: string;
+}
+
+/** CN horizontal-autoscaling policy (CPU-only). `maxReplicas: 0` disables it. */
+export interface StarRocksAutoscaling {
+  minReplicas?: number;
+  maxReplicas: number;
+  targetCpuPercent?: number;
 }
 
 /** A provisioned query engine (Phase 1: Trino on Kubernetes). */
@@ -813,6 +830,17 @@ export interface StarRocksCreateConfig {
   // delegation mode — the backend ignores it otherwise.
   delegationMode?: "jwt" | "impersonate";
   tlsEnabled?: boolean;
+  // Deep-config surface (Phase 1.5). fe.conf / cn.conf overrides merged into the
+  // generated config; omitting a field on UPDATE preserves the stored value.
+  // A protected fe.conf key 400s. Send only when non-empty.
+  feConfig?: Record<string, string>;
+  cnConfig?: Record<string, string>;
+  // CN horizontal autoscaling. `{ maxReplicas: 0 }` is the disabled sentinel
+  // (the only way to clear a stored policy, since omit=preserve).
+  cnAutoscaling?: StarRocksAutoscaling;
+  // Pod & scheduling overrides (edited by the Pod tab); carried verbatim by the
+  // Config tab so a config-only save never drops them.
+  pod?: Record<string, unknown>;
 }
 
 export interface CreateEngineInput {

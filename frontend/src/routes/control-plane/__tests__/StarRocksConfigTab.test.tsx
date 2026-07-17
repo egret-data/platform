@@ -78,6 +78,30 @@ const ENGINE_WITH_DELEG: Omit<Engine, "status"> = {
   },
 };
 
+/** An engine whose stored spec already carries a CN autoscaling policy. */
+const ENGINE_WITH_AUTOSCALING: Omit<Engine, "status"> = {
+  ...ENGINE,
+  spec: {
+    ...ENGINE.spec,
+    starrocksConfig: {
+      ...ENGINE.spec.starrocksConfig,
+      cnAutoscaling: { maxReplicas: 2, targetCpuPercent: 60 },
+    },
+  },
+};
+
+/** An engine whose stored spec carries pod overrides (edited by the Pod tab). */
+const ENGINE_WITH_POD: Omit<Engine, "status"> = {
+  ...ENGINE,
+  spec: {
+    ...ENGINE.spec,
+    starrocksConfig: {
+      ...ENGINE.spec.starrocksConfig,
+      pod: { nodeSelector: { disktype: "ssd" } },
+    },
+  },
+};
+
 describe("StarRocksConfigTab", () => {
   beforeEach(() => {
     vi.mocked(api.updateEngine).mockReset();
@@ -195,5 +219,106 @@ describe("StarRocksConfigTab", () => {
         tlsEnabled: true,
       }),
     );
+  });
+
+  test("adding an FE config override PUTs starrocks.feConfig", async () => {
+    const user = userEvent.setup();
+    renderTab();
+
+    await user.click(screen.getByRole("button", { name: "FE config" }));
+    await user.click(screen.getByRole("button", { name: /Add property/i }));
+    await user.type(screen.getByPlaceholderText("Search properties…"), "sys_log_level");
+    await user.click(screen.getByRole("button", { name: /Add custom key/i }));
+    // The added row renders a plain value input (no catalog) — fill it.
+    const valueInput = screen.getByPlaceholderText("value");
+    await user.type(valueInput, "WARN");
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(api.updateEngine).toHaveBeenCalledTimes(1));
+    const [, body] = vi.mocked(api.updateEngine).mock.calls[0];
+    expect(body.starrocks?.feConfig).toEqual({ sys_log_level: "WARN" });
+  });
+
+  test("enabling autoscaling PUTs cnAutoscaling with max + targetCpu", async () => {
+    const user = userEvent.setup();
+    renderTab();
+
+    await user.click(screen.getByRole("button", { name: "Autoscaling" }));
+    await user.click(screen.getByLabelText("Enable CN autoscaling"));
+    await user.type(screen.getByLabelText("Max replicas"), "3");
+    await user.type(screen.getByLabelText("Target CPU %"), "70");
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(api.updateEngine).toHaveBeenCalledTimes(1));
+    const [, body] = vi.mocked(api.updateEngine).mock.calls[0];
+    expect(body.starrocks?.cnAutoscaling).toEqual({
+      maxReplicas: 3,
+      targetCpuPercent: 70,
+    });
+  });
+
+  test("enabling autoscaling with a blank Max disables Save and never emits the {maxReplicas:0} sentinel", async () => {
+    const user = userEvent.setup();
+    renderTab();
+
+    await user.click(screen.getByRole("button", { name: "Autoscaling" }));
+    await user.click(screen.getByLabelText("Enable CN autoscaling"));
+    // Max left blank; fill only CPU so the ONLY thing missing is Max.
+    await user.type(screen.getByLabelText("Target CPU %"), "70");
+
+    // Save is gated (blank Max) — the red hint has teeth.
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+
+    // Even if forced, the body must NOT carry the {maxReplicas:0} disable sentinel
+    // (no stored policy ⇒ half-filled enable resolves to omit).
+    await user.type(screen.getByLabelText("Max replicas"), "3");
+    await user.clear(screen.getByLabelText("Max replicas"));
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+    expect(api.updateEngine).not.toHaveBeenCalled();
+  });
+
+  test("enabling autoscaling with a blank target CPU disables Save", async () => {
+    const user = userEvent.setup();
+    renderTab();
+
+    await user.click(screen.getByRole("button", { name: "Autoscaling" }));
+    await user.click(screen.getByLabelText("Enable CN autoscaling"));
+    await user.type(screen.getByLabelText("Max replicas"), "3");
+    // target CPU blank ⇒ Save disabled (backend requires it when enabled).
+
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+  });
+
+  test("disabling autoscaling on a stored-autoscaling engine PUTs the {maxReplicas:0} sentinel", async () => {
+    const user = userEvent.setup();
+    renderTab(ENGINE_WITH_AUTOSCALING);
+
+    await user.click(screen.getByRole("button", { name: "Autoscaling" }));
+    const toggle = screen.getByLabelText("Enable CN autoscaling");
+    expect(toggle).toBeChecked();
+    await user.click(toggle); // turn OFF
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(api.updateEngine).toHaveBeenCalledTimes(1));
+    const [, body] = vi.mocked(api.updateEngine).mock.calls[0];
+    expect(body.starrocks?.cnAutoscaling).toEqual({ maxReplicas: 0 });
+  });
+
+  test("a config-only save carries the stored pod block through the PUT", async () => {
+    const user = userEvent.setup();
+    renderTab(ENGINE_WITH_POD);
+
+    const feImage = screen.getByLabelText("FE image");
+    await user.clear(feImage);
+    await user.type(feImage, "starrocks/fe-ubuntu:3.4.1");
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(api.updateEngine).toHaveBeenCalledTimes(1));
+    const [, body] = vi.mocked(api.updateEngine).mock.calls[0];
+    expect(body.starrocks?.pod).toEqual({ nodeSelector: { disktype: "ssd" } });
   });
 });

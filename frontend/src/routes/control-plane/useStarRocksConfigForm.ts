@@ -5,6 +5,7 @@ import {
   type CreateEngineInput,
   type Engine,
   type RoleResources,
+  type StarRocksAutoscaling,
   type StarRocksSpecConfig,
   updateEngine,
 } from "@/api/controlPlane";
@@ -79,6 +80,58 @@ function normResources(r: RoleResources | null | undefined): RoleResources | nul
   return Object.keys(out).length ? out : null;
 }
 
+/** Canonical (order-stable) string map, or `null` when empty. Both the form map
+ * and the server-stored map normalise through this so a content diff is
+ * key-order-insensitive. */
+function normMap(
+  m: Record<string, string> | null | undefined,
+): Record<string, string> | null {
+  if (!m) return null;
+  const out: Record<string, string> = {};
+  for (const k of Object.keys(m).sort()) out[k] = m[k];
+  return Object.keys(out).length ? out : null;
+}
+
+/** The CN-autoscaling form fields (text, so blank/invalid is representable). */
+export interface AutoscalingForm {
+  enabled: boolean;
+  minReplicas: string;
+  maxReplicas: string;
+  targetCpuPercent: string;
+}
+
+/** The `cnAutoscaling` body a save would send, or `undefined` to omit it. */
+type AutoscalingBody = StarRocksAutoscaling | undefined;
+
+/** Canonical (fixed field order) autoscaling block, or `null` when absent. Every
+ * field is optional here (unlike the wire `StarRocksAutoscaling`) because this is
+ * only a comparison snapshot — a stored block missing `maxReplicas` still norms. */
+function normAutoscaling(
+  a: Partial<StarRocksAutoscaling> | null | undefined,
+): Partial<StarRocksAutoscaling> | null {
+  if (!a) return null;
+  const out: Partial<StarRocksAutoscaling> = {};
+  if (typeof a.minReplicas === "number") out.minReplicas = a.minReplicas;
+  if (typeof a.maxReplicas === "number") out.maxReplicas = a.maxReplicas;
+  if (typeof a.targetCpuPercent === "number") out.targetCpuPercent = a.targetCpuPercent;
+  return Object.keys(out).length ? out : null;
+}
+
+/** Seed the autoscaling form from a stored `cnAutoscaling` block. `enabled` is
+ * on only when a policy exists with a real (`> 0`) `maxReplicas` — a stored
+ * `{ maxReplicas: 0 }` is the disabled sentinel and seeds OFF. */
+function seedAutoscaling(
+  a: Partial<StarRocksAutoscaling> | null | undefined,
+): AutoscalingForm {
+  const str = (n: number | undefined) => (typeof n === "number" ? String(n) : "");
+  return {
+    enabled: !!a && typeof a.maxReplicas === "number" && a.maxReplicas > 0,
+    minReplicas: str(a?.minReplicas),
+    maxReplicas: str(a?.maxReplicas),
+    targetCpuPercent: str(a?.targetCpuPercent),
+  };
+}
+
 /** Canonical delegation block, or `null` when no mode. `tlsEnabled` defaults to
  * true (matching the backend), so an absent flag compares equal to an explicit
  * `true`. */
@@ -104,6 +157,10 @@ interface SrBody {
   cnResources?: RoleResources;
   delegationMode?: "jwt" | "impersonate";
   tlsEnabled?: boolean;
+  feConfig?: Record<string, string>;
+  cnConfig?: Record<string, string>;
+  cnAutoscaling?: StarRocksAutoscaling;
+  pod?: Record<string, unknown>;
 }
 
 /** An empty body (every field omitted) — resolves purely to the stored spec. */
@@ -131,6 +188,12 @@ function resolveConfig(body: SrBody, stored: StarRocksSpecConfig | undefined): s
   const delegation = body.delegationMode
     ? normDelegation({ mode: body.delegationMode, tlsEnabled: body.tlsEnabled })
     : normDelegation(stored?.delegation);
+  // Deep-config surface: a non-blank body value wins, else the stored value,
+  // else empty/absent — mirroring `build_starrocks_spec`'s omit=preserve merge.
+  const feConfig = normMap(body.feConfig ?? stored?.feConfig);
+  const cnConfig = normMap(body.cnConfig ?? stored?.cnConfig);
+  const cnAutoscaling = normAutoscaling(body.cnAutoscaling ?? stored?.cnAutoscaling);
+  const pod = body.pod ?? stored?.pod ?? null;
   return JSON.stringify({
     feImage,
     cnImage,
@@ -139,6 +202,10 @@ function resolveConfig(body: SrBody, stored: StarRocksSpecConfig | undefined): s
     feResources,
     cnResources,
     delegation,
+    feConfig,
+    cnConfig,
+    cnAutoscaling,
+    pod,
   });
 }
 
@@ -160,6 +227,17 @@ export interface StarRocksConfigForm {
   setDelegationMode: (v: StarRocksDelegationOption) => void;
   tlsEnabled: boolean;
   setTlsEnabled: (v: boolean) => void;
+  // Deep config — fe.conf / cn.conf key-value overrides + CN autoscaling.
+  feConfig: Record<string, string>;
+  setFeConfig: (v: Record<string, string>) => void;
+  cnConfig: Record<string, string>;
+  setCnConfig: (v: Record<string, string>) => void;
+  autoscaling: AutoscalingForm;
+  setAutoscaling: (v: AutoscalingForm) => void;
+  // True when autoscaling is enabled but Max or target CPU % is blank/invalid —
+  // the tab passes this to `SaveBar`'s `disabled` so Save can't emit a broken
+  // (or sentinel-colliding) policy.
+  autoscalingInvalid: boolean;
   // The stored spec config — `Storage` panel reads it (storage isn't editable).
   storedConfig: StarRocksSpecConfig | undefined;
   // meta (same field names as `useEngineConfigForm` so `SaveBar` works unchanged)
@@ -202,6 +280,20 @@ export function useStarRocksConfigForm(
     (sc?.delegation?.mode as StarRocksDelegationOption) || "none",
   );
   const [tlsEnabled, setTlsEnabled] = useState(sc?.delegation?.tlsEnabled ?? true);
+  const [feConfig, setFeConfig] = useState<Record<string, string>>(
+    () => ({ ...(sc?.feConfig ?? {}) }),
+  );
+  const [cnConfig, setCnConfig] = useState<Record<string, string>>(
+    () => ({ ...(sc?.cnConfig ?? {}) }),
+  );
+  const [autoscaling, setAutoscaling] = useState<AutoscalingForm>(() =>
+    seedAutoscaling(sc?.cnAutoscaling),
+  );
+  // Pod & scheduling — NOT edited here (a later Pod tab owns its UI). Seeded and
+  // carried verbatim through `save()` so a config-only save never drops it.
+  const [pod, setPod] = useState<Record<string, unknown> | undefined>(
+    () => sc?.pod ?? undefined,
+  );
   const [error, setError] = useState<string | null>(null);
 
   // `seed` is the config the stored spec resolves to (an empty body over `sc`).
@@ -227,6 +319,10 @@ export function useStarRocksConfigForm(
     setCnResources(resourcesToForm(next?.cnResources));
     setDelegationMode((next?.delegation?.mode as StarRocksDelegationOption) || "none");
     setTlsEnabled(next?.delegation?.tlsEnabled ?? true);
+    setFeConfig({ ...(next?.feConfig ?? {}) });
+    setCnConfig({ ...(next?.cnConfig ?? {}) });
+    setAutoscaling(seedAutoscaling(next?.cnAutoscaling));
+    setPod(next?.pod ?? undefined);
   }, [seed, engine.spec.starrocksConfig]);
 
   const builtFeResources = useMemo(
@@ -237,6 +333,42 @@ export function useStarRocksConfigForm(
     () => formToResources(cnResources),
     [cnResources],
   );
+
+  // fe.conf / cn.conf overrides: send only when non-empty (else omit → the
+  // server preserves the stored map, mirroring resources).
+  const builtFeConfig = normMap(feConfig) ?? undefined;
+  const builtCnConfig = normMap(cnConfig) ?? undefined;
+
+  // CN autoscaling body (omit=preserve, with a disable sentinel):
+  // - enabled + valid max → { minReplicas?, maxReplicas, targetCpuPercent? }
+  // - enabled, blank/invalid max → undefined (OMIT — never emit `maxReplicas: 0`
+  //   here, or a half-filled enable would collide with the disable sentinel and
+  //   silently clear autoscaling; Save is also gated by `autoscalingInvalid`)
+  // - disabled + stored  → { maxReplicas: 0 } (the only way to clear a policy)
+  // - disabled, no stored→ undefined (omit → nothing to clear)
+  const hasStoredAutoscaling = normAutoscaling(sc?.cnAutoscaling) !== null;
+  const builtAutoscaling: AutoscalingBody = autoscaling.enabled
+    ? (() => {
+        const max = numOrUndef(autoscaling.maxReplicas);
+        if (max === undefined) return undefined; // half-filled enable → omit
+        const out: StarRocksAutoscaling = { maxReplicas: max };
+        const min = numOrUndef(autoscaling.minReplicas);
+        if (min !== undefined) out.minReplicas = min;
+        const cpu = numOrUndef(autoscaling.targetCpuPercent);
+        if (cpu !== undefined) out.targetCpuPercent = cpu;
+        return out;
+      })()
+    : hasStoredAutoscaling
+      ? { maxReplicas: 0 }
+      : undefined;
+
+  // Save-gating: an ENABLED policy needs both a valid Max and target CPU % (the
+  // backend requires targetCpuPercent > 0 when enabled). The red inline hints in
+  // the Autoscaling section have teeth only because this feeds `SaveBar disabled`.
+  const autoscalingInvalid =
+    autoscaling.enabled &&
+    (numOrUndef(autoscaling.maxReplicas) === undefined ||
+      numOrUndef(autoscaling.targetCpuPercent) === undefined);
 
   // The exact `starrocks` body a save would PUT (omit-when-blank), so `dirty`
   // reflects what the request would ACTUALLY change — and `save()` reuses it, so
@@ -249,6 +381,10 @@ export function useStarRocksConfigForm(
     ...(builtFeResources ? { feResources: builtFeResources } : {}),
     ...(builtCnResources ? { cnResources: builtCnResources } : {}),
     ...(delegationMode !== "none" ? { delegationMode, tlsEnabled } : {}),
+    ...(builtFeConfig ? { feConfig: builtFeConfig } : {}),
+    ...(builtCnConfig ? { cnConfig: builtCnConfig } : {}),
+    ...(builtAutoscaling ? { cnAutoscaling: builtAutoscaling } : {}),
+    ...(pod ? { pod } : {}),
   };
 
   // dirty ⇔ the resolved result of the real body differs from the resolved
@@ -302,6 +438,13 @@ export function useStarRocksConfigForm(
     setDelegationMode,
     tlsEnabled,
     setTlsEnabled,
+    feConfig,
+    setFeConfig,
+    cnConfig,
+    setCnConfig,
+    autoscaling,
+    setAutoscaling,
+    autoscalingInvalid,
     storedConfig: sc,
     error,
     dirty,

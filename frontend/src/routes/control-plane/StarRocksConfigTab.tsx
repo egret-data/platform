@@ -9,8 +9,11 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { SaveBar } from "./EngineDetail";
+import { KeyedPropertyList } from "./config/KeyedPropertyList";
 import {
+  type AutoscalingForm,
   type RoleResourcesForm,
   type StarRocksConfigForm,
   DEFAULT_SR_CN_IMAGE,
@@ -23,6 +26,9 @@ const NAV_ITEMS: { key: string; label: string }[] = [
   { key: "image", label: "Image" },
   { key: "compute", label: "Compute" },
   { key: "resources", label: "Resources" },
+  { key: "fe-config", label: "FE config" },
+  { key: "cn-config", label: "CN config" },
+  { key: "autoscaling", label: "Autoscaling" },
   { key: "storage", label: "Storage" },
 ];
 
@@ -84,11 +90,14 @@ export function StarRocksConfigTab({ cfg }: { cfg: StarRocksConfigForm }) {
               {section === "image" && <ImageSection cfg={cfg} />}
               {section === "compute" && <ComputeSection cfg={cfg} />}
               {section === "resources" && <ResourcesSection cfg={cfg} />}
+              {section === "fe-config" && <FeConfigSection cfg={cfg} />}
+              {section === "cn-config" && <CnConfigSection cfg={cfg} />}
+              {section === "autoscaling" && <AutoscalingSection cfg={cfg} />}
               {section === "storage" && <StorageSection cfg={cfg} />}
             </div>
           </div>
 
-          <SaveBar cfg={cfg} />
+          <SaveBar cfg={cfg} disabled={cfg.autoscalingInvalid} />
         </div>
       </CardContent>
     </Card>
@@ -213,6 +222,125 @@ function ResourcesSection({ cfg }: { cfg: StarRocksConfigForm }) {
         strings (e.g. <code className="font-mono">500m</code>,{" "}
         <code className="font-mono">4Gi</code>). Leaving a field blank keeps the
         engine&apos;s current sizing unchanged.
+      </p>
+    </div>
+  );
+}
+
+/** A keyed-property editor over a `Record<string,string>` config map (fe.conf or
+ * cn.conf). No Trino catalog — every key is a free-text custom key. Blanking a
+ * value removes the entry. */
+function ConfigMapEditor({
+  value,
+  onChange,
+}: {
+  value: Record<string, string>;
+  onChange: (v: Record<string, string>) => void;
+}) {
+  return (
+    <KeyedPropertyList
+      catalog={[]}
+      catalogByKey={{}}
+      presentKeys={Object.keys(value)}
+      getValue={(k) => value[k] ?? ""}
+      setValue={(k, v) => {
+        const next = { ...value };
+        if (v === "") delete next[k];
+        else next[k] = v;
+        onChange(next);
+      }}
+    />
+  );
+}
+
+function FeConfigSection({ cfg }: { cfg: StarRocksConfigForm }) {
+  return (
+    <div className="space-y-3">
+      <ConfigMapEditor value={cfg.feConfig} onChange={cfg.setFeConfig} />
+      <p className="text-xs text-muted-foreground">
+        Overrides merged into the generated <code className="font-mono">fe.conf</code>{" "}
+        (e.g. <code className="font-mono">JAVA_OPTS</code>,{" "}
+        <code className="font-mono">sys_log_level</code>,{" "}
+        <code className="font-mono">query_timeout</code>). egret-managed keys
+        (storage, run_mode, ssl, ports) can&apos;t be overridden.
+      </p>
+    </div>
+  );
+}
+
+function CnConfigSection({ cfg }: { cfg: StarRocksConfigForm }) {
+  return (
+    <div className="space-y-3">
+      <ConfigMapEditor value={cfg.cnConfig} onChange={cfg.setCnConfig} />
+      <p className="text-xs text-muted-foreground">
+        Overrides merged into the generated <code className="font-mono">cn.conf</code>.
+        egret-managed keys (storage, run_mode, ssl, ports) can&apos;t be overridden.
+      </p>
+    </div>
+  );
+}
+
+function AutoscalingSection({ cfg }: { cfg: StarRocksConfigForm }) {
+  const a = cfg.autoscaling;
+  const set = (patch: Partial<AutoscalingForm>) =>
+    cfg.setAutoscaling({ ...a, ...patch });
+  const maxMissing = a.enabled && a.maxReplicas.trim() === "";
+  const cpuMissing = a.enabled && a.targetCpuPercent.trim() === "";
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3">
+        <Switch
+          id="sr-autoscaling-enabled"
+          checked={a.enabled}
+          onCheckedChange={(enabled) => set({ enabled })}
+          aria-label="Enable CN autoscaling"
+        />
+        <Label htmlFor="sr-autoscaling-enabled">Enable CN autoscaling</Label>
+      </div>
+      {a.enabled && (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="sr-as-min">Min replicas</Label>
+            <Input
+              id="sr-as-min"
+              type="number"
+              min={1}
+              value={a.minReplicas}
+              onChange={(e) => set({ minReplicas: e.target.value })}
+              placeholder="optional"
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="sr-as-max">Max replicas</Label>
+            <Input
+              id="sr-as-max"
+              type="number"
+              min={1}
+              value={a.maxReplicas}
+              onChange={(e) => set({ maxReplicas: e.target.value })}
+            />
+            {maxMissing && (
+              <p className="text-xs text-destructive">Max replicas is required.</p>
+            )}
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="sr-as-cpu">Target CPU %</Label>
+            <Input
+              id="sr-as-cpu"
+              type="number"
+              min={1}
+              value={a.targetCpuPercent}
+              onChange={(e) => set({ targetCpuPercent: e.target.value })}
+            />
+            {cpuMissing && (
+              <p className="text-xs text-destructive">Target CPU % is required.</p>
+            )}
+          </div>
+        </div>
+      )}
+      <p className="text-xs text-muted-foreground">
+        Enabling hands the CN replica count to a Kubernetes HorizontalPodAutoscaler
+        (CPU-target based); the fixed CN replica count above no longer applies.
       </p>
     </div>
   );
