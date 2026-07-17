@@ -216,3 +216,67 @@ describe("EngineDetail — StarRocks engine", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("EngineDetail — header metadata + page-level actions", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      type: "starrocks",
+      spec: {
+        coordinatorReplicas: 0,
+        workerReplicas: 0,
+        cpuMin: "",
+        cpuMax: "",
+        memory: "",
+        imageVersion: "starrocks/fe-ubuntu:3.3-latest",
+      },
+      status: {
+        phase: "running",
+        message: null,
+        pods: [{ name: "sr1-fe-0", phase: "Running", ready: true }],
+      },
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+  });
+
+  test("header shows a metadata row (image · endpoint · delegation)", async () => {
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    // image (falls back to imageVersion when starrocksConfig.feImage is absent)
+    expect(
+      screen.getByText("starrocks/fe-ubuntu:3.3-latest"),
+    ).toBeInTheDocument();
+    // endpoint host:port derived by kind (StarRocks → {name}-fe-service.{ns}:9030)
+    expect(
+      screen.getByText("analytics-trino-fe-service.engines:9030"),
+    ).toBeInTheDocument();
+    // delegation mode — none configured
+    expect(screen.getByText(/no delegation/i)).toBeInTheDocument();
+  });
+
+  test("Restart lives in the header (single instance) and Delete is in the ⋯ menu", async () => {
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    // exactly one Restart button — the header one; StatusCard no longer has its own
+    const restarts = screen.getAllByRole("button", { name: /^restart$/i });
+    expect(restarts).toHaveLength(1);
+    expect(restarts[0]).toBeEnabled();
+
+    // DangerCard is gone — no "Danger zone" section, no standalone Delete button
+    expect(screen.queryByText(/danger zone/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /delete engine/i }),
+    ).not.toBeInTheDocument();
+
+    // Delete now lives behind the header overflow menu
+    await user.click(
+      screen.getByRole("button", { name: /more engine actions/i }),
+    );
+    expect(
+      await screen.findByRole("menuitem", { name: /delete engine/i }),
+    ).toBeInTheDocument();
+  });
+});
