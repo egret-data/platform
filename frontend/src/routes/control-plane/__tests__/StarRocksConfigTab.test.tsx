@@ -321,4 +321,57 @@ describe("StarRocksConfigTab", () => {
     const [, body] = vi.mocked(api.updateEngine).mock.calls[0];
     expect(body.starrocks?.pod).toEqual({ nodeSelector: { disktype: "ssd" } });
   });
+
+  test("editing Pod & Containers serviceAccount + nodeSelector PUTs starrocks.pod", async () => {
+    const user = userEvent.setup();
+    renderTab();
+
+    await user.click(screen.getByRole("button", { name: "Pod & Containers" }));
+
+    // serviceAccount text field.
+    await user.type(screen.getByLabelText("Service account"), "sr-sa");
+
+    // nodeSelector is the first keyed-property editor in the section.
+    const addButtons = screen.getAllByRole("button", { name: /Add property/i });
+    await user.click(addButtons[0]);
+    await user.type(
+      screen.getByPlaceholderText("Search properties…"),
+      "disktype",
+    );
+    await user.click(screen.getByRole("button", { name: /Add custom key/i }));
+    await user.type(screen.getByPlaceholderText("value"), "ssd");
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(api.updateEngine).toHaveBeenCalledTimes(1));
+    const [, body] = vi.mocked(api.updateEngine).mock.calls[0];
+    expect(body.starrocks?.pod).toEqual({
+      serviceAccount: "sr-sa",
+      nodeSelector: { disktype: "ssd" },
+    });
+  });
+
+  test("invalid affinity JSON in Pod & Containers disables Save until valid/blank", async () => {
+    const user = userEvent.setup();
+    renderTab();
+
+    await user.click(screen.getByRole("button", { name: "Pod & Containers" }));
+
+    // A real edit makes the form dirty ⇒ Save would be enabled.
+    await user.type(screen.getByLabelText("Service account"), "sr-sa");
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
+
+    // Invalid JSON in the affinity raw field registers invalid ⇒ Save blocked.
+    const affinity = screen.getByLabelText("Affinity");
+    await user.type(affinity, "notjson");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled(),
+    );
+
+    // Clearing the raw field back to blank clears the invalid flag ⇒ Save re-enabled.
+    await user.clear(affinity);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled(),
+    );
+  });
 });

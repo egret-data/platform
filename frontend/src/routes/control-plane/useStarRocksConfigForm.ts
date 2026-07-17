@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -132,6 +133,80 @@ function seedAutoscaling(
   };
 }
 
+/**
+ * The engine's cluster-wide pod & container overrides — the block the backend
+ * renders onto BOTH the FE and CN StarRocks roles. Every field is optional;
+ * maps/arrays are the raw k8s shapes (raw-JSON for the array/object fields so
+ * the section can stay engine-agnostic). Note: `securityContext` is NOT here —
+ * the StarRocks operator doesn't support it, so it's never rendered or edited.
+ */
+export interface StarRocksPod {
+  // Open-ended: the block is an arbitrary k8s pod override, so it must remain a
+  // `Record<string, unknown>` subtype for the `starrocks` PUT body. The named
+  // fields below are just the ones this section edits.
+  [key: string]: unknown;
+  serviceAccount?: string;
+  nodeSelector?: Record<string, string>;
+  annotations?: Record<string, string>;
+  podLabels?: Record<string, string>;
+  imagePullSecrets?: string[];
+  env?: unknown;
+  tolerations?: unknown;
+  affinity?: unknown;
+  initContainers?: unknown;
+  sidecars?: unknown;
+}
+
+/** True when a value is a non-empty array. */
+function nonEmptyArray(v: unknown): boolean {
+  return Array.isArray(v) && v.length > 0;
+}
+
+/** True when a value is a plain object with at least one key. */
+function nonEmptyObject(v: unknown): boolean {
+  return (
+    !!v &&
+    typeof v === "object" &&
+    !Array.isArray(v) &&
+    Object.keys(v as object).length > 0
+  );
+}
+
+/**
+ * Canonical (fixed field order, empty sub-fields dropped) pod block, or `null`
+ * when it carries no set field. Both the form-built pod and the server-stored
+ * pod normalise through this so `dirty` is order/blank-insensitive and an
+ * all-empty pod → `null` (the PUT omits `pod` → the server preserves it), exactly
+ * like `normMap`/`normResources`. String maps sort their keys; the raw-JSON
+ * array/object fields are carried verbatim (their order is semantically
+ * meaningful) but dropped when empty.
+ */
+function normPod(
+  p: StarRocksPod | Record<string, unknown> | null | undefined,
+): StarRocksPod | null {
+  if (!p) return null;
+  const src = p as StarRocksPod;
+  const out: StarRocksPod = {};
+  const sa = src.serviceAccount?.trim();
+  if (sa) out.serviceAccount = sa;
+  const nodeSelector = normMap(src.nodeSelector);
+  if (nodeSelector) out.nodeSelector = nodeSelector;
+  const annotations = normMap(src.annotations);
+  if (annotations) out.annotations = annotations;
+  const podLabels = normMap(src.podLabels);
+  if (podLabels) out.podLabels = podLabels;
+  const secrets = Array.isArray(src.imagePullSecrets)
+    ? src.imagePullSecrets.map((s) => s.trim()).filter((s) => s !== "")
+    : [];
+  if (secrets.length) out.imagePullSecrets = secrets;
+  if (nonEmptyArray(src.env)) out.env = src.env;
+  if (nonEmptyArray(src.tolerations)) out.tolerations = src.tolerations;
+  if (nonEmptyObject(src.affinity)) out.affinity = src.affinity;
+  if (nonEmptyArray(src.initContainers)) out.initContainers = src.initContainers;
+  if (nonEmptyArray(src.sidecars)) out.sidecars = src.sidecars;
+  return Object.keys(out).length ? out : null;
+}
+
 /** Canonical delegation block, or `null` when no mode. `tlsEnabled` defaults to
  * true (matching the backend), so an absent flag compares equal to an explicit
  * `true`. */
@@ -160,7 +235,7 @@ interface SrBody {
   feConfig?: Record<string, string>;
   cnConfig?: Record<string, string>;
   cnAutoscaling?: StarRocksAutoscaling;
-  pod?: Record<string, unknown>;
+  pod?: StarRocksPod;
 }
 
 /** An empty body (every field omitted) — resolves purely to the stored spec. */
@@ -193,7 +268,7 @@ function resolveConfig(body: SrBody, stored: StarRocksSpecConfig | undefined): s
   const feConfig = normMap(body.feConfig ?? stored?.feConfig);
   const cnConfig = normMap(body.cnConfig ?? stored?.cnConfig);
   const cnAutoscaling = normAutoscaling(body.cnAutoscaling ?? stored?.cnAutoscaling);
-  const pod = body.pod ?? stored?.pod ?? null;
+  const pod = normPod(body.pod ?? stored?.pod);
   return JSON.stringify({
     feImage,
     cnImage,
@@ -234,6 +309,14 @@ export interface StarRocksConfigForm {
   setCnConfig: (v: Record<string, string>) => void;
   autoscaling: AutoscalingForm;
   setAutoscaling: (v: AutoscalingForm) => void;
+  // Pod & container overrides (serviceAccount, nodeSelector, annotations,
+  // podLabels, imagePullSecrets, env, tolerations, affinity, initContainers,
+  // sidecars) — edited by the Pod & Containers section off this same instance.
+  pod: StarRocksPod | undefined;
+  // A `useState` setter (accepts a functional updater) so the section's raw-JSON
+  // editors — several debounced fields feeding the one `pod` object — each merge
+  // against the LATEST state instead of a captured render snapshot.
+  setPod: Dispatch<SetStateAction<StarRocksPod | undefined>>;
   // True when autoscaling is enabled but Max or target CPU % is blank/invalid —
   // the tab passes this to `SaveBar`'s `disabled` so Save can't emit a broken
   // (or sentinel-colliding) policy.
@@ -289,10 +372,11 @@ export function useStarRocksConfigForm(
   const [autoscaling, setAutoscaling] = useState<AutoscalingForm>(() =>
     seedAutoscaling(sc?.cnAutoscaling),
   );
-  // Pod & scheduling — NOT edited here (a later Pod tab owns its UI). Seeded and
-  // carried verbatim through `save()` so a config-only save never drops it.
-  const [pod, setPod] = useState<Record<string, unknown> | undefined>(
-    () => sc?.pod ?? undefined,
+  // Pod & scheduling — edited by the Pod & Containers section (which shares this
+  // hook instance). Seeded from the stored block and normalised into the SAME
+  // omit=preserve save/dirty path as every other field.
+  const [pod, setPod] = useState<StarRocksPod | undefined>(
+    () => (sc?.pod as StarRocksPod) ?? undefined,
   );
   const [error, setError] = useState<string | null>(null);
 
@@ -322,7 +406,7 @@ export function useStarRocksConfigForm(
     setFeConfig({ ...(next?.feConfig ?? {}) });
     setCnConfig({ ...(next?.cnConfig ?? {}) });
     setAutoscaling(seedAutoscaling(next?.cnAutoscaling));
-    setPod(next?.pod ?? undefined);
+    setPod((next?.pod as StarRocksPod) ?? undefined);
   }, [seed, engine.spec.starrocksConfig]);
 
   const builtFeResources = useMemo(
@@ -370,6 +454,10 @@ export function useStarRocksConfigForm(
     (numOrUndef(autoscaling.maxReplicas) === undefined ||
       numOrUndef(autoscaling.targetCpuPercent) === undefined);
 
+  // Pod overrides body (omit=preserve): drop empty sub-fields; an all-empty pod
+  // normalises to null → omitted → the server keeps the stored block.
+  const builtPod = normPod(pod) ?? undefined;
+
   // The exact `starrocks` body a save would PUT (omit-when-blank), so `dirty`
   // reflects what the request would ACTUALLY change — and `save()` reuses it, so
   // the two can never drift apart.
@@ -384,7 +472,9 @@ export function useStarRocksConfigForm(
     ...(builtFeConfig ? { feConfig: builtFeConfig } : {}),
     ...(builtCnConfig ? { cnConfig: builtCnConfig } : {}),
     ...(builtAutoscaling ? { cnAutoscaling: builtAutoscaling } : {}),
-    ...(pod ? { pod } : {}),
+    // Pod overrides: send only when non-empty (else omit → the server preserves
+    // the stored block, mirroring feConfig/resources).
+    ...(builtPod ? { pod: builtPod } : {}),
   };
 
   // dirty ⇔ the resolved result of the real body differs from the resolved
@@ -445,6 +535,8 @@ export function useStarRocksConfigForm(
     autoscaling,
     setAutoscaling,
     autoscalingInvalid,
+    pod,
+    setPod,
     storedConfig: sc,
     error,
     dirty,
