@@ -2646,6 +2646,11 @@ async fn create_starrocks_engine(
     // FE is actually queryable. A failure is logged, never surfaced to the
     // caller: the admin can retry by re-provisioning or (future) an explicit
     // "rewire catalog" action.
+    // Present the minted FE `root` password (resolved into
+    // `req.starrocks.root_password` by `build_starrocks_provision_req`) on the
+    // post-Ready bootstrap connection; `None` for legacy engines keeps it
+    // passwordless.
+    let root_password = req.starrocks.as_ref().and_then(|s| s.root_password.clone());
     spawn_starrocks_catalog_wire(
         prov.clone(),
         engine.namespace.clone(),
@@ -2654,6 +2659,7 @@ async fn create_starrocks_engine(
         wh.name.clone(),
         client.client_id.clone(),
         client.client_secret.clone(),
+        root_password,
         delegation_bootstrap,
     );
 
@@ -2727,23 +2733,30 @@ fn starrocks_external_catalog_sql(
     )
 }
 
-/// Run one DDL statement against a StarRocks FE over the raw MySQL protocol,
-/// as `root` with no password (dev-cluster default — matches how the FE
-/// ConfigMap ships with no auth hardening yet). Direct `mysql_async` (not
-/// `egret_query`'s interactive `StarRocksConnector`): this is a one-shot admin
-/// statement with no caller-facing row cap/cancellation/result shape to
-/// thread through. `tls_cert_pem` mirrors the connector's (S3-T1) TLS pinning
-/// — `Some(pem)` pins the FE's egret-generated self-signed cert as the trust
-/// root (domain validation skipped, same rationale as
-/// `StarRocksConnector::new`: the cert's CN won't match the in-cluster
-/// Service DNS we dial) and runs the DDL over TLS; `None` stays plain TCP.
-async fn run_starrocks_ddl(
+/// Build the `mysql_async` connection options for egret's own FE `root`
+/// bootstrap connection. Factored out (and pure) so the password/user/TLS
+/// wiring is unit-testable without a live FE — the wire path itself is
+/// dev-DNS-blocked (egret-host -> in-cluster FE Service DNS), so this is the
+/// only place the opts are asserted.
+///
+/// `root_password` is `Some(pw)` for any engine minted with a `root_secret_id`
+/// (T1-T3): the FE `root` account is now passworded, so egret's post-Ready DDL
+/// MUST present it or the connection is rejected. Legacy engines (no
+/// `root_secret_id`) pass `None` and stay passwordless — the pre-hardening
+/// behavior. The password is never logged and lives only inside the
+/// `OptsBuilder` (which does not `Debug`-print it).
+///
+/// `tls_cert_pem` mirrors the connector's (S3-T1) TLS pinning — `Some(pem)`
+/// pins the FE's egret-generated self-signed cert as the trust root (domain
+/// validation skipped, same rationale as `StarRocksConnector::new`: the cert's
+/// CN won't match the in-cluster Service DNS we dial) and runs the DDL over
+/// TLS; `None` stays plain TCP.
+fn starrocks_root_conn_opts(
     host: &str,
     port: u16,
-    sql: &str,
+    root_password: Option<&str>,
     tls_cert_pem: Option<&str>,
-) -> Result<(), String> {
-    use mysql_async::prelude::Queryable;
+) -> mysql_async::OptsBuilder {
     let mut opts = mysql_async::OptsBuilder::default()
         .ip_or_hostname(host)
         .tcp_port(port)
@@ -2752,12 +2765,35 @@ async fn run_starrocks_ddl(
         // `prefer_socket` capability with "unknown variable 'socket'" —
         // matches `StarRocksConnector::new`'s own workaround.
         .prefer_socket(false);
+    if let Some(pw) = root_password {
+        opts = opts.pass(Some(pw));
+    }
     if let Some(pem) = tls_cert_pem {
         let ssl = mysql_async::SslOpts::default()
             .with_root_certs(vec![mysql_async::PathOrBuf::from(pem.as_bytes().to_vec())])
             .with_danger_skip_domain_validation(true);
         opts = opts.ssl_opts(Some(ssl));
     }
+    opts
+}
+
+/// Run one DDL statement against a StarRocks FE over the raw MySQL protocol,
+/// as `root`. Direct `mysql_async` (not `egret_query`'s interactive
+/// `StarRocksConnector`): this is a one-shot admin statement with no
+/// caller-facing row cap/cancellation/result shape to thread through.
+/// `root_password` presents the minted FE `root` password when the engine has
+/// one (`None` -> passwordless, the legacy default); `tls_cert_pem` optionally
+/// pins the FE cert and runs over TLS. See [`starrocks_root_conn_opts`] for the
+/// connection-opts wiring.
+async fn run_starrocks_ddl(
+    host: &str,
+    port: u16,
+    sql: &str,
+    root_password: Option<&str>,
+    tls_cert_pem: Option<&str>,
+) -> Result<(), String> {
+    use mysql_async::prelude::Queryable;
+    let opts = starrocks_root_conn_opts(host, port, root_password, tls_cert_pem);
     let mut conn = mysql_async::Conn::new(opts)
         .await
         .map_err(|e| e.to_string())?;
@@ -2867,6 +2903,7 @@ fn spawn_starrocks_catalog_wire(
     warehouse_name: String,
     client_id: String,
     client_secret: String,
+    root_password: Option<String>,
     delegation: Option<StarRocksDelegationBootstrap>,
 ) {
     tokio::spawn(async move {
@@ -2901,7 +2938,8 @@ fn spawn_starrocks_catalog_wire(
         let credential = format!("{client_id}:{client_secret}");
         let sql = starrocks_external_catalog_sql("egret", &egret_url, &warehouse_name, &credential);
         let fe_host = format!("{engine_name}-fe-service.{namespace}.svc");
-        match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, &sql, None).await {
+        let root_pw = root_password.as_deref();
+        match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, &sql, root_pw, None).await {
             Ok(()) => {
                 tracing::info!(engine = %engine_name,
                     "starrocks catalog auto-wire: external Iceberg catalog wired");
@@ -2927,6 +2965,7 @@ fn spawn_starrocks_catalog_wire(
                     &fe_host,
                     STARROCKS_FE_MYSQL_PORT,
                     stmt,
+                    root_pw,
                     d.tls_cert_pem.as_deref(),
                 )
                 .await
@@ -3185,6 +3224,9 @@ async fn update_starrocks_engine(
         if let Some(boot) = bootstrap {
             match sr_primary_catalog_credential(&st, engine.id).await {
                 Some((client_id, client_secret)) => {
+                    // Same minted-root-password threading as create's wire.
+                    let root_password =
+                        req.starrocks.as_ref().and_then(|s| s.root_password.clone());
                     spawn_starrocks_catalog_wire(
                         prov.clone(),
                         engine.namespace.clone(),
@@ -3193,6 +3235,7 @@ async fn update_starrocks_engine(
                         wh.name.clone(),
                         client_id,
                         client_secret,
+                        root_password,
                         Some(boot),
                     );
                 }
@@ -5961,5 +6004,29 @@ mod tests {
         );
         let evil = starrocks_impersonation_grant_sql("a`.evil");
         assert_eq!(evil, "GRANT IMPERSONATE ON ALL USERS TO `a``.evil`");
+    }
+
+    /// The FE root bootstrap connection (RP-T4) must present the minted `root`
+    /// password when the engine carries one, so a passworded FE (T1-T3) accepts
+    /// egret's own post-Ready catalog-wire + delegation-bootstrap DDL. `Some(pw)`
+    /// -> `pass()` is that password, `user()` stays `root`.
+    #[test]
+    fn starrocks_root_conn_opts_presents_password_when_present() {
+        let opts: mysql_async::Opts =
+            starrocks_root_conn_opts("fe.svc", STARROCKS_FE_MYSQL_PORT, Some("s3cr3t"), None)
+                .into();
+        assert_eq!(opts.user(), Some("root"));
+        assert_eq!(opts.pass(), Some("s3cr3t"));
+    }
+
+    /// Legacy engines (no `root_secret_id` -> `root_password` `None`) stay
+    /// passwordless: the connection presents no password, exactly as before the
+    /// root-password hardening. `user()` still `root`, `pass()` `None`.
+    #[test]
+    fn starrocks_root_conn_opts_stays_passwordless_when_none() {
+        let opts: mysql_async::Opts =
+            starrocks_root_conn_opts("fe.svc", STARROCKS_FE_MYSQL_PORT, None, None).into();
+        assert_eq!(opts.user(), Some("root"));
+        assert_eq!(opts.pass(), None);
     }
 }
