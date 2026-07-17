@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: egret, namespace: {{ .Release.Namespace }} }
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  selector: { matchLabels: { app: egret } }
+  template:
+    metadata: { labels: { app: egret } }
+    spec:
+      serviceAccountName: egret
+      containers:
+        - name: egret
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          ports: [{ containerPort: 8080 }]
+          envFrom:
+            - configMapRef: { name: egret-env }
+          env:
+            - { name: EGRET_STORAGE__ACCESS_KEY, valueFrom: { secretKeyRef: { name: egret-secrets, key: storage-access-key } } }
+            - { name: EGRET_STORAGE__SECRET_KEY, valueFrom: { secretKeyRef: { name: egret-secrets, key: storage-secret-key } } }
+            - { name: EGRET_SECRETS__MASTER_KEY, valueFrom: { secretKeyRef: { name: egret-secrets, key: master-key } } }
+            - { name: EGRET_SECURITY__SECRET_KEY, valueFrom: { secretKeyRef: { name: egret-secrets, key: secret-key } } }
+            - { name: EGRET_CATALOG__AUTH_TOKEN, valueFrom: { secretKeyRef: { name: egret-secrets, key: catalog-auth-token } } }
+            - { name: EGRET_ADMIN_PASSWORD, valueFrom: { secretKeyRef: { name: egret-secrets, key: admin-password } } }
+          readinessProbe: { tcpSocket: { port: 8080 }, initialDelaySeconds: 5, periodSeconds: 5 }
+          livenessProbe: { tcpSocket: { port: 8080 }, initialDelaySeconds: 30, periodSeconds: 20 }
