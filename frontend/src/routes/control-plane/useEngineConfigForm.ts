@@ -615,6 +615,12 @@ export function sectionCounts(cfg: TrinoConfig): Record<string, number> {
     workload: [cfg.resourceGroups, cfg.sessionProperties].filter(present).length,
     pod: podCount + (present(cfg.env) ? 1 : 0) + containersMountsCount,
     autoscaling: [cfg.autoscaling].filter(present).length,
+    // Security & Exposure field-groups: password users, egret-JWT acceptance,
+    // and coordinator ingress. Mirrors the StarRocks security nav badge.
+    security:
+      ((cfg.auth?.passwordUsers?.length ?? 0) > 0 ? 1 : 0) +
+      (cfg.auth?.jwt != null ? 1 : 0) +
+      (present(cfg.ingress) ? 1 : 0),
   };
 }
 

@@ -6,7 +6,8 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import type { Engine } from "@/api/controlPlane";
 import * as api from "@/api/controlPlane";
-import { StarRocksSecurityTab } from "@/routes/control-plane/StarRocksSecurityTab";
+import { SaveBar } from "@/routes/control-plane/EngineDetail";
+import { StarRocksSecuritySection } from "@/routes/control-plane/StarRocksSecuritySection";
 import { useStarRocksConfigForm } from "@/routes/control-plane/useStarRocksConfigForm";
 
 vi.mock("@/api/controlPlane");
@@ -34,10 +35,19 @@ const ENGINE: Omit<Engine, "status"> = {
   },
 };
 
-/** Instantiate the hook (as EngineTabs does) and render the tab against it. */
+/**
+ * Instantiate the hook (as EngineTabs does) and render the section against it,
+ * alongside the shared `SaveBar` — mirroring how `StarRocksConfigTab` renders the
+ * folded-in Security & Delegation section under the single Save.
+ */
 function Harness({ engine }: { engine: Omit<Engine, "status"> }) {
   const cfg = useStarRocksConfigForm(engine);
-  return <StarRocksSecurityTab cfg={cfg} />;
+  return (
+    <>
+      <StarRocksSecuritySection cfg={cfg} />
+      <SaveBar cfg={cfg} />
+    </>
+  );
 }
 
 function renderTab(engine = ENGINE) {
@@ -51,7 +61,7 @@ function renderTab(engine = ENGINE) {
   );
 }
 
-describe("StarRocksSecurityTab", () => {
+describe("StarRocksSecuritySection", () => {
   beforeEach(() => {
     vi.mocked(api.updateEngine).mockReset();
     vi.mocked(api.updateEngine).mockResolvedValue({

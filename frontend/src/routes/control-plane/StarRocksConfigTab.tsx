@@ -8,10 +8,12 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { SaveBar } from "./EngineDetail";
+import { StarRocksSecuritySection } from "./StarRocksSecuritySection";
 import { KeyedPropertyList } from "./config/KeyedPropertyList";
 import { RawJsonField } from "./config/RawJsonField";
 import { ValidityProvider } from "./config/validityRegistry";
@@ -24,8 +26,9 @@ import {
   DEFAULT_SR_FE_IMAGE,
 } from "./useStarRocksConfigForm";
 
-// Left-nav sections for the StarRocks Configuration tab. Storage is read-only
-// (configured from the warehouse at creation), the rest are editable.
+// Left-nav sections for the StarRocks Settings tab. Storage is read-only
+// (configured from the warehouse at creation), the rest are editable; Security &
+// Delegation is folded in as the LAST item, sharing the single form + Save.
 const NAV_ITEMS: { key: string; label: string }[] = [
   { key: "image", label: "Image" },
   { key: "compute", label: "Compute" },
@@ -35,16 +38,68 @@ const NAV_ITEMS: { key: string; label: string }[] = [
   { key: "autoscaling", label: "Autoscaling" },
   { key: "pod", label: "Pod & Containers" },
   { key: "storage", label: "Storage" },
+  { key: "security", label: "Security & Delegation" },
 ];
 
+/** True when a role-resources form carries at least one non-blank field. */
+function resourcesSet(r: RoleResourcesForm): boolean {
+  return [r.cpuRequest, r.cpuLimit, r.memRequest, r.memLimit].some(
+    (v) => v.trim() !== "",
+  );
+}
+
+/** Count the set fields in a StarRocks pod override block (drives its badge). */
+function podFieldCount(pod: StarRocksPod | undefined): number {
+  if (!pod) return 0;
+  const nonEmpty = (v: unknown): boolean => {
+    if (v == null) return false;
+    if (typeof v === "string") return v.trim() !== "";
+    if (Array.isArray(v)) return v.length > 0;
+    if (typeof v === "object") return Object.keys(v as object).length > 0;
+    return true;
+  };
+  return [
+    pod.serviceAccount,
+    pod.nodeSelector,
+    pod.annotations,
+    pod.podLabels,
+    pod.imagePullSecrets,
+    pod.env,
+    pod.tolerations,
+    pod.affinity,
+    pod.initContainers,
+    pod.sidecars,
+  ].filter(nonEmpty).length;
+}
+
 /**
- * Control Plane → Engine detail → Configuration (StarRocks).
+ * Per-section non-default field count for the StarRocks nav badges (parity with
+ * the Trino `sectionCounts`). Only sections with a meaningful "configured" signal
+ * are counted; image/compute/storage always carry seeded values, so they stay
+ * unbadged.
+ */
+function srSectionCounts(cfg: StarRocksConfigForm): Record<string, number> {
+  return {
+    resources:
+      (resourcesSet(cfg.feResources) ? 1 : 0) +
+      (resourcesSet(cfg.cnResources) ? 1 : 0),
+    "fe-config": Object.keys(cfg.feConfig).length,
+    "cn-config": Object.keys(cfg.cnConfig).length,
+    autoscaling: cfg.autoscaling.enabled ? 1 : 0,
+    pod: podFieldCount(cfg.pod),
+    security: cfg.delegationMode !== "none" ? 1 : 0,
+  };
+}
+
+/**
+ * Control Plane → Engine detail → Settings (StarRocks).
  *
  * StarRocks-shaped mirror of the Trino `ConfigurationTab` shell: a `Card` with a
  * left-nav of sections + a content pane + the shared `SaveBar`. Edits FE/CN
- * image, replicas, and per-role resources; storage is read-only. Takes the
- * `useStarRocksConfigForm` instance from `EngineTabs` so a future Security tab
- * can share the same form state (and Save).
+ * image, replicas, and per-role resources; storage is read-only; the
+ * `StarRocksSecuritySection` (delegation + TLS) is folded in as the last nav
+ * item. Takes the `useStarRocksConfigForm` instance from `EngineTabs`, so the
+ * single Save covers config + security.
  */
 export function StarRocksConfigTab({ cfg }: { cfg: StarRocksConfigForm }) {
   // Goes true when any raw-JSON pod field (tolerations / affinity / env /
@@ -63,14 +118,18 @@ export function StarRocksConfigTab({ cfg }: { cfg: StarRocksConfigForm }) {
       { replace: true },
     );
 
+  // Non-default field count per nav item (drives the badges — Trino parity).
+  const counts = srSectionCounts(cfg);
+  const countFor = (key: string): number => counts[key] ?? 0;
+
   return (
     <Card>
       <CardHeader>
         <div className="space-y-1.5">
-          <CardTitle className="text-lg">Configuration</CardTitle>
+          <CardTitle className="text-lg">Settings</CardTitle>
           <CardDescription>
-            FE/CN image, replicas, and compute resources. Saving re-provisions
-            the engine.
+            FE/CN image, replicas, and compute resources plus per-user delegation
+            and transport security. Saving re-provisions the engine.
           </CardDescription>
         </div>
       </CardHeader>
@@ -79,6 +138,7 @@ export function StarRocksConfigTab({ cfg }: { cfg: StarRocksConfigForm }) {
           <div className="flex flex-col gap-4 md:flex-row">
             <nav className="shrink-0 space-y-1 md:w-48">
               {NAV_ITEMS.map((item) => {
+                const count = countFor(item.key);
                 const active = section === item.key;
                 return (
                   <button
@@ -90,6 +150,11 @@ export function StarRocksConfigTab({ cfg }: { cfg: StarRocksConfigForm }) {
                     }`}
                   >
                     <span>{item.label}</span>
+                    {count > 0 && (
+                      <Badge variant="secondary" className="ml-2">
+                        {count}
+                      </Badge>
+                    )}
                   </button>
                 );
               })}
@@ -105,6 +170,7 @@ export function StarRocksConfigTab({ cfg }: { cfg: StarRocksConfigForm }) {
                 {section === "autoscaling" && <AutoscalingSection cfg={cfg} />}
                 {section === "pod" && <PodContainersSection cfg={cfg} />}
                 {section === "storage" && <StorageSection cfg={cfg} />}
+                {section === "security" && <StarRocksSecuritySection cfg={cfg} />}
               </div>
             </ValidityProvider>
           </div>

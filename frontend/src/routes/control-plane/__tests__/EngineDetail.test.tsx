@@ -1,10 +1,11 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import EngineDetail from "@/routes/control-plane/EngineDetail";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import * as api from "@/api/controlPlane";
 import * as engineApi from "@/api/generated/control-plane-engines/control-plane-engines";
 import * as wsApi from "@/api/generated/admin-workspaces/admin-workspaces";
@@ -84,15 +85,17 @@ function mockGetEngine(spec: api.Engine["spec"]) {
   } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
 }
 
-function renderDetail() {
+function renderDetail(entry = `/control-plane/engines/${ENGINE.id}`) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter initialEntries={[`/control-plane/engines/${ENGINE.id}`]}>
-        <Routes>
-          <Route path="/control-plane/engines/:id" element={<EngineDetail />} />
-        </Routes>
-      </MemoryRouter>
+      <TooltipProvider>
+        <MemoryRouter initialEntries={[entry]}>
+          <Routes>
+            <Route path="/control-plane/engines/:id" element={<EngineDetail />} />
+          </Routes>
+        </MemoryRouter>
+      </TooltipProvider>
     </QueryClientProvider>,
   );
 }
@@ -101,6 +104,7 @@ describe("EngineDetail — Workspaces tab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetEngine(ENGINE.spec);
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
     vi.mocked(wsApi.useAdminWorkspacesListWs).mockReturnValue(
       query([WS_A, WS_B, WS_C]) as unknown as ReturnType<typeof wsApi.useAdminWorkspacesListWs>,
     );
@@ -168,6 +172,12 @@ describe("EngineDetail — Workspaces tab", () => {
 describe("EngineDetail — StarRocks engine", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
+      >,
+    );
     vi.mocked(api.getEngine).mockResolvedValue({
       ...ENGINE,
       type: "starrocks",
@@ -187,32 +197,589 @@ describe("EngineDetail — StarRocks engine", () => {
     } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
   });
 
-  test("shows both Configuration and Security tabs, and enables Restart", async () => {
+  test("exposes exactly 5 tabs with a merged Settings (no Configuration/Security tabs)", async () => {
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    // Configuration + Security are merged into ONE Settings tab (Task IA-T4).
+    const tabs = screen.getAllByRole("tab");
+    expect(tabs.map((t) => t.textContent)).toEqual([
+      "Overview",
+      "Catalogs",
+      "Workspaces",
+      "Settings",
+      "Monitor",
+    ]);
+    expect(
+      screen.queryByRole("tab", { name: "Configuration" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: "Security & Exposure" }),
+    ).not.toBeInTheDocument();
+
+    // Restart is now enabled for StarRocks (backend supports it — Task 4).
+    expect(screen.getByRole("button", { name: /restart/i })).toBeEnabled();
+  });
+
+  test("Settings tab folds Security & Delegation in as the LAST config-nav item, with one Save", async () => {
     const user = userEvent.setup();
     renderDetail();
     await screen.findByRole("heading", { name: "analytics-trino" });
 
-    // Configuration is StarRocks-shaped (Task 5); the Security & Exposure tab is
-    // now available for StarRocks too (Task 6 — delegation + TLS).
-    expect(screen.getByRole("tab", { name: "Configuration" })).toBeInTheDocument();
-    expect(
-      screen.getByRole("tab", { name: "Security & Exposure" }),
-    ).toBeInTheDocument();
-    // Other tabs stay available.
-    expect(screen.getByRole("tab", { name: "Catalogs" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Monitor" })).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
 
-    // Restart is now enabled for StarRocks (backend supports it — Task 4).
-    expect(screen.getByRole("button", { name: /restart/i })).toBeEnabled();
-
-    // The StarRocks Configuration tab renders its FE/CN image fields.
-    await user.click(screen.getByRole("tab", { name: "Configuration" }));
+    // The StarRocks config sections render (FE/CN image is the default section).
     expect(await screen.findByLabelText("FE image")).toBeInTheDocument();
 
-    // The StarRocks Security tab renders its delegation control.
-    await user.click(screen.getByRole("tab", { name: "Security & Exposure" }));
+    // Security is folded into the left-nav as the LAST item.
+    const nav = screen.getByRole("navigation");
+    const navButtons = within(nav).getAllByRole("button");
+    expect(navButtons[navButtons.length - 1]).toHaveTextContent(
+      "Security & Delegation",
+    );
+
+    // Selecting it reveals the delegation control in the SAME pane.
+    await user.click(
+      within(nav).getByRole("button", { name: /Security & Delegation/ }),
+    );
     expect(
       await screen.findByLabelText("Per-user delegation"),
     ).toBeInTheDocument();
+
+    // ONE Save button covers config + security (single shared SaveBar).
+    expect(
+      screen.getAllByRole("button", { name: "Save changes" }),
+    ).toHaveLength(1);
+  });
+
+  test("?section=security deep-links straight to the Security & Delegation pane", async () => {
+    renderDetail(
+      `/control-plane/engines/${ENGINE.id}?tab=settings&section=security`,
+    );
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    expect(
+      await screen.findByLabelText("Per-user delegation"),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("EngineDetail — Trino Settings tab (merged Configuration + Security)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetEngine(ENGINE.spec);
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
+      >,
+    );
+  });
+
+  test("exposes exactly 5 tabs with a merged Settings (no Configuration/Security tabs)", async () => {
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    const tabs = screen.getAllByRole("tab");
+    expect(tabs.map((t) => t.textContent)).toEqual([
+      "Overview",
+      "Catalogs",
+      "Workspaces",
+      "Settings",
+      "Monitor",
+    ]);
+    expect(
+      screen.queryByRole("tab", { name: "Configuration" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: /Security & Exposure/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  test("Settings tab folds Security & Exposure in as the LAST config-nav item, with one Save", async () => {
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    await user.click(screen.getByRole("tab", { name: "Settings" }));
+
+    // Config sections render (Image is the default section).
+    const nav = await screen.findByRole("navigation");
+    const navButtons = within(nav).getAllByRole("button");
+    expect(navButtons[navButtons.length - 1]).toHaveTextContent(
+      "Security & Exposure",
+    );
+
+    // Selecting Security reveals its controls in the same pane (password users).
+    await user.click(
+      within(nav).getByRole("button", { name: /Security & Exposure/ }),
+    );
+    expect(await screen.findByText("Password users")).toBeInTheDocument();
+
+    // ONE Save button covers config + security.
+    expect(
+      screen.getAllByRole("button", { name: "Save changes" }),
+    ).toHaveLength(1);
+  });
+
+  test("?section=security deep-links straight to the Security pane", async () => {
+    renderDetail(
+      `/control-plane/engines/${ENGINE.id}?tab=settings&section=security`,
+    );
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    expect(await screen.findByText("Password users")).toBeInTheDocument();
+  });
+
+  test("legacy ?tab=security bookmark resolves to the merged Settings tab", async () => {
+    renderDetail(`/control-plane/engines/${ENGINE.id}?tab=security`);
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    // The old Security tab value maps to Settings — no blank page.
+    expect(screen.getByRole("tab", { name: "Settings" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(await screen.findByRole("navigation")).toBeInTheDocument();
+  });
+
+  test("legacy ?tab=configuration bookmark resolves to the merged Settings tab", async () => {
+    renderDetail(`/control-plane/engines/${ENGINE.id}?tab=configuration`);
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    expect(screen.getByRole("tab", { name: "Settings" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
+  test("an unknown ?tab value falls back to Overview", async () => {
+    renderDetail(`/control-plane/engines/${ENGINE.id}?tab=bogus`);
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    // Overview content (KPI strip) is shown, not a blank page.
+    expect(await screen.findByText("phase")).toBeInTheDocument();
+  });
+});
+
+describe("EngineDetail — header metadata + page-level actions", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
+      >,
+    );
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      type: "starrocks",
+      spec: {
+        coordinatorReplicas: 0,
+        workerReplicas: 0,
+        cpuMin: "",
+        cpuMax: "",
+        memory: "",
+        imageVersion: "starrocks/fe-ubuntu:3.3-latest",
+      },
+      status: {
+        phase: "running",
+        message: null,
+        pods: [{ name: "sr1-fe-0", phase: "Running", ready: true }],
+      },
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+  });
+
+  test("header shows a metadata row (image · endpoint · delegation)", async () => {
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    // image (falls back to imageVersion when starrocksConfig.feImage is absent)
+    expect(
+      screen.getByText("starrocks/fe-ubuntu:3.3-latest"),
+    ).toBeInTheDocument();
+    // endpoint host:port derived by kind (StarRocks → {name}-fe-service.{ns}:9030)
+    expect(
+      screen.getByText("analytics-trino-fe-service.engines:9030"),
+    ).toBeInTheDocument();
+    // delegation mode — none configured. Rendered in exactly two places now:
+    // the header meta row and the Overview KPI strip's Auth item.
+    expect(screen.getAllByText(/no delegation/i)).toHaveLength(2);
+  });
+
+  test("Restart lives in the header (single instance) and Delete is in the ⋯ menu", async () => {
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    // exactly one Restart button — the header one; StatusCard no longer has its own
+    const restarts = screen.getAllByRole("button", { name: /^restart$/i });
+    expect(restarts).toHaveLength(1);
+    expect(restarts[0]).toBeEnabled();
+
+    // DangerCard is gone — no "Danger zone" section, no standalone Delete button
+    expect(screen.queryByText(/danger zone/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /delete engine/i }),
+    ).not.toBeInTheDocument();
+
+    // Delete now lives behind the header overflow menu
+    await user.click(
+      screen.getByRole("button", { name: /more engine actions/i }),
+    );
+    expect(
+      await screen.findByRole("menuitem", { name: /delete engine/i }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("EngineDetail — StatusCard states", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
+      >,
+    );
+  });
+
+  function mockEngineStatus(status: api.EngineStatus) {
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      status,
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+  }
+
+  test("provisioning engine with no pods shows the waiting-for-operator copy", async () => {
+    mockEngineStatus({ phase: "Provisioning", message: null, pods: [] });
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    expect(
+      await screen.findByText(/waiting for the operator to create pods/i),
+    ).toBeInTheDocument();
+    // The terse legacy empty copy is gone.
+    expect(screen.queryByText("No pods yet.")).not.toBeInTheDocument();
+  });
+
+  test("failed engine with a status message surfaces that message", async () => {
+    mockEngineStatus({
+      phase: "Failed",
+      message: "ImagePullBackOff: trinodb/trino:bogus not found",
+      pods: [],
+    });
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    // The failure message is shown (in the header description AND the status body).
+    expect(
+      screen.getAllByText(/ImagePullBackOff: trinodb\/trino:bogus not found/i)
+        .length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText("No pods yet.")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/waiting for the operator to create pods/i),
+    ).not.toBeInTheDocument();
+  });
+
+  test("failed engine with no message falls back to a generic failure line", async () => {
+    mockEngineStatus({ phase: "error", message: null, pods: [] });
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    expect(
+      await screen.findByText(/the engine failed to start/i),
+    ).toBeInTheDocument();
+  });
+
+  test("running engine with no pods reports the neutral empty line", async () => {
+    mockEngineStatus({ phase: "running", message: null, pods: [] });
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    expect(await screen.findByText(/no pods reported/i)).toBeInTheDocument();
+    expect(screen.queryByText("No pods yet.")).not.toBeInTheDocument();
+  });
+});
+
+describe("EngineDetail — engine-aware Monitor tab", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
+      >,
+    );
+  });
+
+  test("StarRocks Monitor renders the pod/cluster health view, not the Trino query monitor", async () => {
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      type: "starrocks",
+      spec: {
+        coordinatorReplicas: 0,
+        workerReplicas: 0,
+        cpuMin: "",
+        cpuMax: "",
+        memory: "",
+        imageVersion: "starrocks/fe-ubuntu:3.3-latest",
+        starrocksConfig: {
+          feReplicas: 1,
+          cnReplicas: 2,
+          cnAutoscaling: { minReplicas: 2, maxReplicas: 5, targetCpuPercent: 70 },
+        },
+      },
+      status: {
+        phase: "running",
+        message: null,
+        pods: [
+          { name: "sr1-fe-0", phase: "Running", ready: true },
+          { name: "sr1-cn-0", phase: "Running", ready: false },
+        ],
+      },
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+    await user.click(screen.getByRole("tab", { name: "Monitor" }));
+
+    // Health view: pod rows sourced from status.pods.
+    expect(await screen.findByText("sr1-fe-0")).toBeInTheDocument();
+    expect(screen.getByText("sr1-cn-0")).toBeInTheDocument();
+
+    // FE/CN replica summary + autoscaling line.
+    expect(screen.getByText("FE replicas")).toBeInTheDocument();
+    expect(screen.getByText("CN replicas")).toBeInTheDocument();
+    expect(screen.getByText(/autoscaling: 2.*5.*70% cpu/i)).toBeInTheDocument();
+
+    // Honest coming-soon note.
+    expect(
+      screen.getByText(/query-level monitoring for starrocks is coming soon/i),
+    ).toBeInTheDocument();
+
+    // The Trino query monitor is NOT rendered — no query API calls, no query chrome.
+    expect(api.listQueries).not.toHaveBeenCalled();
+    expect(api.getCluster).not.toHaveBeenCalled();
+    expect(
+      screen.queryByText(/live queries on the coordinator/i),
+    ).not.toBeInTheDocument();
+  });
+
+  test("StarRocks Monitor shows the phase-aware empty state when there are no pods", async () => {
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      type: "starrocks",
+      spec: {
+        coordinatorReplicas: 0,
+        workerReplicas: 0,
+        cpuMin: "",
+        cpuMax: "",
+        memory: "",
+        imageVersion: "starrocks/fe-ubuntu:3.3-latest",
+        starrocksConfig: { feReplicas: 1, cnReplicas: 1 },
+      },
+      status: { phase: "Provisioning", message: null, pods: [] },
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+    await user.click(screen.getByRole("tab", { name: "Monitor" }));
+
+    expect(
+      await screen.findByText(/waiting for the operator to create pods/i),
+    ).toBeInTheDocument();
+    // Still the health view (coming-soon note), never the Trino monitor.
+    expect(
+      screen.getByText(/query-level monitoring for starrocks is coming soon/i),
+    ).toBeInTheDocument();
+    expect(api.listQueries).not.toHaveBeenCalled();
+  });
+
+  test("StarRocks Monitor omits the Autoscaling line when cnAutoscaling is the disabled sentinel", async () => {
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      type: "starrocks",
+      spec: {
+        coordinatorReplicas: 0,
+        workerReplicas: 0,
+        cpuMin: "",
+        cpuMax: "",
+        memory: "",
+        imageVersion: "starrocks/fe-ubuntu:3.3-latest",
+        // #266 disable sentinel: maxReplicas 0 → autoscaling OFF.
+        starrocksConfig: { feReplicas: 1, cnReplicas: 1, cnAutoscaling: { maxReplicas: 0 } },
+      },
+      status: {
+        phase: "running",
+        message: null,
+        pods: [{ name: "sr1-fe-0", phase: "Running", ready: true }],
+      },
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+    await user.click(screen.getByRole("tab", { name: "Monitor" }));
+
+    expect(await screen.findByText("sr1-fe-0")).toBeInTheDocument();
+    expect(screen.queryByText(/^autoscaling:/i)).not.toBeInTheDocument();
+  });
+
+  test("StarRocks Monitor degrades the FE/CN replica summary to em-dashes when starrocksConfig is absent", async () => {
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      type: "starrocks",
+      spec: {
+        coordinatorReplicas: 0,
+        workerReplicas: 0,
+        cpuMin: "",
+        cpuMax: "",
+        memory: "",
+        imageVersion: "starrocks/fe-ubuntu:3.3-latest",
+        // No starrocksConfig at all — the summary must not crash or print "undefined".
+      },
+      status: {
+        phase: "running",
+        message: null,
+        pods: [{ name: "sr1-fe-0", phase: "Running", ready: true }],
+      },
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+    await user.click(screen.getByRole("tab", { name: "Monitor" }));
+
+    expect(await screen.findByText("FE replicas")).toBeInTheDocument();
+    expect(screen.getByText("CN replicas")).toBeInTheDocument();
+    // Both replica values degrade to em-dashes, never the literal "undefined".
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();
+  });
+
+  test("Trino Monitor still renders the Trino query monitor (EngineMonitor)", async () => {
+    mockGetEngine(ENGINE.spec);
+    vi.mocked(api.getCluster).mockResolvedValue({
+      running: 0,
+      queued: 0,
+      blocked: 0,
+      nodes: [],
+    } as unknown as Awaited<ReturnType<typeof api.getCluster>>);
+    vi.mocked(api.listQueries).mockResolvedValue(
+      [] as unknown as Awaited<ReturnType<typeof api.listQueries>>,
+    );
+
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+    await user.click(screen.getByRole("tab", { name: "Monitor" }));
+
+    // The Trino monitor chrome renders and it polls the Trino REST proxy.
+    expect(
+      await screen.findByText(/live queries on the coordinator/i),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(api.listQueries).toHaveBeenCalled());
+    expect(api.getCluster).toHaveBeenCalled();
+
+    // The StarRocks health view is NOT rendered.
+    expect(
+      screen.queryByText(/query-level monitoring for starrocks is coming soon/i),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("EngineDetail — Overview KPI strip", () => {
+  // Two catalogs → the strip's catalog count resolves to 2.
+  const CATALOGS = [
+    { id: "c1", name: "iceberg", kind: "iceberg", isPrimary: true },
+    { id: "c2", name: "pg", kind: "postgresql", isPrimary: false },
+  ] as unknown as Awaited<ReturnType<typeof api.listEngineCatalogs>>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue(CATALOGS);
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
+      >,
+    );
+  });
+
+  test("StarRocks Overview shows phase, pods, FE/CN replicas, counts, and auth", async () => {
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      type: "starrocks",
+      spec: {
+        coordinatorReplicas: 0,
+        workerReplicas: 0,
+        cpuMin: "",
+        cpuMax: "",
+        memory: "",
+        imageVersion: "starrocks/fe-ubuntu:3.3-latest",
+        starrocksConfig: { feReplicas: 1, cnReplicas: 1 },
+      },
+      status: {
+        phase: "running",
+        message: null,
+        pods: [{ name: "sr1-fe-0", phase: "Running", ready: true }],
+      },
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    // Overview is the default tab — the KPI strip renders above the Status card.
+    expect(screen.getByText("phase")).toBeInTheDocument();
+    expect(screen.getByText("1/1")).toBeInTheDocument(); // ready/total pods
+    expect(screen.getByText("FE 1 · CN 1")).toBeInTheDocument(); // StarRocks replicas
+    expect(screen.getByText("catalogs")).toBeInTheDocument();
+    expect(screen.getByText("workspaces")).toBeInTheDocument();
+    // Catalog count resolves from listEngineCatalogs → 2.
+    expect(await screen.findByText("2")).toBeInTheDocument();
+    // Auth item (StarRocks with no delegation → "No delegation").
+    expect(screen.getByText("auth")).toBeInTheDocument();
+    expect(screen.getAllByText("No delegation").length).toBeGreaterThan(0);
+  });
+
+  test("Trino Overview shows Coord/Worker replicas and JWT auth", async () => {
+    mockGetEngine(ENGINE.spec); // Trino: coord 1 / worker 2, JWT enabled
+
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    expect(screen.getByText("Coord 1 · Worker 2")).toBeInTheDocument();
+    // engineAuthLabel → "JWT auth" (rendered in the strip and the header meta).
+    expect(screen.getAllByText("JWT auth").length).toBeGreaterThan(0);
+  });
+
+  test("Trino Overview never renders 'undefined' when replica counts are absent", async () => {
+    // A DTO that omits coordinatorReplicas/workerReplicas (the fields are only
+    // "surfaced back" as a subset, so a real payload can lack them).
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      spec: {
+        cpuMin: "1",
+        cpuMax: "2",
+        memory: "4Gi",
+        imageVersion: "latest",
+        trinoConfig: { coordinator: {}, worker: {} },
+      },
+      status: { phase: "running", message: null, pods: [] },
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    // The replicas KPI degrades to em-dashes, never the literal "undefined".
+    expect(screen.getByText("Coord — · Worker —")).toBeInTheDocument();
+    expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();
   });
 });

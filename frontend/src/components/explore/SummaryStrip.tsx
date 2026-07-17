@@ -1,5 +1,9 @@
 /** A compact one-line "value label · value label" summary (replaces KPI cards). */
-export function SummaryStrip({ items }: { items: { label: string; value: number }[] }) {
+export function SummaryStrip({
+  items,
+}: {
+  items: { label: string; value: string | number }[];
+}) {
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
       {items.map((it, i) => (
