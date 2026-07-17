@@ -3000,6 +3000,11 @@ async fn update_starrocks_engine(
     validate_sr_delegation_mode(&sr_body)?;
     // Same up-front guard on a `feConfig` override of an egret-managed key.
     validate_sr_fe_config(&sr_body)?;
+    // ...and on out-of-range autoscaling bounds (min>max / min==0 / cpu==0),
+    // which the operator/HPA would otherwise reject or silently mis-apply. This
+    // guard was originally wired into create only; an edit must enforce it too
+    // (a config that can't be created must not be reachable via update either).
+    validate_sr_autoscaling(&sr_body)?;
 
     // Capture the OLD delegation block ({mode, tlsEnabled} or null) from the
     // pre-update engine before we overwrite the spec, so we can detect a
