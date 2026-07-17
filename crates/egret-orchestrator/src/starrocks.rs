@@ -142,6 +142,32 @@ pub fn starrocks_fe_configmap(spec: &EngineSpec) -> Value {
     })
 }
 
+/// The CN role's `cn.conf` ConfigMap (`{name}-cn-cm`). Unlike the FE, there is
+/// NO egret-mandated CN base — `cn.conf` is JUST the admin `cn_config`
+/// overrides, so this returns `None` when `cn_config` is empty (CN then uses
+/// the operator defaults, unchanged from today). Lines are rendered `key =
+/// value`, sorted by the `BTreeMap`'s key order for determinism.
+pub fn starrocks_cn_configmap(spec: &EngineSpec) -> Option<Value> {
+    let sr = spec
+        .starrocks
+        .as_ref()
+        .expect("starrocks_cn_configmap requires spec.starrocks");
+    if sr.cn_config.is_empty() {
+        return None;
+    }
+    let conf: String = sr
+        .cn_config
+        .iter()
+        .map(|(k, v)| format!("{k} = {v}\n"))
+        .collect();
+    Some(json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": { "name": format!("{}-cn-cm", spec.name), "namespace": spec.namespace,
+                      "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
+        "data": { "cn.conf": conf }
+    }))
+}
+
 /// The Ranger plugin's `ranger-starrocks-security.xml` + audit ConfigMap
 /// (`{name}-ranger-cm`). `None` unless `spec.ranger` is bound.
 ///
@@ -382,6 +408,15 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
         "image": sr.cn_image,
         "replicas": sr.cn_replicas,
     });
+    // Mount the admin `cn.conf` ConfigMap (only emitted when `cn_config` is
+    // non-empty — see `starrocks_cn_configmap`). When empty, CN keeps the
+    // operator defaults and gets no `configMapInfo` (unchanged from today).
+    if !sr.cn_config.is_empty() {
+        cn_spec["configMapInfo"] = json!({
+            "configMapName": format!("{}-cn-cm", spec.name),
+            "resolveKey": "cn.conf",
+        });
+    }
     if let Some(r) = &sr.cn_resources {
         let (limits, requests) = resources_json(r);
         if limits.as_object().is_some_and(|m| !m.is_empty()) {
@@ -421,6 +456,9 @@ impl StarRocksProvisioner {
     /// error.
     async fn apply_all(&self, spec: &EngineSpec) -> anyhow::Result<()> {
         self.kube.apply(&starrocks_fe_configmap(spec)).await?;
+        if let Some(cm) = starrocks_cn_configmap(spec) {
+            self.kube.apply(&cm).await?;
+        }
         if let Some(cm) = starrocks_ranger_configmap(spec) {
             self.kube.apply(&cm).await?;
         }
@@ -484,6 +522,25 @@ impl EngineProvisioner for StarRocksProvisioner {
                     "ConfigMap",
                     &spec.namespace,
                     &format!("{}-ranger-cm", spec.name),
+                )
+                .await;
+        }
+        // `apply_all` only applies the CN ConfigMap when `cn_config` is
+        // non-empty, so clearing all CN overrides would otherwise orphan
+        // `{name}-cn-cm` (the CR's `configMapInfo` is dropped, but the
+        // ConfigMap lingers). Best-effort delete it when there are no overrides.
+        if spec
+            .starrocks
+            .as_ref()
+            .is_none_or(|sr| sr.cn_config.is_empty())
+        {
+            let _ = self
+                .kube
+                .delete(
+                    "v1",
+                    "ConfigMap",
+                    &spec.namespace,
+                    &format!("{}-cn-cm", spec.name),
                 )
                 .await;
         }
@@ -558,6 +615,10 @@ impl EngineProvisioner for StarRocksProvisioner {
         let _ = self
             .kube
             .delete("v1", "ConfigMap", namespace, &format!("{name}-fe-cm"))
+            .await;
+        let _ = self
+            .kube
+            .delete("v1", "ConfigMap", namespace, &format!("{name}-cn-cm"))
             .await;
         let _ = self
             .kube
@@ -978,6 +1039,87 @@ mod tests {
         assert!(conf.contains("sys_log_level = WARN"));
         assert!(!conf.contains("sys_log_level = INFO"));
         assert_eq!(conf.matches("sys_log_level =").count(), 1);
+    }
+
+    /// Task 3 TDD: no CN `cn.conf` ConfigMap is emitted when `cn_config` is
+    /// empty — CN uses the operator defaults (behavior-preserving).
+    #[test]
+    fn cn_configmap_none_when_empty() {
+        assert!(starrocks_cn_configmap(&sample_sr_spec()).is_none());
+    }
+
+    /// A non-empty `cn_config` renders a `{name}-cn-cm` ConfigMap whose
+    /// `cn.conf` carries the admin override lines.
+    #[test]
+    fn cn_configmap_some_when_nonempty() {
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().cn_config =
+            BTreeMap::from([("sys_log_level".to_string(), "WARN".to_string())]);
+        let cm = starrocks_cn_configmap(&spec).expect("cn-cm present when cn_config non-empty");
+        assert_eq!(cm["kind"], "ConfigMap");
+        assert_eq!(cm["metadata"]["name"], "sr1-cn-cm");
+        let conf = cm["data"]["cn.conf"].as_str().unwrap();
+        assert!(conf.contains("sys_log_level = WARN"));
+    }
+
+    /// A non-empty `cn_config` wires `starRocksCnSpec.configMapInfo` pointing at
+    /// the `{name}-cn-cm` ConfigMap with `resolveKey: cn.conf`.
+    #[test]
+    fn cr_wires_cn_configmapinfo_when_nonempty() {
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().cn_config =
+            BTreeMap::from([("sys_log_level".to_string(), "WARN".to_string())]);
+        let cr = starrocks_cluster_cr(&spec);
+        let info = &cr["spec"]["starRocksCnSpec"]["configMapInfo"];
+        assert_eq!(info["configMapName"], "sr1-cn-cm");
+        assert_eq!(info["resolveKey"], "cn.conf");
+    }
+
+    /// Empty `cn_config` → CN spec has no `configMapInfo` (unchanged from today).
+    #[test]
+    fn cr_no_cn_configmapinfo_when_empty() {
+        let cr = starrocks_cluster_cr(&sample_sr_spec());
+        assert!(cr["spec"]["starRocksCnSpec"].get("configMapInfo").is_none());
+    }
+
+    /// The provisioner applies the CN ConfigMap (alongside the FE one) when
+    /// `cn_config` is non-empty, and omits it when empty.
+    #[tokio::test]
+    async fn provisioner_applies_cn_configmap() {
+        use crate::kube_client::FakeKube;
+
+        // Non-empty → CN ConfigMap is among the applied objects.
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().cn_config =
+            BTreeMap::from([("sys_log_level".to_string(), "WARN".to_string())]);
+        let kube = Arc::new(FakeKube::default());
+        StarRocksProvisioner::new(kube.clone())
+            .provision(&spec)
+            .await
+            .unwrap();
+        {
+            let applied = kube.applied.lock().unwrap();
+            let cn = applied
+                .get("ConfigMap/sr1-cn-cm")
+                .expect("CN ConfigMap applied");
+            assert!(cn["data"]["cn.conf"]
+                .as_str()
+                .unwrap()
+                .contains("sys_log_level = WARN"));
+        }
+
+        // Empty → no CN ConfigMap applied (behavior-preserving).
+        let kube = Arc::new(FakeKube::default());
+        StarRocksProvisioner::new(kube.clone())
+            .provision(&sample_sr_spec())
+            .await
+            .unwrap();
+        assert!(kube
+            .applied
+            .lock()
+            .unwrap()
+            .get("ConfigMap/sr1-cn-cm")
+            .is_none());
     }
 
     /// T4 TDD: the restart merge-patch body stamps the restart annotation on
