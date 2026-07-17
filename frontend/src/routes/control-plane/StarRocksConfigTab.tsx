@@ -31,8 +31,7 @@ import {
 // Delegation is folded in as the LAST item, sharing the single form + Save.
 const NAV_ITEMS: { key: string; label: string }[] = [
   { key: "image", label: "Image" },
-  { key: "compute", label: "Compute" },
-  { key: "resources", label: "Resources" },
+  { key: "compute", label: "Compute & Resources" },
   { key: "fe-config", label: "FE config" },
   { key: "cn-config", label: "CN config" },
   { key: "autoscaling", label: "Autoscaling" },
@@ -80,7 +79,9 @@ function podFieldCount(pod: StarRocksPod | undefined): number {
  */
 function srSectionCounts(cfg: StarRocksConfigForm): Record<string, number> {
   return {
-    resources:
+    // Compute (FE/CN replicas) always carries seeded values so it's unbadged;
+    // the merged section's badge therefore reflects only the set resources.
+    compute:
       (resourcesSet(cfg.feResources) ? 1 : 0) +
       (resourcesSet(cfg.cnResources) ? 1 : 0),
     "fe-config": Object.keys(cfg.feConfig).length,
@@ -107,7 +108,10 @@ export function StarRocksConfigTab({ cfg }: { cfg: StarRocksConfigForm }) {
   // block Save on a bad payload. Mirrors Trino's `ConfigurationTab`.
   const [podRawInvalid, setPodRawInvalid] = useState(false);
   const [sp, setSp] = useSearchParams();
-  const section = sp.get("section") ?? "image";
+  // "resources" was folded into "compute" (one "Compute & Resources" section);
+  // alias the legacy deep-link so old ?section=resources URLs still resolve.
+  const rawSection = sp.get("section");
+  const section = rawSection === "resources" ? "compute" : (rawSection ?? "image");
   const setSection = (v: string) =>
     setSp(
       (prev) => {
@@ -163,8 +167,12 @@ export function StarRocksConfigTab({ cfg }: { cfg: StarRocksConfigForm }) {
             <ValidityProvider onAnyInvalidChange={setPodRawInvalid}>
               <div className="min-w-0 flex-1">
                 {section === "image" && <ImageSection cfg={cfg} />}
-                {section === "compute" && <ComputeSection cfg={cfg} />}
-                {section === "resources" && <ResourcesSection cfg={cfg} />}
+                {section === "compute" && (
+                  <div className="space-y-8">
+                    <ComputeSection cfg={cfg} />
+                    <ResourcesSection cfg={cfg} />
+                  </div>
+                )}
                 {section === "fe-config" && <FeConfigSection cfg={cfg} />}
                 {section === "cn-config" && <CnConfigSection cfg={cfg} />}
                 {section === "autoscaling" && <AutoscalingSection cfg={cfg} />}
@@ -218,26 +226,35 @@ function ImageSection({ cfg }: { cfg: StarRocksConfigForm }) {
 
 function ComputeSection({ cfg }: { cfg: StarRocksConfigForm }) {
   return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-      <div className="space-y-1.5">
-        <Label htmlFor="sr-fe-replicas">FE replicas</Label>
-        <Input
-          id="sr-fe-replicas"
-          type="number"
-          min={1}
-          value={cfg.feReplicas}
-          onChange={(e) => cfg.setFeReplicas(e.target.value)}
-        />
+    <div className="space-y-3">
+      <div className="space-y-0.5">
+        <p className="text-sm font-medium">Replicas</p>
+        <p className="text-xs text-muted-foreground">
+          Fixed pod counts per role (CN autoscaling, when enabled, overrides the
+          CN count).
+        </p>
       </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="sr-cn-replicas">CN replicas</Label>
-        <Input
-          id="sr-cn-replicas"
-          type="number"
-          min={1}
-          value={cfg.cnReplicas}
-          onChange={(e) => cfg.setCnReplicas(e.target.value)}
-        />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <Label htmlFor="sr-fe-replicas">FE replicas</Label>
+          <Input
+            id="sr-fe-replicas"
+            type="number"
+            min={1}
+            value={cfg.feReplicas}
+            onChange={(e) => cfg.setFeReplicas(e.target.value)}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="sr-cn-replicas">CN replicas</Label>
+          <Input
+            id="sr-cn-replicas"
+            type="number"
+            min={1}
+            value={cfg.cnReplicas}
+            onChange={(e) => cfg.setCnReplicas(e.target.value)}
+          />
+        </div>
       </div>
     </div>
   );
@@ -286,6 +303,7 @@ function ResourceFields({
 function ResourcesSection({ cfg }: { cfg: StarRocksConfigForm }) {
   return (
     <div className="space-y-6">
+      <p className="text-sm font-medium">Resources</p>
       <ResourceFields
         role="FE"
         prefix="sr-fe-res"

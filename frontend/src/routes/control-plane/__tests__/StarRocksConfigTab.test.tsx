@@ -39,19 +39,23 @@ function Harness({ engine }: { engine: Omit<Engine, "status"> }) {
   return <StarRocksConfigTab cfg={cfg} />;
 }
 
-function tree(engine: Omit<Engine, "status">, qc: QueryClient) {
+function tree(
+  engine: Omit<Engine, "status">,
+  qc: QueryClient,
+  initialEntries: string[] = ["/"],
+) {
   return (
     <QueryClientProvider client={qc}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={initialEntries}>
         <Harness engine={engine} />
       </MemoryRouter>
     </QueryClientProvider>
   );
 }
 
-function renderTab(engine = ENGINE) {
+function renderTab(engine = ENGINE, initialEntries?: string[]) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(tree(engine, qc));
+  return render(tree(engine, qc, initialEntries));
 }
 
 /** An engine whose stored spec already carries FE resources. */
@@ -111,6 +115,52 @@ describe("StarRocksConfigTab", () => {
     } as unknown as Engine);
   });
 
+  test("merges Compute + Resources into one 'Compute & Resources' nav section", () => {
+    renderTab();
+    const nav = screen.getByRole("navigation");
+    // The merged item is present…
+    expect(
+      within(nav).getByRole("button", { name: /^Compute & Resources/ }),
+    ).toBeInTheDocument();
+    // …and there is no longer a standalone "Resources" (or "Compute") item.
+    expect(
+      within(nav).queryByRole("button", { name: "Resources" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(nav).queryByRole("button", { name: "Compute" }),
+    ).not.toBeInTheDocument();
+  });
+
+  test("selecting 'Compute & Resources' renders BOTH replicas and CPU/memory inputs", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    await user.click(
+      screen.getByRole("button", { name: /^Compute & Resources/ }),
+    );
+    // Compute group.
+    expect(screen.getByLabelText("FE replicas")).toBeInTheDocument();
+    expect(screen.getByLabelText("CN replicas")).toBeInTheDocument();
+    // Resources group.
+    expect(screen.getByLabelText("FE CPU request")).toBeInTheDocument();
+    expect(screen.getByLabelText("CN memory limit")).toBeInTheDocument();
+  });
+
+  test("legacy ?section=resources deep-link resolves to the merged section", () => {
+    renderTab(ENGINE, ["/?tab=settings&section=resources"]);
+    // Both the replicas and the resource fields render under the merged section.
+    expect(screen.getByLabelText("FE replicas")).toBeInTheDocument();
+    expect(screen.getByLabelText("FE CPU request")).toBeInTheDocument();
+  });
+
+  test("merged badge sums the former compute + resources non-default counts", () => {
+    // ENGINE_WITH_RES carries one set FE resource ⇒ badge count 1 on the merged item.
+    renderTab(ENGINE_WITH_RES);
+    const merged = within(screen.getByRole("navigation")).getByRole("button", {
+      name: /^Compute & Resources/,
+    });
+    expect(merged).toHaveTextContent("1");
+  });
+
   test("seeds FE/CN image + replicas from spec.starrocksConfig", () => {
     renderTab();
     expect(screen.getByLabelText("FE image")).toHaveValue(
@@ -125,8 +175,8 @@ describe("StarRocksConfigTab", () => {
     const user = userEvent.setup();
     renderTab();
 
-    // Replicas live under the Compute section.
-    await user.click(screen.getByRole("button", { name: "Compute" }));
+    // Replicas live under the merged Compute & Resources section.
+    await user.click(screen.getByRole("button", { name: /^Compute & Resources/ }));
     const feReplicas = screen.getByLabelText("FE replicas");
     await user.clear(feReplicas);
     await user.type(feReplicas, "2");
@@ -157,7 +207,7 @@ describe("StarRocksConfigTab", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const { rerender } = render(tree(ENGINE, qc));
 
-    await user.click(screen.getByRole("button", { name: "Compute" }));
+    await user.click(screen.getByRole("button", { name: /^Compute & Resources/ }));
     const feReplicas = screen.getByLabelText("FE replicas");
     await user.clear(feReplicas);
     await user.type(feReplicas, "2");
@@ -187,8 +237,9 @@ describe("StarRocksConfigTab", () => {
     const user = userEvent.setup();
     renderTab(ENGINE_WITH_RES);
 
-    // The nav button carries a non-default-count badge, so match by prefix.
-    await user.click(screen.getByRole("button", { name: /^Resources/ }));
+    // Resources now live under the merged Compute & Resources section; its badge
+    // still reflects the set resource, so match by prefix.
+    await user.click(screen.getByRole("button", { name: /^Compute & Resources/ }));
     const memReq = screen.getByLabelText("FE memory request");
     expect(memReq).toHaveValue("4Gi");
 
