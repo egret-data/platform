@@ -39,19 +39,23 @@ function Harness({ engine }: { engine: Omit<Engine, "status"> }) {
   return <StarRocksConfigTab cfg={cfg} />;
 }
 
-function tree(engine: Omit<Engine, "status">, qc: QueryClient) {
+function tree(
+  engine: Omit<Engine, "status">,
+  qc: QueryClient,
+  initialEntries: string[] = ["/"],
+) {
   return (
     <QueryClientProvider client={qc}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={initialEntries}>
         <Harness engine={engine} />
       </MemoryRouter>
     </QueryClientProvider>
   );
 }
 
-function renderTab(engine = ENGINE) {
+function renderTab(engine = ENGINE, initialEntries?: string[]) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(tree(engine, qc));
+  return render(tree(engine, qc, initialEntries));
 }
 
 /** An engine whose stored spec already carries FE resources. */
@@ -102,6 +106,22 @@ const ENGINE_WITH_POD: Omit<Engine, "status"> = {
   },
 };
 
+/** An engine whose stored pod already carries structured env + toleration lists
+ * (drives the structured-editor seeding + spurious-dirty guard tests). */
+const ENGINE_WITH_POD_LISTS: Omit<Engine, "status"> = {
+  ...ENGINE,
+  spec: {
+    ...ENGINE.spec,
+    starrocksConfig: {
+      ...ENGINE.spec.starrocksConfig,
+      pod: {
+        env: [{ name: "A", value: "B" }],
+        tolerations: [{ key: "k", operator: "Exists" }],
+      },
+    },
+  },
+};
+
 describe("StarRocksConfigTab", () => {
   beforeEach(() => {
     vi.mocked(api.updateEngine).mockReset();
@@ -109,6 +129,52 @@ describe("StarRocksConfigTab", () => {
       ...ENGINE,
       status: "provisioning",
     } as unknown as Engine);
+  });
+
+  test("merges Compute + Resources into one 'Compute & Resources' nav section", () => {
+    renderTab();
+    const nav = screen.getByRole("navigation");
+    // The merged item is present…
+    expect(
+      within(nav).getByRole("button", { name: /^Compute & Resources/ }),
+    ).toBeInTheDocument();
+    // …and there is no longer a standalone "Resources" (or "Compute") item.
+    expect(
+      within(nav).queryByRole("button", { name: "Resources" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(nav).queryByRole("button", { name: "Compute" }),
+    ).not.toBeInTheDocument();
+  });
+
+  test("selecting 'Compute & Resources' renders BOTH replicas and CPU/memory inputs", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    await user.click(
+      screen.getByRole("button", { name: /^Compute & Resources/ }),
+    );
+    // Compute group.
+    expect(screen.getByLabelText("FE replicas")).toBeInTheDocument();
+    expect(screen.getByLabelText("CN replicas")).toBeInTheDocument();
+    // Resources group.
+    expect(screen.getByLabelText("FE CPU request")).toBeInTheDocument();
+    expect(screen.getByLabelText("CN memory limit")).toBeInTheDocument();
+  });
+
+  test("legacy ?section=resources deep-link resolves to the merged section", () => {
+    renderTab(ENGINE, ["/?tab=settings&section=resources"]);
+    // Both the replicas and the resource fields render under the merged section.
+    expect(screen.getByLabelText("FE replicas")).toBeInTheDocument();
+    expect(screen.getByLabelText("FE CPU request")).toBeInTheDocument();
+  });
+
+  test("merged badge sums the former compute + resources non-default counts", () => {
+    // ENGINE_WITH_RES carries one set FE resource ⇒ badge count 1 on the merged item.
+    renderTab(ENGINE_WITH_RES);
+    const merged = within(screen.getByRole("navigation")).getByRole("button", {
+      name: /^Compute & Resources/,
+    });
+    expect(merged).toHaveTextContent("1");
   });
 
   test("seeds FE/CN image + replicas from spec.starrocksConfig", () => {
@@ -125,8 +191,8 @@ describe("StarRocksConfigTab", () => {
     const user = userEvent.setup();
     renderTab();
 
-    // Replicas live under the Compute section.
-    await user.click(screen.getByRole("button", { name: "Compute" }));
+    // Replicas live under the merged Compute & Resources section.
+    await user.click(screen.getByRole("button", { name: /^Compute & Resources/ }));
     const feReplicas = screen.getByLabelText("FE replicas");
     await user.clear(feReplicas);
     await user.type(feReplicas, "2");
@@ -157,7 +223,7 @@ describe("StarRocksConfigTab", () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const { rerender } = render(tree(ENGINE, qc));
 
-    await user.click(screen.getByRole("button", { name: "Compute" }));
+    await user.click(screen.getByRole("button", { name: /^Compute & Resources/ }));
     const feReplicas = screen.getByLabelText("FE replicas");
     await user.clear(feReplicas);
     await user.type(feReplicas, "2");
@@ -187,8 +253,9 @@ describe("StarRocksConfigTab", () => {
     const user = userEvent.setup();
     renderTab(ENGINE_WITH_RES);
 
-    // The nav button carries a non-default-count badge, so match by prefix.
-    await user.click(screen.getByRole("button", { name: /^Resources/ }));
+    // Resources now live under the merged Compute & Resources section; its badge
+    // still reflects the set resource, so match by prefix.
+    await user.click(screen.getByRole("button", { name: /^Compute & Resources/ }));
     const memReq = screen.getByLabelText("FE memory request");
     expect(memReq).toHaveValue("4Gi");
 
@@ -409,7 +476,7 @@ describe("StarRocksConfigTab", () => {
     expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
 
     // Invalid JSON in the affinity raw field registers invalid ⇒ Save blocked.
-    const affinity = screen.getByLabelText("Affinity");
+    const affinity = screen.getByLabelText("Affinity (advanced JSON)");
     await user.type(affinity, "notjson");
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled(),
@@ -420,5 +487,96 @@ describe("StarRocksConfigTab", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled(),
     );
+  });
+
+  test("Pod & Containers exposes only the Affinity raw textarea (env/tolerations/containers are structured)", async () => {
+    const user = userEvent.setup();
+    const { container } = renderTab();
+    await user.click(screen.getByRole("button", { name: "Pod & Containers" }));
+
+    // The ONLY remaining raw-JSON textarea is the advanced affinity escape.
+    const textareas = container.querySelectorAll("textarea");
+    expect(textareas).toHaveLength(1);
+    const affinity = screen.getByLabelText("Affinity (advanced JSON)");
+    expect(affinity.tagName).toBe("TEXTAREA");
+    expect(textareas[0]).toBe(affinity);
+  });
+
+  test("adding an Env row via the structured editor PUTs starrocks.pod.env", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    await user.click(screen.getByRole("button", { name: "Pod & Containers" }));
+
+    await user.click(screen.getByRole("button", { name: "Add env var" }));
+    await user.type(screen.getByLabelText("Variable name"), "TZ");
+    await user.type(screen.getByLabelText("Variable value"), "UTC");
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(api.updateEngine).toHaveBeenCalledTimes(1));
+    const [, body] = vi.mocked(api.updateEngine).mock.calls[0];
+    expect(body.starrocks?.pod?.env).toEqual([{ name: "TZ", value: "UTC" }]);
+  });
+
+  test("adding a toleration row via the structured editor PUTs starrocks.pod.tolerations", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    await user.click(screen.getByRole("button", { name: "Pod & Containers" }));
+
+    await user.click(screen.getByRole("button", { name: "Add toleration" }));
+    await user.type(screen.getByPlaceholderText("key"), "dedicated");
+    await user.type(screen.getByPlaceholderText("Equal / Exists"), "Exists");
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(api.updateEngine).toHaveBeenCalledTimes(1));
+    const [, body] = vi.mocked(api.updateEngine).mock.calls[0];
+    expect(body.starrocks?.pod?.tolerations).toEqual([
+      { key: "dedicated", operator: "Exists" },
+    ]);
+  });
+
+  test("adding an init container via the structured editor PUTs starrocks.pod.initContainers", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    await user.click(screen.getByRole("button", { name: "Pod & Containers" }));
+
+    await user.click(screen.getByRole("button", { name: "Add init container" }));
+    await user.type(screen.getByLabelText("name"), "wait");
+    await user.type(screen.getByLabelText("image"), "busybox:1.36");
+
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(api.updateEngine).toHaveBeenCalledTimes(1));
+    const [, body] = vi.mocked(api.updateEngine).mock.calls[0];
+    expect(body.starrocks?.pod?.initContainers).toEqual([
+      { name: "wait", image: "busybox:1.36" },
+    ]);
+  });
+
+  test("seeds structured env from the stored pod without a spurious dirty", async () => {
+    const user = userEvent.setup();
+    renderTab(ENGINE_WITH_POD_LISTS);
+    await user.click(screen.getByRole("button", { name: /^Pod & Containers/ }));
+
+    // The env editor is prefilled from the stored [{name:A,value:B}] block…
+    expect(screen.getByLabelText("Variable name")).toHaveValue("A");
+    expect(screen.getByLabelText("Variable value")).toHaveValue("B");
+    // …and a seed → no-edit round-trip is NOT spuriously dirty.
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+  });
+
+  test("a just-added blank env row stays visible while typing (working-state buffer)", async () => {
+    const user = userEvent.setup();
+    renderTab();
+    await user.click(screen.getByRole("button", { name: "Pod & Containers" }));
+
+    // Add a row and type only the name — the lossy serializer drops blank-key
+    // rows, so without an internal working buffer this row would vanish.
+    await user.click(screen.getByRole("button", { name: "Add env var" }));
+    const nameInput = screen.getByLabelText("Variable name");
+    await user.type(nameInput, "X");
+    expect(screen.getByLabelText("Variable name")).toBeInTheDocument();
+    expect(screen.getByLabelText("Variable name")).toHaveValue("X");
   });
 });

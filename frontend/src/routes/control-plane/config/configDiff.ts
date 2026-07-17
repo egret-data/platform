@@ -10,6 +10,27 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 }
 
 /**
+ * `JSON.stringify` with object keys sorted recursively so two values that differ
+ * only in object-key order compare equal. Array element order is preserved —
+ * element order IS semantically meaningful in config (e.g. an ordered list of
+ * tolerations/containers); only object-key order is canonicalized, since key
+ * order in a JSON object never carries meaning.
+ */
+function stableStringify(v: unknown): string {
+  if (Array.isArray(v)) {
+    return `[${v.map(stableStringify).join(",")}]`;
+  }
+  if (isPlainObject(v)) {
+    const body = Object.keys(v)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${stableStringify(v[k])}`)
+      .join(",");
+    return `{${body}}`;
+  }
+  return JSON.stringify(v) ?? "null";
+}
+
+/**
  * Recursive leaf-path diff of two JSON-like values. Plain objects recurse over
  * the union of their keys; arrays and primitives are leaves compared whole by
  * `JSON.stringify` equality. Paths are dot-joined (`coordinator.replicas`).
@@ -39,7 +60,7 @@ export function diffConfig(before: unknown, after: unknown): ConfigChange[] {
       changes.push({ path, kind: "removed", from: a });
       return;
     }
-    if (JSON.stringify(a) !== JSON.stringify(b)) {
+    if (stableStringify(a) !== stableStringify(b)) {
       changes.push({ path, kind: "changed", from: a, to: b });
     }
   }

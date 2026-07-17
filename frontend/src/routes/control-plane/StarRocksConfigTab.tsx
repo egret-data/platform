@@ -14,9 +14,24 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { SaveBar } from "./EngineDetail";
 import { StarRocksSecuritySection } from "./StarRocksSecuritySection";
+import { type Kv, KeyValueEditor } from "./EngineResourceGroups";
 import { KeyedPropertyList } from "./config/KeyedPropertyList";
 import { RawJsonField } from "./config/RawJsonField";
+import { TolerationsEditor } from "./config/PlacementSection";
+import {
+  type ContainerForm,
+  ContainerListEditor,
+} from "./config/ContainersMountsSection";
 import { ValidityProvider } from "./config/validityRegistry";
+import { type TolerationForm } from "./useEngineConfigForm";
+import {
+  containersJsonToForms,
+  envJsonToKv,
+  formsToContainersJson,
+  kvToEnvJson,
+  rowsToTolerationsJson,
+  tolerationsJsonToRows,
+} from "./starrocksPodShape";
 import {
   type AutoscalingForm,
   type RoleResourcesForm,
@@ -31,8 +46,7 @@ import {
 // Delegation is folded in as the LAST item, sharing the single form + Save.
 const NAV_ITEMS: { key: string; label: string }[] = [
   { key: "image", label: "Image" },
-  { key: "compute", label: "Compute" },
-  { key: "resources", label: "Resources" },
+  { key: "compute", label: "Compute & Resources" },
   { key: "fe-config", label: "FE config" },
   { key: "cn-config", label: "CN config" },
   { key: "autoscaling", label: "Autoscaling" },
@@ -80,7 +94,9 @@ function podFieldCount(pod: StarRocksPod | undefined): number {
  */
 function srSectionCounts(cfg: StarRocksConfigForm): Record<string, number> {
   return {
-    resources:
+    // Compute (FE/CN replicas) always carries seeded values so it's unbadged;
+    // the merged section's badge therefore reflects only the set resources.
+    compute:
       (resourcesSet(cfg.feResources) ? 1 : 0) +
       (resourcesSet(cfg.cnResources) ? 1 : 0),
     "fe-config": Object.keys(cfg.feConfig).length,
@@ -102,12 +118,16 @@ function srSectionCounts(cfg: StarRocksConfigForm): Record<string, number> {
  * single Save covers config + security.
  */
 export function StarRocksConfigTab({ cfg }: { cfg: StarRocksConfigForm }) {
-  // Goes true when any raw-JSON pod field (tolerations / affinity / env /
-  // init / sidecars) fails to parse; combined with the autoscaling gate to
-  // block Save on a bad payload. Mirrors Trino's `ConfigurationTab`.
+  // Goes true when a raw-JSON pod field fails to parse — the affinity escape or
+  // any container's Advanced-JSON override (env / tolerations / init / sidecars
+  // are structured now); combined with the autoscaling gate to block Save on a
+  // bad payload. Mirrors Trino's `ConfigurationTab`.
   const [podRawInvalid, setPodRawInvalid] = useState(false);
   const [sp, setSp] = useSearchParams();
-  const section = sp.get("section") ?? "image";
+  // "resources" was folded into "compute" (one "Compute & Resources" section);
+  // alias the legacy deep-link so old ?section=resources URLs still resolve.
+  const rawSection = sp.get("section");
+  const section = rawSection === "resources" ? "compute" : (rawSection ?? "image");
   const setSection = (v: string) =>
     setSp(
       (prev) => {
@@ -163,8 +183,12 @@ export function StarRocksConfigTab({ cfg }: { cfg: StarRocksConfigForm }) {
             <ValidityProvider onAnyInvalidChange={setPodRawInvalid}>
               <div className="min-w-0 flex-1">
                 {section === "image" && <ImageSection cfg={cfg} />}
-                {section === "compute" && <ComputeSection cfg={cfg} />}
-                {section === "resources" && <ResourcesSection cfg={cfg} />}
+                {section === "compute" && (
+                  <div className="space-y-8">
+                    <ComputeSection cfg={cfg} />
+                    <ResourcesSection cfg={cfg} />
+                  </div>
+                )}
                 {section === "fe-config" && <FeConfigSection cfg={cfg} />}
                 {section === "cn-config" && <CnConfigSection cfg={cfg} />}
                 {section === "autoscaling" && <AutoscalingSection cfg={cfg} />}
@@ -218,26 +242,35 @@ function ImageSection({ cfg }: { cfg: StarRocksConfigForm }) {
 
 function ComputeSection({ cfg }: { cfg: StarRocksConfigForm }) {
   return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-      <div className="space-y-1.5">
-        <Label htmlFor="sr-fe-replicas">FE replicas</Label>
-        <Input
-          id="sr-fe-replicas"
-          type="number"
-          min={1}
-          value={cfg.feReplicas}
-          onChange={(e) => cfg.setFeReplicas(e.target.value)}
-        />
+    <div className="space-y-3">
+      <div className="space-y-0.5">
+        <p className="text-sm font-medium">Replicas</p>
+        <p className="text-xs text-muted-foreground">
+          Fixed pod counts per role (CN autoscaling, when enabled, overrides the
+          CN count).
+        </p>
       </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="sr-cn-replicas">CN replicas</Label>
-        <Input
-          id="sr-cn-replicas"
-          type="number"
-          min={1}
-          value={cfg.cnReplicas}
-          onChange={(e) => cfg.setCnReplicas(e.target.value)}
-        />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <Label htmlFor="sr-fe-replicas">FE replicas</Label>
+          <Input
+            id="sr-fe-replicas"
+            type="number"
+            min={1}
+            value={cfg.feReplicas}
+            onChange={(e) => cfg.setFeReplicas(e.target.value)}
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="sr-cn-replicas">CN replicas</Label>
+          <Input
+            id="sr-cn-replicas"
+            type="number"
+            min={1}
+            value={cfg.cnReplicas}
+            onChange={(e) => cfg.setCnReplicas(e.target.value)}
+          />
+        </div>
       </div>
     </div>
   );
@@ -286,6 +319,7 @@ function ResourceFields({
 function ResourcesSection({ cfg }: { cfg: StarRocksConfigForm }) {
   return (
     <div className="space-y-6">
+      <p className="text-sm font-medium">Resources</p>
       <ResourceFields
         role="FE"
         prefix="sr-fe-res"
@@ -459,126 +493,255 @@ function CommaListInput({
   );
 }
 
+/** A patch merger over the hook's `pod` block (functional so debounced/commit
+ * pairs never clobber each other). */
+type PodPatch = (p: Partial<StarRocksPod>) => void;
+
+/**
+ * Working-state Environment editor: seeds `Kv[]` ONCE from the stored `pod.env`
+ * and owns the rows locally. The lossy `kvToEnvJson` serializer drops blank-key
+ * rows, so a half-typed row would vanish if it were derived fresh from `pod`
+ * every render — holding the rows here keeps an in-progress row visible while
+ * still committing the serialized `[{name,value}]` upstream (same pattern as
+ * `CommaListInput`).
+ */
+function PodEnvEditor({ pod, patch }: { pod: StarRocksPod; patch: PodPatch }) {
+  const [rows, setRows] = useState<Kv[]>(() => envJsonToKv(pod.env));
+  return (
+    <KeyValueEditor
+      rows={rows}
+      onChange={(next) => {
+        setRows(next);
+        patch({ env: kvToEnvJson(next) });
+      }}
+      keyPlaceholder="Variable name"
+      valuePlaceholder="Variable value"
+      addLabel="Add env var"
+    />
+  );
+}
+
+/** Working-state Tolerations editor (seeds `TolerationForm[]` once from
+ * `pod.tolerations`; commits the omit-empty k8s array upstream). */
+function PodTolerationsEditor({
+  pod,
+  patch,
+}: {
+  pod: StarRocksPod;
+  patch: PodPatch;
+}) {
+  const [rows, setRows] = useState<TolerationForm[]>(() =>
+    tolerationsJsonToRows(pod.tolerations),
+  );
+  return (
+    <TolerationsEditor
+      rows={rows}
+      onChange={(next) => {
+        setRows(next);
+        patch({ tolerations: rowsToTolerationsJson(next) });
+      }}
+    />
+  );
+}
+
+/** Working-state container-list editor (init or sidecar): seeds `ContainerForm[]`
+ * once from the stored JSON and commits the re-serialized k8s array upstream. A
+ * distinct `idPrefix` per list keeps each container's Advanced-JSON RawJsonField
+ * id unique in the surrounding `ValidityProvider`. */
+function PodContainerListEditor({
+  value,
+  onChange,
+  idPrefix,
+  addLabel,
+}: {
+  value: unknown;
+  onChange: (json: unknown[]) => void;
+  idPrefix: string;
+  addLabel: string;
+}) {
+  const [rows, setRows] = useState<ContainerForm[]>(() =>
+    containersJsonToForms(value),
+  );
+  return (
+    <ContainerListEditor
+      rows={rows}
+      idPrefix={idPrefix}
+      addLabel={addLabel}
+      onChange={(next) => {
+        setRows(next);
+        onChange(formsToContainersJson(next));
+      }}
+    />
+  );
+}
+
 /**
  * Pod & Containers section: the cluster-wide pod/container overrides the backend
- * renders onto BOTH the FE and CN roles. serviceAccount is a text input;
- * nodeSelector / annotations / podLabels are keyed-property (key-value) editors;
- * imagePullSecrets is a comma-separated list; env / tolerations / affinity /
- * initContainers / sidecars are raw-JSON fields (invalid JSON blocks Save via the
- * surrounding `ValidityProvider`). securityContext is intentionally NOT exposed —
- * the StarRocks operator doesn't support it. Every field maps into the hook's
- * `pod` block, which flows through the same dirty/save path as the rest of the
- * form (empty sub-fields are dropped, so a blank pod is never dirty).
+ * renders onto BOTH the FE and CN roles, grouped into four sub-sections —
+ * Environment, Scheduling, Containers, Identity.
+ *
+ * env / tolerations / initContainers / sidecars are edited through STRUCTURED
+ * add-row editors (reusing the Trino config primitives via `starrocksPodShape`
+ * converters), each wrapped in a working-state component so in-progress rows
+ * survive the lossy serializers. Only `affinity` stays a raw-JSON field — its
+ * nested nodeAffinity/podAffinity shape has no compact form — so invalid JSON
+ * there (or in a container's Advanced-JSON override) still blocks Save via the
+ * surrounding `ValidityProvider`. serviceAccount is a text input; nodeSelector /
+ * annotations / podLabels are keyed-property editors; imagePullSecrets is a
+ * comma-separated list. securityContext is intentionally NOT exposed — the
+ * StarRocks operator doesn't support it. Every field maps into the hook's `pod`
+ * block, which flows through the same dirty/save path as the rest of the form
+ * (empty sub-fields are dropped, so a blank pod is never dirty).
  */
 function PodContainersSection({ cfg }: { cfg: StarRocksConfigForm }) {
   const pod: StarRocksPod = cfg.pod ?? {};
-  // Functional updater: several debounced RawJsonField editors feed the one
-  // `pod` object, so each patch must merge against the LATEST state (not the
-  // `pod` snapshot captured when this handler was created) or a same-macrotask
-  // pair of commits would clobber each other.
-  const patch = (p: Partial<StarRocksPod>) =>
+  // Functional updater: several independent editors feed the one `pod` object,
+  // so each patch must merge against the LATEST state (not the `pod` snapshot
+  // captured when this handler was created) or a same-macrotask pair of commits
+  // would clobber each other.
+  const patch: PodPatch = (p) =>
     cfg.setPod((prev) => ({ ...(prev ?? {}), ...p }));
 
   return (
-    <div className="space-y-6">
-      <div className="space-y-1.5">
-        <Label htmlFor="sr-pod-sa">Service account</Label>
-        <Input
-          id="sr-pod-sa"
-          value={pod.serviceAccount ?? ""}
-          onChange={(e) => patch({ serviceAccount: e.target.value || undefined })}
-          placeholder="default"
+    <div className="space-y-8">
+      {/* 1 · Environment */}
+      <div className="space-y-3">
+        <div className="space-y-0.5">
+          <h3 className="text-sm font-medium">Environment</h3>
+          <p className="text-xs text-muted-foreground">
+            Environment variables set on both the FE and CN containers.
+          </p>
+        </div>
+        <PodEnvEditor pod={pod} patch={patch} />
+      </div>
+
+      {/* 2 · Scheduling */}
+      <div className="space-y-4">
+        <div className="space-y-0.5">
+          <h3 className="text-sm font-medium">Scheduling</h3>
+          <p className="text-xs text-muted-foreground">
+            Where the FE and CN pods are placed.
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Node selector</Label>
+          <ConfigMapEditor
+            value={pod.nodeSelector ?? {}}
+            onChange={(v) => patch({ nodeSelector: v })}
+          />
+          <p className="text-xs text-muted-foreground">
+            Schedule pods only onto nodes matching these labels.
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Tolerations</Label>
+          <PodTolerationsEditor pod={pod} patch={patch} />
+        </div>
+
+        <RawJsonField
+          id="sr-pod-affinity"
+          label="Affinity (advanced JSON)"
+          value={pod.affinity}
+          onChange={(v) => patch({ affinity: v })}
+          placeholder='{"nodeAffinity": {}}'
         />
         <p className="text-xs text-muted-foreground">
-          ServiceAccount both the FE and CN pods run as.
+          The nested nodeAffinity/podAffinity shape has no compact form — edit as
+          raw Kubernetes JSON.
         </p>
       </div>
 
-      <div className="space-y-2">
-        <Label>Node selector</Label>
-        <ConfigMapEditor
-          value={pod.nodeSelector ?? {}}
-          onChange={(v) => patch({ nodeSelector: v })}
-        />
-        <p className="text-xs text-muted-foreground">
-          Schedule pods only onto nodes matching these labels.
-        </p>
+      {/* 3 · Containers */}
+      <div className="space-y-4">
+        <div className="space-y-0.5">
+          <h3 className="text-sm font-medium">Containers</h3>
+          <p className="text-xs text-muted-foreground">
+            Extra containers added to both the FE and CN pods.
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Init containers</Label>
+          <p className="text-xs text-muted-foreground">
+            Run to completion before the StarRocks container starts (both roles).
+          </p>
+          <PodContainerListEditor
+            value={pod.initContainers}
+            onChange={(v) => patch({ initContainers: v })}
+            idPrefix="sr-init"
+            addLabel="Add init container"
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label>Sidecars</Label>
+          <p className="text-xs text-muted-foreground">
+            Extra containers that run alongside StarRocks (both roles).
+          </p>
+          <PodContainerListEditor
+            value={pod.sidecars}
+            onChange={(v) => patch({ sidecars: v })}
+            idPrefix="sr-sidecar"
+            addLabel="Add sidecar"
+          />
+        </div>
       </div>
 
-      <div className="space-y-2">
-        <Label>Annotations</Label>
-        <ConfigMapEditor
-          value={pod.annotations ?? {}}
-          onChange={(v) => patch({ annotations: v })}
-        />
+      {/* 4 · Identity */}
+      <div className="space-y-4">
+        <div className="space-y-0.5">
+          <h3 className="text-sm font-medium">Identity</h3>
+          <p className="text-xs text-muted-foreground">
+            Service account, image-pull credentials, and pod metadata.
+          </p>
+        </div>
+
+        <div className="space-y-1.5">
+          <Label htmlFor="sr-pod-sa">Service account</Label>
+          <Input
+            id="sr-pod-sa"
+            value={pod.serviceAccount ?? ""}
+            onChange={(e) =>
+              patch({ serviceAccount: e.target.value || undefined })
+            }
+            placeholder="default"
+          />
+          <p className="text-xs text-muted-foreground">
+            ServiceAccount both the FE and CN pods run as.
+          </p>
+        </div>
+
+        <div className="space-y-1.5">
+          <Label htmlFor="sr-pod-pull-secrets">Image pull secrets</Label>
+          <CommaListInput
+            id="sr-pod-pull-secrets"
+            value={pod.imagePullSecrets}
+            onChange={(v) => patch({ imagePullSecrets: v })}
+            placeholder="regcred, other-secret"
+          />
+          <p className="text-xs text-muted-foreground">
+            Comma-separated Secret names used to pull private images.
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Pod labels</Label>
+          <ConfigMapEditor
+            value={pod.podLabels ?? {}}
+            onChange={(v) => patch({ podLabels: v })}
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label>Annotations</Label>
+          <ConfigMapEditor
+            value={pod.annotations ?? {}}
+            onChange={(v) => patch({ annotations: v })}
+          />
+        </div>
       </div>
-
-      <div className="space-y-2">
-        <Label>Pod labels</Label>
-        <ConfigMapEditor
-          value={pod.podLabels ?? {}}
-          onChange={(v) => patch({ podLabels: v })}
-        />
-      </div>
-
-      <div className="space-y-1.5">
-        <Label htmlFor="sr-pod-pull-secrets">Image pull secrets</Label>
-        <CommaListInput
-          id="sr-pod-pull-secrets"
-          value={pod.imagePullSecrets}
-          onChange={(v) => patch({ imagePullSecrets: v })}
-          placeholder="regcred, other-secret"
-        />
-        <p className="text-xs text-muted-foreground">
-          Comma-separated Secret names used to pull private images.
-        </p>
-      </div>
-
-      <RawJsonField
-        id="sr-pod-env"
-        label="Env"
-        value={pod.env}
-        onChange={(v) => patch({ env: v })}
-        placeholder='[{"name": "TZ", "value": "UTC"}]'
-      />
-
-      <RawJsonField
-        id="sr-pod-tolerations"
-        label="Tolerations"
-        value={pod.tolerations}
-        onChange={(v) => patch({ tolerations: v })}
-        placeholder='[{"key": "dedicated", "operator": "Exists"}]'
-      />
-
-      <RawJsonField
-        id="sr-pod-affinity"
-        label="Affinity"
-        value={pod.affinity}
-        onChange={(v) => patch({ affinity: v })}
-        placeholder='{"nodeAffinity": {}}'
-      />
-
-      <RawJsonField
-        id="sr-pod-init"
-        label="Init containers"
-        value={pod.initContainers}
-        onChange={(v) => patch({ initContainers: v })}
-        placeholder='[{"name": "wait", "image": "busybox:1.36"}]'
-      />
-
-      <RawJsonField
-        id="sr-pod-sidecars"
-        label="Sidecars"
-        value={pod.sidecars}
-        onChange={(v) => patch({ sidecars: v })}
-        placeholder='[{"name": "agent", "image": "agent:1.0"}]'
-      />
-
-      <p className="text-xs text-muted-foreground">
-        These pod &amp; container overrides apply to both the FE and CN roles.
-        Tolerations, affinity, env, init containers, and sidecars are raw
-        Kubernetes JSON.
-      </p>
     </div>
   );
 }

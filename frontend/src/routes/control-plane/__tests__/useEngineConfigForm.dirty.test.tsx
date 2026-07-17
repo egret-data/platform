@@ -79,8 +79,9 @@ describe("useEngineConfigForm dirty tracking", () => {
 describe("useEngineConfigForm delegation mode", () => {
   function withDelegation(mode?: "impersonate" | "jwt") {
     const e = makeEngine();
-    (e.spec as { trinoConfig: Record<string, unknown> }).trinoConfig.delegationMode =
-      mode;
+    (
+      e.spec as unknown as { trinoConfig: Record<string, unknown> }
+    ).trinoConfig.delegationMode = mode;
     return e;
   }
 
