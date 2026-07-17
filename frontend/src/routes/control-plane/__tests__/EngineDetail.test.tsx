@@ -264,9 +264,9 @@ describe("EngineDetail — header metadata + page-level actions", () => {
     expect(
       screen.getByText("analytics-trino-fe-service.engines:9030"),
     ).toBeInTheDocument();
-    // delegation mode — none configured (shown in the header meta and the
-    // Overview KPI strip's Auth item, so match at least one instance).
-    expect(screen.getAllByText(/no delegation/i).length).toBeGreaterThan(0);
+    // delegation mode — none configured. Rendered in exactly two places now:
+    // the header meta row and the Overview KPI strip's Auth item.
+    expect(screen.getAllByText(/no delegation/i)).toHaveLength(2);
   });
 
   test("Restart lives in the header (single instance) and Delete is in the ⋯ menu", async () => {
@@ -357,5 +357,28 @@ describe("EngineDetail — Overview KPI strip", () => {
     expect(screen.getByText("Coord 1 · Worker 2")).toBeInTheDocument();
     // engineAuthLabel → "JWT auth" (rendered in the strip and the header meta).
     expect(screen.getAllByText("JWT auth").length).toBeGreaterThan(0);
+  });
+
+  test("Trino Overview never renders 'undefined' when replica counts are absent", async () => {
+    // A DTO that omits coordinatorReplicas/workerReplicas (the fields are only
+    // "surfaced back" as a subset, so a real payload can lack them).
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      spec: {
+        cpuMin: "1",
+        cpuMax: "2",
+        memory: "4Gi",
+        imageVersion: "latest",
+        trinoConfig: { coordinator: {}, worker: {} },
+      },
+      status: { phase: "running", message: null, pods: [] },
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    // The replicas KPI degrades to em-dashes, never the literal "undefined".
+    expect(screen.getByText("Coord — · Worker —")).toBeInTheDocument();
+    expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();
   });
 });

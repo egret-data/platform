@@ -555,10 +555,14 @@ function EngineSummaryStrip({ engine }: { engine: EngineWithStatus }) {
   const { pods } = engine.status;
   const readyPods = pods.filter((p) => p.ready).length;
 
+  // Both branches defend every replica field: these come off the engine DTO,
+  // which may omit them, so a nullish (not falsy — a real 0 must survive)
+  // fallback keeps the KPI from rendering the literal "undefined".
   const sr = engine.spec.starrocksConfig;
+  const num = (n: number | undefined) => n ?? "—";
   const replicas = isStarRocksType(engine.type)
-    ? `FE ${sr?.feReplicas ?? 1} · CN ${sr?.cnReplicas ?? 1}`
-    : `Coord ${engine.spec.coordinatorReplicas} · Worker ${engine.spec.workerReplicas}`;
+    ? `FE ${num(sr?.feReplicas)} · CN ${num(sr?.cnReplicas)}`
+    : `Coord ${num(engine.spec.coordinatorReplicas)} · Worker ${num(engine.spec.workerReplicas)}`;
 
   const catalogCount = catalogsQ.data?.length ?? "—";
   const workspaceCount =
