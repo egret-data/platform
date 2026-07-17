@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { Kv } from "../EngineResourceGroups";
+import { diffConfig } from "../config/configDiff";
 import type { TolerationForm } from "../useEngineConfigForm";
 import {
   containersJsonToForms,
@@ -168,5 +169,61 @@ describe("containers <-> ContainerForm", () => {
     const json = ["weird-entry"];
     const forms = containersJsonToForms(json);
     expect(formsToContainersJson(forms)).toEqual(json);
+  });
+});
+
+// The real dirty-check (config/configDiff) is order-sensitive at the leaf level,
+// so these assert a seed -> forms -> json round-trip yields NO config diff.
+describe("round-trip is not spuriously dirty (diffConfig)", () => {
+  const rtContainers = (seed: unknown) =>
+    formsToContainersJson(containersJsonToForms(seed));
+  const rtTolerations = (seed: unknown) =>
+    rowsToTolerationsJson(tolerationsJsonToRows(seed));
+
+  it("container with unmodeled keys in non-leading position", () => {
+    const seed = [
+      {
+        name: "c",
+        image: "i",
+        resources: { limits: { cpu: "1" } },
+        imagePullPolicy: "IfNotPresent",
+      },
+    ];
+    expect(diffConfig(seed, rtContainers(seed))).toEqual([]);
+  });
+
+  it("toleration in non-canonical key order", () => {
+    const seed = [{ effect: "NoSchedule", key: "k", operator: "Equal", value: "v" }];
+    expect(diffConfig(seed, rtTolerations(seed))).toEqual([]);
+  });
+
+  it("FIX 1: malformed env (string) is preserved, not dropped", () => {
+    const seed = [{ name: "c", image: "i", env: "not-an-array" }];
+    expect(diffConfig(seed, rtContainers(seed))).toEqual([]);
+  });
+
+  it("FIX 1: malformed command (mixed array) is preserved", () => {
+    const seed = [{ name: "c", image: "i", command: ["sh", 1] }];
+    expect(diffConfig(seed, rtContainers(seed))).toEqual([]);
+  });
+
+  it("FIX 2: env with valueFrom (secretKeyRef) is preserved verbatim", () => {
+    const seed = [
+      {
+        name: "c",
+        image: "i",
+        env: [{ name: "PW", valueFrom: { secretKeyRef: { name: "s", key: "k" } } }],
+      },
+    ];
+    expect(diffConfig(seed, rtContainers(seed))).toEqual([]);
+  });
+
+  it("tolerationSeconds 0 survives (finite, not omitted)", () => {
+    const seed = [{ key: "k", operator: "Equal", tolerationSeconds: 0 }];
+    const rows = tolerationsJsonToRows(seed);
+    expect(rows[0].tolerationSeconds).toBe("0");
+    expect(rowsToTolerationsJson(rows)).toEqual([
+      { key: "k", operator: "Equal", tolerationSeconds: 0 },
+    ]);
   });
 });

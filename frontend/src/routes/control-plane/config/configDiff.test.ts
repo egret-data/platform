@@ -34,3 +34,15 @@ test("identical configs produce no diff", () => {
   const cfg = { coordinator: { replicas: 1 }, logLevel: "INFO" };
   expect(diffConfig(cfg, { ...cfg, coordinator: { replicas: 1 } })).toEqual([]);
 });
+
+test("object-key order inside an array leaf is not a change", () => {
+  expect(diffConfig([{ a: 1, b: 2 }], [{ b: 2, a: 1 }])).toEqual([]);
+});
+
+test("a real value change inside an array leaf is still a change", () => {
+  expect(diffConfig([{ a: 1 }], [{ a: 2 }]).length).toBe(1);
+});
+
+test("array element order remains significant", () => {
+  expect(diffConfig([1, 2], [2, 1]).length).toBe(1);
+});

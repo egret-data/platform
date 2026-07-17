@@ -15,8 +15,8 @@
  *     round-tripped through the `rawOverride` field, so container blocks survive
  *     verbatim. A non-object list entry is preserved whole via `rawOverride`.
  *   - Serializers omit empty fields (empty string / empty array / empty record)
- *     so a seed -> no-edit -> serialize cycle stays byte-identical and isn't
- *     spuriously dirty.
+ *     so a seed -> no-edit -> serialize cycle is equal under canonical key order
+ *     (configDiff compares key-order-insensitively) and isn't spuriously dirty.
  */
 
 import type { Kv } from "./EngineResourceGroups";
@@ -42,11 +42,35 @@ function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((x) => typeof x === "string");
 }
 
+/**
+ * True when every entry is a *simple* k8s env var — `{name, value}` strings and
+ * nothing else. A `valueFrom` (secretKeyRef, etc.) or any extra key means the
+ * array can't be losslessly folded into a `Record<string,string>`, so such an
+ * array is preserved verbatim via the container `rawOverride` instead.
+ */
+function isSimpleEnvArray(v: unknown): boolean {
+  return (
+    Array.isArray(v) &&
+    v.every(
+      (e) =>
+        isPlainObject(e) &&
+        typeof e.name === "string" &&
+        typeof e.value === "string" &&
+        Object.keys(e).length === 2,
+    )
+  );
+}
+
 // ── env: [{name,value}] <-> Kv[] (Kv.key = name, Kv.value = value) ────────────
 
 /**
  * k8s `env` array -> `Kv[]`. Preserves order. Returns `[]` for any non-array
  * (malformed) input; the caller keeps the raw value in that case.
+ *
+ * NOTE this pod-level Environment editor is name/value only by design — a k8s
+ * `valueFrom` (secretKeyRef, etc.) is not representable here and is not handled
+ * at this level. (Container env, by contrast, preserves `valueFrom` verbatim via
+ * the container `rawOverride`; see `jsonToContainerForm`.)
  */
 export function envJsonToKv(env: unknown): Kv[] {
   if (!Array.isArray(env)) return [];
@@ -138,17 +162,6 @@ export function rowsToTolerationsJson(rows: TolerationForm[]): unknown[] {
 
 // ── containers: [k8s Container] <-> ContainerForm[] ──────────────────────────
 
-// Keys the ContainerForm models directly; everything else is preserved via the
-// raw override so unknown/extra container keys survive a round-trip.
-const MODELED_CONTAINER_KEYS = new Set([
-  "name",
-  "image",
-  "command",
-  "args",
-  "env",
-  "volumeMounts",
-]);
-
 function jsonToContainerForm(c: unknown): ContainerForm {
   // Non-object entry: preserve whole thing verbatim via rawOverride.
   if (!isPlainObject(c)) {
@@ -171,9 +184,10 @@ function jsonToContainerForm(c: unknown): ContainerForm {
     form.args = rest.args;
     delete rest.args;
   }
-  // env: only consume it when it's a well-formed k8s array; otherwise leave it
-  // in `rest` so a malformed env survives via rawOverride.
-  if (Array.isArray(rest.env)) {
+  // env: only fold into the editable Record when EVERY entry is a simple
+  // name/value pair. An array containing `valueFrom` (secretKeyRef, etc.) or any
+  // extra key is left in `rest` so it round-trips verbatim via rawOverride.
+  if (isSimpleEnvArray(rest.env)) {
     form.env = kvToRecord(envJsonToKv(rest.env));
     if (Object.keys(form.env).length === 0) delete form.env;
     delete rest.env;
@@ -185,10 +199,9 @@ function jsonToContainerForm(c: unknown): ContainerForm {
     delete rest.volumeMounts;
   }
 
-  // Anything left is unmodeled -> raw override.
-  for (const k of Object.keys(rest)) {
-    if (MODELED_CONTAINER_KEYS.has(k)) delete rest[k];
-  }
+  // Whatever survives in `rest` is either unmodeled OR a malformed/unconsumed
+  // modeled key (e.g. `env: "x"`, `command: ["sh", 1]`). Both flow to
+  // rawOverride so no container data is dropped.
   if (Object.keys(rest).length > 0) form.rawOverride = rest;
 
   return form;
