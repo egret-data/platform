@@ -69,6 +69,7 @@ export function TolerationsEditor({
             <Input
               value={t.key}
               placeholder="key"
+              aria-label={`Toleration ${i + 1} key`}
               onChange={(e) =>
                 onChange(
                   rows.map((r, j) => (j === i ? { ...r, key: e.target.value } : r)),
@@ -78,6 +79,7 @@ export function TolerationsEditor({
             <Input
               value={t.operator}
               placeholder="Equal / Exists"
+              aria-label={`Toleration ${i + 1} operator`}
               onChange={(e) =>
                 onChange(
                   rows.map((r, j) =>
@@ -89,6 +91,7 @@ export function TolerationsEditor({
             <Input
               value={t.value}
               placeholder="value"
+              aria-label={`Toleration ${i + 1} value`}
               onChange={(e) =>
                 onChange(
                   rows.map((r, j) => (j === i ? { ...r, value: e.target.value } : r)),
@@ -105,7 +108,7 @@ export function TolerationsEditor({
                 )
               }
             >
-              <SelectTrigger className="w-full">
+              <SelectTrigger className="w-full" aria-label={`Toleration ${i + 1} effect`}>
                 <SelectValue placeholder="effect" />
               </SelectTrigger>
               <SelectContent>
@@ -121,6 +124,7 @@ export function TolerationsEditor({
               type="number"
               value={t.tolerationSeconds}
               placeholder="tolerationSeconds"
+              aria-label={`Toleration ${i + 1} tolerationSeconds`}
               onChange={(e) =>
                 onChange(
                   rows.map((r, j) =>
