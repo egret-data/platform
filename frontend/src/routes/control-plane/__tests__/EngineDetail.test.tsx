@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -504,6 +504,195 @@ describe("EngineDetail — StatusCard states", () => {
 
     expect(await screen.findByText(/no pods reported/i)).toBeInTheDocument();
     expect(screen.queryByText("No pods yet.")).not.toBeInTheDocument();
+  });
+});
+
+describe("EngineDetail — engine-aware Monitor tab", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
+      >,
+    );
+  });
+
+  test("StarRocks Monitor renders the pod/cluster health view, not the Trino query monitor", async () => {
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      type: "starrocks",
+      spec: {
+        coordinatorReplicas: 0,
+        workerReplicas: 0,
+        cpuMin: "",
+        cpuMax: "",
+        memory: "",
+        imageVersion: "starrocks/fe-ubuntu:3.3-latest",
+        starrocksConfig: {
+          feReplicas: 1,
+          cnReplicas: 2,
+          cnAutoscaling: { minReplicas: 2, maxReplicas: 5, targetCpuPercent: 70 },
+        },
+      },
+      status: {
+        phase: "running",
+        message: null,
+        pods: [
+          { name: "sr1-fe-0", phase: "Running", ready: true },
+          { name: "sr1-cn-0", phase: "Running", ready: false },
+        ],
+      },
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+    await user.click(screen.getByRole("tab", { name: "Monitor" }));
+
+    // Health view: pod rows sourced from status.pods.
+    expect(await screen.findByText("sr1-fe-0")).toBeInTheDocument();
+    expect(screen.getByText("sr1-cn-0")).toBeInTheDocument();
+
+    // FE/CN replica summary + autoscaling line.
+    expect(screen.getByText("FE replicas")).toBeInTheDocument();
+    expect(screen.getByText("CN replicas")).toBeInTheDocument();
+    expect(screen.getByText(/autoscaling: 2.*5.*70% cpu/i)).toBeInTheDocument();
+
+    // Honest coming-soon note.
+    expect(
+      screen.getByText(/query-level monitoring for starrocks is coming soon/i),
+    ).toBeInTheDocument();
+
+    // The Trino query monitor is NOT rendered — no query API calls, no query chrome.
+    expect(api.listQueries).not.toHaveBeenCalled();
+    expect(api.getCluster).not.toHaveBeenCalled();
+    expect(
+      screen.queryByText(/live queries on the coordinator/i),
+    ).not.toBeInTheDocument();
+  });
+
+  test("StarRocks Monitor shows the phase-aware empty state when there are no pods", async () => {
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      type: "starrocks",
+      spec: {
+        coordinatorReplicas: 0,
+        workerReplicas: 0,
+        cpuMin: "",
+        cpuMax: "",
+        memory: "",
+        imageVersion: "starrocks/fe-ubuntu:3.3-latest",
+        starrocksConfig: { feReplicas: 1, cnReplicas: 1 },
+      },
+      status: { phase: "Provisioning", message: null, pods: [] },
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+    await user.click(screen.getByRole("tab", { name: "Monitor" }));
+
+    expect(
+      await screen.findByText(/waiting for the operator to create pods/i),
+    ).toBeInTheDocument();
+    // Still the health view (coming-soon note), never the Trino monitor.
+    expect(
+      screen.getByText(/query-level monitoring for starrocks is coming soon/i),
+    ).toBeInTheDocument();
+    expect(api.listQueries).not.toHaveBeenCalled();
+  });
+
+  test("StarRocks Monitor omits the Autoscaling line when cnAutoscaling is the disabled sentinel", async () => {
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      type: "starrocks",
+      spec: {
+        coordinatorReplicas: 0,
+        workerReplicas: 0,
+        cpuMin: "",
+        cpuMax: "",
+        memory: "",
+        imageVersion: "starrocks/fe-ubuntu:3.3-latest",
+        // #266 disable sentinel: maxReplicas 0 → autoscaling OFF.
+        starrocksConfig: { feReplicas: 1, cnReplicas: 1, cnAutoscaling: { maxReplicas: 0 } },
+      },
+      status: {
+        phase: "running",
+        message: null,
+        pods: [{ name: "sr1-fe-0", phase: "Running", ready: true }],
+      },
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+    await user.click(screen.getByRole("tab", { name: "Monitor" }));
+
+    expect(await screen.findByText("sr1-fe-0")).toBeInTheDocument();
+    expect(screen.queryByText(/^autoscaling:/i)).not.toBeInTheDocument();
+  });
+
+  test("StarRocks Monitor degrades the FE/CN replica summary to em-dashes when starrocksConfig is absent", async () => {
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      type: "starrocks",
+      spec: {
+        coordinatorReplicas: 0,
+        workerReplicas: 0,
+        cpuMin: "",
+        cpuMax: "",
+        memory: "",
+        imageVersion: "starrocks/fe-ubuntu:3.3-latest",
+        // No starrocksConfig at all — the summary must not crash or print "undefined".
+      },
+      status: {
+        phase: "running",
+        message: null,
+        pods: [{ name: "sr1-fe-0", phase: "Running", ready: true }],
+      },
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+    await user.click(screen.getByRole("tab", { name: "Monitor" }));
+
+    expect(await screen.findByText("FE replicas")).toBeInTheDocument();
+    expect(screen.getByText("CN replicas")).toBeInTheDocument();
+    // Both replica values degrade to em-dashes, never the literal "undefined".
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();
+  });
+
+  test("Trino Monitor still renders the Trino query monitor (EngineMonitor)", async () => {
+    mockGetEngine(ENGINE.spec);
+    vi.mocked(api.getCluster).mockResolvedValue({
+      running: 0,
+      queued: 0,
+      blocked: 0,
+      nodes: [],
+    } as unknown as Awaited<ReturnType<typeof api.getCluster>>);
+    vi.mocked(api.listQueries).mockResolvedValue(
+      [] as unknown as Awaited<ReturnType<typeof api.listQueries>>,
+    );
+
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+    await user.click(screen.getByRole("tab", { name: "Monitor" }));
+
+    // The Trino monitor chrome renders and it polls the Trino REST proxy.
+    expect(
+      await screen.findByText(/live queries on the coordinator/i),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(api.listQueries).toHaveBeenCalled());
+    expect(api.getCluster).toHaveBeenCalled();
+
+    // The StarRocks health view is NOT rendered.
+    expect(
+      screen.queryByText(/query-level monitoring for starrocks is coming soon/i),
+    ).not.toBeInTheDocument();
   });
 });
 

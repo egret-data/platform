@@ -463,7 +463,17 @@ function EngineTabs({
       </TabsContent>
 
       <TabsContent value="monitor">
-        <EngineMonitor engineId={engineId} />
+        {/* The Trino query monitor (cluster info + running/queued queries + kill)
+            has no StarRocks equivalent — StarRocks exposes no such query API. So
+            StarRocks gets a pod/cluster health view built from the k8s status we
+            already poll (no new API calls); every other kind (incl. unknown/
+            future kinds) defaults to the Trino query monitor. Polarity matches
+            the Settings tab (keys on `starrocks`, else Trino). */}
+        {engine.type === "starrocks" ? (
+          <StarRocksMonitor engine={engine} engineId={engineId} />
+        ) : (
+          <EngineMonitor engineId={engineId} />
+        )}
       </TabsContent>
     </Tabs>
   );
@@ -638,11 +648,24 @@ function StatusEmptyState({
   );
 }
 
-function StatusCard({
-  status,
+/**
+ * A pod health table — one row per pod (name · phase · ready) with per-pod
+ * **Logs** / **Exec** actions — plus the three dialogs those actions drive
+ * ({@link PodLogsDialog}, {@link PodTerminalDialog}, and the Exec-confirm
+ * `AlertDialog`) and their local state. Shared verbatim by the Overview
+ * {@link StatusCard} and the StarRocks {@link StarRocksMonitor} so the two never
+ * drift.
+ *
+ * Renders the table only — callers own the empty state (they branch to
+ * {@link StatusEmptyState} when `pods` is empty), so this is never asked to
+ * render an empty table. The pod DTO carries only `{ name, phase, ready }`
+ * (no restart-count/age), so those columns are intentionally absent.
+ */
+function PodHealthTable({
+  pods,
   engineId,
 }: {
-  status: EngineStatus;
+  pods: EngineStatus["pods"];
   engineId: string;
 }) {
   const [logsPod, setLogsPod] = useState<string | null>(null);
@@ -650,69 +673,55 @@ function StatusCard({
   const [execConfirmPod, setExecConfirmPod] = useState<string | null>(null);
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="space-y-1.5">
-          <CardTitle className="text-lg">Status</CardTitle>
-          <CardDescription>
-            {status.message ?? `Phase: ${status.phase}`}
-          </CardDescription>
-        </div>
-      </CardHeader>
-      <CardContent>
-        {status.pods.length === 0 ? (
-          <StatusEmptyState phase={status.phase} message={status.message} />
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Pod</TableHead>
-                <TableHead>Phase</TableHead>
-                <TableHead>Ready</TableHead>
-                <TableHead className="text-right">
-                  <span className="sr-only">Actions</span>
-                </TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {status.pods.map((pod) => (
-                <TableRow
-                  key={pod.name}
-                  className="cursor-default transition-colors hover:bg-muted/50 motion-reduce:transition-none"
+    <>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Pod</TableHead>
+            <TableHead>Phase</TableHead>
+            <TableHead>Ready</TableHead>
+            <TableHead className="text-right">
+              <span className="sr-only">Actions</span>
+            </TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {pods.map((pod) => (
+            <TableRow
+              key={pod.name}
+              className="cursor-default transition-colors hover:bg-muted/50 motion-reduce:transition-none"
+            >
+              <TableCell className="font-mono text-xs tabular-nums">
+                {pod.name}
+              </TableCell>
+              <TableCell>
+                <Badge variant={phaseVariant(pod.phase)}>{pod.phase}</Badge>
+              </TableCell>
+              <TableCell>
+                <Badge variant={pod.ready ? "success" : "secondary"}>
+                  {pod.ready ? "Ready" : "Not ready"}
+                </Badge>
+              </TableCell>
+              <TableCell className="text-right">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setLogsPod(pod.name)}
                 >
-                  <TableCell className="font-mono text-xs tabular-nums">
-                    {pod.name}
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant={phaseVariant(pod.phase)}>{pod.phase}</Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant={pod.ready ? "success" : "secondary"}>
-                      {pod.ready ? "Ready" : "Not ready"}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setLogsPod(pod.name)}
-                    >
-                      Logs
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setExecConfirmPod(pod.name)}
-                    >
-                      Exec
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        )}
-      </CardContent>
+                  Logs
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setExecConfirmPod(pod.name)}
+                >
+                  Exec
+                </Button>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
 
       <PodLogsDialog
         engineId={engineId}
@@ -752,7 +761,118 @@ function StatusCard({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+    </>
+  );
+}
+
+function StatusCard({
+  status,
+  engineId,
+}: {
+  status: EngineStatus;
+  engineId: string;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <div className="space-y-1.5">
+          <CardTitle className="text-lg">Status</CardTitle>
+          <CardDescription>
+            {status.message ?? `Phase: ${status.phase}`}
+          </CardDescription>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {status.pods.length === 0 ? (
+          <StatusEmptyState phase={status.phase} message={status.message} />
+        ) : (
+          <PodHealthTable pods={status.pods} engineId={engineId} />
+        )}
+      </CardContent>
     </Card>
+  );
+}
+
+/**
+ * Control Plane → Engine → Monitor tab, StarRocks branch.
+ *
+ * StarRocks exposes no live-query REST API, so the Trino {@link EngineMonitor}
+ * (running/queued queries + stage tree + kill) has no equivalent here. Instead
+ * we render a **pod/cluster health** view built entirely from the k8s status
+ * (`engine.status`) and spec (`engine.spec`) the detail query already polls
+ * every 5s — this component issues **no new API calls**.
+ *
+ * Shows: a cluster summary (phase · pod readiness · FE/CN replicas, plus a CN
+ * autoscaling line when configured), a per-pod health table (name · phase ·
+ * ready, with Logs/Exec per pod reusing {@link PodLogsDialog}/
+ * {@link PodTerminalDialog}), the phase-aware {@link StatusEmptyState} while no
+ * pods exist yet, and an honest "query-level monitoring coming soon" footer.
+ *
+ * The per-pod table + its Logs/Exec dialogs are the shared
+ * {@link PodHealthTable} (also used by the Overview {@link StatusCard}).
+ */
+function StarRocksMonitor({
+  engine,
+  engineId,
+}: {
+  engine: EngineWithStatus;
+  engineId: string;
+}) {
+  const { status, spec } = engine;
+  const sr = spec.starrocksConfig;
+  const num = (n: number | undefined) => n ?? "—";
+  const readyPods = status.pods.filter((p) => p.ready).length;
+
+  // CN autoscaling is active only when configured AND maxReplicas > 0
+  // (`{ maxReplicas: 0 }` is the stored "disabled" sentinel).
+  const autoscaling =
+    sr?.cnAutoscaling && sr.cnAutoscaling.maxReplicas > 0
+      ? sr.cnAutoscaling
+      : null;
+
+  return (
+    <div className="space-y-5">
+      <div className="space-y-1.5">
+        <SummaryStrip
+          items={[
+            { label: "phase", value: status.phase },
+            { label: "pods", value: `${readyPods}/${status.pods.length}` },
+            { label: "FE replicas", value: num(sr?.feReplicas) },
+            { label: "CN replicas", value: num(sr?.cnReplicas) },
+          ]}
+        />
+        {autoscaling && (
+          <p className="text-xs text-muted-foreground">
+            Autoscaling: {autoscaling.minReplicas ?? 0}–{autoscaling.maxReplicas}
+            {autoscaling.targetCpuPercent != null
+              ? ` @ ${autoscaling.targetCpuPercent}% CPU`
+              : ""}
+          </p>
+        )}
+      </div>
+
+      <Card>
+        <CardHeader>
+          <div className="space-y-1.5">
+            <CardTitle className="text-lg">Pods</CardTitle>
+            <CardDescription>
+              {status.message ?? `Phase: ${status.phase}`}
+            </CardDescription>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {status.pods.length === 0 ? (
+            <StatusEmptyState phase={status.phase} message={status.message} />
+          ) : (
+            <PodHealthTable pods={status.pods} engineId={engineId} />
+          )}
+        </CardContent>
+      </Card>
+
+      <p className="text-xs text-muted-foreground">
+        Query-level monitoring for StarRocks is coming soon.
+      </p>
+    </div>
   );
 }
 
