@@ -502,6 +502,11 @@ pub struct StarRocksConfig {
     pub cn_autoscaling: Option<CnAutoscaling>,
     /// Pod- and container-level scheduling / customization; `None` = defaults.
     pub pod: Option<StarRocksPod>,
+    /// FE `root` account password set in-cluster via the operator-style
+    /// initpwd Secret/ConfigMap/Job (see egret-orchestrator's
+    /// `starrocks_initpwd_*`). `None`/empty = legacy passwordless root (no
+    /// initpwd resources templated). Minted by the create path (T3).
+    pub root_password: Option<String>,
 }
 
 /// Delegation/security wiring for a provisioned StarRocks. `None` on
@@ -557,6 +562,14 @@ impl std::fmt::Debug for StarRocksConfig {
             .field("cn_config", &self.cn_config)
             .field("cn_autoscaling", &self.cn_autoscaling)
             .field("pod", &self.pod)
+            .field(
+                "root_password",
+                if self.root_password.is_some() {
+                    &"<redacted>"
+                } else {
+                    &"None"
+                },
+            )
             .finish()
     }
 }
@@ -637,6 +650,7 @@ mod tests {
             cn_config: Default::default(),
             cn_autoscaling: None,
             pod: None,
+            root_password: None,
         };
         assert_eq!(s.fe_replicas, 1);
     }

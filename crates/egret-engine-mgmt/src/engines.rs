@@ -2123,6 +2123,7 @@ async fn build_starrocks_provision_req(
             cn_config,
             cn_autoscaling,
             pod,
+            root_password: None,
         }),
     };
     Ok((req, delegation_bootstrap))

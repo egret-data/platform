@@ -247,6 +247,131 @@ pub fn starrocks_ssl_secret(spec: &EngineSpec) -> Option<Value> {
     }))
 }
 
+/// In-pod path the initpwd script is mounted at and invoked from (matches the
+/// kube-starrocks operator's `init-pwd` Job).
+const INITPWD_SCRIPT_PATH: &str = "/opt/starrocks/fe_initpwd.sh";
+/// ConfigMap data key / mount subPath for the initpwd script.
+const INITPWD_SCRIPT_KEY: &str = "fe_initpwd.sh";
+/// FE MySQL-protocol query port the initpwd script connects to.
+const INITPWD_FE_QUERY_PORT: &str = "9030";
+
+/// The FE `root` password, or `None` when the engine is legacy/passwordless
+/// (no `root_password`, or an explicitly-empty one). Central gate for all three
+/// initpwd builders.
+fn root_password(spec: &EngineSpec) -> Option<&str> {
+    spec.starrocks
+        .as_ref()
+        .and_then(|s| s.root_password.as_deref())
+        .filter(|p| !p.is_empty())
+}
+
+/// `{name}-initpwd-secret` Opaque Secret carrying the root password under
+/// `stringData.password`. `None` when the engine has no root password
+/// configured (legacy/passwordless) — nothing is templated.
+pub fn starrocks_root_password_secret(spec: &EngineSpec) -> Option<Value> {
+    let pw = root_password(spec)?;
+    Some(json!({
+        "apiVersion": "v1", "kind": "Secret",
+        "type": "Opaque",
+        "metadata": { "name": format!("{}-initpwd-secret", spec.name), "namespace": spec.namespace,
+                      "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
+        "stringData": { "password": pw }
+    }))
+}
+
+/// `{name}-initpwd-shell` ConfigMap carrying `fe_initpwd.sh` — the operator's
+/// idempotent SET-PASSWORD script (copied VERBATIM from kube-starrocks's
+/// `init-pwd/configmap.yaml`; error codes `1045`/`1064` are treated as
+/// "already changed" and exit 0). `None` when no root password.
+pub fn starrocks_initpwd_configmap(spec: &EngineSpec) -> Option<Value> {
+    root_password(spec)?;
+    // VERBATIM from kube-starrocks helm-charts
+    // charts/kube-starrocks/charts/starrocks/templates/init-pwd/configmap.yaml.
+    let script = r#"#!/bin/bash
+
+# ensure `mysql` command can be ended with 30 seconds
+# Change the root password during initial installation
+init_pwd_sql="SET PASSWORD = PASSWORD('$INIT_PWD');"
+success=`mysql --connect-timeout 30 -h $1 -P $2 -u root --skip-column-names --batch -e "$init_pwd_sql" 2>&1`
+if [ $? -ne 0 ] ; then
+  echo $success
+  errcode=`echo $success | awk -F " " '{print $2}'`
+  echo "error code: $errcode"
+
+  # Password error, believed to have been changed, exiting normally
+  if [[ $errcode = '1045' || $errcode = '1064' ]] ; then
+    echo "Password error, believed to have been changed, exiting normally"
+    exit 0
+  fi
+
+  # Other unsuccessful errors, abnormal exit
+  echo "Other unsuccessful errors, abnormal exit"
+  exit 1
+
+fi
+
+echo "Successfully modified password"
+exit 0
+"#;
+    Some(json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": { "name": format!("{}-initpwd-shell", spec.name), "namespace": spec.namespace,
+                      "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
+        "data": { INITPWD_SCRIPT_KEY: script }
+    }))
+}
+
+/// `{name}-initpwd` batch/v1 Job that runs `fe_initpwd.sh` against the FE
+/// service in-cluster to set root's password — the egret equivalent of the
+/// operator's `init-pwd` Job. Retries (`backoffLimit: 10`, `OnFailure`) until
+/// the FE is up. `None` when no root password.
+///
+/// The script is mounted read-only from the `{name}-initpwd-shell` ConfigMap
+/// via a `subPath` single-file projection (as the operator does), and the
+/// password is injected as `INIT_PWD` from the `{name}-initpwd-secret` Secret.
+/// Unlike the operator (which targets `{name}-fe-0.{name}-fe-search`), egret
+/// targets the FE Service DNS name `{name}-fe-service.{namespace}` so the Job
+/// resolves the FE regardless of pod ordinal.
+pub fn starrocks_initpwd_job(spec: &EngineSpec) -> Option<Value> {
+    root_password(spec)?;
+    let sr = spec.starrocks.as_ref()?;
+    let secret_name = format!("{}-initpwd-secret", spec.name);
+    let cm_name = format!("{}-initpwd-shell", spec.name);
+    let fe_host = format!("{}-fe-service.{}", spec.name, spec.namespace);
+    Some(json!({
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": { "name": format!("{}-initpwd", spec.name), "namespace": spec.namespace,
+                      "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
+        "spec": {
+            "backoffLimit": 10,
+            "template": {
+                "spec": {
+                    "restartPolicy": "OnFailure",
+                    "containers": [{
+                        "name": "initpwd",
+                        "image": sr.fe_image,
+                        "command": ["/bin/bash"],
+                        "args": [INITPWD_SCRIPT_PATH, fe_host, INITPWD_FE_QUERY_PORT],
+                        "env": [{
+                            "name": "INIT_PWD",
+                            "valueFrom": { "secretKeyRef": { "name": secret_name, "key": "password" } },
+                        }],
+                        "volumeMounts": [{
+                            "name": "initpwd-script",
+                            "mountPath": INITPWD_SCRIPT_PATH,
+                            "subPath": INITPWD_SCRIPT_KEY,
+                        }],
+                    }],
+                    "volumes": [{
+                        "name": "initpwd-script",
+                        "configMap": { "name": cm_name, "defaultMode": 0o755 },
+                    }],
+                }
+            }
+        }
+    }))
+}
+
 /// Name of the writable `storageVolumes` entry (see `starrocks_cluster_cr`)
 /// the build-keystore init-container writes `keystore` into and the FE main
 /// container reads `ssl_keystore_location` from.
@@ -799,6 +924,7 @@ mod tests {
                 cn_config: Default::default(),
                 cn_autoscaling: None,
                 pod: None,
+                root_password: None,
             }),
         }
     }
@@ -1463,5 +1589,107 @@ mod tests {
             kube.applied.lock().unwrap().is_empty(),
             "restart uses merge-patch, not full apply"
         );
+    }
+
+    /// `sample_sr_spec` with the FE `root` password set — the fixture for the
+    /// initpwd Secret/ConfigMap/Job builders.
+    fn sample_sr_spec_with_root_pw() -> EngineSpec {
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().root_password = Some("s3cr3t-root".into());
+        spec
+    }
+
+    /// RP-T1 TDD: no root password (legacy passwordless) → all three initpwd
+    /// builders return `None` (nothing new is templated for existing engines).
+    #[test]
+    fn initpwd_none_when_no_root_password() {
+        let spec = sample_sr_spec();
+        assert!(starrocks_root_password_secret(&spec).is_none());
+        assert!(starrocks_initpwd_configmap(&spec).is_none());
+        assert!(starrocks_initpwd_job(&spec).is_none());
+
+        // An explicitly-empty password is also treated as "no password".
+        let mut empty = sample_sr_spec();
+        empty.starrocks.as_mut().unwrap().root_password = Some(String::new());
+        assert!(starrocks_root_password_secret(&empty).is_none());
+        assert!(starrocks_initpwd_configmap(&empty).is_none());
+        assert!(starrocks_initpwd_job(&empty).is_none());
+    }
+
+    /// The Secret is an Opaque `{name}-initpwd-secret` carrying the root
+    /// password under `stringData.password`, with egret's managed-by labels.
+    #[test]
+    fn initpwd_secret_shape() {
+        let spec = sample_sr_spec_with_root_pw();
+        let secret = starrocks_root_password_secret(&spec).expect("secret present when pw set");
+        assert_eq!(secret["kind"], "Secret");
+        assert_eq!(secret["type"], "Opaque");
+        assert_eq!(secret["metadata"]["name"], "sr1-initpwd-secret");
+        assert_eq!(secret["metadata"]["namespace"], "egret-engines");
+        assert_eq!(
+            secret["metadata"]["labels"]["app.kubernetes.io/managed-by"],
+            "egret"
+        );
+        assert_eq!(secret["stringData"]["password"], "s3cr3t-root");
+    }
+
+    /// The ConfigMap is `{name}-initpwd-shell` and carries the operator's
+    /// verbatim idempotent `fe_initpwd.sh` (SET PASSWORD + 1045/1064 branch).
+    #[test]
+    fn initpwd_configmap_carries_script() {
+        let spec = sample_sr_spec_with_root_pw();
+        let cm = starrocks_initpwd_configmap(&spec).expect("configmap present when pw set");
+        assert_eq!(cm["kind"], "ConfigMap");
+        assert_eq!(cm["metadata"]["name"], "sr1-initpwd-shell");
+        let script = cm["data"]["fe_initpwd.sh"].as_str().unwrap();
+        assert!(script.contains("SET PASSWORD = PASSWORD('$INIT_PWD');"));
+        assert!(script.contains("--connect-timeout 30 -h $1 -P $2 -u root"));
+        // Idempotency: already-changed password (1045) or syntax (1064) exits 0.
+        assert!(script.contains("1045"));
+        assert!(script.contains("1064"));
+    }
+
+    /// The Job is a batch/v1 `{name}-initpwd` running the script against the FE
+    /// service in-cluster, with INIT_PWD from the initpwd Secret and the script
+    /// mounted from the initpwd ConfigMap.
+    #[test]
+    fn initpwd_job_shape() {
+        let spec = sample_sr_spec_with_root_pw();
+        let job = starrocks_initpwd_job(&spec).expect("job present when pw set");
+        assert_eq!(job["apiVersion"], "batch/v1");
+        assert_eq!(job["kind"], "Job");
+        assert_eq!(job["metadata"]["name"], "sr1-initpwd");
+        assert_eq!(job["metadata"]["namespace"], "egret-engines");
+
+        let jspec = &job["spec"];
+        assert_eq!(jspec["backoffLimit"], 10);
+        let pod = &jspec["template"]["spec"];
+        assert_eq!(pod["restartPolicy"], "OnFailure");
+
+        let c = &pod["containers"][0];
+        assert_eq!(c["name"], "initpwd");
+        assert_eq!(c["image"], "starrocks/fe-ubuntu:3.3-latest");
+        assert_eq!(c["command"][0], "/bin/bash");
+        let args = c["args"].as_array().unwrap();
+        assert_eq!(args[0], "/opt/starrocks/fe_initpwd.sh");
+        assert_eq!(args[1], "sr1-fe-service.egret-engines");
+        assert_eq!(args[2], "9030");
+
+        // INIT_PWD sourced from the initpwd Secret.
+        let env = c["env"].as_array().unwrap();
+        assert!(env.iter().any(|e| e["name"] == "INIT_PWD"
+            && e["valueFrom"]["secretKeyRef"]["name"] == "sr1-initpwd-secret"
+            && e["valueFrom"]["secretKeyRef"]["key"] == "password"));
+
+        // The script is mounted (subPath) from the initpwd ConfigMap.
+        let mounts = c["volumeMounts"].as_array().unwrap();
+        assert!(mounts
+            .iter()
+            .any(|m| m["mountPath"] == "/opt/starrocks/fe_initpwd.sh"
+                && m["subPath"] == "fe_initpwd.sh"));
+        let vols = pod["volumes"].as_array().unwrap();
+        assert!(vols
+            .iter()
+            .any(|v| v["configMap"]["name"] == "sr1-initpwd-shell"));
     }
 }
