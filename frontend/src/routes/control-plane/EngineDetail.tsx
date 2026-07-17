@@ -421,7 +421,7 @@ function EngineTabs({
         <TabsTrigger value="monitor">Monitor</TabsTrigger>
       </TabsList>
 
-      <TabsContent value="overview" className="space-y-5">
+      <TabsContent value="overview" className="space-y-4">
         <EngineSummaryStrip engine={engine} />
         <StatusCard status={engine.status} engineId={engineId} />
       </TabsContent>
@@ -580,6 +580,52 @@ function EngineSummaryStrip({ engine }: { engine: EngineWithStatus }) {
   return <SummaryStrip items={items} />;
 }
 
+/**
+ * Phase-aware empty state for the pods table (no pods reported yet). The copy
+ * and affordance track {@link phaseVariant}:
+ *   - warning phases (provisioning/pending/creating/updating) → a skeleton +
+ *     "waiting for the operator" reassurance (pods are on their way);
+ *   - destructive phases (failed/error) → the operator's `message` in a
+ *     destructive Alert, or a generic fallback when none was reported;
+ *   - otherwise (running/ready with 0 pods, or an unknown phase) → a neutral line.
+ */
+function StatusEmptyState({
+  phase,
+  message,
+}: {
+  phase: string;
+  message: string | null;
+}) {
+  const variant = phaseVariant(phase);
+
+  if (variant === "warning") {
+    return (
+      <div className="space-y-3 py-1">
+        <p className="text-sm text-muted-foreground">
+          Waiting for the operator to create pods…
+        </p>
+        <ListSkeleton rows={3} cols={3} />
+      </div>
+    );
+  }
+
+  if (variant === "destructive") {
+    return (
+      <Alert variant="destructive">
+        <AlertDescription>
+          {message ?? "The engine failed to start."}
+        </AlertDescription>
+      </Alert>
+    );
+  }
+
+  return (
+    <p className="py-6 text-center text-sm text-muted-foreground">
+      No pods reported.
+    </p>
+  );
+}
+
 function StatusCard({
   status,
   engineId,
@@ -602,31 +648,27 @@ function StatusCard({
         </div>
       </CardHeader>
       <CardContent>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Pod</TableHead>
-              <TableHead>Phase</TableHead>
-              <TableHead>Ready</TableHead>
-              <TableHead className="text-right">
-                <span className="sr-only">Actions</span>
-              </TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {status.pods.length === 0 ? (
-              <TableRow className="hover:bg-transparent">
-                <TableCell
-                  colSpan={4}
-                  className="py-10 text-center text-muted-foreground"
-                >
-                  No pods yet.
-                </TableCell>
+        {status.pods.length === 0 ? (
+          <StatusEmptyState phase={status.phase} message={status.message} />
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Pod</TableHead>
+                <TableHead>Phase</TableHead>
+                <TableHead>Ready</TableHead>
+                <TableHead className="text-right">
+                  <span className="sr-only">Actions</span>
+                </TableHead>
               </TableRow>
-            ) : (
-              status.pods.map((pod) => (
-                <TableRow key={pod.name}>
-                  <TableCell className="font-mono text-xs">
+            </TableHeader>
+            <TableBody>
+              {status.pods.map((pod) => (
+                <TableRow
+                  key={pod.name}
+                  className="cursor-default transition-colors hover:bg-muted/50 motion-reduce:transition-none"
+                >
+                  <TableCell className="font-mono text-xs tabular-nums">
                     {pod.name}
                   </TableCell>
                   <TableCell>
@@ -654,10 +696,10 @@ function StatusCard({
                     </Button>
                   </TableCell>
                 </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
+              ))}
+            </TableBody>
+          </Table>
+        )}
       </CardContent>
 
       <PodLogsDialog

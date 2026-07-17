@@ -295,6 +295,76 @@ describe("EngineDetail — header metadata + page-level actions", () => {
   });
 });
 
+describe("EngineDetail — StatusCard states", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.listEngineCatalogs).mockResolvedValue([]);
+    vi.mocked(engineApi.useControlPlaneEnginesListEngineWorkspaces).mockReturnValue(
+      query(ASSIGNED) as unknown as ReturnType<
+        typeof engineApi.useControlPlaneEnginesListEngineWorkspaces
+      >,
+    );
+  });
+
+  function mockEngineStatus(status: api.EngineStatus) {
+    vi.mocked(api.getEngine).mockResolvedValue({
+      ...ENGINE,
+      status,
+    } as unknown as Awaited<ReturnType<typeof api.getEngine>>);
+  }
+
+  test("provisioning engine with no pods shows the waiting-for-operator copy", async () => {
+    mockEngineStatus({ phase: "Provisioning", message: null, pods: [] });
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    expect(
+      await screen.findByText(/waiting for the operator to create pods/i),
+    ).toBeInTheDocument();
+    // The terse legacy empty copy is gone.
+    expect(screen.queryByText("No pods yet.")).not.toBeInTheDocument();
+  });
+
+  test("failed engine with a status message surfaces that message", async () => {
+    mockEngineStatus({
+      phase: "Failed",
+      message: "ImagePullBackOff: trinodb/trino:bogus not found",
+      pods: [],
+    });
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    // The failure message is shown (in the header description AND the status body).
+    expect(
+      screen.getAllByText(/ImagePullBackOff: trinodb\/trino:bogus not found/i)
+        .length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText("No pods yet.")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/waiting for the operator to create pods/i),
+    ).not.toBeInTheDocument();
+  });
+
+  test("failed engine with no message falls back to a generic failure line", async () => {
+    mockEngineStatus({ phase: "error", message: null, pods: [] });
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    expect(
+      await screen.findByText(/the engine failed to start/i),
+    ).toBeInTheDocument();
+  });
+
+  test("running engine with no pods reports the neutral empty line", async () => {
+    mockEngineStatus({ phase: "running", message: null, pods: [] });
+    renderDetail();
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    expect(await screen.findByText(/no pods reported/i)).toBeInTheDocument();
+    expect(screen.queryByText("No pods yet.")).not.toBeInTheDocument();
+  });
+});
+
 describe("EngineDetail — Overview KPI strip", () => {
   // Two catalogs → the strip's catalog count resolves to 2.
   const CATALOGS = [
