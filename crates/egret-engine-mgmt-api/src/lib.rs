@@ -431,6 +431,9 @@ pub struct StarRocksPod {
     pub tolerations: Option<Value>,
     #[serde(default)]
     pub affinity: Option<Value>,
+    /// Reserved — NOT rendered: the kube-starrocks operator has no role-level
+    /// `securityContext` field (it lives per-container inside
+    /// `initContainers`/`sidecars`). Kept for forward-compat.
     #[serde(default)]
     pub security_context: Option<Value>,
     #[serde(default)]

@@ -7,7 +7,7 @@
 
 use crate::kube_client::KubeClient;
 use crate::provisioner::EngineProvisioner;
-use crate::spec::{EngineSpec, EngineStatus, PodStatus, RoleResources};
+use crate::spec::{EngineSpec, EngineStatus, PodStatus, RoleResources, StarRocksPod};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -279,6 +279,95 @@ pub fn starrocks_restart_patch(stamp: &str) -> Value {
     })
 }
 
+/// Apply the admin pod/scheduling fields onto a role spec (FE or CN). Simple
+/// scalars/maps overwrite; `init_containers`/`sidecars` are APPENDED to any
+/// existing array (so the FE SSL keystore init-container is preserved).
+/// `env_key` is the role-specific env field name ("feEnvVars" | "cnEnvVars").
+///
+/// Operator CR keys (kube-starrocks `StarRocksLoadSpec`/`StarRocksComponentSpec`,
+/// `pkg/apis/starrocks/v1/{load_type,component_type,starrockscluster_types}.go`):
+/// `serviceAccount`, `nodeSelector`, `annotations`, `podLabels`, `feEnvVars`/
+/// `cnEnvVars`, `tolerations`, `affinity`, `imagePullSecrets`
+/// (`[]LocalObjectReference` → `[{name}]`), `initContainers`, `sidecars`.
+///
+/// NOTE: `pod.security_context` is intentionally NOT rendered. The operator's
+/// FE/CN role spec has no role-level `securityContext` field, and the
+/// StarRocksCluster CRD is a structural schema (no
+/// `x-kubernetes-preserve-unknown-fields`), so an emitted `securityContext`
+/// key would be silently PRUNED by the API server — a misleading no-op. Pod
+/// security lives per-container inside `initContainers`/`sidecars` instead.
+fn apply_pod_fields(spec: &mut Value, pod: &StarRocksPod, env_key: &str) {
+    if let Some(sa) = &pod.service_account {
+        spec["serviceAccount"] = json!(sa);
+    }
+    if !pod.node_selector.is_empty() {
+        spec["nodeSelector"] = json!(pod.node_selector);
+    }
+    if !pod.annotations.is_empty() {
+        // MERGE into any existing `annotations` map — never clobber (there are
+        // none here today, but the restart flow stamps this field separately).
+        let entry = spec
+            .as_object_mut()
+            .expect("role spec is a JSON object")
+            .entry("annotations")
+            .or_insert_with(|| json!({}));
+        if let Some(map) = entry.as_object_mut() {
+            for (k, v) in &pod.annotations {
+                map.insert(k.clone(), json!(v));
+            }
+        }
+    }
+    if !pod.pod_labels.is_empty() {
+        spec["podLabels"] = json!(pod.pod_labels);
+    }
+    if !pod.env.is_empty() {
+        spec[env_key] = json!(pod.env);
+    }
+    if let Some(t) = &pod.tolerations {
+        spec["tolerations"] = t.clone();
+    }
+    if let Some(a) = &pod.affinity {
+        spec["affinity"] = a.clone();
+    }
+    // `pod.security_context` is intentionally NOT rendered — see the doc comment.
+    if !pod.image_pull_secrets.is_empty() {
+        // k8s `LocalObjectReference`: a list of `{name: "..."}` objects.
+        spec["imagePullSecrets"] = json!(pod
+            .image_pull_secrets
+            .iter()
+            .map(|n| json!({ "name": n }))
+            .collect::<Vec<_>>());
+    }
+    // APPEND (never overwrite): the FE SSL block may already have populated
+    // `initContainers` with the build-keystore container.
+    append_array(spec, "initContainers", pod.init_containers.as_ref());
+    append_array(spec, "sidecars", pod.sidecars.as_ref());
+}
+
+/// Append the elements of `add` (expected a JSON array) onto `spec[key]`,
+/// creating the array if absent — preserving any existing entries (e.g. the
+/// FE SSL keystore init-container already on `initContainers`).
+fn append_array(spec: &mut Value, key: &str, add: Option<&Value>) {
+    // A present-but-non-array passthrough is malformed (the field is typed
+    // `Option<Value>` so we can't rely on serde to reject it) — drop it, but
+    // surface the drop so it isn't silently invisible.
+    if let Some(v) = add {
+        if !v.is_null() && !v.is_array() {
+            tracing::warn!(field = key, "ignoring non-array StarRocks pod field");
+        }
+    }
+    let Some(add_items) = add.and_then(Value::as_array).filter(|a| !a.is_empty()) else {
+        return;
+    };
+    let obj = spec.as_object_mut().expect("role spec is a JSON object");
+    match obj.get_mut(key).and_then(Value::as_array_mut) {
+        Some(existing) => existing.extend(add_items.iter().cloned()),
+        None => {
+            obj.insert(key.to_string(), Value::Array(add_items.clone()));
+        }
+    }
+}
+
 /// The `starrocks.com/v1 StarRocksCluster` CR: FE + CN roles only (shared-data
 /// mode has no BE). FE mounts `fe.conf` via `configMapInfo`, plus the Ranger
 /// XML ConfigMap under `configMaps` when a binding is present. When
@@ -460,6 +549,14 @@ pub fn starrocks_cluster_cr(spec: &EngineSpec) -> Value {
             }
             cn_spec["autoScalingPolicy"] = pol;
         }
+    }
+
+    // Admin pod/scheduling fields on BOTH roles, applied LAST so the FE SSL
+    // block's `initContainers` (build-keystore) is already in place and gets
+    // APPENDED to — not clobbered — by any admin `init_containers`.
+    if let Some(pod) = &sr.pod {
+        apply_pod_fields(&mut fe_spec, pod, "feEnvVars");
+        apply_pod_fields(&mut cn_spec, pod, "cnEnvVars");
     }
 
     json!({
@@ -1237,6 +1334,104 @@ mod tests {
         let cr = starrocks_cluster_cr(&sample_sr_spec());
         assert!(cr["spec"]["starRocksFeSpec"].get("annotations").is_none());
         assert!(cr["spec"]["starRocksCnSpec"].get("annotations").is_none());
+    }
+
+    /// Task 5 TDD: the admin pod/scheduling fields render onto BOTH the FE and
+    /// CN role specs, using each role's operator keys.
+    #[test]
+    fn pod_fields_on_both_roles() {
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().pod = Some(StarRocksPod {
+            service_account: Some("sa".into()),
+            node_selector: BTreeMap::from([("disktype".to_string(), "ssd".to_string())]),
+            tolerations: Some(json!([{ "key": "dedicated", "operator": "Exists" }])),
+            ..Default::default()
+        });
+        let cr = starrocks_cluster_cr(&spec);
+        for role in ["starRocksFeSpec", "starRocksCnSpec"] {
+            let rs = &cr["spec"][role];
+            assert_eq!(rs["serviceAccount"], "sa", "{role}");
+            assert_eq!(rs["nodeSelector"]["disktype"], "ssd", "{role}");
+            assert_eq!(rs["tolerations"][0]["key"], "dedicated", "{role}");
+        }
+    }
+
+    /// Env vars use the role-SPECIFIC operator key (`feEnvVars` on FE,
+    /// `cnEnvVars` on CN) — never a generic `env`.
+    #[test]
+    fn pod_env_uses_role_specific_key() {
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().pod = Some(StarRocksPod {
+            env: vec![json!({ "name": "FOO", "value": "bar" })],
+            ..Default::default()
+        });
+        let cr = starrocks_cluster_cr(&spec);
+        let fe = &cr["spec"]["starRocksFeSpec"];
+        assert_eq!(fe["feEnvVars"][0]["name"], "FOO");
+        assert_eq!(fe["feEnvVars"][0]["value"], "bar");
+        assert!(fe.get("env").is_none());
+        assert!(fe.get("cnEnvVars").is_none());
+        let cn = &cr["spec"]["starRocksCnSpec"];
+        assert_eq!(cn["cnEnvVars"][0]["name"], "FOO");
+        assert!(cn.get("env").is_none());
+        assert!(cn.get("feEnvVars").is_none());
+    }
+
+    /// Admin `init_containers` are APPENDED to the FE spec — the SSL
+    /// build-keystore init-container the TLS block already set MUST survive.
+    #[test]
+    fn pod_initcontainers_preserve_ssl() {
+        let mut spec = sample_sr_spec_with_tls();
+        spec.starrocks.as_mut().unwrap().pod = Some(StarRocksPod {
+            init_containers: Some(json!([{ "name": "admin-init", "image": "busybox" }])),
+            ..Default::default()
+        });
+        let cr = starrocks_cluster_cr(&spec);
+        let inits = cr["spec"]["starRocksFeSpec"]["initContainers"]
+            .as_array()
+            .unwrap();
+        let names: Vec<&str> = inits.iter().filter_map(|c| c["name"].as_str()).collect();
+        assert!(
+            names.contains(&"build-keystore"),
+            "SSL keystore init survives: {names:?}"
+        );
+        assert!(
+            names.contains(&"admin-init"),
+            "admin init appended: {names:?}"
+        );
+        assert_eq!(inits.len(), 2);
+    }
+
+    /// `pod = None` is a no-op: no pod/scheduling keys appear on either role,
+    /// and a TLS engine's SSL init-container is still present and alone.
+    #[test]
+    fn pod_none_is_noop() {
+        let cr = starrocks_cluster_cr(&sample_sr_spec());
+        for role in ["starRocksFeSpec", "starRocksCnSpec"] {
+            let rs = &cr["spec"][role];
+            for k in [
+                "serviceAccount",
+                "nodeSelector",
+                "annotations",
+                "podLabels",
+                "tolerations",
+                "affinity",
+                "securityContext",
+                "imagePullSecrets",
+                "sidecars",
+                "feEnvVars",
+                "cnEnvVars",
+            ] {
+                assert!(rs.get(k).is_none(), "{role} unexpectedly has {k}");
+            }
+        }
+        // TLS engine, pod = None: the SSL init-container is present and alone.
+        let cr = starrocks_cluster_cr(&sample_sr_spec_with_tls());
+        let inits = cr["spec"]["starRocksFeSpec"]["initContainers"]
+            .as_array()
+            .unwrap();
+        assert_eq!(inits.len(), 1);
+        assert_eq!(inits[0]["name"], "build-keystore");
     }
 
     /// `StarRocksProvisioner::restart` JSON-merge-patches the existing
