@@ -1442,6 +1442,72 @@ async fn ensure_delegator_secret(st: &CpState, engine: &Engine) -> Result<(Uuid,
     Ok((id, pw))
 }
 
+/// Ensure the engine has a stored StarRocks FE `root` password secret; generate one
+/// on first call and persist its named-secret id on the engine row (idempotent via
+/// the `root_secret_id` column). Mirrors [`ensure_delegator_secret`] exactly — same
+/// RNG (24 random bytes, URL-safe base64) and same GLOBAL (workspace `None`) named
+/// [`egret_secrets::WorkspaceSecretStore`] entry so `resolve_plaintext` (keyed off
+/// the named id) can read it back at provision-req assembly time. Returns
+/// `(secret_id, plaintext)`. Secure-by-default: `create_starrocks_engine` calls this
+/// unconditionally, so every NEW StarRocks engine gets a strong root password; only
+/// legacy engines (no `root_secret_id`) stay passwordless.
+async fn ensure_root_password_secret(
+    st: &CpState,
+    engine: &Engine,
+) -> Result<(Uuid, String), CpError> {
+    if let Some(id) = engine.root_secret_id {
+        let pw = st
+            .secrets
+            .resolve_plaintext(None, id)
+            .await
+            .map_err(|e| CpError::BadRequest(format!("resolve root password secret: {e}")))?;
+        return Ok((id, pw));
+    }
+    let pw: String = {
+        use rand::RngCore;
+        let mut b = [0u8; 24];
+        rand::thread_rng().fill_bytes(&mut b);
+        use base64::Engine as _;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+    };
+    // Deterministic per-engine name so a partial prior run (secret created but the
+    // engine column not yet set) recovers by name instead of erroring forever.
+    let name = format!("egret-root-{}", engine.id);
+    let id = match st
+        .secrets
+        .create(None, &name, Some("StarRocks FE root password"), &pw)
+        .await
+    {
+        Ok(id) => id,
+        Err(egret_secrets::SecretsError::AlreadyExists(_)) => {
+            let meta = st
+                .secrets
+                .list(None)
+                .await
+                .map_err(|e| CpError::BadRequest(format!("list root password secret: {e}")))?
+                .into_iter()
+                .find(|m| m.name == name)
+                .ok_or_else(|| {
+                    CpError::BadRequest("root password secret vanished after conflict".into())
+                })?;
+            let pw = st
+                .secrets
+                .resolve_plaintext(None, meta.id)
+                .await
+                .map_err(|e| CpError::BadRequest(format!("resolve root password secret: {e}")))?;
+            st.engine_mgmt.set_root_secret(engine.id, meta.id).await?;
+            return Ok((meta.id, pw));
+        }
+        Err(e) => {
+            return Err(CpError::BadRequest(format!(
+                "store root password secret: {e}"
+            )))
+        }
+    };
+    st.engine_mgmt.set_root_secret(engine.id, id).await?;
+    Ok((id, pw))
+}
+
 /// Extract the leading `-----BEGIN CERTIFICATE-----`…`-----END CERTIFICATE-----`
 /// block (including the trailing newline) from a concatenated cert+key keystore
 /// PEM. Returns `None` when no certificate block is present.
@@ -2099,6 +2165,20 @@ async fn build_starrocks_provision_req(
         service_password: delegation_service_password.clone().unwrap_or_default(),
     });
 
+    // Secure-by-default root password: resolve the engine's stored FE `root`
+    // password (minted at create) so the provisioner (Task 2) applies it via
+    // initpwd. `Some` iff the engine carries a `root_secret_id` — legacy engines
+    // provisioned before this column existed have `None` and stay passwordless.
+    let root_password = match engine.root_secret_id {
+        Some(sid) => Some(
+            st.secrets
+                .resolve_plaintext(None, sid)
+                .await
+                .map_err(|e| CpError::BadRequest(format!("resolve root password secret: {e}")))?,
+        ),
+        None => None,
+    };
+
     let req = EngineProvisionReq {
         name: engine.name.clone(),
         namespace: engine.namespace.clone(),
@@ -2123,6 +2203,7 @@ async fn build_starrocks_provision_req(
             cn_config,
             cn_autoscaling,
             pod,
+            root_password,
         }),
     };
     Ok((req, delegation_bootstrap))
@@ -2501,6 +2582,20 @@ async fn create_starrocks_engine(
             Err(e) => tracing::warn!(error = %e, "list_services failed during starrocks create"),
         }
     }
+    // Secure-by-default (root-password task): mint + store a strong random FE
+    // `root` password and persist its `root_secret_id` UNCONDITIONALLY — every NEW
+    // StarRocks engine is passworded, closing the passwordless-root default. Rolls
+    // back exactly like every other provisioning step above (delete the engine row,
+    // revoke the catalog client). The persisted id is read back by the `get_engine`
+    // refetch below so `build_starrocks_provision_req` resolves it into
+    // `StarRocksConfig.root_password` (which Task 2's provisioner applies via
+    // initpwd). Legacy engines (no `root_secret_id`) stay passwordless.
+    if let Err(e) = ensure_root_password_secret(&st, &engine).await {
+        let _ = st.engine_mgmt.delete_engine(engine.id).await;
+        let _ = st.catalog.revoke_client(client.id).await;
+        return Err(e);
+    }
+
     let engine = match st.engine_mgmt.get_engine(engine.id).await {
         Ok(Some(e)) => e,
         Ok(None) => {
@@ -2551,6 +2646,11 @@ async fn create_starrocks_engine(
     // FE is actually queryable. A failure is logged, never surfaced to the
     // caller: the admin can retry by re-provisioning or (future) an explicit
     // "rewire catalog" action.
+    // Present the minted FE `root` password (resolved into
+    // `req.starrocks.root_password` by `build_starrocks_provision_req`) on the
+    // post-Ready bootstrap connection; `None` for legacy engines keeps it
+    // passwordless.
+    let root_password = req.starrocks.as_ref().and_then(|s| s.root_password.clone());
     spawn_starrocks_catalog_wire(
         prov.clone(),
         engine.namespace.clone(),
@@ -2559,6 +2659,7 @@ async fn create_starrocks_engine(
         wh.name.clone(),
         client.client_id.clone(),
         client.client_secret.clone(),
+        root_password,
         delegation_bootstrap,
     );
 
@@ -2632,23 +2733,30 @@ fn starrocks_external_catalog_sql(
     )
 }
 
-/// Run one DDL statement against a StarRocks FE over the raw MySQL protocol,
-/// as `root` with no password (dev-cluster default — matches how the FE
-/// ConfigMap ships with no auth hardening yet). Direct `mysql_async` (not
-/// `egret_query`'s interactive `StarRocksConnector`): this is a one-shot admin
-/// statement with no caller-facing row cap/cancellation/result shape to
-/// thread through. `tls_cert_pem` mirrors the connector's (S3-T1) TLS pinning
-/// — `Some(pem)` pins the FE's egret-generated self-signed cert as the trust
-/// root (domain validation skipped, same rationale as
-/// `StarRocksConnector::new`: the cert's CN won't match the in-cluster
-/// Service DNS we dial) and runs the DDL over TLS; `None` stays plain TCP.
-async fn run_starrocks_ddl(
+/// Build the `mysql_async` connection options for egret's own FE `root`
+/// bootstrap connection. Factored out (and pure) so the password/user/TLS
+/// wiring is unit-testable without a live FE — the wire path itself is
+/// dev-DNS-blocked (egret-host -> in-cluster FE Service DNS), so this is the
+/// only place the opts are asserted.
+///
+/// `root_password` is `Some(pw)` for any engine minted with a `root_secret_id`
+/// (T1-T3): the FE `root` account is now passworded, so egret's post-Ready DDL
+/// MUST present it or the connection is rejected. Legacy engines (no
+/// `root_secret_id`) pass `None` and stay passwordless — the pre-hardening
+/// behavior. The password is never logged and lives only inside the
+/// `OptsBuilder` (which does not `Debug`-print it).
+///
+/// `tls_cert_pem` mirrors the connector's (S3-T1) TLS pinning — `Some(pem)`
+/// pins the FE's egret-generated self-signed cert as the trust root (domain
+/// validation skipped, same rationale as `StarRocksConnector::new`: the cert's
+/// CN won't match the in-cluster Service DNS we dial) and runs the DDL over
+/// TLS; `None` stays plain TCP.
+fn starrocks_root_conn_opts(
     host: &str,
     port: u16,
-    sql: &str,
+    root_password: Option<&str>,
     tls_cert_pem: Option<&str>,
-) -> Result<(), String> {
-    use mysql_async::prelude::Queryable;
+) -> mysql_async::OptsBuilder {
     let mut opts = mysql_async::OptsBuilder::default()
         .ip_or_hostname(host)
         .tcp_port(port)
@@ -2657,12 +2765,35 @@ async fn run_starrocks_ddl(
         // `prefer_socket` capability with "unknown variable 'socket'" —
         // matches `StarRocksConnector::new`'s own workaround.
         .prefer_socket(false);
+    if let Some(pw) = root_password {
+        opts = opts.pass(Some(pw));
+    }
     if let Some(pem) = tls_cert_pem {
         let ssl = mysql_async::SslOpts::default()
             .with_root_certs(vec![mysql_async::PathOrBuf::from(pem.as_bytes().to_vec())])
             .with_danger_skip_domain_validation(true);
         opts = opts.ssl_opts(Some(ssl));
     }
+    opts
+}
+
+/// Run one DDL statement against a StarRocks FE over the raw MySQL protocol,
+/// as `root`. Direct `mysql_async` (not `egret_query`'s interactive
+/// `StarRocksConnector`): this is a one-shot admin statement with no
+/// caller-facing row cap/cancellation/result shape to thread through.
+/// `root_password` presents the minted FE `root` password when the engine has
+/// one (`None` -> passwordless, the legacy default); `tls_cert_pem` optionally
+/// pins the FE cert and runs over TLS. See [`starrocks_root_conn_opts`] for the
+/// connection-opts wiring.
+async fn run_starrocks_ddl(
+    host: &str,
+    port: u16,
+    sql: &str,
+    root_password: Option<&str>,
+    tls_cert_pem: Option<&str>,
+) -> Result<(), String> {
+    use mysql_async::prelude::Queryable;
+    let opts = starrocks_root_conn_opts(host, port, root_password, tls_cert_pem);
     let mut conn = mysql_async::Conn::new(opts)
         .await
         .map_err(|e| e.to_string())?;
@@ -2772,6 +2903,7 @@ fn spawn_starrocks_catalog_wire(
     warehouse_name: String,
     client_id: String,
     client_secret: String,
+    root_password: Option<String>,
     delegation: Option<StarRocksDelegationBootstrap>,
 ) {
     tokio::spawn(async move {
@@ -2806,7 +2938,8 @@ fn spawn_starrocks_catalog_wire(
         let credential = format!("{client_id}:{client_secret}");
         let sql = starrocks_external_catalog_sql("egret", &egret_url, &warehouse_name, &credential);
         let fe_host = format!("{engine_name}-fe-service.{namespace}.svc");
-        match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, &sql, None).await {
+        let root_pw = root_password.as_deref();
+        match run_starrocks_ddl(&fe_host, STARROCKS_FE_MYSQL_PORT, &sql, root_pw, None).await {
             Ok(()) => {
                 tracing::info!(engine = %engine_name,
                     "starrocks catalog auto-wire: external Iceberg catalog wired");
@@ -2832,6 +2965,7 @@ fn spawn_starrocks_catalog_wire(
                     &fe_host,
                     STARROCKS_FE_MYSQL_PORT,
                     stmt,
+                    root_pw,
                     d.tls_cert_pem.as_deref(),
                 )
                 .await
@@ -3090,6 +3224,9 @@ async fn update_starrocks_engine(
         if let Some(boot) = bootstrap {
             match sr_primary_catalog_credential(&st, engine.id).await {
                 Some((client_id, client_secret)) => {
+                    // Same minted-root-password threading as create's wire.
+                    let root_password =
+                        req.starrocks.as_ref().and_then(|s| s.root_password.clone());
                     spawn_starrocks_catalog_wire(
                         prov.clone(),
                         engine.namespace.clone(),
@@ -3098,6 +3235,7 @@ async fn update_starrocks_engine(
                         wh.name.clone(),
                         client_id,
                         client_secret,
+                        root_password,
                         Some(boot),
                     );
                 }
@@ -4870,6 +5008,7 @@ mod tests {
             status: "pending".into(),
             authz_service_id: None,
             delegator_secret_id: None,
+            root_secret_id: None,
             tls_secret_id: None,
             coordinator_cert: None,
             created_at: chrono::Utc::now(),
@@ -5076,6 +5215,187 @@ mod tests {
         assert_eq!(sr2.cn_replicas, 1);
         assert!(sr2.delegation.is_none());
         assert!(boot2.is_none());
+    }
+
+    /// A no-op `EngineProvisioningPort` so the full `create_starrocks_engine`
+    /// handler runs to completion in tests (which otherwise short-circuit with
+    /// "kubernetes not configured" and roll the engine row back). Every method
+    /// succeeds; `status` reports no pods (the best-effort catalog-wire task the
+    /// handler spawns then just polls in the background and is aborted at test
+    /// end).
+    struct NoopProvisioner;
+    #[async_trait::async_trait]
+    impl egret_engine_mgmt_api::EngineProvisioningPort for NoopProvisioner {
+        async fn provision(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Ok(())
+        }
+        async fn status(
+            &self,
+            _kind: &str,
+            _namespace: &str,
+            _name: &str,
+        ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
+            Ok(egret_engine_mgmt_api::EngineStatus::default())
+        }
+        async fn update(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Ok(())
+        }
+        async fn delete(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn restart(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// `ensure_root_password_secret` is idempotent: two calls (the second on a
+    /// row that now carries the persisted `root_secret_id`) return the SAME
+    /// secret id and the SAME plaintext, and the first call persists the id.
+    #[tokio::test]
+    async fn ensure_root_password_secret_is_idempotent() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping ensure_root_password_secret_is_idempotent: DATABASE_URL not set");
+            return;
+        };
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("sr-{}", Uuid::new_v4().simple()),
+                "starrocks",
+                "egret-engines",
+                wh.id,
+                &serde_json::json!({ "starrocksConfig": {} }),
+            )
+            .await
+            .expect("create engine row");
+        // Fresh row: no root secret yet.
+        assert!(engine.root_secret_id.is_none());
+
+        let (id1, pw1) = ensure_root_password_secret(&st, &engine)
+            .await
+            .expect("mint root password");
+        // First call persisted the id on the row.
+        let refetched = st
+            .engine_mgmt
+            .get_engine(engine.id)
+            .await
+            .expect("get_engine")
+            .expect("engine present");
+        assert_eq!(refetched.root_secret_id, Some(id1));
+
+        // Second call on the persisted row takes the fast path → same id + plaintext.
+        let (id2, pw2) = ensure_root_password_secret(&st, &refetched)
+            .await
+            .expect("resolve root password");
+        assert_eq!(id1, id2);
+        assert_eq!(pw1, pw2);
+        assert!(!pw1.is_empty());
+    }
+
+    /// Secure-by-default: `create_starrocks_engine` mints + persists a
+    /// `root_secret_id` on the created engine UNCONDITIONALLY (no delegation, no
+    /// opt-in).
+    #[tokio::test]
+    async fn create_starrocks_engine_mints_root_password() {
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping create_starrocks_engine_mints_root_password: DATABASE_URL not set");
+            return;
+        };
+        st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+
+        let mut body = sr_update_body(None);
+        body.name = format!("sr-{}", Uuid::new_v4().simple());
+        let name = body.name.clone();
+
+        let (code, _dto) = create_starrocks_engine(st.clone(), body, wh)
+            .await
+            .expect("create_starrocks_engine");
+        assert_eq!(code, StatusCode::CREATED);
+
+        let created = st
+            .engine_mgmt
+            .list_engines()
+            .await
+            .expect("list_engines")
+            .into_iter()
+            .find(|e| e.name == name)
+            .expect("created engine present");
+        assert!(
+            created.root_secret_id.is_some(),
+            "new StarRocks engine must have a minted root_secret_id (secure-by-default)"
+        );
+    }
+
+    /// `build_starrocks_provision_req` threads the stored root password into
+    /// `StarRocksConfig.root_password` when the engine carries a `root_secret_id`,
+    /// and leaves it `None` for a legacy engine (no `root_secret_id`).
+    #[tokio::test]
+    async fn build_starrocks_provision_req_threads_root_password() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping build_starrocks_provision_req_threads_root_password: DATABASE_URL not set"
+            );
+            return;
+        };
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _secret) = seed_sr_warehouse(&st, &db).await;
+
+        // Legacy engine (created directly, never minted) → root_password None.
+        let legacy = st
+            .engine_mgmt
+            .create_engine(
+                &format!("sr-{}", Uuid::new_v4().simple()),
+                "starrocks",
+                "egret-engines",
+                wh.id,
+                &serde_json::json!({ "starrocksConfig": {} }),
+            )
+            .await
+            .expect("create legacy engine row");
+        let (legacy_req, _) = build_starrocks_provision_req(&st, &legacy, &wh)
+            .await
+            .expect("build (legacy)");
+        assert!(
+            legacy_req
+                .starrocks
+                .as_ref()
+                .expect("sr config")
+                .root_password
+                .is_none(),
+            "legacy engine (no root_secret_id) must stay passwordless"
+        );
+
+        // Engine WITH a minted root secret → root_password Some(plaintext).
+        let (secret_id, plaintext) = ensure_root_password_secret(&st, &legacy)
+            .await
+            .expect("mint root password");
+        let refetched = st
+            .engine_mgmt
+            .get_engine(legacy.id)
+            .await
+            .expect("get_engine")
+            .expect("engine present");
+        assert_eq!(refetched.root_secret_id, Some(secret_id));
+        let (req, _) = build_starrocks_provision_req(&st, &refetched, &wh)
+            .await
+            .expect("build (passworded)");
+        assert_eq!(
+            req.starrocks.as_ref().expect("sr config").root_password,
+            Some(plaintext)
+        );
     }
 
     /// A minimal StarRocks-shaped `CreateEngineBody` for update tests (only
@@ -5684,5 +6004,29 @@ mod tests {
         );
         let evil = starrocks_impersonation_grant_sql("a`.evil");
         assert_eq!(evil, "GRANT IMPERSONATE ON ALL USERS TO `a``.evil`");
+    }
+
+    /// The FE root bootstrap connection (RP-T4) must present the minted `root`
+    /// password when the engine carries one, so a passworded FE (T1-T3) accepts
+    /// egret's own post-Ready catalog-wire + delegation-bootstrap DDL. `Some(pw)`
+    /// -> `pass()` is that password, `user()` stays `root`.
+    #[test]
+    fn starrocks_root_conn_opts_presents_password_when_present() {
+        let opts: mysql_async::Opts =
+            starrocks_root_conn_opts("fe.svc", STARROCKS_FE_MYSQL_PORT, Some("s3cr3t"), None)
+                .into();
+        assert_eq!(opts.user(), Some("root"));
+        assert_eq!(opts.pass(), Some("s3cr3t"));
+    }
+
+    /// Legacy engines (no `root_secret_id` -> `root_password` `None`) stay
+    /// passwordless: the connection presents no password, exactly as before the
+    /// root-password hardening. `user()` still `root`, `pass()` `None`.
+    #[test]
+    fn starrocks_root_conn_opts_stays_passwordless_when_none() {
+        let opts: mysql_async::Opts =
+            starrocks_root_conn_opts("fe.svc", STARROCKS_FE_MYSQL_PORT, None, None).into();
+        assert_eq!(opts.user(), Some("root"));
+        assert_eq!(opts.pass(), None);
     }
 }
