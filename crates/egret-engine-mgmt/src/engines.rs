@@ -229,6 +229,13 @@ struct EngineSpecDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Object)]
     trino_config: Option<serde_json::Value>,
+    /// StarRocks equivalent of `trino_config`: the persisted `starrocksConfig`
+    /// block (images/replicas/resources/delegation/feConfig/cnConfig/
+    /// cnAutoscaling/pod) surfaced back so the UI can prefill the StarRocks
+    /// config editor + show KPIs/auth on reload. Absent for Trino engines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    starrocks_config: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -4678,6 +4685,43 @@ mod tests {
         assert_eq!(ucfg["feConfig"]["sys_log_level"], "WARN");
         assert_eq!(ucfg["cnAutoscaling"]["maxReplicas"], 3);
         assert_eq!(ucfg["pod"]["nodeSelector"]["disktype"], "ssd");
+    }
+
+    #[test]
+    fn engine_spec_dto_surfaces_starrocks_config() {
+        // REGRESSION (caught by the full live smoke): `EngineSpecDto` only
+        // carried `trinoConfig`, so `From<Engine>`'s `from_value` silently
+        // dropped `starrocksConfig` — the UI then read `undefined` and showed
+        // empty replicas/auth + an un-seeded config editor for every StarRocks
+        // engine. The DTO must round-trip the stored `starrocksConfig` back out.
+        let stored_spec = serde_json::json!({
+            "imageVersion": "starrocks/fe-ubuntu:3.4-latest",
+            "starrocksConfig": {
+                "feImage": "starrocks/fe-ubuntu:3.4-latest",
+                "feReplicas": 1,
+                "cnReplicas": 1,
+                "delegation": { "mode": "jwt", "tlsEnabled": true },
+                "feConfig": { "sys_log_level": "WARN" },
+            },
+        });
+        let dto: EngineSpecDto = serde_json::from_value(stored_spec).unwrap();
+        let out = serde_json::to_value(&dto).unwrap();
+        let sc = &out["starrocksConfig"];
+        assert!(
+            !sc.is_null(),
+            "starrocksConfig must be surfaced back to the UI"
+        );
+        assert_eq!(sc["feReplicas"], 1);
+        assert_eq!(sc["cnReplicas"], 1);
+        assert_eq!(sc["delegation"]["mode"], "jwt");
+        assert_eq!(sc["feConfig"]["sys_log_level"], "WARN");
+        // A Trino engine (no starrocksConfig) must NOT emit the key.
+        let trino: EngineSpecDto =
+            serde_json::from_value(serde_json::json!({ "imageVersion": "x" })).unwrap();
+        assert!(serde_json::to_value(&trino)
+            .unwrap()
+            .get("starrocksConfig")
+            .is_none());
     }
 
     // ── validate_sr_fe_config: protected fe.conf keys are rejected ───────────
