@@ -725,6 +725,31 @@ impl StarRocksProvisioner {
         if let Some(secret) = starrocks_ssl_secret(spec) {
             self.kube.apply(&secret).await?;
         }
+        // Root-password initpwd resources (present only when a root password is
+        // configured). The Secret + ConfigMap are mutable and freely
+        // re-appliable; the Job's `spec.template` is IMMUTABLE, so on a second
+        // provision/update a plain apply would error on immutable fields. Delete
+        // any existing `{name}-initpwd` Job first (best-effort, ignore
+        // not-found) so every provision/update gets a fresh Job running the
+        // idempotent SET-PASSWORD script.
+        if let Some(secret) = starrocks_root_password_secret(spec) {
+            self.kube.apply(&secret).await?;
+            if let Some(cm) = starrocks_initpwd_configmap(spec) {
+                self.kube.apply(&cm).await?;
+            }
+            if let Some(job) = starrocks_initpwd_job(spec) {
+                let _ = self
+                    .kube
+                    .delete(
+                        "batch/v1",
+                        "Job",
+                        &spec.namespace,
+                        &format!("{}-initpwd", spec.name),
+                    )
+                    .await;
+                self.kube.apply(&job).await?;
+            }
+        }
         self.kube.apply(&starrocks_cluster_cr(spec)).await?;
         Ok(())
     }
@@ -888,6 +913,25 @@ impl EngineProvisioner for StarRocksProvisioner {
         let _ = self
             .kube
             .delete("v1", "Secret", namespace, &format!("{name}-ssl-secret"))
+            .await;
+        // Root-password initpwd resources (present only when a root password was
+        // configured; delete is best-effort / ignore-not-found otherwise).
+        let _ = self
+            .kube
+            .delete("batch/v1", "Job", namespace, &format!("{name}-initpwd"))
+            .await;
+        let _ = self
+            .kube
+            .delete(
+                "v1",
+                "ConfigMap",
+                namespace,
+                &format!("{name}-initpwd-shell"),
+            )
+            .await;
+        let _ = self
+            .kube
+            .delete("v1", "Secret", namespace, &format!("{name}-initpwd-secret"))
             .await;
         Ok(())
     }
@@ -1438,6 +1482,74 @@ mod tests {
             .unwrap()
             .get("ConfigMap/sr1-cn-cm")
             .is_none());
+    }
+
+    /// The provisioner applies the initpwd Secret + ConfigMap + Job when the
+    /// engine has a root password, and applies none of them when it doesn't
+    /// (behavior-preserving for legacy/passwordless engines). Because a Job's
+    /// `spec.template` is immutable, the Job is deleted-before-applied so a
+    /// re-provision gets a fresh, idempotent run.
+    #[tokio::test]
+    async fn provisioner_applies_initpwd_when_root_password_set() {
+        use crate::kube_client::FakeKube;
+
+        // With a root password → Secret + ConfigMap + Job are all applied, and
+        // the Job was deleted (delete-before-apply) first.
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().root_password = Some("s3cret".to_string());
+        let kube = Arc::new(FakeKube::default());
+        StarRocksProvisioner::new(kube.clone())
+            .provision(&spec)
+            .await
+            .unwrap();
+        {
+            let applied = kube.applied.lock().unwrap();
+            let secret = applied
+                .get("Secret/sr1-initpwd-secret")
+                .expect("initpwd Secret applied");
+            assert_eq!(secret["stringData"]["password"], "s3cret");
+            applied
+                .get("ConfigMap/sr1-initpwd-shell")
+                .expect("initpwd ConfigMap applied");
+            applied.get("Job/sr1-initpwd").expect("initpwd Job applied");
+        }
+        assert!(
+            kube.deleted
+                .lock()
+                .unwrap()
+                .contains(&"Job/sr1-initpwd".to_string()),
+            "initpwd Job is deleted-before-applied (immutable spec.template)"
+        );
+
+        // Without a root password → none of the initpwd objects are applied.
+        let kube = Arc::new(FakeKube::default());
+        StarRocksProvisioner::new(kube.clone())
+            .provision(&sample_sr_spec())
+            .await
+            .unwrap();
+        {
+            let applied = kube.applied.lock().unwrap();
+            assert!(applied.get("Secret/sr1-initpwd-secret").is_none());
+            assert!(applied.get("ConfigMap/sr1-initpwd-shell").is_none());
+            assert!(applied.get("Job/sr1-initpwd").is_none());
+        }
+    }
+
+    /// `delete` best-effort cleans up the initpwd Job, ConfigMap, and Secret
+    /// alongside the CR + other orphans.
+    #[tokio::test]
+    async fn provisioner_delete_cleans_up_initpwd() {
+        use crate::kube_client::FakeKube;
+
+        let kube = Arc::new(FakeKube::default());
+        StarRocksProvisioner::new(kube.clone())
+            .delete("egret-engines", "sr1")
+            .await
+            .unwrap();
+        let deleted = kube.deleted.lock().unwrap();
+        assert!(deleted.contains(&"Job/sr1-initpwd".to_string()));
+        assert!(deleted.contains(&"ConfigMap/sr1-initpwd-shell".to_string()));
+        assert!(deleted.contains(&"Secret/sr1-initpwd-secret".to_string()));
     }
 
     /// T4 TDD: the restart merge-patch body stamps the restart annotation on
