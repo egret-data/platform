@@ -9,3 +9,7 @@
 {{- $s := (lookup "v1" "Secret" .Release.Namespace "egret-secrets") -}}
 {{- if and $s (index $s.data "secret-key") -}}{{ index $s.data "secret-key" | b64dec }}{{- else -}}{{ randBytes 64 }}{{- end -}}
 {{- end -}}
+{{- define "egret.catalogAuthToken" -}}
+{{- $s := (lookup "v1" "Secret" .Release.Namespace "egret-secrets") -}}
+{{- if and $s (index $s.data "catalog-auth-token") -}}{{ index $s.data "catalog-auth-token" | b64dec }}{{- else -}}{{ randAlphaNum 40 }}{{- end -}}
+{{- end -}}

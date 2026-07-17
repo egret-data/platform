@@ -9,7 +9,7 @@ data:
   EGRET_STORAGE__PATH_STYLE: "{{ .Values.storage.pathStyle }}"
   EGRET_CATALOG__ENABLED: "true"
   EGRET_CATALOG__WAREHOUSE: "s3://{{ .Values.deps.minio.bucket }}"
-  EGRET_CATALOG__PUBLIC_URL: "http://egret:8080"
+  EGRET_CATALOG__PUBLIC_URL: "http://egret.{{ .Release.Namespace }}.svc.cluster.local:8080"
   EGRET_OIDC__ENABLED: "{{ .Values.oidc.enabled }}"
   EGRET_ADMIN_EMAIL: "{{ .Values.admin.email }}"
   EGRET_LOG__FILTER: "info,egret=debug"
