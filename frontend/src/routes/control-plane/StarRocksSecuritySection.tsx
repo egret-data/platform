@@ -1,10 +1,3 @@
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -14,7 +7,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { SaveBar } from "./EngineDetail";
 import { DELEGATION_HELP } from "./ControlPlaneEngines";
 import {
   type StarRocksConfigForm,
@@ -22,26 +14,20 @@ import {
 } from "./useStarRocksConfigForm";
 
 /**
- * Control Plane → Engine detail → Security & Exposure (StarRocks).
+ * Control Plane → Engine detail → Settings → Security & Delegation (StarRocks).
  *
- * StarRocks-shaped mirror of the Trino `SecurityTab`, driven by the SAME
- * `useStarRocksConfigForm` instance the Configuration tab uses (passed down from
- * `EngineTabs`). Editing delegation / TLS here and pressing Save re-provisions
- * the engine together with any pending config edits — one form, one Save.
+ * The StarRocks Security & Delegation content (per-user delegation + transport
+ * TLS + the read-only Ranger note), with NO Card or SaveBar of its own. Rendered
+ * as the last section of the merged StarRocks Settings left-nav
+ * (`StarRocksConfigTab`), driven by the SAME `useStarRocksConfigForm` instance
+ * the config sections use — so the single shared `SaveBar` covers delegation
+ * edits together with any pending config edits (one form, one Save).
  *
  * Scoped to per-user delegation + transport TLS. The Ranger/authz binding
  * (`authzServiceId`) is NOT editable here: the StarRocks update path
  * (`update_starrocks_engine` → `build_starrocks_spec`) never reads
  * `authz_service_id` from the PUT body, so it's fixed at creation. Surfacing an
  * editable control would fake a change the backend silently ignores.
- */
-/**
- * The StarRocks Security & Delegation content (per-user delegation + transport
- * TLS + the read-only Ranger note), with NO Card or SaveBar of its own. Rendered
- * both as the last section of the merged StarRocks Settings left-nav
- * (`StarRocksConfigTab`) and inside the standalone {@link StarRocksSecurityTab}
- * wrapper. Driven by the same `useStarRocksConfigForm` instance, so the shared
- * SaveBar covers delegation edits together with any pending config edits.
  */
 export function StarRocksSecuritySection({
   cfg,
@@ -118,25 +104,5 @@ export function StarRocksSecuritySection({
         and isn&apos;t editable here.
       </p>
     </div>
-  );
-}
-
-export function StarRocksSecurityTab({ cfg }: { cfg: StarRocksConfigForm }) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-lg">Security &amp; Exposure</CardTitle>
-        <CardDescription>
-          Per-user delegation and transport security. Saving re-provisions the
-          engine.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div className="space-y-4">
-          <StarRocksSecuritySection cfg={cfg} />
-          <SaveBar cfg={cfg} />
-        </div>
-      </CardContent>
-    </Card>
   );
 }

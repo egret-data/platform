@@ -368,6 +368,16 @@ export default function EngineDetail() {
   );
 }
 
+/** The valid top-level `?tab=` values (drives normalization of stale/legacy
+ * bookmarks so a controlled Radix `<Tabs>` never gets an unmatched value). */
+const KNOWN_TABS = new Set([
+  "overview",
+  "catalogs",
+  "workspaces",
+  "settings",
+  "monitor",
+]);
+
 /**
  * Top-level engine tabs: Overview / Catalogs / Workspaces / Settings / Monitor.
  * The config form hook is instantiated here so the merged Settings tab — which
@@ -401,7 +411,16 @@ function EngineTabs({
   // Active top-level tab lives in the URL (`?tab=`) so the view is
   // deep-linkable and survives a refresh. Default preserved: "overview".
   const [sp, setSp] = useSearchParams();
-  const tab = sp.get("tab") ?? "overview";
+  // Normalize the param: an unknown value on a controlled Radix <Tabs> matches no
+  // trigger → blank page. The legacy `configuration`/`security` tab values (now
+  // merged) map to "settings"; anything else unknown falls back to "overview".
+  const raw = sp.get("tab");
+  const tab =
+    raw && KNOWN_TABS.has(raw)
+      ? raw
+      : raw === "configuration" || raw === "security"
+        ? "settings"
+        : "overview";
   const setTab = (v: string) =>
     setSp(
       (prev) => {

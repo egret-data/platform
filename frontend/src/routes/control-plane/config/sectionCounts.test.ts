@@ -1,7 +1,7 @@
 import { sectionCounts } from "../useEngineConfigForm";
 import type { TrinoConfig } from "@/api/controlPlane";
 
-test("counts non-default field-groups per section (7 keys)", () => {
+test("counts non-default field-groups per section (8 keys)", () => {
   const cfg: TrinoConfig = {
     coordinator: { replicas: 2 },
     worker: {},
@@ -13,6 +13,7 @@ test("counts non-default field-groups per section (7 keys)", () => {
     "coordinator",
     "image",
     "pod",
+    "security",
     "server",
     "worker",
     "workload",
@@ -25,6 +26,30 @@ test("counts non-default field-groups per section (7 keys)", () => {
   expect(counts.worker).toBe(0);
   expect(counts.workload).toBe(0);
   expect(counts.pod).toBe(0);
+  expect(counts.security).toBe(0);
+});
+
+test("security counts password users, JWT acceptance, and ingress exposure", () => {
+  const base: TrinoConfig = { coordinator: {}, worker: {} };
+  expect(sectionCounts(base).security).toBe(0);
+  // Password users present → 1.
+  expect(
+    sectionCounts({
+      ...base,
+      auth: { passwordUsers: [{ username: "u", secretRef: "s" }] },
+    }).security,
+  ).toBe(1);
+  // Password users + JWT + ingress → 3.
+  expect(
+    sectionCounts({
+      ...base,
+      auth: {
+        passwordUsers: [{ username: "u", secretRef: "s" }],
+        jwt: { jwksUri: "http://kc/jwks" },
+      },
+      ingress: { enabled: true, host: "trino.example.com" },
+    }).security,
+  ).toBe(3);
 });
 
 test("per-role sizing and placement fields both count under that role's own section", () => {

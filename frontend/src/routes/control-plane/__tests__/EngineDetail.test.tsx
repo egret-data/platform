@@ -330,6 +330,40 @@ describe("EngineDetail — Trino Settings tab (merged Configuration + Security)"
 
     expect(await screen.findByText("Password users")).toBeInTheDocument();
   });
+
+  test("legacy ?tab=security bookmark resolves to the merged Settings tab", async () => {
+    renderDetail(`/control-plane/engines/${ENGINE.id}?tab=security`);
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    // The old Security tab value maps to Settings — no blank page.
+    expect(screen.getByRole("tab", { name: "Settings" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(await screen.findByRole("navigation")).toBeInTheDocument();
+  });
+
+  test("legacy ?tab=configuration bookmark resolves to the merged Settings tab", async () => {
+    renderDetail(`/control-plane/engines/${ENGINE.id}?tab=configuration`);
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    expect(screen.getByRole("tab", { name: "Settings" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
+  test("an unknown ?tab value falls back to Overview", async () => {
+    renderDetail(`/control-plane/engines/${ENGINE.id}?tab=bogus`);
+    await screen.findByRole("heading", { name: "analytics-trino" });
+
+    expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    // Overview content (KPI strip) is shown, not a blank page.
+    expect(await screen.findByText("phase")).toBeInTheDocument();
+  });
 });
 
 describe("EngineDetail — header metadata + page-level actions", () => {

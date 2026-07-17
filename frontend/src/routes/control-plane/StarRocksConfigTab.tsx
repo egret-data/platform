@@ -13,7 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { SaveBar } from "./EngineDetail";
-import { StarRocksSecuritySection } from "./StarRocksSecurityTab";
+import { StarRocksSecuritySection } from "./StarRocksSecuritySection";
 import { KeyedPropertyList } from "./config/KeyedPropertyList";
 import { RawJsonField } from "./config/RawJsonField";
 import { ValidityProvider } from "./config/validityRegistry";
@@ -96,10 +96,10 @@ function srSectionCounts(cfg: StarRocksConfigForm): Record<string, number> {
  *
  * StarRocks-shaped mirror of the Trino `ConfigurationTab` shell: a `Card` with a
  * left-nav of sections + a content pane + the shared `SaveBar`. Edits FE/CN
- * image, replicas, and per-role resources; storage is read-only; Security &
- * Delegation is folded in as the last nav item (the same `StarRocksSecuritySection`
- * the standalone security tab renders). Takes the `useStarRocksConfigForm`
- * instance from `EngineTabs`, so the single Save covers config + security.
+ * image, replicas, and per-role resources; storage is read-only; the
+ * `StarRocksSecuritySection` (delegation + TLS) is folded in as the last nav
+ * item. Takes the `useStarRocksConfigForm` instance from `EngineTabs`, so the
+ * single Save covers config + security.
  */
 export function StarRocksConfigTab({ cfg }: { cfg: StarRocksConfigForm }) {
   // Goes true when any raw-JSON pod field (tolerations / affinity / env /
