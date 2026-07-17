@@ -33,6 +33,54 @@ fn resources_json(r: &RoleResources) -> (Value, Value) {
     (Value::Object(limits), Value::Object(requests))
 }
 
+/// Merge admin `fe.conf` overrides into the egret-generated base. Each base line
+/// of the form `key = value` (or `key=value`) whose key appears in `overrides`
+/// is REPLACED in place (preserving position); overrides whose key isn't in the
+/// base are appended. Keys in `protected` are SKIPPED (egret's value wins) —
+/// belt-and-suspenders behind the API-layer 400 guard. Comment/blank lines are
+/// preserved verbatim.
+fn merge_fe_conf(
+    base: &str,
+    overrides: &std::collections::BTreeMap<String, String>,
+    protected: &[&str],
+) -> String {
+    let mut consumed: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    // Preserve a trailing newline: `split('\n')` on "a\n" yields ["a", ""], so
+    // the empty final element is re-joined with the same '\n' separator.
+    let mut out_lines: Vec<String> = Vec::new();
+    for line in base.split('\n') {
+        // Only `key = value` lines are candidates; comments/blanks pass through.
+        let is_kv =
+            !line.trim_start().starts_with('#') && line.contains('=') && !line.trim().is_empty();
+        if is_kv {
+            let (raw_key, _) = line.split_once('=').expect("contains('=') checked above");
+            let key = raw_key.trim();
+            if !protected.contains(&key) {
+                if let Some((k, v)) = overrides.get_key_value(key) {
+                    out_lines.push(format!("{k} = {v}"));
+                    consumed.insert(k.as_str());
+                    continue;
+                }
+            }
+        }
+        out_lines.push(line.to_string());
+    }
+    let mut out = out_lines.join("\n");
+    // Append any override key not present in the base (and not protected), in
+    // sorted BTreeMap order for determinism. Ensure the appended block starts on
+    // its own line.
+    for (k, v) in overrides {
+        if consumed.contains(k.as_str()) || protected.contains(&k.as_str()) {
+            continue;
+        }
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("{k} = {v}\n"));
+    }
+    out
+}
+
 /// The FE role's `fe.conf` ConfigMap (`{name}-fe-cm`). Templates the base
 /// ports/log block, the `run_mode = shared_data` object-store volume config
 /// sourced from `spec.starrocks`, and — only when a Ranger binding is present
@@ -82,11 +130,15 @@ pub fn starrocks_fe_configmap(spec: &EngineSpec) -> Value {
         conf.push_str("ssl_force_secure_transport = false\n");
     }
 
+    // Merge admin `fe.conf` overrides over the egret-generated base. Protected
+    // keys are guarded here too (defense in depth behind the API-layer 400).
+    let merged = merge_fe_conf(&conf, &sr.fe_config, crate::spec::SR_PROTECTED_FE_KEYS);
+
     json!({
         "apiVersion": "v1", "kind": "ConfigMap",
         "metadata": { "name": format!("{}-fe-cm", spec.name), "namespace": spec.namespace,
                       "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
-        "data": { "fe.conf": conf }
+        "data": { "fe.conf": merged }
     })
 }
 
@@ -527,6 +579,7 @@ impl EngineProvisioner for StarRocksProvisioner {
 mod tests {
     use super::*;
     use crate::spec::*;
+    use std::collections::BTreeMap;
 
     fn sample_sr_spec() -> EngineSpec {
         EngineSpec {
@@ -865,6 +918,66 @@ mod tests {
             .iter()
             .any(|e| e["name"] == "FE_PEM"
                 && e["valueFrom"]["secretKeyRef"]["name"] == "sr1-ssl-secret"));
+    }
+
+    /// Task 2 TDD: an existing base key whose name is in the overrides map is
+    /// REPLACED in place, exactly once, dropping the old value line.
+    #[test]
+    fn merge_fe_conf_replaces_existing_key() {
+        let base = "# header\nsys_log_level = INFO\nquery_port = 9030\n";
+        let overrides = BTreeMap::from([("sys_log_level".to_string(), "WARN".to_string())]);
+        let out = merge_fe_conf(base, &overrides, &[]);
+        assert!(out.contains("sys_log_level = WARN"));
+        assert!(!out.contains("sys_log_level = INFO"));
+        assert_eq!(out.matches("sys_log_level =").count(), 1);
+        // Unrelated lines are preserved verbatim.
+        assert!(out.contains("# header"));
+        assert!(out.contains("query_port = 9030"));
+    }
+
+    /// An override key absent from the base is appended as `key = value`.
+    #[test]
+    fn merge_fe_conf_appends_new_key() {
+        let base = "sys_log_level = INFO\n";
+        let overrides = BTreeMap::from([("query_timeout".to_string(), "600".to_string())]);
+        let out = merge_fe_conf(base, &overrides, &[]);
+        assert!(out.contains("sys_log_level = INFO"));
+        assert!(out.contains("query_timeout = 600"));
+    }
+
+    /// A protected override key is SKIPPED — egret's base line wins, the admin
+    /// value never appears (belt-and-suspenders behind the API 400 guard).
+    #[test]
+    fn merge_fe_conf_skips_protected() {
+        let base = "run_mode = shared_data\n";
+        let overrides = BTreeMap::from([("run_mode".to_string(), "shared_nothing".to_string())]);
+        let out = merge_fe_conf(base, &overrides, &["run_mode"]);
+        assert!(out.contains("run_mode = shared_data"));
+        assert!(!out.contains("shared_nothing"));
+    }
+
+    /// Empty overrides → output is byte-identical to the base.
+    #[test]
+    fn merge_fe_conf_empty_is_identity() {
+        let base = "# header\nsys_log_level = INFO\nrun_mode = shared_data\n";
+        let overrides = BTreeMap::new();
+        assert_eq!(merge_fe_conf(base, &overrides, SR_PROTECTED_FE_KEYS), base);
+    }
+
+    /// Integration through `starrocks_fe_configmap`: an admin `feConfig`
+    /// override for a non-protected key lands in the rendered `fe.conf` once.
+    #[test]
+    fn fe_configmap_applies_override() {
+        let mut spec = sample_sr_spec();
+        spec.starrocks.as_mut().unwrap().fe_config =
+            BTreeMap::from([("sys_log_level".to_string(), "WARN".to_string())]);
+        let conf = starrocks_fe_configmap(&spec)["data"]["fe.conf"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(conf.contains("sys_log_level = WARN"));
+        assert!(!conf.contains("sys_log_level = INFO"));
+        assert_eq!(conf.matches("sys_log_level =").count(), 1);
     }
 
     /// T4 TDD: the restart merge-patch body stamps the restart annotation on
