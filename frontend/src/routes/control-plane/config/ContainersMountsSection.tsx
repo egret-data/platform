@@ -334,21 +334,28 @@ function MiniContainerEditor({
   );
 }
 
-/** A list of `MiniContainerEditor`s with add/remove (init or sidecar). */
+/**
+ * A list of `MiniContainerEditor`s with add/remove (init or sidecar).
+ *
+ * Extracted for reuse by the StarRocks Settings tab (exported below as
+ * `ContainerListEditor`). `idPrefix` / `addLabel` are optional so a standalone
+ * caller need only supply `rows` + `onChange`; the Trino callers keep passing
+ * them explicitly and render identically.
+ */
 function MiniContainerList({
-  idPrefix,
-  items,
+  idPrefix = "container",
+  rows,
   onChange,
-  addLabel,
+  addLabel = "Add container",
 }: {
-  idPrefix: string;
-  items: MiniContainer[];
-  onChange: Dispatch<SetStateAction<MiniContainer[]>>;
-  addLabel: string;
+  idPrefix?: string;
+  rows: MiniContainer[];
+  onChange: (rows: MiniContainer[]) => void;
+  addLabel?: string;
 }) {
   return (
     <div className="space-y-3">
-      {items.map((c, i) => (
+      {rows.map((c, i) => (
         <div key={i} className="space-y-2">
           <div className="flex items-center justify-end">
             <Button
@@ -356,7 +363,7 @@ function MiniContainerList({
               variant="ghost"
               size="sm"
               className="text-muted-foreground"
-              onClick={() => onChange(items.filter((_, j) => j !== i))}
+              onClick={() => onChange(rows.filter((_, j) => j !== i))}
             >
               <Trash2 className="h-4 w-4" />
               Remove container
@@ -367,7 +374,7 @@ function MiniContainerList({
             rawId={`containers.${idPrefix}.${i}.raw`}
             value={c}
             onChange={(next) =>
-              onChange(items.map((x, j) => (j === i ? next : x)))
+              onChange(rows.map((x, j) => (j === i ? next : x)))
             }
           />
         </div>
@@ -376,7 +383,7 @@ function MiniContainerList({
         type="button"
         variant="outline"
         size="sm"
-        onClick={() => onChange([...items, { name: "", image: "" }])}
+        onClick={() => onChange([...rows, { name: "", image: "" }])}
       >
         <Plus className="h-4 w-4" />
         {addLabel}
@@ -384,6 +391,14 @@ function MiniContainerList({
     </div>
   );
 }
+
+/**
+ * Standalone container-list editor for reuse (e.g. the StarRocks Settings tab).
+ * `ContainerForm` is the `MiniContainer` shape (name/image, command/args string
+ * lists, env `Record<string,string>`, volume mounts, raw-JSON override).
+ */
+export { MiniContainerList as ContainerListEditor };
+export type { MiniContainer as ContainerForm } from "@/api/controlPlane";
 
 // ── section props ────────────────────────────────────────────────────────────
 
@@ -499,7 +514,7 @@ export function ContainersMountsSection({
           </p>
           <MiniContainerList
             idPrefix="init"
-            items={initContainers}
+            rows={initContainers}
             onChange={setInitContainers}
             addLabel="Add init container"
           />
@@ -511,7 +526,7 @@ export function ContainersMountsSection({
           </p>
           <MiniContainerList
             idPrefix="sidecar"
-            items={sidecarContainers}
+            rows={sidecarContainers}
             onChange={setSidecarContainers}
             addLabel="Add sidecar container"
           />

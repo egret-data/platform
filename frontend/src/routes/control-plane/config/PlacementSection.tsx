@@ -49,6 +49,118 @@ const TOLERATION_EFFECTS = ["NoSchedule", "PreferNoSchedule", "NoExecute"];
 const WHEN_UNSATISFIABLE = ["DoNotSchedule", "ScheduleAnyway"];
 
 /**
+ * Standalone toleration-rows editor (key / operator / value / effect /
+ * tolerationSeconds) with add/remove. Extracted verbatim from the Trino
+ * placement section so the StarRocks Settings tab can reuse it; the Trino path
+ * renders identically by passing `form.tolerations` / `setTolerations`.
+ */
+export function TolerationsEditor({
+  rows,
+  onChange,
+}: {
+  rows: TolerationForm[];
+  onChange: (rows: TolerationForm[]) => void;
+}) {
+  return (
+    <>
+      {rows.map((t, i) => (
+        <div key={i} className="flex items-start gap-2">
+          <div className="grid flex-1 grid-cols-2 gap-2 sm:grid-cols-5">
+            <Input
+              value={t.key}
+              placeholder="key"
+              onChange={(e) =>
+                onChange(
+                  rows.map((r, j) => (j === i ? { ...r, key: e.target.value } : r)),
+                )
+              }
+            />
+            <Input
+              value={t.operator}
+              placeholder="Equal / Exists"
+              onChange={(e) =>
+                onChange(
+                  rows.map((r, j) =>
+                    j === i ? { ...r, operator: e.target.value } : r,
+                  ),
+                )
+              }
+            />
+            <Input
+              value={t.value}
+              placeholder="value"
+              onChange={(e) =>
+                onChange(
+                  rows.map((r, j) => (j === i ? { ...r, value: e.target.value } : r)),
+                )
+              }
+            />
+            <Select
+              value={t.effect || SELECT_NONE}
+              onValueChange={(v) =>
+                onChange(
+                  rows.map((r, j) =>
+                    j === i ? { ...r, effect: v === SELECT_NONE ? "" : v } : r,
+                  ),
+                )
+              }
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="effect" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={SELECT_NONE}>(any effect)</SelectItem>
+                {TOLERATION_EFFECTS.map((e) => (
+                  <SelectItem key={e} value={e}>
+                    {e}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Input
+              type="number"
+              value={t.tolerationSeconds}
+              placeholder="tolerationSeconds"
+              onChange={(e) =>
+                onChange(
+                  rows.map((r, j) =>
+                    j === i ? { ...r, tolerationSeconds: e.target.value } : r,
+                  ),
+                )
+              }
+            />
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="shrink-0 text-muted-foreground"
+            onClick={() => onChange(rows.filter((_, j) => j !== i))}
+            aria-label="Remove toleration"
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
+      ))}
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() =>
+          onChange([
+            ...rows,
+            { key: "", operator: "", value: "", effect: "", tolerationSeconds: "" },
+          ])
+        }
+      >
+        <Plus className="h-4 w-4" />
+        Add toleration
+      </Button>
+    </>
+  );
+}
+
+/**
  * The per-role placement fields (nodeSelector / tolerations / topologySpread /
  * affinity / termination grace / extra ports) editing one role's `RoleForm`
  * slice. The affinity raw-JSON override is text-in-form; it is bridged to the
@@ -98,105 +210,7 @@ export function RolePlacementEditor({
       {/* tolerations */}
       <div className="space-y-2">
         <Label>Tolerations</Label>
-        {form.tolerations.map((t, i) => (
-          <div key={i} className="flex items-start gap-2">
-            <div className="grid flex-1 grid-cols-2 gap-2 sm:grid-cols-5">
-              <Input
-                value={t.key}
-                placeholder="key"
-                onChange={(e) =>
-                  setTolerations(
-                    form.tolerations.map((r, j) =>
-                      j === i ? { ...r, key: e.target.value } : r,
-                    ),
-                  )
-                }
-              />
-              <Input
-                value={t.operator}
-                placeholder="Equal / Exists"
-                onChange={(e) =>
-                  setTolerations(
-                    form.tolerations.map((r, j) =>
-                      j === i ? { ...r, operator: e.target.value } : r,
-                    ),
-                  )
-                }
-              />
-              <Input
-                value={t.value}
-                placeholder="value"
-                onChange={(e) =>
-                  setTolerations(
-                    form.tolerations.map((r, j) =>
-                      j === i ? { ...r, value: e.target.value } : r,
-                    ),
-                  )
-                }
-              />
-              <Select
-                value={t.effect || SELECT_NONE}
-                onValueChange={(v) =>
-                  setTolerations(
-                    form.tolerations.map((r, j) =>
-                      j === i ? { ...r, effect: v === SELECT_NONE ? "" : v } : r,
-                    ),
-                  )
-                }
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="effect" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={SELECT_NONE}>(any effect)</SelectItem>
-                  {TOLERATION_EFFECTS.map((e) => (
-                    <SelectItem key={e} value={e}>
-                      {e}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Input
-                type="number"
-                value={t.tolerationSeconds}
-                placeholder="tolerationSeconds"
-                onChange={(e) =>
-                  setTolerations(
-                    form.tolerations.map((r, j) =>
-                      j === i ? { ...r, tolerationSeconds: e.target.value } : r,
-                    ),
-                  )
-                }
-              />
-            </div>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="shrink-0 text-muted-foreground"
-              onClick={() =>
-                setTolerations(form.tolerations.filter((_, j) => j !== i))
-              }
-              aria-label="Remove toleration"
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          </div>
-        ))}
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() =>
-            setTolerations([
-              ...form.tolerations,
-              { key: "", operator: "", value: "", effect: "", tolerationSeconds: "" },
-            ])
-          }
-        >
-          <Plus className="h-4 w-4" />
-          Add toleration
-        </Button>
+        <TolerationsEditor rows={form.tolerations} onChange={setTolerations} />
       </div>
 
       {/* topology spread */}
