@@ -1576,14 +1576,29 @@ async fn list_engines(
     Auth(p): Auth,
 ) -> Result<Json<Vec<EngineDto>>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:read").await?;
-    Ok(Json(
-        st.engine_mgmt
-            .list_engines()
-            .await?
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-    ))
+    // The stored `status` column is only ever the create-time value
+    // ("provisioning") — nothing writes it back, so it would show every engine
+    // as forever-provisioning on the list. Recompute the LIVE phase per engine
+    // from the provisioner (same source `get_engine` uses), falling back to the
+    // stored value if the live read fails or no provisioner is configured.
+    let engines = st.engine_mgmt.list_engines().await?;
+    let prov = st.engine_provisioner.as_ref();
+    let mut out = Vec::with_capacity(engines.len());
+    for engine in engines {
+        let (kind, ns, name) = (
+            engine.r#type.clone(),
+            engine.namespace.clone(),
+            engine.name.clone(),
+        );
+        let mut dto: EngineDto = engine.into();
+        if let Some(prov) = prov {
+            if let Ok(s) = prov.status(&kind, &ns, &name).await {
+                dto.status = s.phase;
+            }
+        }
+        out.push(dto);
+    }
+    Ok(Json(out))
 }
 
 /// Find (or create) the shared per-warehouse engine role and return its id. A new
