@@ -3,6 +3,7 @@
 //! `egret-orchestrator` (k8s rendering) depend on these — neither owns the model.
 //! Kube-free by construction: this crate has no dependencies.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -398,6 +399,75 @@ impl EngineKind {
     }
 }
 
+/// CN (compute-node) horizontal autoscaling target. Rendered into the
+/// StarRocksCluster CR's `starRocksCnSpec.autoScalingPolicy`. `max_replicas` is
+/// the only required knob; the rest fall back to operator defaults when None.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CnAutoscaling {
+    pub min_replicas: Option<u32>,
+    pub max_replicas: u32,
+    pub target_cpu_percent: Option<u32>,
+}
+
+/// Pod- and container-level scheduling / customization surface applied to the
+/// FE + CN specs of a provisioned StarRocks. Every field is optional (absent ⇒
+/// operator default); the raw-JSON fields are passed through verbatim to give
+/// full escape-hatch control without modelling every k8s sub-object here.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StarRocksPod {
+    #[serde(default)]
+    pub service_account: Option<String>,
+    #[serde(default)]
+    pub node_selector: BTreeMap<String, String>,
+    #[serde(default)]
+    pub annotations: BTreeMap<String, String>,
+    #[serde(default)]
+    pub pod_labels: BTreeMap<String, String>,
+    #[serde(default)]
+    pub env: Vec<Value>,
+    #[serde(default)]
+    pub tolerations: Option<Value>,
+    #[serde(default)]
+    pub affinity: Option<Value>,
+    #[serde(default)]
+    pub security_context: Option<Value>,
+    #[serde(default)]
+    pub init_containers: Option<Value>,
+    #[serde(default)]
+    pub sidecars: Option<Value>,
+    #[serde(default)]
+    pub image_pull_secrets: Vec<String>,
+}
+
+/// `fe.conf` keys egret manages itself (shared-data run mode, object-store
+/// coordinates, TLS keystore, and the wire ports). A user-supplied `feConfig`
+/// override for any of these is rejected up front so it can't clobber the
+/// provisioner's own wiring. Shared with the orchestrator (which renders the
+/// merged `fe.conf`) via this contract crate so both sides agree on the set.
+pub const SR_PROTECTED_FE_KEYS: &[&str] = &[
+    "run_mode",
+    "cloud_native_meta_port",
+    "cloud_native_storage_type",
+    "aws_s3_endpoint",
+    "aws_s3_path",
+    "aws_s3_access_key",
+    "aws_s3_secret_key",
+    "aws_s3_use_aws_sdk_default_behavior",
+    "aws_s3_enable_path_style_access",
+    "enable_load_volume_from_conf",
+    "access_control",
+    "ssl_keystore_location",
+    "ssl_keystore_password",
+    "ssl_key_password",
+    "ssl_force_secure_transport",
+    "http_port",
+    "rpc_port",
+    "query_port",
+    "edit_log_port",
+];
+
 /// StarRocks shared-data engine config (FE + CN). Storage params drive the
 /// FE builtin storage volume (object store); FE/CN resources default when None.
 ///
@@ -420,6 +490,15 @@ pub struct StarRocksConfig {
     /// Delegation/security wiring (JWT integration + FE TLS); `None` = neither
     /// templated (slice-2 behavior, open engine).
     pub delegation: Option<StarRocksDelegation>,
+    /// FE (`fe.conf`) override keys merged over egret's managed base; the
+    /// managed keys ([`SR_PROTECTED_FE_KEYS`]) are guarded away at the API.
+    pub fe_config: BTreeMap<String, String>,
+    /// CN (`cn.conf`) override keys merged over egret's managed base.
+    pub cn_config: BTreeMap<String, String>,
+    /// CN horizontal autoscaling target; `None` = fixed `cn_replicas`.
+    pub cn_autoscaling: Option<CnAutoscaling>,
+    /// Pod- and container-level scheduling / customization; `None` = defaults.
+    pub pod: Option<StarRocksPod>,
 }
 
 /// Delegation/security wiring for a provisioned StarRocks. `None` on
@@ -471,6 +550,10 @@ impl std::fmt::Debug for StarRocksConfig {
             .field("fe_resources", &self.fe_resources)
             .field("cn_resources", &self.cn_resources)
             .field("delegation", &self.delegation)
+            .field("fe_config", &self.fe_config)
+            .field("cn_config", &self.cn_config)
+            .field("cn_autoscaling", &self.cn_autoscaling)
+            .field("pod", &self.pod)
             .finish()
     }
 }
@@ -547,6 +630,10 @@ mod tests {
             fe_resources: None,
             cn_resources: None,
             delegation: None,
+            fe_config: Default::default(),
+            cn_config: Default::default(),
+            cn_autoscaling: None,
+            pod: None,
         };
         assert_eq!(s.fe_replicas, 1);
     }

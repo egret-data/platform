@@ -195,6 +195,23 @@ struct StarRocksConfigBody {
     /// otherwise. `false` opts out of TLS while still enabling delegation
     /// (e.g. a dev cluster where the extra listener setup isn't wanted).
     tls_enabled: Option<bool>,
+    /// FE (`fe.conf`) override keys → merged over egret's managed base by the
+    /// orchestrator. egret-managed keys ([`egret_engine_mgmt_api::SR_PROTECTED_FE_KEYS`])
+    /// are rejected up front by [`validate_sr_fe_config`]. Omitted ⇒ preserved on update.
+    fe_config: Option<std::collections::BTreeMap<String, String>>,
+    /// CN (`cn.conf`) override keys → rendered into a ConfigMap by the orchestrator.
+    /// Omitted ⇒ preserved on update.
+    cn_config: Option<std::collections::BTreeMap<String, String>>,
+    /// CN horizontal autoscaling `{ minReplicas?, maxReplicas, targetCpuPercent? }`.
+    /// Stored/read as opaque JSON here; typed into `CnAutoscaling` at provision-req
+    /// assembly. Omitted ⇒ preserved on update.
+    #[schema(value_type = Object)]
+    cn_autoscaling: Option<serde_json::Value>,
+    /// Pod- & container-level scheduling / customization surface (nodeSelector,
+    /// tolerations, affinity, sidecars, …). Opaque JSON here; typed into
+    /// `StarRocksPod` at provision-req assembly. Omitted ⇒ preserved on update.
+    #[schema(value_type = Object)]
+    pod: Option<serde_json::Value>,
 }
 
 /// The provisioning parameters surfaced back to clients (subset of the stored
@@ -1962,6 +1979,33 @@ async fn build_starrocks_provision_req(
         .filter(|v| !v.is_null())
         .map(parse_resources);
 
+    // Deep-config surface read back into typed contract fields. Lenient like the
+    // reads above: absent/null/parse-fail ⇒ empty map (feConfig/cnConfig) or
+    // `None` (cnAutoscaling/pod), so a spec written before this surface existed
+    // still assembles.
+    let fe_config = cfg
+        .and_then(|c| c.get("feConfig"))
+        .filter(|v| !v.is_null())
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let cn_config = cfg
+        .and_then(|c| c.get("cnConfig"))
+        .filter(|v| !v.is_null())
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let cn_autoscaling = cfg
+        .and_then(|c| c.get("cnAutoscaling"))
+        .filter(|v| !v.is_null())
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok());
+    let pod = cfg
+        .and_then(|c| c.get("pod"))
+        .filter(|v| !v.is_null())
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok());
+
     // Delegation opt-in read back from the stored `{mode, tlsEnabled}` block.
     // `tls_enabled` mirrors create: on only when delegation is configured,
     // defaulting to true (TLS-on) unless the stored block opted out.
@@ -2053,6 +2097,10 @@ async fn build_starrocks_provision_req(
             fe_resources,
             cn_resources,
             delegation,
+            fe_config,
+            cn_config,
+            cn_autoscaling,
+            pod,
         }),
     };
     Ok((req, delegation_bootstrap))
@@ -2067,6 +2115,26 @@ fn validate_sr_delegation_mode(sr_body: &StarRocksConfigBody) -> Result<(), CpEr
             return Err(CpError::BadRequest(format!(
                 "invalid starrocks delegationMode: {m} (expected \"jwt\" or \"impersonate\")"
             )));
+        }
+    }
+    Ok(())
+}
+
+/// Reject a StarRocks body whose `feConfig` override tries to set a key egret
+/// manages itself ([`egret_engine_mgmt_api::SR_PROTECTED_FE_KEYS`] — the
+/// shared-data run mode, object-store coords, TLS keystore, and wire ports). The
+/// SAME guard runs up front on both create and update, before any spec is
+/// persisted, so a bad override 400s with nothing to roll back. The orchestrator
+/// (Task 2, a separate crate) keeps its own belt-and-suspenders copy of the set
+/// when it merges the config, but this is the primary API-level gate.
+fn validate_sr_fe_config(sr_body: &StarRocksConfigBody) -> Result<(), CpError> {
+    if let Some(fc) = sr_body.fe_config.as_ref() {
+        for k in fc.keys() {
+            if egret_engine_mgmt_api::SR_PROTECTED_FE_KEYS.contains(&k.as_str()) {
+                return Err(CpError::BadRequest(format!(
+                    "fe.conf key '{k}' is managed by egret and cannot be overridden"
+                )));
+            }
         }
     }
     Ok(())
@@ -2161,6 +2229,33 @@ fn build_starrocks_spec(
             .unwrap_or(serde_json::Value::Null),
     };
 
+    // Deep-config surface (feConfig/cnConfig/cnAutoscaling/pod): same omit=preserve
+    // rule as the fields above — a body value wins; else preserve the existing
+    // stored value; else the empty/absent default (`{}` for the config maps, JSON
+    // `null` for the optional autoscaling/pod blocks).
+    let fe_config = sr_body
+        .fe_config
+        .clone()
+        .map(|m| serde_json::to_value(m).unwrap_or_else(|_| serde_json::json!({})))
+        .or_else(|| existing_cfg.and_then(|c| c.get("feConfig")).cloned())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let cn_config = sr_body
+        .cn_config
+        .clone()
+        .map(|m| serde_json::to_value(m).unwrap_or_else(|_| serde_json::json!({})))
+        .or_else(|| existing_cfg.and_then(|c| c.get("cnConfig")).cloned())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let cn_autoscaling = sr_body
+        .cn_autoscaling
+        .clone()
+        .or_else(|| existing_cfg.and_then(|c| c.get("cnAutoscaling")).cloned())
+        .unwrap_or(serde_json::Value::Null);
+    let pod = sr_body
+        .pod
+        .clone()
+        .or_else(|| existing_cfg.and_then(|c| c.get("pod")).cloned())
+        .unwrap_or(serde_json::Value::Null);
+
     serde_json::json!({
         "imageVersion": fe_image,
         "starrocksConfig": {
@@ -2171,6 +2266,10 @@ fn build_starrocks_spec(
             "feResources": fe_resources,
             "cnResources": cn_resources,
             "delegation": delegation,
+            "feConfig": fe_config,
+            "cnConfig": cn_config,
+            "cnAutoscaling": cn_autoscaling,
+            "pod": pod,
         },
     })
 }
@@ -2238,6 +2337,8 @@ async fn create_starrocks_engine(
     // cleartext via the mysql_clear_password plugin, so TLS matters here too and
     // disabling it must be an explicit opt-out).
     validate_sr_delegation_mode(&sr_body)?;
+    // Reject any `feConfig` override of an egret-managed fe.conf key up front.
+    validate_sr_fe_config(&sr_body)?;
 
     // ── Iceberg external-catalog auto-wire (T6), step 1: mint a Catalog Client
     // for the warehouse — the EXACT same call the Trino path uses
@@ -2842,6 +2943,8 @@ async fn update_starrocks_engine(
     // Validate delegationMode exactly like create (jwt|impersonate|blank) BEFORE
     // persisting anything, so a bad value 400s without corrupting the stored spec.
     validate_sr_delegation_mode(&sr_body)?;
+    // Same up-front guard on a `feConfig` override of an egret-managed key.
+    validate_sr_fe_config(&sr_body)?;
 
     // Capture the OLD delegation block ({mode, tlsEnabled} or null) from the
     // pre-update engine before we overwrite the spec, so we can detect a
@@ -4495,6 +4598,62 @@ mod tests {
             updated["starrocksConfig"]["delegation"]["tlsEnabled"],
             false
         );
+    }
+
+    // ── build_starrocks_spec: deep-config fields (feConfig/cnConfig/
+    //    cnAutoscaling/pod) round-trip + omit=preserve ────────────────────────
+    #[test]
+    fn build_starrocks_spec_roundtrips_deep_fields() {
+        // Create-shaped call: body carries the deep-config surface.
+        let mut fe_config = std::collections::BTreeMap::new();
+        fe_config.insert("sys_log_level".to_string(), "WARN".to_string());
+        let body = StarRocksConfigBody {
+            fe_config: Some(fe_config),
+            cn_autoscaling: Some(serde_json::json!({ "maxReplicas": 3 })),
+            pod: Some(serde_json::json!({ "nodeSelector": { "disktype": "ssd" } })),
+            ..Default::default()
+        };
+        let created = build_starrocks_spec(&body, None);
+        let cfg = &created["starrocksConfig"];
+        assert_eq!(cfg["feConfig"]["sys_log_level"], "WARN");
+        assert_eq!(cfg["cnAutoscaling"]["maxReplicas"], 3);
+        assert_eq!(cfg["pod"]["nodeSelector"]["disktype"], "ssd");
+
+        // Follow-up update that OMITS the deep fields ⇒ all preserved verbatim.
+        let update = StarRocksConfigBody {
+            fe_replicas: Some(2),
+            ..Default::default()
+        };
+        let updated = build_starrocks_spec(&update, Some(&created));
+        let ucfg = &updated["starrocksConfig"];
+        assert_eq!(ucfg["feReplicas"], 2);
+        assert_eq!(ucfg["feConfig"]["sys_log_level"], "WARN");
+        assert_eq!(ucfg["cnAutoscaling"]["maxReplicas"], 3);
+        assert_eq!(ucfg["pod"]["nodeSelector"]["disktype"], "ssd");
+    }
+
+    // ── validate_sr_fe_config: protected fe.conf keys are rejected ───────────
+    #[test]
+    fn feconfig_protected_key_rejected() {
+        let mut fe_config = std::collections::BTreeMap::new();
+        fe_config.insert("run_mode".to_string(), "shared_nothing".to_string());
+        let body = StarRocksConfigBody {
+            fe_config: Some(fe_config),
+            ..Default::default()
+        };
+        match validate_sr_fe_config(&body) {
+            Err(CpError::BadRequest(m)) => assert!(m.contains("run_mode"), "msg was: {m}"),
+            other => panic!("expected BadRequest rejecting run_mode, got {other:?}"),
+        }
+
+        // A non-protected key passes.
+        let mut ok_config = std::collections::BTreeMap::new();
+        ok_config.insert("sys_log_level".to_string(), "WARN".to_string());
+        let ok_body = StarRocksConfigBody {
+            fe_config: Some(ok_config),
+            ..Default::default()
+        };
+        assert!(validate_sr_fe_config(&ok_body).is_ok());
     }
 
     // ── sr_delegation_block: the delegation-change detector ─────────────────

@@ -549,6 +549,10 @@ mod tests {
                 fe_resources: None,
                 cn_resources: None,
                 delegation: None,
+                fe_config: Default::default(),
+                cn_config: Default::default(),
+                cn_autoscaling: None,
+                pod: None,
             }),
         }
     }
