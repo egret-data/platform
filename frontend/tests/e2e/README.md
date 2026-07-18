@@ -223,3 +223,15 @@ Pure browser UI — deterministic, no async k8s (runs in seconds).
 
 Needs the seeded `member-sso` realm user (a fresh `deploy-kind-oidc` imports it).
 Member creds override via `EGRET_E2E_OIDC_MEMBER_USER` / `EGRET_E2E_OIDC_MEMBER_PASSWORD`.
+
+## Governance enforcement e2e (`governance-kind.spec.ts`)
+
+Opt-in (`EGRET_E2E_KIND=1`), needs a **Ranger-on** deploy — run via `just
+e2e-kind-governance` (deploys with `--set ranger.enabled=true`, so provisioned Trino
+engines bind Ranger; egret embeds the Ranger admin at `/service`, no separate server).
+
+Provisions a Ranger-bound Trino engine, seeds a governed Iceberg table, creates
+access + column-mask + row-filter policies (via `/api/control-plane/policies`,
+targeting the admin's own Trino user), and asserts the admin's `SELECT` returns
+MASKED `item` values and ONLY `country='US'` rows. The Trino Ranger plugin polls
+every ~5s, so policy changes take a few seconds to take effect.
