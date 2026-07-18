@@ -23,6 +23,8 @@ oidc:
   keycloakImage: quay.io/keycloak/keycloak:26.0
   keycloakAdmin: admin
   keycloakAdminPassword: admin
+ranger:
+  enabled: false
 deps:
   enabled: true
   postgres:
