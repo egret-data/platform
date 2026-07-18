@@ -148,3 +148,39 @@ Requirements:
 
 Skipped unless `EGRET_E2E_CATALOG=1`. See `deploy/embedded-catalog/engine-wiring.md`
 to wire a real engine (Trino / pyiceberg).
+
+## Data-plane e2e on kind (`dataplane-kind.spec.ts`)
+
+Opt-in (`EGRET_E2E_KIND=1`), and unlike the other specs it targets the
+**in-cluster kind deploy** (`http://egret.localtest.me`), not the host dev stack.
+It provisions the full lifecycle via the egret API — storage → warehouse → Trino
+engine (1Gi, 1 worker) → enable egret-JWT → assign workspace — then asserts in
+SQL Lab that `SELECT current_user` returns the **caller** (`admin`), proving
+per-user impersonation (OIDC → engine JWKS → JWT → TLS:8443 → impersonation →
+query). It cleans up the engine in `afterAll` to free node memory.
+
+### One-time prereq
+
+```bash
+just k8s-up            # kind `egret` cluster
+just ingress-install   # nginx-ingress (kind flavor)
+just coredns-rewrite   # egret.localtest.me resolves cluster-wide
+```
+
+### Run
+
+```bash
+just e2e-kind          # deploy-kind-oidc → wait-ready → playwright dataplane-kind
+```
+
+`just e2e-kind` re-deploys (idempotent `helm upgrade --install`), waits for pods +
+OIDC discovery, then runs the spec. Re-runnable on the same cluster — each run uses
+a unique `EGRET_E2E_RUN_ID` suffix and cleans up its engine.
+
+Env overrides: `EGRET_E2E_BASE_URL`, `EGRET_E2E_RUN_ID`, `EGRET_E2E_BUCKET`,
+`EGRET_E2E_S3_ENDPOINT` / `EGRET_E2E_S3_KEY` / `EGRET_E2E_S3_SECRET`, and the
+break-glass admin `EGRET_E2E_EMAIL` / `EGRET_E2E_PASSWORD`.
+
+> If the single kind node is memory-wedged, delete stale engines first:
+> `kubectl get deploy -n egret-engines` then `kubectl delete deploy <name>` (or
+> delete the engine via the CP UI).
