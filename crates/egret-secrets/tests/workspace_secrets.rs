@@ -209,6 +209,54 @@ async fn rename_rejects_duplicate_and_missing() {
 }
 
 #[tokio::test]
+async fn typed_named_secret_lists_type_and_keys() {
+    let Some(c) = ctx().await else {
+        eprintln!("skip");
+        return;
+    };
+    let ws = seed_workspace(&c.db).await;
+
+    use std::collections::BTreeMap;
+    let mut tls = BTreeMap::new();
+    tls.insert("tls.crt".to_string(), "CERT".to_string());
+    tls.insert("tls.key".to_string(), "KEY".to_string());
+    let id = c
+        .store
+        .create_typed(Some(ws), "wildcard", None, "kubernetes.io/tls", &tls)
+        .await
+        .unwrap();
+
+    // list exposes the type + the data key names (sorted), never the values.
+    let metas = c.store.list(Some(ws)).await.unwrap();
+    let m = metas.into_iter().find(|m| m.id == id).unwrap();
+    assert_eq!(m.r#type, "kubernetes.io/tls");
+    assert_eq!(m.keys, vec!["tls.crt".to_string(), "tls.key".to_string()]);
+
+    // The plaintext is still retrievable per key (P0 get_key) — it just never
+    // rides along in the metadata.
+    let secret_ref: Uuid =
+        sqlx::query_scalar("SELECT secret_ref FROM workspace_secrets WHERE id = $1")
+            .bind(id)
+            .fetch_one(&c.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        c.secrets.get_key(secret_ref, "tls.crt").await.unwrap(),
+        "CERT"
+    );
+
+    // Legacy (single-value) create still surfaces as Opaque{value}.
+    let lid = c
+        .store
+        .create(Some(ws), "legacy", None, "hunter2")
+        .await
+        .unwrap();
+    let lm = c.store.get_meta(Some(ws), lid).await.unwrap();
+    assert_eq!(lm.r#type, "Opaque");
+    assert_eq!(lm.keys, vec!["value".to_string()]);
+}
+
+#[tokio::test]
 async fn global_and_workspace_scopes_are_isolated() {
     let Some(c) = ctx().await else {
         eprintln!("skip");
