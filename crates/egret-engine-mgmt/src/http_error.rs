@@ -83,6 +83,9 @@ impl From<SecretsError> for EngineHttpError {
             SecretsError::NotConfigured => {
                 EngineHttpError::BadRequest("secrets master_key is not configured".to_string())
             }
+            SecretsError::InvalidType(_) | SecretsError::MissingKey(_) => {
+                EngineHttpError::BadRequest(e.to_string())
+            }
             SecretsError::Crypto(_) | SecretsError::Db(_) => EngineHttpError::Internal,
         }
     }

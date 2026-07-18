@@ -67,6 +67,9 @@ impl From<SecretsError> for CpError {
             SecretsError::NotConfigured => {
                 CpError::BadRequest("secrets master_key is not configured".to_string())
             }
+            SecretsError::InvalidType(_) | SecretsError::MissingKey(_) => {
+                CpError::BadRequest(e.to_string())
+            }
             SecretsError::Crypto(_) | SecretsError::Db(_) => CpError::Internal,
         }
     }

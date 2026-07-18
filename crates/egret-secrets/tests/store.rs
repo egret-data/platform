@@ -35,3 +35,56 @@ async fn put_without_key_errors() {
     let err = no_key.put("db_password", "x").await.unwrap_err();
     assert!(matches!(err, egret_secrets::SecretsError::NotConfigured));
 }
+
+#[tokio::test]
+async fn typed_roundtrips_and_validates() {
+    let Some(store) = store().await else {
+        eprintln!("skip");
+        return;
+    };
+    use std::collections::BTreeMap;
+
+    // Opaque multi-key round-trip.
+    let mut opaque = BTreeMap::new();
+    opaque.insert("a".into(), "1".into());
+    opaque.insert("b".into(), "2".into());
+    let id = store
+        .put_typed("cfg", egret_secrets::secret_type::OPAQUE, &opaque)
+        .await
+        .unwrap();
+    let got = store.get_typed(id).await.unwrap();
+    assert_eq!(got.r#type, "Opaque");
+    assert_eq!(got.data.get("a").unwrap(), "1");
+    assert_eq!(store.get_key(id, "b").await.unwrap(), "2");
+
+    // TLS round-trip.
+    let mut tls = BTreeMap::new();
+    tls.insert("tls.crt".into(), "CERT".into());
+    tls.insert("tls.key".into(), "KEY".into());
+    let tid = store
+        .put_typed("cfg", egret_secrets::secret_type::TLS, &tls)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_typed(tid).await.unwrap().r#type,
+        "kubernetes.io/tls"
+    );
+
+    // Validation: TLS missing tls.key → MissingKey; unknown type → InvalidType.
+    let mut bad = BTreeMap::new();
+    bad.insert("tls.crt".into(), "CERT".into());
+    assert!(store
+        .put_typed("cfg", egret_secrets::secret_type::TLS, &bad)
+        .await
+        .is_err());
+    assert!(store.put_typed("cfg", "not/a-type", &opaque).await.is_err());
+
+    // Backward-compat shim: put/get still round-trip a single value as Opaque{value}.
+    let sid = store.put("legacy", "hunter2").await.unwrap();
+    assert_eq!(store.get(sid).await.unwrap(), "hunter2");
+    let shimmed = store.get_typed(sid).await.unwrap();
+    assert_eq!(shimmed.r#type, "Opaque");
+    assert_eq!(shimmed.data.get("value").unwrap(), "hunter2");
+    store.update(sid, "hunter3").await.unwrap();
+    assert_eq!(store.get(sid).await.unwrap(), "hunter3");
+}
