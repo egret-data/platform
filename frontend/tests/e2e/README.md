@@ -244,3 +244,17 @@ Notes (baked into `just e2e-kind-governance`):
 - The egret Trino provisioner sets the Ranger plugin poll interval to **30s**, so a
   new mask/row-filter takes up to ~30s to enforce — the spec re-queries until it does.
 - The Trino catalog egret provisions is named **`egret`** (not `iceberg`).
+
+## Engine provisioning via the UI (`provisioning-ui-kind.spec.ts`)
+
+Opt-in (`EGRET_E2E_KIND=1`), runs against any in-cluster deploy (e.g. after
+`just e2e-kind`). Seeds a warehouse via the API, then drives the control-plane
+UI: fills the **Add engine** form for a Trino cluster (1 worker, 1Gi), waits for
+the row's status badge to reach **running** (~1–2 min of real k8s provisioning),
+then deletes the engine via its detail page. Needs `EGRET_E2E_BUCKET=e2e` (the
+default `warehouse` bucket carries a lakekeeper orphan — see the data-plane note).
+
+```bash
+cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
+  EGRET_E2E_BUCKET=e2e npx playwright test provisioning-ui-kind
+```
