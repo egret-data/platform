@@ -6,10 +6,12 @@ import { ExternalLink, Loader2, Plus, Server } from "lucide-react";
 import {
   type CreateEngineInput,
   type Engine,
+  type Secret,
   type Warehouse,
   createEngine,
   getEngine,
   listEngines,
+  listSecrets,
   listWarehouses,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
@@ -333,6 +335,12 @@ function AddEngineDialog({
     retry: false,
     enabled: open,
   });
+  const secrets = useQuery<Secret[], ApiError>({
+    queryKey: ["control-plane", "secrets"],
+    queryFn: listSecrets,
+    retry: false,
+    enabled: open,
+  });
   const createMutation = useMutation<Engine, ApiError, CreateEngineInput>({
     mutationFn: createEngine,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: enginesQueryKey }),
@@ -353,6 +361,9 @@ function AddEngineDialog({
   const [delegationMode, setDelegationMode] =
     useState<StarRocksDelegationOption>("none");
   const [tlsEnabled, setTlsEnabled] = useState(true);
+  // Optional coordinator TLS cert: "" = self-signed (default); otherwise the id
+  // of a kubernetes.io/tls named secret.
+  const [tlsCertSecretRef, setTlsCertSecretRef] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const isStarRocks = engineType === "starrocks";
@@ -375,6 +386,7 @@ function AddEngineDialog({
     setCnReplicas(1);
     setDelegationMode("none");
     setTlsEnabled(true);
+    setTlsCertSecretRef("");
     setError(null);
     createMutation.reset();
   }
@@ -421,6 +433,7 @@ function AddEngineDialog({
           cpuMin: cpuMin.trim(),
           cpuMax: cpuMax.trim(),
           memory: memory.trim(),
+          ...(tlsCertSecretRef ? { tlsCertSecretRef } : {}),
         };
 
     try {
@@ -629,6 +642,36 @@ function AddEngineDialog({
                       required
                     />
                   </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="cpe-tls-cert">Coordinator TLS cert</Label>
+                  <Select
+                    value={tlsCertSecretRef || "__self_signed__"}
+                    onValueChange={(v) =>
+                      setTlsCertSecretRef(v === "__self_signed__" ? "" : v)
+                    }
+                  >
+                    <SelectTrigger id="cpe-tls-cert" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__self_signed__">
+                        Self-signed (default)
+                      </SelectItem>
+                      {(secrets.data ?? [])
+                        .filter((s) => s.type === "kubernetes.io/tls")
+                        .map((s) => (
+                          <SelectItem key={s.id} value={s.id}>
+                            {s.name}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Only used for JWT/TLS engines. Pick a kubernetes.io/tls
+                    secret to back the coordinator cert, or keep self-signed.
+                  </p>
                 </div>
               </>
             )}
