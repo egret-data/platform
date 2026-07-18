@@ -12,9 +12,12 @@ async fn set_then_get_roundtrips(pool: sqlx::PgPool) {
     .fetch_one(&db.pool)
     .await
     .unwrap();
+    // `secrets` no longer stores an inline value: the typed-secrets migration
+    // (0088) dropped `nonce`/`ciphertext` in favor of the `secret_data` table.
+    // This test only needs a valid `secrets` row as the FK target.
     let secret_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO secrets (kind, nonce, ciphertext, key_id) \
-         VALUES ('oidc_refresh', '\\x00', '\\x00', 'k1') RETURNING id",
+        "INSERT INTO secrets (kind, key_id) \
+         VALUES ('oidc_refresh', 'k1') RETURNING id",
     )
     .fetch_one(&db.pool)
     .await

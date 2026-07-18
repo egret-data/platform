@@ -762,6 +762,8 @@ export interface TrinoConfig {
     className?: string;
     host: string;
     tlsSecret?: string;
+    /** Optional `kubernetes.io/tls` secret id backing the ingress cert. */
+    tlsCertSecretRef?: string;
     annotations?: Record<string, string>;
   };
   // Cluster-wide pod & scheduling (Phase 1.5.3): pod-shape/placement knobs

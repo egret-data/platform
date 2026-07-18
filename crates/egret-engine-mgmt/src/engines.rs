@@ -588,6 +588,18 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
             port: 8443,
         });
     }
+    // Ingress TLS from a typed secret: resolve the referenced kubernetes.io/tls
+    // secret, project it into `{name}-ingress-tls`, and point the Ingress at it.
+    // Typed ref wins over a raw `tls_secret` string when both are set. Shared by
+    // provision and update (both build the spec here), so it stays consistent.
+    if let Some(ing) = config.ingress.as_mut() {
+        if let Some(ref_id) = ing.tls_cert_secret_ref {
+            let (cert_pem, key_pem) = resolve_tls_cert_secret(st, ref_id).await?;
+            ing.tls_cert_pem = Some(cert_pem);
+            ing.tls_key_pem = Some(key_pem);
+            ing.tls_secret = Some(format!("{}-ingress-tls", engine.name));
+        }
+    }
     // Impersonate-mode delegation: when auth is on, provision the `egret_delegator`
     // service user (generate + store its password once, inject its bcrypt into the
     // auth block so it lands in `password.db`) and seed the impersonate + query-
@@ -1186,6 +1198,9 @@ fn parse_ingress(v: &serde_json::Value) -> Option<IngressReq> {
         class_name: v["className"].as_str().map(Into::into),
         host: v["host"].as_str().unwrap_or_default().to_string(),
         tls_secret: v["tlsSecret"].as_str().map(Into::into),
+        tls_cert_secret_ref: v["tlsCertSecretRef"].as_str().and_then(|s| s.parse().ok()),
+        tls_cert_pem: None,
+        tls_key_pem: None,
         annotations: str_map(&v["annotations"]),
     })
 }
@@ -1809,6 +1824,18 @@ async fn create_engine(
     // referenced cert resolves. `ensure_tls_cert` re-resolves it at provisioning.
     if let Some(ref_id) = b.tls_cert_secret_ref {
         resolve_tls_cert_secret(&st, ref_id).await?;
+    }
+
+    // Validate an optional ingress-TLS secret reference the same way (400 on a
+    // missing / non-TLS / incomplete secret) before any resources are minted.
+    if let Some(ing) = b
+        .trino_config
+        .as_ref()
+        .and_then(|tc| parse_ingress(&tc["ingress"]))
+    {
+        if let Some(ref_id) = ing.tls_cert_secret_ref {
+            resolve_tls_cert_secret(&st, ref_id).await?;
+        }
     }
 
     match egret_engine_mgmt_api::EngineKind::parse(&b.kind) {
@@ -3191,6 +3218,13 @@ async fn update_engine(
         spec["trinoConfig"] = tc.clone();
     }
     validate_spec_resource_groups(&spec)?;
+    // Validate an optional ingress-TLS secret reference (400 on a missing /
+    // non-TLS / incomplete secret) before persisting, mirroring create.
+    if let Some(ing) = parse_ingress(&spec["trinoConfig"]["ingress"]) {
+        if let Some(ref_id) = ing.tls_cert_secret_ref {
+            resolve_tls_cert_secret(&st, ref_id).await?;
+        }
+    }
     st.engine_mgmt
         .update_engine(id, &spec, &engine.status)
         .await?;
@@ -5596,6 +5630,73 @@ mod tests {
             .expect("engine present");
         assert_eq!(refetched.coordinator_cert.as_deref(), Some("CERTPEM"));
         assert_eq!(refetched.tls_cert_secret_ref, Some(cert_ref));
+    }
+
+    /// The create handler validates the INGRESS `tlsCertSecretRef` up front: an
+    /// Opaque (non-TLS) secret is rejected with a 400, mirroring the coordinator
+    /// `tls_cert_secret_ref` check (Task 4).
+    #[tokio::test]
+    async fn create_rejects_ingress_tls_cert_ref_non_tls() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping create_rejects_ingress_tls_cert_ref_non_tls: DATABASE_URL not set");
+            return;
+        };
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+
+        // Engines only provision against a lakekeeper-backed warehouse; mark it
+        // so the handler passes the provisioned check and reaches TLS validation.
+        egret_catalog_engine::CatalogStore::new(db.clone())
+            .set_lakekeeper_warehouse_id(wh.id, "lk-test")
+            .await
+            .expect("mark warehouse provisioned");
+
+        // A single-value create is an Opaque secret, not kubernetes.io/tls.
+        let opaque = st
+            .secrets
+            .create(
+                None,
+                &format!("op-{}", Uuid::new_v4().simple()),
+                None,
+                "plain",
+            )
+            .await
+            .expect("create opaque secret");
+
+        let body = CreateEngineBody {
+            name: format!("trino-{}", Uuid::new_v4().simple()),
+            warehouse_id: wh.id,
+            image_version: None,
+            coordinator_replicas: 1,
+            worker_replicas: 1,
+            cpu_min: "1".into(),
+            cpu_max: "1".into(),
+            memory: "1Gi".into(),
+            trino_config: Some(serde_json::json!({
+                "ingress": { "enabled": true, "host": "h", "tlsCertSecretRef": opaque }
+            })),
+            authz_service_id: None,
+            kind: "trino".into(),
+            starrocks: None,
+            tls_cert_secret_ref: None,
+        };
+
+        let principal = egret_core::context::Principal {
+            user_id: egret_core::ids::UserId::new(),
+            email: "admin@egret.local".into(),
+            platform_roles: vec!["platform_admin".into()],
+            permissions: vec![],
+            group_ids: vec![],
+        };
+
+        match create_engine(State(st), Auth(principal), Json(body)).await {
+            Err(CpError::BadRequest(_)) => {}
+            Err(other) => panic!("expected BadRequest, got {other:?}"),
+            Ok(_) => panic!("expected create to reject non-TLS ingress cert ref"),
+        }
     }
 
     /// Secure-by-default: `create_starrocks_engine` mints + persists a

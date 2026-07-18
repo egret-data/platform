@@ -691,6 +691,8 @@ export interface EngineConfigForm {
   setIngressClassName: (v: string) => void;
   ingressTlsSecret: string;
   setIngressTlsSecret: (v: string) => void;
+  ingressTlsCertSecretRef: string;
+  setIngressTlsCertSecretRef: (v: string) => void;
   ingressAnnotations: Kv[];
   setIngressAnnotations: Dispatch<SetStateAction<Kv[]>>;
   // pod & scheduling (cluster-wide)
@@ -830,6 +832,9 @@ export function useEngineConfigForm(
   const [ingressTlsSecret, setIngressTlsSecret] = useState(
     tc?.ingress?.tlsSecret ?? "",
   );
+  const [ingressTlsCertSecretRef, setIngressTlsCertSecretRef] = useState(
+    tc?.ingress?.tlsCertSecretRef ?? "",
+  );
   const [ingressAnnotations, setIngressAnnotations] = useState<Kv[]>(
     recordToKv(tc?.ingress?.annotations),
   );
@@ -951,6 +956,7 @@ export function useEngineConfigForm(
     setIngressHost(next?.ingress?.host ?? "");
     setIngressClassName(next?.ingress?.className ?? "nginx");
     setIngressTlsSecret(next?.ingress?.tlsSecret ?? "");
+    setIngressTlsCertSecretRef(next?.ingress?.tlsCertSecretRef ?? "");
     setIngressAnnotations(recordToKv(next?.ingress?.annotations));
     setServiceAccount(next?.serviceAccount ?? "");
     setImage(next?.image ?? "");
@@ -1084,6 +1090,9 @@ export function useEngineConfigForm(
         ...(ingressTlsSecret.trim()
           ? { tlsSecret: ingressTlsSecret.trim() }
           : {}),
+        ...(ingressTlsCertSecretRef
+          ? { tlsCertSecretRef: ingressTlsCertSecretRef }
+          : {}),
         ...(Object.keys(anns).length ? { annotations: anns } : {}),
       };
     }
@@ -1185,6 +1194,7 @@ export function useEngineConfigForm(
     ingressHost,
     ingressClassName,
     ingressTlsSecret,
+    ingressTlsCertSecretRef,
     ingressAnnotations,
     serviceAccount,
     image,
@@ -1327,6 +1337,8 @@ export function useEngineConfigForm(
     setIngressClassName,
     ingressTlsSecret,
     setIngressTlsSecret,
+    ingressTlsCertSecretRef,
+    setIngressTlsCertSecretRef,
     ingressAnnotations,
     setIngressAnnotations,
     serviceAccount,

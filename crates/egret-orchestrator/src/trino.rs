@@ -437,6 +437,24 @@ pub fn trino_tls_secret(spec: &EngineSpec) -> Option<Value> {
     }))
 }
 
+/// Project the resolved ingress TLS cert/key into a real k8s
+/// `type: kubernetes.io/tls` Secret named `{name}-ingress-tls`. Returns `None`
+/// unless the ingress is enabled and carries resolved cert+key PEMs (populated
+/// at provision from a typed `kubernetes.io/tls` secret ref).
+pub fn trino_ingress_tls_secret(spec: &EngineSpec) -> Option<Value> {
+    let ing = spec.config.ingress.as_ref()?;
+    if !ing.enabled {
+        return None;
+    }
+    let (crt, key) = (ing.tls_cert_pem.as_ref()?, ing.tls_key_pem.as_ref()?);
+    Some(json!({
+        "apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/tls",
+        "metadata": { "name": format!("{}-ingress-tls", spec.name), "namespace": spec.namespace,
+                      "labels": { "app.kubernetes.io/managed-by": "egret", "egret/engine": spec.name } },
+        "stringData": { "tls.crt": crt, "tls.key": key }
+    }))
+}
+
 fn config_checksum(spec: &EngineSpec) -> String {
     // Rolls the pods whenever rendered config or catalogs change.
     let mut h = DefaultHasher::new();
@@ -1149,6 +1167,9 @@ impl TrinoProvisioner {
         self.kube
             .apply(&trino_deployment(spec, Role::Worker))
             .await?;
+        if let Some(isec) = trino_ingress_tls_secret(spec) {
+            self.kube.apply(&isec).await?;
+        }
         if let Some(ing) = trino_ingress(spec) {
             self.kube.apply(&ing).await?;
         }
@@ -1209,6 +1230,16 @@ impl EngineProvisioner for TrinoProvisioner {
                     "Ingress",
                     &spec.namespace,
                     &format!("{}-trino", spec.name),
+                )
+                .await;
+            // Also clean up the stale ingress TLS Secret (managed by egret).
+            let _ = self
+                .kube
+                .delete(
+                    "v1",
+                    "Secret",
+                    &spec.namespace,
+                    &format!("{}-ingress-tls", spec.name),
                 )
                 .await;
         }
@@ -1276,6 +1307,16 @@ impl EngineProvisioner for TrinoProvisioner {
         let _ = self
             .kube
             .delete("v1", "Secret", namespace, &format!("{name}-env"))
+            .await;
+        // Best-effort delete the coordinator keystore + ingress TLS Secrets
+        // (managed by egret; previously orphaned on delete).
+        let _ = self
+            .kube
+            .delete("v1", "Secret", namespace, &format!("{name}-tls"))
+            .await;
+        let _ = self
+            .kube
+            .delete("v1", "Secret", namespace, &format!("{name}-ingress-tls"))
             .await;
         // Best-effort; harmless when no Ingress was ever applied.
         let _ = self
@@ -2201,6 +2242,9 @@ mod tests {
             class_name: Some("nginx".into()),
             host: "trino-demo.egret.example.com".into(),
             tls_secret: Some("trino-demo-tls".into()),
+            tls_cert_secret_ref: None,
+            tls_cert_pem: None,
+            tls_key_pem: None,
             annotations: anns,
         });
         let ing = trino_ingress(&s).unwrap();
@@ -2225,6 +2269,44 @@ mod tests {
             8080
         );
         assert_eq!(ing["spec"]["tls"][0]["secretName"], "trino-demo-tls");
+    }
+    #[test]
+    fn ingress_tls_secret_renders_typed_kubernetes_io_tls() {
+        let mut s = sample_spec();
+        s.config.ingress = Some(crate::spec::Ingress {
+            enabled: true,
+            class_name: Some("nginx".into()),
+            host: "trino-demo.egret.example.com".into(),
+            tls_secret: Some("demo-ingress-tls".into()),
+            tls_cert_secret_ref: None,
+            tls_cert_pem: Some("CERTPEM".into()),
+            tls_key_pem: Some("KEYPEM".into()),
+            annotations: BTreeMap::new(),
+        });
+        let sec = trino_ingress_tls_secret(&s).unwrap();
+        assert_eq!(sec["type"], "kubernetes.io/tls");
+        assert_eq!(sec["metadata"]["name"], "demo-ingress-tls");
+        assert_eq!(sec["metadata"]["namespace"], "egret-engines");
+        assert_eq!(
+            sec["metadata"]["labels"]["app.kubernetes.io/managed-by"],
+            "egret"
+        );
+        assert_eq!(sec["stringData"]["tls.crt"], "CERTPEM");
+        assert_eq!(sec["stringData"]["tls.key"], "KEYPEM");
+
+        // No resolved cert PEM -> no Secret projected.
+        let mut s2 = sample_spec();
+        s2.config.ingress = Some(crate::spec::Ingress {
+            enabled: true,
+            class_name: Some("nginx".into()),
+            host: "trino-demo.egret.example.com".into(),
+            tls_secret: Some("demo-ingress-tls".into()),
+            tls_cert_secret_ref: None,
+            tls_cert_pem: None,
+            tls_key_pem: Some("KEYPEM".into()),
+            annotations: BTreeMap::new(),
+        });
+        assert!(trino_ingress_tls_secret(&s2).is_none());
     }
     #[test]
     fn ingress_none_when_disabled() {
@@ -2433,6 +2515,9 @@ mod tests {
             class_name: Some("nginx".into()),
             host: "trino-demo.egret.example.com".into(),
             tls_secret: None,
+            tls_cert_secret_ref: None,
+            tls_cert_pem: None,
+            tls_key_pem: None,
             annotations: std::collections::BTreeMap::new(),
         });
         p.provision(&s).await.unwrap();
@@ -2504,6 +2589,6 @@ mod tests {
         let p = TrinoProvisioner::new(kube.clone());
         p.delete("egret-engines", "demo").await.unwrap();
         let d = kube.deleted.lock().unwrap();
-        assert_eq!(d.len(), 9); // 2 deployments, service, 2 configmaps, secret, ingress, hpa, scaledobject
+        assert_eq!(d.len(), 11); // 2 deployments, service, 2 configmaps, env secret, tls secret, ingress-tls secret, ingress, hpa, scaledobject
     }
 }
