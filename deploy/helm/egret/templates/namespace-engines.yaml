@@ -1,0 +1,11 @@
+{{- /*
+The engine target namespace is normally created by `just k8s-up` (see
+deploy/k8s/README.md) and is shared/pre-existing, so the chart does NOT manage
+it by default (Helm refuses to adopt a namespace it didn't create). On a bare
+cluster where it does not yet exist, set `createEngineNamespace=true`.
+*/ -}}
+{{- if .Values.createEngineNamespace }}
+apiVersion: v1
+kind: Namespace
+metadata: { name: {{ .Values.engineNamespace }} }
+{{- end }}

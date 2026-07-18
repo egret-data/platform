@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: egret-env, namespace: {{ .Release.Namespace }} }
+data:
+  EGRET_DATABASE__URL: "postgres://{{ .Values.deps.postgres.user }}:{{ .Values.deps.postgres.password }}@postgres:5432/{{ .Values.deps.postgres.db }}"
+  EGRET_STORAGE__ENDPOINT: "http://minio:9000"
+  EGRET_STORAGE__BUCKET: "{{ .Values.deps.minio.bucket }}"
+  EGRET_STORAGE__REGION: "{{ .Values.storage.region }}"
+  EGRET_STORAGE__PATH_STYLE: "{{ .Values.storage.pathStyle }}"
+  EGRET_CATALOG__ENABLED: "true"
+  EGRET_CATALOG__WAREHOUSE: "s3://{{ .Values.deps.minio.bucket }}"
+  EGRET_CATALOG__PUBLIC_URL: "http://egret.{{ .Release.Namespace }}.svc.cluster.local:8080"
+  EGRET_OIDC__ENABLED: "{{ .Values.oidc.enabled }}"
+  EGRET_OIDC__ISSUER_URL: "http://{{ .Values.ingress.host }}/auth/realms/{{ .Values.oidc.realm }}"
+  EGRET_OIDC__CLIENT_ID: "{{ .Values.oidc.clientId }}"
+  EGRET_OIDC__REDIRECT_URL: "http://{{ .Values.ingress.host }}/api/auth/oidc/callback"
+  EGRET_ADMIN_EMAIL: "{{ .Values.admin.email }}"
+  EGRET_LOG__FILTER: "info,egret=debug"

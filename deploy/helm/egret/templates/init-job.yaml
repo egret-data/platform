@@ -1,0 +1,38 @@
+{{- /*
+Bootstrap the initial platform admin + default workspace by running `egret init`
+once the DB is up. The backend image CMD is `serve`, which does NOT seed the
+admin, so without this a fresh install has no login. `egret init` is idempotent:
+without --force it no-ops when a platform_admin already exists, so re-running on
+`helm upgrade` is safe. OnFailure + backoffLimit lets it retry until Postgres is
+ready (same first-boot race the backend rides out).
+*/ -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: egret-init
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 30
+  template:
+    metadata:
+      labels: { app: egret-init }
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          args: ["init"]
+          envFrom:
+            - configMapRef: { name: egret-env }
+          env:
+            - { name: EGRET_STORAGE__ACCESS_KEY, valueFrom: { secretKeyRef: { name: egret-secrets, key: storage-access-key } } }
+            - { name: EGRET_STORAGE__SECRET_KEY, valueFrom: { secretKeyRef: { name: egret-secrets, key: storage-secret-key } } }
+            - { name: EGRET_SECRETS__MASTER_KEY, valueFrom: { secretKeyRef: { name: egret-secrets, key: master-key } } }
+            - { name: EGRET_SECURITY__SECRET_KEY, valueFrom: { secretKeyRef: { name: egret-secrets, key: secret-key } } }
+            - { name: EGRET_CATALOG__AUTH_TOKEN, valueFrom: { secretKeyRef: { name: egret-secrets, key: catalog-auth-token } } }
+            - { name: EGRET_ADMIN_PASSWORD, valueFrom: { secretKeyRef: { name: egret-secrets, key: admin-password } } }

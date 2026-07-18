@@ -1,0 +1,37 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: egret-engine-provisioner, namespace: {{ .Values.engineNamespace }} }
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["create","get","list","watch","patch","update","delete"]
+  - apiGroups: [""]
+    resources: ["services","configmaps","secrets","pods","pods/log","persistentvolumeclaims"]
+    verbs: ["create","get","list","watch","patch","update","delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create","get","list","watch","patch","delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["create","get","list","watch","patch","delete"]
+  - apiGroups: ["starrocks.com"]
+    resources: ["starrocksclusters"]
+    verbs: ["create","get","list","watch","patch","update","delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["create","get","list","watch","patch","delete"]
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects"]
+    verbs: ["create","get","list","watch","patch","delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get","list","watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: egret-engine-provisioner, namespace: {{ .Values.engineNamespace }} }
+subjects:
+  - kind: ServiceAccount
+    name: egret
+    namespace: {{ .Release.Namespace }}
+roleRef: { kind: Role, name: egret-engine-provisioner, apiGroup: rbac.authorization.k8s.io }

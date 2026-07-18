@@ -1,0 +1,43 @@
+backend:
+  image: { repository: egret-backend, tag: dev, pullPolicy: IfNotPresent }
+  replicas: 1
+frontend:
+  image: { repository: egret-frontend, tag: dev, pullPolicy: IfNotPresent }
+  nodePort: 30080
+ingress:
+  enabled: false
+  host: egret.localtest.me
+  className: nginx
+engineNamespace: egret-engines
+# The engine namespace is normally pre-created by `just k8s-up`. Set true only on
+# a bare cluster where it doesn't exist yet (else Helm can't adopt it).
+createEngineNamespace: false
+admin:
+  email: admin@egret.local
+  password: Admin12345!
+oidc:
+  enabled: false
+  realm: egret
+  clientId: egret
+  clientSecret: egret-secret
+  keycloakImage: quay.io/keycloak/keycloak:26.0
+  keycloakAdmin: admin
+  keycloakAdminPassword: admin
+deps:
+  enabled: true
+  postgres:
+    image: postgres:16
+    user: egret
+    password: egret
+    db: egret
+  minio:
+    image: minio/minio:latest
+    mcImage: minio/mc:latest
+    rootUser: egret
+    rootPassword: egretsecret
+    bucket: warehouse
+storage:
+  region: us-east-1
+  pathStyle: true
+# master/secret keys: generated-and-persisted by the chart (see secret.yaml); do
+# NOT put real secrets here.
