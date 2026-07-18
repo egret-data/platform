@@ -54,6 +54,20 @@ deploy-kind: images-build
     helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m
     @echo "egret SPA: http://localhost:30080  (login admin@egret.local / Admin12345!)"
 
+# Like deploy-kind but OIDC-on + ingress (Milestone B) — required for the data-plane e2e.
+deploy-kind-oidc: images-build
+    kind load docker-image egret-backend:dev egret-frontend:dev --name egret
+    helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m \
+      --set oidc.enabled=true --set ingress.enabled=true
+    @echo "egret SPA: http://egret.localtest.me  (login admin@egret.local / Admin12345!)"
+
+# Opt-in data-plane e2e against the in-cluster kind deploy (egret.localtest.me).
+# One-time prereq: just k8s-up && just ingress-install && just coredns-rewrite
+e2e-kind: deploy-kind-oidc
+    ./deploy/k8s/wait-ready.sh
+    cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
+      npx playwright test dataplane-kind
+
 # Uninstall the egret release (leaves the kind cluster + operators up).
 kind-undeploy:
     helm uninstall egret -n egret-system || true
