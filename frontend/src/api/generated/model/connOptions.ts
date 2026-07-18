@@ -28,14 +28,16 @@ export interface ConnOptions {
      */
   database?: string | null;
   /**
-     * Trino only: run each query as the logged-in user (X-Trino-User).
-     * Requires Trino impersonation + Ranger. Default false.
+     * Run each query as the logged-in user (impersonate delegation mode).
+     * Trino → `X-Trino-User`; StarRocks → `EXECUTE AS <user> WITH NO REVERT`.
+     * Requires engine impersonation + Ranger. Default false.
      * @nullable
      */
   impersonate?: boolean | null;
   /**
-     * Trino jwt-mode/TLS only: PEM of the coordinator's self-signed cert to pin as a
-     * trusted root (server-auth over TLS). Set on egret-provisioned TLS connections.
+     * PEM of the engine's self-signed cert to pin as a trusted root (server-auth
+     * over TLS). Set on egret-provisioned TLS connections — Trino jwt/TLS mode
+     * (https) and StarRocks delegation (in-band TLS on :9030).
      * @nullable
      */
   tls_cert?: string | null;

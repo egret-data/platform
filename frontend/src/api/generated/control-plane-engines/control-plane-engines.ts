@@ -2716,11 +2716,13 @@ export const getControlPlaneEnginesRestartEngineUrl = (id: string,) => {
 }
 
 /**
- * @summary `POST /engines/{id}/restart` — roll the coordinator + worker pods without
-changing config (like `kubectl rollout restart`). Unlike `update`, this
-always forces a roll: `prov.restart` patches a fresh timestamp annotation
-onto both Deployments' pod templates regardless of whether the rendered
-config changed.
+ * @summary `POST /engines/{id}/restart` — roll the engine's pods without changing config
+(like `kubectl rollout restart`). Unlike `update`, this always forces a roll:
+`prov.restart` patches a fresh timestamp annotation onto the pod templates
+regardless of whether the rendered config changed. For Trino this rolls the
+coordinator + worker Deployments directly; for StarRocks it merge-patches the
+restart stamp onto the `StarRocksCluster` CR's FE + CN specs and the operator
+propagates it to the pod templates.
  */
 export const controlPlaneEnginesRestartEngine = async (id: string, options?: RequestInit): Promise<controlPlaneEnginesRestartEngineResponse> => {
 
@@ -2769,11 +2771,13 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type ControlPlaneEnginesRestartEngineMutationError = ErrorBody
 
     /**
- * @summary `POST /engines/{id}/restart` — roll the coordinator + worker pods without
-changing config (like `kubectl rollout restart`). Unlike `update`, this
-always forces a roll: `prov.restart` patches a fresh timestamp annotation
-onto both Deployments' pod templates regardless of whether the rendered
-config changed.
+ * @summary `POST /engines/{id}/restart` — roll the engine's pods without changing config
+(like `kubectl rollout restart`). Unlike `update`, this always forces a roll:
+`prov.restart` patches a fresh timestamp annotation onto the pod templates
+regardless of whether the rendered config changed. For Trino this rolls the
+coordinator + worker Deployments directly; for StarRocks it merge-patches the
+restart stamp onto the `StarRocksCluster` CR's FE + CN specs and the operator
+propagates it to the pod templates.
  */
 export const useControlPlaneEnginesRestartEngine = <TError = ErrorBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneEnginesRestartEngine>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}

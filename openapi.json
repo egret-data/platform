@@ -3889,7 +3889,7 @@
         "tags": [
           "control-plane-engines"
         ],
-        "summary": "`POST /engines/{id}/restart` — roll the coordinator + worker pods without\nchanging config (like `kubectl rollout restart`). Unlike `update`, this\nalways forces a roll: `prov.restart` patches a fresh timestamp annotation\nonto both Deployments' pod templates regardless of whether the rendered\nconfig changed.",
+        "summary": "`POST /engines/{id}/restart` — roll the engine's pods without changing config\n(like `kubectl rollout restart`). Unlike `update`, this always forces a roll:\n`prov.restart` patches a fresh timestamp annotation onto the pod templates\nregardless of whether the rendered config changed. For Trino this rolls the\ncoordinator + worker Deployments directly; for StarRocks it merge-patches the\nrestart stamp onto the `StarRocksCluster` CR's FE + CN specs and the operator\npropagates it to the pod templates.",
         "operationId": "restart_engine",
         "parameters": [
           {
@@ -21212,14 +21212,14 @@
               "boolean",
               "null"
             ],
-            "description": "Trino only: run each query as the logged-in user (X-Trino-User).\nRequires Trino impersonation + Ranger. Default false."
+            "description": "Run each query as the logged-in user (impersonate delegation mode).\nTrino → `X-Trino-User`; StarRocks → `EXECUTE AS <user> WITH NO REVERT`.\nRequires engine impersonation + Ranger. Default false."
           },
           "tls_cert": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Trino jwt-mode/TLS only: PEM of the coordinator's self-signed cert to pin as a\ntrusted root (server-auth over TLS). Set on egret-provisioned TLS connections."
+            "description": "PEM of the engine's self-signed cert to pin as a trusted root (server-auth\nover TLS). Set on egret-provisioned TLS connections — Trino jwt/TLS mode\n(https) and StarRocks delegation (in-band TLS on :9030)."
           }
         }
       },
@@ -21574,10 +21574,9 @@
       },
       "CreateSecretInput": {
         "type": "object",
-        "description": "Request body for creating a global named secret.",
+        "description": "Request body for creating a global named secret. Either a typed `data` map\n(with `type`, default `Opaque`) or the legacy single `value` (→ Opaque{value}).",
         "required": [
-          "name",
-          "value"
+          "name"
         ],
         "properties": {
           "name": {
@@ -21589,8 +21588,30 @@
               "null"
             ]
           },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "data": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "value": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Back-compat: a single value stored as `Opaque{value}`."
           }
         }
       },
@@ -22743,6 +22764,10 @@
           "trinoConfig": {
             "type": "object",
             "description": "Surfaced back so the UI can prefill the config editor on reload."
+          },
+          "starrocksConfig": {
+            "type": "object",
+            "description": "StarRocks equivalent of `trino_config`: the persisted `starrocksConfig`\nblock (images/replicas/resources/delegation/feConfig/cnConfig/\ncnAutoscaling/pod) surfaced back so the UI can prefill the StarRocks\nconfig editor + show KPIs/auth on reload. Absent for Trino engines."
           }
         }
       },
@@ -24939,7 +24964,9 @@
           "id",
           "name",
           "created_at",
-          "used_by"
+          "used_by",
+          "type",
+          "keys"
         ],
         "properties": {
           "id": {
@@ -24962,6 +24989,15 @@
           "used_by": {
             "type": "integer",
             "format": "int64"
+          },
+          "type": {
+            "type": "string"
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -25172,6 +25208,42 @@
             ],
             "description": "Enable FE SSL on the MySQL-protocol port (:9030) when delegation is\nconfigured. Defaults to `true` when `delegation_mode` is set; ignored\notherwise. `false` opts out of TLS while still enabling delegation\n(e.g. a dev cluster where the extra listener setup isn't wanted).",
             "default": null
+          },
+          "feConfig": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "FE (`fe.conf`) override keys → merged over egret's managed base by the\norchestrator. egret-managed keys ([`egret_engine_mgmt_api::SR_PROTECTED_FE_KEYS`])\nare rejected up front by [`validate_sr_fe_config`]. Omitted ⇒ preserved on update.",
+            "default": null,
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "cnConfig": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "CN (`cn.conf`) override keys → rendered into a ConfigMap by the orchestrator.\nOmitted ⇒ preserved on update.",
+            "default": null,
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "cnAutoscaling": {
+            "type": "object",
+            "description": "CN horizontal autoscaling `{ minReplicas?, maxReplicas, targetCpuPercent? }`.\nStored/read as opaque JSON here; typed into `CnAutoscaling` at provision-req\nassembly. Omitted ⇒ preserved on update."
+          },
+          "pod": {
+            "type": "object",
+            "description": "Pod- & container-level scheduling / customization surface (nodeSelector,\ntolerations, affinity, sidecars, …). Opaque JSON here; typed into\n`StarRocksPod` at provision-req assembly. Omitted ⇒ preserved on update."
           }
         }
       },
@@ -25797,7 +25869,7 @@
       },
       "UpdateSecretInput": {
         "type": "object",
-        "description": "Request body for updating a global named secret. Any subset may be present:\na `name` triggers a rename (re-describing with `description`); a `value`\nrotates the underlying vault row.",
+        "description": "Request body for updating a global named secret. Any subset may be present:\na `name` triggers a rename (re-describing with `description`); a `type`+`data`\n(or legacy `value`) rotates the underlying vault row.",
         "properties": {
           "name": {
             "type": [
@@ -25810,6 +25882,24 @@
               "string",
               "null"
             ]
+          },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "data": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "value": {
             "type": [

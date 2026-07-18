@@ -5,13 +5,23 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { CreateSecretInputData } from './createSecretInputData';
 
 /**
- * Request body for creating a global named secret.
+ * Request body for creating a global named secret. Either a typed `data` map
+ * (with `type`, default `Opaque`) or the legacy single `value` (→ Opaque{value}).
  */
 export interface CreateSecretInput {
   name: string;
   /** @nullable */
   description?: string | null;
-  value: string;
+  /** @nullable */
+  type?: string | null;
+  /** @nullable */
+  data?: CreateSecretInputData;
+  /**
+     * Back-compat: a single value stored as `Opaque{value}`.
+     * @nullable
+     */
+  value?: string | null;
 }

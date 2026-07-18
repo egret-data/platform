@@ -5,8 +5,12 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { StarRocksConfigBodyCnAutoscaling } from './starRocksConfigBodyCnAutoscaling';
+import type { StarRocksConfigBodyCnConfig } from './starRocksConfigBodyCnConfig';
 import type { StarRocksConfigBodyCnResources } from './starRocksConfigBodyCnResources';
+import type { StarRocksConfigBodyFeConfig } from './starRocksConfigBodyFeConfig';
 import type { StarRocksConfigBodyFeResources } from './starRocksConfigBodyFeResources';
+import type { StarRocksConfigBodyPod } from './starRocksConfigBodyPod';
 
 /**
  * Wire shape for `CreateEngineBody.starrocks`: FE/CN image + replicas +
@@ -49,4 +53,29 @@ export interface StarRocksConfigBody {
      * @nullable
      */
   tlsEnabled?: boolean | null;
+  /**
+     * FE (`fe.conf`) override keys → merged over egret's managed base by the
+     * orchestrator. egret-managed keys ([`egret_engine_mgmt_api::SR_PROTECTED_FE_KEYS`])
+     * are rejected up front by [`validate_sr_fe_config`]. Omitted ⇒ preserved on update.
+     * @nullable
+     */
+  feConfig?: StarRocksConfigBodyFeConfig;
+  /**
+     * CN (`cn.conf`) override keys → rendered into a ConfigMap by the orchestrator.
+     * Omitted ⇒ preserved on update.
+     * @nullable
+     */
+  cnConfig?: StarRocksConfigBodyCnConfig;
+  /**
+     * CN horizontal autoscaling `{ minReplicas?, maxReplicas, targetCpuPercent? }`.
+     * Stored/read as opaque JSON here; typed into `CnAutoscaling` at provision-req
+     * assembly. Omitted ⇒ preserved on update.
+     */
+  cnAutoscaling?: StarRocksConfigBodyCnAutoscaling;
+  /**
+     * Pod- & container-level scheduling / customization surface (nodeSelector,
+     * tolerations, affinity, sidecars, …). Opaque JSON here; typed into
+     * `StarRocksPod` at provision-req assembly. Omitted ⇒ preserved on update.
+     */
+  pod?: StarRocksConfigBodyPod;
 }
