@@ -8,5 +8,5 @@ mod workspace_secrets;
 
 pub use crypto::Crypto;
 pub use error::SecretsError;
-pub use store::SecretStore;
+pub use store::{SecretStore, TypedSecret};
 pub use workspace_secrets::{NewSecret, WorkspaceSecretMeta, WorkspaceSecretStore};
