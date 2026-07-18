@@ -257,6 +257,39 @@ async fn typed_named_secret_lists_type_and_keys() {
 }
 
 #[tokio::test]
+async fn resolve_typed_returns_type_and_data_map() {
+    let Some(c) = ctx().await else {
+        eprintln!("skip");
+        return;
+    };
+    let ws = seed_workspace(&c.db).await;
+
+    use std::collections::BTreeMap;
+    let mut tls = BTreeMap::new();
+    tls.insert("tls.crt".to_string(), "CERTPEM".to_string());
+    tls.insert("tls.key".to_string(), "KEYPEM".to_string());
+    let id = c
+        .store
+        .create_typed(Some(ws), "coord-tls", None, "kubernetes.io/tls", &tls)
+        .await
+        .unwrap();
+
+    // resolve_typed decrypts and returns the {type, data} form (values included,
+    // unlike list/get_meta which expose only the key names).
+    let ts = c.store.resolve_typed(Some(ws), id).await.unwrap();
+    assert_eq!(ts.r#type, "kubernetes.io/tls");
+    assert_eq!(ts.data.get("tls.crt").map(String::as_str), Some("CERTPEM"));
+    assert_eq!(ts.data.get("tls.key").map(String::as_str), Some("KEYPEM"));
+
+    // Cross-workspace access is NotFound (scoping is enforced before decrypt).
+    let other_ws = seed_workspace(&c.db).await;
+    assert!(matches!(
+        c.store.resolve_typed(Some(other_ws), id).await,
+        Err(SecretsError::NotFound)
+    ));
+}
+
+#[tokio::test]
 async fn global_and_workspace_scopes_are_isolated() {
     let Some(c) = ctx().await else {
         eprintln!("skip");

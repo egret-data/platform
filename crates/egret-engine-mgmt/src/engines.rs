@@ -5435,6 +5435,169 @@ mod tests {
         assert!(!pw1.is_empty());
     }
 
+    /// The projection primitive resolves a `kubernetes.io/tls` named secret to
+    /// its `(tls.crt, tls.key)` PEM pair.
+    #[tokio::test]
+    async fn resolve_tls_cert_secret_returns_crt_and_key() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping resolve_tls_cert_secret_returns_crt_and_key: DATABASE_URL not set");
+            return;
+        };
+        let mut data = std::collections::BTreeMap::new();
+        data.insert("tls.crt".to_string(), "CERTPEM".to_string());
+        data.insert("tls.key".to_string(), "KEYPEM".to_string());
+        let id = st
+            .secrets
+            .create_typed(
+                None,
+                &format!("tls-{}", Uuid::new_v4().simple()),
+                None,
+                egret_secrets::secret_type::TLS,
+                &data,
+            )
+            .await
+            .expect("create typed tls secret");
+
+        let (crt, key) = resolve_tls_cert_secret(&st, id)
+            .await
+            .expect("resolve tls cert secret");
+        assert_eq!(crt, "CERTPEM");
+        assert_eq!(key, "KEYPEM");
+    }
+
+    /// A non-TLS (Opaque) secret is rejected with a 400.
+    #[tokio::test]
+    async fn resolve_tls_cert_secret_rejects_non_tls_type() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping resolve_tls_cert_secret_rejects_non_tls_type: DATABASE_URL not set"
+            );
+            return;
+        };
+        // A single-value create is an Opaque secret, not kubernetes.io/tls.
+        let id = st
+            .secrets
+            .create(
+                None,
+                &format!("op-{}", Uuid::new_v4().simple()),
+                None,
+                "plain",
+            )
+            .await
+            .expect("create opaque secret");
+        let err = resolve_tls_cert_secret(&st, id).await.unwrap_err();
+        assert!(
+            matches!(err, CpError::BadRequest(_)),
+            "expected BadRequest, got {err:?}"
+        );
+    }
+
+    /// A TLS secret whose `tls.key` data row is missing (a corrupt keystore;
+    /// `validate()` blocks creating one, so we drop the row) is rejected with a
+    /// 400 by the projection's completeness guard.
+    #[tokio::test]
+    async fn resolve_tls_cert_secret_rejects_missing_key() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping resolve_tls_cert_secret_rejects_missing_key: DATABASE_URL not set");
+            return;
+        };
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let mut data = std::collections::BTreeMap::new();
+        data.insert("tls.crt".to_string(), "CERTPEM".to_string());
+        data.insert("tls.key".to_string(), "KEYPEM".to_string());
+        let id = st
+            .secrets
+            .create_typed(
+                None,
+                &format!("tls-{}", Uuid::new_v4().simple()),
+                None,
+                egret_secrets::secret_type::TLS,
+                &data,
+            )
+            .await
+            .expect("create typed tls secret");
+        let vault_id: Uuid =
+            sqlx::query_scalar("SELECT secret_ref FROM workspace_secrets WHERE id = $1")
+                .bind(id)
+                .fetch_one(&db.pool)
+                .await
+                .expect("vault id");
+        sqlx::query("DELETE FROM secret_data WHERE secret_id = $1 AND key = 'tls.key'")
+            .bind(vault_id)
+            .execute(&db.pool)
+            .await
+            .expect("drop tls.key row");
+
+        let err = resolve_tls_cert_secret(&st, id).await.unwrap_err();
+        assert!(
+            matches!(err, CpError::BadRequest(_)),
+            "expected BadRequest, got {err:?}"
+        );
+    }
+
+    /// End-to-end of Task 3: an engine that references a `kubernetes.io/tls`
+    /// secret materializes its keystore from the PROVIDED cert (not a fresh
+    /// self-signed one) and pins `coordinator_cert` to the provided `tls.crt`.
+    #[tokio::test]
+    async fn ensure_tls_cert_uses_referenced_secret() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping ensure_tls_cert_uses_referenced_secret: DATABASE_URL not set");
+            return;
+        };
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+
+        let mut data = std::collections::BTreeMap::new();
+        data.insert("tls.crt".to_string(), "CERTPEM".to_string());
+        data.insert("tls.key".to_string(), "KEYPEM".to_string());
+        let cert_ref = st
+            .secrets
+            .create_typed(
+                None,
+                &format!("tls-{}", Uuid::new_v4().simple()),
+                None,
+                egret_secrets::secret_type::TLS,
+                &data,
+            )
+            .await
+            .expect("create tls secret");
+
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                "egret-engines",
+                wh.id,
+                &serde_json::json!({ "trinoConfig": {} }),
+                Some(cert_ref),
+            )
+            .await
+            .expect("create engine row");
+
+        let (keystore, cert) = ensure_tls_cert(&st, &engine)
+            .await
+            .expect("ensure tls cert");
+        assert_eq!(cert, "CERTPEM");
+        assert_eq!(keystore, "CERTPEMKEYPEM");
+
+        // The provided cert is pinned on the row (the connector trusts it).
+        let refetched = st
+            .engine_mgmt
+            .get_engine(engine.id)
+            .await
+            .expect("get_engine")
+            .expect("engine present");
+        assert_eq!(refetched.coordinator_cert.as_deref(), Some("CERTPEM"));
+        assert_eq!(refetched.tls_cert_secret_ref, Some(cert_ref));
+    }
+
     /// Secure-by-default: `create_starrocks_engine` mints + persists a
     /// `root_secret_id` on the created engine UNCONDITIONALLY (no delegation, no
     /// opt-in).
@@ -5554,6 +5717,7 @@ mod tests {
             authz_service_id: None,
             kind: "starrocks".into(),
             starrocks,
+            tls_cert_secret_ref: None,
         }
     }
 
