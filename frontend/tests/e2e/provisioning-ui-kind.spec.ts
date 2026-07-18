@@ -68,8 +68,10 @@ test.describe("engine provisioning via the UI", () => {
       // Trino startup; the badge auto-polls every 5s).
       await expect(row.getByText(/^running$/i)).toBeVisible({ timeout: 300_000 });
 
-      // Delete via the UI: engine detail → ⋯ → Delete engine → confirm.
-      await row.getByRole("link", { name: /Details/ }).click();
+      // Delete via the UI: open the engine detail page → ⋯ → Delete engine → confirm.
+      // (Navigate by id — the row's "Details" link exposes an aria-label "View {name}",
+      // not "Details", so match it by neither; the id is already captured above.)
+      await page.goto(`/control-plane/engines/${engineId}`);
       await page.getByRole("button", { name: "More engine actions" }).click();
       await page.getByRole("menuitem", { name: "Delete engine" }).click();
       await page.getByPlaceholder("delete").fill("delete");
