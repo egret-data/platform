@@ -193,3 +193,49 @@ export async function deleteEngine(
 ): Promise<void> {
   await req.delete(`/api/control-plane/engines/${id}`, { headers: h }).catch(() => {});
 }
+
+/**
+ * Drive SQL Lab: open the workspace's SQL Lab, set the editor to `sql` (Monaco
+ * intercepts direct clicks, so set the model value programmatically), pick the
+ * engine in the Database dropdown, Run, and return the results panel text.
+ */
+export async function runSqlInLab(
+  page: Page,
+  workspaceSlug: string,
+  engineName: string,
+  sql: string,
+): Promise<string> {
+  await page.goto(`/explore/${workspaceSlug}/sql-lab`);
+
+  // Monaco must be mounted before we can set the model value.
+  await page.waitForFunction(
+    () => (window as any).monaco?.editor?.getModels?.().length > 0,
+    null,
+    { timeout: 20_000 },
+  );
+  await page.evaluate(
+    (q) => (window as any).monaco.editor.getModels()[0].setValue(q),
+    sql,
+  );
+
+  // Pick the engine in the Database dropdown (a Radix combobox trigger).
+  const dbTrigger = page.getByRole("combobox").first();
+  await dbTrigger.click();
+  await page.getByRole("option", { name: new RegExp(engineName, "i") }).first().click();
+
+  // Run and wait for the results tabpanel to populate.
+  await page.getByRole("button", { name: /^Run$/ }).click();
+
+  const results = page.locator('[role="tabpanel"][data-state="active"]');
+  await results.waitFor({ state: "visible", timeout: 60_000 });
+  // Give the query round-trip a moment to render rows into the active panel.
+  await page.waitForFunction(
+    () => {
+      const p = document.querySelector('[role="tabpanel"][data-state="active"]');
+      return !!p && /rows|row\b/i.test(p.textContent ?? "");
+    },
+    null,
+    { timeout: 60_000 },
+  );
+  return (await results.innerText()).trim();
+}
