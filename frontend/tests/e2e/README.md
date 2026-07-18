@@ -154,10 +154,17 @@ to wire a real engine (Trino / pyiceberg).
 Opt-in (`EGRET_E2E_KIND=1`), and unlike the other specs it targets the
 **in-cluster kind deploy** (`http://egret.localtest.me`), not the host dev stack.
 It provisions the full lifecycle via the egret API — storage → warehouse → Trino
-engine (1Gi, 1 worker) → enable egret-JWT → assign workspace — then asserts in
-SQL Lab that `SELECT current_user` returns the **caller** (`admin`), proving
-per-user impersonation (OIDC → engine JWKS → JWT → TLS:8443 → impersonation →
-query). It cleans up the engine in `afterAll` to free node memory.
+engine (1Gi, 1 worker) → enable egret-JWT → assign workspace — confirms the engine
+lists + auto-selects in the **SQL Lab** Database picker (the real UI path), then
+runs `SELECT current_user` through the SQL Lab query backend (`POST
+/api/ws/{ws}/queries`, the exact endpoint the Run button calls) and asserts it
+returns the **caller** (`admin`), proving per-user impersonation (OIDC → engine
+JWKS → JWT → TLS:8443 → impersonation → query). The query is driven via the API
+rather than the Monaco editor + results grid because that DOM chrome is flaky to
+script; the money-path exercised is identical. It deletes the engine in a
+`try/finally` (not `afterAll`, which runs after `page.request` is torn down) to
+free node memory. A freshly JWT-re-provisioned coordinator 500s for ~30–40s until
+Trino is `SERVER STARTED`, so the query step retries through that warmup.
 
 ### One-time prereq
 
@@ -166,6 +173,24 @@ just k8s-up            # kind `egret` cluster
 just ingress-install   # nginx-ingress (kind flavor)
 just coredns-rewrite   # egret.localtest.me resolves cluster-wide
 ```
+
+**Reserved MinIO bucket.** lakekeeper rejects a new warehouse whose storage profile
+overlaps an existing one, and a **prefix-less** warehouse claims a whole bucket — so
+point the e2e at a bucket that has no root-level warehouse, via `EGRET_E2E_BUCKET`
+(default `warehouse`, the chart-seeded bucket). If that bucket already holds a
+prefix-less warehouse (e.g. a hand-provisioned `demo-catalog`), use a dedicated
+bucket and create it once in the in-cluster MinIO, e.g.:
+
+```bash
+kubectl port-forward -n egret-system svc/minio 9000:9000 &
+AWS_ACCESS_KEY_ID=egret AWS_SECRET_ACCESS_KEY=egretsecret \
+  aws --endpoint-url http://localhost:9000 s3 mb s3://e2e
+# then: EGRET_E2E_BUCKET=e2e just e2e-kind   (each run uses a unique key_prefix)
+```
+
+> Note: deleting a warehouse via the CP API removes egret's row but does **not**
+> deregister it from the embedded lakekeeper, so its storage profile keeps claiming
+> the bucket — prefer a dedicated bucket over reusing one that held a warehouse.
 
 ### Run
 

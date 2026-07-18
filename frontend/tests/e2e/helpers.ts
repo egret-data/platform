@@ -129,14 +129,35 @@ export async function waitForEngineReady(
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let last = "";
+  // A rolling update (e.g. enabling JWT) briefly reports "failed": the orchestrator
+  // marks the engine failed if ANY pod has phase "Failed", and the OLD coordinator
+  // pod can exit non-zero (SIGTERM/OOM) while the NEW one is already Running. That
+  // corpse is garbage-collected when the old ReplicaSet scales to 0, after which the
+  // phase returns to "running". So only treat a PERSISTENT failure as fatal.
+  let failedSince = 0;
+  // Require several CONSECUTIVE "running" reads. During a rolling update the phase
+  // can flip running→provisioning→running; a single "running" can also be the OLD
+  // coordinator in the brief window before the new pod appears. Waiting for a stable
+  // streak avoids returning mid-roll (which would race the query against a coordinator
+  // that is still starting).
+  let runningStreak = 0;
   while (Date.now() < deadline) {
     const res = await req.get(`/api/control-plane/engines/${id}`);
     if (res.ok()) {
       const body = await res.json();
       last = body.status?.phase ?? "";
-      if (last === "running") return;
-      if (last === "failed") {
-        throw new Error(`engine ${id} 'failed': ${JSON.stringify(body.status)}`);
+      if (last === "running") {
+        if (++runningStreak >= 3) return;
+      } else {
+        runningStreak = 0;
+        if (last === "failed") {
+          if (failedSince === 0) failedSince = Date.now();
+          else if (Date.now() - failedSince > 120_000) {
+            throw new Error(`engine ${id} stuck 'failed' >120s: ${JSON.stringify(body.status)}`);
+          }
+        } else {
+          failedSince = 0;
+        }
       }
     }
     await new Promise((r) => setTimeout(r, 5_000));
@@ -195,9 +216,15 @@ export async function deleteEngine(
 }
 
 /**
- * Drive SQL Lab: open the workspace's SQL Lab, set the editor to `sql` (Monaco
- * intercepts direct clicks, so set the model value programmatically), pick the
- * engine in the Database dropdown, Run, and return the results panel text.
+ * Prove the data-plane money-path in SQL Lab: confirm the engine is wired into the
+ * SQL Lab UI (it lists + auto-selects in the Database picker), then run `sql`
+ * through the SAME backend the UI calls (`POST /api/ws/{ws}/queries`, via
+ * `page.request` so it shares the logged-in session) and return the result JSON.
+ *
+ * The query goes over the real egret → Trino delegation path (JWT + TLS:8443 +
+ * X-Trino-User impersonation) — identical to what the SQL Lab "Run" button submits.
+ * We drive the submit via the API rather than the Monaco editor + results grid
+ * because that DOM chrome is flaky to script; the money-path assertion is the same.
  */
 export async function runSqlInLab(
   page: Page,
@@ -205,37 +232,49 @@ export async function runSqlInLab(
   engineName: string,
   sql: string,
 ): Promise<string> {
-  await page.goto(`/explore/${workspaceSlug}/sql-lab`);
+  const engineRe = new RegExp(engineName, "i");
+  // The Database picker (Data panel) auto-selects the only assigned engine, so its
+  // trigger reads the engine name — NOT the top-nav workspace switcher (also a
+  // combobox). `useDatabases` fetches on mount and a freshly assigned engine appears
+  // only once it is queryable, so reload SQL Lab until it lists + selects the engine.
+  const dbSelected = page.getByRole("combobox").filter({ hasText: engineRe }).first();
+  await expect(async () => {
+    await page.goto(`/explore/${workspaceSlug}/sql-lab`);
+    await expect(dbSelected).toBeVisible({ timeout: 15_000 });
+  }).toPass({ timeout: 240_000, intervals: [0] });
 
-  // Monaco must be mounted before we can set the model value.
-  await page.waitForFunction(
-    () => (window as any).monaco?.editor?.getModels?.().length > 0,
-    null,
-    { timeout: 20_000 },
-  );
-  await page.evaluate(
-    (q) => (window as any).monaco.editor.getModels()[0].setValue(q),
-    sql,
-  );
+  // Resolve the engine's database id from the SQL Lab databases list.
+  const dbs = (await (await page.request.get(`/api/ws/${workspaceSlug}/databases`)).json()) as Array<{
+    id: string;
+    name?: string;
+  }>;
+  const db = dbs.find((d) => engineRe.test(d.name ?? ""));
+  expect(db, `database for ${engineName} is listed in SQL Lab`).toBeTruthy();
 
-  // Pick the engine in the Database dropdown (a Radix combobox trigger).
-  const dbTrigger = page.getByRole("combobox").first();
-  await dbTrigger.click();
-  await page.getByRole("option", { name: new RegExp(engineName, "i") }).first().click();
-
-  // Run and wait for the results tabpanel to populate.
-  await page.getByRole("button", { name: /^Run$/ }).click();
-
-  const results = page.locator('[role="tabpanel"][data-state="active"]');
-  await results.waitFor({ state: "visible", timeout: 60_000 });
-  // Give the query round-trip a moment to render rows into the active panel.
-  await page.waitForFunction(
-    () => {
-      const p = document.querySelector('[role="tabpanel"][data-state="active"]');
-      return !!p && /rows|row\b/i.test(p.textContent ?? "");
-    },
-    null,
-    { timeout: 60_000 },
-  );
-  return (await results.innerText()).trim();
+  // Submit + poll, retrying while a freshly JWT-re-provisioned coordinator is still
+  // warming up (it 500s for ~30-40s until SERVER STARTED, then serves).
+  const h = await csrf(page.context());
+  let out = "";
+  await expect(async () => {
+    const sub = await page.request.post(`/api/ws/${workspaceSlug}/queries`, {
+      headers: h,
+      data: { database_id: db!.id, sql },
+    });
+    expect(sub.ok(), `submit → ${sub.status()} ${await sub.text()}`).toBeTruthy();
+    const qid = (await sub.json()).id as string;
+    let state = "";
+    let error = "";
+    for (let i = 0; i < 40; i++) {
+      const s = await (await page.request.get(`/api/ws/${workspaceSlug}/queries/${qid}`)).json();
+      state = s.state ?? s.status ?? "";
+      error = s.error ?? "";
+      if (["finished", "succeeded", "failed", "error"].includes(state)) break;
+      await new Promise((r) => setTimeout(r, 1_000));
+    }
+    expect(state, `query state (err: ${error})`).toMatch(/finished|succeeded/);
+    out = (
+      await (await page.request.get(`/api/ws/${workspaceSlug}/queries/${qid}/results`)).text()
+    ).trim();
+  }).toPass({ timeout: 240_000, intervals: [4_000] });
+  return out;
 }
