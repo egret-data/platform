@@ -45,8 +45,12 @@ test.describe("governance enforcement on kind", () => {
   test("column-mask + row-filter enforce on a governed Trino query", async () => {
     const request = page.request;
     const h = await csrf(page.context());
-    const username = (await (await request.get("/api/me")).json()).username as string;
-    const T = "iceberg.demo.report"; // catalog.schema.table (Trino catalog is `iceberg`)
+    // The impersonated Trino username = slugified email local-part (egret's
+    // `ensure_username`). /api/auth/me returns the email; derive the same slug.
+    const email = (await (await request.get("/api/auth/me")).json()).email as string;
+    const username =
+      email.split("@")[0].toLowerCase().replace(/[^a-z0-9_]+/g, "-").replace(/^-+|-+$/g, "") || "user";
+    const T = "egret.demo.report"; // catalog.schema.table (egret names the Trino catalog `egret`)
     const policyIds: number[] = [];
     let engineId: string | undefined;
 
@@ -79,7 +83,7 @@ test.describe("governance enforcement on kind", () => {
         }),
         await createPolicy(request, h, {
           kind: "access", name: `e2e-tbl-${RUN_ID}`, service,
-          resources: R({ catalog: ["iceberg"], schema: ["*"], table: ["*"], column: ["*"] }),
+          resources: R({ catalog: ["egret"], schema: ["*"], table: ["*"], column: ["*"] }),
           // NOTE: exact access strings for DDL/DML are finalized live (Task 6); "all"
           // is the broad grant. If the service-def rejects it, use the explicit list.
           items: [{ users: [username], accesses: ["all"], effect: "allow" }],
@@ -88,7 +92,7 @@ test.describe("governance enforcement on kind", () => {
       await new Promise((r) => setTimeout(r, POLL_MS));
 
       // 3. Seed a governed table with data (some US rows, some not).
-      await runQuery(request, h, ws.slug, eng, "CREATE SCHEMA IF NOT EXISTS iceberg.demo");
+      await runQuery(request, h, ws.slug, eng, "CREATE SCHEMA IF NOT EXISTS egret.demo");
       await runQuery(request, h, ws.slug, eng,
         `CREATE TABLE IF NOT EXISTS ${T} (id bigint, item varchar, country varchar)`);
       await runQuery(request, h, ws.slug, eng,
@@ -102,28 +106,29 @@ test.describe("governance enforcement on kind", () => {
       policyIds.push(
         await createPolicy(request, h, {
           kind: "masking", name: `e2e-mask-${RUN_ID}`, service,
-          resources: R({ catalog: ["iceberg"], schema: ["demo"], table: ["report"], column: ["item"] }),
+          resources: R({ catalog: ["egret"], schema: ["demo"], table: ["report"], column: ["item"] }),
           items: [{ users: [username], maskType: "MASK" }],
         }),
         await createPolicy(request, h, {
           kind: "rowfilter", name: `e2e-rowf-${RUN_ID}`, service,
-          resources: R({ catalog: ["iceberg"], schema: ["demo"], table: ["report"] }),
+          resources: R({ catalog: ["egret"], schema: ["demo"], table: ["report"] }),
           items: [{ users: [username], filterExpr: "country = 'US'" }],
         }),
       );
-      await new Promise((r) => setTimeout(r, POLL_MS));
-
       // 5. Enforcement: only US rows, and `item` masked (not the raw values).
-      const enforced = await runQuery(request, h, ws.slug, eng, `SELECT id, item, country FROM ${T} ORDER BY id`);
-      const itemIdx = enforced.columns.findIndex((c) => c.name === "item");
-      const countryIdx = enforced.columns.findIndex((c) => c.name === "country");
-      expect(enforced.rows.every((r) => r[countryIdx] === "US"), "row-filter: only US rows").toBeTruthy();
-      expect(enforced.rows.length, "2 US rows").toBe(2);
-      // MASK redacts the value; assert the raw items are gone (exact masked form
-      // finalized live in Task 6 — e.g. all-x or a hash).
-      const items = enforced.rows.map((r) => r[itemIdx]);
-      expect(items, "item is masked, not raw").not.toContain("book");
-      expect(items, "item is masked, not raw").not.toContain("lamp");
+      //    The Trino Ranger plugin polls every 30s (trino.rs poll_interval_ms), so
+      //    re-query until the just-created mask + row-filter take effect.
+      await expect(async () => {
+        const enforced = await runQuery(request, h, ws.slug, eng, `SELECT id, item, country FROM ${T} ORDER BY id`);
+        const itemIdx = enforced.columns.findIndex((c) => c.name === "item");
+        const countryIdx = enforced.columns.findIndex((c) => c.name === "country");
+        expect(enforced.rows.length, "row-filter → only 2 US rows").toBe(2);
+        expect(enforced.rows.every((r) => r[countryIdx] === "US"), "only US rows").toBeTruthy();
+        // MASK redacts the value; assert the raw items are gone.
+        const items = enforced.rows.map((r) => r[itemIdx]);
+        expect(items, "item is masked, not raw").not.toContain("book");
+        expect(items, "item is masked, not raw").not.toContain("lamp");
+      }).toPass({ timeout: 90_000, intervals: [5_000] });
     } finally {
       for (const id of policyIds) {
         await request.delete(`/api/control-plane/policies/${id}`, { headers: h }).catch(() => {});

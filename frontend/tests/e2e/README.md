@@ -233,5 +233,14 @@ engines bind Ranger; egret embeds the Ranger admin at `/service`, no separate se
 Provisions a Ranger-bound Trino engine, seeds a governed Iceberg table, creates
 access + column-mask + row-filter policies (via `/api/control-plane/policies`,
 targeting the admin's own Trino user), and asserts the admin's `SELECT` returns
-MASKED `item` values and ONLY `country='US'` rows. The Trino Ranger plugin polls
-every ~5s, so policy changes take a few seconds to take effect.
+MASKED `item` values and ONLY `country='US'` rows.
+
+Notes (baked into `just e2e-kind-governance`):
+- `EGRET_E2E_BUCKET=e2e` — a reserved bucket (the default `warehouse` bucket carries
+  a prefix-less orphan warehouse; see the data-plane section's reserved-bucket note).
+- `EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000` — the FQDN,
+  because Trino (namespace `egret-engines`) can't resolve the bare `minio` (in
+  `egret-system`) for the Iceberg write path.
+- The egret Trino provisioner sets the Ranger plugin poll interval to **30s**, so a
+  new mask/row-filter takes up to ~30s to enforce — the spec re-queries until it does.
+- The Trino catalog egret provisions is named **`egret`** (not `iceberg`).

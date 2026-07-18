@@ -80,6 +80,8 @@ deploy-kind-governance: images-build
 e2e-kind-governance: deploy-kind-governance
     ./deploy/k8s/wait-ready.sh
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
+      EGRET_E2E_BUCKET=e2e \
+      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
       npx playwright test governance-kind
 
 # Uninstall the egret release (leaves the kind cluster + operators up).
