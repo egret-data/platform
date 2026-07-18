@@ -52,15 +52,16 @@ impl Engine {
         self.r#type == "starrocks"
     }
 
-    /// In-cluster DNS name of this engine's coordinator/FE service. Trino's
-    /// kube-trino operator names it `{name}-coordinator.{namespace}.svc`;
-    /// StarRocks' kube-starrocks operator instead exposes the FE (the
-    /// MySQL-protocol query endpoint) as `{name}-fe-service.{namespace}.svc`.
+    /// In-cluster DNS name of this engine's coordinator/FE service. For Trino,
+    /// egret provisions plain Deployments plus a single Service named
+    /// `{name}-trino.{namespace}.svc` (the coordinator selector) — so that is
+    /// the host we dial. StarRocks' kube-starrocks operator instead exposes the
+    /// FE (the MySQL-protocol query endpoint) as `{name}-fe-service.{namespace}.svc`.
     pub fn coordinator_host(&self) -> String {
         if self.is_starrocks() {
             format!("{}-fe-service.{}.svc", self.name, self.namespace)
         } else {
-            format!("{}-coordinator.{}.svc", self.name, self.namespace)
+            format!("{}-trino.{}.svc", self.name, self.namespace)
         }
     }
 
@@ -583,9 +584,10 @@ mod tests {
         assert_eq!(e.coordinator_port(), 9030);
     }
 
-    /// Trino's helpers must be completely unaffected by the starrocks branch.
+    /// Trino's coordinator_host must dial the `{name}-trino` Service that the
+    /// provisioner actually creates, and its port must stay 8080.
     #[test]
-    fn trino_coordinator_host_and_port_unchanged() {
+    fn trino_coordinator_host_matches_provisioned_service() {
         let e = Engine {
             id: Uuid::nil(),
             name: "trino1".into(),
@@ -601,7 +603,7 @@ mod tests {
             coordinator_cert: None,
             created_at: chrono::Utc::now(),
         };
-        assert_eq!(e.coordinator_host(), "trino1-coordinator.engines.svc");
+        assert_eq!(e.coordinator_host(), "trino1-trino.engines.svc");
         assert_eq!(e.coordinator_port(), 8080);
     }
 

@@ -121,6 +121,33 @@ async fn init(config: Config, force: bool) -> anyhow::Result<()> {
     tracing::info!(%email, "bootstrap admin created");
     println!("Bootstrap admin: {email}");
     println!("Password: {password}");
+
+    // Seed a default workspace so a fresh deploy has somewhere to provision
+    // warehouses (a bare `egret init` otherwise leaves 0 workspaces, and
+    // warehouse-creation has nothing to attach to). Idempotent: reuse an
+    // existing `default` workspace rather than erroring on a re-run
+    // (`init --force`, or a partial prior run). The freshly-bootstrapped admin
+    // is made the workspace owner (`ws_admin`) so it can actually use it;
+    // `MemberRepo::add` replaces-then-inserts, so re-running is a no-op.
+    let workspaces = WorkspaceRepo::new(db.clone());
+    let default_ws = match workspaces
+        .get_by_slug("default")
+        .await
+        .context("looking up default workspace")?
+    {
+        Some(ws) => ws,
+        None => workspaces
+            .create("default", "Default", user_id)
+            .await
+            .context("creating default workspace")?,
+    };
+    MemberRepo::new(db.clone())
+        .add(default_ws.id, "user", user_id.0, "ws_admin", user_id)
+        .await
+        .context("adding bootstrap admin as default-workspace owner")?;
+
+    tracing::info!(slug = "default", "default workspace ready");
+    println!("Default workspace: default");
     Ok(())
 }
 
@@ -1447,6 +1474,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         } else {
             String::new()
         },
+        // Gates the Ranger auto-bind on Trino engine create. Disabled by default,
+        // so new engines stay unbound (allow-all) and delegated impersonation
+        // queries work; an admin who explicitly picks an `authz_service_id` still
+        // binds regardless.
+        ranger_enabled: config.ranger.enabled,
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).

@@ -317,7 +317,7 @@ fn coordinator_host_and_jwt_check() {
         coordinator_cert: None,
         created_at: chrono::Utc::now(),
     };
-    assert_eq!(e.coordinator_host(), "trino-prod-coordinator.engines.svc");
+    assert_eq!(e.coordinator_host(), "trino-prod-trino.engines.svc");
     assert_eq!(e.coordinator_port(), 8080);
     assert!(e.supports_jwt_delegation());
 

@@ -60,6 +60,14 @@ pub struct EngineMgmtState {
     /// unconfigured — not hard-failed; a StarRocks jwt-delegation engine
     /// simply gets an empty issuer/jwks in that case. Tests set a dummy value.
     pub engine_oidc_issuer: String,
+    /// Whether the platform Ranger integration is enabled (`config.ranger.enabled`).
+    /// Gates the auto-CREATE of a Ranger policy profile on Trino engine create:
+    /// when `false` (the default) a new Trino engine is left UNBOUND
+    /// (`authz_service_id = None`) so the provisioner writes no
+    /// `access-control.properties` and Trino defaults to allow-all — which is what
+    /// makes per-user delegated impersonation queries work. An admin explicitly
+    /// passing `authz_service_id` still binds regardless of this flag.
+    pub ranger_enabled: bool,
 }
 
 impl FromRef<EngineMgmtState> for SessionService {
