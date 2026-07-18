@@ -87,6 +87,7 @@ impl From<egret_secrets::SecretsError> for CatalogHttpError {
             E::NotConfigured => {
                 CatalogHttpError::BadRequest("secrets master_key is not configured".to_string())
             }
+            E::InvalidType(_) | E::MissingKey(_) => CatalogHttpError::BadRequest(e.to_string()),
             E::Crypto(_) | E::Db(_) => CatalogHttpError::Internal,
         }
     }
