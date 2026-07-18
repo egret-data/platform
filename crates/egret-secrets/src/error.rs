@@ -17,6 +17,12 @@ pub enum SecretsError {
     /// The named secret is still referenced by connections and cannot be deleted.
     #[error("secret is in use by {0} connection(s)")]
     InUse(i64),
+    /// Unknown/unsupported secret type.
+    #[error("unknown secret type {0:?}")]
+    InvalidType(String),
+    /// A required key for the secret's type is missing or empty.
+    #[error("secret is missing required key {0:?}")]
+    MissingKey(String),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }

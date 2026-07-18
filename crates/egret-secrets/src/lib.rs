@@ -2,6 +2,7 @@
 
 mod crypto;
 mod error;
+pub mod secret_type;
 mod store;
 mod workspace_secrets;
 
