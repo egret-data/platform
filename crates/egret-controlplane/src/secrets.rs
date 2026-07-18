@@ -17,28 +17,40 @@ use uuid::Uuid;
 
 use egret_core::http::ErrorBody;
 use egret_core::Ack;
+use std::collections::BTreeMap;
 
 use crate::error::CpError;
 use crate::CpState;
 
-/// Request body for creating a global named secret.
+/// Request body for creating a global named secret. Either a typed `data` map
+/// (with `type`, default `Opaque`) or the legacy single `value` (→ Opaque{value}).
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateSecretInput {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
-    pub value: String,
+    #[serde(default, rename = "type")]
+    pub r#type: Option<String>,
+    #[serde(default)]
+    pub data: Option<BTreeMap<String, String>>,
+    /// Back-compat: a single value stored as `Opaque{value}`.
+    #[serde(default)]
+    pub value: Option<String>,
 }
 
 /// Request body for updating a global named secret. Any subset may be present:
-/// a `name` triggers a rename (re-describing with `description`); a `value`
-/// rotates the underlying vault row.
+/// a `name` triggers a rename (re-describing with `description`); a `type`+`data`
+/// (or legacy `value`) rotates the underlying vault row.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateSecretInput {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default, rename = "type")]
+    pub r#type: Option<String>,
+    #[serde(default)]
+    pub data: Option<BTreeMap<String, String>>,
     #[serde(default)]
     pub value: Option<String>,
 }
@@ -51,6 +63,9 @@ pub struct SecretDto {
     pub description: Option<String>,
     pub created_at: DateTime<Utc>,
     pub used_by: i64,
+    #[serde(rename = "type")]
+    pub r#type: String,
+    pub keys: Vec<String>,
 }
 
 impl From<WorkspaceSecretMeta> for SecretDto {
@@ -61,7 +76,29 @@ impl From<WorkspaceSecretMeta> for SecretDto {
             description: m.description,
             created_at: m.created_at,
             used_by: m.used_by,
+            r#type: m.r#type,
+            keys: m.keys,
         }
+    }
+}
+
+/// Resolve the (type, data) to write from the typed fields or the legacy `value`.
+fn resolve_type_data(
+    r#type: &Option<String>,
+    data: &Option<BTreeMap<String, String>>,
+    value: &Option<String>,
+) -> Result<(String, BTreeMap<String, String>), CpError> {
+    match (data, value) {
+        (Some(d), None) => Ok((r#type.clone().unwrap_or_else(|| "Opaque".into()), d.clone())),
+        (None, Some(v)) => {
+            let mut m = BTreeMap::new();
+            m.insert("value".to_string(), v.clone());
+            Ok(("Opaque".to_string(), m))
+        }
+        (None, None) => Err(CpError::BadRequest("secret needs `data` or `value`".into())),
+        (Some(_), Some(_)) => Err(CpError::BadRequest(
+            "give `data` or `value`, not both".into(),
+        )),
     }
 }
 
@@ -111,9 +148,16 @@ async fn create(
     Json(body): Json<CreateSecretInput>,
 ) -> Result<(StatusCode, Json<SecretDto>), CpError> {
     egret_core::authz::require(&*st.pdp, &principal, "secret:create").await?;
+    let (r#type, data) = resolve_type_data(&body.r#type, &body.data, &body.value)?;
     let id = st
         .secrets
-        .create(None, &body.name, body.description.as_deref(), &body.value)
+        .create_typed(
+            None,
+            &body.name,
+            body.description.as_deref(),
+            &r#type,
+            &data,
+        )
         .await?;
     let meta = st.secrets.get_meta(None, id).await?;
     Ok((StatusCode::CREATED, Json(meta.into())))
@@ -147,8 +191,9 @@ async fn update(
             .rename(None, id, name, body.description.as_deref())
             .await?;
     }
-    if let Some(value) = &body.value {
-        st.secrets.update_value(None, id, value).await?;
+    if body.data.is_some() || body.value.is_some() {
+        let (r#type, data) = resolve_type_data(&body.r#type, &body.data, &body.value)?;
+        st.secrets.update_typed(None, id, &r#type, &data).await?;
     }
     let meta = st.secrets.get_meta(None, id).await?;
     Ok(Json(meta.into()))
