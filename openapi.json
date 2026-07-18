@@ -21470,6 +21470,14 @@
                 "description": "StarRocks-specific config surface (FE/CN image + replicas + optional\nresources); only read when `kind == \"starrocks\"`. Storage (endpoint/\npath/keys) is NOT accepted here — it's derived from the warehouse's\nstorage connection, same as the Trino S3 connector."
               }
             ]
+          },
+          "tlsCertSecretRef": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Optional: a kubernetes.io/tls named secret to back the coordinator TLS."
           }
         }
       },
