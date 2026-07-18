@@ -1186,6 +1186,9 @@ fn parse_ingress(v: &serde_json::Value) -> Option<IngressReq> {
         class_name: v["className"].as_str().map(Into::into),
         host: v["host"].as_str().unwrap_or_default().to_string(),
         tls_secret: v["tlsSecret"].as_str().map(Into::into),
+        tls_cert_secret_ref: v["tlsCertSecretRef"].as_str().and_then(|s| s.parse().ok()),
+        tls_cert_pem: None,
+        tls_key_pem: None,
         annotations: str_map(&v["annotations"]),
     })
 }

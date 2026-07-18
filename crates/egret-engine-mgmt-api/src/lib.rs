@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use uuid::Uuid;
 
 /// A pod toleration allowing scheduling onto tainted nodes.
 #[derive(Clone, Debug, Default)]
@@ -255,6 +256,17 @@ pub struct Ingress {
     pub class_name: Option<String>,
     pub host: String,
     pub tls_secret: Option<String>,
+    /// Typed `kubernetes.io/tls` secret backing the ingress TLS. When set, the
+    /// provision step resolves it, projects a `{name}-ingress-tls` k8s Secret,
+    /// and points `tls_secret` at that projected name.
+    pub tls_cert_secret_ref: Option<Uuid>,
+    /// Resolved cert/key PEMs, injected at provision (NOT persisted). The
+    /// orchestrator renders the `{name}-ingress-tls` Secret from these. Like the
+    /// sibling `Tls` DTO these are plain runtime fields — this struct is not
+    /// serde-serialized (its wire form is parsed/rendered by hand), so the PEMs
+    /// never reach stored config.
+    pub tls_cert_pem: Option<String>,
+    pub tls_key_pem: Option<String>,
     pub annotations: BTreeMap<String, String>,
 }
 

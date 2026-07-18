@@ -2201,6 +2201,9 @@ mod tests {
             class_name: Some("nginx".into()),
             host: "trino-demo.egret.example.com".into(),
             tls_secret: Some("trino-demo-tls".into()),
+            tls_cert_secret_ref: None,
+            tls_cert_pem: None,
+            tls_key_pem: None,
             annotations: anns,
         });
         let ing = trino_ingress(&s).unwrap();
@@ -2433,6 +2436,9 @@ mod tests {
             class_name: Some("nginx".into()),
             host: "trino-demo.egret.example.com".into(),
             tls_secret: None,
+            tls_cert_secret_ref: None,
+            tls_cert_pem: None,
+            tls_key_pem: None,
             annotations: std::collections::BTreeMap::new(),
         });
         p.provision(&s).await.unwrap();
