@@ -129,9 +129,10 @@ fn config_properties(spec: &EngineSpec, coord: bool) -> String {
         // which add X-Forwarded-* headers. Trino (Jetty) rejects requests carrying
         // those unless process-forwarded is enabled, so set it unconditionally.
         out.push_str("http-server.process-forwarded=true\n");
-        if spec.ranger.is_some() {
-            out.push_str("access-control.config-files=/etc/trino/access-control.properties\n");
-        }
+        // access-control.properties is always rendered (ranger when bound, else
+        // allow-all), so always point Trino at it — otherwise it falls back to the
+        // impersonation-denying default and delegated queries fail.
+        out.push_str("access-control.config-files=/etc/trino/access-control.properties\n");
         if let Some(auth) = &cfg.auth {
             if let Some(t) = auth_type(auth) {
                 out.push_str(&format!("http-server.authentication.type={t}\n"));
@@ -365,6 +366,18 @@ pub fn trino_config_map(spec: &EngineSpec) -> Value {
 </configuration>\n",
                 svc = r.service_name, url = r.egret_url, poll = r.poll_interval_ms
             )),
+        );
+    } else {
+        // No Ranger binding (Ranger disabled): pin Trino's built-in ALLOW-ALL
+        // access control EXPLICITLY. Omitting access-control.properties falls back
+        // to Trino's default system access control, which DENIES impersonation —
+        // so egret's per-user delegation (the `egret_delegator` service account
+        // impersonating the calling user via X-Trino-User) fails with
+        // "cannot impersonate user". allow-all permits it. This engine is then
+        // ungoverned at the data plane; enable Ranger for policy enforcement.
+        data.insert(
+            "access-control.properties".into(),
+            json!("access-control.name=allow-all\n"),
         );
     }
 
@@ -632,8 +645,11 @@ pub fn trino_deployment(spec: &EngineSpec, role: Role) -> Value {
             volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/auth/password/password.db", "subPath": "password.db" }));
         }
     }
+    // access-control.properties is ALWAYS rendered (ranger when bound, else
+    // allow-all — see the config map builder), so ALWAYS mount it; without the
+    // mount Trino falls back to its impersonation-denying default.
+    volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/access-control.properties", "subPath": "access-control.properties" }));
     if spec.ranger.is_some() {
-        volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/access-control.properties", "subPath": "access-control.properties" }));
         volume_mounts.push(json!({ "name": "config", "mountPath": "/etc/trino/ranger-trino-security.xml", "subPath": "ranger-trino-security.xml" }));
     }
     // Only the coordinator serves HTTPS, so only it mounts the keystore Secret.
@@ -1379,14 +1395,21 @@ mod tests {
         assert!(cc.contains("access-control.config-files=/etc/trino/access-control.properties"));
     }
     #[test]
-    fn no_ranger_binding_omits_access_control() {
+    fn no_ranger_binding_uses_allow_all_access_control() {
+        // Without a Ranger binding the engine must still get an EXPLICIT allow-all
+        // access control (+ config-files pointing at it), not Trino's default —
+        // otherwise the coordinator denies `egret_delegator`'s per-user
+        // impersonation. The ranger XML stays absent.
         let cm = trino_config_map(&sample_spec());
-        assert!(cm["data"].get("access-control.properties").is_none());
+        assert_eq!(
+            cm["data"]["access-control.properties"].as_str().unwrap(),
+            "access-control.name=allow-all\n"
+        );
         assert!(cm["data"].get("ranger-trino-security.xml").is_none());
-        assert!(!cm["data"]["config-coordinator.properties"]
+        assert!(cm["data"]["config-coordinator.properties"]
             .as_str()
             .unwrap()
-            .contains("access-control.config-files"));
+            .contains("access-control.config-files=/etc/trino/access-control.properties"));
     }
     #[test]
     fn ranger_binding_mounts_config_files() {
