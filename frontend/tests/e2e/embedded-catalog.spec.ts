@@ -1,5 +1,5 @@
-import { test, expect, type APIRequestContext, type BrowserContext } from "@playwright/test";
-import { loginLocalAdmin } from "./helpers";
+import { test, expect } from "@playwright/test";
+import { loginLocalAdmin, csrf, postJson as json } from "./helpers";
 
 /**
  * Embedded-catalog end-to-end (opt-in — needs the live stack + a reserved,
@@ -16,19 +16,6 @@ const BUCKET = process.env.EGRET_E2E_BUCKET ?? "e2e";
 const S3_ENDPOINT = process.env.EGRET_E2E_S3_ENDPOINT ?? "http://localhost:9000";
 const S3_KEY = process.env.EGRET_E2E_S3_KEY ?? "egret";
 const S3_SECRET = process.env.EGRET_E2E_S3_SECRET ?? "egretsecret";
-
-/** CSRF header from the session cookie (double-submit), for control-plane mutations. */
-async function csrf(context: BrowserContext): Promise<Record<string, string>> {
-  const cookies = await context.cookies();
-  const token = cookies.find((c) => c.name === "egret_csrf")?.value ?? "";
-  return { "X-Egret-CSRF": token, "Content-Type": "application/json" };
-}
-
-async function json(req: APIRequestContext, url: string, headers: Record<string, string>, body: unknown) {
-  const res = await req.post(url, { headers, data: body });
-  expect(res.ok(), `${url} → ${res.status()} ${await res.text()}`).toBeTruthy();
-  return res.json();
-}
 
 test.describe("embedded catalog", () => {
   test.skip(!ENABLED, "opt-in: set EGRET_E2E_CATALOG=1 with the live stack + a reserved bucket");

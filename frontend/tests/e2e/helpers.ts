@@ -1,4 +1,9 @@
-import { type Page } from "@playwright/test";
+import {
+  type Page,
+  type BrowserContext,
+  type APIRequestContext,
+  expect,
+} from "@playwright/test";
 
 const OIDC_USER = process.env.EGRET_E2E_OIDC_USER ?? "tester@egret.local";
 const OIDC_PASSWORD = process.env.EGRET_E2E_OIDC_PASSWORD ?? "pw";
@@ -32,4 +37,23 @@ export async function loginLocalAdmin(page: Page): Promise<void> {
   await page.getByPlaceholder("Password").fill(ADMIN_PASSWORD);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.waitForURL(/\/explore\/[^/]+\//, { timeout: 20_000 });
+}
+
+/** CSRF double-submit header from the session cookie, for control-plane mutations. */
+export async function csrf(context: BrowserContext): Promise<Record<string, string>> {
+  const cookies = await context.cookies();
+  const token = cookies.find((c) => c.name === "egret_csrf")?.value ?? "";
+  return { "X-Egret-CSRF": token, "Content-Type": "application/json" };
+}
+
+/** POST that asserts a 2xx and returns the parsed JSON body. */
+export async function postJson(
+  req: APIRequestContext,
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+): Promise<any> {
+  const res = await req.post(url, { headers, data: body });
+  expect(res.ok(), `${url} → ${res.status()} ${await res.text()}`).toBeTruthy();
+  return res.json();
 }
