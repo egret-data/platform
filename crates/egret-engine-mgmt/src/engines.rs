@@ -162,6 +162,9 @@ struct CreateEngineBody {
     /// storage connection, same as the Trino S3 connector.
     #[serde(default)]
     starrocks: Option<StarRocksConfigBody>,
+    /// Optional: a kubernetes.io/tls named secret to back the coordinator TLS.
+    #[serde(default)]
+    tls_cert_secret_ref: Option<Uuid>,
 }
 
 fn default_engine_kind() -> String {
@@ -1801,6 +1804,13 @@ async fn create_engine(
         ));
     }
 
+    // Validate an optional coordinator-TLS secret reference up front (400 on a
+    // missing / non-TLS / incomplete secret) so the row is only created once the
+    // referenced cert resolves. `ensure_tls_cert` re-resolves it at provisioning.
+    if let Some(ref_id) = b.tls_cert_secret_ref {
+        resolve_tls_cert_secret(&st, ref_id).await?;
+    }
+
     match egret_engine_mgmt_api::EngineKind::parse(&b.kind) {
         Some(egret_engine_mgmt_api::EngineKind::StarRocks) => {
             return create_starrocks_engine(st, b, wh).await;
@@ -1867,7 +1877,14 @@ async fn create_engine(
     validate_spec_resource_groups(&spec)?;
     let engine = match st
         .engine_mgmt
-        .create_engine(&b.name, "trino", &namespace, wh.id, &spec, None)
+        .create_engine(
+            &b.name,
+            "trino",
+            &namespace,
+            wh.id,
+            &spec,
+            b.tls_cert_secret_ref,
+        )
         .await
     {
         Ok(e) => e,
@@ -2582,7 +2599,14 @@ async fn create_starrocks_engine(
 
     let engine = match st
         .engine_mgmt
-        .create_engine(&b.name, "starrocks", &namespace, wh.id, &spec, None)
+        .create_engine(
+            &b.name,
+            "starrocks",
+            &namespace,
+            wh.id,
+            &spec,
+            b.tls_cert_secret_ref,
+        )
         .await
     {
         Ok(e) => e,
