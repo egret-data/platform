@@ -209,3 +209,17 @@ break-glass admin `EGRET_E2E_EMAIL` / `EGRET_E2E_PASSWORD`.
 > If the single kind node is memory-wedged, delete stale engines first:
 > `kubectl get deploy -n egret-engines` then `kubectl delete deploy <name>` (or
 > delete the engine via the CP UI).
+
+## Auth + control-plane admin e2e (`auth-gating.spec.ts`, `cp-admin.spec.ts`)
+
+Opt-in (`EGRET_E2E_KIND=1`), same `just e2e-kind` run, target `egret.localtest.me`.
+Pure browser UI — deterministic, no async k8s (runs in seconds).
+
+- `auth-gating`: a break-glass admin reaches `/control-plane`; a JIT OIDC member
+  (`member-sso@egret.local`) is denied it (403 — Forbidden).
+- `cp-admin`: the access console pages load seeded data; a group CRUD round-trip
+  works through the UI; an audited `role:assign` (triggered via the API) shows in
+  the audit log.
+
+Needs the seeded `member-sso` realm user (a fresh `deploy-kind-oidc` imports it).
+Member creds override via `EGRET_E2E_OIDC_MEMBER_USER` / `EGRET_E2E_OIDC_MEMBER_PASSWORD`.
