@@ -278,3 +278,21 @@ export async function runSqlInLab(
   }).toPass({ timeout: 240_000, intervals: [4_000] });
   return out;
 }
+
+const OIDC_MEMBER_USER = process.env.EGRET_E2E_OIDC_MEMBER_USER ?? "member-sso@egret.local";
+const OIDC_MEMBER_PASSWORD = process.env.EGRET_E2E_OIDC_MEMBER_PASSWORD ?? "Member12345!";
+
+/**
+ * Sign in through the real Keycloak as a plain member. Unlike `loginViaOidc`, this
+ * does NOT wait for `/explore/{ws}/` — a member may have no workspace; it only waits
+ * for the OIDC callback to land back in the app (off the Keycloak `/realms/` pages),
+ * which is enough to establish the JIT-provisioned session.
+ */
+export async function loginViaOidcMember(page: Page): Promise<void> {
+  await page.goto("/login");
+  await page.getByRole("link", { name: /sign in with sso/i }).click();
+  await page.locator("#username, input[name='username']").first().fill(OIDC_MEMBER_USER);
+  await page.locator("#password, input[name='password']").first().fill(OIDC_MEMBER_PASSWORD);
+  await page.locator("#kc-login, button[type='submit'], input[type='submit']").first().click();
+  await page.waitForURL((url) => !/\/realms\//.test(url.toString()), { timeout: 30_000 });
+}
