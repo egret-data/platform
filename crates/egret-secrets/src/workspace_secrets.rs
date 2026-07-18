@@ -271,6 +271,16 @@ impl WorkspaceSecretStore {
         self.secrets.get(secret_ref).await
     }
 
+    /// Decrypt and return a named secret as its typed form (type + data map).
+    pub async fn resolve_typed(
+        &self,
+        workspace_id: Option<Uuid>,
+        id: Uuid,
+    ) -> Result<crate::store::TypedSecret, SecretsError> {
+        let secret_ref = self.secret_ref(workspace_id, id).await?;
+        self.secrets.get_typed(secret_ref).await
+    }
+
     /// Resolve a secret readable from `workspace_id`: its own workspace secret, or a
     /// GLOBAL (workspace_id NULL) secret. Used for platform-provisioned secrets (e.g.
     /// the per-engine delegator credential) that a workspace database references.

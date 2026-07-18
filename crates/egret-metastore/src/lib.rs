@@ -1,6 +1,6 @@
 //! Postgres access: a pooled connection wrapper and the embedded migrator.
 //! (touched to re-embed migrations: 0037 removes notebook engine column; 0040_user_username adds users.username citext; 0041_kernels adds kernels table; 0042_notebook_kernels adds notebook_kernels table; 0043_kernel_token adds token_hash + token_expires_at; 0044_oidc_refresh_tokens adds oidc_refresh_tokens table; 0045 adds unique index on workspace_warehouses.warehouse_id; 0046 adds notebook_cells.sql_target; 0047 drops notebook_cells.sql_target)
-// migrations: through 0067 (E5b: analytics + kernel schemas); 0088 typed_secrets (multi-field secret_data)
+// migrations: through 0067 (E5b: analytics + kernel schemas); 0088 typed_secrets (multi-field secret_data); 0089 engine_tls_cert_ref
 // re-embed: 0081 catalog_tag_targets (catalog table/column tag assignments)
 // re-embed: 0082 classification_policies (tag-conditioned BI object access; Access P3.3)
 // re-embed: 0083 classification_required_groups (clearance by group/department; Access P3.4)

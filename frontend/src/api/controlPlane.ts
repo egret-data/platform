@@ -867,6 +867,8 @@ export interface CreateEngineInput {
   kind?: "trino" | "starrocks";
   /** Only read by the backend when `kind === "starrocks"`. */
   starrocks?: StarRocksCreateConfig;
+  /** Optional `kubernetes.io/tls` named-secret id backing the coordinator TLS. */
+  tlsCertSecretRef?: string;
 }
 
 export async function listEngines(): Promise<Engine[]> {

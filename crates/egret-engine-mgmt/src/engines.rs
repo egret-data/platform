@@ -162,6 +162,9 @@ struct CreateEngineBody {
     /// storage connection, same as the Trino S3 connector.
     #[serde(default)]
     starrocks: Option<StarRocksConfigBody>,
+    /// Optional: a kubernetes.io/tls named secret to back the coordinator TLS.
+    #[serde(default)]
+    tls_cert_secret_ref: Option<Uuid>,
 }
 
 fn default_engine_kind() -> String {
@@ -1541,6 +1544,33 @@ fn extract_leading_cert(keystore_pem: &str) -> Option<String> {
 /// (cert+key PEM) in a GLOBAL egret secret + the public cert PEM on the engine
 /// row, and reuse both on subsequent calls (idempotent via the `tls_secret_id` /
 /// `coordinator_cert` columns). Returns `(keystore_pem, cert_pem)`.
+/// Projection primitive: resolve a `kubernetes.io/tls` named secret to
+/// `(cert_pem, key_pem)`. Reused wherever a typed TLS secret backs a k8s cert.
+async fn resolve_tls_cert_secret(
+    st: &CpState,
+    secret_ref: Uuid,
+) -> Result<(String, String), CpError> {
+    let ts = st
+        .secrets
+        .resolve_typed(None, secret_ref)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("resolve tls cert secret: {e}")))?;
+    if ts.r#type != egret_secrets::secret_type::TLS {
+        return Err(CpError::BadRequest(format!(
+            "secret is not a {} secret",
+            egret_secrets::secret_type::TLS
+        )));
+    }
+    let get = |k: &str| {
+        ts.data
+            .get(k)
+            .filter(|v| !v.is_empty())
+            .cloned()
+            .ok_or_else(|| CpError::BadRequest(format!("tls secret missing {k}")))
+    };
+    Ok((get("tls.crt")?, get("tls.key")?))
+}
+
 async fn ensure_tls_cert(st: &CpState, engine: &Engine) -> Result<(String, String), CpError> {
     if let (Some(sid), Some(cert)) = (engine.tls_secret_id, engine.coordinator_cert.clone()) {
         let keystore = st
@@ -1550,9 +1580,14 @@ async fn ensure_tls_cert(st: &CpState, engine: &Engine) -> Result<(String, Strin
             .map_err(|e| CpError::BadRequest(format!("resolve engine tls secret: {e}")))?;
         return Ok((keystore, cert));
     }
-    let (cert_pem, key_pem) =
+    // A referenced kubernetes.io/tls secret backs the coordinator TLS; otherwise
+    // fall back to a fresh self-signed cert (SAN = the coordinator host).
+    let (cert_pem, key_pem) = if let Some(ref_id) = engine.tls_cert_secret_ref {
+        resolve_tls_cert_secret(st, ref_id).await?
+    } else {
         crate::tls_cert::generate_self_signed(&[engine.coordinator_host()])
-            .map_err(|e| CpError::BadRequest(format!("generate engine tls cert: {e}")))?;
+            .map_err(|e| CpError::BadRequest(format!("generate engine tls cert: {e}")))?
+    };
     let keystore = format!("{cert_pem}{key_pem}");
     // Deterministic per-engine name so a partial prior run (secret created but the
     // engine column not yet set) recovers by name instead of erroring forever.
@@ -1769,6 +1804,13 @@ async fn create_engine(
         ));
     }
 
+    // Validate an optional coordinator-TLS secret reference up front (400 on a
+    // missing / non-TLS / incomplete secret) so the row is only created once the
+    // referenced cert resolves. `ensure_tls_cert` re-resolves it at provisioning.
+    if let Some(ref_id) = b.tls_cert_secret_ref {
+        resolve_tls_cert_secret(&st, ref_id).await?;
+    }
+
     match egret_engine_mgmt_api::EngineKind::parse(&b.kind) {
         Some(egret_engine_mgmt_api::EngineKind::StarRocks) => {
             return create_starrocks_engine(st, b, wh).await;
@@ -1835,7 +1877,14 @@ async fn create_engine(
     validate_spec_resource_groups(&spec)?;
     let engine = match st
         .engine_mgmt
-        .create_engine(&b.name, "trino", &namespace, wh.id, &spec)
+        .create_engine(
+            &b.name,
+            "trino",
+            &namespace,
+            wh.id,
+            &spec,
+            b.tls_cert_secret_ref,
+        )
         .await
     {
         Ok(e) => e,
@@ -2550,7 +2599,14 @@ async fn create_starrocks_engine(
 
     let engine = match st
         .engine_mgmt
-        .create_engine(&b.name, "starrocks", &namespace, wh.id, &spec)
+        .create_engine(
+            &b.name,
+            "starrocks",
+            &namespace,
+            wh.id,
+            &spec,
+            b.tls_cert_secret_ref,
+        )
         .await
     {
         Ok(e) => e,
@@ -5088,6 +5144,7 @@ mod tests {
             root_secret_id: None,
             tls_secret_id: None,
             coordinator_cert: None,
+            tls_cert_secret_ref: None,
             created_at: chrono::Utc::now(),
         }
     }
@@ -5240,6 +5297,7 @@ mod tests {
                 "egret-engines",
                 wh.id,
                 &spec,
+                None,
             )
             .await
             .expect("create engine row");
@@ -5280,6 +5338,7 @@ mod tests {
                 "egret-engines",
                 wh.id,
                 &spec2,
+                None,
             )
             .await
             .expect("create engine row 2");
@@ -5348,6 +5407,7 @@ mod tests {
                 "egret-engines",
                 wh.id,
                 &serde_json::json!({ "starrocksConfig": {} }),
+                None,
             )
             .await
             .expect("create engine row");
@@ -5373,6 +5433,169 @@ mod tests {
         assert_eq!(id1, id2);
         assert_eq!(pw1, pw2);
         assert!(!pw1.is_empty());
+    }
+
+    /// The projection primitive resolves a `kubernetes.io/tls` named secret to
+    /// its `(tls.crt, tls.key)` PEM pair.
+    #[tokio::test]
+    async fn resolve_tls_cert_secret_returns_crt_and_key() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping resolve_tls_cert_secret_returns_crt_and_key: DATABASE_URL not set");
+            return;
+        };
+        let mut data = std::collections::BTreeMap::new();
+        data.insert("tls.crt".to_string(), "CERTPEM".to_string());
+        data.insert("tls.key".to_string(), "KEYPEM".to_string());
+        let id = st
+            .secrets
+            .create_typed(
+                None,
+                &format!("tls-{}", Uuid::new_v4().simple()),
+                None,
+                egret_secrets::secret_type::TLS,
+                &data,
+            )
+            .await
+            .expect("create typed tls secret");
+
+        let (crt, key) = resolve_tls_cert_secret(&st, id)
+            .await
+            .expect("resolve tls cert secret");
+        assert_eq!(crt, "CERTPEM");
+        assert_eq!(key, "KEYPEM");
+    }
+
+    /// A non-TLS (Opaque) secret is rejected with a 400.
+    #[tokio::test]
+    async fn resolve_tls_cert_secret_rejects_non_tls_type() {
+        let Some(st) = test_state().await else {
+            eprintln!(
+                "skipping resolve_tls_cert_secret_rejects_non_tls_type: DATABASE_URL not set"
+            );
+            return;
+        };
+        // A single-value create is an Opaque secret, not kubernetes.io/tls.
+        let id = st
+            .secrets
+            .create(
+                None,
+                &format!("op-{}", Uuid::new_v4().simple()),
+                None,
+                "plain",
+            )
+            .await
+            .expect("create opaque secret");
+        let err = resolve_tls_cert_secret(&st, id).await.unwrap_err();
+        assert!(
+            matches!(err, CpError::BadRequest(_)),
+            "expected BadRequest, got {err:?}"
+        );
+    }
+
+    /// A TLS secret whose `tls.key` data row is missing (a corrupt keystore;
+    /// `validate()` blocks creating one, so we drop the row) is rejected with a
+    /// 400 by the projection's completeness guard.
+    #[tokio::test]
+    async fn resolve_tls_cert_secret_rejects_missing_key() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping resolve_tls_cert_secret_rejects_missing_key: DATABASE_URL not set");
+            return;
+        };
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let mut data = std::collections::BTreeMap::new();
+        data.insert("tls.crt".to_string(), "CERTPEM".to_string());
+        data.insert("tls.key".to_string(), "KEYPEM".to_string());
+        let id = st
+            .secrets
+            .create_typed(
+                None,
+                &format!("tls-{}", Uuid::new_v4().simple()),
+                None,
+                egret_secrets::secret_type::TLS,
+                &data,
+            )
+            .await
+            .expect("create typed tls secret");
+        let vault_id: Uuid =
+            sqlx::query_scalar("SELECT secret_ref FROM workspace_secrets WHERE id = $1")
+                .bind(id)
+                .fetch_one(&db.pool)
+                .await
+                .expect("vault id");
+        sqlx::query("DELETE FROM secret_data WHERE secret_id = $1 AND key = 'tls.key'")
+            .bind(vault_id)
+            .execute(&db.pool)
+            .await
+            .expect("drop tls.key row");
+
+        let err = resolve_tls_cert_secret(&st, id).await.unwrap_err();
+        assert!(
+            matches!(err, CpError::BadRequest(_)),
+            "expected BadRequest, got {err:?}"
+        );
+    }
+
+    /// End-to-end of Task 3: an engine that references a `kubernetes.io/tls`
+    /// secret materializes its keystore from the PROVIDED cert (not a fresh
+    /// self-signed one) and pins `coordinator_cert` to the provided `tls.crt`.
+    #[tokio::test]
+    async fn ensure_tls_cert_uses_referenced_secret() {
+        let Some(st) = test_state().await else {
+            eprintln!("skipping ensure_tls_cert_uses_referenced_secret: DATABASE_URL not set");
+            return;
+        };
+        let dsn = std::env::var("DATABASE_URL").unwrap();
+        let db = egret_metastore::Db::connect(&dsn, 5)
+            .await
+            .expect("connect");
+        let (wh, _s) = seed_sr_warehouse(&st, &db).await;
+
+        let mut data = std::collections::BTreeMap::new();
+        data.insert("tls.crt".to_string(), "CERTPEM".to_string());
+        data.insert("tls.key".to_string(), "KEYPEM".to_string());
+        let cert_ref = st
+            .secrets
+            .create_typed(
+                None,
+                &format!("tls-{}", Uuid::new_v4().simple()),
+                None,
+                egret_secrets::secret_type::TLS,
+                &data,
+            )
+            .await
+            .expect("create tls secret");
+
+        let engine = st
+            .engine_mgmt
+            .create_engine(
+                &format!("trino-{}", Uuid::new_v4().simple()),
+                "trino",
+                "egret-engines",
+                wh.id,
+                &serde_json::json!({ "trinoConfig": {} }),
+                Some(cert_ref),
+            )
+            .await
+            .expect("create engine row");
+
+        let (keystore, cert) = ensure_tls_cert(&st, &engine)
+            .await
+            .expect("ensure tls cert");
+        assert_eq!(cert, "CERTPEM");
+        assert_eq!(keystore, "CERTPEMKEYPEM");
+
+        // The provided cert is pinned on the row (the connector trusts it).
+        let refetched = st
+            .engine_mgmt
+            .get_engine(engine.id)
+            .await
+            .expect("get_engine")
+            .expect("engine present");
+        assert_eq!(refetched.coordinator_cert.as_deref(), Some("CERTPEM"));
+        assert_eq!(refetched.tls_cert_secret_ref, Some(cert_ref));
     }
 
     /// Secure-by-default: `create_starrocks_engine` mints + persists a
@@ -5440,6 +5663,7 @@ mod tests {
                 "egret-engines",
                 wh.id,
                 &serde_json::json!({ "starrocksConfig": {} }),
+                None,
             )
             .await
             .expect("create legacy engine row");
@@ -5493,6 +5717,7 @@ mod tests {
             authz_service_id: None,
             kind: "starrocks".into(),
             starrocks,
+            tls_cert_secret_ref: None,
         }
     }
 
@@ -5518,6 +5743,7 @@ mod tests {
                 "egret-engines",
                 wh_id,
                 &spec,
+                None,
             )
             .await
             .expect("create engine row")

@@ -41,4 +41,9 @@ export interface CreateEngineBody {
      */
   kind?: string;
   starrocks?: null | StarRocksConfigBody;
+  /**
+     * Optional: a kubernetes.io/tls named secret to back the coordinator TLS.
+     * @nullable
+     */
+  tlsCertSecretRef?: string | null;
 }
