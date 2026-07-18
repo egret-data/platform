@@ -1835,7 +1835,7 @@ async fn create_engine(
     validate_spec_resource_groups(&spec)?;
     let engine = match st
         .engine_mgmt
-        .create_engine(&b.name, "trino", &namespace, wh.id, &spec)
+        .create_engine(&b.name, "trino", &namespace, wh.id, &spec, None)
         .await
     {
         Ok(e) => e,
@@ -2550,7 +2550,7 @@ async fn create_starrocks_engine(
 
     let engine = match st
         .engine_mgmt
-        .create_engine(&b.name, "starrocks", &namespace, wh.id, &spec)
+        .create_engine(&b.name, "starrocks", &namespace, wh.id, &spec, None)
         .await
     {
         Ok(e) => e,
@@ -5088,6 +5088,7 @@ mod tests {
             root_secret_id: None,
             tls_secret_id: None,
             coordinator_cert: None,
+            tls_cert_secret_ref: None,
             created_at: chrono::Utc::now(),
         }
     }
@@ -5240,6 +5241,7 @@ mod tests {
                 "egret-engines",
                 wh.id,
                 &spec,
+                None,
             )
             .await
             .expect("create engine row");
@@ -5280,6 +5282,7 @@ mod tests {
                 "egret-engines",
                 wh.id,
                 &spec2,
+                None,
             )
             .await
             .expect("create engine row 2");
@@ -5348,6 +5351,7 @@ mod tests {
                 "egret-engines",
                 wh.id,
                 &serde_json::json!({ "starrocksConfig": {} }),
+                None,
             )
             .await
             .expect("create engine row");
@@ -5440,6 +5444,7 @@ mod tests {
                 "egret-engines",
                 wh.id,
                 &serde_json::json!({ "starrocksConfig": {} }),
+                None,
             )
             .await
             .expect("create legacy engine row");
@@ -5518,6 +5523,7 @@ mod tests {
                 "egret-engines",
                 wh_id,
                 &spec,
+                None,
             )
             .await
             .expect("create engine row")

@@ -80,7 +80,7 @@ async fn seed_typed_engine_and_ws(
 
     let eng_name = format!("{prefix}-eng-{}", Uuid::new_v4().simple());
     let engine = engine_mgmt
-        .create_engine(&eng_name, engine_type, "egret-engines", wh.id, &spec)
+        .create_engine(&eng_name, engine_type, "egret-engines", wh.id, &spec, None)
         .await
         .expect("create engine");
 

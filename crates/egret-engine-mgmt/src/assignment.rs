@@ -278,6 +278,7 @@ mod tests {
             root_secret_id: None,
             tls_secret_id: None,
             coordinator_cert: None,
+            tls_cert_secret_ref: None,
             created_at: chrono::Utc::now(),
         }
     }

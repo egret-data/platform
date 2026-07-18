@@ -67,7 +67,7 @@ async fn create_list_get_delete_engine() {
     let eng_name = format!("eng-{}", Uuid::new_v4().simple());
     let spec = serde_json::json!({ "coordinatorReplicas": 1, "workerReplicas": 2 });
     let created = engine_mgmt
-        .create_engine(&eng_name, "trino", "egret-engines", wh_id, &spec)
+        .create_engine(&eng_name, "trino", "egret-engines", wh_id, &spec, None)
         .await
         .unwrap();
     assert_eq!(created.name, eng_name);
@@ -100,7 +100,7 @@ async fn create_list_delete_engine_catalogs_cascade() {
     let eng_name = format!("cat-eng-{}", Uuid::new_v4().simple());
     let spec = serde_json::json!({ "coordinatorReplicas": 1, "workerReplicas": 2 });
     let engine = engine_mgmt
-        .create_engine(&eng_name, "trino", "egret-engines", wh_id, &spec)
+        .create_engine(&eng_name, "trino", "egret-engines", wh_id, &spec, None)
         .await
         .unwrap();
 
@@ -176,7 +176,7 @@ async fn update_engine_catalog_reflects_in_get() {
     let eng_name = format!("upd-eng-{}", Uuid::new_v4().simple());
     let spec = serde_json::json!({ "coordinatorReplicas": 1, "workerReplicas": 2 });
     let engine = engine_mgmt
-        .create_engine(&eng_name, "trino", "egret-engines", wh_id, &spec)
+        .create_engine(&eng_name, "trino", "egret-engines", wh_id, &spec, None)
         .await
         .unwrap();
 
@@ -239,7 +239,7 @@ async fn seed_engine_and_ws(
     let eng_name = format!("{prefix}-eng-{}", Uuid::new_v4().simple());
     let spec = serde_json::json!({ "coordinatorReplicas": 1, "workerReplicas": 2 });
     let engine = engine_mgmt
-        .create_engine(&eng_name, "trino", "egret-engines", wh_id, &spec)
+        .create_engine(&eng_name, "trino", "egret-engines", wh_id, &spec, None)
         .await
         .unwrap();
 
@@ -315,6 +315,7 @@ fn coordinator_host_and_jwt_check() {
         root_secret_id: None,
         tls_secret_id: None,
         coordinator_cert: None,
+        tls_cert_secret_ref: None,
         created_at: chrono::Utc::now(),
     };
     assert_eq!(e.coordinator_host(), "trino-prod-trino.engines.svc");

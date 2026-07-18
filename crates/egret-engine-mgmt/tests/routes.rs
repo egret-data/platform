@@ -2457,6 +2457,7 @@ async fn seed_jwt_engine(f: &Fixture, warehouse_id: Uuid) -> Uuid {
             "egret-engines",
             warehouse_id,
             &spec,
+            None,
         )
         .await
         .expect("seed jwt engine")
