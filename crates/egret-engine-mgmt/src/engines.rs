@@ -1897,6 +1897,19 @@ async fn create_engine(
                 None
             }
         },
+        // No admin-chosen service. Auto-create a fresh Ranger profile ONLY when
+        // the platform Ranger integration is enabled. When it is off (the
+        // default), leave the engine UNBOUND: the provisioner then writes no
+        // `access-control.properties`, Trino defaults to allow-all, and per-user
+        // delegated impersonation queries work (a Ranger-bound-but-unpolicied
+        // Trino denies `egret_delegator` becoming the target user).
+        None if !st.ranger_enabled => {
+            tracing::info!(
+                engine = %b.name,
+                "ranger disabled; Trino engine provisioned without Ranger access-control (allow-all)"
+            );
+            None
+        }
         None => {
             if let Err(e) = st.authz.ensure_trino_def().await {
                 tracing::warn!(error = %e, "ensure_trino_def failed during auto-bind");
@@ -5053,6 +5066,7 @@ mod tests {
             engine_egret_url: "http://egret:8080".into(),
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),
+            ranger_enabled: false,
         })
     }
 

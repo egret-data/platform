@@ -85,6 +85,7 @@ fn build_app(
             engine_egret_url: "http://egret:8080".into(),
             engine_jwks_uri: "https://idp/jwks".into(),
             engine_oidc_issuer: "https://idp/realms/egret".into(),
+            ranger_enabled: false,
         })
 }
 

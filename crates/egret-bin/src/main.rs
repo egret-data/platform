@@ -1447,6 +1447,11 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         } else {
             String::new()
         },
+        // Gates the Ranger auto-bind on Trino engine create. Disabled by default,
+        // so new engines stay unbound (allow-all) and delegated impersonation
+        // queries work; an admin who explicitly picks an `authz_service_id` still
+        // binds regardless.
+        ranger_enabled: config.ranger.enabled,
     });
 
     // egret mini machine-IdP: mints Catalog Client tokens (/oauth/token + JWKS).
