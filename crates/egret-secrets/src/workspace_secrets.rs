@@ -33,19 +33,33 @@ pub struct WorkspaceSecretMeta {
     pub created_at: DateTime<Utc>,
     /// Number of connections (storages + databases) referencing this secret.
     pub used_by: i64,
+    /// k8s-style secret type (Opaque / kubernetes.io/tls / kubernetes.io/basic-auth).
+    pub r#type: String,
+    /// Data key names (NOT values).
+    pub keys: Vec<String>,
 }
 
-/// One `workspace_secrets` row joined with its reference count, as selected from SQL.
-type MetaRow = (Uuid, String, Option<String>, DateTime<Utc>, i64);
+/// One `workspace_secrets` row joined with its type, key names, and reference count.
+type MetaRow = (
+    Uuid,
+    String,
+    Option<String>,
+    DateTime<Utc>,
+    i64,
+    String,
+    Vec<String>,
+);
 
 impl From<MetaRow> for WorkspaceSecretMeta {
-    fn from((id, name, description, created_at, used_by): MetaRow) -> Self {
+    fn from((id, name, description, created_at, used_by, r#type, keys): MetaRow) -> Self {
         WorkspaceSecretMeta {
             id,
             name,
             description,
             created_at,
             used_by,
+            r#type,
+            keys,
         }
     }
 }
@@ -100,6 +114,55 @@ impl WorkspaceSecretStore {
         }
     }
 
+    /// Create a typed named secret (validates + seals the data map into a new
+    /// vault row, then registers the named entry). Duplicate name → rollback.
+    pub async fn create_typed(
+        &self,
+        workspace_id: Option<Uuid>,
+        name: &str,
+        description: Option<&str>,
+        r#type: &str,
+        data: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Uuid, SecretsError> {
+        let vault_id = self
+            .secrets
+            .put_typed("workspace_secret", r#type, data)
+            .await?;
+        let res: Result<Uuid, sqlx::Error> = sqlx::query_scalar(
+            "INSERT INTO workspace_secrets (workspace_id, name, description, secret_ref) \
+             VALUES ($1, $2, $3, $4) RETURNING id",
+        )
+        .bind(workspace_id)
+        .bind(name)
+        .bind(description)
+        .bind(vault_id)
+        .fetch_one(&self.db.pool)
+        .await;
+        match res {
+            Ok(id) => Ok(id),
+            Err(e) => {
+                let _ = self.secrets.delete(vault_id).await;
+                if is_unique_violation(&e) {
+                    Err(SecretsError::AlreadyExists(name.to_string()))
+                } else {
+                    Err(e.into())
+                }
+            }
+        }
+    }
+
+    /// Rotate a named secret's type + data map (re-validates; the named id is unchanged).
+    pub async fn update_typed(
+        &self,
+        workspace_id: Option<Uuid>,
+        id: Uuid,
+        r#type: &str,
+        data: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), SecretsError> {
+        let secret_ref = self.secret_ref(workspace_id, id).await?;
+        self.secrets.update_typed(secret_ref, r#type, data).await
+    }
+
     /// List a workspace's named secrets with reference counts, ordered by name.
     pub async fn list(
         &self,
@@ -108,8 +171,10 @@ impl WorkspaceSecretStore {
         let rows: Vec<MetaRow> = sqlx::query_as(
             "SELECT ws.id, ws.name, ws.description, ws.created_at, \
              (SELECT count(*) FROM storage.storage_connections WHERE secret_ref = ws.id) \
-             + (SELECT count(*) FROM query.databases WHERE secret_id = ws.id) AS used_by \
-             FROM workspace_secrets ws \
+             + (SELECT count(*) FROM query.databases WHERE secret_id = ws.id) AS used_by, \
+             s.type, \
+             ARRAY(SELECT key FROM secret_data WHERE secret_id = ws.secret_ref ORDER BY key) AS keys \
+             FROM workspace_secrets ws JOIN secrets s ON s.id = ws.secret_ref \
              WHERE ws.workspace_id IS NOT DISTINCT FROM $1 \
              ORDER BY ws.name",
         )
@@ -128,8 +193,10 @@ impl WorkspaceSecretStore {
         let row: Option<MetaRow> = sqlx::query_as(
             "SELECT ws.id, ws.name, ws.description, ws.created_at, \
              (SELECT count(*) FROM storage.storage_connections WHERE secret_ref = ws.id) \
-             + (SELECT count(*) FROM query.databases WHERE secret_id = ws.id) AS used_by \
-             FROM workspace_secrets ws \
+             + (SELECT count(*) FROM query.databases WHERE secret_id = ws.id) AS used_by, \
+             s.type, \
+             ARRAY(SELECT key FROM secret_data WHERE secret_id = ws.secret_ref ORDER BY key) AS keys \
+             FROM workspace_secrets ws JOIN secrets s ON s.id = ws.secret_ref \
              WHERE ws.id = $1 AND ws.workspace_id IS NOT DISTINCT FROM $2",
         )
         .bind(id)

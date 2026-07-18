@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { EngineSpecDtoStarrocksConfig } from './engineSpecDtoStarrocksConfig';
 import type { EngineSpecDtoTrinoConfig } from './engineSpecDtoTrinoConfig';
 
 /**
@@ -22,4 +23,11 @@ export interface EngineSpecDto {
   imageVersion?: string;
   /** Surfaced back so the UI can prefill the config editor on reload. */
   trinoConfig?: EngineSpecDtoTrinoConfig;
+  /**
+     * StarRocks equivalent of `trino_config`: the persisted `starrocksConfig`
+     * block (images/replicas/resources/delegation/feConfig/cnConfig/
+     * cnAutoscaling/pod) surfaced back so the UI can prefill the StarRocks
+     * config editor + show KPIs/auth on reload. Absent for Trino engines.
+     */
+  starrocksConfig?: EngineSpecDtoStarrocksConfig;
 }

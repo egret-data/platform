@@ -165,19 +165,26 @@ export interface Secret {
   created_at: string;
   // Number of connections referencing this secret. 0 = safe to delete.
   used_by: number;
+  // k8s-style type (Opaque / kubernetes.io/tls / kubernetes.io/basic-auth).
+  type: string;
+  // Data key names (NOT values).
+  keys: string[];
 }
 
 export interface SecretInput {
   name: string;
   description?: string | null;
-  // Write-only — never returned by the API.
-  value: string;
+  type?: string;
+  data?: Record<string, string>;
+  // Back-compat single value (Opaque{value}); prefer `type`+`data`.
+  value?: string;
 }
 
 export interface SecretUpdate {
   name?: string;
   description?: string | null;
-  // Write-only. Omit/blank to keep the existing value; a value rotates it.
+  type?: string;
+  data?: Record<string, string>;
   value?: string;
 }
 

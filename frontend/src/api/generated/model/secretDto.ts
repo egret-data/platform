@@ -16,4 +16,6 @@ export interface SecretDto {
   description?: string | null;
   created_at: string;
   used_by: number;
+  type: string;
+  keys: string[];
 }

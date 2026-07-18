@@ -5,17 +5,22 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { UpdateSecretInputData } from './updateSecretInputData';
 
 /**
  * Request body for updating a global named secret. Any subset may be present:
- * a `name` triggers a rename (re-describing with `description`); a `value`
- * rotates the underlying vault row.
+ * a `name` triggers a rename (re-describing with `description`); a `type`+`data`
+ * (or legacy `value`) rotates the underlying vault row.
  */
 export interface UpdateSecretInput {
   /** @nullable */
   name?: string | null;
   /** @nullable */
   description?: string | null;
+  /** @nullable */
+  type?: string | null;
+  /** @nullable */
+  data?: UpdateSecretInputData;
   /** @nullable */
   value?: string | null;
 }
