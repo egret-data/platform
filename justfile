@@ -68,6 +68,22 @@ e2e-kind: deploy-kind-oidc
     cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
       npx playwright test dataplane-kind
 
+# Like deploy-kind-oidc but ALSO Ranger-on — provisioned Trino engines bind Ranger
+# (egret embeds the Ranger admin at /service). For the governance enforcement e2e.
+deploy-kind-governance: images-build
+    kind load docker-image egret-backend:dev egret-frontend:dev --name egret
+    helm upgrade --install egret deploy/helm/egret -n egret-system --create-namespace --wait --timeout 10m \
+      --set oidc.enabled=true --set ingress.enabled=true --set ranger.enabled=true
+    @echo "egret (ranger-on): http://egret.localtest.me"
+
+# Opt-in governance enforcement e2e (mask + row-filter on a live Trino query).
+e2e-kind-governance: deploy-kind-governance
+    ./deploy/k8s/wait-ready.sh
+    cd frontend && EGRET_E2E_KIND=1 EGRET_E2E_BASE_URL=http://egret.localtest.me \
+      EGRET_E2E_BUCKET=e2e \
+      EGRET_E2E_S3_ENDPOINT=http://minio.egret-system.svc.cluster.local:9000 \
+      npx playwright test governance-kind
+
 # Uninstall the egret release (leaves the kind cluster + operators up).
 kind-undeploy:
     helm uninstall egret -n egret-system || true

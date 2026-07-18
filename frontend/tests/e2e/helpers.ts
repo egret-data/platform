@@ -296,3 +296,73 @@ export async function loginViaOidcMember(page: Page): Promise<void> {
   await page.locator("#kc-login, button[type='submit'], input[type='submit']").first().click();
   await page.waitForURL((url) => !/\/realms\//.test(url.toString()), { timeout: 30_000 });
 }
+
+/**
+ * Run one SQL statement through the SQL Lab query backend (POST /api/ws/{ws}/queries,
+ * the endpoint the Run button calls) and return the results JSON `{columns, rows}`.
+ * Retries while a freshly provisioned coordinator is warming up (500s ~30-40s until
+ * SERVER STARTED) or a just-created Ranger policy hasn't propagated yet.
+ */
+export async function runQuery(
+  request: APIRequestContext,
+  h: Record<string, string>,
+  workspaceSlug: string,
+  engineName: string,
+  sql: string,
+): Promise<{ columns: Array<{ name: string }>; rows: string[][] }> {
+  const engineRe = new RegExp(engineName, "i");
+  const dbs = (await (await request.get(`/api/ws/${workspaceSlug}/databases`)).json()) as Array<{
+    id: string;
+    name?: string;
+  }>;
+  const db = dbs.find((d) => engineRe.test(d.name ?? ""));
+  expect(db, `database for ${engineName} is listed`).toBeTruthy();
+
+  let out: { columns: Array<{ name: string }>; rows: string[][] } = { columns: [], rows: [] };
+  await expect(async () => {
+    const sub = await request.post(`/api/ws/${workspaceSlug}/queries`, {
+      headers: h,
+      data: { database_id: db!.id, sql },
+    });
+    expect(sub.ok(), `submit → ${sub.status()} ${await sub.text()}`).toBeTruthy();
+    const qid = (await sub.json()).id as string;
+    let state = "";
+    let error = "";
+    for (let i = 0; i < 60; i++) {
+      const s = await (await request.get(`/api/ws/${workspaceSlug}/queries/${qid}`)).json();
+      state = s.state ?? s.status ?? "";
+      error = s.error ?? "";
+      if (["finished", "succeeded", "failed", "error"].includes(state)) break;
+      await new Promise((r) => setTimeout(r, 1_000));
+    }
+    expect(state, `query state (err: ${error}) for: ${sql}`).toMatch(/finished|succeeded/);
+    out = await (await request.get(`/api/ws/${workspaceSlug}/queries/${qid}/results`)).json();
+  }).toPass({ timeout: 300_000, intervals: [4_000] });
+  return out;
+}
+
+/** The Ranger profile (service) name auto-bound to `engineName` (= engine name). */
+export async function engineProfileName(
+  request: APIRequestContext,
+  engineName: string,
+): Promise<string> {
+  const profiles = (await (
+    await request.get("/api/control-plane/policies/services")
+  ).json()) as Array<{ name: string; engines?: Array<{ name?: string }> }>;
+  const p =
+    profiles.find((x) => x.engines?.some((e) => e.name === engineName)) ??
+    profiles.find((x) => x.name === engineName);
+  expect(p, `Ranger profile for ${engineName}`).toBeTruthy();
+  return p!.name;
+}
+
+/** Create one policy via the policy admin API; returns its id (for cleanup). */
+export async function createPolicy(
+  request: APIRequestContext,
+  h: Record<string, string>,
+  body: Record<string, unknown>,
+): Promise<number> {
+  const res = await request.post("/api/control-plane/policies", { headers: h, data: body });
+  expect(res.ok(), `create policy ${body.name} → ${res.status()} ${await res.text()}`).toBeTruthy();
+  return (await res.json()).id as number;
+}

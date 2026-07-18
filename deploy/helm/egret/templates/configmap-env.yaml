@@ -14,5 +14,7 @@ data:
   EGRET_OIDC__ISSUER_URL: "http://{{ .Values.ingress.host }}/auth/realms/{{ .Values.oidc.realm }}"
   EGRET_OIDC__CLIENT_ID: "{{ .Values.oidc.clientId }}"
   EGRET_OIDC__REDIRECT_URL: "http://{{ .Values.ingress.host }}/api/auth/oidc/callback"
+  EGRET_RANGER__ENABLED: "{{ .Values.ranger.enabled }}"
+  EGRET_RANGER__AUTH_TOKEN: ""
   EGRET_ADMIN_EMAIL: "{{ .Values.admin.email }}"
   EGRET_LOG__FILTER: "info,egret=debug"
