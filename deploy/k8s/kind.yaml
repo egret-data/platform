@@ -7,6 +7,17 @@ kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
   - role: control-plane
+    # NOTE: kubeadmConfigPatches + extraPortMappings apply only when the cluster
+    # is CREATED. Changing them requires `just k8s-down && just k8s-up`.
+    #
+    # Label the node ingress-ready so the kind-flavored ingress-nginx controller
+    # schedules its DaemonSet here (the standard kind nginx-ingress recipe).
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
     # Expose a NodePort on the host so a local Trino CLI / egret can reach the
     # coordinator without kubectl port-forward. Egret provisions Trino as plain
     # Deployments + a ClusterIP Service; expose it with a NodePort in the
@@ -18,4 +29,11 @@ nodes:
       # egret-frontend NodePort -> browse the SPA at http://localhost:30080
       - containerPort: 30080
         hostPort: 30080
+        protocol: TCP
+      # ingress-nginx single-origin (egret.localtest.me) -> :80 / :443 on the host.
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
         protocol: TCP

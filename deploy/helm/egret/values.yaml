@@ -4,6 +4,10 @@ backend:
 frontend:
   image: { repository: egret-frontend, tag: dev, pullPolicy: IfNotPresent }
   nodePort: 30080
+ingress:
+  enabled: false
+  host: egret.localtest.me
+  className: nginx
 engineNamespace: egret-engines
 # The engine namespace is normally pre-created by `just k8s-up`. Set true only on
 # a bare cluster where it doesn't exist yet (else Helm can't adopt it).

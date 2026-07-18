@@ -57,3 +57,8 @@ deploy-kind: images-build
 # Uninstall the egret release (leaves the kind cluster + operators up).
 kind-undeploy:
     helm uninstall egret -n egret-system || true
+
+# Install the kind-flavored ingress-nginx controller (needs a cluster created with the ingress-ready label + :80 map).
+ingress-install:
+    kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+    kubectl wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=180s
