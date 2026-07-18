@@ -45,6 +45,8 @@ export function EngineSecurity(props: {
   setIngressClassName: (v: string) => void;
   ingressTlsSecret: string;
   setIngressTlsSecret: (v: string) => void;
+  ingressTlsCertSecretRef: string;
+  setIngressTlsCertSecretRef: (v: string) => void;
   ingressAnnotations: Kv[];
   setIngressAnnotations: React.Dispatch<React.SetStateAction<Kv[]>>;
 }) {
@@ -65,8 +67,11 @@ export function EngineSecurity(props: {
     setIngressHost,
     ingressClassName,
     setIngressClassName,
-    ingressTlsSecret,
-    setIngressTlsSecret,
+    // `ingressTlsSecret`/`setIngressTlsSecret` (raw k8s Secret name) stay in the
+    // props channel for back-compat but are no longer rendered — the typed
+    // `kubernetes.io/tls` picker below (ingressTlsCertSecretRef) replaces them.
+    ingressTlsCertSecretRef,
+    setIngressTlsCertSecretRef,
     ingressAnnotations,
     setIngressAnnotations,
   } = props;
@@ -338,16 +343,34 @@ export function EngineSecurity(props: {
             </div>
             <div className="space-y-1.5">
               <FieldLabel
-                fieldKey="ingress.tlsSecret"
-                label="TLS secret"
-                htmlFor="ced-ing-tls"
+                fieldKey="ingress.tlsCertSecretRef"
+                label="Ingress TLS cert"
+                htmlFor="es-ingress-tls-cert"
               />
-              <Input
-                id="ced-ing-tls"
-                value={ingressTlsSecret}
-                placeholder="optional — Kubernetes TLS secret name"
-                onChange={(e) => setIngressTlsSecret(e.target.value)}
-              />
+              <Select
+                value={ingressTlsCertSecretRef || "__none__"}
+                onValueChange={(v) =>
+                  setIngressTlsCertSecretRef(v === "__none__" ? "" : v)
+                }
+              >
+                <SelectTrigger id="es-ingress-tls-cert" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">None (default)</SelectItem>
+                  {(secrets.data ?? [])
+                    .filter((s) => s.type === "kubernetes.io/tls")
+                    .map((s) => (
+                      <SelectItem key={s.id} value={s.id}>
+                        {s.name}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Pick a kubernetes.io/tls secret to back the ingress cert, or keep
+                the default.
+              </p>
             </div>
             <div className="space-y-1.5">
               <Label>Annotations</Label>

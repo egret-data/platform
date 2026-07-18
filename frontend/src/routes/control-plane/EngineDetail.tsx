@@ -1072,6 +1072,8 @@ function SecuritySection({ cfg }: { cfg: EngineConfigForm }) {
     setIngressClassName,
     ingressTlsSecret,
     setIngressTlsSecret,
+    ingressTlsCertSecretRef,
+    setIngressTlsCertSecretRef,
     ingressAnnotations,
     setIngressAnnotations,
   } = cfg;
@@ -1096,6 +1098,8 @@ function SecuritySection({ cfg }: { cfg: EngineConfigForm }) {
       setIngressClassName={setIngressClassName}
       ingressTlsSecret={ingressTlsSecret}
       setIngressTlsSecret={setIngressTlsSecret}
+      ingressTlsCertSecretRef={ingressTlsCertSecretRef}
+      setIngressTlsCertSecretRef={setIngressTlsCertSecretRef}
       ingressAnnotations={ingressAnnotations}
       setIngressAnnotations={setIngressAnnotations}
     />
