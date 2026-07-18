@@ -1315,17 +1315,33 @@ async fn resolve_auth(st: &CpState, tc: &serde_json::Value) -> Result<Option<Aut
     }
     let jwt = {
         let j = &auth["jwt"];
-        j.is_object().then(|| {
+        if j.is_object() {
             let jwks_uri = j["jwksUri"]
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .map(String::from)
                 .unwrap_or_else(|| st.engine_jwks_uri.clone());
-            JwtReq {
+            // Enabling "accept egret JWT" with no JWKS to validate against would
+            // template `http-server.authentication.jwt.key-file=<empty>` and crash
+            // the Trino coordinator at boot (FileSigningKeyLocator /
+            // io.jsonwebtoken.security.SecurityException). Reject at the API
+            // boundary instead of provisioning a broken engine. Falls back to the
+            // platform default JWKS above, so this fires only when BOTH the engine
+            // block and the platform (OIDC) have no JWKS.
+            if jwks_uri.is_empty() {
+                return Err(CpError::BadRequest(
+                    "Cannot enable engine JWT authentication: the platform has no JWKS \
+                     (OIDC is not configured). Enable OIDC first, or disable JWT on this engine."
+                        .into(),
+                ));
+            }
+            Some(JwtReq {
                 jwks_uri,
                 required_audience: j["requiredAudience"].as_str().map(Into::into),
-            }
-        })
+            })
+        } else {
+            None
+        }
     };
     Ok(Some(AuthReq {
         password_users,
@@ -4699,6 +4715,54 @@ mod tests {
         let mut auth: Option<AuthReq> = None;
         inject_monitor_user(&mut auth, Uuid::new_v4()).unwrap();
         assert!(auth.is_none());
+    }
+
+    /// Fix #3c: enabling the engine `jwt` block with no JWKS anywhere (platform
+    /// OIDC unconfigured AND no per-engine `jwksUri`) must be REJECTED at the
+    /// API boundary, not silently provision a coordinator that crashes at boot.
+    /// Self-skips without `DATABASE_URL` (mirrors the other `test_state` tests).
+    #[tokio::test]
+    async fn resolve_auth_rejects_jwt_when_no_jwks() {
+        let Some(mut st) = test_state().await else {
+            eprintln!("skipping resolve_auth_rejects_jwt_when_no_jwks: DATABASE_URL not set");
+            return;
+        };
+
+        // Platform has no JWKS (OIDC unconfigured).
+        st.engine_jwks_uri.clear();
+
+        // jwt block enabled + no jwks anywhere → BadRequest.
+        let tc = serde_json::json!({ "auth": { "jwt": {} } });
+        let err = resolve_auth(&st, &tc)
+            .await
+            .expect_err("jwt with no jwks must be rejected");
+        assert!(matches!(err, CpError::BadRequest(_)), "got {err:?}");
+
+        // An explicit per-engine jwksUri satisfies it even with no platform JWKS.
+        let tc_explicit =
+            serde_json::json!({ "auth": { "jwt": { "jwksUri": "https://engine/jwks" } } });
+        let out = resolve_auth(&st, &tc_explicit)
+            .await
+            .expect("explicit per-engine jwks is accepted");
+        assert!(out.and_then(|a| a.jwt).is_some());
+
+        // No jwt block (password-only / no-security) is unaffected by the gate.
+        let tc_no_jwt = serde_json::json!({ "auth": { "passwordUsers": [] } });
+        let out = resolve_auth(&st, &tc_no_jwt)
+            .await
+            .expect("no-jwt auth is accepted");
+        assert!(out.expect("auth block present").jwt.is_none());
+
+        // With a platform JWKS present, the jwt block is accepted and falls back
+        // to the platform default.
+        st.engine_jwks_uri = "https://idp/jwks".into();
+        let tc2 = serde_json::json!({ "auth": { "jwt": {} } });
+        let jwt = resolve_auth(&st, &tc2)
+            .await
+            .expect("platform jwks accepted")
+            .and_then(|a| a.jwt)
+            .expect("jwt present");
+        assert_eq!(jwt.jwks_uri, "https://idp/jwks");
     }
 
     /// An engine whose stored spec selects a given delegation mode (+ jwt auth so
