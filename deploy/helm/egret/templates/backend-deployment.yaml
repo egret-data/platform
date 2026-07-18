@@ -22,5 +22,6 @@ spec:
             - { name: EGRET_SECURITY__SECRET_KEY, valueFrom: { secretKeyRef: { name: egret-secrets, key: secret-key } } }
             - { name: EGRET_CATALOG__AUTH_TOKEN, valueFrom: { secretKeyRef: { name: egret-secrets, key: catalog-auth-token } } }
             - { name: EGRET_ADMIN_PASSWORD, valueFrom: { secretKeyRef: { name: egret-secrets, key: admin-password } } }
+            - { name: EGRET_OIDC__CLIENT_SECRET, valueFrom: { secretKeyRef: { name: egret-secrets, key: oidc-client-secret } } }
           readinessProbe: { tcpSocket: { port: 8080 }, initialDelaySeconds: 5, periodSeconds: 5 }
           livenessProbe: { tcpSocket: { port: 8080 }, initialDelaySeconds: 30, periodSeconds: 20 }

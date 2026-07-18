@@ -17,6 +17,12 @@ admin:
   password: Admin12345!
 oidc:
   enabled: false
+  realm: egret
+  clientId: egret
+  clientSecret: egret-secret
+  keycloakImage: quay.io/keycloak/keycloak:26.0
+  keycloakAdmin: admin
+  keycloakAdminPassword: admin
 deps:
   enabled: true
   postgres:

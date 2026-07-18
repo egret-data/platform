@@ -62,3 +62,8 @@ kind-undeploy:
 ingress-install:
     kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
     kubectl wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=180s
+
+# Make egret.localtest.me resolve cluster-wide to the ingress controller (so in-cluster
+# pods — incl. provisioned engines fetching the OIDC JWKS — reach it). Run AFTER ingress-install.
+coredns-rewrite:
+    ./deploy/k8s/coredns-rewrite.sh

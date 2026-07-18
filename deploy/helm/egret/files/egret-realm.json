@@ -1,0 +1,111 @@
+{
+  "realm": "egret",
+  "enabled": true,
+  "sslRequired": "none",
+  "groups": [{ "name": "data-team" }, { "name": "platform-admins" }],
+  "clients": [
+    {
+      "clientId": "egret",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "egret-secret",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "redirectUris": ["http://localhost:8080/*", "http://localhost/*", "*"],
+      "attributes": { "pkce.code.challenge.method": "S256" },
+      "defaultClientScopes": [
+        "basic",
+        "web-origins",
+        "acr",
+        "profile",
+        "roles",
+        "email"
+      ],
+      "optionalClientScopes": [
+        "offline_access"
+      ],
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "aud-egret-catalog",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "egret-catalog",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "aud-trino",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "trino",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "aud-starrocks",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "starrocks",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "tester",
+      "enabled": true,
+      "email": "tester@egret.local",
+      "emailVerified": true,
+      "firstName": "Test",
+      "lastName": "User",
+      "credentials": [{ "type": "password", "value": "pw", "temporary": false }],
+      "realmRoles": ["offline_access"],
+      "groups": ["/data-team"]
+    },
+    {
+      "id": "a5510000-0000-4000-8000-000000000001",
+      "username": "admin-sso",
+      "enabled": true,
+      "email": "admin-sso@egret.local",
+      "emailVerified": true,
+      "firstName": "Admin",
+      "lastName": "SSO",
+      "credentials": [{ "type": "password", "value": "Admin12345!", "temporary": false }],
+      "realmRoles": ["offline_access"],
+      "groups": ["/platform-admins"]
+    },
+    {
+      "id": "a5510000-0000-4000-8000-000000000002",
+      "username": "member-sso",
+      "enabled": true,
+      "email": "member-sso@egret.local",
+      "emailVerified": true,
+      "firstName": "Member",
+      "lastName": "SSO",
+      "credentials": [{ "type": "password", "value": "Member12345!", "temporary": false }],
+      "realmRoles": ["offline_access"],
+      "groups": ["/data-team"]
+    }
+  ]
+}
