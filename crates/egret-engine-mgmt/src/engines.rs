@@ -588,6 +588,18 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
             port: 8443,
         });
     }
+    // Ingress TLS from a typed secret: resolve the referenced kubernetes.io/tls
+    // secret, project it into `{name}-ingress-tls`, and point the Ingress at it.
+    // Typed ref wins over a raw `tls_secret` string when both are set. Shared by
+    // provision and update (both build the spec here), so it stays consistent.
+    if let Some(ing) = config.ingress.as_mut() {
+        if let Some(ref_id) = ing.tls_cert_secret_ref {
+            let (cert_pem, key_pem) = resolve_tls_cert_secret(st, ref_id).await?;
+            ing.tls_cert_pem = Some(cert_pem);
+            ing.tls_key_pem = Some(key_pem);
+            ing.tls_secret = Some(format!("{}-ingress-tls", engine.name));
+        }
+    }
     // Impersonate-mode delegation: when auth is on, provision the `egret_delegator`
     // service user (generate + store its password once, inject its bcrypt into the
     // auth block so it lands in `password.db`) and seed the impersonate + query-
