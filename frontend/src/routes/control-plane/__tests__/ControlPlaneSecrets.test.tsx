@@ -14,6 +14,8 @@ const SECRET: api.Secret = {
   description: "S3 credentials",
   created_at: new Date().toISOString(),
   used_by: 0,
+  type: "Opaque",
+  keys: ["value"],
 };
 
 function renderPage() {

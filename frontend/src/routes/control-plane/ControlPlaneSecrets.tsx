@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
+import { KeyRound, Loader2, Plus, Trash2, X } from "lucide-react";
 
 import {
   type Secret,
@@ -33,6 +33,13 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Table,
   TableBody,
   TableCell,
@@ -40,8 +47,16 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
 
-const COLUMNS = ["Name", "Description", "Used by", "Created", ""];
+const COLUMNS = ["Name", "Type", "Description", "Used by", "Created", ""];
+
+/** Selectable k8s-style secret types. */
+const SECRET_TYPES = [
+  "Opaque",
+  "kubernetes.io/tls",
+  "kubernetes.io/basic-auth",
+] as const;
 
 export const secretsQueryKey = ["control-plane", "secrets"] as const;
 
@@ -49,7 +64,7 @@ export const secretsQueryKey = ["control-plane", "secrets"] as const;
  * Control Plane → Secrets
  *
  * Platform-admin registry of GLOBAL named secrets. Lists, adds, and deletes
- * secrets. Plaintext values are never displayed — write-only on create.
+ * typed secrets. Plaintext values are never displayed — write-only on create.
  */
 export default function ControlPlaneSecrets() {
   const secrets = useQuery<Secret[], ApiError>({
@@ -127,7 +142,19 @@ export default function ControlPlaneSecrets() {
                   const inUse = secret.used_by > 0;
                   return (
                     <TableRow key={secret.id}>
-                      <TableCell className="font-medium">{secret.name}</TableCell>
+                      <TableCell className="font-medium">
+                        <div>{secret.name}</div>
+                        {secret.keys.length > 0 && (
+                          <div className="text-xs font-normal text-muted-foreground">
+                            {secret.keys.join(", ")}
+                          </div>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="font-mono text-xs">
+                          {secret.type}
+                        </Badge>
+                      </TableCell>
                       <TableCell className="text-muted-foreground">
                         {secret.description ?? "—"}
                       </TableCell>
@@ -186,6 +213,11 @@ export default function ControlPlaneSecrets() {
   );
 }
 
+interface OpaqueRow {
+  key: string;
+  value: string;
+}
+
 function AddSecretDialog({
   open,
   onOpenChange,
@@ -201,13 +233,26 @@ function AddSecretDialog({
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [value, setValue] = useState("");
+  const [type, setType] = useState<string>("Opaque");
+  // Opaque: key→value rows (never render an existing value; write-only).
+  const [rows, setRows] = useState<OpaqueRow[]>([{ key: "value", value: "" }]);
+  // kubernetes.io/tls
+  const [tlsCrt, setTlsCrt] = useState("");
+  const [tlsKey, setTlsKey] = useState("");
+  // kubernetes.io/basic-auth
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   function reset() {
     setName("");
     setDescription("");
-    setValue("");
+    setType("Opaque");
+    setRows([{ key: "value", value: "" }]);
+    setTlsCrt("");
+    setTlsKey("");
+    setUsername("");
+    setPassword("");
     setError(null);
     createMutation.reset();
   }
@@ -217,14 +262,34 @@ function AddSecretDialog({
     onOpenChange(next);
   }
 
+  function buildData(): Record<string, string> {
+    if (type === "kubernetes.io/tls") {
+      return { "tls.crt": tlsCrt, "tls.key": tlsKey };
+    }
+    if (type === "kubernetes.io/basic-auth") {
+      return { username, password };
+    }
+    // Opaque
+    return Object.fromEntries(
+      rows.filter((r) => r.key.trim().length > 0).map((r) => [r.key.trim(), r.value]),
+    );
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
 
+    const data = buildData();
+    if (Object.keys(data).length === 0) {
+      setError("Add at least one data key.");
+      return;
+    }
+
     const input: SecretInput = {
       name: name.trim(),
       description: description.trim().length > 0 ? description.trim() : null,
-      value,
+      type,
+      data,
     };
 
     try {
@@ -271,17 +336,138 @@ function AddSecretDialog({
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor="cp-secret-value">Value</Label>
-              <Input
-                id="cp-secret-value"
-                type="password"
-                value={value}
-                onChange={(e) => setValue(e.target.value)}
-                placeholder="Enter a value"
-                required
-                autoComplete="new-password"
-              />
+              <Label htmlFor="cp-secret-type">Type</Label>
+              <Select value={type} onValueChange={setType}>
+                <SelectTrigger id="cp-secret-type">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {SECRET_TYPES.map((t) => (
+                    <SelectItem key={t} value={t}>
+                      {t}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
+
+            {type === "Opaque" && (
+              <div className="space-y-2">
+                <Label>Data</Label>
+                {rows.map((row, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <Input
+                      aria-label={`Key ${i + 1}`}
+                      value={row.key}
+                      onChange={(e) =>
+                        setRows((rs) =>
+                          rs.map((r, j) =>
+                            j === i ? { ...r, key: e.target.value } : r,
+                          ),
+                        )
+                      }
+                      placeholder="key"
+                      className="flex-1"
+                    />
+                    <Input
+                      aria-label={`Value ${i + 1}`}
+                      type="password"
+                      value={row.value}
+                      onChange={(e) =>
+                        setRows((rs) =>
+                          rs.map((r, j) =>
+                            j === i ? { ...r, value: e.target.value } : r,
+                          ),
+                        )
+                      }
+                      placeholder="value"
+                      autoComplete="new-password"
+                      className="flex-1"
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="text-muted-foreground hover:text-destructive"
+                      onClick={() =>
+                        setRows((rs) =>
+                          rs.length > 1 ? rs.filter((_, j) => j !== i) : rs,
+                        )
+                      }
+                      disabled={rows.length <= 1}
+                      aria-label={`Remove row ${i + 1}`}
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setRows((rs) => [...rs, { key: "", value: "" }])}
+                >
+                  <Plus className="h-4 w-4" />
+                  Add key
+                </Button>
+              </div>
+            )}
+
+            {type === "kubernetes.io/tls" && (
+              <>
+                <div className="space-y-1.5">
+                  <Label htmlFor="cp-secret-tls-crt">tls.crt</Label>
+                  <Textarea
+                    id="cp-secret-tls-crt"
+                    value={tlsCrt}
+                    onChange={(e) => setTlsCrt(e.target.value)}
+                    placeholder="-----BEGIN CERTIFICATE-----"
+                    className="font-mono text-xs"
+                    rows={4}
+                    required
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="cp-secret-tls-key">tls.key</Label>
+                  <Textarea
+                    id="cp-secret-tls-key"
+                    value={tlsKey}
+                    onChange={(e) => setTlsKey(e.target.value)}
+                    placeholder="-----BEGIN PRIVATE KEY-----"
+                    className="font-mono text-xs"
+                    rows={4}
+                    required
+                  />
+                </div>
+              </>
+            )}
+
+            {type === "kubernetes.io/basic-auth" && (
+              <>
+                <div className="space-y-1.5">
+                  <Label htmlFor="cp-secret-username">Username</Label>
+                  <Input
+                    id="cp-secret-username"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    placeholder="Username"
+                    required
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="cp-secret-password">Password</Label>
+                  <Input
+                    id="cp-secret-password"
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Password"
+                    autoComplete="new-password"
+                    required
+                  />
+                </div>
+              </>
+            )}
 
             {error && (
               <Alert variant="destructive">
