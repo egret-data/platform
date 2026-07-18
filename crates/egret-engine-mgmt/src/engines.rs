@@ -1577,9 +1577,14 @@ async fn ensure_tls_cert(st: &CpState, engine: &Engine) -> Result<(String, Strin
             .map_err(|e| CpError::BadRequest(format!("resolve engine tls secret: {e}")))?;
         return Ok((keystore, cert));
     }
-    let (cert_pem, key_pem) =
+    // A referenced kubernetes.io/tls secret backs the coordinator TLS; otherwise
+    // fall back to a fresh self-signed cert (SAN = the coordinator host).
+    let (cert_pem, key_pem) = if let Some(ref_id) = engine.tls_cert_secret_ref {
+        resolve_tls_cert_secret(st, ref_id).await?
+    } else {
         crate::tls_cert::generate_self_signed(&[engine.coordinator_host()])
-            .map_err(|e| CpError::BadRequest(format!("generate engine tls cert: {e}")))?;
+            .map_err(|e| CpError::BadRequest(format!("generate engine tls cert: {e}")))?
+    };
     let keystore = format!("{cert_pem}{key_pem}");
     // Deterministic per-engine name so a partial prior run (secret created but the
     // engine column not yet set) recovers by name instead of erroring forever.
