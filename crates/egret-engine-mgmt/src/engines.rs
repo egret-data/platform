@@ -1541,6 +1541,33 @@ fn extract_leading_cert(keystore_pem: &str) -> Option<String> {
 /// (cert+key PEM) in a GLOBAL egret secret + the public cert PEM on the engine
 /// row, and reuse both on subsequent calls (idempotent via the `tls_secret_id` /
 /// `coordinator_cert` columns). Returns `(keystore_pem, cert_pem)`.
+/// Projection primitive: resolve a `kubernetes.io/tls` named secret to
+/// `(cert_pem, key_pem)`. Reused wherever a typed TLS secret backs a k8s cert.
+async fn resolve_tls_cert_secret(
+    st: &CpState,
+    secret_ref: Uuid,
+) -> Result<(String, String), CpError> {
+    let ts = st
+        .secrets
+        .resolve_typed(None, secret_ref)
+        .await
+        .map_err(|e| CpError::BadRequest(format!("resolve tls cert secret: {e}")))?;
+    if ts.r#type != egret_secrets::secret_type::TLS {
+        return Err(CpError::BadRequest(format!(
+            "secret is not a {} secret",
+            egret_secrets::secret_type::TLS
+        )));
+    }
+    let get = |k: &str| {
+        ts.data
+            .get(k)
+            .filter(|v| !v.is_empty())
+            .cloned()
+            .ok_or_else(|| CpError::BadRequest(format!("tls secret missing {k}")))
+    };
+    Ok((get("tls.crt")?, get("tls.key")?))
+}
+
 async fn ensure_tls_cert(st: &CpState, engine: &Engine) -> Result<(String, String), CpError> {
     if let (Some(sid), Some(cert)) = (engine.tls_secret_id, engine.coordinator_cert.clone()) {
         let keystore = st
