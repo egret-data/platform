@@ -1232,6 +1232,16 @@ impl EngineProvisioner for TrinoProvisioner {
                     &format!("{}-trino", spec.name),
                 )
                 .await;
+            // Also clean up the stale ingress TLS Secret (managed by egret).
+            let _ = self
+                .kube
+                .delete(
+                    "v1",
+                    "Secret",
+                    &spec.namespace,
+                    &format!("{}-ingress-tls", spec.name),
+                )
+                .await;
         }
         // Likewise, `apply_all` only applies the autoscaler for the current mode.
         // Best-effort delete the stale object when autoscaling is off or the mode
@@ -1297,6 +1307,16 @@ impl EngineProvisioner for TrinoProvisioner {
         let _ = self
             .kube
             .delete("v1", "Secret", namespace, &format!("{name}-env"))
+            .await;
+        // Best-effort delete the coordinator keystore + ingress TLS Secrets
+        // (managed by egret; previously orphaned on delete).
+        let _ = self
+            .kube
+            .delete("v1", "Secret", namespace, &format!("{name}-tls"))
+            .await;
+        let _ = self
+            .kube
+            .delete("v1", "Secret", namespace, &format!("{name}-ingress-tls"))
             .await;
         // Best-effort; harmless when no Ingress was ever applied.
         let _ = self
@@ -2569,6 +2589,6 @@ mod tests {
         let p = TrinoProvisioner::new(kube.clone());
         p.delete("egret-engines", "demo").await.unwrap();
         let d = kube.deleted.lock().unwrap();
-        assert_eq!(d.len(), 9); // 2 deployments, service, 2 configmaps, secret, ingress, hpa, scaledobject
+        assert_eq!(d.len(), 11); // 2 deployments, service, 2 configmaps, env secret, tls secret, ingress-tls secret, ingress, hpa, scaledobject
     }
 }
