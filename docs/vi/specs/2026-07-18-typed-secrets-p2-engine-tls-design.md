@@ -69,7 +69,7 @@ ALTER TABLE engine_mgmt.engines ADD COLUMN tls_cert_secret_ref uuid;
 ## Rủi ro
 
 1. **Data-plane TLS** — keystore/pin sai làm vỡ HTTPS coordinator + kết nối egret. Verify bằng đường data-plane live (provision + JWT + query). Giữ self-signed fallback làm mặc định.
-2. **Cert hợp lệ** — cert cung cấp phải có SAN khớp coordinator host egret dial (`coordinator_host()` = `{name}-trino.{ns}.svc`), nếu không TLS verify fail. Ghi: cert chung/công ty cần SAN đúng (hoặc wildcard); pin `coordinator_cert` chấp nhận cert self-CA.
+2. **Cert hợp lệ** — cert cung cấp phải (a) có SAN khớp coordinator host egret dial (`coordinator_host()` = `{name}-trino.{ns}.svc`), nếu không TLS verify fail, và (b) là **cert leaf** (`basicConstraints CA:FALSE`, `extendedKeyUsage serverAuth`). reqwest/rustls (webpki) từ chối cert `CA:TRUE` khi được dùng làm server leaf — query fail với lỗi chung chung `connect: error sending request` (curl/openssl dễ dãi nên che mất). Đường self-signed không dính vì rcgen mặc định `NoCA`. Ghi: cert chung/công ty cần SAN đúng (hoặc wildcard) **và** phải là leaf cert hợp lệ; ngoài ra pin `coordinator_cert` vẫn chấp nhận cert self-signed. **Đã proven live (2026-07-18):** leaf company cert (`CA:FALSE` + `serverAuth` + SAN) tham chiếu bởi jwt-mode Trino engine → keystore `{name}-tls` = cert cung cấp (sha256 trùng) → `SELECT 1, current_user` qua TLS dial pin-cert trả `1, admin`.
 3. **Thứ tự PEM** — keystore self-signed là `cert + key`; keystore cung cấp phải cùng thứ tự (`tls.crt` rồi `tls.key`); `coordinator_cert` = chỉ `tls.crt`.
 4. **Migration re-embed** — migration mới `0089` cần touch `metastore/src/lib.rs` ([[egret-sqlx-migration-staleness]]).
 
