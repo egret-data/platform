@@ -1,5 +1,6 @@
 //! `egret` binary entrypoint: parse the CLI, load config, dispatch the command.
 
+mod backfill;
 mod cli;
 
 use anyhow::Context;
@@ -995,6 +996,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         };
         egret_secrets::SecretStore::new(db.clone(), crypto)
     };
+
+    // P1b: eagerly upgrade existing storage + DB connection credential secrets from
+    // Opaque to `kubernetes.io/basic-auth` (idempotent one-shot, no-op once converged).
+    backfill::backfill_basic_auth_credentials(&db, &secrets)
+        .await
+        .context("P1b basic-auth backfill")?;
 
     // Epic B: the named per-workspace secret layer over the vault. Built once from
     // the shared vault and threaded into the browse + database states so storage
