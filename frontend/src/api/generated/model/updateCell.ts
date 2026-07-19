@@ -11,4 +11,8 @@ export interface UpdateCell {
   cell_type?: string | null;
   /** @nullable */
   source?: string | null;
+  /** @nullable */
+  sql_target?: string | null;
+  /** @nullable */
+  sql_into?: string | null;
 }

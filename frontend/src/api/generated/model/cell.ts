@@ -16,4 +16,8 @@ export interface Cell {
   last_output?: unknown;
   /** @nullable */
   last_execution_time_ms?: number | null;
+  /** @nullable */
+  sql_target?: string | null;
+  /** @nullable */
+  sql_into?: string | null;
 }

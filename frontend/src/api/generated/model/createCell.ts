@@ -12,4 +12,8 @@ export interface CreateCell {
   source?: string | null;
   /** @nullable */
   cell_order?: number | null;
+  /** @nullable */
+  sql_target?: string | null;
+  /** @nullable */
+  sql_into?: string | null;
 }

@@ -20947,6 +20947,18 @@
               "null"
             ],
             "format": "int32"
+          },
+          "sql_target": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sql_into": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -21310,6 +21322,18 @@
               "null"
             ],
             "format": "int32"
+          },
+          "sql_target": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sql_into": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -25713,6 +25737,18 @@
             ]
           },
           "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sql_target": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sql_into": {
             "type": [
               "string",
               "null"
