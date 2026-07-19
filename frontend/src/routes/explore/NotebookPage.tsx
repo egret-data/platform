@@ -27,6 +27,7 @@ import {
   useUpdateNotebook,
 } from "@/api/notebooks";
 import { CellEditor } from "@/components/notebook/CellEditor";
+import { CommandPalette, type PaletteAction } from "@/components/notebook/CommandPalette";
 import { setNotebookCompletionContext } from "@/components/notebook/monaco/notebookCompletion";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import type { KernelConnection, VarInfo } from "@/lib/kernel/KernelConnection";
@@ -313,6 +314,20 @@ export default function NotebookPage() {
 
   const kernelStatus = useKernelConnectionStatus(kernel);
   const [nameDirty, setNameDirty] = useState(false);
+
+  // ⌘K / Ctrl+K command palette (S4-1).
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  useEffect(() => {
+    const onKeyDown = (e: globalThis.KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   // Tools (outline / data sources) live in an on-demand RIGHT panel, closed by
   // default — the notebook content stays centered and full-width (Deepnote /
   // Databricks pattern), avoiding a second left sidebar next to the app nav.
@@ -502,6 +517,59 @@ export default function NotebookPage() {
   const handleAddCell = (cellType: CellType = "code") => {
     insertCell(cellType, (notebook.data?.cells ?? []).length);
   };
+
+  // Command-palette actions (S4-1): a flat list built from the existing
+  // handlers above (add cell / run / interrupt / restart / clear / toggle
+  // panel) plus one "go to cell" entry per cell. Memoized so the palette
+  // doesn't rebuild its action list on every unrelated render.
+  const paletteActions: PaletteAction[] = useMemo(() => {
+    const cells = [...(notebook.data?.cells ?? [])].sort(
+      (a, b) => a.cell_order - b.cell_order,
+    );
+    const goToCellActions: PaletteAction[] = cells.map((cell) => {
+      const execLabel =
+        cell.execution_count == null ? "In [ ]:" : `In [${cell.execution_count}]:`;
+      const firstLine =
+        cell.source.split("\n").find((l) => l.trim().length > 0)?.trim() ?? "(empty cell)";
+      return {
+        id: `goto-${cell.id}`,
+        label: `Go to cell: ${execLabel} · ${firstLine.slice(0, 60)}`,
+        hint: cell.cell_type,
+        run: () => focusCell(cell.id),
+      };
+    });
+
+    return [
+      { id: "add-code", label: "Add code cell", run: () => handleAddCell("code") },
+      { id: "add-markdown", label: "Add markdown cell", run: () => handleAddCell("markdown") },
+      { id: "add-sql", label: "Add SQL cell", run: () => handleAddCell("sql") },
+      { id: "run-all", label: "Run all", run: () => { void runAll(); } },
+      {
+        id: "interrupt",
+        label: "Interrupt",
+        run: () =>
+          kernel.interrupt().catch((e) => toast.error(String((e as Error)?.message ?? e))),
+      },
+      {
+        id: "restart",
+        label: "Restart kernel",
+        run: () =>
+          kernel.restart().catch((e) => toast.error(String((e as Error)?.message ?? e))),
+      },
+      { id: "clear-outputs", label: "Clear outputs", run: () => clearAll() },
+      { id: "toggle-toc", label: "Toggle Outline", run: () => togglePanel("toc") },
+      { id: "toggle-data", label: "Toggle Data sources", run: () => togglePanel("data") },
+      { id: "toggle-schema", label: "Toggle Schema", run: () => togglePanel("schema") },
+      { id: "toggle-vars", label: "Toggle Variables", run: () => togglePanel("vars") },
+      ...goToCellActions,
+    ];
+    // Deliberately depend only on the cells array (the one input that actually
+    // changes what the action list contains). handleAddCell/togglePanel/focusCell/
+    // runAll/clearAll are plain closures re-created every render — like the rest
+    // of this component's inline handlers (e.g. NotebookHeader's onRunAll={runAll}
+    // below) — so tracking them here would recompute this memo on every render
+    // and defeat the point of memoizing it.
+  }, [notebook.data?.cells]);
 
   // Command-mode keyboard nav must never hijack typing in a real input/select/
   // Monaco (the notebook-name field, the SQL result-variable input, etc.) nor
@@ -851,6 +919,8 @@ export default function NotebookPage() {
           )}
         </aside>
       )}
+
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} actions={paletteActions} />
     </div>
   );
 }
